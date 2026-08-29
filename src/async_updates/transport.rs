@@ -2003,8 +2003,9 @@ impl BoundedDocumentTransportSession {
             Ok(authorized) => authorized,
             Err(error) => {
                 pulled_candidate.disarm();
-                return Err(self.reject_pulled_delivery(
+                return Err(self.reject_pulled_delivery_from(
                     error,
+                    &candidate.authorization,
                     pressure_membership.clone(),
                     pressure_position,
                 ));
@@ -2019,8 +2020,9 @@ impl BoundedDocumentTransportSession {
             !terminal,
         ) {
             pulled_candidate.disarm();
-            return Err(self.reject_pulled_delivery(
+            return Err(self.reject_pulled_delivery_from(
                 error,
+                &candidate.authorization,
                 pressure_membership.clone(),
                 pressure_position,
             ));
@@ -2034,24 +2036,27 @@ impl BoundedDocumentTransportSession {
             !terminal,
         ) {
             pulled_candidate.disarm();
-            return Err(self.reject_pulled_delivery(
+            return Err(self.reject_pulled_delivery_from(
                 error,
+                &candidate.authorization,
                 pressure_membership.clone(),
                 pressure_position,
             ));
         }
         if authorized.document_generation() != self.transport.control_generation {
             let error = AsyncTransportError::new(AsyncTransportErrorKind::StaleControl);
-            return Err(self.reject_pulled_delivery(
+            return Err(self.reject_pulled_delivery_from(
                 error,
+                &candidate.authorization,
                 pressure_membership.clone(),
                 pressure_position,
             ));
         }
         if !authorized.is_current_at(commit_now) {
             let error = AsyncTransportError::new(AsyncTransportErrorKind::AuthorizationLost);
-            return Err(self.reject_pulled_delivery(
+            return Err(self.reject_pulled_delivery_from(
                 error,
+                &candidate.authorization,
                 pressure_membership.clone(),
                 pressure_position,
             ));
@@ -2061,8 +2066,9 @@ impl BoundedDocumentTransportSession {
             Err(_) => {
                 let error = AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope);
                 pulled_candidate.disarm();
-                return Err(self.reject_pulled_delivery(
+                return Err(self.reject_pulled_delivery_from(
                     error,
+                    &candidate.authorization,
                     pressure_membership.clone(),
                     pressure_position,
                 ));
@@ -2185,32 +2191,6 @@ impl BoundedDocumentTransportSession {
         Ok(disposition)
     }
 
-    /// Detaches one membership after delivery proves its authorization is no longer current.
-    ///
-    /// The caller must supply the exact stored authorization whose delivery failed. This closes
-    /// only that logical membership; sibling memberships and their sequence lanes remain active.
-    pub fn detach_authorization_lost(
-        &mut self,
-        authorization: &AuthorizedTransportSubscription,
-    ) -> Result<CloseDisposition, AsyncTransportError> {
-        let index = self
-            .transport
-            .memberships
-            .iter()
-            .position(|membership| {
-                membership.authorization.subscription() == authorization.subscription()
-                    && membership.authorization.binding() == authorization.binding()
-            })
-            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::UnknownMembership))?;
-        let retirement = self.transport.detach_membership(index);
-        self.transport.poll_exact_retirement_once(retirement);
-        self.pressure
-            .retire_membership(authorization.subscription(), authorization.binding());
-        self.sequence_lanes
-            .retain(|lane| !lane.matches(authorization));
-        Ok(CloseDisposition::Closed)
-    }
-
     /// Dispatches one leased queue head through Task 3 without exposing the lease.
     pub fn dispatch_next(
         &mut self,
@@ -2270,6 +2250,8 @@ impl BoundedDocumentTransportSession {
                     || !authorized.is_current_at(now)
             }) {
                 self.prune_empty_terminal_drains();
+                drop(delivery);
+                self.retire_lost_authorization(&authorization);
                 return Err(AsyncDeliveryError::new(
                     AsyncDeliveryErrorKind::AuthorizationLost,
                 ));
@@ -2287,6 +2269,8 @@ impl BoundedDocumentTransportSession {
                 && lane.binding == *delivery.binding()
         }) else {
             self.prune_empty_terminal_drains();
+            drop(delivery);
+            self.retire_lost_authorization(&authorization);
             return Err(AsyncDeliveryError::new(
                 AsyncDeliveryErrorKind::AuthorizationLost,
             ));
@@ -2332,7 +2316,7 @@ impl BoundedDocumentTransportSession {
         }
         self.pressure.commit_recoveries_if_drained();
         self.prune_empty_terminal_drains();
-        match outcome {
+        let result = match outcome {
             Ok(disposition) => Ok(Some(disposition)),
             Err(LeaseDispatchError::Retired) => {
                 Err(AsyncDeliveryError::new(AsyncDeliveryErrorKind::Retired))
@@ -2357,7 +2341,14 @@ impl BoundedDocumentTransportSession {
                 AsyncDeliveryErrorKind::Sequence(error.kind()),
             )),
             Err(LeaseDispatchError::Replay(error)) => Err(AsyncDeliveryError::from_replay(error)),
+        };
+        if matches!(
+            &result,
+            Err(error) if error.kind() == AsyncDeliveryErrorKind::AuthorizationLost
+        ) {
+            self.retire_lost_authorization(&authorization);
         }
+        result
     }
 
     /// Returns the aggregate retained item count across every logical membership.
@@ -2596,6 +2587,49 @@ impl BoundedDocumentTransportSession {
         self.pressure.record_delivery_loss(membership, high_water);
         self.prune_empty_terminal_drains();
         error
+    }
+
+    fn reject_pulled_delivery_from(
+        &mut self,
+        error: AsyncTransportError,
+        authorization: &AuthorizedTransportSubscription,
+        membership: PressureMembership,
+        high_water: StreamPosition,
+    ) -> AsyncTransportError {
+        let authorization_lost = error.kind() == AsyncTransportErrorKind::AuthorizationLost;
+        let error = self.reject_pulled_delivery(error, membership, high_water);
+        if authorization_lost {
+            self.retire_lost_authorization(authorization);
+        }
+        error
+    }
+
+    fn retire_lost_authorization(&mut self, authorization: &AuthorizedTransportSubscription) {
+        let Ok(stored) = self
+            .transport
+            .resolve_active_stored_authorization(authorization)
+        else {
+            return;
+        };
+        if self.transport.ensure_generation_available().is_err() {
+            self.transport.begin_bounded_close();
+            self.purge_inactive_delivery();
+            return;
+        }
+        let Some(index) = self.transport.memberships.iter().position(|membership| {
+            membership.authorization.subscription() == stored.subscription()
+                && membership.authorization.binding() == stored.binding()
+                && membership.authorization.document_scope() == stored.document_scope()
+                && membership.authorization.context() == stored.context()
+                && Arc::ptr_eq(&membership.authorization.authority, &stored.authority)
+        }) else {
+            return;
+        };
+        let retirement = self.transport.detach_membership(index);
+        self.transport.poll_exact_retirement_once(retirement);
+        self.pressure
+            .retire_membership(stored.subscription(), stored.binding());
+        self.sequence_lanes.retain(|lane| !lane.matches(&stored));
     }
 
     fn prune_empty_terminal_drains(&mut self) {

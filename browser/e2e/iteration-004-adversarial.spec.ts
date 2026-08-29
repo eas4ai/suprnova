@@ -22,6 +22,7 @@ interface Snapshot {
     readonly validation_scan_calls: number;
   }>;
   readonly retiredEnvelopeAttempts: number;
+  readonly portsCreated: number;
   readonly transportFailures: readonly string[];
 }
 
@@ -37,14 +38,38 @@ interface OrdinaryActionResult {
 
 interface AsyncAdversarialOutcome {
   readonly accepted_sequence: number;
+  readonly affected_subscription: string;
+  readonly browser_delivery: Readonly<{
+    readonly active_ports_after: number;
+    readonly active_ports_before: number;
+    readonly authorizations_after: number;
+    readonly authorizations_before: number;
+    readonly ports_created_after: number;
+    readonly ports_created_before: number;
+    readonly stream_states: readonly string[];
+    readonly transport_closed: boolean;
+  }>;
   readonly ceiling_bytes: number;
   readonly ceiling_events: number;
   readonly dependent_closed: boolean;
+  readonly document_memberships_after: number;
+  readonly document_memberships_before: number;
   readonly disposition: string;
+  readonly logical_memberships_after: number;
+  readonly logical_memberships_before: number;
   readonly recovery: string;
   readonly retained_bytes: number;
   readonly retained_events: number;
+  readonly sibling_accepted_sequence_after: number | null;
+  readonly sibling_accepted_sequence_before: number | null;
+  readonly sibling_lease_owned_after: boolean;
+  readonly sibling_lease_owned_before: boolean;
+  readonly sibling_open_after: boolean;
+  readonly sibling_open_before: boolean;
+  readonly sibling_subscription: string | null;
   readonly sibling_usable: boolean;
+  readonly transport_generation_after: number;
+  readonly transport_generation_before: number;
   readonly wire: string | null;
 }
 
@@ -666,6 +691,13 @@ for (const format of ["esm", "classic"] as const) {
         "data-live-stream-state",
         "current",
       );
+      if (caseName === "revoked-authorization") {
+        await expect(page.locator("[data-live-stream-state]").nth(1)).toHaveAttribute(
+          "data-live-stream-state",
+          "current",
+        );
+      }
+      const before = await snapshot(page);
 
       const outcome = await page.evaluate(async (selectedCase) => {
         const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
@@ -681,7 +713,38 @@ for (const format of ["esm", "classic"] as const) {
       expect(outcome.retained_events).toBeLessThanOrEqual(outcome.ceiling_events);
       expect(outcome.retained_bytes).toBeLessThanOrEqual(outcome.ceiling_bytes);
       expect(outcome.accepted_sequence).toBeGreaterThanOrEqual(0);
-      if (caseName === "revoked-authorization") expect(outcome.sibling_usable).toBe(true);
+      if (caseName === "revoked-authorization") {
+        expect(outcome.sibling_usable).toBe(true);
+        expect(outcome.sibling_subscription).not.toBeNull();
+        expect(outcome.sibling_subscription).not.toBe(outcome.affected_subscription);
+        expect(outcome.transport_generation_after).toBe(outcome.transport_generation_before);
+        expect(outcome.sibling_accepted_sequence_after).toBe(
+          outcome.sibling_accepted_sequence_before,
+        );
+        expect(outcome.sibling_open_before).toBe(true);
+        expect(outcome.sibling_open_after).toBe(true);
+        expect(outcome.sibling_lease_owned_before).toBe(true);
+        expect(outcome.sibling_lease_owned_after).toBe(true);
+        expect(outcome.document_memberships_before).toBe(2);
+        expect(outcome.document_memberships_after).toBe(1);
+        expect(outcome.logical_memberships_before).toBe(2);
+        expect(outcome.logical_memberships_after).toBe(1);
+        expect(outcome.browser_delivery.stream_states).toEqual(["degraded", "current"]);
+        expect(outcome.browser_delivery.transport_closed).toBe(false);
+        expect(outcome.browser_delivery.active_ports_before).toBe(1);
+        expect(outcome.browser_delivery.active_ports_after).toBe(1);
+        expect(outcome.browser_delivery.ports_created_after).toBe(
+          outcome.browser_delivery.ports_created_before,
+        );
+        expect(outcome.browser_delivery.authorizations_after).toBe(
+          outcome.browser_delivery.authorizations_before,
+        );
+        expect(outcome.browser_delivery.ports_created_before).toBe(before.portsCreated);
+        await expect(page.locator("[data-live-stream-state]").nth(1)).toHaveAttribute(
+          "data-live-stream-state",
+          "current",
+        );
+      }
 
       if (caseName === "reordered-message" || caseName === "replay-overflow") {
         await expect(page.locator("[data-live-stream-state]").first()).toHaveAttribute(
@@ -700,6 +763,14 @@ for (const format of ["esm", "classic"] as const) {
       expect(state.cspViolations).toEqual([]);
       expect(state.errors).toEqual([]);
       expect(state.host.active_physical_transports).toBeLessThanOrEqual(1);
+      if (caseName === "revoked-authorization") {
+        expect(state.portsCreated).toBe(before.portsCreated);
+        expect(state.host.active_physical_transports).toBe(before.host.active_physical_transports);
+        await expect(page.locator("[data-live-stream-state]").nth(1)).toHaveAttribute(
+          "data-live-stream-state",
+          "current",
+        );
+      }
       expect(state.host.logical_memberships).toBeLessThanOrEqual(
         caseName === "revoked-authorization" ? 2 : 1,
       );

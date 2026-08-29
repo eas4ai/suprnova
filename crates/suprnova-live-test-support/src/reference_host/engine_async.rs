@@ -660,10 +660,13 @@ impl ReferenceFreshRender {
 
 impl EngineMembershipRegistry {
     fn activate(&self, subscription: SubscriptionId) {
-        self.subscriptions
-            .lock()
-            .expect("engine membership lock")
-            .push(subscription);
+        let mut subscriptions = self.subscriptions.lock().expect("engine membership lock");
+        if !subscriptions
+            .iter()
+            .any(|candidate| candidate == &subscription)
+        {
+            subscriptions.push(subscription);
+        }
     }
 
     fn remove(&self, subscription: &SubscriptionId) {
@@ -933,6 +936,25 @@ impl EngineAsyncFixture {
             suprnova_live::async_updates::AsyncPayload::Heartbeat(Heartbeat),
         )
         .map_err(|_| "engine envelope")
+    }
+
+    pub(super) fn authorization_lost_envelope(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+        sequence: u64,
+    ) -> Result<AsyncEnvelope, &'static str> {
+        AsyncEnvelope::new(
+            authorization.context(),
+            StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(sequence)),
+            suprnova_live::async_updates::AsyncPayload::Error(
+                suprnova_live::async_updates::StreamErrorCode::AuthorizationLost,
+            ),
+        )
+        .map_err(|_| "engine envelope")
+    }
+
+    pub(super) fn reauthorize(&self, authorization: &AuthorizedTransportSubscription) {
+        self.registry.activate(authorization.subscription().clone());
     }
 
     pub(super) fn browser_event_envelope(

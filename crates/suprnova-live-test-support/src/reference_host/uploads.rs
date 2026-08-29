@@ -553,7 +553,7 @@ struct ReferenceFinalizer {
     durable: SyncMutex<HashMap<String, DurableUpload>>,
     ledger: Arc<MemoryUploadLedger>,
     operation_pause: Arc<UploadOperationPause>,
-    fault: SyncMutex<Option<ReferenceFinalizeFault>>,
+    fault: SyncMutex<Option<ArmedReferenceFinalizeFault>>,
     commit_calls: AtomicUsize,
     compensation_calls: AtomicUsize,
     reconciliation_calls: AtomicUsize,
@@ -563,6 +563,18 @@ struct ReferenceFinalizer {
 enum ReferenceFinalizeFault {
     CommitUnavailable,
     LedgerAfterDurableCommit,
+}
+
+struct ArmedReferenceFinalizeFault {
+    fault: ReferenceFinalizeFault,
+    handle: UploadHandle,
+    ready_revision: UploadRevision,
+}
+
+impl ArmedReferenceFinalizeFault {
+    fn targets(&self, prepared: &PreparedFinalize) -> bool {
+        self.handle == *prepared.handle() && self.ready_revision == prepared.ready_revision()
+    }
 }
 
 #[derive(Default)]
@@ -622,11 +634,17 @@ impl UploadFinalizer for ReferenceFinalizer {
     ) -> UploadFuture<'a, Result<DurableUpload, UploadError>> {
         Box::pin(async move {
             self.commit_calls.fetch_add(1, Ordering::SeqCst);
-            let fault = self
-                .fault
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
+            let fault = {
+                let mut armed = self.fault.lock().unwrap_or_else(|error| error.into_inner());
+                if armed
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.targets(&prepared))
+                {
+                    armed.take().map(|candidate| candidate.fault)
+                } else {
+                    None
+                }
+            };
             if fault == Some(ReferenceFinalizeFault::CommitUnavailable) {
                 return Err(UploadError::new(UploadErrorKind::ProviderUnavailable));
             }
@@ -1765,7 +1783,6 @@ impl UploadRuntime {
         if current != Some(operation_generation) {
             return Err("upload_finalize_fault_scope_invalid");
         }
-        drop(records);
         let selected = match fault {
             "commit-unavailable" => ReferenceFinalizeFault::CommitUnavailable,
             "ledger-after-commit" => ReferenceFinalizeFault::LedgerAfterDurableCommit,
@@ -1779,7 +1796,13 @@ impl UploadRuntime {
         if current.is_some() {
             return Err("upload_finalize_fault_in_use");
         }
-        *current = Some(selected);
+        *current = Some(ArmedReferenceFinalizeFault {
+            fault: selected,
+            handle: UploadHandle::parse(handle)
+                .map_err(|_| "upload_finalize_fault_scope_invalid")?,
+            ready_revision: UploadRevision::new(operation_generation),
+        });
+        drop(records);
         Ok(())
     }
 

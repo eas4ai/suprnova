@@ -593,6 +593,65 @@ async fn final_authority_validation_follows_the_last_host_clock_callback_before_
 }
 
 #[tokio::test]
+async fn admission_authorization_loss_retires_only_the_exact_internal_candidate() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, revoked, sibling) = bounded_two_memberships(
+        &fixture,
+        0x5c,
+        0x5d,
+        0x5e,
+        vec![
+            vec![ScriptItem::Envelope(
+                position(7, 1),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+            vec![ScriptItem::Envelope(
+                position(7, 1),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+        ],
+        ResourceBounds::new(4, 256 * 1024).expect("aggregate bounds"),
+    )
+    .await;
+    fixture.registry.drift_after_delivery_validation(
+        1,
+        DeliveryAuthorityDrift::RemoveSubscription(revoked.subscription().clone()),
+    );
+
+    assert_eq!(
+        bounded
+            .pump_next(fixture.registry.as_ref())
+            .await
+            .expect_err("the exact pulled membership loses current authorization")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(bounded.transport().membership_count(), 1);
+    assert_eq!(bounded.sequence_position(&revoked), None);
+    assert_eq!(bounded.sequence_position(&sibling), Some(position(7, 0)));
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.active_permits(), 0);
+
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    let mut dispatcher = RecordingDispatcher::default();
+    assert_eq!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    );
+    assert_eq!(
+        dispatcher.subscriptions,
+        vec![sibling.subscription().clone()]
+    );
+    assert_eq!(bounded.sequence_position(&sibling), Some(position(7, 1)));
+    assert_eq!(bounded.transport().membership_count(), 1);
+}
+
+#[tokio::test]
 async fn final_authority_validation_follows_the_last_host_clock_callback_before_dispatch() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document(
@@ -618,10 +677,54 @@ async fn final_authority_validation_follows_the_last_host_clock_callback_before_
         AsyncDeliveryErrorKind::AuthorizationLost
     );
     assert_eq!(dispatcher.applied, 0);
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.transport().membership_count(), 0);
+}
+
+#[tokio::test]
+async fn dispatch_authorization_loss_retires_only_the_exact_internal_candidate() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, revoked, sibling) = bounded_two_memberships(
+        &fixture,
+        0x5f,
+        0x60,
+        0x62,
+        vec![
+            vec![ScriptItem::Envelope(
+                position(7, 1),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+            vec![ScriptItem::Envelope(
+                position(7, 1),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+        ],
+        ResourceBounds::new(4, 256 * 1024).expect("aggregate bounds"),
+    )
+    .await;
     assert_eq!(
-        bounded.sequence_position(&authorization),
-        Some(position(7, 0))
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
     );
+    fixture
+        .registry
+        .drift_after_now_call(1, DeliveryAuthorityDrift::Revoke);
+
+    assert_eq!(
+        bounded
+            .dispatch_next(
+                fixture.registry.as_ref(),
+                &mut RecordingDispatcher::default()
+            )
+            .expect_err("the exact dequeued membership loses current authorization")
+            .kind(),
+        AsyncDeliveryErrorKind::AuthorizationLost
+    );
+    assert_eq!(bounded.transport().membership_count(), 1);
+    assert_eq!(bounded.sequence_position(&revoked), None);
+    assert_eq!(bounded.sequence_position(&sibling), Some(position(7, 0)));
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.active_permits(), 0);
 }
 
 async fn assert_post_seal_drift_rejects(
@@ -636,11 +739,12 @@ async fn assert_post_seal_drift_rejects(
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
     assert_eq!(bounded.active_permits(), 0);
-    assert!(bounded.is_degraded());
+    assert_eq!(bounded.transport().membership_count(), 0);
+    assert!(!bounded.is_degraded());
 }
 
 #[tokio::test]
-async fn final_admission_rejects_expiry_revocation_and_membership_removal_without_mutation() {
+async fn final_admission_rejects_expiry_revocation_and_retires_lost_membership() {
     let expiry = TransportFixture::new(position(7, 0)).await;
     assert_post_seal_drift_rejects(
         &expiry,
@@ -667,7 +771,7 @@ async fn final_admission_rejects_expiry_revocation_and_membership_removal_withou
 }
 
 #[tokio::test]
-async fn final_admission_rejects_contract_binding_and_scope_drift_without_mutation() {
+async fn final_admission_rejects_contract_binding_and_retires_lost_membership() {
     let contract = TransportFixture::new(position(7, 0)).await;
     let revised = TransportFixture::new_with_contract_revision(position(7, 0)).await;
     assert_post_seal_drift_rejects(
@@ -711,7 +815,7 @@ async fn final_admission_rejects_contract_binding_and_scope_drift_without_mutati
 }
 
 #[tokio::test]
-async fn final_admission_rejects_target_count_and_target_set_drift_without_mutation() {
+async fn final_admission_rejects_target_drift_and_retires_lost_membership() {
     let count = TransportFixture::new(position(7, 0)).await;
     let count_context = count
         .request(
@@ -1007,12 +1111,10 @@ async fn post_pop_revocation_is_rechecked_before_registered_dispatch() {
         .expect_err("revocation after dequeue must deny dispatch");
     assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
     assert_eq!(dispatcher.applied, 0);
-    assert_eq!(
-        bounded.sequence_position(&authorization),
-        Some(position(7, 0))
-    );
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.transport().membership_count(), 0);
     assert_eq!(bounded.active_permits(), 0);
-    assert!(bounded.is_degraded());
+    assert!(!bounded.is_degraded());
 }
 
 async fn assert_post_pop_drift_denies(
@@ -1033,12 +1135,10 @@ async fn assert_post_pop_drift_denies(
         .expect_err("post-pop authority drift must deny dispatch");
     assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
     assert_eq!(dispatcher.applied, 0);
-    assert_eq!(
-        bounded.sequence_position(&authorization),
-        Some(position(7, 0))
-    );
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.transport().membership_count(), 0);
     assert_eq!(bounded.active_permits(), 0);
-    assert!(bounded.is_degraded());
+    assert!(!bounded.is_degraded());
 }
 
 #[tokio::test]
@@ -2833,16 +2933,10 @@ async fn replay_dispatch_revalidates_each_entry_immediately_before_its_dispatch(
     assert_eq!(replay.state(), SequenceState::Degraded);
     assert_eq!(replay.high_water(), Some(position(7, 3)));
     assert_eq!(dispatcher.applied, 1);
-    assert_eq!(
-        bounded.sequence_position(&authorization),
-        Some(position(7, 1)),
-        "only the truthfully dispatched prefix commits"
-    );
-    assert_eq!(
-        bounded.sequence_state(&authorization),
-        Some(SequenceState::Degraded)
-    );
-    assert!(bounded.is_degraded());
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.sequence_state(&authorization), None);
+    assert_eq!(bounded.transport().membership_count(), 0);
+    assert!(!bounded.is_degraded());
 }
 
 #[tokio::test]
@@ -3374,7 +3468,7 @@ async fn partial_replay_dispatch_panic_retains_the_committed_prefix_and_releases
 }
 
 #[tokio::test]
-async fn replay_authority_loss_after_dequeue_keeps_recovery_degraded_without_dispatch() {
+async fn replay_authority_loss_after_dequeue_retires_the_membership_without_dispatch() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let provisional = fixture.request(
         subscription(0x94),
@@ -3418,15 +3512,10 @@ async fn replay_authority_loss_after_dequeue_keeps_recovery_degraded_without_dis
         .expect_err("replay authorization loss");
     assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
     assert_eq!(dispatcher.applied, 0);
-    assert_eq!(
-        bounded.sequence_position(&authorization),
-        Some(position(7, 0))
-    );
-    assert_eq!(
-        bounded.sequence_state(&authorization),
-        Some(SequenceState::Degraded)
-    );
-    assert!(bounded.is_degraded());
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.sequence_state(&authorization), None);
+    assert_eq!(bounded.transport().membership_count(), 0);
+    assert!(!bounded.is_degraded());
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.active_permits(), 0);
 }

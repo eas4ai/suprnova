@@ -605,6 +605,18 @@ impl AsyncReferenceAuthority {
         (self.current_sequence, envelope)
     }
 
+    /// Advances the authoritative sequence by one membership-scoped authorization loss.
+    pub fn authorization_lost(&mut self) -> (u64, String) {
+        self.current_sequence = self.current_sequence.saturating_add(1);
+        let envelope = envelope_for(
+            &self.subscription_id,
+            self.current_sequence,
+            json!({ "kind": "error", "code": "authorization_lost" }),
+        );
+        self.record_history(self.current_sequence, envelope.clone());
+        (self.current_sequence, envelope)
+    }
+
     /// Advances the authoritative sequence by one terminal completion.
     pub fn completion(&mut self) -> (u64, String) {
         self.current_sequence = self.current_sequence.saturating_add(1);

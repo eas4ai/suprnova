@@ -124,6 +124,7 @@ impl fmt::Debug for FinalizeRequest<'_> {
 pub struct PreparedFinalize {
     token: FinalizeToken,
     handle: UploadHandle,
+    ready_revision: UploadRevision,
     action: ActionName,
     idempotency_key: UploadIdempotencyKey,
     policy_digest: ContentDigest,
@@ -136,6 +137,7 @@ impl PreparedFinalize {
         Self {
             token,
             handle: request.evidence().handle().clone(),
+            ready_revision: request.evidence().ready_revision(),
             action: request.action().clone(),
             idempotency_key: request.idempotency_key().clone(),
             policy_digest: request.evidence().policy_digest().clone(),
@@ -154,8 +156,15 @@ impl PreparedFinalize {
         &self.handle
     }
 
+    /// Returns the exact ready revision accepted during preparation.
+    #[must_use]
+    pub const fn ready_revision(&self) -> UploadRevision {
+        self.ready_revision
+    }
+
     fn matches(&self, request: &FinalizeRequest<'_>) -> bool {
         self.handle == *request.evidence().handle()
+            && self.ready_revision == request.evidence().ready_revision()
             && self.action == *request.action()
             && self.idempotency_key == *request.idempotency_key()
             && self.policy_digest == *request.evidence().policy_digest()

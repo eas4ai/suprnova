@@ -1067,6 +1067,11 @@ Reflect.set(
       if (issued === undefined || port === undefined) {
         throw new Error("iteration_004_transport_missing");
       }
+      const browserDelivery = {
+        active_ports_before: activePorts.size,
+        authorizations_before: observations.authorizations.length,
+        ports_created_before: observations.portsCreated,
+      };
       const response = await originalFetch(
         `/__test/iteration-004/control/async/adversarial/${encodeURIComponent(caseName)}`,
         {
@@ -1078,12 +1083,22 @@ Reflect.set(
       const outcome = await response.json();
       if (!response.ok) throw new Error(`iteration_004_async_adversarial_failed:${outcome.error}`);
       if (typeof outcome.wire === "string") port.request.message(outcome.wire);
-      if (outcome.disposition === "authorization_lost") {
-        port.request.failed("authorization_lost");
-      } else if (outcome.disposition === "async_fanout_exceeded") {
+      if (outcome.disposition === "async_fanout_exceeded") {
         port.request.failed("async_fanout_exceeded");
       }
-      return outcome;
+      return Object.freeze({
+        ...outcome,
+        browser_delivery: Object.freeze({
+          ...browserDelivery,
+          active_ports_after: activePorts.size,
+          authorizations_after: observations.authorizations.length,
+          ports_created_after: observations.portsCreated,
+          stream_states: [...document.querySelectorAll("[data-live-stream-state]")].map((element) =>
+            element.getAttribute("data-live-stream-state"),
+          ),
+          transport_closed: port.closed,
+        }),
+      });
     },
     async runUploadRace(caseName) {
       if (readyUpload === null || readyUpload.readyRevision === null) {

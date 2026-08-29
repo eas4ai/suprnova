@@ -49,6 +49,7 @@ const ADVERSARIAL_SCAN_PORT: u16 = 4_202;
 const ADVERSARIAL_PROVIDER_PORT: u16 = 4_203;
 const REAL_ASYNC_MATRIX_PORT: u16 = 4_204;
 const REAL_UPLOAD_RACE_PORT: u16 = 4_205;
+const FINALIZER_SCOPE_PORT: u16 = 4_206;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -172,6 +173,53 @@ async fn upload_request(
         headers.push(("x-live-upload-grant", grant));
     }
     request(host, method, path, &headers, body).await
+}
+
+struct ReadyReferenceUpload {
+    handle: String,
+    revision: u64,
+}
+
+async fn ready_reference_upload(
+    host: &ReferenceHost,
+    field: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> ReadyReferenceUpload {
+    let (status, _, created) = json_request(
+        host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": field,
+            "filename": filename,
+            "content_type": "application/octet-stream",
+            "expected_bytes": bytes.len(),
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"]
+        .as_str()
+        .expect("upload handle")
+        .to_owned();
+    let grant = created["grant"].as_str().expect("upload grant").to_owned();
+    let chunk = chunked_upload(host, &handle, &grant, 0, &[bytes]).await;
+    assert!(chunk.starts_with("HTTP/1.1 200"), "{chunk}");
+    let (status, _, completed) = json_request(
+        host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+    ReadyReferenceUpload {
+        handle,
+        revision: completed["revision"].as_u64().expect("ready revision"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1679,6 +1727,148 @@ async fn provider_partial_failure_compensates_then_retries_through_the_real_fina
     host.shutdown()
         .await
         .expect("clean adversarial provider-partial shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finalizer_fault_controls_are_exactly_handle_revision_scoped_and_one_shot() {
+    let root = TestRoot::new("finalizer-fault-scope");
+    let host = start_host(FINALIZER_SCOPE_PORT, &root, ReferenceFaultSchedule::None).await;
+    let first = ready_reference_upload(&host, "first", "first.bin", b"first").await;
+    let sibling = ready_reference_upload(&host, "sibling", "sibling.bin", b"sibling").await;
+
+    let (status, _, wrong_revision) = json_request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/finalizer/commit-unavailable",
+        json!({"handle": first.handle, "upload_revision": first.revision + 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{wrong_revision}");
+    assert_eq!(
+        wrong_revision["error"],
+        "upload_finalize_fault_scope_invalid"
+    );
+    let (status, _, wrong_scope) = json_request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/finalizer/commit-unavailable",
+        json!({"handle": "AAAAAAAAAAAAAAAAAAAAAA", "upload_revision": first.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{wrong_scope}");
+    assert_eq!(wrong_scope["error"], "upload_finalize_fault_scope_invalid");
+
+    let (status, _, armed) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/finalizer/commit-unavailable",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        serde_json::to_vec(&json!({"handle": first.handle, "upload_revision": first.revision}))
+            .expect("finalizer control JSON"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&armed)
+    );
+
+    let (status, _, sibling_finalized) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": sibling.handle, "ready_revision": sibling.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sibling_finalized}");
+    assert_eq!(sibling_finalized["state"], "finalized");
+    let (status, _, targeted_failure) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": first.handle, "ready_revision": first.revision}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{targeted_failure}"
+    );
+    assert_eq!(targeted_failure["error"], "upload_provider_unavailable");
+    let (status, _, targeted_retry) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": first.handle, "ready_revision": first.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{targeted_retry}");
+    assert_eq!(targeted_retry["state"], "finalized");
+
+    let ledger_target = ready_reference_upload(&host, "ledger", "ledger.bin", b"ledger").await;
+    let ledger_sibling =
+        ready_reference_upload(&host, "ledger-sibling", "ledger-sibling.bin", b"clean").await;
+    let (status, _, armed) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/finalizer/ledger-after-commit",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        serde_json::to_vec(&json!({
+            "handle": ledger_target.handle,
+            "upload_revision": ledger_target.revision
+        }))
+        .expect("finalizer ledger control JSON"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&armed)
+    );
+    let (status, _, ledger_sibling_finalized) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": ledger_sibling.handle, "ready_revision": ledger_sibling.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ledger_sibling_finalized}");
+    assert_eq!(ledger_sibling_finalized["state"], "finalized");
+    let (status, _, reconciliation) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": ledger_target.handle, "ready_revision": ledger_target.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reconciliation}");
+    assert_eq!(reconciliation["error"], "upload_reconciliation_required");
+    let (status, _, reconciled) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": ledger_target.handle, "ready_revision": ledger_target.revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reconciled}");
+    assert_eq!(reconciled["state"], "finalized");
+
+    let inspection = host.inspection();
+    assert_eq!(inspection.active_uploads, 0);
+    let (status, _, action) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{action}");
+    assert_eq!(action["domain_count"], 1);
+    host.shutdown()
+        .await
+        .expect("clean finalizer-fault scope shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

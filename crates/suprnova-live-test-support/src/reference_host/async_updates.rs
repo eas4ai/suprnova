@@ -13,7 +13,7 @@ use suprnova_live::async_updates::{
     AsyncCloseCode, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDeliveryDisposition,
     AsyncDeliveryErrorKind, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
     AsyncPolicy, AsyncTransportErrorKind, AuthorizedTransportSubscription,
-    BoundedDocumentTransportSession, BufferDisposition, CloseDisposition, DocumentTransportKind,
+    BoundedDocumentTransportSession, BufferDisposition, DocumentTransportKind,
     MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
     MAX_REPLAY_TRANSCRIPT_ENVELOPES, ResolvedAsyncDelivery, SequenceDegradation,
     SequenceDisposition, SequenceState, SseEncoder, SseMembershipControl, StreamEpoch,
@@ -163,6 +163,20 @@ pub(super) struct AsyncAdversarialOutcome {
     pub(super) ceiling_bytes: usize,
     pub(super) accepted_sequence: u64,
     pub(super) dependent_closed: bool,
+    pub(super) affected_subscription: String,
+    pub(super) sibling_subscription: Option<String>,
+    pub(super) transport_generation_before: u64,
+    pub(super) transport_generation_after: u64,
+    pub(super) sibling_accepted_sequence_before: Option<u64>,
+    pub(super) sibling_accepted_sequence_after: Option<u64>,
+    pub(super) sibling_open_before: bool,
+    pub(super) sibling_open_after: bool,
+    pub(super) sibling_lease_owned_before: bool,
+    pub(super) sibling_lease_owned_after: bool,
+    pub(super) logical_memberships_before: usize,
+    pub(super) logical_memberships_after: usize,
+    pub(super) document_memberships_before: usize,
+    pub(super) document_memberships_after: usize,
     pub(super) sibling_usable: bool,
     pub(super) wire: Option<String>,
 }
@@ -321,6 +335,15 @@ impl AsyncRuntime {
             return Err("transport_retired");
         }
         if let Some(transport_id) = state.by_kind.get(&kind).cloned() {
+            if let Some((subscription, _)) = replay_from {
+                let authorization = state
+                    .transports
+                    .get(&transport_id)
+                    .and_then(|transport| transport.memberships.get(subscription))
+                    .map(|membership| membership.engine_authorization.clone())
+                    .ok_or("membership_authority_invalid")?;
+                state.engine.reauthorize(&authorization);
+            }
             let transport = state
                 .transports
                 .get(&transport_id)
@@ -1255,10 +1278,35 @@ impl AsyncRuntime {
             .transports
             .get_mut(transport_id)
             .ok_or("transport_authority_invalid")?;
+        let affected_subscription = transport
+            .memberships
+            .iter()
+            .find_map(|(subscription, membership)| membership.open.then(|| subscription.clone()))
+            .ok_or("membership_authority_invalid")?;
+        let sibling_subscription =
+            transport
+                .memberships
+                .iter()
+                .find_map(|(subscription, membership)| {
+                    (membership.open && subscription != &affected_subscription)
+                        .then(|| subscription.clone())
+                });
+        let transport_generation_before = transport.generation;
+        let sibling_before = sibling_subscription
+            .as_ref()
+            .and_then(|subscription| transport.memberships.get(subscription))
+            .map(|membership| {
+                (
+                    membership.authority.current_sequence(),
+                    membership.open,
+                    membership.lease.is_some(),
+                )
+            });
+        let logical_memberships_before = self.logical_memberships.current();
+        let document_memberships_before = transport.document.transport().membership_count();
         let primary = transport
             .memberships
-            .values_mut()
-            .find(|membership| membership.open)
+            .get_mut(&affected_subscription)
             .ok_or("membership_authority_invalid")?;
         let authorization = primary.engine_authorization.clone();
         let accepted_sequence = transport
@@ -1270,9 +1318,16 @@ impl AsyncRuntime {
         if primary.authority.current_sequence() != accepted_sequence {
             return Err("engine_sequence_authority_mismatch");
         }
-        let sequence = primary.authority.sequence_gap().0;
+        let sequence = if case == "revoked-authorization" {
+            primary.authority.authorization_lost().0
+        } else {
+            primary.authority.sequence_gap().0
+        };
 
         let envelope = match case {
+            "revoked-authorization" => {
+                engine.authorization_lost_envelope(&authorization, sequence)?
+            }
             "fanout-pressure" => {
                 engine.set_resolved_event_fanout(2);
                 engine.browser_event_envelope(&authorization, sequence)?
@@ -1302,17 +1357,10 @@ impl AsyncRuntime {
                 if error.kind() != AsyncTransportErrorKind::AuthorizationLost {
                     return Err("engine_revocation_disposition_invalid");
                 }
-                if transport
-                    .document
-                    .detach_authorization_lost(&authorization)
-                    .map_err(|error| error.kind().as_str())?
-                    != CloseDisposition::Closed
-                {
-                    return Err("engine_revocation_detach_invalid");
-                }
+                primary.authority.retire_membership();
                 primary.open = false;
                 drop(primary.lease.take());
-                ("authorization_lost", "reauthorize", true, 0)
+                ("authorization_lost", "reauthorize", true, sequence)
             }
             "fanout-pressure" => {
                 engine.set_resolved_event_fanout(1);
@@ -1370,6 +1418,21 @@ impl AsyncRuntime {
             _ => return Err("adversarial_case_unknown"),
         };
 
+        let sibling_after = sibling_subscription
+            .as_ref()
+            .and_then(|subscription| transport.memberships.get(subscription))
+            .map(|membership| {
+                (
+                    membership.authority.current_sequence(),
+                    membership.open,
+                    membership.lease.is_some(),
+                )
+            });
+        let transport_generation_after = transport.generation;
+        let logical_memberships_after = self.logical_memberships.current();
+        let document_memberships_after = transport.document.transport().membership_count();
+        let sibling_usable = sibling_after.is_some_and(|(_, open, owned)| open && owned);
+
         Ok(AsyncAdversarialOutcome {
             disposition,
             recovery,
@@ -1379,10 +1442,21 @@ impl AsyncRuntime {
             ceiling_bytes: MAX_ASYNC_BUFFER_BYTES,
             accepted_sequence,
             dependent_closed,
-            sibling_usable: transport
-                .memberships
-                .values()
-                .any(|membership| membership.open),
+            affected_subscription,
+            sibling_subscription,
+            transport_generation_before,
+            transport_generation_after,
+            sibling_accepted_sequence_before: sibling_before.map(|(sequence, _, _)| sequence),
+            sibling_accepted_sequence_after: sibling_after.map(|(sequence, _, _)| sequence),
+            sibling_open_before: sibling_before.is_some_and(|(_, open, _)| open),
+            sibling_open_after: sibling_after.is_some_and(|(_, open, _)| open),
+            sibling_lease_owned_before: sibling_before.is_some_and(|(_, _, owned)| owned),
+            sibling_lease_owned_after: sibling_after.is_some_and(|(_, _, owned)| owned),
+            logical_memberships_before,
+            logical_memberships_after,
+            document_memberships_before,
+            document_memberships_after,
+            sibling_usable,
             wire,
         })
     }
