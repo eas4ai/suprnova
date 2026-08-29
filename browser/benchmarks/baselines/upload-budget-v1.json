@@ -1,0 +1,119 @@
+{
+  "exploratoryReference": {
+    "artifact": {
+      "brotliBytes": 14584,
+      "file": "suprnova-live.uploads.esm.js",
+      "role": "uploads-esm",
+      "sha256": "cb9bf0f53f809aa6fc8104528d97a28105fd7c7643254eeaa665ae459cec9d6a"
+    },
+    "browser": {
+      "bounds": {
+        "maxChunksPerActiveTransfer": 2,
+        "maxManagerOwnedBytes": 262144,
+        "maxProgressP95Milliseconds": 16
+      },
+      "environment": {
+        "architecture": "x86_64",
+        "browser": "chromium",
+        "browserRevision": "149.0.7827.55 @ /home/shawn/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "classification": "unqualified",
+        "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+        "cpuThrottleRate": 4,
+        "dedicatedVcpusAttested": false,
+        "extensions": false,
+        "kernel": "Linux 7.0.0-30-generic",
+        "memoryBytes": 100993044480,
+        "operatingSystem": "linux",
+        "playwrightVersion": "1.62.1",
+        "profile": "B1",
+        "qualificationRequirementsMet": false,
+        "selectedCpuCount": 8,
+        "viewport": {
+          "height": 720,
+          "width": 1280
+        },
+        "warmHttpCache": true
+      },
+      "measurements": {
+        "activeTransfers": 4,
+        "liveChunkBuffers": 2,
+        "managerOwnedBytes": 262144,
+        "maxChunksPerTransfer": 2,
+        "maxConcurrentTransfers": 4,
+        "maxQueueDepth": 4,
+        "progressP50Milliseconds": 0,
+        "progressP95Milliseconds": 0.5999999940395355,
+        "retainedBytes": 786432,
+        "slicedBytes": 67108864,
+        "slices": 256
+      },
+      "methodology": {
+        "independentRuns": 1,
+        "measuredSamples": 267,
+        "warmupIterations": 5
+      },
+      "workload": {
+        "activeTransfers": 4,
+        "chunkBytes": 262144,
+        "fileBytes": 16777216,
+        "files": 4
+      }
+    },
+    "recordedAt": "2026-08-29T10:50:51.072Z",
+    "schemaVersion": 1,
+    "server": {
+      "bounds": {
+        "maxChunksPerActiveTransfer": 2,
+        "maxControlP95Microseconds": 2000,
+        "maxManagerOwnedBytes": 524288
+      },
+      "environment": {
+        "architecture": "x86_64",
+        "classification": "unqualified",
+        "cpuGovernor": "powersave",
+        "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+        "database": "not_used_by_upload_control_budget",
+        "dedicatedVcpusAttested": false,
+        "kernel": "Linux 7.0.0-30-generic",
+        "loopbackProviders": true,
+        "memoryBytes": 100993044480,
+        "operatingSystem": "linux",
+        "profile": "S1",
+        "qualificationRequirementsMet": false,
+        "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)",
+        "selectedCpuCount": 8,
+        "warmFilesystemCache": true
+      },
+      "measurements": {
+        "excludedCalls": {
+          "applicationValidation": 0,
+          "bodyIo": 0,
+          "provider": 0,
+          "scanner": 0
+        },
+        "liveChunkBuffers": 0,
+        "managerOwnedBytes": 0,
+        "maxChunksPerTransfer": 0,
+        "maxConcurrentTransfers": 0,
+        "maxQueueDepth": 0,
+        "p50Microseconds": 15.222,
+        "p95Microseconds": 16.158,
+        "retainedBytes": 0
+      },
+      "methodology": {
+        "measuredSamples": 40,
+        "warmupIterations": 50
+      },
+      "workload": {
+        "activeTransfers": 4,
+        "chunkBytes": 262144,
+        "fileBytes": 16777216,
+        "files": 4
+      }
+    },
+    "workload": "U4/16"
+  },
+  "qualifiedBaseline": null,
+  "schemaVersion": 1,
+  "workload": "U4/16"
+}

@@ -95,6 +95,13 @@ rtk env \
     SUPRNOVA_LIVE_BENCH_RESULT="${local_action_result}" \
     scripts/run-action-budget.sh
 
+phase "U4/16 upload framework and browser budget"
+if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
+    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh
+else
+    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
+fi
+
 phase "macro expansion and isolated compile budget"
 rtk node scripts/check-expansion-budget.mjs
 

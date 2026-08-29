@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "action_framework_budget"
 harness = false
+
+[[bench]]
+name = "upload_framework_budget"
+harness = false

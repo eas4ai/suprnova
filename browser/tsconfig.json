@@ -22,6 +22,7 @@
   },
   "include": [
     "src/**/*.ts",
+    "benchmarks/**/*.ts",
     "tests/**/*.ts",
     "e2e/**/*.ts",
     "playwright.config.ts",
