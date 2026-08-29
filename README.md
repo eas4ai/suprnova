@@ -14,6 +14,11 @@ runtime: deterministic assets, closed directives, local signals, bounded
 scheduling and feedback, secure transport/application ordering, DOM morphing
 and interaction continuity, native navigation enhancements, lifecycle control,
 actual-browser qualification contracts, and browser performance budgets.
+Iteration 004 adds the standalone upload and asynchronous-update foundation:
+bounded temporary uploads, quarantine and validation, provider-neutral transfer,
+explicit finalization and cleanup, typed events, signed subscriptions,
+multiplexed SSE/WebSocket delivery, polling, continuity recovery, backpressure,
+optional production artifacts, and qualified workload contracts.
 
 It is not a third-party crate and is not yet the application-facing Live API.
 The eventual public facade belongs under `suprnova::live`. Actual Suprnova
@@ -26,7 +31,7 @@ asset registration wait for the atomic integration move.
 - `browser/` contains the strict TypeScript browser runtime, deterministic
   builder, unit/property suites, three-engine Playwright host, compatibility
   qualification, and browser budget harness.
-- `fixtures/v1/`, `fixtures/v2/`, and `fixtures/v3/` are the reviewed
+- `fixtures/v1/`, `fixtures/v2/`, `fixtures/v3/`, and `fixtures/v4/` are the reviewed
   cross-language fixture corpora.
 - `docs/specs/suprnova-live/` is the normative specification set.
 - `docs/implementation/` records what completed iterations actually implement.
@@ -41,7 +46,7 @@ in `Cargo.lock`; browser tooling is exact in `browser/package-lock.json`.
 Run the unattended gate from the repository root:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 scripts/gate.sh
+rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 ```
 
 The gate checks the implementation-document contract, specs and optional Fable
@@ -69,6 +74,9 @@ without blanket warning denial.
 - [Morphing and continuity](docs/implementation/morphing-and-continuity.md),
   [document navigation](docs/implementation/document-navigation.md), and
   [browser testing](docs/implementation/browser-testing.md)
+- [Uploads](docs/implementation/uploads.md),
+  [asynchronous updates](docs/implementation/async-updates.md), and
+  [Iteration 004 operations](docs/implementation/iteration-004-operations.md)
 - [Snapshot v1](docs/implementation/snapshot-v1.md) and
   [protocol v1](docs/implementation/protocol-v1.md)
 - [Threat model](docs/implementation/threat-model-v1.md),

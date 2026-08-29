@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-26
+Last revised: 2026-08-29
 
 ## Authority and application
 
@@ -133,6 +133,11 @@ iteration must do that explicitly.
 - Protocol, snapshot, directive, view metadata, and cache-entry fixtures are
   consumed by both Rust and TypeScript tests. A handwritten duplicate schema is
   not a second source of truth.
+- Iteration 004 conformance lives in `fixtures/v4/`. Upload protocol v1 and
+  asynchronous envelope/subscription protocol v1 remain independently
+  versioned while interoperating with Live update protocols v1/v2. The feature
+  registry ABI is `suprnova.live.features.v1`; its checked capabilities are
+  `uploads@1` and `async@1` against compatible core `>=0.1.0 <0.2.0`.
 
 ### RenderCache and providers
 
@@ -160,6 +165,11 @@ iteration must do that explicitly.
 - Runtime source is strict TypeScript targeting ES2020 and is built into
   deterministic versioned ESM and classic-script artifacts with source maps kept
   out of production responses by default.
+- Asset manifest schema v2 records engine `0.1.0`, runtime contract version 1,
+  Live protocol versions 1/2, snapshot version 1, and exact `core@1`,
+  `stimulus@1`, `uploads@1`, and `async@1` ESM/classic roles. A version change
+  updates generated contracts, fixtures, compatibility checks, and this record
+  together.
 - The universal core and optional Stimulus/upload/async ESM/classic feature
   pairs are selected only through trusted rendered roles and the typed asset
   manifest. Optional loading deduplicates and registers through the core
@@ -518,6 +528,12 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-29 -- Recorded the completed Iteration 004 artifact and protocol
+  facts: fixture corpus v4, upload and async protocol v1, feature-registry ABI
+  v1, asset-manifest schema v2, runtime contract v1, and optional capabilities
+  `uploads@1`/`async@1` alongside `core@1`/`stimulus@1`. These are standalone
+  development and conformance contracts, not Suprnova route, provider, scanner,
+  storage, or broadcaster integration.
 - 2026-08-26 -- Appended the reviewed Task 7 measurements in a separate commit
   after their producing code and policy decision became immutable at
   `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`. The checker verifies strict source

@@ -20,6 +20,56 @@ const files = [
     .map((name) => path.join("docs", "implementation", name)),
 ];
 const failures = [];
+const requiredHeadings = new Map([
+  [
+    "docs/implementation/uploads.md",
+    [
+      "Handle and grant",
+      "Provider modes",
+      "Quarantine and scanning",
+      "Finalization and compensation",
+      "Current-document resume",
+      "Cleanup",
+    ],
+  ],
+  [
+    "docs/implementation/async-updates.md",
+    [
+      "Event schemas",
+      "Subscription authorization",
+      "Polling and push modes",
+      "Continuity",
+      "Degraded freshness",
+      "Backpressure",
+    ],
+  ],
+  [
+    "docs/implementation/iteration-004-operations.md",
+    [
+      "Artifacts",
+      "Limits",
+      "Observability",
+      "Benchmarks",
+      "Reference-host boundary",
+      "Suprnova integration boundary",
+    ],
+  ],
+]);
+
+for (const [relativeFile, headings] of requiredHeadings) {
+  const fullPath = path.join(repositoryRoot, relativeFile);
+  if (!fs.existsSync(fullPath)) {
+    failures.push(`${relativeFile}: required implementation document is missing`);
+    continue;
+  }
+
+  const text = fs.readFileSync(fullPath, "utf8");
+  for (const heading of headings) {
+    if (!text.split("\n").includes(`## ${heading}`)) {
+      failures.push(`${relativeFile}: missing exact heading: ## ${heading}`);
+    }
+  }
+}
 
 for (const relativeFile of files) {
   const fullPath = path.join(repositoryRoot, relativeFile);

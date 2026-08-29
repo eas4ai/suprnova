@@ -56,7 +56,10 @@ for required_file in \
     docs/implementation/scheduling-and-feedback.md \
     docs/implementation/morphing-and-continuity.md \
     docs/implementation/document-navigation.md \
-    docs/implementation/browser-testing.md
+    docs/implementation/browser-testing.md \
+    docs/implementation/uploads.md \
+    docs/implementation/async-updates.md \
+    docs/implementation/iteration-004-operations.md
 do
     require_file "${required_file}"
 done
@@ -136,6 +139,27 @@ require_heading docs/implementation/document-navigation.md "Page lifecycle and b
 require_heading docs/implementation/browser-testing.md "Test layers"
 require_heading docs/implementation/browser-testing.md "Actual browser qualification"
 require_heading docs/implementation/browser-testing.md "Budgets and diagnostics"
+
+require_heading docs/implementation/uploads.md "Handle and grant"
+require_heading docs/implementation/uploads.md "Provider modes"
+require_heading docs/implementation/uploads.md "Quarantine and scanning"
+require_heading docs/implementation/uploads.md "Finalization and compensation"
+require_heading docs/implementation/uploads.md "Current-document resume"
+require_heading docs/implementation/uploads.md "Cleanup"
+
+require_heading docs/implementation/async-updates.md "Event schemas"
+require_heading docs/implementation/async-updates.md "Subscription authorization"
+require_heading docs/implementation/async-updates.md "Polling and push modes"
+require_heading docs/implementation/async-updates.md "Continuity"
+require_heading docs/implementation/async-updates.md "Degraded freshness"
+require_heading docs/implementation/async-updates.md "Backpressure"
+
+require_heading docs/implementation/iteration-004-operations.md "Artifacts"
+require_heading docs/implementation/iteration-004-operations.md "Limits"
+require_heading docs/implementation/iteration-004-operations.md "Observability"
+require_heading docs/implementation/iteration-004-operations.md "Benchmarks"
+require_heading docs/implementation/iteration-004-operations.md "Reference-host boundary"
+require_heading docs/implementation/iteration-004-operations.md "Suprnova integration boundary"
 
 require_text docs/implementation/component-authoring.md \
     "final application facade" 'suprnova::live'
