@@ -597,6 +597,22 @@ require_file "upload media-header fuzz target" "fuzz/fuzz_targets/upload_media_h
 require_file "async envelope fuzz target" "fuzz/fuzz_targets/async_envelope.rs"
 require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 
+correctness_sleep_files=(
+    "${repository_root}"/tests/iteration_004*.rs
+    "${repository_root}"/crates/suprnova-live-test-support/tests/reference_host.rs
+    "${repository_root}"/browser/tests/async-*.test.ts
+    "${repository_root}"/browser/tests/upload-*.test.ts
+    "${repository_root}"/browser/e2e/iteration-004*.spec.ts
+)
+for correctness_sleep_file in "${correctness_sleep_files[@]}"; do
+    correctness_sleep_source=$(<"${correctness_sleep_file}")
+    if [[ ${correctness_sleep_source} =~ tokio::time::sleep|std::thread::sleep|thread::sleep|waitForTimeout\( ]]; then
+        printf 'gate contract: correctness sleep is forbidden (%s)\n' \
+            "${correctness_sleep_file#"${repository_root}/"}" >&2
+        exit 1
+    fi
+done
+
 if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
     exit 1

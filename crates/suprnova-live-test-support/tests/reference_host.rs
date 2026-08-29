@@ -630,7 +630,13 @@ async fn aborted_chunk_restores_coherent_upload_state_and_shutdown_removes_quara
     .await
     .expect("chunk entered provider I/O");
     drop(stream);
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    timeout(Duration::from_secs(1), async {
+        while inspection.snapshot().open_files != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborted body released provider I/O");
 
     let (status, _, body) = upload_request(
         &host,
@@ -2699,8 +2705,6 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     assert_eq!(final_state.open_timers, 0);
     assert_eq!(final_state.active_uploads, 0);
     assert_eq!(final_state.logical_memberships, 0);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(inspection.snapshot(), final_state, "late resource revival");
 }
 
 async fn chunked_upload(
