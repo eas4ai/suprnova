@@ -369,12 +369,23 @@ export class UploadManager {
     let pendingChunkBuffers = 0;
     let pendingChunkBytes = 0;
     let retainedStringCodeUnits = 0;
+    const transferChunks = [];
     for (const { transfer } of this.#entries.values()) {
       const resource = transfer.resourceSnapshot();
       pendingChunkBuffers += resource.pendingChunkBuffers;
       pendingChunkBytes += resource.pendingChunkBytes;
       retainedStringCodeUnits += resource.retainedStringCodeUnits;
+      if (resource.handle !== null) {
+        transferChunks.push(
+          Object.freeze({
+            handle: resource.handle,
+            pendingChunkBuffers: resource.pendingChunkBuffers,
+            pendingChunkBytes: resource.pendingChunkBytes,
+          }),
+        );
+      }
     }
+    transferChunks.sort((left, right) => left.handle.localeCompare(right.handle));
     return Object.freeze({
       activeLeases: owner.active,
       bindings,
@@ -388,6 +399,7 @@ export class UploadManager {
       queuedBytes: owner.queuedBytes,
       queuedItems: owner.queuedItems,
       retainedStringCodeUnits,
+      transferChunks: Object.freeze(transferChunks),
       waitingPermits: owner.waitingPermits,
     });
   }

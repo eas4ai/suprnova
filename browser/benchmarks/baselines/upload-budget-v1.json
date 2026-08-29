@@ -1,10 +1,10 @@
 {
   "exploratoryReference": {
     "artifact": {
-      "brotliBytes": 14954,
+      "brotliBytes": 15005,
       "file": "suprnova-live.uploads.esm.js",
       "role": "uploads-esm",
-      "sha256": "4eabbe618a6b42909eebf5d630b842f10c37ea027146f8b4a5fff3a0d2475709"
+      "sha256": "ce7a5aa012d6b4e4ec1ae8a14c46eac11e7eedcacb3e1ca492a8c1a2d33ff5ec"
     },
     "browser": {
       "bounds": {
@@ -36,6 +36,60 @@
       },
       "measurements": {
         "activeTransfers": 4,
+        "chunkBuffersByTransfer": [
+          {
+            "currentBytes": 0,
+            "currentManagerBuffers": 0,
+            "currentTotalBuffers": 0,
+            "currentTransportBuffers": 0,
+            "handle": "018f47c1-2af0-7cc4-a001-000000000001",
+            "managerHighWater": 1,
+            "managerHighWaterBytes": 262144,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 524288,
+            "transportHighWater": 1,
+            "transportHighWaterBytes": 262144
+          },
+          {
+            "currentBytes": 0,
+            "currentManagerBuffers": 0,
+            "currentTotalBuffers": 0,
+            "currentTransportBuffers": 0,
+            "handle": "018f47c1-2af0-7cc4-a001-000000000002",
+            "managerHighWater": 1,
+            "managerHighWaterBytes": 262144,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 524288,
+            "transportHighWater": 1,
+            "transportHighWaterBytes": 262144
+          },
+          {
+            "currentBytes": 0,
+            "currentManagerBuffers": 0,
+            "currentTotalBuffers": 0,
+            "currentTransportBuffers": 0,
+            "handle": "018f47c1-2af0-7cc4-a001-000000000003",
+            "managerHighWater": 1,
+            "managerHighWaterBytes": 262144,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 524288,
+            "transportHighWater": 1,
+            "transportHighWaterBytes": 262144
+          },
+          {
+            "currentBytes": 524288,
+            "currentManagerBuffers": 1,
+            "currentTotalBuffers": 2,
+            "currentTransportBuffers": 1,
+            "handle": "018f47c1-2af0-7cc4-a001-000000000004",
+            "managerHighWater": 1,
+            "managerHighWaterBytes": 262144,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 524288,
+            "transportHighWater": 1,
+            "transportHighWaterBytes": 262144
+          }
+        ],
         "liveChunkBuffers": 2,
         "managerChunkBuffers": 1,
         "managerOwnedBytes": 10418,
@@ -71,7 +125,7 @@
       },
       "runs": [
         {
-          "artifactSha256": "4eabbe618a6b42909eebf5d630b842f10c37ea027146f8b4a5fff3a0d2475709",
+          "artifactSha256": "ce7a5aa012d6b4e4ec1ae8a14c46eac11e7eedcacb3e1ca492a8c1a2d33ff5ec",
           "environment": {
             "architecture": "x86_64",
             "browser": "chromium",
@@ -96,6 +150,60 @@
           },
           "measurements": {
             "activeTransfers": 4,
+            "chunkBuffersByTransfer": [
+              {
+                "currentBytes": 0,
+                "currentManagerBuffers": 0,
+                "currentTotalBuffers": 0,
+                "currentTransportBuffers": 0,
+                "handle": "018f47c1-2af0-7cc4-a001-000000000001",
+                "managerHighWater": 1,
+                "managerHighWaterBytes": 262144,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 524288,
+                "transportHighWater": 1,
+                "transportHighWaterBytes": 262144
+              },
+              {
+                "currentBytes": 0,
+                "currentManagerBuffers": 0,
+                "currentTotalBuffers": 0,
+                "currentTransportBuffers": 0,
+                "handle": "018f47c1-2af0-7cc4-a001-000000000002",
+                "managerHighWater": 1,
+                "managerHighWaterBytes": 262144,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 524288,
+                "transportHighWater": 1,
+                "transportHighWaterBytes": 262144
+              },
+              {
+                "currentBytes": 0,
+                "currentManagerBuffers": 0,
+                "currentTotalBuffers": 0,
+                "currentTransportBuffers": 0,
+                "handle": "018f47c1-2af0-7cc4-a001-000000000003",
+                "managerHighWater": 1,
+                "managerHighWaterBytes": 262144,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 524288,
+                "transportHighWater": 1,
+                "transportHighWaterBytes": 262144
+              },
+              {
+                "currentBytes": 524288,
+                "currentManagerBuffers": 1,
+                "currentTotalBuffers": 2,
+                "currentTransportBuffers": 1,
+                "handle": "018f47c1-2af0-7cc4-a001-000000000004",
+                "managerHighWater": 1,
+                "managerHighWaterBytes": 262144,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 524288,
+                "transportHighWater": 1,
+                "transportHighWaterBytes": 262144
+              }
+            ],
             "liveChunkBuffers": 2,
             "managerChunkBuffers": 1,
             "managerOwnedBytes": 10418,
@@ -118,29 +226,34 @@
             "maxConcurrentTransfers": 4,
             "maxQueueDepth": 4,
             "progressDurationsMilliseconds": [
-              0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0.10000000894069672,
-              0.10000000894069672, 0, 0, 0, 0.7000000029802322, 0.20000000298023224, 0, 0, 0, 0, 0,
-              0, 0, 2.5, 0.10000000894069672, 0, 0, 0, 0.5, 0, 0, 0, 0.10000000894069672,
-              0.6000000089406967, 0, 0, 0, 0, 0.20000000298023224, 0, 0, 0.10000000894069672, 0,
-              0.10000000894069672, 0, 0, 0, 0.20000000298023224, 0, 0, 0, 0, 0, 0,
-              0.7999999970197678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0,
-              0, 0, 0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0.10000000894069672, 0,
-              0.20000000298023224, 0, 0, 0, 0, 0.09999999403953552, 0.09999999403953552, 0,
-              0.7000000029802322, 0, 0.09999999403953552, 0, 0, 0.5999999940395355, 0,
-              0.10000000894069672, 0.09999999403953552, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0,
-              0, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0.5, 0, 0.10000000894069672,
-              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.29999999701976776, 0, 0, 0.09999999403953552,
-              0.29999999701976776, 0, 0, 0, 0, 0, 0, 0.7999999970197678, 0, 0.7000000029802322, 0,
-              0, 0, 0, 0, 0, 0.10000000894069672, 0.09999999403953552, 0, 0, 0, 0,
-              0.20000000298023224, 0, 0, 0.7000000029802322, 0, 0, 0, 2.2999999970197678, 0, 0, 0,
-              0.20000000298023224, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.10000000894069672, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0,
-              0.29999999701976776, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5999999940395355, 0, 0,
-              0.29999999701976776, 0.09999999403953552, 0.09999999403953552, 0, 0.09999999403953552,
-              0.20000000298023224, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0, 0, 0,
-              0.5999999940395355, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0.4000000059604645, 0,
-              0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0
+              0, 0, 0, 0, 0.4000000059604645, 0, 0, 0, 0, 0, 0.09999999403953552,
+              0.29999999701976776, 0, 0, 0, 0.5, 0.5, 0.09999999403953552, 0, 0, 0, 0, 0, 0,
+              0.20000000298023224, 2.2999999970197678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.5999999940395355, 0, 0, 0, 0.5, 0.10000000894069672, 0.29999999701976776, 0, 0, 0,
+              0, 0, 0, 0, 0.09999999403953552, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0, 0, 0.19999998807907104, 0, 0.09999999403953552, 0.5999999940395355, 0,
+              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0.5999999940395355, 0,
+              0.09999999403953552, 0.5, 0, 0, 0.29999999701976776, 0, 0, 0, 0, 0, 0,
+              0.10000000894069672, 0, 0, 0.5999999940395355, 0.3999999910593033, 0, 0, 0,
+              0.20000000298023224, 0.10000000894069672, 0.09999999403953552, 0, 0.10000000894069672,
+              0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0, 0.10000000894069672, 0,
+              0, 0, 0.5, 0, 0.09999999403953552, 0.7999999970197678, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0, 0.4000000059604645,
+              0.20000000298023224, 0, 0.5, 0.29999999701976776, 0.10000000894069672, 0,
+              0.10000000894069672, 0, 0.09999999403953552, 0.7999999970197678, 0, 0, 0, 0, 0, 0, 0,
+              0, 0, 0.09999999403953552, 0.10000000894069672, 0, 0, 2.5999999940395355, 0,
+              0.09999999403953552, 0, 0.6000000089406967, 0.09999999403953552, 0,
+              0.10000000894069672, 0, 0, 0, 0, 0, 0.4000000059604645, 0.7000000029802322,
+              0.10000000894069672, 0.09999999403953552, 0.10000000894069672, 0, 0,
+              0.09999999403953552, 0, 0.20000000298023224, 0, 0.29999999701976776,
+              0.09999999403953552, 0, 0, 0.10000000894069672, 0.29999999701976776, 0, 0.5, 0, 0, 0,
+              0.4000000059604645, 0, 0, 0, 0, 0, 0, 0.29999999701976776, 0.20000000298023224, 0,
+              0.5, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0.7000000029802322,
+              0.09999999403953552, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0.5, 0, 0, 0, 0, 0, 0, 0,
+              0, 0, 0, 0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0.4000000059604645,
+              0.09999999403953552, 0.29999999701976776, 0.09999999403953552, 0.09999999403953552, 0,
+              0.20000000298023224, 0, 0, 0, 0, 0, 0.09999999403953552, 0.7000000029802322, 0,
+              0.7000000029802322
             ],
             "progressP50Milliseconds": 0,
             "progressP95Milliseconds": 0.5,
@@ -169,7 +282,7 @@
         "files": 4
       }
     },
-    "recordedAt": "2026-08-29T11:46:30.030Z",
+    "recordedAt": "2026-08-29T12:56:19.419Z",
     "schemaVersion": 1,
     "server": {
       "bounds": {
@@ -195,6 +308,52 @@
         "warmFilesystemCache": true
       },
       "measurements": {
+        "chunkBuffersByTransfer": [
+          {
+            "bodyHighWater": 1,
+            "currentBodyBuffers": 1,
+            "currentBytes": 327680,
+            "currentProviderBuffers": 1,
+            "currentTotalBuffers": 2,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000000",
+            "providerHighWater": 1,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 327680
+          },
+          {
+            "bodyHighWater": 1,
+            "currentBodyBuffers": 1,
+            "currentBytes": 327680,
+            "currentProviderBuffers": 1,
+            "currentTotalBuffers": 2,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000001",
+            "providerHighWater": 1,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 327680
+          },
+          {
+            "bodyHighWater": 1,
+            "currentBodyBuffers": 1,
+            "currentBytes": 327680,
+            "currentProviderBuffers": 1,
+            "currentTotalBuffers": 2,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000002",
+            "providerHighWater": 1,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 327680
+          },
+          {
+            "bodyHighWater": 1,
+            "currentBodyBuffers": 1,
+            "currentBytes": 327680,
+            "currentProviderBuffers": 1,
+            "currentTotalBuffers": 2,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000003",
+            "providerHighWater": 1,
+            "totalHighWater": 2,
+            "totalHighWaterBytes": 327680
+          }
+        ],
         "excludedCalls": {
           "applicationValidation": 0,
           "bodyIo": 0,
@@ -204,19 +363,21 @@
         "liveChunkBuffers": 8,
         "managerOwnedBytes": 4240,
         "managerOwnedCategories": {
-          "activePermits": 4,
-          "chunkQueueEntries": 8,
-          "permitSlots": 4,
-          "queueControlRecords": 2,
+          "activeServicePermits": 4,
+          "providerActiveChunks": 4,
+          "providerActiveDescriptors": 4,
+          "providerActiveOperations": 4,
+          "providerControlRecords": 1,
+          "providerOwnedTransfers": 4,
           "retainedHandleBytes": 144,
-          "transferQueueEntries": 4
+          "serviceControlRecords": 1
         },
         "maxChunksPerTransfer": 2,
         "maxConcurrentTransfers": 4,
         "maxQueueDepth": 4,
-        "p50Microseconds": 15.395000000000001,
-        "p95Microseconds": 19.9,
-        "retainedBytes": 2101536
+        "p50Microseconds": 15.424,
+        "p95Microseconds": 16.503,
+        "retainedBytes": 1314960
       },
       "methodology": {
         "measuredSamples": 40,

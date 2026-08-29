@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   U4_16,
   evaluateUploadBudget,
+  regressionAtLeast15Percent,
   summarizeUploadSamples,
   validateUploadBudgetBaseline,
   validateUploadBudgetEvidence,
@@ -12,6 +13,40 @@ import {
 import { estimateUploadManagerOwnedBytes } from "../benchmarks/upload-accounting.js";
 
 const SHA256 = "a".repeat(64);
+const HANDLES = Array.from(
+  { length: U4_16.activeTransfers },
+  (_, index) => `018f47c1-2af0-7cc4-a001-${String(index + 1).padStart(12, "0")}`,
+);
+
+function browserChunkDistribution(): Record<string, unknown>[] {
+  return HANDLES.map((handle, index) => ({
+    currentBytes: index === 0 ? 2 * U4_16.chunkBytes : 0,
+    currentManagerBuffers: index === 0 ? 1 : 0,
+    currentTotalBuffers: index === 0 ? 2 : 0,
+    currentTransportBuffers: index === 0 ? 1 : 0,
+    handle,
+    managerHighWater: 1,
+    managerHighWaterBytes: U4_16.chunkBytes,
+    totalHighWater: 2,
+    totalHighWaterBytes: 2 * U4_16.chunkBytes,
+    transportHighWater: 1,
+    transportHighWaterBytes: U4_16.chunkBytes,
+  }));
+}
+
+function serverChunkDistribution(): Record<string, unknown>[] {
+  return HANDLES.map((handle) => ({
+    bodyHighWater: 1,
+    currentBodyBuffers: 1,
+    currentBytes: U4_16.chunkBytes + 64 * 1024,
+    currentProviderBuffers: 1,
+    currentTotalBuffers: 2,
+    handle,
+    providerHighWater: 1,
+    totalHighWater: 2,
+    totalHighWaterBytes: U4_16.chunkBytes + 64 * 1024,
+  }));
+}
 
 function evidence(): Record<string, unknown> {
   const candidate: Record<string, unknown> = {
@@ -50,6 +85,7 @@ function evidence(): Record<string, unknown> {
       },
       measurements: {
         activeTransfers: 4,
+        chunkBuffersByTransfer: browserChunkDistribution(),
         liveChunkBuffers: 2,
         managerChunkBuffers: 1,
         managerOwnedBytes: 10_432,
@@ -115,6 +151,7 @@ function evidence(): Record<string, unknown> {
         warmFilesystemCache: true,
       },
       measurements: {
+        chunkBuffersByTransfer: serverChunkDistribution(),
         excludedCalls: {
           applicationValidation: 0,
           bodyIo: 0,
@@ -124,19 +161,21 @@ function evidence(): Record<string, unknown> {
         liveChunkBuffers: 8,
         managerOwnedBytes: 4_240,
         managerOwnedCategories: {
-          activePermits: 4,
-          chunkQueueEntries: 8,
-          permitSlots: 4,
-          queueControlRecords: 2,
+          activeServicePermits: 4,
+          providerActiveChunks: 4,
+          providerActiveDescriptors: 4,
+          providerActiveOperations: 4,
+          providerControlRecords: 1,
+          providerOwnedTransfers: 4,
           retainedHandleBytes: 144,
-          transferQueueEntries: 4,
+          serviceControlRecords: 1,
         },
         maxChunksPerTransfer: 2,
         maxConcurrentTransfers: 4,
         maxQueueDepth: 4,
         p50Microseconds: 50,
         p95Microseconds: 100,
-        retainedBytes: 8 * 256 * 1024 + 4_240 + 144,
+        retainedBytes: 4 * (256 * 1024 + 64 * 1024) + 4_240,
       },
       methodology: {
         measuredSamples: 40,
@@ -174,6 +213,61 @@ function nestedMutation(
   const candidate = structuredClone(evidence());
   mutate(candidate);
   return candidate;
+}
+
+function qualifyThreeRuns(value: Record<string, unknown>): void {
+  const browser = value["browser"] as {
+    environment: Record<string, unknown>;
+    methodology: { independentRuns: number; measuredSamples: number };
+    runs: Record<string, unknown>[];
+  };
+  const server = value["server"] as { environment: Record<string, unknown> };
+  browser.environment = {
+    ...browser.environment,
+    classification: "qualified",
+    dedicatedVcpusAttested: true,
+    qualificationRequirementsMet: true,
+  };
+  server.environment = {
+    ...server.environment,
+    classification: "qualified",
+    cpuGovernor: "performance",
+    dedicatedVcpusAttested: true,
+    qualificationRequirementsMet: true,
+  };
+  const first = browser.runs[0];
+  if (first === undefined) throw new Error("fixture_run_missing");
+  browser.runs = [1, 2, 3].map((runIndex) => ({
+    ...structuredClone(first),
+    environment: structuredClone(browser.environment),
+    runIndex,
+  }));
+  browser.methodology.independentRuns = 3;
+  browser.methodology.measuredSamples = 90;
+}
+
+function regressRuns(value: Record<string, unknown>, count: number, p95: number): void {
+  const runs = (
+    value["browser"] as {
+      runs: {
+        measurements: {
+          progressDurationsMilliseconds: number[];
+          progressP95Milliseconds: number;
+        };
+      }[];
+    }
+  ).runs;
+  for (const run of runs.slice(0, count)) {
+    run.measurements.progressDurationsMilliseconds.splice(-2, 2, p95, p95);
+    run.measurements.progressP95Milliseconds = p95;
+  }
+  const allSamples = runs.flatMap(({ measurements }) => measurements.progressDurationsMilliseconds);
+  const browser = value["browser"] as {
+    measurements: { progressP50Milliseconds: number; progressP95Milliseconds: number };
+  };
+  const summary = summarizeUploadSamples(allSamples);
+  browser.measurements.progressP50Milliseconds = summary.p50;
+  browser.measurements.progressP95Milliseconds = summary.p95;
 }
 
 describe("U4/16 evidence schema", () => {
@@ -314,6 +408,30 @@ describe("U4/16 evidence schema", () => {
     expect(summary).toEqual({ p50: 10, p95: 19 });
   });
 
+  it("treats just-below, exact, and above-threshold ratios precisely", () => {
+    expect(regressionAtLeast15Percent(2.299_999_999, 2)).toBe(false);
+    expect(regressionAtLeast15Percent(2.3, 2)).toBe(true);
+    expect(regressionAtLeast15Percent(2.300_000_001, 2)).toBe(true);
+  });
+
+  it.each(["artifact", "environment", "samples"] as const)(
+    "fails closed when one independent run has mismatched %s evidence",
+    (mutation) => {
+      const value = evidence();
+      qualifyThreeRuns(value);
+      const runs = (value["browser"] as { runs: Record<string, unknown>[] }).runs;
+      const selected = runs[1];
+      if (selected === undefined) throw new Error("fixture_run_missing");
+      if (mutation === "artifact") selected["artifactSha256"] = "b".repeat(64);
+      else if (mutation === "environment") {
+        (selected["environment"] as Record<string, unknown>)["browserRevision"] = "mismatch";
+      } else {
+        (selected["methodology"] as Record<string, unknown>)["measuredSamples"] = 29;
+      }
+      expect(() => validateUploadBudgetEvidence(value)).toThrow("upload_budget_evidence_invalid");
+    },
+  );
+
   it("fails hard bounds, artifact mismatch, regressions, and false qualification independently", () => {
     const baseline = validateUploadBudgetEvidence(evidence());
     const overCap = nestedMutation((value) => {
@@ -341,25 +459,10 @@ describe("U4/16 evidence schema", () => {
         run.artifactSha256 = "b".repeat(64);
       }
     });
-    const regressed = nestedMutation((value) => {
-      const browser = value["browser"] as {
-        measurements: { progressP50Milliseconds: number; progressP95Milliseconds: number };
-        runs: {
-          measurements: {
-            progressDurationsMilliseconds: number[];
-            progressP50Milliseconds: number;
-            progressP95Milliseconds: number;
-          };
-        }[];
-      };
-      browser.measurements.progressP50Milliseconds = 2.3;
-      browser.measurements.progressP95Milliseconds = 2.3;
-      for (const run of browser.runs) {
-        run.measurements.progressDurationsMilliseconds.fill(2.3);
-        run.measurements.progressP50Milliseconds = 2.3;
-        run.measurements.progressP95Milliseconds = 2.3;
-      }
-    });
+    const regressionBaselineValue = evidence();
+    qualifyThreeRuns(regressionBaselineValue);
+    const regressed = structuredClone(regressionBaselineValue);
+    regressRuns(regressed, 3, 2.3);
     const wrongEnvironment = nestedMutation((value) => {
       const environment = (value["browser"] as { environment: { browserRevision: string } })
         .environment;
@@ -386,7 +489,10 @@ describe("U4/16 evidence schema", () => {
       }).issues,
     ).toContain("upload_budget:artifact_mismatch");
     expect(
-      evaluateUploadBudget(validateUploadBudgetEvidence(regressed), baseline).issues,
+      evaluateUploadBudget(
+        validateUploadBudgetEvidence(regressed),
+        validateUploadBudgetEvidence(regressionBaselineValue),
+      ).issues,
     ).toContain("upload_budget:browser:progress_p95_regression");
     expect(
       evaluateUploadBudget(validateUploadBudgetEvidence(wrongEnvironment), baseline).issues,
@@ -433,6 +539,105 @@ describe("U4/16 evidence schema", () => {
     expect(evaluation.issues).toContain("upload_budget:browser:manager_bytes_hard_cap");
   });
 
+  it("fails a skewed three-buffer browser transfer even when document totals remain acceptable", () => {
+    const mutated = nestedMutation((value) => {
+      const browser = value["browser"] as {
+        measurements: {
+          chunkBuffersByTransfer: {
+            currentBytes: number;
+            currentManagerBuffers: number;
+            currentTotalBuffers: number;
+            managerHighWater: number;
+            managerHighWaterBytes: number;
+            totalHighWater: number;
+            totalHighWaterBytes: number;
+            transportHighWater: number;
+          }[];
+          liveChunkBuffers: number;
+          managerChunkBuffers: number;
+          managerOwnedBytes: number;
+          maxChunksPerTransfer: number;
+          retainedBytes: number;
+        };
+        runs: {
+          measurements: {
+            chunkBuffersByTransfer: {
+              currentBytes: number;
+              currentManagerBuffers: number;
+              currentTotalBuffers: number;
+              managerHighWater: number;
+              managerHighWaterBytes: number;
+              totalHighWater: number;
+              totalHighWaterBytes: number;
+              transportHighWater: number;
+            }[];
+            liveChunkBuffers: number;
+            managerChunkBuffers: number;
+            managerOwnedBytes: number;
+            maxChunksPerTransfer: number;
+            retainedBytes: number;
+          };
+        }[];
+      };
+      for (const measurements of [
+        browser.measurements,
+        ...browser.runs.map(({ measurements }) => measurements),
+      ]) {
+        const first = measurements.chunkBuffersByTransfer[0];
+        if (first === undefined) throw new Error("fixture_transfer_missing");
+        first.currentBytes = 3 * U4_16.chunkBytes;
+        first.currentManagerBuffers = 2;
+        first.currentTotalBuffers = 3;
+        first.managerHighWater = 2;
+        first.managerHighWaterBytes = 2 * U4_16.chunkBytes;
+        first.totalHighWater = 3;
+        first.totalHighWaterBytes = 3 * U4_16.chunkBytes;
+        measurements.liveChunkBuffers = 3;
+        measurements.managerChunkBuffers = 2;
+        measurements.maxChunksPerTransfer = 3;
+        measurements.retainedBytes = 3 * U4_16.chunkBytes + measurements.managerOwnedBytes;
+      }
+    });
+    const evaluation = evaluateUploadBudget(validateUploadBudgetEvidence(mutated), null);
+    expect(evaluation.issues).toContain("upload_budget:browser:chunks_per_transfer_hard_cap");
+  });
+
+  it("fails a skewed three-buffer server transfer even when the average remains two", () => {
+    const mutated = nestedMutation((value) => {
+      const measurements = (
+        value["server"] as {
+          measurements: {
+            chunkBuffersByTransfer: {
+              bodyHighWater: number;
+              currentBytes: number;
+              currentProviderBuffers: number;
+              currentTotalBuffers: number;
+              providerHighWater: number;
+              totalHighWater: number;
+              totalHighWaterBytes: number;
+            }[];
+            maxChunksPerTransfer: number;
+          };
+        }
+      ).measurements;
+      const first = measurements.chunkBuffersByTransfer[0];
+      const second = measurements.chunkBuffersByTransfer[1];
+      if (first === undefined || second === undefined) throw new Error("fixture_transfer_missing");
+      first.providerHighWater = 2;
+      first.totalHighWater = 3;
+      first.currentProviderBuffers = 2;
+      first.currentTotalBuffers = 3;
+      first.currentBytes += 64 * 1024;
+      first.totalHighWaterBytes += 64 * 1024;
+      second.currentProviderBuffers = 0;
+      second.currentTotalBuffers = 1;
+      second.currentBytes -= 64 * 1024;
+      measurements.maxChunksPerTransfer = 3;
+    });
+    const evaluation = evaluateUploadBudget(validateUploadBudgetEvidence(mutated), null);
+    expect(evaluation.issues).toContain("upload_budget:server:chunks_per_transfer_hard_cap");
+  });
+
   it("requires both environments and three independent browser runs for release qualification", () => {
     const unqualified = validateUploadBudgetEvidence(evidence());
     expect(evaluateUploadBudget(unqualified, unqualified, { release: true }).classification).toBe(
@@ -446,40 +651,50 @@ describe("U4/16 evidence schema", () => {
     );
   });
 
-  it("rejects a 15-percent regression isolated to one Chromium process", () => {
-    const threeRuns = (value: Record<string, unknown>): void => {
-      const browser = value["browser"] as {
-        methodology: { independentRuns: number; measuredSamples: number };
-        runs: Record<string, unknown>[];
-      };
-      const first = browser.runs[0];
-      if (first === undefined) throw new Error("fixture_run_missing");
-      browser.runs = [1, 2, 3].map((runIndex) => ({ ...structuredClone(first), runIndex }));
-      browser.methodology.independentRuns = 3;
-      browser.methodology.measuredSamples = 90;
-    };
-    const baselineValue = evidence();
-    threeRuns(baselineValue);
-    const candidateValue = structuredClone(baselineValue);
-    const run = (
-      candidateValue["browser"] as {
-        runs: {
-          measurements: {
-            progressDurationsMilliseconds: number[];
-            progressP95Milliseconds: number;
-          };
-        }[];
-      }
-    ).runs[1];
-    if (run === undefined) throw new Error("fixture_run_missing");
-    run.measurements.progressDurationsMilliseconds.splice(-2, 2, 2.3, 2.3);
-    run.measurements.progressP95Milliseconds = 2.3;
+  it.each([
+    [1, false],
+    [2, false],
+    [3, true],
+  ])(
+    "reports %i of three exact regressions and blocks only a repeated result",
+    (regressedRunCount, confirmed) => {
+      const baselineValue = evidence();
+      qualifyThreeRuns(baselineValue);
+      const candidateValue = structuredClone(baselineValue);
+      regressRuns(candidateValue, regressedRunCount, 2.3);
 
+      const evaluation = evaluateUploadBudget(
+        validateUploadBudgetEvidence(candidateValue),
+        validateUploadBudgetEvidence(baselineValue),
+      );
+      expect(evaluation.observations).toContain(
+        `upload_budget:browser:progress_p95_regression_${String(regressedRunCount)}_of_3`,
+      );
+      expect(evaluation.issues.includes("upload_budget:browser:progress_p95_regression")).toBe(
+        confirmed,
+      );
+    },
+  );
+
+  it("does not report just-below-threshold run noise as a regression", () => {
+    const baselineValue = evidence();
+    qualifyThreeRuns(baselineValue);
+    const candidateValue = structuredClone(baselineValue);
+    regressRuns(candidateValue, 3, 2.299_8);
     const evaluation = evaluateUploadBudget(
       validateUploadBudgetEvidence(candidateValue),
       validateUploadBudgetEvidence(baselineValue),
     );
-    expect(evaluation.issues).toContain("upload_budget:browser:run_2:progress_p95_regression");
+    expect(evaluation.issues).not.toContain("upload_budget:browser:progress_p95_regression");
+    expect(evaluation.observations).toEqual([]);
+  });
+
+  it("applies hard latency caps to every independent browser run", () => {
+    const value = evidence();
+    qualifyThreeRuns(value);
+    regressRuns(value, 1, 17);
+    const evaluation = evaluateUploadBudget(validateUploadBudgetEvidence(value), null);
+    expect(evaluation.issues).toContain("upload_budget:browser:run_1:progress_p95_hard_cap");
   });
 
   it("keeps exploratory evidence separate from an absent qualified regression baseline", () => {

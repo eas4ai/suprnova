@@ -1,8 +1,10 @@
 import {
   assertUploadArtifactNamespace,
   estimateUploadManagerOwnedBytes,
+  type UploadManagerAccountingCategories,
   type ObservedUploadManagerResources,
   type UploadArtifactNamespace,
+  UploadTransferChunkObserver,
   UPLOAD_BUDGET_OBSERVER_MARKER,
 } from "./upload-accounting.js";
 import { U4_16, summarizeUploadSamples } from "./upload-schema.js";
@@ -11,10 +13,11 @@ const WARMUP_PROGRESS_APPLICATIONS = 5;
 
 interface UploadWorkloadMeasurement {
   readonly activeTransfers: number;
+  readonly chunkBuffersByTransfer: readonly TransferChunkHighWater[];
   readonly liveChunkBuffers: number;
   readonly managerChunkBuffers: number;
   readonly managerOwnedBytes: number;
-  readonly managerOwnedCategories: ObservedUploadManagerResources;
+  readonly managerOwnedCategories: UploadManagerAccountingCategories;
   readonly maxChunksPerTransfer: number;
   readonly maxConcurrentTransfers: number;
   readonly maxQueueDepth: number;
@@ -26,6 +29,20 @@ interface UploadWorkloadMeasurement {
   readonly slicedBytes: number;
   readonly slices: number;
   readonly transportChunkBuffers: number;
+}
+
+interface TransferChunkHighWater {
+  readonly currentBytes: number;
+  readonly currentManagerBuffers: number;
+  readonly currentTotalBuffers: number;
+  readonly currentTransportBuffers: number;
+  readonly handle: string;
+  readonly managerHighWater: number;
+  readonly managerHighWaterBytes: number;
+  readonly totalHighWater: number;
+  readonly totalHighWaterBytes: number;
+  readonly transportHighWater: number;
+  readonly transportHighWaterBytes: number;
 }
 
 interface FileSliceObservation {
@@ -96,6 +113,18 @@ class ImmediateUploadTransport {
 
   activeChunkBuffers(): number {
     return this.#activeChunks.size;
+  }
+
+  activeChunksByTransfer(): readonly Readonly<{
+    bytes: number;
+    buffers: number;
+    handle: string;
+  }>[] {
+    return Object.freeze(
+      [...this.#activeChunks.entries()]
+        .map(([handle, bytes]) => Object.freeze({ bytes: bytes.byteLength, buffers: 1, handle }))
+        .sort((left, right) => left.handle.localeCompare(right.handle)),
+    );
   }
 
   completed(): Promise<void> {
@@ -196,7 +225,28 @@ function blankResources(): ObservedUploadManagerResources {
     queuedBytes: 0,
     queuedItems: 0,
     retainedStringCodeUnits: 0,
+    transferChunks: Object.freeze([]),
     waitingPermits: 0,
+  });
+}
+
+function accountingCategories(
+  resources: ObservedUploadManagerResources,
+): UploadManagerAccountingCategories {
+  return Object.freeze({
+    activeLeases: resources.activeLeases,
+    bindings: resources.bindings,
+    cleanupObligations: resources.cleanupObligations,
+    entries: resources.entries,
+    generationFields: resources.generationFields,
+    observers: resources.observers,
+    ownedResources: resources.ownedResources,
+    pendingChunkBuffers: resources.pendingChunkBuffers,
+    pendingChunkBytes: resources.pendingChunkBytes,
+    queuedBytes: resources.queuedBytes,
+    queuedItems: resources.queuedItems,
+    retainedStringCodeUnits: resources.retainedStringCodeUnits,
+    waitingPermits: resources.waitingPermits,
   });
 }
 
@@ -221,34 +271,25 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
   let progressApplicationStartedAt = 0;
   let latestResources = blankResources();
   let managerOwnedBytes = 0;
-  let managerOwnedCategories = latestResources;
-  let liveChunkBuffers = 0;
-  let managerChunkBuffers = 0;
-  let maxChunksPerTransfer = 0;
+  let managerOwnedCategories = accountingCategories(latestResources);
+  const chunkObserver = new UploadTransferChunkObserver();
   let maxConcurrentTransfers = 0;
   let maxQueueDepth = 0;
   let retainedBytes = 0;
-  let transportChunkBuffers = 0;
 
   const observeResources = (): void => {
     const managerBytes = estimateUploadManagerOwnedBytes(latestResources);
-    const activeTransportBuffers = transport.activeChunkBuffers();
-    const chunks = latestResources.pendingChunkBuffers + activeTransportBuffers;
     if (managerBytes >= managerOwnedBytes) {
       managerOwnedBytes = managerBytes;
-      managerOwnedCategories = latestResources;
+      managerOwnedCategories = accountingCategories(latestResources);
     }
-    if (chunks >= liveChunkBuffers) {
-      liveChunkBuffers = chunks;
-      managerChunkBuffers = latestResources.pendingChunkBuffers;
-      transportChunkBuffers = activeTransportBuffers;
-    }
-    maxChunksPerTransfer = Math.max(
-      maxChunksPerTransfer,
-      Math.min(
-        2,
-        Number(latestResources.pendingChunkBuffers > 0) + Number(activeTransportBuffers > 0),
-      ),
+    chunkObserver.observe(
+      latestResources.transferChunks.map((transfer) => ({
+        buffers: transfer.pendingChunkBuffers,
+        bytes: transfer.pendingChunkBytes,
+        handle: transfer.handle,
+      })),
+      transport.activeChunksByTransfer(),
     );
     maxConcurrentTransfers = Math.max(
       maxConcurrentTransfers,
@@ -355,13 +396,19 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       throw new Error("upload_budget_workload_incomplete");
     }
     const progressSummary = summarizeUploadSamples(progressSamples);
+    const chunks = chunkObserver.snapshot();
+    const chunkBuffersByTransfer = chunks.chunkBuffersByTransfer;
+    if (chunkBuffersByTransfer.length !== U4_16.activeTransfers) {
+      throw new Error("upload_budget_transfer_buffer_evidence_incomplete");
+    }
     return Object.freeze({
       activeTransfers: U4_16.activeTransfers,
-      liveChunkBuffers,
-      managerChunkBuffers,
+      chunkBuffersByTransfer,
+      liveChunkBuffers: chunks.liveChunkBuffers,
+      managerChunkBuffers: chunks.managerChunkBuffers,
       managerOwnedBytes,
       managerOwnedCategories,
-      maxChunksPerTransfer,
+      maxChunksPerTransfer: chunks.maxChunksPerTransfer,
       maxConcurrentTransfers,
       maxQueueDepth,
       progressP50Milliseconds: progressSummary.p50,
@@ -371,7 +418,7 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       retainedBytes,
       slicedBytes: slices.bytes,
       slices: slices.calls,
-      transportChunkBuffers,
+      transportChunkBuffers: chunks.transportChunkBuffers,
     });
   } finally {
     drive(4, islandElement);

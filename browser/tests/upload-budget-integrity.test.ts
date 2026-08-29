@@ -8,6 +8,7 @@ import {
   assertUploadArtifactNamespace,
   assertUploadBenchmarkBundleInputs,
   estimateUploadManagerOwnedBytes,
+  UploadTransferChunkObserver,
 } from "../benchmarks/upload-accounting.js";
 import { argumentsFrom } from "../scripts/run-upload-budget.mjs";
 
@@ -94,6 +95,28 @@ describe("U4/16 benchmark integrity", () => {
     expect(
       estimateUploadManagerOwnedBytes({ ...base, retainedStringCodeUnits: 200_000 }),
     ).toBeGreaterThan(256 * 1024);
+  });
+
+  it("detects three buffers held by one transfer while the document average remains two", () => {
+    const handles = Array.from(
+      { length: 4 },
+      (_, index) => `018f47c1-2af0-7cc4-a001-${String(index + 1).padStart(12, "0")}`,
+    );
+    const observer = new UploadTransferChunkObserver();
+    observer.observe(
+      handles.map((handle) => ({ buffers: 1, bytes: 256 * 1024, handle })),
+      [
+        { buffers: 2, bytes: 2 * 256 * 1024, handle: handles[0] ?? "" },
+        { buffers: 0, bytes: 0, handle: handles[1] ?? "" },
+        { buffers: 1, bytes: 256 * 1024, handle: handles[2] ?? "" },
+        { buffers: 1, bytes: 256 * 1024, handle: handles[3] ?? "" },
+      ],
+    );
+    const snapshot = observer.snapshot();
+    expect(snapshot.liveChunkBuffers).toBe(8);
+    expect(snapshot.liveChunkBuffers / handles.length).toBe(2);
+    expect(snapshot.maxChunksPerTransfer).toBe(3);
+    expect(snapshot.chunkBuffersByTransfer[0]?.totalHighWater).toBe(3);
   });
 
   it("loads the artifact namespace and passes it into the workload", async () => {

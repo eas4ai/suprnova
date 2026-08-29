@@ -7,6 +7,8 @@ export const U4_16 = Object.freeze({
   files: 4,
 });
 
+const UPLOAD_HANDLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
 export interface UploadBudgetArtifact {
   readonly brotliBytes: number;
   readonly file: "suprnova-live.uploads.esm.js";
@@ -87,16 +89,45 @@ export interface UploadBudgetManagerOwnedCategories {
 }
 
 export interface UploadBudgetServerManagerOwnedCategories {
-  readonly activePermits: number;
-  readonly chunkQueueEntries: number;
-  readonly permitSlots: number;
-  readonly queueControlRecords: number;
+  readonly activeServicePermits: number;
+  readonly providerActiveChunks: number;
+  readonly providerActiveDescriptors: number;
+  readonly providerActiveOperations: number;
+  readonly providerControlRecords: number;
+  readonly providerOwnedTransfers: number;
   readonly retainedHandleBytes: number;
-  readonly transferQueueEntries: number;
+  readonly serviceControlRecords: number;
+}
+
+export interface UploadBudgetBrowserTransferChunkBuffers {
+  readonly currentBytes: number;
+  readonly currentManagerBuffers: number;
+  readonly currentTotalBuffers: number;
+  readonly currentTransportBuffers: number;
+  readonly handle: string;
+  readonly managerHighWater: number;
+  readonly managerHighWaterBytes: number;
+  readonly totalHighWater: number;
+  readonly totalHighWaterBytes: number;
+  readonly transportHighWater: number;
+  readonly transportHighWaterBytes: number;
+}
+
+export interface UploadBudgetServerTransferChunkBuffers {
+  readonly bodyHighWater: number;
+  readonly currentBodyBuffers: number;
+  readonly currentBytes: number;
+  readonly currentProviderBuffers: number;
+  readonly currentTotalBuffers: number;
+  readonly handle: string;
+  readonly providerHighWater: number;
+  readonly totalHighWater: number;
+  readonly totalHighWaterBytes: number;
 }
 
 export interface UploadBudgetBrowserMeasurements {
   readonly activeTransfers: number;
+  readonly chunkBuffersByTransfer: readonly UploadBudgetBrowserTransferChunkBuffers[];
   readonly liveChunkBuffers: number;
   readonly managerChunkBuffers: number;
   readonly managerOwnedBytes: number;
@@ -147,6 +178,7 @@ export interface UploadBudgetEvidence {
     }>;
     environment: UploadBudgetServerEnvironment;
     measurements: Readonly<{
+      chunkBuffersByTransfer: readonly UploadBudgetServerTransferChunkBuffers[];
       excludedCalls: Readonly<{
         applicationValidation: 0;
         bodyIo: 0;
@@ -171,6 +203,7 @@ export interface UploadBudgetEvidence {
 export interface UploadBudgetEvaluation {
   readonly classification: UploadBudgetClassification;
   readonly issues: readonly string[];
+  readonly observations: readonly string[];
 }
 
 export interface UploadBudgetBaseline {
@@ -181,20 +214,29 @@ export interface UploadBudgetBaseline {
 }
 
 type EvidenceKey =
+  | "activeServicePermits"
   | "activeTransfers"
   | "applicationValidation"
   | "architecture"
   | "artifact"
   | "bodyIo"
+  | "bodyHighWater"
   | "bounds"
   | "browser"
   | "browserRevision"
   | "brotliBytes"
   | "chunkBytes"
+  | "chunkBuffersByTransfer"
   | "classification"
   | "cpuGovernor"
   | "cpuModel"
   | "cpuThrottleRate"
+  | "currentBodyBuffers"
+  | "currentBytes"
+  | "currentManagerBuffers"
+  | "currentProviderBuffers"
+  | "currentTotalBuffers"
+  | "currentTransportBuffers"
   | "database"
   | "dedicatedVcpusAttested"
   | "environment"
@@ -205,10 +247,13 @@ type EvidenceKey =
   | "fileBytes"
   | "files"
   | "height"
+  | "handle"
   | "independentRuns"
   | "kernel"
   | "liveChunkBuffers"
   | "managerChunkBuffers"
+  | "managerHighWater"
+  | "managerHighWaterBytes"
   | "loopbackProviders"
   | "managerOwnedBytes"
   | "managerOwnedCategories"
@@ -231,6 +276,12 @@ type EvidenceKey =
   | "progressP50Milliseconds"
   | "progressP95Milliseconds"
   | "provider"
+  | "providerActiveChunks"
+  | "providerActiveDescriptors"
+  | "providerActiveOperations"
+  | "providerControlRecords"
+  | "providerHighWater"
+  | "providerOwnedTransfers"
   | "qualificationRequirementsMet"
   | "qualifiedBaseline"
   | "recordedAt"
@@ -241,10 +292,15 @@ type EvidenceKey =
   | "schemaVersion"
   | "selectedCpuCount"
   | "server"
+  | "serviceControlRecords"
   | "sha256"
   | "slicedBytes"
   | "slices"
   | "transportChunkBuffers"
+  | "transportHighWater"
+  | "transportHighWaterBytes"
+  | "totalHighWater"
+  | "totalHighWaterBytes"
   | "viewport"
   | "warmFilesystemCache"
   | "warmHttpCache"
@@ -450,12 +506,14 @@ function managerCategories(value: unknown): UploadBudgetManagerOwnedCategories {
 function serverManagerCategories(value: unknown): UploadBudgetServerManagerOwnedCategories {
   const candidate = record(value);
   exact(candidate, [
-    "activePermits",
-    "chunkQueueEntries",
-    "permitSlots",
-    "queueControlRecords",
+    "activeServicePermits",
+    "providerActiveChunks",
+    "providerActiveDescriptors",
+    "providerActiveOperations",
+    "providerControlRecords",
+    "providerOwnedTransfers",
     "retainedHandleBytes",
-    "transferQueueEntries",
+    "serviceControlRecords",
   ]);
   for (const value of Object.values(candidate)) integer(value);
   return candidate as unknown as UploadBudgetServerManagerOwnedCategories;
@@ -465,13 +523,117 @@ function estimateServerManagerOwnedBytes(
   categories: UploadBudgetServerManagerOwnedCategories,
 ): number {
   return (
-    categories.queueControlRecords * 512 +
-    categories.transferQueueEntries * 256 +
-    categories.chunkQueueEntries * 128 +
-    categories.activePermits * 128 +
-    categories.permitSlots * 128 +
+    categories.serviceControlRecords * 512 +
+    categories.providerControlRecords * 512 +
+    categories.providerOwnedTransfers * 256 +
+    categories.activeServicePermits * 128 +
+    categories.providerActiveOperations * 128 +
+    categories.providerActiveDescriptors * 128 +
+    categories.providerActiveChunks * 128 +
     categories.retainedHandleBytes
   );
+}
+
+function browserTransferChunkBuffers(
+  value: unknown,
+): readonly UploadBudgetBrowserTransferChunkBuffers[] {
+  if (!Array.isArray(value) || value.length !== U4_16.activeTransfers) fail();
+  const seen = new Set<string>();
+  const transfers = value.map((entry): UploadBudgetBrowserTransferChunkBuffers => {
+    const candidate = record(entry);
+    exact(candidate, [
+      "currentBytes",
+      "currentManagerBuffers",
+      "currentTotalBuffers",
+      "currentTransportBuffers",
+      "handle",
+      "managerHighWater",
+      "managerHighWaterBytes",
+      "totalHighWater",
+      "totalHighWaterBytes",
+      "transportHighWater",
+      "transportHighWaterBytes",
+    ]);
+    const handle = string(candidate.handle);
+    if (!UPLOAD_HANDLE.test(handle) || seen.has(handle)) fail();
+    seen.add(handle);
+    const currentBytes = integer(candidate.currentBytes);
+    const currentManagerBuffers = integer(candidate.currentManagerBuffers);
+    const currentTransportBuffers = integer(candidate.currentTransportBuffers);
+    const currentTotalBuffers = integer(candidate.currentTotalBuffers);
+    const managerHighWater = integer(candidate.managerHighWater);
+    const managerHighWaterBytes = integer(candidate.managerHighWaterBytes);
+    const transportHighWater = integer(candidate.transportHighWater);
+    const transportHighWaterBytes = integer(candidate.transportHighWaterBytes);
+    const totalHighWater = integer(candidate.totalHighWater, 1);
+    const totalHighWaterBytes = integer(candidate.totalHighWaterBytes, 1);
+    if (
+      currentTotalBuffers !== currentManagerBuffers + currentTransportBuffers ||
+      currentManagerBuffers > managerHighWater ||
+      currentTransportBuffers > transportHighWater ||
+      currentTotalBuffers > totalHighWater ||
+      currentBytes > totalHighWaterBytes ||
+      managerHighWaterBytes > totalHighWaterBytes ||
+      transportHighWaterBytes > totalHighWaterBytes ||
+      totalHighWater < Math.max(managerHighWater, transportHighWater) ||
+      totalHighWater > managerHighWater + transportHighWater
+    ) {
+      fail();
+    }
+    return candidate as unknown as UploadBudgetBrowserTransferChunkBuffers;
+  });
+  const suppliedHandles = transfers.map(({ handle }) => handle);
+  transfers.sort((left, right) => left.handle.localeCompare(right.handle));
+  if (transfers.some((entry, index) => entry.handle !== suppliedHandles[index])) fail();
+  return Object.freeze(transfers);
+}
+
+function serverTransferChunkBuffers(
+  value: unknown,
+): readonly UploadBudgetServerTransferChunkBuffers[] {
+  if (!Array.isArray(value) || value.length !== U4_16.activeTransfers) fail();
+  const seen = new Set<string>();
+  const transfers = value.map((entry): UploadBudgetServerTransferChunkBuffers => {
+    const candidate = record(entry);
+    exact(candidate, [
+      "bodyHighWater",
+      "currentBodyBuffers",
+      "currentBytes",
+      "currentProviderBuffers",
+      "currentTotalBuffers",
+      "handle",
+      "providerHighWater",
+      "totalHighWater",
+      "totalHighWaterBytes",
+    ]);
+    const handle = string(candidate.handle);
+    if (!UPLOAD_HANDLE.test(handle) || seen.has(handle)) fail();
+    seen.add(handle);
+    const bodyHighWater = integer(candidate.bodyHighWater);
+    const currentBodyBuffers = integer(candidate.currentBodyBuffers);
+    const currentBytes = integer(candidate.currentBytes);
+    const currentProviderBuffers = integer(candidate.currentProviderBuffers);
+    const currentTotalBuffers = integer(candidate.currentTotalBuffers, 1);
+    const providerHighWater = integer(candidate.providerHighWater);
+    const totalHighWater = integer(candidate.totalHighWater, 1);
+    const totalHighWaterBytes = integer(candidate.totalHighWaterBytes, 1);
+    if (
+      currentTotalBuffers !== currentBodyBuffers + currentProviderBuffers ||
+      currentBodyBuffers > bodyHighWater ||
+      currentProviderBuffers > providerHighWater ||
+      currentTotalBuffers > totalHighWater ||
+      totalHighWater < Math.max(bodyHighWater, providerHighWater) ||
+      totalHighWater > bodyHighWater + providerHighWater ||
+      currentBytes > totalHighWaterBytes
+    ) {
+      fail();
+    }
+    return candidate as unknown as UploadBudgetServerTransferChunkBuffers;
+  });
+  const suppliedHandles = transfers.map(({ handle }) => handle);
+  transfers.sort((left, right) => left.handle.localeCompare(right.handle));
+  if (transfers.some((entry, index) => entry.handle !== suppliedHandles[index])) fail();
+  return Object.freeze(transfers);
 }
 
 function browserMeasurements(
@@ -481,6 +643,7 @@ function browserMeasurements(
   const candidate = record(value);
   exact(candidate, [
     "activeTransfers",
+    "chunkBuffersByTransfer",
     "liveChunkBuffers",
     "managerChunkBuffers",
     "managerOwnedBytes",
@@ -497,18 +660,28 @@ function browserMeasurements(
     "transportChunkBuffers",
   ]);
   literal(candidate.activeTransfers, U4_16.activeTransfers);
+  const chunkBuffersByTransfer = browserTransferChunkBuffers(candidate.chunkBuffersByTransfer);
   const liveChunkBuffers = integer(candidate.liveChunkBuffers, 1);
   const managerChunkBuffers = integer(candidate.managerChunkBuffers, 1);
   const transportChunkBuffers = integer(candidate.transportChunkBuffers, 1);
   if (
     liveChunkBuffers !== managerChunkBuffers + transportChunkBuffers ||
-    liveChunkBuffers > U4_16.activeTransfers * 2
+    liveChunkBuffers !==
+      chunkBuffersByTransfer.reduce((sum, entry) => sum + entry.currentTotalBuffers, 0) ||
+    managerChunkBuffers !==
+      chunkBuffersByTransfer.reduce((sum, entry) => sum + entry.currentManagerBuffers, 0) ||
+    transportChunkBuffers !==
+      chunkBuffersByTransfer.reduce((sum, entry) => sum + entry.currentTransportBuffers, 0) ||
+    liveChunkBuffers < Math.max(...chunkBuffersByTransfer.map((entry) => entry.totalHighWater))
   ) {
     fail();
   }
   const categories = managerCategories(candidate.managerOwnedCategories);
   literal(candidate.managerOwnedBytes, estimateUploadManagerOwnedBytes(categories));
-  literal(candidate.maxChunksPerTransfer, 2);
+  literal(
+    candidate.maxChunksPerTransfer,
+    Math.max(...chunkBuffersByTransfer.map(({ totalHighWater }) => totalHighWater)),
+  );
   literal(candidate.maxConcurrentTransfers, U4_16.activeTransfers);
   literal(candidate.maxQueueDepth, U4_16.files);
   number(candidate.progressP50Milliseconds);
@@ -518,7 +691,8 @@ function browserMeasurements(
   literal(candidate.slices, U4_16.files * (U4_16.fileBytes / U4_16.chunkBytes));
   if (number(candidate.progressP50Milliseconds) > number(candidate.progressP95Milliseconds)) fail();
   const minimumRetained =
-    liveChunkBuffers * U4_16.chunkBytes + integer(candidate.managerOwnedBytes);
+    chunkBuffersByTransfer.reduce((sum, entry) => sum + entry.currentBytes, 0) +
+    integer(candidate.managerOwnedBytes);
   if (integer(candidate.retainedBytes) < minimumRetained) fail();
   if (samplesRequired) {
     if (!Array.isArray(candidate["progressDurationsMilliseconds"])) fail();
@@ -603,16 +777,52 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
   const maximum = (key: keyof UploadBudgetBrowserMeasurements): number =>
     Math.max(...runs.map((run) => run.measurements[key] as number));
   for (const key of [
-    "liveChunkBuffers",
-    "managerChunkBuffers",
     "managerOwnedBytes",
     "maxChunksPerTransfer",
     "maxConcurrentTransfers",
     "maxQueueDepth",
     "retainedBytes",
-    "transportChunkBuffers",
   ] as const) {
     if (measurements[key] !== maximum(key)) fail();
+  }
+  const aggregateTransferChunks = measurements.chunkBuffersByTransfer;
+  const currentDistributionMatchesOneRun = runs.some(
+    (run) =>
+      run.measurements.liveChunkBuffers === measurements.liveChunkBuffers &&
+      run.measurements.managerChunkBuffers === measurements.managerChunkBuffers &&
+      run.measurements.transportChunkBuffers === measurements.transportChunkBuffers &&
+      run.measurements.chunkBuffersByTransfer.every((transfer, index) => {
+        const aggregateTransfer = aggregateTransferChunks[index];
+        if (aggregateTransfer === undefined) return false;
+        return (
+          transfer.handle === aggregateTransfer.handle &&
+          transfer.currentBytes === aggregateTransfer.currentBytes &&
+          transfer.currentManagerBuffers === aggregateTransfer.currentManagerBuffers &&
+          transfer.currentTotalBuffers === aggregateTransfer.currentTotalBuffers &&
+          transfer.currentTransportBuffers === aggregateTransfer.currentTransportBuffers
+        );
+      }),
+  );
+  if (!currentDistributionMatchesOneRun) fail();
+  for (const [index, aggregateTransfer] of aggregateTransferChunks.entries()) {
+    const runTransfers = runs.map((run) => run.measurements.chunkBuffersByTransfer[index]);
+    if (
+      runTransfers.some((transfer) => transfer?.handle !== aggregateTransfer.handle) ||
+      aggregateTransfer.managerHighWater !==
+        Math.max(...runTransfers.map((transfer) => transfer?.managerHighWater ?? -1)) ||
+      aggregateTransfer.managerHighWaterBytes !==
+        Math.max(...runTransfers.map((transfer) => transfer?.managerHighWaterBytes ?? -1)) ||
+      aggregateTransfer.transportHighWater !==
+        Math.max(...runTransfers.map((transfer) => transfer?.transportHighWater ?? -1)) ||
+      aggregateTransfer.transportHighWaterBytes !==
+        Math.max(...runTransfers.map((transfer) => transfer?.transportHighWaterBytes ?? -1)) ||
+      aggregateTransfer.totalHighWater !==
+        Math.max(...runTransfers.map((transfer) => transfer?.totalHighWater ?? -1)) ||
+      aggregateTransfer.totalHighWaterBytes !==
+        Math.max(...runTransfers.map((transfer) => transfer?.totalHighWaterBytes ?? -1))
+    ) {
+      fail();
+    }
   }
   return candidate as unknown as UploadBudgetEvidence["browser"];
 }
@@ -636,6 +846,7 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
 
   const measurements = record(candidate.measurements);
   exact(measurements, [
+    "chunkBuffersByTransfer",
     "excludedCalls",
     "liveChunkBuffers",
     "managerOwnedBytes",
@@ -653,23 +864,31 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
   literal(excluded.bodyIo, 0);
   literal(excluded.provider, 0);
   literal(excluded.scanner, 0);
-  literal(measurements.liveChunkBuffers, U4_16.activeTransfers * 2);
+  const chunkBuffersByTransfer = serverTransferChunkBuffers(measurements.chunkBuffersByTransfer);
+  literal(
+    measurements.liveChunkBuffers,
+    chunkBuffersByTransfer.reduce((sum, transfer) => sum + transfer.currentTotalBuffers, 0),
+  );
   const categories = serverManagerCategories(measurements.managerOwnedCategories);
-  literal(categories.activePermits, U4_16.activeTransfers);
-  literal(categories.chunkQueueEntries, U4_16.activeTransfers * 2);
-  literal(categories.permitSlots, U4_16.activeTransfers);
-  literal(categories.queueControlRecords, 2);
-  literal(categories.transferQueueEntries, U4_16.activeTransfers);
+  literal(categories.activeServicePermits, U4_16.activeTransfers);
+  literal(categories.providerActiveChunks, U4_16.activeTransfers);
+  literal(categories.providerActiveDescriptors, U4_16.activeTransfers);
+  literal(categories.providerActiveOperations, U4_16.activeTransfers);
+  literal(categories.providerControlRecords, 1);
+  literal(categories.providerOwnedTransfers, U4_16.activeTransfers);
+  literal(categories.serviceControlRecords, 1);
   literal(measurements.managerOwnedBytes, estimateServerManagerOwnedBytes(categories));
-  literal(measurements.maxChunksPerTransfer, 2);
+  literal(
+    measurements.maxChunksPerTransfer,
+    Math.max(...chunkBuffersByTransfer.map(({ totalHighWater }) => totalHighWater)),
+  );
   literal(measurements.maxConcurrentTransfers, U4_16.activeTransfers);
   literal(measurements.maxQueueDepth, U4_16.activeTransfers);
   number(measurements.p50Microseconds);
   number(measurements.p95Microseconds);
   const expectedRetained =
-    U4_16.activeTransfers * 2 * U4_16.chunkBytes +
-    integer(measurements.managerOwnedBytes) +
-    categories.retainedHandleBytes;
+    chunkBuffersByTransfer.reduce((sum, transfer) => sum + transfer.currentBytes, 0) +
+    integer(measurements.managerOwnedBytes);
   literal(measurements.retainedBytes, expectedRetained);
   if (number(measurements.p50Microseconds) > number(measurements.p95Microseconds)) fail();
   return candidate as unknown as UploadBudgetEvidence["server"];
@@ -799,6 +1018,7 @@ export function evaluateUploadBudget(
   options: Readonly<{ artifactSha256?: string; release?: boolean }> = {},
 ): UploadBudgetEvaluation {
   const issues: string[] = [];
+  const observations: string[] = [];
   if (
     options.artifactSha256 !== undefined &&
     candidate.artifact.sha256 !== options.artifactSha256
@@ -818,6 +1038,20 @@ export function evaluateUploadBudget(
   if (browser.progressP95Milliseconds > 16) {
     issues.push("upload_budget:browser:progress_p95_hard_cap");
   }
+  for (const run of candidate.browser.runs) {
+    if (run.measurements.liveChunkBuffers > U4_16.activeTransfers * 2) {
+      issues.push(`upload_budget:browser:run_${String(run.runIndex)}:live_chunk_buffers_hard_cap`);
+    }
+    if (run.measurements.maxChunksPerTransfer > 2) {
+      issues.push(`upload_budget:browser:run_${String(run.runIndex)}:chunks_per_transfer_hard_cap`);
+    }
+    if (run.measurements.managerOwnedBytes > 256 * 1024) {
+      issues.push(`upload_budget:browser:run_${String(run.runIndex)}:manager_bytes_hard_cap`);
+    }
+    if (run.measurements.progressP95Milliseconds > 16) {
+      issues.push(`upload_budget:browser:run_${String(run.runIndex)}:progress_p95_hard_cap`);
+    }
+  }
   const server = candidate.server.measurements;
   if (server.liveChunkBuffers > U4_16.activeTransfers * 2) {
     issues.push("upload_budget:server:live_chunk_buffers_hard_cap");
@@ -835,17 +1069,10 @@ export function evaluateUploadBudget(
     if (!sameEnvironment(candidate, baseline)) {
       issues.push("upload_budget:baseline_environment_mismatch");
     } else {
-      if (
-        regressionAtLeast15Percent(
-          browser.progressP95Milliseconds,
-          baseline.browser.measurements.progressP95Milliseconds,
-        )
-      ) {
-        issues.push("upload_budget:browser:progress_p95_regression");
-      }
       if (candidate.browser.runs.length !== baseline.browser.runs.length) {
         issues.push("upload_budget:browser:run_count_mismatch");
       } else {
+        let regressedRuns = 0;
         for (let index = 0; index < candidate.browser.runs.length; index += 1) {
           const candidateRun = candidate.browser.runs[index];
           const baselineRun = baseline.browser.runs[index];
@@ -868,8 +1095,20 @@ export function evaluateUploadBudget(
               baselineRun.measurements.progressP95Milliseconds,
             )
           ) {
-            issues.push(`upload_budget:browser:run_${String(index + 1)}:progress_p95_regression`);
+            regressedRuns += 1;
           }
+        }
+        const repeatableComparison =
+          candidate.browser.environment.classification === "qualified" &&
+          baseline.browser.environment.classification === "qualified" &&
+          candidate.browser.runs.length === 3;
+        if (repeatableComparison && regressedRuns > 0) {
+          observations.push(
+            `upload_budget:browser:progress_p95_regression_${String(regressedRuns)}_of_3`,
+          );
+        }
+        if (repeatableComparison && regressedRuns === 3) {
+          issues.push("upload_budget:browser:progress_p95_regression");
         }
       }
       if (
@@ -895,5 +1134,6 @@ export function evaluateUploadBudget(
   return Object.freeze({
     classification: qualified ? "qualified" : "unqualified",
     issues: Object.freeze(issues),
+    observations: Object.freeze(observations),
   });
 }

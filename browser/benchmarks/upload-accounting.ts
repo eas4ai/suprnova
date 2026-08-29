@@ -18,7 +18,172 @@ export interface ObservedUploadManagerResources {
   readonly queuedBytes: number;
   readonly queuedItems: number;
   readonly retainedStringCodeUnits: number;
+  readonly transferChunks: readonly Readonly<{
+    readonly handle: string;
+    readonly pendingChunkBuffers: number;
+    readonly pendingChunkBytes: number;
+  }>[];
   readonly waitingPermits: number;
+}
+
+export type UploadManagerAccountingCategories = Omit<
+  ObservedUploadManagerResources,
+  "transferChunks"
+>;
+
+export interface ObservedTransferChunkOwnership {
+  readonly buffers: number;
+  readonly bytes: number;
+  readonly handle: string;
+}
+
+export interface ObservedTransferChunkHighWater {
+  readonly currentBytes: number;
+  readonly currentManagerBuffers: number;
+  readonly currentTotalBuffers: number;
+  readonly currentTransportBuffers: number;
+  readonly handle: string;
+  readonly managerHighWater: number;
+  readonly managerHighWaterBytes: number;
+  readonly totalHighWater: number;
+  readonly totalHighWaterBytes: number;
+  readonly transportHighWater: number;
+  readonly transportHighWaterBytes: number;
+}
+
+export interface UploadTransferChunkObservation {
+  readonly chunkBuffersByTransfer: readonly ObservedTransferChunkHighWater[];
+  readonly liveChunkBuffers: number;
+  readonly managerChunkBuffers: number;
+  readonly maxChunksPerTransfer: number;
+  readonly transportChunkBuffers: number;
+}
+
+function ownershipByHandle(
+  ownership: readonly ObservedTransferChunkOwnership[],
+): ReadonlyMap<string, ObservedTransferChunkOwnership> {
+  const byHandle = new Map<string, ObservedTransferChunkOwnership>();
+  for (const entry of ownership) {
+    if (
+      entry.handle.length === 0 ||
+      !Number.isSafeInteger(entry.buffers) ||
+      entry.buffers < 0 ||
+      !Number.isSafeInteger(entry.bytes) ||
+      entry.bytes < 0 ||
+      byHandle.has(entry.handle)
+    ) {
+      throw new Error("upload_budget_transfer_chunk_ownership_invalid");
+    }
+    byHandle.set(entry.handle, entry);
+  }
+  return byHandle;
+}
+
+/** Tracks exact current and per-transfer high-water ownership without averaging. */
+export class UploadTransferChunkObserver {
+  readonly #currentAtDocumentHigh = new Map<
+    string,
+    Readonly<{
+      currentBytes: number;
+      currentManagerBuffers: number;
+      currentTotalBuffers: number;
+      currentTransportBuffers: number;
+    }>
+  >();
+  readonly #highs = new Map<string, ObservedTransferChunkHighWater>();
+  #liveChunkBuffers = 0;
+  #managerChunkBuffers = 0;
+  #transportChunkBuffers = 0;
+
+  observe(
+    managerOwnership: readonly ObservedTransferChunkOwnership[],
+    transportOwnership: readonly ObservedTransferChunkOwnership[],
+  ): void {
+    const manager = ownershipByHandle(managerOwnership);
+    const transport = ownershipByHandle(transportOwnership);
+    const managerChunkBuffers = [...manager.values()].reduce(
+      (sum, entry) => sum + entry.buffers,
+      0,
+    );
+    const transportChunkBuffers = [...transport.values()].reduce(
+      (sum, entry) => sum + entry.buffers,
+      0,
+    );
+    const liveChunkBuffers = managerChunkBuffers + transportChunkBuffers;
+    if (liveChunkBuffers >= this.#liveChunkBuffers) {
+      this.#liveChunkBuffers = liveChunkBuffers;
+      this.#managerChunkBuffers = managerChunkBuffers;
+      this.#transportChunkBuffers = transportChunkBuffers;
+      this.#currentAtDocumentHigh.clear();
+      for (const handle of new Set([...manager.keys(), ...transport.keys()])) {
+        const managerEntry = manager.get(handle);
+        const transportEntry = transport.get(handle);
+        this.#currentAtDocumentHigh.set(
+          handle,
+          Object.freeze({
+            currentBytes: (managerEntry?.bytes ?? 0) + (transportEntry?.bytes ?? 0),
+            currentManagerBuffers: managerEntry?.buffers ?? 0,
+            currentTotalBuffers: (managerEntry?.buffers ?? 0) + (transportEntry?.buffers ?? 0),
+            currentTransportBuffers: transportEntry?.buffers ?? 0,
+          }),
+        );
+      }
+    }
+    for (const handle of new Set([...manager.keys(), ...transport.keys()])) {
+      const managerBuffers = manager.get(handle)?.buffers ?? 0;
+      const managerBytes = manager.get(handle)?.bytes ?? 0;
+      const transportBuffers = transport.get(handle)?.buffers ?? 0;
+      const transportBytes = transport.get(handle)?.bytes ?? 0;
+      const prior = this.#highs.get(handle);
+      this.#highs.set(
+        handle,
+        Object.freeze({
+          currentBytes: 0,
+          currentManagerBuffers: 0,
+          currentTotalBuffers: 0,
+          currentTransportBuffers: 0,
+          handle,
+          managerHighWater: Math.max(prior?.managerHighWater ?? 0, managerBuffers),
+          managerHighWaterBytes: Math.max(prior?.managerHighWaterBytes ?? 0, managerBytes),
+          totalHighWater: Math.max(prior?.totalHighWater ?? 0, managerBuffers + transportBuffers),
+          totalHighWaterBytes: Math.max(
+            prior?.totalHighWaterBytes ?? 0,
+            managerBytes + transportBytes,
+          ),
+          transportHighWater: Math.max(prior?.transportHighWater ?? 0, transportBuffers),
+          transportHighWaterBytes: Math.max(prior?.transportHighWaterBytes ?? 0, transportBytes),
+        }),
+      );
+    }
+  }
+
+  snapshot(): UploadTransferChunkObservation {
+    const chunkBuffersByTransfer = Object.freeze(
+      [...this.#highs.values()]
+        .map((high) =>
+          Object.freeze({
+            ...high,
+            ...(this.#currentAtDocumentHigh.get(high.handle) ?? {
+              currentBytes: 0,
+              currentManagerBuffers: 0,
+              currentTotalBuffers: 0,
+              currentTransportBuffers: 0,
+            }),
+          }),
+        )
+        .sort((left, right) => left.handle.localeCompare(right.handle)),
+    );
+    return Object.freeze({
+      chunkBuffersByTransfer,
+      liveChunkBuffers: this.#liveChunkBuffers,
+      managerChunkBuffers: this.#managerChunkBuffers,
+      maxChunksPerTransfer: Math.max(
+        0,
+        ...chunkBuffersByTransfer.map(({ totalHighWater }) => totalHighWater),
+      ),
+      transportChunkBuffers: this.#transportChunkBuffers,
+    });
+  }
 }
 
 export interface UploadArtifactNamespace {
@@ -39,7 +204,9 @@ export interface UploadArtifactNamespace {
  * Fixed records use 128 bytes, collection entries 64 bytes, live promises and
  * permit/lease records 256 bytes, and strings two bytes per UTF-16 code unit.
  */
-export function estimateUploadManagerOwnedBytes(snapshot: ObservedUploadManagerResources): number {
+export function estimateUploadManagerOwnedBytes(
+  snapshot: UploadManagerAccountingCategories,
+): number {
   const managerAndOwnerRecords = 1_024;
   const entryAndTransferRecords = snapshot.entries * 1_536;
   const bindingRecords = snapshot.bindings * 512;

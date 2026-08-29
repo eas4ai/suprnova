@@ -209,6 +209,47 @@ function maximum(runs, key) {
   return Math.max(...runs.map((run) => run[key]));
 }
 
+function maximumTransferChunkDistribution(runs, currentRun) {
+  const currentByHandle = new Map(
+    currentRun.chunkBuffersByTransfer.map((transfer) => [transfer.handle, transfer]),
+  );
+  const byHandle = new Map();
+  for (const run of runs) {
+    for (const transfer of run.chunkBuffersByTransfer) {
+      const prior = byHandle.get(transfer.handle);
+      byHandle.set(
+        transfer.handle,
+        Object.freeze({
+          currentBytes: currentByHandle.get(transfer.handle)?.currentBytes ?? 0,
+          currentManagerBuffers: currentByHandle.get(transfer.handle)?.currentManagerBuffers ?? 0,
+          currentTotalBuffers: currentByHandle.get(transfer.handle)?.currentTotalBuffers ?? 0,
+          currentTransportBuffers:
+            currentByHandle.get(transfer.handle)?.currentTransportBuffers ?? 0,
+          handle: transfer.handle,
+          managerHighWater: Math.max(prior?.managerHighWater ?? 0, transfer.managerHighWater),
+          managerHighWaterBytes: Math.max(
+            prior?.managerHighWaterBytes ?? 0,
+            transfer.managerHighWaterBytes,
+          ),
+          totalHighWater: Math.max(prior?.totalHighWater ?? 0, transfer.totalHighWater),
+          totalHighWaterBytes: Math.max(
+            prior?.totalHighWaterBytes ?? 0,
+            transfer.totalHighWaterBytes,
+          ),
+          transportHighWater: Math.max(prior?.transportHighWater ?? 0, transfer.transportHighWater),
+          transportHighWaterBytes: Math.max(
+            prior?.transportHighWaterBytes ?? 0,
+            transfer.transportHighWaterBytes,
+          ),
+        }),
+      );
+    }
+  }
+  return Object.freeze(
+    [...byHandle.values()].sort((left, right) => left.handle.localeCompare(right.handle)),
+  );
+}
+
 async function main() {
   try {
     const options = argumentsFrom(process.argv.slice(2));
@@ -267,6 +308,9 @@ async function main() {
     const managerHighWater = runs.reduce((selected, run) =>
       run.managerOwnedBytes > selected.managerOwnedBytes ? run : selected,
     );
+    const chunkHighWater = runs.reduce((selected, run) =>
+      run.liveChunkBuffers >= selected.liveChunkBuffers ? run : selected,
+    );
     const browserEvidence = {
       bounds: {
         maxChunksPerActiveTransfer: 2,
@@ -276,8 +320,9 @@ async function main() {
       environment,
       measurements: {
         activeTransfers: 4,
-        liveChunkBuffers: maximum(runs, "liveChunkBuffers"),
-        managerChunkBuffers: maximum(runs, "managerChunkBuffers"),
+        chunkBuffersByTransfer: maximumTransferChunkDistribution(runs, chunkHighWater),
+        liveChunkBuffers: chunkHighWater.liveChunkBuffers,
+        managerChunkBuffers: chunkHighWater.managerChunkBuffers,
         managerOwnedBytes: maximum(runs, "managerOwnedBytes"),
         managerOwnedCategories: managerHighWater.managerOwnedCategories,
         maxChunksPerTransfer: maximum(runs, "maxChunksPerTransfer"),
@@ -288,7 +333,7 @@ async function main() {
         retainedBytes: maximum(runs, "retainedBytes"),
         slicedBytes: runs[0].slicedBytes,
         slices: runs[0].slices,
-        transportChunkBuffers: maximum(runs, "transportChunkBuffers"),
+        transportChunkBuffers: chunkHighWater.transportChunkBuffers,
       },
       methodology: {
         independentRuns: runsRequired,
@@ -300,6 +345,7 @@ async function main() {
         environment,
         measurements: {
           activeTransfers: run.activeTransfers,
+          chunkBuffersByTransfer: run.chunkBuffersByTransfer,
           liveChunkBuffers: run.liveChunkBuffers,
           managerChunkBuffers: run.managerChunkBuffers,
           managerOwnedBytes: run.managerOwnedBytes,
@@ -380,6 +426,11 @@ async function main() {
     if (evaluation.issues.length > 0) {
       process.stderr.write(`U4/16 upload budget failed: ${evaluation.issues.join(",")}\n`);
       process.exitCode = 1;
+    }
+    if (evaluation.observations.length > 0) {
+      process.stdout.write(
+        `U4/16 upload budget observations: ${evaluation.observations.join(",")}\n`,
+      );
     }
   } catch (error) {
     const code = error instanceof UploadBudgetRunnerError ? error.code : "internal";
