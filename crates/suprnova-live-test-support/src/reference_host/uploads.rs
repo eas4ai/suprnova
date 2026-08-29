@@ -1,14 +1,16 @@
 //! Bounded upload routes backed by the production provider contracts.
 
 use std::collections::HashMap;
+use std::future::{Future as _, poll_fn};
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::Poll;
 
 use axum::body::{Body, Bytes};
 use http_body_util::BodyExt as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use suprnova_live::action::{
@@ -32,18 +34,19 @@ use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SnapshotSchemaSet};
 use suprnova_live::upload::{
-    AcceptedChunk, AcceptedUploadType, AuthoritativeUploadType, ChunkBody, ChunkDisposition,
-    ClientUploadMetadata, DetectedUploadType, DirectTransferInstruction, DirectUploadProvider,
-    DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken,
-    FinalizeUploadRequest, PrepareTransfer, PreparedFinalize, QuarantineBytes,
-    QuarantinedFileProvider, ReportDirectPart, ReverseProxyUploadProvider, TransferGrant,
+    AcceptedChunk, ChunkBody, ChunkDisposition, ClientUploadMetadata, DetectedUploadType,
+    DirectTransferInstruction, DirectUploadProvider, DurableUpload, DurableUploadId,
+    FailedFinalize, FinalizeRequest, FinalizeToken, FinalizeUploadRequest, PrepareTransfer,
+    PreparedFinalize, QuarantineBytes, QuarantinedFileProvider, ReportDirectPart,
+    ReverseProxyUploadProvider, ScanDisposition, ScanFailurePolicy, ScanInput, TransferGrant,
     TransferGrantCodec, TransferGrantRequest, TransferGrantScope, TrustedProviderOrigin,
     UploadChecksum, UploadCreationRequest, UploadError, UploadErrorKind, UploadFieldPolicy,
     UploadFinalizationService, UploadFinalizer, UploadFuture, UploadHandle, UploadIdempotencyKey,
-    UploadInspection, UploadProvider, UploadReplacementPolicy, UploadRevision, UploadScanPolicy,
-    UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
-    UploadTransitionRequest, UploadValidationStore, ValidatedUpload, ValidationStoreDisposition,
-    VerifyTransfer, WriteChunk,
+    UploadInspection, UploadProvider, UploadRejectionReason, UploadReplacementPolicy,
+    UploadRevision, UploadScanPolicy, UploadScanner, UploadService, UploadState, UploadTransition,
+    UploadTransitionAdmission, UploadTransitionRequest, UploadValidationDisposition,
+    UploadValidationRequest, UploadValidationService, UploadValidationStore, ValidatedUpload,
+    ValidationStoreDisposition, VerifyTransfer, WriteChunk,
 };
 use suprnova_live::validation::ValidationSelection;
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -123,6 +126,7 @@ enum UploadPausePoint {
     Cancel,
     Reacquire,
     Finalize,
+    Expire,
 }
 
 struct UploadOperationPause {
@@ -372,7 +376,6 @@ impl UploadOperationPause {
         state.selected.is_some() || state.active.is_some()
     }
 
-    #[cfg(test)]
     async fn wait_until_entered(&self, generation: u64) {
         loop {
             let entered = self.entered.notified();
@@ -455,10 +458,41 @@ pub(super) struct CompleteUploadRequest {
     grant: String,
 }
 
+pub(super) enum CompleteUploadOutcome {
+    Ready(Value),
+    Rejected {
+        reason: UploadRejectionReason,
+        status: Value,
+    },
+    Retry {
+        reason: UploadRejectionReason,
+        status: Value,
+    },
+}
+
+impl CompleteUploadOutcome {
+    #[cfg(test)]
+    fn status(&self) -> &Value {
+        match self {
+            Self::Ready(status) | Self::Rejected { status, .. } | Self::Retry { status, .. } => {
+                status
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct FinalizeUploadRequestBody {
     pub(super) handle: String,
     pub(super) ready_revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct UploadRaceOutcome {
+    pub(super) disposition: &'static str,
+    pub(super) terminal_state: &'static str,
+    pub(super) accepted_outcomes: usize,
+    pub(super) active_uploads: usize,
 }
 
 #[derive(Default)]
@@ -517,7 +551,51 @@ impl UploadValidationStore for ReferenceValidationStore {
 
 struct ReferenceFinalizer {
     durable: SyncMutex<HashMap<String, DurableUpload>>,
+    ledger: Arc<MemoryUploadLedger>,
     operation_pause: Arc<UploadOperationPause>,
+    fault: SyncMutex<Option<ReferenceFinalizeFault>>,
+    commit_calls: AtomicUsize,
+    compensation_calls: AtomicUsize,
+    reconciliation_calls: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReferenceFinalizeFault {
+    CommitUnavailable,
+    LedgerAfterDurableCommit,
+}
+
+#[derive(Default)]
+struct ReferenceScanner {
+    timeouts: SyncMutex<HashMap<String, UploadRevision>>,
+    scan_calls: AtomicUsize,
+}
+
+impl UploadScanner for ReferenceScanner {
+    fn scan<'a>(
+        &'a self,
+        input: ScanInput<'a>,
+    ) -> UploadFuture<'a, Result<ScanDisposition, UploadError>> {
+        Box::pin(async move {
+            self.scan_calls.fetch_add(1, Ordering::SeqCst);
+            let prefix = input.content().read(0, 12).await?;
+            if prefix.len() > 12 || input.deadline() <= input.started_at() {
+                return Err(UploadError::new(UploadErrorKind::InvalidField));
+            }
+            let handle = input.upload().handle().to_string();
+            let timed_out = self
+                .timeouts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&handle)
+                .is_some();
+            Ok(if timed_out {
+                ScanDisposition::TimedOut
+            } else {
+                ScanDisposition::Clean
+            })
+        })
+    }
 }
 
 impl UploadFinalizer for ReferenceFinalizer {
@@ -543,6 +621,15 @@ impl UploadFinalizer for ReferenceFinalizer {
         prepared: PreparedFinalize,
     ) -> UploadFuture<'a, Result<DurableUpload, UploadError>> {
         Box::pin(async move {
+            self.commit_calls.fetch_add(1, Ordering::SeqCst);
+            let fault = self
+                .fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if fault == Some(ReferenceFinalizeFault::CommitUnavailable) {
+                return Err(UploadError::new(UploadErrorKind::ProviderUnavailable));
+            }
             let durable = DurableUpload::new(
                 &prepared,
                 DurableUploadId::parse(&format!("durable-{}", prepared.handle()))?,
@@ -552,14 +639,19 @@ impl UploadFinalizer for ReferenceFinalizer {
                 .durable
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            match stored.get(&key) {
+            let outcome = match stored.get(&key) {
                 Some(existing) if existing == &durable => Ok(existing.clone()),
                 Some(_) => Err(UploadError::new(UploadErrorKind::UploadConflict)),
                 None => {
                     stored.insert(key, durable.clone());
                     Ok(durable)
                 }
+            }?;
+            drop(stored);
+            if fault == Some(ReferenceFinalizeFault::LedgerAfterDurableCommit) {
+                self.ledger.fail_next_transition();
             }
+            Ok(outcome)
         })
     }
 
@@ -567,7 +659,10 @@ impl UploadFinalizer for ReferenceFinalizer {
         &'a self,
         _failed: FailedFinalize,
     ) -> UploadFuture<'a, Result<(), UploadError>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            self.compensation_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
     }
 
     fn reconcile<'a>(
@@ -575,6 +670,7 @@ impl UploadFinalizer for ReferenceFinalizer {
         request: FinalizeRequest<'a>,
     ) -> UploadFuture<'a, Result<Option<DurableUpload>, UploadError>> {
         Box::pin(async move {
+            self.reconciliation_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self
                 .durable
                 .lock()
@@ -592,7 +688,10 @@ pub(super) struct UploadRuntime {
     ledger: Arc<MemoryUploadLedger>,
     service: Arc<UploadService>,
     validation: Arc<ReferenceValidationStore>,
+    validation_service: UploadValidationService,
+    scanner: Arc<ReferenceScanner>,
     finalization: UploadFinalizationService,
+    finalizer: Arc<ReferenceFinalizer>,
     grants: TransferGrantCodec,
     context: TrustedLiveRequestContext,
     scope: HostScopeFacts,
@@ -649,14 +748,30 @@ impl UploadRuntime {
                 .map_err(|error| format!("upload service: {error:?}"))?,
         );
         let validation = Arc::new(ReferenceValidationStore::default());
+        let scanner = Arc::new(ReferenceScanner::default());
+        let validation_service = UploadValidationService::new(
+            Arc::clone(&service),
+            file.clone(),
+            validation.clone(),
+            Some(scanner.clone()),
+            None,
+            limits,
+        )
+        .map_err(|error| format!("upload validation: {error:?}"))?;
         let operation_pause = Arc::new(UploadOperationPause::new(open_timers));
+        let finalizer = Arc::new(ReferenceFinalizer {
+            durable: SyncMutex::new(HashMap::new()),
+            ledger: Arc::clone(&ledger),
+            operation_pause: Arc::clone(&operation_pause),
+            fault: SyncMutex::new(None),
+            commit_calls: AtomicUsize::new(0),
+            compensation_calls: AtomicUsize::new(0),
+            reconciliation_calls: AtomicUsize::new(0),
+        });
         let finalization = UploadFinalizationService::new(
             Arc::clone(&service),
             validation.clone(),
-            Arc::new(ReferenceFinalizer {
-                durable: SyncMutex::new(HashMap::new()),
-                operation_pause: Arc::clone(&operation_pause),
-            }),
+            finalizer.clone(),
         );
         Ok(Self {
             limits,
@@ -665,7 +780,10 @@ impl UploadRuntime {
             ledger,
             service,
             validation,
+            validation_service,
+            scanner,
             finalization,
+            finalizer,
             grants: grant_codec(),
             context,
             scope,
@@ -1103,31 +1221,29 @@ impl UploadRuntime {
         &self,
         handle: &str,
         request: CompleteUploadRequest,
-    ) -> Result<Value, UploadError> {
+    ) -> Result<CompleteUploadOutcome, UploadError> {
         self.record_call();
         let mut operation = self.take_upload(handle)?;
         let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
             .pause_if_selected(UploadPausePoint::Complete, &pause_handle, pause_generation)
             .await;
-        let result = self
-            .complete_inner(operation.upload_mut(), &request.grant)
-            .await;
-        result.map(|()| status_json(operation.upload()))
+        self.complete_inner(operation.upload_mut(), &request.grant)
+            .await
     }
 
     async fn complete_inner(
         &self,
         upload: &mut StoredUpload,
         grant: &str,
-    ) -> Result<(), UploadError> {
+    ) -> Result<CompleteUploadOutcome, UploadError> {
         self.require_current_grant(upload, grant)?;
         if upload.received_bytes != upload.expected_bytes {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
         if upload.state == UploadState::Ready {
             drop(upload.active_lease.take());
-            return Ok(());
+            return Ok(CompleteUploadOutcome::Ready(status_json(upload)));
         }
         if upload.state != UploadState::Transferring && upload.state != UploadState::Verifying {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
@@ -1137,53 +1253,91 @@ impl UploadRuntime {
             self.transition(upload, UploadTransition::Complete, "complete")
                 .await?;
         }
-        match upload.mode {
+        let client = upload
+            .client
+            .clone()
+            .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
+        let policy = upload
+            .policy
+            .clone()
+            .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
+        let outcome = match upload.mode {
             TransferMode::File => {
-                self.file
-                    .verify(VerifyTransfer::new(&upload.handle, &checksum))
-                    .await?;
+                self.validation_service
+                    .validate(
+                        &self.context,
+                        UploadValidationRequest::new(
+                            upload.handle.clone(),
+                            upload.field.clone(),
+                            upload.revision,
+                            idempotency("validate")?,
+                            client,
+                            upload.received_bytes,
+                            checksum,
+                            policy,
+                        ),
+                        CREATED_AT,
+                    )
+                    .await?
             }
             TransferMode::Direct => {
                 self.direct
                     .verify(VerifyTransfer::new(&upload.handle, &checksum))
                     .await?;
+                self.transition(upload, UploadTransition::Accept, "accept")
+                    .await?;
+                let authority = TransferGrantScope::new(
+                    upload.handle.clone(),
+                    self.context.mount().component().clone(),
+                    upload.field.clone(),
+                    self.scope.clone(),
+                    1,
+                );
+                let inspection = UploadInspection::from_store(
+                    upload.handle.clone(),
+                    client,
+                    DetectedUploadType::Unknown,
+                    None,
+                    upload.received_bytes,
+                    checksum,
+                    None,
+                    CREATED_AT,
+                )?;
+                self.validation
+                    .put(ValidatedUpload::from_store(
+                        authority,
+                        upload.revision,
+                        policy.contract_digest().clone(),
+                        inspection,
+                    )?)
+                    .await?;
+                drop(upload.active_lease.take());
+                return Ok(CompleteUploadOutcome::Ready(status_json(upload)));
             }
+        };
+        if let Some(transition) = outcome.transition() {
+            upload.state = transition.state();
+            upload.revision = transition.revision();
         }
-        self.transition(upload, UploadTransition::Accept, "accept")
-            .await?;
-        if let (Some(client), Some(policy)) = (&upload.client, &upload.policy) {
-            let authoritative_type = client
-                .claimed_media_type()
-                .map(AuthoritativeUploadType::application)
-                .transpose()?;
-            let inspection = UploadInspection::from_store(
-                upload.handle.clone(),
-                client.clone(),
-                DetectedUploadType::Unknown,
-                authoritative_type,
-                upload.received_bytes,
-                checksum,
-                None,
-                CREATED_AT,
-            )?;
-            let authority = TransferGrantScope::new(
-                upload.handle.clone(),
-                self.context.mount().component().clone(),
-                upload.field.clone(),
-                self.scope.clone(),
-                1,
-            );
-            self.validation
-                .put(ValidatedUpload::from_store(
-                    authority,
-                    upload.revision,
-                    policy.contract_digest().clone(),
-                    inspection,
-                )?)
-                .await?;
+        let reason = outcome.reason();
+        match outcome.disposition() {
+            UploadValidationDisposition::Ready => {
+                drop(upload.active_lease.take());
+                Ok(CompleteUploadOutcome::Ready(status_json(upload)))
+            }
+            UploadValidationDisposition::Rejected => {
+                drop(upload.active_lease.take());
+                Ok(CompleteUploadOutcome::Rejected {
+                    reason: reason
+                        .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?,
+                    status: status_json(upload),
+                })
+            }
+            UploadValidationDisposition::Retry => Ok(CompleteUploadOutcome::Retry {
+                reason: reason.ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?,
+                status: status_json(upload),
+            }),
         }
-        drop(upload.active_lease.take());
-        Ok(())
     }
 
     pub(super) async fn finalize(
@@ -1295,14 +1449,199 @@ impl UploadRuntime {
     }
 
     async fn cancel_inner(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
+        self.transition(upload, UploadTransition::Cancel, "cancel")
+            .await
+            .map_err(normalize_terminal_conflict)?;
         match upload.mode {
             TransferMode::File => self.file.cancel(&upload.handle).await?,
             TransferMode::Direct => self.direct.cancel(&upload.handle).await?,
         }
-        self.transition(upload, UploadTransition::Cancel, "cancel")
-            .await?;
         drop(upload.active_lease.take());
         Ok(())
+    }
+
+    async fn expire(&self, handle: &str) -> Result<Value, UploadError> {
+        self.record_call();
+        let mut operation = self.take_upload_after_inflight(handle).await?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Expire, &pause_handle, pause_generation)
+            .await;
+        let upload = operation.upload_mut();
+        self.transition(upload, UploadTransition::Expire, "expire")
+            .await
+            .map_err(normalize_terminal_conflict)?;
+        match upload.mode {
+            TransferMode::File => self.file.expire(&upload.handle).await?,
+            TransferMode::Direct => self.direct.expire(&upload.handle).await?,
+        }
+        drop(upload.active_lease.take());
+        Ok(status_json(upload))
+    }
+
+    pub(super) async fn adversarial_race(
+        &self,
+        handle: &str,
+        ready_revision: u64,
+        case: &str,
+    ) -> Result<UploadRaceOutcome, UploadError> {
+        let (terminal_is_cancel, terminal_wins, terminal_state) = match case {
+            "cancel-finalize-cancel-wins" => (true, true, "canceled"),
+            "cancel-finalize-finalize-wins" => (true, false, "finalized"),
+            "expire-finalize-expire-wins" => (false, true, "expired"),
+            "expire-finalize-finalize-wins" => (false, false, "finalized"),
+            _ => return Err(UploadError::new(UploadErrorKind::InvalidField)),
+        };
+        let grant = {
+            let records = self
+                .uploads
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(UploadSlot::Ready(upload)) = records.get(handle) else {
+                return Ok(UploadRaceOutcome {
+                    disposition: "upload_missing",
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                });
+            };
+            if upload.state != UploadState::Ready || upload.revision.get() != ready_revision {
+                return Ok(UploadRaceOutcome {
+                    disposition: "upload_not_ready",
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                });
+            }
+            upload.grant.expose_bearer().to_owned()
+        };
+        let pause_point = if terminal_wins {
+            if terminal_is_cancel {
+                UploadPausePoint::Cancel
+            } else {
+                UploadPausePoint::Expire
+            }
+        } else {
+            UploadPausePoint::Finalize
+        };
+        let pause_generation =
+            match self
+                .operation_pause
+                .select(pause_point, handle, ready_revision)
+            {
+                Ok(generation) => generation,
+                Err(_) => {
+                    return Ok(UploadRaceOutcome {
+                        disposition: "pause_select_failed",
+                        terminal_state,
+                        accepted_outcomes: 0,
+                        active_uploads: self.active_uploads.current(),
+                    });
+                }
+            };
+
+        let finalize = self.finalize(FinalizeUploadRequestBody {
+            handle: handle.to_owned(),
+            ready_revision,
+        });
+        let terminal = async {
+            if terminal_is_cancel {
+                self.cancel(handle, &grant).await
+            } else {
+                self.expire(handle).await
+            }
+        };
+        tokio::pin!(finalize);
+        tokio::pin!(terminal);
+
+        let (winner, loser) = if terminal_wins {
+            tokio::select! {
+                () = self.operation_pause.wait_until_entered(pause_generation) => {}
+                result = &mut terminal => return Ok(UploadRaceOutcome {
+                    disposition: if result.is_ok() { "race_did_not_pause" } else { "terminal_failed_before_pause" },
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                }),
+            }
+            let loser = finalize.await;
+            if self.operation_pause.resume(pause_generation).is_err() {
+                return Ok(UploadRaceOutcome {
+                    disposition: "pause_resume_failed",
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                });
+            }
+            let winner = terminal.await;
+            (winner, loser)
+        } else {
+            tokio::select! {
+                () = self.operation_pause.wait_until_entered(pause_generation) => {}
+                result = &mut finalize => return Ok(UploadRaceOutcome {
+                    disposition: if result.is_ok() { "race_did_not_pause" } else { "finalize_failed_before_pause" },
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                }),
+            }
+            let terminal_pending =
+                poll_fn(|task| Poll::Ready(matches!(terminal.as_mut().poll(task), Poll::Pending)))
+                    .await;
+            if !terminal_pending {
+                return Ok(UploadRaceOutcome {
+                    disposition: "terminal_not_pending",
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                });
+            }
+            if self.operation_pause.resume(pause_generation).is_err() {
+                return Ok(UploadRaceOutcome {
+                    disposition: "pause_resume_failed",
+                    terminal_state,
+                    accepted_outcomes: 0,
+                    active_uploads: self.active_uploads.current(),
+                });
+            }
+            let winner = finalize.await;
+            let loser = terminal.await;
+            (winner, loser)
+        };
+        if let Err(error) = winner {
+            return Ok(UploadRaceOutcome {
+                disposition: error.kind().as_str(),
+                terminal_state,
+                accepted_outcomes: 0,
+                active_uploads: self.active_uploads.current(),
+            });
+        }
+        let loser = match loser {
+            Err(error) => error,
+            Ok(_) => {
+                return Ok(UploadRaceOutcome {
+                    disposition: "multiple_outcomes_accepted",
+                    terminal_state,
+                    accepted_outcomes: 2,
+                    active_uploads: self.active_uploads.current(),
+                });
+            }
+        };
+        if loser.kind() != UploadErrorKind::UploadConflict {
+            return Ok(UploadRaceOutcome {
+                disposition: loser.kind().as_str(),
+                terminal_state,
+                accepted_outcomes: 1,
+                active_uploads: self.active_uploads.current(),
+            });
+        }
+        Ok(UploadRaceOutcome {
+            disposition: "upload_conflict",
+            terminal_state,
+            accepted_outcomes: 1,
+            active_uploads: self.active_uploads.current(),
+        })
     }
 
     pub(super) async fn reacquire(&self, handle: &str) -> Result<Value, UploadError> {
@@ -1355,6 +1694,105 @@ impl UploadRuntime {
 
     pub(super) fn fault_count(&self) -> usize {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
+    }
+
+    pub(super) fn arm_scan_timeout(
+        &self,
+        handle: &str,
+        operation_generation: u64,
+    ) -> Result<(), &'static str> {
+        let mut records = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let upload = records.get_mut(handle).and_then(|slot| match slot {
+            UploadSlot::Ready(upload) => Some(upload.as_mut()),
+            UploadSlot::Busy { .. } => None,
+        });
+        let Some(upload) = upload else {
+            return Err("upload_scan_scope_invalid");
+        };
+        if upload.revision.get() != operation_generation
+            || upload.state != UploadState::Created
+            || upload.mode != TransferMode::File
+        {
+            return Err("upload_scan_scope_invalid");
+        }
+        let client = upload.client.as_ref().ok_or("upload_scan_scope_invalid")?;
+        upload.policy = Some(
+            reference_upload_policy_with_scan(
+                client.display_name(),
+                client
+                    .claimed_media_type()
+                    .unwrap_or("application/octet-stream"),
+                UploadScanPolicy::Required {
+                    on_timeout: ScanFailurePolicy::Retry,
+                    on_unavailable: ScanFailurePolicy::Reject,
+                },
+            )
+            .map_err(|_| "upload_scan_scope_invalid")?,
+        );
+        let mut timeouts = self
+            .scanner
+            .timeouts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if timeouts.contains_key(handle) {
+            return Err("upload_scan_fault_in_use");
+        }
+        timeouts.insert(handle.to_owned(), UploadRevision::new(operation_generation));
+        Ok(())
+    }
+
+    pub(super) fn arm_finalize_fault(
+        &self,
+        handle: &str,
+        operation_generation: u64,
+        fault: &'static str,
+    ) -> Result<(), &'static str> {
+        let records = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = records.get(handle).and_then(|slot| match slot {
+            UploadSlot::Ready(upload) if upload.state == UploadState::Ready => {
+                Some(upload.revision.get())
+            }
+            UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+        });
+        if current != Some(operation_generation) {
+            return Err("upload_finalize_fault_scope_invalid");
+        }
+        drop(records);
+        let selected = match fault {
+            "commit-unavailable" => ReferenceFinalizeFault::CommitUnavailable,
+            "ledger-after-commit" => ReferenceFinalizeFault::LedgerAfterDurableCommit,
+            _ => return Err("upload_finalize_fault_invalid"),
+        };
+        let mut current = self
+            .finalizer
+            .fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.is_some() {
+            return Err("upload_finalize_fault_in_use");
+        }
+        *current = Some(selected);
+        Ok(())
+    }
+
+    pub(super) fn validation_scan_calls(&self) -> usize {
+        self.scanner.scan_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn finalizer_counts(&self) -> (usize, usize, usize) {
+        (
+            self.finalizer.commit_calls.load(Ordering::SeqCst),
+            self.finalizer.compensation_calls.load(Ordering::SeqCst),
+            self.finalizer.reconciliation_calls.load(Ordering::SeqCst),
+        )
     }
 
     pub(super) async fn pause_chunk(
@@ -1638,6 +2076,14 @@ impl UploadRuntime {
     }
 }
 
+fn normalize_terminal_conflict(error: UploadError) -> UploadError {
+    if error.kind() == UploadErrorKind::InvalidTransition {
+        UploadError::new(UploadErrorKind::UploadConflict)
+    } else {
+        error
+    }
+}
+
 fn status_json(upload: &StoredUpload) -> Value {
     json!({
         "handle": upload.handle.to_string(),
@@ -1673,16 +2119,21 @@ fn reference_upload_policy(
     filename: &str,
     content_type: &str,
 ) -> Result<UploadFieldPolicy, UploadError> {
-    let extension = filename
-        .rsplit_once('.')
-        .map_or("bin", |(_, extension)| extension);
+    reference_upload_policy_with_scan(filename, content_type, UploadScanPolicy::Disabled)
+}
+
+fn reference_upload_policy_with_scan(
+    _filename: &str,
+    _content_type: &str,
+    scan: UploadScanPolicy,
+) -> Result<UploadFieldPolicy, UploadError> {
     UploadFieldPolicy::new_with_accepted_types(
         16,
         UploadLimitConfig::reference().max_file_bytes,
         UploadReplacementPolicy::RetirePrevious,
-        vec![AcceptedUploadType::application(content_type, &[extension])?],
+        Vec::new(),
         None,
-        UploadScanPolicy::Disabled,
+        scan,
         ActionName::parse("refresh")
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?,
     )
@@ -2005,6 +2456,7 @@ mod tests {
             UploadPausePoint::Cancel,
             UploadPausePoint::Reacquire,
             UploadPausePoint::Finalize,
+            UploadPausePoint::Expire,
         ] {
             let created = runtime
                 .create(CreateUploadRequest {
@@ -2018,7 +2470,8 @@ mod tests {
                 .expect("created upload");
             let handle = created["handle"].as_str().expect("handle").to_owned();
             let grant = created["grant"].as_str().expect("grant").to_owned();
-            let revision = if point == UploadPausePoint::Finalize {
+            let revision = if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire)
+            {
                 let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
                 runtime
                     .write_chunk(
@@ -2039,7 +2492,8 @@ mod tests {
                         },
                     )
                     .await
-                    .expect("finalization upload ready")["revision"]
+                    .expect("finalization upload ready")
+                    .status()["revision"]
                     .as_u64()
                     .expect("ready revision")
             } else {
@@ -2072,16 +2526,15 @@ mod tests {
                             .status(&operation_handle, &operation_grant)
                             .await
                     }
-                    UploadPausePoint::Complete => {
-                        operation_runtime
-                            .complete(
-                                &operation_handle,
-                                CompleteUploadRequest {
-                                    grant: operation_grant,
-                                },
-                            )
-                            .await
-                    }
+                    UploadPausePoint::Complete => operation_runtime
+                        .complete(
+                            &operation_handle,
+                            CompleteUploadRequest {
+                                grant: operation_grant,
+                            },
+                        )
+                        .await
+                        .map(|outcome| outcome.status().clone()),
                     UploadPausePoint::Cancel => {
                         operation_runtime
                             .cancel(&operation_handle, &operation_grant)
@@ -2098,6 +2551,7 @@ mod tests {
                             })
                             .await
                     }
+                    UploadPausePoint::Expire => operation_runtime.expire(&operation_handle).await,
                 }
             });
             timeout(
@@ -2112,7 +2566,7 @@ mod tests {
                 runtime.operation_pause.resume(pause_generation),
                 Err("upload_pause_generation_stale")
             );
-            if point == UploadPausePoint::Finalize {
+            if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
                 let parsed_handle = UploadHandle::parse(&handle).expect("stored upload handle");
                 let authoritative = suprnova_live::upload::UploadLedger::load(
                     runtime.ledger.as_ref(),
@@ -2121,7 +2575,14 @@ mod tests {
                 .await
                 .expect("authoritative finalizing upload")
                 .expect("retained finalizing upload");
-                assert_eq!(authoritative.state(), UploadState::Finalizing);
+                assert_eq!(
+                    authoritative.state(),
+                    if point == UploadPausePoint::Finalize {
+                        UploadState::Finalizing
+                    } else {
+                        UploadState::Ready
+                    }
+                );
                 assert_eq!(
                     runtime.reset_creation_window().await,
                     Err("upload_window_not_quiescent")
@@ -2135,7 +2596,7 @@ mod tests {
             assert_eq!(coherent["handle"], handle);
             assert_eq!(
                 coherent["state"],
-                if point == UploadPausePoint::Finalize {
+                if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
                     "ready"
                 } else {
                     "created"

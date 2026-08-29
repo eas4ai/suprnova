@@ -1,19 +1,28 @@
 //! Deterministic HTTP, SSE, and WebSocket adapters over production async authority.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use serde::Deserialize;
+use futures_util::FutureExt as _;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use suprnova_live::async_updates::{
-    AuthorizedTransportSubscription, DocumentTransportKind, DocumentTransportSession, SseEncoder,
-    SseMembershipControl, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
+    AsyncCloseCode, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDeliveryDisposition,
+    AsyncDeliveryErrorKind, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
+    AsyncPolicy, AsyncTransportErrorKind, AuthorizedTransportSubscription,
+    BoundedDocumentTransportSession, BufferDisposition, CloseDisposition, DocumentTransportKind,
+    MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, ResolvedAsyncDelivery, SequenceDegradation,
+    SequenceDisposition, SequenceState, SseEncoder, SseMembershipControl, StreamEpoch,
+    StreamPosition, StreamSequence, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
     WebSocketMembershipControl,
 };
 use suprnova_live::endpoint::LiveEndpointResponse;
 use suprnova_live::identity::UnixMillis;
+use suprnova_live::resource::{PermitPool, ResourceBounds};
 use tokio::sync::Notify;
 
 use crate::{
@@ -22,7 +31,7 @@ use crate::{
     AsyncReferencePosition, AsyncReferenceScenario,
 };
 
-use super::engine_async::{EngineAsyncFixture, EngineSource};
+use super::engine_async::EngineAsyncFixture;
 use super::faults::ReferenceFaultSchedule;
 use super::{ResourceCounter, ResourceLease};
 
@@ -86,7 +95,7 @@ struct IssuedTransport {
     generation: u64,
     pending_emissions: usize,
     reader_active: bool,
-    document: DocumentTransportSession,
+    document: BoundedDocumentTransportSession,
     memberships: BTreeMap<String, IssuedMembership>,
 }
 
@@ -142,6 +151,43 @@ impl AsyncPhasePause {
 
 pub(super) struct WebSocketControlOutcome {
     pub(super) messages: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct AsyncAdversarialOutcome {
+    pub(super) disposition: &'static str,
+    pub(super) recovery: &'static str,
+    pub(super) retained_events: usize,
+    pub(super) retained_bytes: usize,
+    pub(super) ceiling_events: usize,
+    pub(super) ceiling_bytes: usize,
+    pub(super) accepted_sequence: u64,
+    pub(super) dependent_closed: bool,
+    pub(super) sibling_usable: bool,
+    pub(super) wire: Option<String>,
+}
+
+#[derive(Default)]
+struct EncodingDispatcher {
+    envelopes: Vec<AsyncEnvelope>,
+}
+
+struct FixedContinuity(StreamPosition);
+
+impl AsyncContinuityAuthorityPort for FixedContinuity {
+    fn authoritative_refresh(
+        &self,
+        _request: AsyncContinuityRequest<'_>,
+    ) -> Option<StreamPosition> {
+        Some(self.0)
+    }
+}
+
+impl AsyncEnvelopeDispatchPort for EncodingDispatcher {
+    fn dispatch(&mut self, delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError> {
+        self.envelopes.push(delivery.envelope().clone());
+        Ok(())
+    }
 }
 
 pub(super) struct AsyncRuntime {
@@ -300,7 +346,20 @@ impl AsyncRuntime {
             TransportKind::WebSocket => DocumentTransportKind::WebSocket,
         };
         let marker = u8::try_from(sequence).unwrap_or(u8::MAX).max(1);
-        let document = state.engine.document(origin, document_kind, marker)?;
+        let document = BoundedDocumentTransportSession::new(
+            state.engine.document(origin, document_kind, marker)?,
+            ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_BUFFER_BYTES)
+                .map_err(|_| "engine_delivery_bounds")?,
+            PermitPool::new(1).map_err(|_| "engine_delivery_bounds")?,
+            AsyncPolicy {
+                max_payload_bytes: NonZeroUsize::new(MAX_ASYNC_PAYLOAD_BYTES)
+                    .expect("non-zero async payload bound"),
+                max_replay_events: NonZeroUsize::new(MAX_REPLAY_TRANSCRIPT_ENVELOPES)
+                    .expect("non-zero replay bound"),
+                max_fanout: NonZeroUsize::new(1).expect("non-zero fanout bound"),
+            },
+        )
+        .map_err(|_| "engine_delivery_bounds")?;
         let mut memberships = BTreeMap::new();
         for subscription_id in MEMBERSHIP_IDS {
             let engine_authorization = state.engine.authorization(subscription_id, origin)?;
@@ -433,9 +492,9 @@ impl AsyncRuntime {
                         return Err("membership_control_in_flight");
                     }
                     let pending = SseMembershipControl::prepare_subscribe(
-                        &transport.document,
-                        transport.document.handle(),
-                        transport.document.origin(),
+                        transport.document.transport(),
+                        transport.document.transport().handle(),
+                        transport.document.transport().origin(),
                         authorization,
                     )
                     .map_err(|_| "engine_membership_rejected")?;
@@ -457,20 +516,22 @@ impl AsyncRuntime {
                     .authorize()
                     .await
                     .map_err(|_| "engine_membership_rejected")?;
-                let establishing = {
+                let (establishing, engine) = {
                     let mut state = self.state.lock().expect("async runtime lock");
+                    let engine = Arc::clone(&state.engine);
                     let transport = state
                         .transports
                         .get_mut(transport_id)
                         .filter(|transport| transport.generation == generation)
                         .ok_or("transport_authority_invalid")?;
-                    transport
+                    let establishing = transport
                         .document
                         .prepare_establish(authorized)
-                        .map_err(|_| "engine_membership_rejected")?
+                        .map_err(|_| "engine_membership_rejected")?;
+                    (establishing, engine)
                 };
                 let ready = establishing
-                    .establish(&EngineSource)
+                    .establish(engine.source())
                     .await
                     .map_err(|_| "engine_membership_rejected")?;
                 let response = {
@@ -484,17 +545,39 @@ impl AsyncRuntime {
                         .document
                         .commit_add(ready)
                         .map_err(|_| "engine_membership_rejected")?;
-                    let membership = transport
-                        .memberships
-                        .get_mut(subscription)
-                        .ok_or("authority_missing")?;
-                    let response = membership
-                        .authority
-                        .commit_membership(prepared_reference, NOW)?;
-                    membership.open = true;
-                    membership.lease = Some(lease);
-                    self.maximum_memberships
-                        .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
+                    let (response, baseline, installed_authorization) = {
+                        let membership = transport
+                            .memberships
+                            .get_mut(subscription)
+                            .ok_or("authority_missing")?;
+                        let response = membership
+                            .authority
+                            .commit_membership(prepared_reference, NOW)?;
+                        membership.open = true;
+                        membership.lease = Some(lease);
+                        (
+                            response,
+                            membership.authority.current_sequence(),
+                            membership.engine_authorization.clone(),
+                        )
+                    };
+                    if baseline > 0 {
+                        transport
+                            .document
+                            .recover_from_authoritative_refresh(
+                                &installed_authorization,
+                                engine.registry(),
+                                &FixedContinuity(StreamPosition::new(
+                                    StreamEpoch::new(1),
+                                    StreamSequence::new(baseline),
+                                )),
+                            )
+                            .map_err(|_| "engine_sequence_baseline_invalid")?;
+                    }
+                    self.maximum_memberships.fetch_max(
+                        transport.document.transport().membership_count(),
+                        Ordering::SeqCst,
+                    );
                     response
                 };
                 drop(control);
@@ -523,9 +606,9 @@ impl AsyncRuntime {
                         return Err("membership_control_in_flight");
                     }
                     let pending = SseMembershipControl::prepare_unsubscribe(
-                        &transport.document,
-                        transport.document.handle(),
-                        transport.document.origin(),
+                        transport.document.transport(),
+                        transport.document.transport().handle(),
+                        transport.document.transport().origin(),
                         &authorization,
                     )
                     .map_err(|_| "engine_membership_rejected")?;
@@ -728,8 +811,25 @@ impl AsyncRuntime {
                 membership.authority.next_heartbeat().0
             };
             let envelope = engine.envelope(&membership.engine_authorization, sequence)?;
+            engine.queue(envelope.clone())?;
+            let admission = transport
+                .document
+                .pump_next(engine.registry())
+                .now_or_never()
+                .ok_or("engine_delivery_pending")?
+                .map_err(|error| error.kind().as_str())?;
+            if admission.is_none() {
+                return Err("engine_delivery_missing");
+            }
+            let mut dispatcher = EncodingDispatcher::default();
+            transport
+                .document
+                .dispatch_next(engine.registry(), &mut dispatcher)
+                .map_err(|error| delivery_error_code(error.kind()))?
+                .ok_or("engine_delivery_missing")?;
+            let delivered = dispatcher.envelopes.first().unwrap_or(&envelope);
             let event =
-                SseEncoder::encode_envelope(&envelope).map_err(|_| "engine_envelope_invalid")?;
+                SseEncoder::encode_envelope(delivered).map_err(|_| "engine_envelope_invalid")?;
             bytes.extend_from_slice(event.as_bytes());
         }
         if bytes.is_empty() {
@@ -785,7 +885,7 @@ impl AsyncRuntime {
                     return Err("membership_control_in_flight");
                 }
                 let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
-                    &transport.document,
+                    transport.document.transport(),
                     request,
                     membership.engine_authorization.clone(),
                 )
@@ -808,19 +908,21 @@ impl AsyncRuntime {
                 .authorize()
                 .await
                 .map_err(|_| "websocket_control_invalid")?;
-            let establishing = {
+            let (establishing, engine) = {
                 let state = self.state.lock().expect("async runtime lock");
+                let engine = Arc::clone(&state.engine);
                 let transport = state
                     .transports
                     .get(transport_id)
                     .filter(|transport| transport.generation == generation)
                     .ok_or("transport_authority_invalid")?;
-                authorized
-                    .prepare_establish(&transport.document)
-                    .map_err(|_| "websocket_control_invalid")?
+                let establishing = authorized
+                    .prepare_establish(transport.document.transport())
+                    .map_err(|_| "websocket_control_invalid")?;
+                (establishing, engine)
             };
             let ready = establishing
-                .establish(&EngineSource)
+                .establish(engine.source())
                 .await
                 .map_err(|_| "websocket_control_invalid")?;
             let (receipt, envelope) = {
@@ -831,22 +933,47 @@ impl AsyncRuntime {
                     .get_mut(transport_id)
                     .filter(|transport| transport.generation == generation)
                     .ok_or("transport_authority_invalid")?;
-                let receipt = WebSocketMembershipControl::commit_authenticated_subscribe(
+                let receipt = WebSocketMembershipControl::commit_authenticated_bounded_subscribe(
                     &mut transport.document,
                     ready,
                 )
                 .map_err(|_| "websocket_control_invalid")?;
+                let (baseline, installed_authorization) = {
+                    let membership = transport
+                        .memberships
+                        .get_mut(&subscription)
+                        .ok_or("membership_authority_invalid")?;
+                    membership
+                        .authority
+                        .commit_membership(prepared_reference, NOW)?;
+                    membership.open = true;
+                    membership.lease = Some(lease);
+                    (
+                        membership.authority.current_sequence(),
+                        membership.engine_authorization.clone(),
+                    )
+                };
+                if baseline > 0 {
+                    transport
+                        .document
+                        .recover_from_authoritative_refresh(
+                            &installed_authorization,
+                            engine.registry(),
+                            &FixedContinuity(StreamPosition::new(
+                                StreamEpoch::new(1),
+                                StreamSequence::new(baseline),
+                            )),
+                        )
+                        .map_err(|_| "engine_sequence_baseline_invalid")?;
+                }
+                self.maximum_memberships.fetch_max(
+                    transport.document.transport().membership_count(),
+                    Ordering::SeqCst,
+                );
                 let membership = transport
                     .memberships
                     .get_mut(&subscription)
                     .ok_or("membership_authority_invalid")?;
-                membership
-                    .authority
-                    .commit_membership(prepared_reference, NOW)?;
-                membership.open = true;
-                membership.lease = Some(lease);
-                self.maximum_memberships
-                    .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
                 let sequence = membership.authority.next_heartbeat().0;
                 let envelope = engine.envelope(&membership.engine_authorization, sequence)?;
                 (receipt, envelope)
@@ -868,7 +995,7 @@ impl AsyncRuntime {
                 payload,
                 final_fragment: true,
             })
-            .map_err(|_| "websocket_control_invalid")?;
+            .map_err(|error| error.kind().as_str())?;
         let WebSocketControlRecord::Unsubscribe(subscription) = control else {
             return Err("websocket_control_invalid");
         };
@@ -935,7 +1062,7 @@ impl AsyncRuntime {
                 .filter(|transport| transport.generation == generation)
                 .ok_or("transport_authority_invalid")?;
             WebSocketMembershipControl::prepare_unsubscribe(
-                &transport.document,
+                transport.document.transport(),
                 &unsubscribe,
                 &authorization,
             )
@@ -1088,13 +1215,176 @@ impl AsyncRuntime {
         {
             let sequence = membership.authority.next_heartbeat().0;
             let envelope = engine.envelope(&membership.engine_authorization, sequence)?;
+            engine.queue(envelope.clone())?;
+            let admission = transport
+                .document
+                .pump_next(engine.registry())
+                .now_or_never()
+                .ok_or("engine_delivery_pending")?
+                .map_err(|error| error.kind().as_str())?;
+            if admission.is_none() {
+                return Err("engine_delivery_missing");
+            }
+            let mut dispatcher = EncodingDispatcher::default();
+            transport
+                .document
+                .dispatch_next(engine.registry(), &mut dispatcher)
+                .map_err(|error| delivery_error_code(error.kind()))?
+                .ok_or("engine_delivery_missing")?;
+            let delivered = dispatcher.envelopes.first().unwrap_or(&envelope);
             messages.push(
                 codec
-                    .encode_envelope(&envelope)
+                    .encode_envelope(delivered)
                     .map_err(|_| "engine_envelope_invalid")?,
             );
         }
         Ok(messages)
+    }
+
+    pub(super) fn adversarial_delivery(
+        &self,
+        transport_id: &str,
+        case: &str,
+    ) -> Result<AsyncAdversarialOutcome, &'static str> {
+        let mut state = self.state.lock().expect("async runtime lock");
+        if state.retired {
+            return Err("transport_retired");
+        }
+        let engine = Arc::clone(&state.engine);
+        let transport = state
+            .transports
+            .get_mut(transport_id)
+            .ok_or("transport_authority_invalid")?;
+        let primary = transport
+            .memberships
+            .values_mut()
+            .find(|membership| membership.open)
+            .ok_or("membership_authority_invalid")?;
+        let authorization = primary.engine_authorization.clone();
+        let accepted_sequence = transport
+            .document
+            .sequence_position(&authorization)
+            .ok_or("engine_sequence_position_missing")?
+            .sequence()
+            .get();
+        if primary.authority.current_sequence() != accepted_sequence {
+            return Err("engine_sequence_authority_mismatch");
+        }
+        let sequence = primary.authority.sequence_gap().0;
+
+        let envelope = match case {
+            "fanout-pressure" => {
+                engine.set_resolved_event_fanout(2);
+                engine.browser_event_envelope(&authorization, sequence)?
+            }
+            _ => engine.envelope(&authorization, sequence)?,
+        };
+        let wire = SseEncoder::encode_envelope(&envelope)
+            .ok()
+            .and_then(|record| String::from_utf8(record.data().to_vec()).ok());
+
+        if case == "revoked-authorization" {
+            engine.revoke(&authorization);
+        }
+        engine.queue(envelope.clone())?;
+        let admission = transport
+            .document
+            .pump_next(engine.registry())
+            .now_or_never()
+            .ok_or("engine_delivery_pending")?;
+
+        let (disposition, recovery, dependent_closed, accepted_sequence) = match case {
+            "revoked-authorization" => {
+                let error = match admission {
+                    Err(error) => error,
+                    Ok(_) => return Err("engine_revocation_disposition_invalid"),
+                };
+                if error.kind() != AsyncTransportErrorKind::AuthorizationLost {
+                    return Err("engine_revocation_disposition_invalid");
+                }
+                if transport
+                    .document
+                    .detach_authorization_lost(&authorization)
+                    .map_err(|error| error.kind().as_str())?
+                    != CloseDisposition::Closed
+                {
+                    return Err("engine_revocation_detach_invalid");
+                }
+                primary.open = false;
+                drop(primary.lease.take());
+                ("authorization_lost", "reauthorize", true, 0)
+            }
+            "fanout-pressure" => {
+                engine.set_resolved_event_fanout(1);
+                match admission.map_err(|error| error.kind().as_str())? {
+                    Some(BufferDisposition::Closed(AsyncCloseCode::FanoutExceeded)) => {
+                        ("async_fanout_exceeded", "reconnect", true, 0)
+                    }
+                    _ => return Err("engine_fanout_disposition_invalid"),
+                }
+            }
+            "reordered-message" | "replay-overflow" => {
+                match admission.map_err(|error| error.kind().as_str())? {
+                    Some(BufferDisposition::Queued | BufferDisposition::Coalesced) => {}
+                    _ => return Err("engine_sequence_admission_invalid"),
+                }
+                let mut dispatcher = EncodingDispatcher::default();
+                let delivered = transport
+                    .document
+                    .dispatch_next(engine.registry(), &mut dispatcher)
+                    .map_err(|error| delivery_error_code(error.kind()))?
+                    .ok_or("engine_delivery_missing")?;
+                match delivered {
+                    AsyncDeliveryDisposition::Sequence(SequenceDisposition::Degraded(
+                        SequenceDegradation::Gap,
+                    )) => {}
+                    _ => return Err("engine_sequence_disposition_invalid"),
+                }
+                if transport.document.sequence_state(&authorization)
+                    != Some(SequenceState::Degraded)
+                {
+                    return Err("engine_sequence_state_invalid");
+                }
+                if case == "replay-overflow" {
+                    let mut transcript = Vec::with_capacity(MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1);
+                    for offset in 0..=MAX_REPLAY_TRANSCRIPT_ENVELOPES {
+                        let offset = u64::try_from(offset).map_err(|_| "engine_replay_invalid")?;
+                        transcript.push(engine.envelope(&authorization, sequence + offset + 1)?);
+                    }
+                    let error = match transport.document.admit_replay(
+                        &authorization,
+                        transcript,
+                        engine.registry(),
+                    ) {
+                        Err(error) => error,
+                        Ok(_) => return Err("engine_replay_disposition_invalid"),
+                    };
+                    if error.kind() != AsyncTransportErrorKind::InvalidEnvelope {
+                        return Err("engine_replay_disposition_invalid");
+                    }
+                    ("invalid_envelope", "fresh_render", false, accepted_sequence)
+                } else {
+                    ("sequence_gap", "fresh_render", false, accepted_sequence)
+                }
+            }
+            _ => return Err("adversarial_case_unknown"),
+        };
+
+        Ok(AsyncAdversarialOutcome {
+            disposition,
+            recovery,
+            retained_events: transport.document.retained_events(),
+            retained_bytes: transport.document.retained_bytes(),
+            ceiling_events: MAX_ASYNC_BUFFER_EVENTS,
+            ceiling_bytes: MAX_ASYNC_BUFFER_BYTES,
+            accepted_sequence,
+            dependent_closed,
+            sibling_usable: transport
+                .memberships
+                .values()
+                .any(|membership| membership.open),
+            wire,
+        })
     }
 
     pub(super) fn fault_count(&self) -> usize {
@@ -1249,6 +1539,14 @@ fn transport_response(
         "kind": transport_kind,
         "transport_generation": transport.generation,
     }))
+}
+
+fn delivery_error_code(kind: AsyncDeliveryErrorKind) -> &'static str {
+    match kind {
+        AsyncDeliveryErrorKind::Retired => "async_delivery_retired",
+        AsyncDeliveryErrorKind::AuthorizationLost => "authorization_lost",
+        AsyncDeliveryErrorKind::Sequence(kind) => kind.as_str(),
+    }
 }
 
 #[cfg(test)]

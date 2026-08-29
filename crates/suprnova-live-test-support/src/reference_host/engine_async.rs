@@ -1,12 +1,12 @@
 //! Production async-transport fixture owned by the deterministic reference host.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use axum::body::Bytes;
 use axum::http::Method;
@@ -27,11 +27,12 @@ use suprnova_live::async_updates::{
     BoundedTargets, BoundedTopics, BrowserPayloadSchema, CapabilityVersion, CloseDisposition,
     CurrentSubscriptionRegistration, DocumentAuthorizationScope, DocumentTransportHandle,
     DocumentTransportKind, DocumentTransportLimits, DocumentTransportSession, EventCyclePolicy,
-    EventOrder, EventSource, EventTarget, Heartbeat, PollFallbackPolicy, PollInitialBehavior,
-    PollVisibilityPolicy, ReconnectPolicy, ResolvedEventFanout, StreamEpoch, StreamName,
-    StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
-    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
+    EventOrder, EventSource, EventTarget, Heartbeat, MAX_ASYNC_BUFFER_EVENTS, PollFallbackPolicy,
+    PollInitialBehavior, PollVisibilityPolicy, ReconnectPolicy, RegisteredBrowserEvent,
+    ResolvedEventFanout, StreamEpoch, StreamName, StreamPosition, StreamSequence,
+    SubscriptionAuthorizationDecision, SubscriptionAuthorizationPort,
+    SubscriptionAuthorizationRequest, SubscriptionBaselineRequest, SubscriptionContinuityPort,
+    SubscriptionCredentialPort, SubscriptionCredentialRequest,
     SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
     SubscriptionError, SubscriptionId, SubscriptionIssueRequest, SubscriptionMetadata,
     SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
@@ -58,8 +59,8 @@ use suprnova_live::host::{
     ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    ActionName, BuildId, ComponentName, ContentDigest, IslandSlot, KeyId, ModelField,
-    RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
+    ActionName, BrowserOperationName, BuildId, ComponentName, ContentDigest, IslandSlot, KeyId,
+    ModelField, RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
@@ -356,6 +357,7 @@ struct EngineMembershipRegistry {
     modes: SubscriptionModes,
     authorization_memo: suprnova_live::async_updates::AuthorizationMemo,
     document_scope: DocumentAuthorizationScope,
+    resolved_event_fanout: AtomicU64,
 }
 
 struct FreshRenderKernel {
@@ -690,13 +692,29 @@ impl AsyncMembershipRegistryPort for EngineMembershipRegistry {
             return;
         }
         if request.envelope().is_some() {
+            let resolved = match request.envelope().map(AsyncEnvelope::payload) {
+                Some(suprnova_live::async_updates::AsyncPayload::BrowserEvent(_)) => {
+                    std::num::NonZeroU16::new(
+                        u16::try_from(self.resolved_event_fanout.load(Ordering::Acquire))
+                            .unwrap_or(u16::MAX),
+                    )
+                    .map(|recipients| {
+                        ResolvedEventFanout::from_host(
+                            recipients,
+                            ContentDigest::from_bytes(&[0xe4; 32])
+                                .expect("static resolved target scope"),
+                        )
+                    })
+                }
+                _ => None,
+            };
             validation.accept_delivery_current(
                 &self.stream,
                 &self.events,
                 &self.signals,
                 &self.authorization_memo,
                 &self.document_scope,
-                None::<ResolvedEventFanout>,
+                resolved,
             );
         } else if request.binding().is_some() {
             validation.accept_scope_current(
@@ -751,6 +769,7 @@ impl AsyncTransportAuthorityPort for EngineMembershipRegistry {
 pub(super) struct EngineAsyncFixture {
     authorized: AuthorizedSubscription,
     registry: Arc<EngineMembershipRegistry>,
+    source: Arc<EngineSource>,
     document_scope: DocumentAuthorizationScope,
     descriptor: String,
     descriptor_binding: String,
@@ -822,7 +841,9 @@ impl EngineAsyncFixture {
             modes: engine_modes(),
             authorization_memo: claims.authorization_memo().clone(),
             document_scope: document_scope.clone(),
+            resolved_event_fanout: AtomicU64::new(1),
         });
+        let source = Arc::new(EngineSource::default());
         Ok(Self {
             descriptor,
             descriptor_binding: authorized.binding().to_base64url(),
@@ -830,6 +851,7 @@ impl EngineAsyncFixture {
             expires_at,
             authorized,
             registry,
+            source,
             document_scope,
             fresh_render: Mutex::new(fresh_render),
         })
@@ -888,6 +910,14 @@ impl EngineAsyncFixture {
         ))
     }
 
+    pub(super) fn source(&self) -> &EngineSource {
+        self.source.as_ref()
+    }
+
+    pub(super) fn queue(&self, envelope: AsyncEnvelope) -> Result<(), &'static str> {
+        self.source.push(envelope)
+    }
+
     pub(super) fn remove(&self, authorization: &AuthorizedTransportSubscription) {
         self.registry.remove(authorization.subscription());
     }
@@ -903,6 +933,41 @@ impl EngineAsyncFixture {
             suprnova_live::async_updates::AsyncPayload::Heartbeat(Heartbeat),
         )
         .map_err(|_| "engine envelope")
+    }
+
+    pub(super) fn browser_event_envelope(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+        sequence: u64,
+    ) -> Result<AsyncEnvelope, &'static str> {
+        let event = RegisteredBrowserEvent::new(
+            authorization.context(),
+            BrowserOperationName::parse("orders.updated").map_err(|_| "engine event")?,
+            1,
+            EventTarget::Document,
+            CanonicalValue::Null,
+        )
+        .map_err(|_| "engine event")?;
+        AsyncEnvelope::new(
+            authorization.context(),
+            StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(sequence)),
+            suprnova_live::async_updates::AsyncPayload::BrowserEvent(event),
+        )
+        .map_err(|_| "engine envelope")
+    }
+
+    pub(super) fn revoke(&self, authorization: &AuthorizedTransportSubscription) {
+        self.registry.remove(authorization.subscription());
+    }
+
+    pub(super) fn set_resolved_event_fanout(&self, fanout: u16) {
+        self.registry
+            .resolved_event_fanout
+            .store(u64::from(fanout), Ordering::Release);
+    }
+
+    pub(super) fn registry(&self) -> &dyn AsyncMembershipRegistryPort {
+        self.registry.as_ref()
     }
 
     pub(super) fn fresh_render_endpoint(&self) -> Arc<ReferenceFreshRender> {
@@ -921,7 +986,33 @@ impl EngineAsyncFixture {
     }
 }
 
-pub(super) struct EngineSource;
+#[derive(Default)]
+pub(super) struct EngineSource {
+    state: Arc<Mutex<BTreeMap<String, EngineSourceQueue>>>,
+}
+
+#[derive(Default)]
+struct EngineSourceQueue {
+    envelopes: VecDeque<AsyncEnvelope>,
+    waker: Option<Waker>,
+}
+
+impl EngineSource {
+    pub(super) fn push(&self, envelope: AsyncEnvelope) -> Result<(), &'static str> {
+        let mut state = self.state.lock().expect("engine source lock");
+        let queue = state
+            .entry(envelope.subscription().to_base64url())
+            .or_default();
+        if queue.envelopes.len() >= MAX_ASYNC_BUFFER_EVENTS {
+            return Err("engine_source_exhausted");
+        }
+        queue.envelopes.push_back(envelope);
+        if let Some(waker) = queue.waker.take() {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
 
 impl AsyncEventSource for EngineSource {
     fn subscribe<'a>(
@@ -933,6 +1024,8 @@ impl AsyncEventSource for EngineSource {
             Ok(Box::pin(EngineSession {
                 baseline: request.baseline(),
                 closed: false,
+                source: Arc::clone(&self.state),
+                subscription: request.subscription().to_base64url(),
             }) as Pin<Box<dyn AsyncEventSession>>)
         })
     }
@@ -941,6 +1034,8 @@ impl AsyncEventSource for EngineSource {
 struct EngineSession {
     baseline: StreamPosition,
     closed: bool,
+    source: Arc<Mutex<BTreeMap<String, EngineSourceQueue>>>,
+    subscription: String,
 }
 
 impl AsyncEventSession for EngineSession {
@@ -950,9 +1045,20 @@ impl AsyncEventSession for EngineSession {
 
     fn poll_next(
         self: Pin<&mut Self>,
-        _task: &mut Context<'_>,
+        task: &mut Context<'_>,
     ) -> Poll<Result<Option<AsyncEnvelope>, AsyncTransportError>> {
-        Poll::Pending
+        let this = self.get_mut();
+        if this.closed {
+            return Poll::Ready(Ok(None));
+        }
+        let mut source = this.source.lock().expect("engine source lock");
+        let queue = source.entry(this.subscription.clone()).or_default();
+        if let Some(envelope) = queue.envelopes.pop_front() {
+            Poll::Ready(Ok(Some(envelope)))
+        } else {
+            queue.waker = Some(task.waker().clone());
+            Poll::Pending
+        }
     }
 
     fn poll_close(
@@ -963,6 +1069,10 @@ impl AsyncEventSession for EngineSession {
             Poll::Ready(Ok(CloseDisposition::AlreadyClosed))
         } else {
             self.closed = true;
+            self.source
+                .lock()
+                .expect("engine source lock")
+                .remove(&self.subscription);
             Poll::Ready(Ok(CloseDisposition::Closed))
         }
     }
@@ -973,10 +1083,11 @@ fn engine_metadata() -> &'static ComponentMetadata {
     METADATA.get_or_init(|| {
         let event = EventMetadata::from_payload_with_contract::<OrdersUpdated>(
             EventSource::Stream,
-            BoundedTargets::new(vec![EventTarget::SelfIsland]).expect("engine event targets"),
+            BoundedTargets::new(vec![EventTarget::SelfIsland, EventTarget::Document])
+                .expect("engine event targets"),
             EventOrder::PerSourceSequence,
             EventCyclePolicy::ForbidRepeatedIsland,
-            1,
+            4,
         )
         .expect("engine event metadata");
         let subscription = SubscriptionMetadata::new(

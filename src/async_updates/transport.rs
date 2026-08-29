@@ -2185,6 +2185,32 @@ impl BoundedDocumentTransportSession {
         Ok(disposition)
     }
 
+    /// Detaches one membership after delivery proves its authorization is no longer current.
+    ///
+    /// The caller must supply the exact stored authorization whose delivery failed. This closes
+    /// only that logical membership; sibling memberships and their sequence lanes remain active.
+    pub fn detach_authorization_lost(
+        &mut self,
+        authorization: &AuthorizedTransportSubscription,
+    ) -> Result<CloseDisposition, AsyncTransportError> {
+        let index = self
+            .transport
+            .memberships
+            .iter()
+            .position(|membership| {
+                membership.authorization.subscription() == authorization.subscription()
+                    && membership.authorization.binding() == authorization.binding()
+            })
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::UnknownMembership))?;
+        let retirement = self.transport.detach_membership(index);
+        self.transport.poll_exact_retirement_once(retirement);
+        self.pressure
+            .retire_membership(authorization.subscription(), authorization.binding());
+        self.sequence_lanes
+            .retain(|lane| !lane.matches(authorization));
+        Ok(CloseDisposition::Closed)
+    }
+
     /// Dispatches one leased queue head through Task 3 without exposing the lease.
     pub fn dispatch_next(
         &mut self,

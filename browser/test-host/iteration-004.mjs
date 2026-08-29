@@ -58,6 +58,8 @@ let successorBarrierPort = null;
 let persistedRestart = false;
 let runtime = null;
 let readyUpload = null;
+const primedUploads = [];
+let nextUploadFault = null;
 let pauseNextUploadChunk = false;
 let pauseEveryUploadChunk = false;
 let uploadPauseGeneration = null;
@@ -238,6 +240,15 @@ async function referenceUploadFetch(input, init = {}) {
   }
   if (!response.ok) return response;
   const value = await response.json();
+  if (operation === "create" && nextUploadFault === "scan-timeout") {
+    nextUploadFault = null;
+    const control = await originalFetch("/__test/iteration-004/control/upload/scan-timeout", {
+      body: JSON.stringify({ handle: value.handle, upload_revision: value.revision }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    if (!control.ok) throw new Error("reference_upload_scan_control_failed");
+  }
   if (operation === "create" && rejectUploadOnce) {
     rejectUploadOnce = false;
     const reject = await originalFetch("/__test/iteration-004/control/upload/reject-chunk", {
@@ -250,6 +261,7 @@ async function referenceUploadFetch(input, init = {}) {
   if (operation === "create") {
     readyUpload = {
       expectedBytes: value.expected_bytes,
+      grant: value.grant,
       handle: value.handle,
       readyRevision: null,
     };
@@ -706,8 +718,12 @@ class ReferenceWebSocketPort {
     this.socket.onerror = () => {
       if (!this.closed) request.failed("transport_lost");
     };
-    this.socket.onclose = () => {
-      if (!this.closed) request.failed("transport_lost");
+    this.socket.onclose = (event) => {
+      if (!this.closed) {
+        const reason = event.reason || "transport_lost";
+        boundedPush(observations.transportFailures, `ws-close:${event.code}:${reason}`);
+        request.failed(reason);
+      }
     };
   }
 
@@ -866,6 +882,29 @@ Reflect.set(
   window,
   "__suprnovaIteration004",
   Object.freeze({
+    armScanTimeout() {
+      if (nextUploadFault !== null || readyUpload !== null) {
+        throw new Error("iteration_004_upload_fault_in_use");
+      }
+      nextUploadFault = "scan-timeout";
+    },
+    async armProviderCommitFailure() {
+      if (readyUpload === null || readyUpload.readyRevision === null) {
+        throw new Error("iteration_004_ready_upload_missing");
+      }
+      const response = await originalFetch(
+        "/__test/iteration-004/control/upload/finalizer/commit-unavailable",
+        {
+          body: JSON.stringify({
+            handle: readyUpload.handle,
+            upload_revision: readyUpload.readyRevision,
+          }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        },
+      );
+      if (!response.ok) throw new Error("iteration_004_provider_fault_control_failed");
+    },
     advanceUploadClock(milliseconds) {
       if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
         throw new Error("iteration_004_upload_clock_step_invalid");
@@ -874,6 +913,18 @@ Reflect.set(
     },
     advanceTransportReconnect() {
       fireControlledTimer(125);
+    },
+    async cancelSelectedUpload() {
+      if (readyUpload === null) throw new Error("iteration_004_selected_upload_missing");
+      const response = await originalFetch(`/__live/uploads/${readyUpload.handle}/cancel`, {
+        headers: {
+          Authorization: REFERENCE_AUTHORIZATION,
+          "X-Live-Upload-Grant": readyUpload.grant,
+        },
+        method: "POST",
+      });
+      if (!response.ok) throw new Error("iteration_004_selected_upload_cancel_failed");
+      readyUpload = null;
     },
     async finalizeSelectedUpload() {
       if (readyUpload === null || readyUpload.readyRevision === null) {
@@ -890,10 +941,35 @@ Reflect.set(
         },
         method: "POST",
       });
-      if (!response.ok) throw new Error("iteration_004_finalize_failed");
       const value = await response.json();
+      const progress = document.querySelector("#iteration-upload-progress");
+      if (!response.ok) {
+        const code = typeof value.error === "string" ? value.error : "upload_finalize_failed";
+        progress?.setAttribute("data-live-finalize-disposition", code);
+        return code;
+      }
+      progress?.setAttribute("data-live-finalize-disposition", value.state);
       readyUpload = null;
       return value.state;
+    },
+    async repeatSelectedCompletion() {
+      if (readyUpload === null || readyUpload.readyRevision === null) {
+        throw new Error("iteration_004_ready_upload_missing");
+      }
+      const response = await originalFetch(`/__live/uploads/${readyUpload.handle}/complete`, {
+        body: JSON.stringify({ grant: readyUpload.grant }),
+        headers: {
+          Authorization: REFERENCE_AUTHORIZATION,
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+      const outcome = await response.json();
+      if (!response.ok) throw new Error(`iteration_004_duplicate_complete_failed:${outcome.error}`);
+      document
+        .querySelector("#iteration-upload-progress")
+        ?.setAttribute("data-live-completion-disposition", "existing_outcome");
+      return outcome;
     },
     freeze() {
       pauseNextUploadChunk = false;
@@ -925,6 +1001,47 @@ Reflect.set(
       }
       pauseEveryUploadChunk = true;
     },
+    async primeUploadExhaustion() {
+      if (primedUploads.length !== 0 || readyUpload !== null) {
+        throw new Error("iteration_004_upload_exhaustion_in_use");
+      }
+      for (let index = 0; index < 64; index += 1) {
+        const response = await originalFetch("/__live/uploads", {
+          body: JSON.stringify({
+            content_type: "application/octet-stream",
+            expected_bytes: 1,
+            field: `evidence_${index}`,
+            filename: `exhaust-${index}.bin`,
+            mode: "file",
+          }),
+          headers: {
+            Authorization: REFERENCE_AUTHORIZATION,
+            "Content-Type": "application/json",
+          },
+          method: "POST",
+        });
+        const upload = await response.json();
+        if (!response.ok) throw new Error(`iteration_004_upload_exhaustion_prime:${upload.error}`);
+        primedUploads.push({ grant: upload.grant, handle: upload.handle });
+      }
+    },
+    async clearUploadExhaustion() {
+      for (const upload of primedUploads.splice(0)) {
+        const response = await originalFetch(`/__live/uploads/${upload.handle}/cancel`, {
+          headers: {
+            Authorization: REFERENCE_AUTHORIZATION,
+            "X-Live-Upload-Grant": upload.grant,
+          },
+          method: "POST",
+        });
+        if (!response.ok) throw new Error("iteration_004_upload_exhaustion_cleanup_failed");
+      }
+      const reset = await originalFetch(
+        "/__test/iteration-004/control/upload/reset-creation-window",
+        { method: "POST" },
+      );
+      if (!reset.ok) throw new Error("iteration_004_upload_exhaustion_reset_failed");
+    },
     async emitNextEnvelope() {
       const kind = transportKind === "websocket" ? "websocket" : "sse";
       const issued = issuedByKind.get(kind);
@@ -938,6 +1055,74 @@ Reflect.set(
         method: "POST",
       });
       if (!response.ok) throw new Error("iteration_004_emit_failed");
+    },
+    async runAsyncAdversarial(caseName) {
+      const kind = transportKind === "websocket" ? "websocket" : "sse";
+      const issued = issuedByKind.get(kind);
+      const port = [...activePorts].find((candidate) =>
+        kind === "websocket"
+          ? candidate instanceof ReferenceWebSocketPort
+          : candidate instanceof ReferenceSsePort,
+      );
+      if (issued === undefined || port === undefined) {
+        throw new Error("iteration_004_transport_missing");
+      }
+      const response = await originalFetch(
+        `/__test/iteration-004/control/async/adversarial/${encodeURIComponent(caseName)}`,
+        {
+          body: JSON.stringify({ transport: issued.transport }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        },
+      );
+      const outcome = await response.json();
+      if (!response.ok) throw new Error(`iteration_004_async_adversarial_failed:${outcome.error}`);
+      if (typeof outcome.wire === "string") port.request.message(outcome.wire);
+      if (outcome.disposition === "authorization_lost") {
+        port.request.failed("authorization_lost");
+      } else if (outcome.disposition === "async_fanout_exceeded") {
+        port.request.failed("async_fanout_exceeded");
+      }
+      return outcome;
+    },
+    async runUploadRace(caseName) {
+      if (readyUpload === null || readyUpload.readyRevision === null) {
+        throw new Error("iteration_004_ready_upload_missing");
+      }
+      const response = await originalFetch(
+        `/__test/iteration-004/control/upload/race/${encodeURIComponent(caseName)}`,
+        {
+          body: JSON.stringify({
+            handle: readyUpload.handle,
+            upload_revision: readyUpload.readyRevision,
+          }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        },
+      );
+      const outcome = await response.json();
+      if (!response.ok) throw new Error(`iteration_004_upload_race_failed:${outcome.error}`);
+      const progress = document.querySelector("#iteration-upload-progress");
+      progress?.setAttribute("data-live-race-disposition", outcome.disposition);
+      progress?.setAttribute("data-live-upload-state", outcome.terminal_state);
+      readyUpload = null;
+      return outcome;
+    },
+    sendHostileWebSocket(caseName) {
+      const issued = issuedByKind.get("websocket");
+      const port = [...activePorts].find(
+        (candidate) => candidate instanceof ReferenceWebSocketPort && candidate.issued === issued,
+      );
+      if (port === undefined || port.socket.readyState !== WebSocket.OPEN) {
+        throw new Error("iteration_004_websocket_missing");
+      }
+      if (caseName === "oversized-message") {
+        port.socket.send("x".repeat(513));
+      } else if (caseName === "truncated-message") {
+        port.socket.send('{"kind":"subscribe",');
+      } else {
+        throw new Error("iteration_004_websocket_case_invalid");
+      }
     },
     releaseRetiredEnvelopes() {
       for (const held of heldEnvelopes.splice(0)) {

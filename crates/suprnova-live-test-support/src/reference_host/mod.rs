@@ -1,12 +1,12 @@
 //! Browser-facing production-artifact host for Iteration 004 conformance.
 
-mod adversarial;
 mod artifacts;
 mod async_updates;
 mod engine_async;
 mod faults;
 mod uploads;
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::Body;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
@@ -36,7 +36,7 @@ use suprnova_live::protocol::{
     OperationV2, ProtocolLimitConfig, ProtocolLimits, VersionedUpdateRequest,
     parse_versioned_update_request,
 };
-use suprnova_live::upload::{UploadError, UploadErrorKind};
+use suprnova_live::upload::{UploadError, UploadErrorKind, UploadRejectionReason};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -46,7 +46,8 @@ use artifacts::ValidatedArtifacts;
 use async_updates::{AsyncRuntime, MembershipRequest, PollRequest, TransportCreateRequest};
 pub use faults::ReferenceFaultSchedule;
 use uploads::{
-    CompleteUploadRequest, CreateUploadRequest, FinalizeUploadRequestBody, UploadRuntime,
+    CompleteUploadOutcome, CompleteUploadRequest, CreateUploadRequest, FinalizeUploadRequestBody,
+    UploadRuntime,
 };
 
 /// Upload-creation route.
@@ -87,9 +88,14 @@ const ITERATION_004_STYLES: &str = "/scenario/iteration004.css";
 const ITERATION_004_FINALIZE_UPLOAD: &str = "/scenario/iteration004/finalize-upload";
 const ITERATION_004_ACTION: &str = "/scenario/iteration004/action";
 const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
-const ITERATION_004_ADVERSARIAL: &str = "/__test/iteration-004/adversarial/:case";
 const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
 const ITERATION_004_PAUSE_FINALIZE: &str = "/__test/iteration-004/control/upload/pause-finalize";
+const ITERATION_004_SCAN_TIMEOUT: &str = "/__test/iteration-004/control/upload/scan-timeout";
+const ITERATION_004_FINALIZER_COMMIT_UNAVAILABLE: &str =
+    "/__test/iteration-004/control/upload/finalizer/commit-unavailable";
+const ITERATION_004_FINALIZER_LEDGER_AFTER_COMMIT: &str =
+    "/__test/iteration-004/control/upload/finalizer/ledger-after-commit";
+const ITERATION_004_UPLOAD_RACE: &str = "/__test/iteration-004/control/upload/race/:case";
 const ITERATION_004_ADVANCE_UPLOAD_PAUSE_CLOCK: &str =
     "/__test/iteration-004/control/upload/advance-pause-clock";
 const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/resume-chunk";
@@ -100,6 +106,8 @@ const ITERATION_004_RESUME_FRESH_RENDER: &str = "/__test/iteration-004/control/f
 const ITERATION_004_RESET_SEQUENCE_GAP: &str =
     "/__test/iteration-004/control/async/reset-sequence-gap";
 const ITERATION_004_EMIT_ASYNC: &str = "/__test/iteration-004/control/async/emit";
+const ITERATION_004_ADVERSARIAL_ASYNC: &str =
+    "/__test/iteration-004/control/async/adversarial/:case";
 const ITERATION_004_DIRECT_STORE: &str = "/__test/iteration-004/direct/:handle/store";
 const ITERATION_004_DIRECT_REPORT: &str = "/__test/iteration-004/direct/:handle/report";
 const ITERATION_004_DIRECT_PROVIDER: &str =
@@ -184,6 +192,14 @@ pub struct ReferenceHostInspection {
     pub logical_memberships: usize,
     /// Currently owned browser-facing physical document transports.
     pub active_physical_transports: usize,
+    /// Authoritative scanner invocations through `UploadValidationService`.
+    pub validation_scan_calls: usize,
+    /// Durable provider commit attempts through `UploadFinalizationService`.
+    pub finalizer_commit_calls: usize,
+    /// Provider compensation attempts through `UploadFinalizationService`.
+    pub finalizer_compensation_calls: usize,
+    /// Durable reconciliation attempts through `UploadFinalizationService`.
+    pub finalizer_reconciliation_calls: usize,
 }
 
 const RESOURCE_RETIRED: usize = 1 << (usize::BITS - 1);
@@ -326,6 +342,8 @@ struct HostState {
 
 impl HostState {
     fn snapshot(&self) -> ReferenceHostInspection {
+        let (finalizer_commit_calls, finalizer_compensation_calls, finalizer_reconciliation_calls) =
+            self.uploads.finalizer_counts();
         ReferenceHostInspection {
             upload_service_calls: self.uploads.service_calls(),
             physical_sse_connections: self
@@ -360,6 +378,10 @@ impl HostState {
                 .resources
                 .active_physical_transports
                 .current(),
+            validation_scan_calls: self.uploads.validation_scan_calls(),
+            finalizer_commit_calls,
+            finalizer_compensation_calls,
+            finalizer_reconciliation_calls,
         }
     }
 }
@@ -610,12 +632,21 @@ fn router(state: Arc<HostState>) -> Router {
         )
         .route(ITERATION_004_ACTION, post(iteration_004_action))
         .route(ITERATION_004_INSPECTION, get(iteration_004_inspection))
-        .route(ITERATION_004_ADVERSARIAL, post(iteration_004_adversarial))
         .route(ITERATION_004_PAUSE_UPLOAD, post(iteration_004_pause_upload))
         .route(
             ITERATION_004_PAUSE_FINALIZE,
             post(iteration_004_pause_finalize),
         )
+        .route(ITERATION_004_SCAN_TIMEOUT, post(iteration_004_scan_timeout))
+        .route(
+            ITERATION_004_FINALIZER_COMMIT_UNAVAILABLE,
+            post(iteration_004_finalizer_commit_unavailable),
+        )
+        .route(
+            ITERATION_004_FINALIZER_LEDGER_AFTER_COMMIT,
+            post(iteration_004_finalizer_ledger_after_commit),
+        )
+        .route(ITERATION_004_UPLOAD_RACE, post(iteration_004_upload_race))
         .route(
             ITERATION_004_ADVANCE_UPLOAD_PAUSE_CLOCK,
             post(iteration_004_advance_upload_pause_clock),
@@ -641,6 +672,10 @@ fn router(state: Arc<HostState>) -> Router {
             post(iteration_004_reset_sequence_gap),
         )
         .route(ITERATION_004_EMIT_ASYNC, post(iteration_004_emit_async))
+        .route(
+            ITERATION_004_ADVERSARIAL_ASYNC,
+            post(iteration_004_adversarial_async),
+        )
         .route(ITERATION_004_DIRECT_STORE, put(iteration_004_direct_store))
         .route(
             ITERATION_004_DIRECT_PROVIDER,
@@ -758,7 +793,13 @@ async fn upload_complete(
         return response;
     }
     match state.uploads.complete(&handle, request).await {
-        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Ok(CompleteUploadOutcome::Ready(value)) => (StatusCode::OK, Json(value)).into_response(),
+        Ok(CompleteUploadOutcome::Retry { reason, status }) => {
+            validation_disposition(StatusCode::SERVICE_UNAVAILABLE, reason, status)
+        }
+        Ok(CompleteUploadOutcome::Rejected { reason, status }) => {
+            validation_disposition(StatusCode::UNPROCESSABLE_ENTITY, reason, status)
+        }
         Err(error) => upload_error(error),
     }
 }
@@ -1104,7 +1145,17 @@ async fn websocket_session(
                     continue;
                 };
                 if text.len() > 512 || accepted >= MAX_CONTROLS_PER_CONNECTION {
-                    let _ = socket.close().await;
+                    let reason = if text.len() > 512 {
+                        "frame_too_large"
+                    } else {
+                        "control_capacity_exceeded"
+                    };
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 1008,
+                            reason: Cow::Borrowed(reason),
+                        })))
+                        .await;
                     break;
                 }
                 accepted += 1;
@@ -1115,8 +1166,13 @@ async fn websocket_session(
                             if socket.send(Message::Text(response)).await.is_err() { return; }
                         }
                     }
-                    Err(_) => {
-                        let _ = socket.close().await;
+                    Err(code) => {
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1008,
+                                reason: Cow::Borrowed(code),
+                            })))
+                            .await;
                         break;
                     }
                 }
@@ -1252,14 +1308,47 @@ async fn iteration_004_inspection(State(state): State<Arc<HostState>>) -> Respon
         "physical_websocket_connections": snapshot.physical_websocket_connections,
         "websocket_authentication_attempts": snapshot.websocket_authentication_attempts,
         "upload_service_calls": snapshot.upload_service_calls,
+        "validation_scan_calls": snapshot.validation_scan_calls,
+        "finalizer_commit_calls": snapshot.finalizer_commit_calls,
+        "finalizer_compensation_calls": snapshot.finalizer_compensation_calls,
+        "finalizer_reconciliation_calls": snapshot.finalizer_reconciliation_calls,
     }))
     .into_response()
 }
 
-async fn iteration_004_adversarial(Path(case): Path<String>) -> Response {
-    match adversarial::execute(&case) {
-        Some(outcome) => Json(outcome).into_response(),
-        None => error(StatusCode::NOT_FOUND, "adversarial_case_unknown"),
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsyncAdversarialRequest {
+    transport: String,
+}
+
+async fn iteration_004_adversarial_async(
+    State(state): State<Arc<HostState>>,
+    Path(case): Path<String>,
+    Json(request): Json<AsyncAdversarialRequest>,
+) -> Response {
+    match state
+        .async_runtime
+        .adversarial_delivery(&request.transport, &case)
+    {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err("adversarial_case_unknown") => error(StatusCode::NOT_FOUND, "adversarial_case_unknown"),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_upload_race(
+    State(state): State<Arc<HostState>>,
+    Path(case): Path<String>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    match state
+        .uploads
+        .adversarial_race(&request.handle, request.upload_revision, &case)
+        .await
+    {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err(error) => upload_error(error),
     }
 }
 
@@ -1300,6 +1389,47 @@ async fn iteration_004_pause_finalize(
         .await
     {
         Ok(generation) => Json(json!({"pause_generation": generation})).into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_scan_timeout(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    match state
+        .uploads
+        .arm_scan_timeout(&request.handle, request.upload_revision)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_finalizer_commit_unavailable(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    iteration_004_arm_finalizer_fault(state, request, "commit-unavailable")
+}
+
+async fn iteration_004_finalizer_ledger_after_commit(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    iteration_004_arm_finalizer_fault(state, request, "ledger-after-commit")
+}
+
+fn iteration_004_arm_finalizer_fault(
+    state: Arc<HostState>,
+    request: PauseUploadRequest,
+    fault: &'static str,
+) -> Response {
+    match state
+        .uploads
+        .arm_finalize_fault(&request.handle, request.upload_revision, fault)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(code) => error(StatusCode::CONFLICT, code),
     }
 }
@@ -1627,6 +1757,26 @@ fn upload_error(upload: UploadError) -> Response {
         | UploadErrorKind::CompensationFailed => StatusCode::SERVICE_UNAVAILABLE,
     };
     error(status, upload.kind().as_str())
+}
+
+fn validation_disposition(
+    status: StatusCode,
+    reason: UploadRejectionReason,
+    upload: Value,
+) -> Response {
+    let code = match reason {
+        UploadRejectionReason::SizeMismatch => "upload_size_mismatch",
+        UploadRejectionReason::IntegrityMismatch => "upload_integrity_mismatch",
+        UploadRejectionReason::TypeMismatch => "upload_type_mismatch",
+        UploadRejectionReason::MediaHeaderUnproved => "upload_media_header_unproved",
+        UploadRejectionReason::DimensionsExceeded => "upload_dimensions_exceeded",
+        UploadRejectionReason::PixelsExceeded => "upload_pixels_exceeded",
+        UploadRejectionReason::ScanRejected => "upload_scan_rejected",
+        UploadRejectionReason::ScanTimedOut => "upload_scan_timed_out",
+        UploadRejectionReason::ScanUnavailable => "upload_scan_unavailable",
+        UploadRejectionReason::ApplicationRejected => "upload_application_rejected",
+    };
+    (status, Json(json!({"error": code, "upload": upload}))).into_response()
 }
 
 fn error(status: StatusCode, code: &str) -> Response {

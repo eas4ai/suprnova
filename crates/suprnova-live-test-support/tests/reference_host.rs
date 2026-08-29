@@ -45,7 +45,10 @@ const DIRECT_FLOW_PORT: u16 = 4_198;
 const ORDINARY_ACTION_PORT: u16 = 4_199;
 const UPLOAD_WINDOW_PORT: u16 = 4_200;
 const ADVERSARIAL_ORIGIN_PORT: u16 = 4_201;
-const ADVERSARIAL_MATRIX_PORT: u16 = 4_202;
+const ADVERSARIAL_SCAN_PORT: u16 = 4_202;
+const ADVERSARIAL_PROVIDER_PORT: u16 = 4_203;
+const REAL_ASYNC_MATRIX_PORT: u16 = 4_204;
+const REAL_UPLOAD_RACE_PORT: u16 = 4_205;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -1506,93 +1509,241 @@ async fn websocket_upgrade_rejects_every_hostile_origin_shape_before_transport_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adversarial_control_executes_the_closed_engine_matrix_and_preserves_ordinary_work() {
-    let root = TestRoot::new("adversarial-matrix");
-    let host = start_host(ADVERSARIAL_MATRIX_PORT, &root, ReferenceFaultSchedule::None).await;
-    let cases = [
-        ("hostile-media-header", "media_header_unproved", "replace"),
-        ("scan-timeout", "scan_retry", "retry"),
-        (
-            "provider-partial-failure",
-            "reconciliation_required",
-            "reconcile",
-        ),
-        ("replay-overflow", "invalid_envelope", "fresh_render"),
-        ("revoked-authorization", "authorization_lost", "reauthorize"),
-        ("fanout-pressure", "fanout_exceeded", "reconnect"),
-        ("oversized-message", "frame_too_large", "close_transport"),
-        ("truncated-message", "invalid_envelope", "close_transport"),
-        ("reordered-message", "sequence_gap", "fresh_render"),
-        ("duplicate-completion", "existing_outcome", "none"),
-        (
-            "cancel-finalize-cancel-wins",
-            "upload_conflict",
-            "terminal_canceled",
-        ),
-        (
-            "cancel-finalize-finalize-wins",
-            "upload_conflict",
-            "terminal_finalized",
-        ),
-        (
-            "expire-finalize-expire-wins",
-            "upload_conflict",
-            "terminal_expired",
-        ),
-        (
-            "expire-finalize-finalize-wins",
-            "upload_conflict",
-            "terminal_finalized",
-        ),
-        ("late-event", "retired_delivery_ignored", "none"),
-        ("retirement", "retired", "none"),
-        ("unknown-feature-failure", "feature_unavailable", "none"),
-        ("scoped-exhaustion", "creation_rate_exceeded", "new_scope"),
-    ];
-    let mut expected_action_revision = 0_u64;
+async fn scan_timeout_control_drives_the_real_validation_service_and_preserves_live_work() {
+    let root = TestRoot::new("adversarial-scan-timeout");
+    let host = start_host(ADVERSARIAL_SCAN_PORT, &root, ReferenceFaultSchedule::None).await;
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0";
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "evidence",
+            "filename": "timeout.png",
+            "content_type": "image/png",
+            "expected_bytes": png.len(),
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("upload handle");
+    let grant = created["grant"].as_str().expect("upload grant");
+    let revision = created["revision"].as_u64().expect("upload revision");
 
-    for (case, disposition, recovery) in cases {
-        let (status, _, body) = request(
+    let (status, _, control) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/scan-timeout",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        serde_json::to_vec(&json!({"handle": handle, "upload_revision": revision}))
+            .expect("scan control JSON"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&control)
+    );
+
+    let chunk = chunked_upload(&host, handle, grant, 0, &[png]).await;
+    assert!(chunk.starts_with("HTTP/1.1 200"), "{chunk}");
+    let (status, _, timed_out) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{timed_out}");
+    assert_eq!(timed_out["error"], "upload_scan_timed_out");
+
+    let (status, _, upload) = upload_request(
+        &host,
+        Method::GET,
+        &format!("/__live/uploads/{handle}"),
+        Some(grant),
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let upload: Value = serde_json::from_slice(&upload).expect("upload status");
+    assert_eq!(upload["state"], "verifying");
+
+    let (status, _, action) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{action}");
+    assert_eq!(action["domain_count"], 1);
+
+    host.shutdown()
+        .await
+        .expect("clean adversarial scan-timeout shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_partial_failure_compensates_then_retries_through_the_real_finalizer() {
+    let root = TestRoot::new("adversarial-provider-partial");
+    let host = start_host(
+        ADVERSARIAL_PROVIDER_PORT,
+        &root,
+        ReferenceFaultSchedule::None,
+    )
+    .await;
+    let bytes = b"provider";
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "evidence",
+            "filename": "provider.bin",
+            "content_type": "application/octet-stream",
+            "expected_bytes": bytes.len(),
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("upload handle");
+    let grant = created["grant"].as_str().expect("upload grant");
+    let chunk = chunked_upload(&host, handle, grant, 0, &[bytes]).await;
+    assert!(chunk.starts_with("HTTP/1.1 200"), "{chunk}");
+    let (status, _, completed) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+    let revision = completed["revision"].as_u64().expect("ready revision");
+
+    let (status, _, control) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/finalizer/commit-unavailable",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        serde_json::to_vec(&json!({"handle": handle, "upload_revision": revision}))
+            .expect("finalizer control JSON"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&control)
+    );
+
+    let (status, _, failed) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": handle, "ready_revision": revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failed}");
+    assert_eq!(failed["error"], "upload_provider_unavailable");
+    let after_failure = host.inspection();
+    assert_eq!(after_failure.finalizer_commit_calls, 1);
+    assert_eq!(after_failure.finalizer_compensation_calls, 1);
+
+    let (status, _, recovered) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": handle, "ready_revision": revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recovered}");
+    assert_eq!(recovered["state"], "finalized");
+    let after_recovery = host.inspection();
+    assert_eq!(after_recovery.finalizer_commit_calls, 2);
+    assert_eq!(after_recovery.finalizer_compensation_calls, 1);
+    assert!(after_recovery.finalizer_reconciliation_calls >= 2);
+
+    let (status, _, action) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{action}");
+    host.shutdown()
+        .await
+        .expect("clean adversarial provider-partial shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_adversarial_controls_execute_the_real_delivery_owners() {
+    for (case, expected, sibling_memberships) in [
+        ("reordered-message", "sequence_gap", 1_usize),
+        ("replay-overflow", "invalid_envelope", 1),
+        ("revoked-authorization", "authorization_lost", 2),
+        ("fanout-pressure", "async_fanout_exceeded", 1),
+    ] {
+        let root = TestRoot::new(&format!("real-owner-{case}"));
+        let host = start_host(REAL_ASYNC_MATRIX_PORT, &root, ReferenceFaultSchedule::None).await;
+        let (status, _, transport) = json_request(
             &host,
             Method::POST,
-            &format!("/__test/iteration-004/adversarial/{case}"),
-            &[],
-            Bytes::new(),
+            "/__live/async/transports",
+            json!({"kind": "sse", "subscription": "orders", "transport_generation": 1}),
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "{case}: {}",
-            String::from_utf8_lossy(&body)
-        );
-        assert!(body.len() <= 4_096, "{case} response exceeded its bound");
-        let outcome: Value = serde_json::from_slice(&body).expect("adversarial outcome JSON");
-        assert_eq!(outcome["case"], case, "{case}");
-        assert_eq!(outcome["disposition"], disposition, "{case}");
-        assert_eq!(outcome["recovery"], recovery, "{case}");
-        assert_eq!(outcome["retained_items"], 0, "{case}");
-        assert_eq!(outcome["retained_bytes"], 0, "{case}");
-        assert_eq!(outcome["dependent_feature_closed"], true, "{case}");
-        assert_eq!(outcome["unrelated_scope_usable"], true, "{case}");
+        assert_eq!(status, StatusCode::CREATED, "{case}: {transport}");
+        let transport_id = transport["transport"].as_str().expect("transport");
+        let memberships = transport["memberships"].as_array().expect("memberships");
+        for (index, membership) in memberships.iter().take(sibling_memberships).enumerate() {
+            let subscription = membership["subscription"].as_str().expect("subscription");
+            let path =
+                format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}");
+            let (status, _, acknowledgment) = json_request(
+                &host,
+                Method::POST,
+                &path,
+                json!({
+                    "authority": membership["authority"],
+                    "control_nonce": format!("real-owner-{case}-{index}"),
+                    "operation": "subscribe",
+                    "transport_generation": 1
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {acknowledgment}");
+        }
+        let (status, _, outcome) = json_request(
+            &host,
+            Method::POST,
+            &format!("/__test/iteration-004/control/async/adversarial/{case}"),
+            json!({"transport": transport_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {outcome}");
+        assert_eq!(outcome["disposition"], expected, "{case}");
         assert!(
-            outcome["high_water_items"]
+            outcome["retained_events"]
                 .as_u64()
-                .expect("item high water")
-                <= outcome["ceiling_items"].as_u64().expect("item ceiling"),
-            "{case} item ceiling"
+                .expect("retained events")
+                <= outcome["ceiling_events"].as_u64().expect("event ceiling"),
+            "{case} event ceiling"
         );
         assert!(
-            outcome["high_water_bytes"]
-                .as_u64()
-                .expect("byte high water")
+            outcome["retained_bytes"].as_u64().expect("retained bytes")
                 <= outcome["ceiling_bytes"].as_u64().expect("byte ceiling"),
             "{case} byte ceiling"
         );
-        let diagnostic = outcome["diagnostic"].as_str().expect("safe diagnostic");
-        assert!(diagnostic.len() <= 128, "{case} diagnostic bound");
-        assert!(!diagnostic.contains("secret"), "{case} diagnostic leak");
-
+        if case == "revoked-authorization" {
+            assert_eq!(outcome["dependent_closed"], true);
+            assert_eq!(outcome["sibling_usable"], true);
+        }
         let (status, _, action) = json_request(
             &host,
             Method::POST,
@@ -1600,15 +1751,84 @@ async fn adversarial_control_executes_the_closed_engine_matrix_and_preserves_ord
             json!({}),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{case} poisoned ordinary action");
-        expected_action_revision += 1;
-        assert_eq!(action["revision"], expected_action_revision, "{case}");
-        assert_eq!(action["domain_count"], expected_action_revision, "{case}");
+        assert_eq!(status, StatusCode::OK, "{case}: {action}");
+        host.shutdown()
+            .await
+            .expect("real-owner matrix host shutdown");
     }
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_race_control_runs_both_real_winner_orderings_without_leaks() {
+    let root = TestRoot::new("real-upload-races");
+    let host = start_host(REAL_UPLOAD_RACE_PORT, &root, ReferenceFaultSchedule::None).await;
+    for (case, terminal_state) in [
+        ("cancel-finalize-cancel-wins", "canceled"),
+        ("cancel-finalize-finalize-wins", "finalized"),
+        ("expire-finalize-expire-wins", "expired"),
+        ("expire-finalize-finalize-wins", "finalized"),
+    ] {
+        let bytes = case.as_bytes();
+        let (status, _, created) = json_request(
+            &host,
+            Method::POST,
+            "/__live/uploads",
+            json!({
+                "field": "evidence",
+                "filename": format!("{case}.bin"),
+                "content_type": "application/octet-stream",
+                "expected_bytes": bytes.len(),
+                "mode": "file"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{case}: {created}");
+        let handle = created["handle"].as_str().expect("handle");
+        let grant = created["grant"].as_str().expect("grant");
+        let chunk = chunked_upload(&host, handle, grant, 0, &[bytes]).await;
+        assert!(chunk.starts_with("HTTP/1.1 200"), "{case}: {chunk}");
+        let (status, _, ready) = json_request(
+            &host,
+            Method::POST,
+            &format!("/__live/uploads/{handle}/complete"),
+            json!({"grant": grant}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {ready}");
+        let ready_revision = ready["revision"].as_u64().expect("ready revision");
+        let (status, _, outcome) = json_request(
+            &host,
+            Method::POST,
+            &format!("/__test/iteration-004/control/upload/race/{case}"),
+            json!({"handle": handle, "upload_revision": ready_revision}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {outcome}");
+        assert_eq!(outcome["disposition"], "upload_conflict", "{case}");
+        assert_eq!(outcome["terminal_state"], terminal_state, "{case}");
+        assert_eq!(outcome["accepted_outcomes"], 1, "{case}");
+        assert_eq!(outcome["active_uploads"], 0, "{case}");
+        let (status, _, _) = request(
+            &host,
+            Method::POST,
+            "/__test/iteration-004/control/upload/reset-creation-window",
+            &[],
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{case}");
+    }
+    let (status, _, action) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{action}");
     host.shutdown()
         .await
-        .expect("clean adversarial-matrix shutdown");
+        .expect("real upload race host shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

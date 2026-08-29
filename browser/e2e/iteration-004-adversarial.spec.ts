@@ -10,12 +10,16 @@ interface Snapshot {
   readonly authorizations: readonly unknown[];
   readonly cspViolations: readonly string[];
   readonly errors: readonly string[];
+  readonly heldEnvelopes: number;
   readonly host: Readonly<{
     readonly active_physical_transports: number;
+    readonly active_uploads: number;
     readonly logical_memberships: number;
     readonly physical_sse_connections: number;
     readonly physical_websocket_connections: number;
+    readonly validation_scan_calls: number;
   }>;
+  readonly retiredEnvelopeAttempts: number;
   readonly transportFailures: readonly string[];
 }
 
@@ -29,19 +33,24 @@ interface OrdinaryActionResult {
   readonly revision: number;
 }
 
-interface AdversarialOutcome {
-  readonly case: string;
+interface AsyncAdversarialOutcome {
+  readonly accepted_sequence: number;
   readonly ceiling_bytes: number;
-  readonly ceiling_items: number;
-  readonly dependent_feature_closed: boolean;
-  readonly diagnostic: string;
+  readonly ceiling_events: number;
+  readonly dependent_closed: boolean;
   readonly disposition: string;
-  readonly high_water_bytes: number;
-  readonly high_water_items: number;
   readonly recovery: string;
   readonly retained_bytes: number;
-  readonly retained_items: number;
-  readonly unrelated_scope_usable: boolean;
+  readonly retained_events: number;
+  readonly sibling_usable: boolean;
+  readonly wire: string | null;
+}
+
+interface UploadRaceOutcome {
+  readonly accepted_outcomes: number;
+  readonly active_uploads: number;
+  readonly disposition: string;
+  readonly terminal_state: string;
 }
 
 interface RawUpgradeResponse {
@@ -80,6 +89,18 @@ async function command(page: Page, name: string): Promise<void> {
         : null;
     if (typeof callback !== "function") throw new Error(`iteration_004_${commandName}_missing`);
     await Reflect.apply(callback, probe, []);
+  }, name);
+}
+
+async function commandResult<T>(page: Page, name: string): Promise<T> {
+  return page.evaluate(async (commandName) => {
+    const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
+    const callback: unknown =
+      (typeof probe === "object" || typeof probe === "function") && probe !== null
+        ? Reflect.get(probe, commandName)
+        : null;
+    if (typeof callback !== "function") throw new Error(`iteration_004_${commandName}_missing`);
+    return Reflect.apply(callback, probe, []) as Promise<T>;
   }, name);
 }
 
@@ -143,10 +164,14 @@ async function waitForHostQuiescent(page: Page): Promise<void> {
       };
     })
     .toEqual({ memberships: 0, physical: 0 });
-  const reset = await page.request.post(
-    `${REFERENCE_ORIGIN}/__test/iteration-004/control/upload/reset-creation-window`,
-  );
-  expect(reset.status()).toBe(204);
+  await expect
+    .poll(async () => {
+      const reset = await page.request.post(
+        `${REFERENCE_ORIGIN}/__test/iteration-004/control/upload/reset-creation-window`,
+      );
+      return reset.status();
+    })
+    .toBe(204);
 }
 
 async function rawWebSocketUpgrade(headers: readonly string[]): Promise<RawUpgradeResponse> {
@@ -488,71 +513,366 @@ for (const format of ["esm", "classic"] as const) {
   });
 }
 
-test("the Rust host executes every remaining DOD 31 fault with bounded recovery", async ({
-  page,
-}) => {
-  await waitForHostQuiescent(page);
-  await page.goto(scenario());
-  await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
-  const cases = [
-    ["hostile-media-header", "media_header_unproved", "replace"],
-    ["scan-timeout", "scan_retry", "retry"],
-    ["provider-partial-failure", "reconciliation_required", "reconcile"],
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} runtime observes the real scanner timeout and leaves ordinary Live usable`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(`${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`);
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    const before = await snapshot(page);
+
+    await command(page, "armScanTimeout");
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0,
+        0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+      ]),
+      mimeType: "image/png",
+      name: "scan-timeout.png",
+    });
+    await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+      "data-live-upload-state",
+      "failed",
+    );
+    await expect(page.locator("#iteration-upload-error")).toContainText("Upload failed");
+    const after = await snapshot(page);
+    expect(after.host.validation_scan_calls).toBe(before.host.validation_scan_calls + 1);
+    expect(after.host.active_physical_transports).toBe(0);
+    expect(after.host.logical_memberships).toBe(0);
+    const action = await runOrdinaryAction(page);
+    expect(action.domain_count).toBeGreaterThan(0);
+
+    await command(page, "cancelSelectedUpload");
+    await resetUploadCreationWindow(page);
+    expect((await snapshot(page)).errors).toEqual([]);
+  });
+}
+
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} runtime rejects a hostile media header through real validation`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(`${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`);
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    const before = await snapshot(page);
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      mimeType: "image/png",
+      name: "truncated.png",
+    });
+    const progress = page.locator("#iteration-upload-progress");
+    await expect(progress).toHaveAttribute("data-live-upload-state", "failed");
+    await expect(page.locator("#iteration-upload-error")).toContainText("Upload failed");
+    const after = await snapshot(page);
+    expect(after.host.validation_scan_calls).toBe(before.host.validation_scan_calls);
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    await resetUploadCreationWindow(page);
+  });
+}
+
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} runtime preserves the real idempotent completion outcome`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(`${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`);
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from("duplicate-completion"),
+      mimeType: "application/octet-stream",
+      name: "duplicate.bin",
+    });
+    const progress = page.locator("#iteration-upload-progress");
+    await expect(progress).toHaveAttribute("data-live-upload-state", "ready");
+    const repeated = await commandResult<{ readonly revision: number; readonly state: string }>(
+      page,
+      "repeatSelectedCompletion",
+    );
+    expect(repeated.state).toBe("ready");
+    await expect(progress).toHaveAttribute("data-live-completion-disposition", "existing_outcome");
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    await command(page, "cancelSelectedUpload");
+    await resetUploadCreationWindow(page);
+  });
+}
+
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} runtime observes provider compensation and real finalizer recovery`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(`${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`);
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from("provider"),
+      mimeType: "application/octet-stream",
+      name: "provider.bin",
+    });
+    const progress = page.locator("#iteration-upload-progress");
+    await expect(progress).toHaveAttribute("data-live-upload-state", "ready");
+
+    await command(page, "armProviderCommitFailure");
+    expect(await commandResult<string>(page, "finalizeSelectedUpload")).toBe(
+      "upload_provider_unavailable",
+    );
+    await expect(progress).toHaveAttribute(
+      "data-live-finalize-disposition",
+      "upload_provider_unavailable",
+    );
+    const afterFailure = await page.request.get(
+      `${REFERENCE_ORIGIN}/__test/iteration-004/inspection`,
+    );
+    const failedInspection = (await afterFailure.json()) as {
+      finalizer_commit_calls: number;
+      finalizer_compensation_calls: number;
+    };
+    expect(failedInspection.finalizer_commit_calls).toBeGreaterThanOrEqual(1);
+    expect(failedInspection.finalizer_compensation_calls).toBeGreaterThanOrEqual(1);
+
+    expect(await commandResult<string>(page, "finalizeSelectedUpload")).toBe("finalized");
+    await expect(progress).toHaveAttribute("data-live-finalize-disposition", "finalized");
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    await resetUploadCreationWindow(page);
+  });
+}
+
+for (const format of ["esm", "classic"] as const) {
+  for (const [caseName, disposition, recovery] of [
+    ["reordered-message", "sequence_gap", "fresh_render"],
     ["replay-overflow", "invalid_envelope", "fresh_render"],
     ["revoked-authorization", "authorization_lost", "reauthorize"],
-    ["fanout-pressure", "fanout_exceeded", "reconnect"],
-    ["oversized-message", "frame_too_large", "close_transport"],
-    ["truncated-message", "invalid_envelope", "close_transport"],
-    ["reordered-message", "sequence_gap", "fresh_render"],
-    ["duplicate-completion", "existing_outcome", "none"],
-    ["cancel-finalize-cancel-wins", "upload_conflict", "terminal_canceled"],
-    ["cancel-finalize-finalize-wins", "upload_conflict", "terminal_finalized"],
-    ["expire-finalize-expire-wins", "upload_conflict", "terminal_expired"],
-    ["expire-finalize-finalize-wins", "upload_conflict", "terminal_finalized"],
-    ["late-event", "retired_delivery_ignored", "none"],
-    ["retirement", "retired", "none"],
-    ["unknown-feature-failure", "feature_unavailable", "none"],
-    ["scoped-exhaustion", "creation_rate_exceeded", "new_scope"],
-  ] as const;
-  let previousAction = await runOrdinaryAction(page);
+    ["fanout-pressure", "async_fanout_exceeded", "reconnect"],
+  ] as const) {
+    test(`${format} runtime observes real ${caseName} authority and bounded recovery`, async ({
+      page,
+    }, testInfo) => {
+      test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+      await waitForHostQuiescent(page);
+      await page.goto(
+        `${REFERENCE_ORIGIN}/scenario/iteration004?features=async&format=${format}&transport=sse${caseName === "revoked-authorization" ? "&islands=2" : ""}${caseName === "reordered-message" || caseName === "replay-overflow" ? "&controlled-clock=true" : ""}`,
+      );
+      await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+      await expect(page.locator("[data-live-stream-state]").first()).toHaveAttribute(
+        "data-live-stream-state",
+        "current",
+      );
 
-  for (const [name, disposition, recovery] of cases) {
-    const response = await page.evaluate(async (caseName) => {
-      const result = await fetch(`/__test/iteration-004/adversarial/${caseName}`, {
-        method: "POST",
-      });
-      return { body: await result.text(), status: result.status };
-    }, name);
-    expect(response.status, name).toBe(200);
-    expect(Buffer.byteLength(response.body), name).toBeLessThanOrEqual(4_096);
-    const outcome = JSON.parse(response.body) as AdversarialOutcome;
-    expect(outcome.case, name).toBe(name);
-    expect(outcome.disposition, name).toBe(disposition);
-    expect(outcome.recovery, name).toBe(recovery);
-    expect(outcome.retained_items, name).toBe(0);
-    expect(outcome.retained_bytes, name).toBe(0);
-    expect(outcome.high_water_items, name).toBeLessThanOrEqual(outcome.ceiling_items);
-    expect(outcome.high_water_bytes, name).toBeLessThanOrEqual(outcome.ceiling_bytes);
-    expect(outcome.dependent_feature_closed, name).toBe(true);
-    expect(outcome.unrelated_scope_usable, name).toBe(true);
-    expect(outcome.diagnostic.length, name).toBeLessThanOrEqual(128);
-    expect(outcome.diagnostic, name).not.toContain("secret");
+      const outcome = await page.evaluate(async (selectedCase) => {
+        const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
+        const callback: unknown =
+          (typeof probe === "object" || typeof probe === "function") && probe !== null
+            ? Reflect.get(probe, "runAsyncAdversarial")
+            : null;
+        if (typeof callback !== "function") throw new Error("iteration_004_async_probe_missing");
+        return Reflect.apply(callback, probe, [selectedCase]) as Promise<AsyncAdversarialOutcome>;
+      }, caseName);
+      expect(outcome.disposition).toBe(disposition);
+      expect(outcome.recovery).toBe(recovery);
+      expect(outcome.retained_events).toBeLessThanOrEqual(outcome.ceiling_events);
+      expect(outcome.retained_bytes).toBeLessThanOrEqual(outcome.ceiling_bytes);
+      expect(outcome.accepted_sequence).toBeGreaterThanOrEqual(0);
+      if (caseName === "revoked-authorization") expect(outcome.sibling_usable).toBe(true);
 
-    const nextAction = await runOrdinaryAction(page);
-    expect(nextAction.revision, name).toBe(previousAction.revision + 1);
-    expect(nextAction.domain_count, name).toBe(previousAction.domain_count + 1);
-    previousAction = nextAction;
-    const state = await snapshot(page);
-    expect(state.host.active_physical_transports, name).toBeLessThanOrEqual(1);
-    expect(state.host.logical_memberships, name).toBeLessThanOrEqual(1);
+      if (caseName === "reordered-message" || caseName === "replay-overflow") {
+        await expect(page.locator("[data-live-stream-state]").first()).toHaveAttribute(
+          "data-live-stream-state",
+          "degraded",
+        );
+        await command(page, "advanceTransportReconnect");
+      }
+      await expect(page.locator("[data-live-stream-state]").first()).toHaveAttribute(
+        "data-live-stream-state",
+        "current",
+      );
+      const action = await runOrdinaryAction(page);
+      expect(action.domain_count).toBeGreaterThan(0);
+      const state = await snapshot(page);
+      expect(state.cspViolations).toEqual([]);
+      expect(state.errors).toEqual([]);
+      expect(state.host.active_physical_transports).toBeLessThanOrEqual(1);
+      expect(state.host.logical_memberships).toBeLessThanOrEqual(
+        caseName === "revoked-authorization" ? 2 : 1,
+      );
+    });
   }
+}
 
-  const state = await snapshot(page);
-  expect(state.errors).toEqual([]);
-  expect(state.cspViolations).toEqual([]);
-  expect(state.host.active_physical_transports).toBe(1);
-  expect(state.host.logical_memberships).toBe(1);
-});
+for (const format of ["esm", "classic"] as const) {
+  for (const [caseName, closeReason] of [
+    ["oversized-message", "frame_too_large"],
+    ["truncated-message", "invalid_envelope"],
+  ] as const) {
+    test(`${format} runtime receives typed ${caseName} closure from the real WebSocket host`, async ({
+      page,
+    }, testInfo) => {
+      test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+      await waitForHostQuiescent(page);
+      await page.goto(
+        `${REFERENCE_ORIGIN}/scenario/iteration004?features=async&format=${format}&transport=websocket`,
+      );
+      await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+      await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+        "data-live-stream-state",
+        "current",
+      );
+      const before = await snapshot(page);
+      await page.evaluate((selectedCase) => {
+        const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
+        const callback: unknown =
+          (typeof probe === "object" || typeof probe === "function") && probe !== null
+            ? Reflect.get(probe, "sendHostileWebSocket")
+            : null;
+        if (typeof callback !== "function") throw new Error("iteration_004_ws_probe_missing");
+        Reflect.apply(callback, probe, [selectedCase]);
+      }, caseName);
+      await expect
+        .poll(async () => (await snapshot(page)).transportFailures)
+        .toContain(`ws-close:1008:${closeReason}`);
+      await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+        "data-live-stream-state",
+        "current",
+      );
+      const after = await snapshot(page);
+      expect(after.host.active_physical_transports).toBe(1);
+      expect(after.host.logical_memberships).toBe(1);
+      expect(after.host.physical_websocket_connections).toBe(
+        before.host.physical_websocket_connections + 1,
+      );
+      expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    });
+  }
+}
+
+for (const format of ["esm", "classic"] as const) {
+  for (const [caseName, terminalState] of [
+    ["cancel-finalize-cancel-wins", "canceled"],
+    ["cancel-finalize-finalize-wins", "finalized"],
+    ["expire-finalize-expire-wins", "expired"],
+    ["expire-finalize-finalize-wins", "finalized"],
+  ] as const) {
+    test(`${format} runtime observes actual concurrent ${caseName}`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+      await waitForHostQuiescent(page);
+      await page.goto(
+        `${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`,
+      );
+      await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+      await page.getByLabel("Iteration 004 file").setInputFiles({
+        buffer: Buffer.from(`race:${caseName}`),
+        mimeType: "application/octet-stream",
+        name: `${caseName}.bin`,
+      });
+      const progress = page.locator("#iteration-upload-progress");
+      await expect(progress).toHaveAttribute("data-live-upload-state", "ready");
+
+      const outcome = await page.evaluate(async (selectedCase) => {
+        const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
+        const callback: unknown =
+          (typeof probe === "object" || typeof probe === "function") && probe !== null
+            ? Reflect.get(probe, "runUploadRace")
+            : null;
+        if (typeof callback !== "function") throw new Error("iteration_004_race_probe_missing");
+        return Reflect.apply(callback, probe, [selectedCase]) as Promise<UploadRaceOutcome>;
+      }, caseName);
+      expect(outcome).toEqual({
+        accepted_outcomes: 1,
+        active_uploads: 0,
+        disposition: "upload_conflict",
+        terminal_state: terminalState,
+      });
+      await expect(progress).toHaveAttribute("data-live-race-disposition", "upload_conflict");
+      await expect(progress).toHaveAttribute("data-live-upload-state", terminalState);
+      expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+      await resetUploadCreationWindow(page);
+    });
+  }
+}
+
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} runtime retirement ignores one actual late envelope and drains its owners`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(
+      `${REFERENCE_ORIGIN}/scenario/iteration004?features=async&format=${format}&transport=websocket`,
+    );
+    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+      "data-live-stream-state",
+      "current",
+    );
+    await command(page, "holdNextEnvelope");
+    await command(page, "emitNextEnvelope");
+    await expect.poll(async () => (await snapshot(page)).heldEnvelopes).toBe(1);
+    await command(page, "shutdown");
+    await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(0);
+    await expect.poll(async () => (await snapshot(page)).host.logical_memberships).toBe(0);
+    const retiredDom = await page.locator("[data-suprnova-live-island]").innerHTML();
+    await command(page, "releaseRetiredEnvelopes");
+    await expect.poll(async () => (await snapshot(page)).retiredEnvelopeAttempts).toBe(1);
+    expect(await page.locator("[data-suprnova-live-island]").innerHTML()).toBe(retiredDom);
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+  });
+
+  test(`${format} incompatible async feature closes only its dependent surface`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(
+      `${REFERENCE_ORIGIN}/scenario/iteration004?features=both&format=${format}&async-artifact=incompatible`,
+    );
+    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+      "data-live-stream-state",
+      "disconnected",
+    );
+    const state = await snapshot(page);
+    expect(state.host.active_physical_transports).toBe(0);
+    expect(state.host.logical_memberships).toBe(0);
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from("unrelated-upload"),
+      mimeType: "application/octet-stream",
+      name: "unrelated.bin",
+    });
+    await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+      "data-live-upload-state",
+      "ready",
+    );
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    await command(page, "cancelSelectedUpload");
+    await resetUploadCreationWindow(page);
+  });
+
+  test(`${format} upload-scope exhaustion is exact while unrelated Live remains usable`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await waitForHostQuiescent(page);
+    await page.goto(`${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}`);
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    await command(page, "primeUploadExhaustion");
+    expect((await snapshot(page)).host.active_uploads).toBe(64);
+    await page.getByLabel("Iteration 004 file").setInputFiles({
+      buffer: Buffer.from("ninth"),
+      mimeType: "application/octet-stream",
+      name: "ninth.bin",
+    });
+    await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+      "data-live-upload-state",
+      "failed",
+    );
+    expect((await snapshot(page)).host.active_uploads).toBe(64);
+    expect((await runOrdinaryAction(page)).domain_count).toBeGreaterThan(0);
+    await command(page, "clearUploadExhaustion");
+    expect((await snapshot(page)).host.active_uploads).toBe(0);
+  });
+}
 
 test("every hostile Origin rejects before browser session authority or transport allocation", async ({
   page,

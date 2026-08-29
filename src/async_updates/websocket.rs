@@ -8,9 +8,10 @@ use crate::limits::InputLimits;
 use super::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEventSource, AsyncTransportError,
     AsyncTransportErrorKind, AuthorizedTransportAdd, AuthorizedTransportSubscription,
-    DocumentTransportKind, DocumentTransportSession, EstablishingTransportAdd, PendingTransportAdd,
-    PendingTransportRemove, ReadyTransportAdd, StreamName, SubscriptionBinding, SubscriptionId,
-    VerifiedOrigin, decode_async_envelope, encode_async_envelope,
+    BoundedDocumentTransportSession, DocumentTransportKind, DocumentTransportSession,
+    EstablishingTransportAdd, PendingTransportAdd, PendingTransportRemove, ReadyTransportAdd,
+    StreamName, SubscriptionBinding, SubscriptionId, VerifiedOrigin, decode_async_envelope,
+    encode_async_envelope,
 };
 
 const MAX_WEBSOCKET_CONTROL_BYTES: usize = 512;
@@ -286,6 +287,18 @@ impl WebSocketMembershipControl {
         ready: ReadyWebSocketMembershipAdd,
     ) -> Result<WebSocketMembershipCommitReceipt, AsyncTransportError> {
         validate_document_kind(document)?;
+        document.commit_add(ready.ready)?;
+        Ok(WebSocketMembershipCommitReceipt {
+            request: ready.request,
+        })
+    }
+
+    /// Commits one authenticated membership through the bounded document owner.
+    pub fn commit_authenticated_bounded_subscribe(
+        document: &mut BoundedDocumentTransportSession,
+        ready: ReadyWebSocketMembershipAdd,
+    ) -> Result<WebSocketMembershipCommitReceipt, AsyncTransportError> {
+        validate_document_kind(document.transport())?;
         document.commit_add(ready.ready)?;
         Ok(WebSocketMembershipCommitReceipt {
             request: ready.request,
