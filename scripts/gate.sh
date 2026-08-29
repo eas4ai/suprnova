@@ -96,6 +96,11 @@ phase "browser dependency and conformance gates"
         --project=firefox \
         --project=webkit
     rtk npm run test:browser -- e2e/csp.spec.ts --project=chromium
+    phase "real BFCache browser lifecycle"
+    rtk npm run test:browser -- \
+        e2e/async-lifecycle.spec.ts \
+        e2e/iteration-004-lifecycle.spec.ts \
+        --project=chrome-bfcache
     phase "browser broad matrix"
     rtk npm run test:browser -- \
         --project=chromium \
@@ -141,6 +146,9 @@ fi
 
 phase "macro expansion and isolated compile budget"
 rtk node scripts/check-expansion-budget.mjs
+
+phase "final worktree diff check"
+rtk git diff --check
 
 phase "complete"
 printf '%s\n' "Suprnova Live iteration gate passed"
