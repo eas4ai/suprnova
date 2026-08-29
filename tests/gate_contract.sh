@@ -598,6 +598,7 @@ require_file "async envelope fuzz target" "fuzz/fuzz_targets/async_envelope.rs"
 require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 
 correctness_sleep_files=(
+    "${repository_root}"/src/upload/provider.rs
     "${repository_root}"/tests/iteration_004*.rs
     "${repository_root}"/crates/suprnova-live-test-support/tests/reference_host.rs
     "${repository_root}"/browser/tests/async-*.test.ts
@@ -612,7 +613,7 @@ correctness_sleep_files=(
 for correctness_sleep_file in "${correctness_sleep_files[@]}"; do
     correctness_sleep_source=$(<"${correctness_sleep_file}")
     correctness_sleep_compact=${correctness_sleep_source//[[:space:]]/}
-    if [[ ${correctness_sleep_source} =~ tokio::time::sleep|std::thread::sleep|thread::sleep|waitForTimeout\( ]]; then
+    if [[ ${correctness_sleep_source} =~ tokio::time::sleep|std::thread::sleep|thread::sleep|std::thread::yield_now\(\)|waitForTimeout\( ]]; then
         printf 'gate contract: correctness sleep is forbidden (%s)\n' \
             "${correctness_sleep_file#"${repository_root}/"}" >&2
         exit 1

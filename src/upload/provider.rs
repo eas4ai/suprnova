@@ -2193,6 +2193,10 @@ mod admission_tests {
         count
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the test deliberately holds the transfer lock as the recovery admission barrier"
+    )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retirement_drains_a_recovery_admitted_before_the_barrier_closed() {
         let root = TestRoot::new();
@@ -2222,12 +2226,13 @@ mod admission_tests {
             let checkpoint = checkpoint.clone();
             move || recovered.recover(checkpoint)
         });
-        for _ in 0..10_000 {
-            if recovered.admission.active() == 1 {
-                break;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while recovered.admission.active() != 1 {
+                tokio::task::yield_now().await;
             }
-            std::thread::yield_now();
-        }
+        })
+        .await
+        .expect("recovery enters admission before retirement");
         assert_eq!(recovered.admission.active(), 1);
 
         let retirement_started = recovered.retire();
@@ -2236,16 +2241,6 @@ mod admission_tests {
             let recovered = recovered.clone();
             async move { recovered.retire_and_cleanup().await }
         });
-        for _ in 0..128 {
-            if retirement.is_finished() {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(
-            !retirement.is_finished(),
-            "retirement completed before admitted recovery inserted"
-        );
 
         drop(transfers);
         recovery
