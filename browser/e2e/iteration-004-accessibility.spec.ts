@@ -44,6 +44,7 @@ async function probeCommand(page: import("@playwright/test").Page, name: string)
 async function hostResources(page: import("@playwright/test").Page): Promise<{
   readonly active_uploads: number;
   readonly paused_upload_operations: number;
+  readonly upload_service_calls: number;
 }> {
   return page.evaluate(async () => {
     const response = await fetch("/__test/iteration-004/inspection", { cache: "no-store" });
@@ -51,6 +52,7 @@ async function hostResources(page: import("@playwright/test").Page): Promise<{
     return response.json() as Promise<{
       readonly active_uploads: number;
       readonly paused_upload_operations: number;
+      readonly upload_service_calls: number;
     }>;
   });
 }
@@ -236,32 +238,50 @@ for (const format of ["esm", "classic"] as const) {
   });
 }
 
-test("upload failure is visible associated and preserves native-input focus", async ({
-  page,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
-  await page.goto(
-    `${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=esm&upload-chunk-bytes=262145`,
-  );
-  await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
-  const input = page.getByLabel("Iteration 004 file");
-  await input.focus();
-  await input.setInputFiles({
-    buffer: Buffer.alloc(256 * 1024 + 1, 0x62),
-    mimeType: "application/octet-stream",
-    name: "rejected-chunk.bin",
+for (const format of ["esm", "classic"] as const) {
+  test(`${format} Rust upload rejection exposes its associated alert and keyboard retry focus`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "chrome-bfcache", "Lifecycle has a dedicated matrix.");
+    await page.goto(
+      `${REFERENCE_ORIGIN}/scenario/iteration004?features=uploads&format=${format}&upload-reject-once=true`,
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-iteration-004-ready", "true");
+    const serviceCalls = (await hostResources(page)).upload_service_calls;
+    const input = page.getByLabel("Iteration 004 file");
+    await input.focus();
+    await input.setInputFiles({
+      buffer: Buffer.from("rust-rejection-and-retry"),
+      mimeType: "application/octet-stream",
+      name: "rejected-chunk.bin",
+    });
+    const progress = page.locator("#iteration-upload-progress");
+    await expect(progress).toHaveAttribute("data-live-upload-state", "failed");
+    await expect(progress).toHaveAttribute("aria-invalid", "true");
+    await expect(progress).toHaveAttribute("aria-errormessage", "iteration-upload-error");
+    await expect(page.locator("#iteration-upload-error")).toBeVisible();
+    await expect(page.locator("#iteration-upload-error")).toContainText("Upload failed");
+    await expect(input).toBeFocused();
+    await expect
+      .poll(async () => (await hostResources(page)).upload_service_calls)
+      .toBe(serviceCalls + 2);
+
+    const retry = page.getByRole("button", { name: "Retry upload" });
+    await expect(retry).toBeEnabled();
+    await retry.focus();
+    await page.keyboard.press("Enter");
+    await expect(progress).toHaveAttribute("data-live-upload-state", "ready");
+    await expect
+      .poll(async () => (await hostResources(page)).upload_service_calls)
+      .toBe(serviceCalls + 4);
+    await expect(page.getByRole("button", { name: "Cancel upload" })).toBeFocused();
+    await expect(page.locator("#iteration-upload-error")).toBeHidden();
+    await page.getByRole("button", { name: "Remove upload" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(input).toBeFocused();
+    await expect.poll(async () => (await hostResources(page)).active_uploads).toBe(0);
   });
-  const progress = page.locator("#iteration-upload-progress");
-  await expect(progress).toHaveAttribute("data-live-upload-state", "failed");
-  await expect(progress).toHaveAttribute("aria-invalid", "true");
-  await expect(progress).toHaveAttribute("aria-errormessage", "iteration-upload-error");
-  await expect(page.locator("#iteration-upload-error")).toBeVisible();
-  await expect(page.locator("#iteration-upload-error")).toContainText("Upload failed");
-  await expect(input).toBeFocused();
-  await expect(page.getByRole("button", { name: "Retry upload" })).toBeEnabled();
-  await page.getByRole("button", { name: "Remove upload" }).click();
-  await expect.poll(async () => (await hostResources(page)).active_uploads).toBe(0);
-});
+}
 
 for (const artifact of ["missing", "incompatible"] as const) {
   for (const format of ["esm", "classic"] as const) {

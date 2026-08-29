@@ -87,7 +87,9 @@ const ITERATION_004_FINALIZE_UPLOAD: &str = "/scenario/iteration004/finalize-upl
 const ITERATION_004_ACTION: &str = "/scenario/iteration004/action";
 const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
 const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
+const ITERATION_004_PAUSE_FINALIZE: &str = "/__test/iteration-004/control/upload/pause-finalize";
 const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/resume-chunk";
+const ITERATION_004_REJECT_UPLOAD: &str = "/__test/iteration-004/control/upload/reject-chunk";
 const ITERATION_004_RESET_UPLOAD_WINDOW: &str =
     "/__test/iteration-004/control/upload/reset-creation-window";
 const ITERATION_004_RESUME_FRESH_RENDER: &str = "/__test/iteration-004/control/fresh-render/resume";
@@ -596,8 +598,16 @@ fn router(state: Arc<HostState>) -> Router {
         .route(ITERATION_004_INSPECTION, get(iteration_004_inspection))
         .route(ITERATION_004_PAUSE_UPLOAD, post(iteration_004_pause_upload))
         .route(
+            ITERATION_004_PAUSE_FINALIZE,
+            post(iteration_004_pause_finalize),
+        )
+        .route(
             ITERATION_004_RESUME_UPLOAD,
             post(iteration_004_resume_upload),
+        )
+        .route(
+            ITERATION_004_REJECT_UPLOAD,
+            post(iteration_004_reject_upload),
         )
         .route(
             ITERATION_004_RESET_UPLOAD_WINDOW,
@@ -1244,6 +1254,19 @@ async fn iteration_004_pause_upload(
     }
 }
 
+async fn iteration_004_pause_finalize(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    match state
+        .uploads
+        .pause_finalize(&request.handle, request.upload_revision)
+    {
+        Ok(generation) => Json(json!({"pause_generation": generation})).into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
 async fn iteration_004_resume_upload(
     State(state): State<Arc<HostState>>,
     Json(request): Json<ResumeUploadRequest>,
@@ -1254,8 +1277,21 @@ async fn iteration_004_resume_upload(
     }
 }
 
+async fn iteration_004_reject_upload(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    match state
+        .uploads
+        .reject_chunk_once(&request.handle, request.upload_revision)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
 async fn iteration_004_reset_upload_window(State(state): State<Arc<HostState>>) -> StatusCode {
-    if state.uploads.reset_creation_window().is_ok() {
+    if state.uploads.reset_creation_window().await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::CONFLICT

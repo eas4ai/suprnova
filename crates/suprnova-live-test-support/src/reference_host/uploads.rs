@@ -46,7 +46,7 @@ use suprnova_live::upload::{
     VerifyTransfer, WriteChunk,
 };
 use suprnova_live::validation::ValidationSelection;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 use tokio::time::{Duration, timeout};
 
 use crate::{
@@ -110,6 +110,11 @@ struct UploadSlots {
     changed: Notify,
 }
 
+struct UploadChunkRejection {
+    handle: String,
+    operation_generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UploadPausePoint {
     Chunk,
@@ -117,6 +122,7 @@ enum UploadPausePoint {
     Complete,
     Cancel,
     Reacquire,
+    Finalize,
 }
 
 struct UploadOperationPause {
@@ -319,11 +325,6 @@ impl UploadOperationPause {
         )
     }
 
-    fn pending_count(&self) -> usize {
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        usize::from(state.selected.is_some()) + usize::from(state.active.is_some())
-    }
-
     #[cfg(test)]
     async fn wait_until_entered(&self, generation: u64) {
         loop {
@@ -467,9 +468,9 @@ impl UploadValidationStore for ReferenceValidationStore {
     }
 }
 
-#[derive(Default)]
 struct ReferenceFinalizer {
     durable: SyncMutex<HashMap<String, DurableUpload>>,
+    operation_pause: Arc<UploadOperationPause>,
 }
 
 impl UploadFinalizer for ReferenceFinalizer {
@@ -478,6 +479,13 @@ impl UploadFinalizer for ReferenceFinalizer {
         request: FinalizeRequest<'a>,
     ) -> UploadFuture<'a, Result<PreparedFinalize, UploadError>> {
         Box::pin(async move {
+            self.operation_pause
+                .pause_if_selected(
+                    UploadPausePoint::Finalize,
+                    &request.evidence().handle().to_string(),
+                    request.evidence().ready_revision().get(),
+                )
+                .await;
             let token = FinalizeToken::parse(&format!("prepared-{}", request.evidence().handle()))?;
             Ok(PreparedFinalize::new(&request, token))
         })
@@ -548,7 +556,9 @@ pub(super) struct UploadRuntime {
     fault_applied: AtomicBool,
     shutdown: watch::Receiver<bool>,
     active_uploads: Arc<ResourceCounter>,
+    creation_window_gate: AsyncMutex<()>,
     operation_pause: Arc<UploadOperationPause>,
+    chunk_rejection: SyncMutex<Option<UploadChunkRejection>>,
 }
 
 impl UploadRuntime {
@@ -592,10 +602,14 @@ impl UploadRuntime {
                 .map_err(|error| format!("upload service: {error:?}"))?,
         );
         let validation = Arc::new(ReferenceValidationStore::default());
+        let operation_pause = Arc::new(UploadOperationPause::new(open_timers));
         let finalization = UploadFinalizationService::new(
             Arc::clone(&service),
             validation.clone(),
-            Arc::new(ReferenceFinalizer::default()),
+            Arc::new(ReferenceFinalizer {
+                durable: SyncMutex::new(HashMap::new()),
+                operation_pause: Arc::clone(&operation_pause),
+            }),
         );
         Ok(Self {
             limits,
@@ -619,11 +633,14 @@ impl UploadRuntime {
             fault_applied: AtomicBool::new(false),
             shutdown,
             active_uploads,
-            operation_pause: Arc::new(UploadOperationPause::new(open_timers)),
+            creation_window_gate: AsyncMutex::new(()),
+            operation_pause,
+            chunk_rejection: SyncMutex::new(None),
         })
     }
 
     pub(super) async fn create(&self, request: CreateUploadRequest) -> Result<Value, UploadError> {
+        let _creation_window_guard = self.creation_window_gate.lock().await;
         self.record_call();
         if request.field.is_empty()
             || request.field.len() > 64
@@ -780,6 +797,9 @@ impl UploadRuntime {
         self.operation_pause
             .pause_if_selected(UploadPausePoint::Chunk, &pause_handle, pause_generation)
             .await;
+        if self.consume_chunk_rejection(&pause_handle, pause_generation) {
+            return Err(UploadError::new(UploadErrorKind::InputTooLarge));
+        }
         let result = self
             .write_chunk_inner(
                 operation.upload_mut(),
@@ -1266,20 +1286,108 @@ impl UploadRuntime {
         self.operation_pause.resume(generation)
     }
 
+    pub(super) fn pause_finalize(
+        &self,
+        handle: &str,
+        operation_generation: u64,
+    ) -> Result<u64, &'static str> {
+        let records = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = records.get(handle).and_then(|slot| match slot {
+            UploadSlot::Ready(upload) if upload.state == UploadState::Ready => {
+                Some(upload.revision.get())
+            }
+            UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+        });
+        if current != Some(operation_generation) {
+            return Err("upload_pause_scope_invalid");
+        }
+        drop(records);
+        self.operation_pause
+            .select(UploadPausePoint::Finalize, handle, operation_generation)
+    }
+
+    pub(super) fn reject_chunk_once(
+        &self,
+        handle: &str,
+        operation_generation: u64,
+    ) -> Result<(), &'static str> {
+        let records = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = records.get(handle).and_then(|slot| match slot {
+            UploadSlot::Ready(upload)
+                if upload.mode == TransferMode::File && !upload.state.is_terminal() =>
+            {
+                Some(upload.revision.get())
+            }
+            UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+        });
+        if current != Some(operation_generation) {
+            return Err("upload_rejection_scope_invalid");
+        }
+        let mut selected = self
+            .chunk_rejection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if selected.is_some() {
+            return Err("upload_rejection_in_use");
+        }
+        *selected = Some(UploadChunkRejection {
+            handle: handle.to_owned(),
+            operation_generation,
+        });
+        Ok(())
+    }
+
+    fn consume_chunk_rejection(&self, handle: &str, operation_generation: u64) -> bool {
+        let mut selected = self
+            .chunk_rejection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if selected.as_ref().is_some_and(|selection| {
+            selection.handle == handle && selection.operation_generation == operation_generation
+        }) {
+            *selected = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn paused_operations(&self) -> usize {
         self.operation_pause.active_count()
     }
 
-    pub(super) fn reset_creation_window(&self) -> Result<(), &'static str> {
-        if self.active_uploads.current() != 0 || self.operation_pause.pending_count() != 0 {
+    pub(super) async fn reset_creation_window(&self) -> Result<(), &'static str> {
+        let _creation_window_guard = self.creation_window_gate.lock().await;
+        let uploads = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let slots_are_terminal = !uploads.values().any(|slot| match slot {
+            UploadSlot::Ready(upload) => !upload.state.is_terminal(),
+            UploadSlot::Busy { .. } => true,
+        });
+        let ledger_is_terminal = self.ledger.reset_creation_window_if_all_terminal();
+        if !slots_are_terminal || !ledger_is_terminal {
             return Err("upload_window_not_quiescent");
         }
-        self.ledger.reset_creation_window();
         Ok(())
     }
 
     pub(super) async fn retire(&self) -> Result<(), String> {
         self.operation_pause.retire();
+        *self
+            .chunk_rejection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         self.uploads.retired.store(true, Ordering::Release);
         self.uploads.changed.notify_waiters();
         let pending = {
@@ -1739,6 +1847,7 @@ mod tests {
             UploadPausePoint::Complete,
             UploadPausePoint::Cancel,
             UploadPausePoint::Reacquire,
+            UploadPausePoint::Finalize,
         ] {
             let created = runtime
                 .create(CreateUploadRequest {
@@ -1752,7 +1861,33 @@ mod tests {
                 .expect("created upload");
             let handle = created["handle"].as_str().expect("handle").to_owned();
             let grant = created["grant"].as_str().expect("grant").to_owned();
-            let revision = created["revision"].as_u64().expect("revision");
+            let revision = if point == UploadPausePoint::Finalize {
+                let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+                runtime
+                    .write_chunk(
+                        &handle,
+                        0,
+                        &grant,
+                        &checksum,
+                        Some(8),
+                        Body::from("abcdefgh"),
+                    )
+                    .await
+                    .expect("finalization upload chunk");
+                runtime
+                    .complete(
+                        &handle,
+                        CompleteUploadRequest {
+                            grant: grant.clone(),
+                        },
+                    )
+                    .await
+                    .expect("finalization upload ready")["revision"]
+                    .as_u64()
+                    .expect("ready revision")
+            } else {
+                created["revision"].as_u64().expect("revision")
+            };
             let pause_generation = runtime
                 .operation_pause
                 .select(point, &handle, revision)
@@ -1798,6 +1933,14 @@ mod tests {
                     UploadPausePoint::Reacquire => {
                         operation_runtime.reacquire(&operation_handle).await
                     }
+                    UploadPausePoint::Finalize => {
+                        operation_runtime
+                            .finalize(FinalizeUploadRequestBody {
+                                handle: operation_handle,
+                                ready_revision: revision,
+                            })
+                            .await
+                    }
                 }
             });
             timeout(
@@ -1812,13 +1955,35 @@ mod tests {
                 runtime.operation_pause.resume(pause_generation),
                 Err("upload_pause_generation_stale")
             );
+            if point == UploadPausePoint::Finalize {
+                let parsed_handle = UploadHandle::parse(&handle).expect("stored upload handle");
+                let authoritative = suprnova_live::upload::UploadLedger::load(
+                    runtime.ledger.as_ref(),
+                    &parsed_handle,
+                )
+                .await
+                .expect("authoritative finalizing upload")
+                .expect("retained finalizing upload");
+                assert_eq!(authoritative.state(), UploadState::Finalizing);
+                assert_eq!(
+                    runtime.reset_creation_window().await,
+                    Err("upload_window_not_quiescent")
+                );
+            }
 
             let coherent = runtime
                 .status(&handle, &grant)
                 .await
                 .expect("successor request sees restored upload");
             assert_eq!(coherent["handle"], handle);
-            assert_eq!(coherent["state"], "created");
+            assert_eq!(
+                coherent["state"],
+                if point == UploadPausePoint::Finalize {
+                    "ready"
+                } else {
+                    "created"
+                }
+            );
         }
 
         runtime.retire().await.expect("runtime retires");

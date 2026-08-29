@@ -964,6 +964,7 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
   const controlledClock = searchParams.get("controlled-clock") === "true";
   const controlledUploadClock = searchParams.get("controlled-upload-clock") === "true";
   const uploadChunkBytes = searchParams.get("upload-chunk-bytes") === "262145" ? 262145 : 262144;
+  const rejectUploadOnce = searchParams.get("upload-reject-once") === "true";
   const syntheticLifecycle = searchParams.get("synthetic-lifecycle") === "true";
   const hasUploads = features === "uploads" || features === "both";
   const hasAsync = features === "async" || features === "both";
@@ -1029,7 +1030,7 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
   );
   return page.replace(
     '<html lang="en">',
-    `<html lang="en" data-iteration-004-features="${features}" data-iteration-004-format="${format}" data-iteration-004-upload-artifact="${uploadArtifact}" data-iteration-004-async-artifact="${asyncArtifact}" data-iteration-004-transport="${transport}" data-iteration-004-lifecycle="${String(lifecycle)}" data-iteration-004-synthetic-lifecycle="${String(syntheticLifecycle)}" data-iteration-004-controlled-clock="${String(controlledClock)}" data-iteration-004-controlled-upload-clock="${String(controlledUploadClock)}" data-iteration-004-upload-chunk-bytes="${uploadChunkBytes}">`,
+    `<html lang="en" data-iteration-004-features="${features}" data-iteration-004-format="${format}" data-iteration-004-upload-artifact="${uploadArtifact}" data-iteration-004-async-artifact="${asyncArtifact}" data-iteration-004-transport="${transport}" data-iteration-004-lifecycle="${String(lifecycle)}" data-iteration-004-synthetic-lifecycle="${String(syntheticLifecycle)}" data-iteration-004-controlled-clock="${String(controlledClock)}" data-iteration-004-controlled-upload-clock="${String(controlledUploadClock)}" data-iteration-004-upload-chunk-bytes="${uploadChunkBytes}" data-iteration-004-reject-upload-once="${String(rejectUploadOnce)}">`,
   );
 }
 

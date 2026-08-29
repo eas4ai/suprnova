@@ -20,6 +20,8 @@ const controlledUploadClock =
 const uploadChunkBytes = Number(
   document.documentElement.getAttribute("data-iteration-004-upload-chunk-bytes") ?? "262144",
 );
+let rejectUploadOnce =
+  document.documentElement.getAttribute("data-iteration-004-reject-upload-once") === "true";
 if (uploadChunkBytes !== 262_144 && uploadChunkBytes !== 262_145) {
   throw new Error("iteration_004_upload_chunk_bytes_invalid");
 }
@@ -45,10 +47,14 @@ const observations = {
   portsCreated: 0,
   retiredEnvelopeAttempts: 0,
   subscriptionAttempts: 0,
+  successorAcknowledgmentsHeld: 0,
+  successorBarriersInstalled: 0,
   transportFailures: [],
 };
 const heldEnvelopes = [];
 let holdNextEnvelope = false;
+let successorBarrierArmed = false;
+let successorBarrierPort = null;
 let persistedRestart = false;
 let runtime = null;
 let readyUpload = null;
@@ -232,6 +238,15 @@ async function referenceUploadFetch(input, init = {}) {
   }
   if (!response.ok) return response;
   const value = await response.json();
+  if (operation === "create" && rejectUploadOnce) {
+    rejectUploadOnce = false;
+    const reject = await originalFetch("/__test/iteration-004/control/upload/reject-chunk", {
+      body: JSON.stringify({ handle: value.handle, upload_revision: value.revision }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    if (!reject.ok) throw new Error("reference_upload_rejection_failed");
+  }
   if (operation === "create") {
     readyUpload = {
       expectedBytes: value.expected_bytes,
@@ -361,6 +376,13 @@ async function issueAuthorization(request) {
 }
 
 function deliverEnvelope(port, request, encoded) {
+  if (port.successorBarrierActive) {
+    if (port.successorBarrierEnvelopes.length === 8) {
+      throw new Error("iteration_004_successor_barrier_exhausted");
+    }
+    port.successorBarrierEnvelopes.push(encoded);
+    return;
+  }
   if (holdNextEnvelope) {
     holdNextEnvelope = false;
     observations.heldEnvelopes += 1;
@@ -370,6 +392,74 @@ function deliverEnvelope(port, request, encoded) {
   if (port.closed) return;
   observations.forwardedEnvelopes += 1;
   request.message(encoded);
+}
+
+function installSuccessorBarrier(port) {
+  if (!successorBarrierArmed) return;
+  if (successorBarrierPort !== null) {
+    throw new Error("iteration_004_successor_barrier_in_use");
+  }
+  successorBarrierArmed = false;
+  successorBarrierPort = port;
+  port.successorBarrierActive = true;
+  observations.successorBarriersInstalled += 1;
+}
+
+function retireSuccessorBarrier(port) {
+  if (successorBarrierPort === port) successorBarrierPort = null;
+  port.successorBarrierActive = false;
+  port.successorBarrierEnvelopes.length = 0;
+  const acknowledgment = port.successorBarrierAcknowledgment;
+  port.successorBarrierAcknowledgment = null;
+  acknowledgment?.resolve(Object.freeze({ kind: "rejected", reason: "closed" }));
+}
+
+async function waitForProductionCurrent() {
+  const stream = document.querySelector("[data-live-stream-state]");
+  if (!(stream instanceof window.Element)) throw new Error("iteration_004_stream_missing");
+  if (stream.getAttribute("data-live-stream-state") === "current") return;
+  await new Promise((resolve) => {
+    const observer = new window.MutationObserver(() => {
+      if (stream.getAttribute("data-live-stream-state") !== "current") return;
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(stream, { attributeFilter: ["data-live-stream-state"] });
+  });
+}
+
+async function releaseSuccessorBarrier() {
+  const port = successorBarrierPort;
+  if (port === null || !port.successorBarrierActive) {
+    throw new Error("iteration_004_successor_barrier_missing");
+  }
+  successorBarrierPort = null;
+  port.successorBarrierActive = false;
+  const acknowledgment = port.successorBarrierAcknowledgment;
+  port.successorBarrierAcknowledgment = null;
+  if (acknowledgment === null) {
+    throw new Error("iteration_004_successor_acknowledgment_missing");
+  }
+  acknowledgment.resolve(acknowledgment.value);
+  await waitForProductionCurrent();
+  port.deliveryReady = true;
+  for (const encoded of port.preCurrentEnvelopes.splice(0)) {
+    deliverEnvelope(port, port.request, encoded);
+  }
+  for (const encoded of port.successorBarrierEnvelopes.splice(0)) {
+    deliverEnvelope(port, port.request, encoded);
+  }
+}
+
+function replaceCurrentTransport(holdSuccessor) {
+  if (activePorts.size !== 1) throw new Error("iteration_004_active_transport_invalid");
+  if (holdSuccessor) {
+    if (successorBarrierArmed) throw new Error("iteration_004_successor_barrier_in_use");
+    successorBarrierArmed = true;
+  }
+  const [port] = activePorts;
+  port.request.failed("transport_lost");
+  fireControlledTimer(125);
 }
 
 class ReferenceSsePort {
@@ -382,6 +472,11 @@ class ReferenceSsePort {
     this.nextControl = 0;
     this.controlTail = Promise.resolve();
     this.readerStarted = false;
+    this.deliveryReady = false;
+    this.preCurrentEnvelopes = [];
+    this.successorBarrierAcknowledgment = null;
+    this.successorBarrierActive = false;
+    this.successorBarrierEnvelopes = [];
     if (this.issued === undefined) throw new Error("reference_sse_transport_missing");
     if (this.issued.transport_generation !== request.transportGeneration) {
       throw new Error("reference_sse_transport_generation_mismatch");
@@ -389,6 +484,7 @@ class ReferenceSsePort {
     persistedRestart = false;
     observations.portsCreated += 1;
     activePorts.add(this);
+    installSuccessorBarrier(this);
     queueMicrotask(() => {
       if (!this.closed) request.opened();
     });
@@ -432,12 +528,27 @@ class ReferenceSsePort {
     this.subscriptions.add(subscription.subscriptionId);
     if (!this.readerStarted) {
       this.readerStarted = true;
-      void this.controlTail.then(() => {
-        if (!this.closed) void this.read();
-      });
+      void this.read();
     }
     const acknowledged = await response.json();
-    return Object.freeze(acknowledged);
+    const value = Object.freeze(acknowledged);
+    if (!this.successorBarrierActive) {
+      void this.releaseDeliveryAfterCurrent();
+      return value;
+    }
+    observations.successorAcknowledgmentsHeld += 1;
+    return new Promise((resolve) => {
+      this.successorBarrierAcknowledgment = { resolve, value };
+    });
+  }
+
+  async releaseDeliveryAfterCurrent() {
+    await waitForProductionCurrent();
+    if (this.closed) return;
+    this.deliveryReady = true;
+    for (const encoded of this.preCurrentEnvelopes.splice(0)) {
+      deliverEnvelope(this, this.request, encoded);
+    }
   }
 
   unsubscribe(subscriptionId) {
@@ -468,7 +579,9 @@ class ReferenceSsePort {
     for (const subscription of [...this.subscriptions]) this.unsubscribe(subscription);
     this.closed = true;
     this.abort.abort();
+    this.preCurrentEnvelopes.length = 0;
     activePorts.delete(this);
+    retireSuccessorBarrier(this);
     requestedGenerationByKind.set(
       "sse",
       persistedRestart ? 1 : this.request.transportGeneration + 1,
@@ -509,7 +622,15 @@ class ReferenceSsePort {
             .split("\n")
             .find((line) => line.startsWith("data:"))
             ?.slice(5);
-          if (data !== undefined) deliverEnvelope(this, this.request, data);
+          if (data === undefined) continue;
+          if (!this.deliveryReady && !this.successorBarrierActive) {
+            if (this.preCurrentEnvelopes.length === 8) {
+              throw new Error("iteration_004_pre_current_delivery_exhausted");
+            }
+            this.preCurrentEnvelopes.push(data);
+            continue;
+          }
+          deliverEnvelope(this, this.request, data);
         }
       }
     } catch {
@@ -522,8 +643,13 @@ class ReferenceSsePort {
 class ReferenceWebSocketPort {
   constructor(request) {
     this.closed = false;
+    this.deliveryReady = false;
     this.pending = new Map();
+    this.preCurrentEnvelopes = [];
     this.request = request;
+    this.successorBarrierAcknowledgment = null;
+    this.successorBarrierActive = false;
+    this.successorBarrierEnvelopes = [];
     this.issued = issuedByKind.get("websocket");
     this.nextControl = 0;
     if (this.issued === undefined) throw new Error("reference_websocket_transport_missing");
@@ -539,6 +665,7 @@ class ReferenceWebSocketPort {
     this.controlSequenceBase = BigInt(transportSequence) * 65_536n;
     this.socket = new WebSocket("/__live/async/ws", `suprnova-live-v1.${this.issued.transport}`);
     activePorts.add(this);
+    installSuccessorBarrier(this);
     this.socket.onopen = () => {
       if (!this.closed) request.opened();
     };
@@ -555,15 +682,22 @@ class ReferenceWebSocketPort {
         const pending = this.pending.get(value.control_nonce);
         if (pending !== undefined) {
           this.pending.delete(value.control_nonce);
-          pending.resolve(
-            Object.freeze({
-              descriptorBinding: value.descriptor_binding,
-              kind: "authenticated",
-              stream: value.stream,
-              subscriptionId: value.subscription,
-              transportGeneration: value.transport_generation,
-            }),
-          );
+          const acknowledgment = Object.freeze({
+            descriptorBinding: value.descriptor_binding,
+            kind: "authenticated",
+            stream: value.stream,
+            subscriptionId: value.subscription,
+            transportGeneration: value.transport_generation,
+          });
+          if (this.successorBarrierActive) {
+            observations.successorAcknowledgmentsHeld += 1;
+            this.successorBarrierAcknowledgment = {
+              resolve: pending.resolve,
+              value: acknowledgment,
+            };
+          } else {
+            pending.resolve(acknowledgment);
+          }
         }
         return;
       }
@@ -615,8 +749,10 @@ class ReferenceWebSocketPort {
       resolve(Object.freeze({ kind: "rejected", reason: "closed" }));
     }
     this.pending.clear();
+    this.preCurrentEnvelopes.length = 0;
     this.socket.close(1000, "suprnova_live_async_closed");
     activePorts.delete(this);
+    retireSuccessorBarrier(this);
     requestedGenerationByKind.set(
       "websocket",
       persistedRestart ? 1 : this.request.transportGeneration + 1,
@@ -771,6 +907,12 @@ Reflect.set(
     holdNextEnvelope() {
       holdNextEnvelope = true;
     },
+    holdSuccessorDelivery() {
+      if (successorBarrierArmed || successorBarrierPort !== null) {
+        throw new Error("iteration_004_successor_barrier_in_use");
+      }
+      successorBarrierArmed = true;
+    },
     pauseNextUpload() {
       if (uploadPauseGeneration !== null || pauseNextUploadChunk || pauseEveryUploadChunk) {
         throw new Error("iteration_004_upload_pause_in_use");
@@ -802,6 +944,15 @@ Reflect.set(
         observations.retiredEnvelopeAttempts += 1;
         held.request.message(held.encoded);
       }
+    },
+    async releaseSuccessorDelivery() {
+      await releaseSuccessorBarrier();
+    },
+    replaceCurrentTransport() {
+      replaceCurrentTransport(false);
+    },
+    replaceHeldSuccessorAndHoldNext() {
+      replaceCurrentTransport(true);
     },
     resume() {
       const kind = transportKind === "websocket" ? "websocket" : "sse";
@@ -837,4 +988,5 @@ Reflect.set(
     },
   }),
 );
+if (asyncArtifact === "current" && hasAsync) await waitForProductionCurrent();
 document.documentElement.setAttribute("data-iteration-004-ready", "true");

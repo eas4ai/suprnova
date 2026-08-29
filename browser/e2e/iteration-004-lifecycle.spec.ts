@@ -34,6 +34,8 @@ interface LifecycleSnapshot {
   readonly portsCreated: number;
   readonly retiredEnvelopeAttempts: number;
   readonly subscriptionAttempts: number;
+  readonly successorAcknowledgmentsHeld: number;
+  readonly successorBarriersInstalled: number;
   readonly transportFailures: readonly string[];
   readonly runtimeResources: Readonly<Record<string, number>>;
 }
@@ -132,7 +134,9 @@ for (const bfcacheTransport of ["sse", "websocket"] as const) {
       "Persisted PageTransitionEvent proof runs in dedicated stable Chrome.",
     );
     await waitForHostQuiescent(page);
-    await page.goto(BOTH_SCENARIO.replace("transport=sse", `transport=${bfcacheTransport}`));
+    await page.goto(
+      `${BOTH_SCENARIO.replace("transport=sse", `transport=${bfcacheTransport}`)}&controlled-clock=true`,
+    );
     try {
       await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
         "data-live-stream-state",
@@ -148,10 +152,8 @@ for (const bfcacheTransport of ["sse", "websocket"] as const) {
     await command(page, "emitNextEnvelope");
     await expect.poll(async () => (await snapshot(page)).heldEnvelopes).toBe(1);
     expect((await snapshot(page)).forwardedEnvelopes).toBe(beforeHold.forwardedEnvelopes);
+    await command(page, "holdSuccessorDelivery");
     const before = await snapshot(page);
-    const beforePresentation = await page
-      .locator("[data-live-stream-state]")
-      .getAttribute("data-live-stream-state");
     expect(before.host).toMatchObject({
       active_physical_transports: 1,
       logical_memberships: 1,
@@ -205,16 +207,20 @@ for (const bfcacheTransport of ["sse", "websocket"] as const) {
       .poll(async () => (await snapshot(page)).subscriptionAttempts)
       .toBe(before.subscriptionAttempts + 1);
     expect((await snapshot(page)).transportFailures).toEqual([]);
-    await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);
-    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
-      "data-live-stream-state",
-      "current",
-    );
-
     await expect
-      .poll(async () => (await snapshot(page)).forwardedEnvelopes)
-      .toBe(before.forwardedEnvelopes + 1);
+      .poll(async () => {
+        const current = await snapshot(page);
+        return {
+          acknowledgments: current.successorAcknowledgmentsHeld,
+          barriers: current.successorBarriersInstalled,
+          forwarded: current.forwardedEnvelopes,
+        };
+      })
+      .toEqual({ acknowledgments: 1, barriers: 1, forwarded: before.forwardedEnvelopes });
+    await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);
     const beforeRelease = await snapshot(page);
+    const heldSuccessorPosition = last(beforeRelease.authorizations)?.position;
+    expect(heldSuccessorPosition).not.toBeNull();
     const beforeReleaseDom = await page
       .locator("[data-suprnova-live-island]")
       .evaluate((node) => node.outerHTML);
@@ -251,7 +257,49 @@ for (const bfcacheTransport of ["sse", "websocket"] as const) {
     expect(
       await page.locator("[data-live-stream-state]").getAttribute("data-live-stream-state"),
     ).toBe(beforeReleasePresentation);
-    expect(beforeReleasePresentation).toBe(beforePresentation);
+    expect(beforeReleasePresentation).toBe("connecting");
+
+    await command(page, "replaceHeldSuccessorAndHoldNext");
+    await expect
+      .poll(async () => (await snapshot(page)).authorizations.length)
+      .toBe(before.authorizations.length + 2);
+    await expect
+      .poll(async () => {
+        const current = await snapshot(page);
+        return {
+          acknowledgments: current.successorAcknowledgmentsHeld,
+          barriers: current.successorBarriersInstalled,
+        };
+      })
+      .toEqual({ acknowledgments: 2, barriers: 2 });
+    const staleGenerationProbe = await snapshot(page);
+    expect(last(staleGenerationProbe.authorizations)?.position).toEqual(heldSuccessorPosition);
+    expect(last(staleGenerationProbe.authorizations)?.replay).toBe(2);
+
+    await command(page, "releaseSuccessorDelivery");
+    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+      "data-live-stream-state",
+      "current",
+    );
+    await expect
+      .poll(async () => (await snapshot(page)).forwardedEnvelopes)
+      .toBe(before.forwardedEnvelopes + 1);
+    await command(page, "replaceCurrentTransport");
+    await expect
+      .poll(async () => (await snapshot(page)).authorizations.length)
+      .toBe(before.authorizations.length + 3);
+    const replayed = await snapshot(page);
+    expect(last(replayed.authorizations)?.position).toEqual({
+      epoch: heldSuccessorPosition?.epoch,
+      sequence: String(BigInt(heldSuccessorPosition?.sequence ?? "0") + 3n),
+    });
+    expect(last(replayed.authorizations)?.replay).toBe(0);
+    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+      "data-live-stream-state",
+      "current",
+    );
+    await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);
+    await expect.poll(async () => (await snapshot(page)).host.logical_memberships).toBe(1);
     await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
       "data-live-upload-state",
       "interrupted",

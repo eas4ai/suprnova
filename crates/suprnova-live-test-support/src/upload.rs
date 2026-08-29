@@ -305,10 +305,20 @@ impl MemoryUploadLedger {
         self.len() == 0
     }
 
-    /// Clears only the deterministic creation-rate window for a quiescent
-    /// compiled test host. Authoritative upload records remain unchanged.
-    pub fn reset_creation_window(&self) {
-        lock(&self.state).creations.clear();
+    /// Clears only the deterministic creation-rate window when every retained
+    /// upload authority is terminal. The check and timestamp reset share the
+    /// ledger lock, so admission cannot cross the reset boundary.
+    pub fn reset_creation_window_if_all_terminal(&self) -> bool {
+        let mut state = lock(&self.state);
+        if state
+            .records
+            .values()
+            .any(|stored| !stored.record.state().is_terminal())
+        {
+            return false;
+        }
+        state.creations.clear();
+        true
     }
 }
 

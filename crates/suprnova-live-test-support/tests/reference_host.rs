@@ -930,11 +930,194 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
 
     let handle = created["handle"].as_str().expect("handle");
     let grant = created["grant"].as_str().expect("grant");
+    let revision = created["revision"].as_u64().expect("created revision");
+    let pause_request = |upload_revision| {
+        serde_json::to_vec(&json!({
+            "handle": handle,
+            "upload_revision": upload_revision,
+        }))
+        .expect("pause request")
+    };
+    let (status, _, selected) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/pause-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        pause_request(revision),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let selected: Value = serde_json::from_slice(&selected).expect("selected pause response");
+    let selected_generation = selected["pause_generation"]
+        .as_u64()
+        .expect("selected pause generation");
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let resume = serde_json::to_vec(&json!({"pause_generation": selected_generation}))
+        .expect("resume selected pause");
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/resume-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        resume,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, active) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/pause-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        pause_request(revision),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let active: Value = serde_json::from_slice(&active).expect("active pause response");
+    let active_generation = active["pause_generation"]
+        .as_u64()
+        .expect("active pause generation");
+    let inspection = host.inspection_handle();
+    let active_control = async {
+        timeout(Duration::from_secs(1), async {
+            while inspection.snapshot().paused_upload_operations != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transfer reached exact active barrier");
+        let snapshot = inspection.snapshot();
+        assert_eq!(snapshot.active_uploads, 1);
+        assert_eq!(snapshot.open_timers, 1);
+        let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let resume = serde_json::to_vec(&json!({"pause_generation": active_generation}))
+            .expect("resume active transfer");
+        let (status, _, _) = request(
+            &host,
+            Method::POST,
+            "/__test/iteration-004/control/upload/resume-chunk",
+            &[(CONTENT_TYPE.as_str(), "application/json")],
+            resume,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    };
+    let (response, ()) = tokio::join!(
+        chunked_upload(&host, handle, grant, 0, &[b"x"]),
+        active_control,
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let (status, _, completed) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let pause_request = serde_json::to_vec(&json!({
+        "handle": handle,
+        "upload_revision": completed["revision"],
+    }))
+    .expect("pause-finalize request");
+    let (status, _, body) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/pause-finalize",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        pause_request,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pause-finalize control missing: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let paused: Value = serde_json::from_slice(&body).expect("pause-finalize response");
+    let pause_generation = paused["pause_generation"]
+        .as_u64()
+        .expect("pause generation");
+    let inspection = host.inspection_handle();
+    let control = async {
+        timeout(Duration::from_secs(1), async {
+            while inspection.snapshot().paused_upload_operations != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finalization reached exact Finalizing barrier");
+        let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let resume = serde_json::to_vec(&json!({"pause_generation": pause_generation}))
+            .expect("resume-finalize request");
+        let (status, _, _) = request(
+            &host,
+            Method::POST,
+            "/__test/iteration-004/control/upload/resume-chunk",
+            &[(CONTENT_TYPE.as_str(), "application/json")],
+            resume,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    };
+    let (finalized, ()) = tokio::join!(
+        json_request(
+            &host,
+            Method::POST,
+            "/scenario/iteration004/finalize-upload",
+            json!({
+                "handle": handle,
+                "ready_revision": completed["revision"],
+            }),
+        ),
+        control,
+    );
+    let (status, _, finalized) = finalized;
+    assert_eq!(status, StatusCode::OK, "{finalized}");
+    assert_eq!(finalized["state"], "finalized");
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, replayed) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({
+            "handle": handle,
+            "ready_revision": completed["revision"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["revision"], finalized["revision"]);
+
+    let (status, _, canceled) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "canceled.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 1,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{canceled}");
+    let canceled_handle = canceled["handle"].as_str().expect("canceled handle");
+    let canceled_grant = canceled["grant"].as_str().expect("canceled grant");
     let (status, _, _) = upload_request(
         &host,
         Method::POST,
-        &format!("/__live/uploads/{handle}/cancel"),
-        Some(grant),
+        &format!("/__live/uploads/{canceled_handle}/cancel"),
+        Some(canceled_grant),
         Bytes::new(),
     )
     .await;
