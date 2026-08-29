@@ -35,6 +35,11 @@ export interface UploadBudgetBrowserMethodology extends UploadBudgetMethodology 
   readonly regressionReference: "median_run_p95_v1";
 }
 
+export interface UploadBudgetServerMethodology extends UploadBudgetMethodology {
+  readonly independentRuns: number;
+  readonly regressionReference: "median_run_p95_v1";
+}
+
 export interface UploadBudgetBrowserEnvironment {
   readonly architecture: string;
   readonly browser: "chromium";
@@ -157,6 +162,46 @@ export interface UploadBudgetBrowserRun {
   readonly workload: UploadBudgetWorkload;
 }
 
+export interface UploadBudgetServerMeasurements {
+  readonly chunkBuffersByTransfer: readonly UploadBudgetServerTransferChunkBuffers[];
+  readonly completedBytes: number;
+  readonly completedChunks: number;
+  readonly completedTransfers: readonly Readonly<{
+    acceptedBytes: number;
+    acceptedChunks: number;
+    duplicateDisposition: "existing_outcome";
+    finalRevision: number;
+    handle: string;
+    providerCheckpointChunks: number;
+    providerCommittedBytes: number;
+  }>[];
+  readonly excludedCalls: Readonly<{
+    applicationValidation: 0;
+    bodyIo: 0;
+    provider: 0;
+    scanner: 0;
+  }>;
+  readonly liveChunkBuffers: number;
+  readonly managerOwnedBytes: number;
+  readonly managerOwnedCategories: UploadBudgetServerManagerOwnedCategories;
+  readonly maxChunksPerTransfer: number;
+  readonly maxConcurrentTransfers: number;
+  readonly maxQueueDepth: number;
+  readonly p50Microseconds: number;
+  readonly p95Microseconds: number;
+  readonly retainedBytes: number;
+}
+
+export interface UploadBudgetServerRun {
+  readonly artifactSha256: string;
+  readonly environment: UploadBudgetServerEnvironment;
+  readonly measurements: UploadBudgetServerMeasurements;
+  readonly methodology: UploadBudgetMethodology;
+  readonly processId: number;
+  readonly runIndex: number;
+  readonly workload: UploadBudgetWorkload;
+}
+
 export interface UploadBudgetEvidence {
   readonly schemaVersion: 1;
   readonly workload: "U4/16";
@@ -181,36 +226,9 @@ export interface UploadBudgetEvidence {
       maxManagerOwnedBytes: 524288;
     }>;
     environment: UploadBudgetServerEnvironment;
-    measurements: Readonly<{
-      chunkBuffersByTransfer: readonly UploadBudgetServerTransferChunkBuffers[];
-      completedBytes: number;
-      completedChunks: number;
-      completedTransfers: readonly Readonly<{
-        acceptedBytes: number;
-        acceptedChunks: number;
-        duplicateDisposition: "existing_outcome";
-        finalRevision: number;
-        handle: string;
-        providerCheckpointChunks: number;
-        providerCommittedBytes: number;
-      }>[];
-      excludedCalls: Readonly<{
-        applicationValidation: 0;
-        bodyIo: 0;
-        provider: 0;
-        scanner: 0;
-      }>;
-      liveChunkBuffers: number;
-      managerOwnedBytes: number;
-      managerOwnedCategories: UploadBudgetServerManagerOwnedCategories;
-      maxChunksPerTransfer: number;
-      maxConcurrentTransfers: number;
-      maxQueueDepth: number;
-      p50Microseconds: number;
-      p95Microseconds: number;
-      retainedBytes: number;
-    }>;
-    methodology: UploadBudgetMethodology;
+    measurements: UploadBudgetServerMeasurements;
+    methodology: UploadBudgetServerMethodology;
+    runs: readonly UploadBudgetServerRun[];
     workload: UploadBudgetWorkload;
   }>;
 }
@@ -294,6 +312,8 @@ type EvidenceKey =
   | "p50Microseconds"
   | "p95Microseconds"
   | "playwrightVersion"
+  | "processId"
+  | "processRuns"
   | "profile"
   | "progressP50Milliseconds"
   | "progressP95Milliseconds"
@@ -312,6 +332,8 @@ type EvidenceKey =
   | "recordedAt"
   | "regressionReference"
   | "retainedBytes"
+  | "runIndex"
+  | "runs"
   | "role"
   | "rustc"
   | "scanner"
@@ -820,10 +842,10 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
   literal(bounds.maxProgressP95Milliseconds, 16);
 
   const measurements = browserMeasurements(candidate.measurements, false);
-  if (!Array.isArray(candidate["runs"]) || candidate["runs"].length < 1) fail();
-  if (candidate["runs"].length !== aggregateMethodology.independentRuns) fail();
-  if (aggregateEnvironment.classification === "qualified" && candidate["runs"].length !== 3) fail();
-  const runs = candidate["runs"].map((value): UploadBudgetBrowserRun => {
+  if (!Array.isArray(candidate.runs) || candidate.runs.length < 1) fail();
+  if (candidate.runs.length !== aggregateMethodology.independentRuns) fail();
+  if (aggregateEnvironment.classification === "qualified" && candidate.runs.length !== 3) fail();
+  const runs = candidate.runs.map((value): UploadBudgetBrowserRun => {
     const run = record(value);
     exact(run, [
       "artifactSha256",
@@ -833,7 +855,7 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
       "runIndex",
       "workload",
     ]);
-    integer(run["runIndex"], 1);
+    integer(run.runIndex, 1);
     literal(run["artifactSha256"], artifactSha256);
     workload(run.workload);
     const runEnvironment = browserEnvironment(run.environment);
@@ -915,14 +937,8 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
   return candidate as unknown as UploadBudgetEvidence["browser"];
 }
 
-function validateServer(value: unknown): UploadBudgetEvidence["server"] {
-  const candidate = record(value);
-  exact(candidate, ["bounds", "environment", "measurements", "methodology", "workload"]);
-  workload(candidate.workload);
-  methodology(candidate.methodology, false);
-  serverEnvironment(candidate.environment);
-
-  const bounds = record(candidate.bounds);
+function validateServerBounds(value: unknown): UploadBudgetEvidence["server"]["bounds"] {
+  const bounds = record(value);
   exact(bounds, [
     "maxChunksPerActiveTransfer",
     "maxControlP95Microseconds",
@@ -931,8 +947,11 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
   literal(bounds.maxChunksPerActiveTransfer, 2);
   literal(bounds.maxControlP95Microseconds, 2_000);
   literal(bounds.maxManagerOwnedBytes, 512 * 1024);
+  return bounds as unknown as UploadBudgetEvidence["server"]["bounds"];
+}
 
-  const measurements = record(candidate.measurements);
+function serverMeasurements(value: unknown): UploadBudgetServerMeasurements {
+  const measurements = record(value);
   exact(measurements, [
     "chunkBuffersByTransfer",
     "completedBytes",
@@ -997,7 +1016,158 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
     integer(measurements.managerOwnedBytes);
   literal(measurements.retainedBytes, expectedRetained);
   if (number(measurements.p50Microseconds) > number(measurements.p95Microseconds)) fail();
+  return measurements as unknown as UploadBudgetServerMeasurements;
+}
+
+function equalServerEnvironment(
+  left: UploadBudgetServerEnvironment,
+  right: UploadBudgetServerEnvironment,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateServer(value: unknown, artifactSha256: string): UploadBudgetEvidence["server"] {
+  const candidate = record(value);
+  exact(candidate, ["bounds", "environment", "measurements", "methodology", "runs", "workload"]);
+  workload(candidate.workload);
+  validateServerBounds(candidate.bounds);
+  const aggregateEnvironment = serverEnvironment(candidate.environment);
+  const aggregateMeasurements = serverMeasurements(candidate.measurements);
+  const aggregateMethodology = methodology(
+    candidate.methodology,
+    true,
+  ) as UploadBudgetServerMethodology;
+  literal(aggregateMethodology.warmupIterations, 50);
+  if (!Array.isArray(candidate.runs)) fail();
+  const expectedRuns = aggregateEnvironment.classification === "qualified" ? 3 : 1;
+  if (
+    candidate.runs.length !== expectedRuns ||
+    aggregateMethodology.independentRuns !== expectedRuns
+  ) {
+    fail();
+  }
+  const runs = candidate.runs.map((value): UploadBudgetServerRun => {
+    const run = record(value);
+    exact(run, [
+      "artifactSha256",
+      "environment",
+      "measurements",
+      "methodology",
+      "processId",
+      "runIndex",
+      "workload",
+    ]);
+    literal(run["artifactSha256"], artifactSha256);
+    workload(run.workload);
+    const environment = serverEnvironment(run.environment);
+    if (!equalServerEnvironment(environment, aggregateEnvironment)) fail();
+    const runMethodology = methodology(run.methodology, false);
+    literal(runMethodology.warmupIterations, 50);
+    literal(runMethodology.measuredSamples, 40);
+    serverMeasurements(run.measurements);
+    integer(run.processId, 1);
+    integer(run.runIndex, 1);
+    return run as unknown as UploadBudgetServerRun;
+  });
+  const runIndexes = runs.map(({ runIndex }) => runIndex).sort((left, right) => left - right);
+  const processIds = runs.map(({ processId }) => processId);
+  if (
+    runIndexes.some((runIndex, index) => runIndex !== index + 1) ||
+    new Set(processIds).size !== processIds.length
+  ) {
+    fail();
+  }
+  literal(
+    aggregateMethodology.measuredSamples,
+    runs.reduce((sum, run) => sum + run.methodology.measuredSamples, 0),
+  );
+  const aggregateSource = [...runs].sort(
+    (left, right) =>
+      right.measurements.p95Microseconds - left.measurements.p95Microseconds ||
+      left.runIndex - right.runIndex,
+  )[0];
+  if (
+    aggregateSource === undefined ||
+    JSON.stringify(aggregateMeasurements) !== JSON.stringify(aggregateSource.measurements)
+  ) {
+    fail();
+  }
   return candidate as unknown as UploadBudgetEvidence["server"];
+}
+
+export function uploadServerEvidenceFromProcessRuns(
+  value: unknown,
+  artifactSha256: string,
+  profile: "qualified" | "reduced",
+): UploadBudgetEvidence["server"] {
+  const envelope = record(value);
+  exact(envelope, ["processRuns", "schemaVersion"]);
+  literal(envelope.schemaVersion, 1);
+  if (!Array.isArray(envelope.processRuns)) fail();
+  const processRuns = envelope.processRuns as unknown[];
+  const expectedRuns = profile === "qualified" ? 3 : 1;
+  if (processRuns.length !== expectedRuns) fail();
+  const firstProcessRun = record(processRuns[0]);
+  const runs = processRuns.map((value): UploadBudgetServerRun => {
+    const processRun = record(value);
+    exact(processRun, [
+      "bounds",
+      "environment",
+      "measurements",
+      "methodology",
+      "processId",
+      "runIndex",
+      "workload",
+    ]);
+    validateServerBounds(processRun.bounds);
+    serverEnvironment(processRun.environment);
+    serverMeasurements(processRun.measurements);
+    const runMethodology = methodology(processRun.methodology, false);
+    literal(runMethodology.warmupIterations, 50);
+    literal(runMethodology.measuredSamples, 40);
+    workload(processRun.workload);
+    integer(processRun.processId, 1);
+    integer(processRun.runIndex, 1);
+    return {
+      artifactSha256,
+      environment: processRun.environment as UploadBudgetServerEnvironment,
+      measurements: processRun.measurements as UploadBudgetServerMeasurements,
+      methodology: processRun.methodology as UploadBudgetMethodology,
+      processId: processRun.processId as number,
+      runIndex: processRun.runIndex as number,
+      workload: processRun.workload as UploadBudgetWorkload,
+    };
+  });
+  const environment = runs[0]?.environment;
+  if (
+    environment === undefined ||
+    runs.some((run) => !equalServerEnvironment(run.environment, environment)) ||
+    (profile === "qualified") !== (environment.classification === "qualified")
+  ) {
+    fail();
+  }
+  const aggregateSource = [...runs].sort(
+    (left, right) =>
+      right.measurements.p95Microseconds - left.measurements.p95Microseconds ||
+      left.runIndex - right.runIndex,
+  )[0];
+  if (aggregateSource === undefined) fail();
+  return validateServer(
+    {
+      bounds: firstProcessRun.bounds,
+      environment,
+      measurements: aggregateSource.measurements,
+      methodology: {
+        independentRuns: expectedRuns,
+        measuredSamples: runs.reduce((sum, run) => sum + run.methodology.measuredSamples, 0),
+        regressionReference: "median_run_p95_v1",
+        warmupIterations: 50,
+      },
+      runs,
+      workload: aggregateSource.workload,
+    },
+    artifactSha256,
+  );
 }
 
 export function validateUploadBudgetEvidence(value: unknown): UploadBudgetEvidence {
@@ -1015,7 +1185,7 @@ export function validateUploadBudgetEvidence(value: unknown): UploadBudgetEviden
   if (!/^[0-9a-f]{64}$/u.test(string(artifact.sha256))) fail();
 
   const browser = validateBrowser(candidate.browser, string(artifact.sha256));
-  const server = validateServer(candidate.server);
+  const server = validateServer(candidate.server, string(artifact.sha256));
   if (
     browser.environment.classification === "qualified" &&
     server.environment.classification === "qualified" &&
@@ -1052,7 +1222,8 @@ export function validateUploadBudgetBaseline(value: unknown): UploadBudgetBaseli
       qualifiedBaseline !== null &&
       (qualifiedBaseline.browser.environment.classification !== "qualified" ||
         qualifiedBaseline.server.environment.classification !== "qualified" ||
-        qualifiedBaseline.browser.methodology.independentRuns < 3)
+        qualifiedBaseline.browser.methodology.independentRuns !== 3 ||
+        qualifiedBaseline.server.methodology.independentRuns !== 3)
     ) {
       throw new Error("upload_budget_baseline_invalid");
     }
@@ -1097,6 +1268,18 @@ export function medianRunP95(runs: readonly UploadBudgetBrowserRun[]): number {
   if (runs.length !== 3) fail();
   const sorted = runs
     .map(({ measurements }) => measurements.progressP95Milliseconds)
+    .sort((left, right) => left - right);
+  const median = sorted[1];
+  if (median === undefined) fail();
+  return median;
+}
+
+export function medianServerRunP95(
+  runs: readonly Readonly<{ measurements: Readonly<{ p95Microseconds: number }> }>[],
+): number {
+  if (runs.length !== 3) fail();
+  const sorted = runs
+    .map(({ measurements }) => number(measurements.p95Microseconds))
     .sort((left, right) => left - right);
   const median = sorted[1];
   if (median === undefined) fail();
@@ -1181,6 +1364,21 @@ export function evaluateUploadBudget(
   if (server.p95Microseconds > 2_000) {
     issues.push("upload_budget:server:control_p95_hard_cap");
   }
+  for (const run of candidate.server.runs) {
+    const measurements = run.measurements;
+    if (measurements.liveChunkBuffers > U4_16.activeTransfers * 2) {
+      issues.push(`upload_budget:server:run_${String(run.runIndex)}:live_chunk_buffers_hard_cap`);
+    }
+    if (measurements.maxChunksPerTransfer > 2) {
+      issues.push(`upload_budget:server:run_${String(run.runIndex)}:chunks_per_transfer_hard_cap`);
+    }
+    if (measurements.managerOwnedBytes > 512 * 1024) {
+      issues.push(`upload_budget:server:run_${String(run.runIndex)}:manager_bytes_hard_cap`);
+    }
+    if (measurements.p95Microseconds > 2_000) {
+      issues.push(`upload_budget:server:run_${String(run.runIndex)}:control_p95_hard_cap`);
+    }
+  }
   if (baseline !== null) {
     if (!sameEnvironment(candidate, baseline)) {
       issues.push("upload_budget:baseline_environment_mismatch");
@@ -1219,20 +1417,38 @@ export function evaluateUploadBudget(
           issues.push("upload_budget:browser:progress_p95_regression");
         }
       }
-      if (
-        regressionAtLeast15Percent(
-          server.p95Microseconds,
-          baseline.server.measurements.p95Microseconds,
-        )
-      ) {
-        issues.push("upload_budget:server:control_p95_regression");
+      if (candidate.server.runs.length !== baseline.server.runs.length) {
+        issues.push("upload_budget:server:run_count_mismatch");
+      } else {
+        const repeatableServerComparison =
+          candidate.server.environment.classification === "qualified" &&
+          baseline.server.environment.classification === "qualified" &&
+          candidate.server.runs.length === 3 &&
+          baseline.server.runs.length === 3;
+        const baselineReference = repeatableServerComparison
+          ? medianServerRunP95(baseline.server.runs)
+          : 0;
+        const regressedRuns = repeatableServerComparison
+          ? candidate.server.runs.filter((run) =>
+              regressionAtLeast15Percent(run.measurements.p95Microseconds, baselineReference),
+            ).length
+          : 0;
+        if (repeatableServerComparison && regressedRuns > 0) {
+          observations.push(
+            `upload_budget:server:control_p95_regression_${String(regressedRuns)}_of_3`,
+          );
+        }
+        if (repeatableServerComparison && regressedRuns === 3) {
+          issues.push("upload_budget:server:control_p95_regression");
+        }
       }
     }
   }
   const qualified =
     candidate.browser.environment.classification === "qualified" &&
     candidate.server.environment.classification === "qualified" &&
-    candidate.browser.methodology.independentRuns >= 3;
+    candidate.browser.methodology.independentRuns === 3 &&
+    candidate.server.methodology.independentRuns === 3;
   if (options.release === true && !qualified) {
     issues.push("upload_budget:release_environment_unqualified");
   }

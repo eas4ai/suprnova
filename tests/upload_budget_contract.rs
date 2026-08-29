@@ -87,6 +87,30 @@ fn checked_upload_budget_locks_workload_bounds_and_exclusions() {
             0
         );
     }
+    assert_eq!(
+        pointer(
+            &value,
+            "/exploratoryReference/server/methodology/independentRuns"
+        ),
+        1
+    );
+    let server_runs = pointer(&value, "/exploratoryReference/server/runs")
+        .as_array()
+        .expect("server process runs");
+    assert_eq!(server_runs.len(), 1);
+    assert_eq!(
+        pointer(&value, "/exploratoryReference/server/runs/0/artifactSha256"),
+        pointer(&value, "/exploratoryReference/artifact/sha256")
+    );
+    assert_eq!(
+        pointer(&value, "/exploratoryReference/server/runs/0/runIndex"),
+        1
+    );
+    assert!(
+        pointer(&value, "/exploratoryReference/server/runs/0/processId")
+            .as_u64()
+            .is_some_and(|process_id| process_id > 0)
+    );
     let hash = pointer(&value, "/exploratoryReference/artifact/sha256")
         .as_str()
         .expect("artifact hash");
@@ -108,4 +132,5 @@ fn upload_budget_has_a_release_safe_runner_contract() {
     assert!(gate.contains("SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh"));
     assert!(runner.contains("SUPRNOVA_LIVE_S1_DEDICATED"));
     assert!(runner.contains("SUPRNOVA_LIVE_B1_DEDICATED"));
+    assert!(runner.contains("run-upload-server-processes.mjs"));
 }

@@ -23,20 +23,11 @@ fi
 cd "${repository_root}"
 
 printf '%s\n' "[upload-budget] U4/16 server control path profile=${profile} CPU set ${cpu_set}"
-if [[ ${profile} == qualified ]]; then
-    rtk env \
-        CARGO_INCREMENTAL=0 \
-        SUPRNOVA_LIVE_REQUIRE_S1=1 \
-        SUPRNOVA_LIVE_UPLOAD_SERVER_RESULT="${server_result}" \
-        taskset -c "${cpu_set}" \
-        cargo bench --bench upload_framework_budget
-else
-    rtk env \
-        CARGO_INCREMENTAL=0 \
-        SUPRNOVA_LIVE_UPLOAD_SERVER_RESULT="${server_result}" \
-        taskset -c "${cpu_set}" \
-        cargo bench --bench upload_framework_budget
-fi
+rtk node browser/scripts/run-upload-server-processes.mjs \
+    --profile "${profile}" \
+    --cpu-set "${cpu_set}" \
+    --baseline "${baseline}" \
+    --output "${server_result}"
 
 printf '%s\n' "[upload-budget] U4/16 production browser upload path profile=${profile}"
 (

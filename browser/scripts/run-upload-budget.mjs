@@ -479,12 +479,17 @@ async function main() {
         `${JSON.stringify({ measurements: browserEvidence.measurements, runs: browserEvidence.runs.map(({ measurements }) => ({ ...measurements, progressDurationsMilliseconds: `[${String(measurements.progressDurationsMilliseconds.length)} samples]` })) }, null, 2)}\n`,
       );
     }
+    const serverEvidence = schema.uploadServerEvidenceFromProcessRuns(
+      await boundedJson(options.serverResult),
+      artifactEvidence.sha256,
+      options.profile,
+    );
     const result = schema.validateUploadBudgetEvidence({
       artifact: artifactEvidence,
       browser: browserEvidence,
       recordedAt: new Date().toISOString(),
       schemaVersion: 1,
-      server: await boundedJson(options.serverResult),
+      server: serverEvidence,
       workload: "U4/16",
     });
     const baselineValue = await boundedJson(options.baseline, true);

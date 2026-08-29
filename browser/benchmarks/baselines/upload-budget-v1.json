@@ -27,7 +27,7 @@
         "playwrightVersion": "1.62.1",
         "profile": "B1",
         "qualificationRequirementsMet": false,
-        "selectedCpuCount": 32,
+        "selectedCpuCount": 8,
         "viewport": {
           "height": 720,
           "width": 1280
@@ -144,7 +144,7 @@
             "playwrightVersion": "1.62.1",
             "profile": "B1",
             "qualificationRequirementsMet": false,
-            "selectedCpuCount": 32,
+            "selectedCpuCount": 8,
             "viewport": {
               "height": 720,
               "width": 1280
@@ -231,32 +231,31 @@
             "maxSimultaneousTransportOperations": 4,
             "maxSimultaneousTransportTransfers": 4,
             "progressDurationsMilliseconds": [
-              0.09999999403953552, 0, 0, 0, 0.7000000029802322, 0, 0, 0, 0, 0.5, 0,
-              0.09999999403953552, 0, 0, 0, 0, 0.5, 0, 0.29999999701976776, 0, 0, 0, 0, 0,
-              2.7000000029802322, 0.7000000029802322, 0, 0, 0, 0, 0.10000000894069672, 0,
-              0.09999999403953552, 0.7000000029802322, 0, 0, 0, 0.09999999403953552, 0,
-              0.10000000894069672, 0, 0, 0.29999999701976776, 0.20000000298023224,
-              0.09999999403953552, 0.5, 0, 0.20000000298023224, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.4000000059604645, 0, 0, 0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0,
-              0, 0.10000000894069672, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0.10000000894069672,
-              0.10000000894069672, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0, 0,
-              0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0.5999999940395355, 0, 0, 0,
-              0, 0, 0, 0.5, 0.09999999403953552, 0.10000000894069672, 0.6000000089406967,
-              0.09999999403953552, 0.09999999403953552, 0.09999999403953552, 0, 0.5,
-              0.10000000894069672, 0, 0, 0, 0.7999999970197678, 0, 0.09999999403953552,
-              0.4000000059604645, 0, 0, 0.5999999940395355, 0.10000000894069672,
-              0.09999999403953552, 0, 0, 0, 0.09999999403953552, 0, 0.09999999403953552, 0, 0, 0, 0,
-              0.29999999701976776, 0, 0, 0, 0, 0.5, 0, 0, 0.20000000298023224, 0,
-              0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0.10000000894069672, 0, 0,
-              0.09999999403953552, 0, 1.9000000059604645, 0, 0, 0, 0.5, 0.09999999403953552, 0, 0,
-              0, 0, 0, 0.3999999910593033, 0.10000000894069672, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0.5999999940395355, 0,
-              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0.3999999910593033, 0, 0, 0, 0,
-              0.10000000894069672, 0, 0.3999999910593033, 0, 0, 0, 0.5, 0, 0.10000000894069672,
-              0.6000000089406967, 0, 0.10000000894069672, 0.7000000029802322, 0.09999999403953552,
-              0, 0, 0, 0, 0, 0, 0, 0, 0.4000000059604645, 0, 0, 0, 0.3999999910593033, 0, 0, 0, 0,
-              0.20000000298023224, 0, 0.29999999701976776, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.09999999403953552, 0, 0, 0, 0
+              0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0.5, 0.10000000894069672, 0.10000000894069672, 0, 0,
+              0, 0, 0.09999999403953552, 0.09999999403953552, 0, 0, 0, 2.2999999970197678, 0, 0,
+              0.5, 0, 0.09999999403953552, 0, 0, 0, 0.20000000298023224, 0, 0.29999999701976776,
+              0.09999999403953552, 0.3999999910593033, 0.6000000089406967, 0, 0.09999999403953552,
+              0, 0, 0.7000000029802322, 0.20000000298023224, 0, 0, 0, 0.09999999403953552, 0, 0,
+              0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0.20000000298023224, 0, 0, 0.4000000059604645, 0, 0, 0, 0,
+              0, 0, 0, 0, 0, 0.09999999403953552, 0.7000000029802322, 0, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0.09999999403953552, 0, 0.5, 0, 0, 0, 0.10000000894069672,
+              0.5999999940395355, 0, 0.29999999701976776, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0,
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.4000000059604645, 0, 0.10000000894069672, 0,
+              0.09999999403953552, 0.10000000894069672, 0, 0, 0, 0, 0, 0.10000000894069672,
+              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.29999999701976776, 0, 0, 0, 0, 0, 1.2999999970197678, 0, 0, 0, 0.6000000089406967,
+              0.09999999403953552, 0, 0, 0.09999999403953552, 0.09999999403953552, 0, 0, 0, 0, 0, 0,
+              0.3999999910593033, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552,
+              0.29999999701976776, 0, 0.4000000059604645, 0, 0.09999999403953552, 0,
+              0.7999999970197678, 0, 0, 0, 0.20000000298023224, 0.7999999970197678, 0, 0,
+              0.10000000894069672, 0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0,
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.4000000059604645, 0.6000000089406967,
+              0.5999999940395355, 0, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0.5999999940395355,
+              0, 0.09999999403953552, 0, 0, 0.10000000894069672, 0, 0.09999999403953552, 0, 0,
+              0.09999999403953552, 0, 0, 0, 0.10000000894069672, 0.09999999403953552, 0, 0,
+              0.7000000029802322, 0, 0, 0, 0, 0, 0, 0
             ],
             "progressP50Milliseconds": 0,
             "progressP95Milliseconds": 0.5,
@@ -285,7 +284,7 @@
         "files": 4
       }
     },
-    "recordedAt": "2026-08-29T14:16:08.288Z",
+    "recordedAt": "2026-08-29T14:52:26.321Z",
     "schemaVersion": 1,
     "server": {
       "bounds": {
@@ -419,14 +418,163 @@
         "maxChunksPerTransfer": 2,
         "maxConcurrentTransfers": 4,
         "maxQueueDepth": 4,
-        "p50Microseconds": 15.633000000000001,
-        "p95Microseconds": 16.323,
+        "p50Microseconds": 16.252,
+        "p95Microseconds": 17.048000000000002,
         "retainedBytes": 1363344
       },
       "methodology": {
+        "independentRuns": 1,
         "measuredSamples": 40,
+        "regressionReference": "median_run_p95_v1",
         "warmupIterations": 50
       },
+      "runs": [
+        {
+          "artifactSha256": "ce7a5aa012d6b4e4ec1ae8a14c46eac11e7eedcacb3e1ca492a8c1a2d33ff5ec",
+          "environment": {
+            "architecture": "x86_64",
+            "classification": "unqualified",
+            "cpuGovernor": "powersave",
+            "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+            "database": "not_used_by_upload_control_budget",
+            "dedicatedVcpusAttested": false,
+            "kernel": "Linux 7.0.0-30-generic",
+            "loopbackProviders": true,
+            "memoryBytes": 100993044480,
+            "operatingSystem": "linux",
+            "profile": "S1",
+            "qualificationRequirementsMet": false,
+            "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)",
+            "selectedCpuCount": 8,
+            "warmFilesystemCache": true
+          },
+          "measurements": {
+            "chunkBuffersByTransfer": [
+              {
+                "bodyHighWater": 1,
+                "currentBodyBuffers": 1,
+                "currentBytes": 327680,
+                "currentProviderBuffers": 1,
+                "currentTotalBuffers": 2,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000000",
+                "providerHighWater": 1,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 327680
+              },
+              {
+                "bodyHighWater": 1,
+                "currentBodyBuffers": 1,
+                "currentBytes": 327680,
+                "currentProviderBuffers": 1,
+                "currentTotalBuffers": 2,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000001",
+                "providerHighWater": 1,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 327680
+              },
+              {
+                "bodyHighWater": 1,
+                "currentBodyBuffers": 1,
+                "currentBytes": 327680,
+                "currentProviderBuffers": 1,
+                "currentTotalBuffers": 2,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000002",
+                "providerHighWater": 1,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 327680
+              },
+              {
+                "bodyHighWater": 1,
+                "currentBodyBuffers": 1,
+                "currentBytes": 327680,
+                "currentProviderBuffers": 1,
+                "currentTotalBuffers": 2,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000003",
+                "providerHighWater": 1,
+                "totalHighWater": 2,
+                "totalHighWaterBytes": 327680
+              }
+            ],
+            "completedBytes": 67108864,
+            "completedChunks": 256,
+            "completedTransfers": [
+              {
+                "acceptedBytes": 16777216,
+                "acceptedChunks": 64,
+                "duplicateDisposition": "existing_outcome",
+                "finalRevision": 71,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000000",
+                "providerCheckpointChunks": 64,
+                "providerCommittedBytes": 16777216
+              },
+              {
+                "acceptedBytes": 16777216,
+                "acceptedChunks": 64,
+                "duplicateDisposition": "existing_outcome",
+                "finalRevision": 71,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000001",
+                "providerCheckpointChunks": 64,
+                "providerCommittedBytes": 16777216
+              },
+              {
+                "acceptedBytes": 16777216,
+                "acceptedChunks": 64,
+                "duplicateDisposition": "existing_outcome",
+                "finalRevision": 71,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000002",
+                "providerCheckpointChunks": 64,
+                "providerCommittedBytes": 16777216
+              },
+              {
+                "acceptedBytes": 16777216,
+                "acceptedChunks": 64,
+                "duplicateDisposition": "existing_outcome",
+                "finalRevision": 71,
+                "handle": "018f47c1-2af0-7cc4-b001-000000000003",
+                "providerCheckpointChunks": 64,
+                "providerCommittedBytes": 16777216
+              }
+            ],
+            "excludedCalls": {
+              "applicationValidation": 0,
+              "bodyIo": 0,
+              "provider": 0,
+              "scanner": 0
+            },
+            "liveChunkBuffers": 8,
+            "managerOwnedBytes": 52624,
+            "managerOwnedCategories": {
+              "activeServicePermits": 4,
+              "providerAcceptedChunkRecords": 252,
+              "providerActiveChunks": 4,
+              "providerActiveDescriptors": 4,
+              "providerActiveOperations": 4,
+              "providerControlRecords": 1,
+              "providerOwnedTransfers": 4,
+              "retainedHandleBytes": 144,
+              "serviceControlRecords": 1
+            },
+            "maxChunksPerTransfer": 2,
+            "maxConcurrentTransfers": 4,
+            "maxQueueDepth": 4,
+            "p50Microseconds": 16.252,
+            "p95Microseconds": 17.048000000000002,
+            "retainedBytes": 1363344
+          },
+          "methodology": {
+            "measuredSamples": 40,
+            "warmupIterations": 50
+          },
+          "processId": 59982,
+          "runIndex": 1,
+          "workload": {
+            "activeTransfers": 4,
+            "chunkBytes": 262144,
+            "fileBytes": 16777216,
+            "files": 4
+          }
+        }
+      ],
       "workload": {
         "activeTransfers": 4,
         "chunkBytes": 262144,

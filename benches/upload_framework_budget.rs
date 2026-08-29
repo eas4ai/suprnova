@@ -1497,6 +1497,10 @@ struct ServerBudgetResult {
     environment: EnvironmentEvidence,
     measurements: ServerMeasurements,
     methodology: Methodology,
+    #[serde(rename = "processId")]
+    process_id: u32,
+    #[serde(rename = "runIndex")]
+    run_index: usize,
     workload: Workload,
 }
 
@@ -1708,6 +1712,8 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
             measured_samples: MEASURED_SAMPLES,
             warmup_iterations: WARMUP_ITERATIONS,
         },
+        process_id: std::process::id(),
+        run_index: result_run_index()?,
         workload: Workload {
             active_transfers: ACTIVE_TRANSFERS,
             chunk_bytes: CHUNK_BYTES,
@@ -1746,6 +1752,22 @@ fn result_path() -> PathBuf {
         || PathBuf::from("benchmarks/local/upload-server-v1.json"),
         PathBuf::from,
     )
+}
+
+fn result_run_index() -> Result<usize, Box<dyn Error>> {
+    let Some(value) = std::env::var_os("SUPRNOVA_LIVE_UPLOAD_SERVER_RUN_INDEX") else {
+        return Ok(1);
+    };
+    let parsed = value
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("upload server run index is not UTF-8"))?
+        .parse::<usize>()?;
+    if !(1..=3).contains(&parsed) {
+        return Err(
+            std::io::Error::other("upload server run index must be between 1 and 3").into(),
+        );
+    }
+    Ok(parsed)
 }
 
 fn write_result(result: &ServerBudgetResult, path: PathBuf) -> Result<(), Box<dyn Error>> {
