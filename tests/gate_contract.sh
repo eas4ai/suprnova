@@ -53,6 +53,7 @@ contains_blanket_warning_denial() {
     local short_form='(^|[[:space:]])-D[[:space:]]*warnings([[:space:]]|$)'
     local long_form='(^|[[:space:]])--deny([=[:space:]]+)warnings([[:space:]]|$)'
     local unquoted=${source//\"/}
+    local assignment
     local line
     local rustflags
 
@@ -63,12 +64,25 @@ contains_blanket_warning_denial() {
 
     while IFS= read -r line; do
         if [[ ${line} =~ (^|[[:space:]])RUSTFLAGS[[:space:]]*= ]]; then
-            rustflags=${line#*=}
+            assignment=${BASH_REMATCH[0]}
+            rustflags=${line#*"${assignment}"}
+            rustflags=${rustflags#"${rustflags%%[![:space:]]*}"}
+            case ${rustflags:0:1} in
+                '"')
+                    rustflags=${rustflags:1}
+                    rustflags=${rustflags%%\"*}
+                    ;;
+                "'")
+                    rustflags=${rustflags:1}
+                    rustflags=${rustflags%%\'*}
+                    ;;
+                *) rustflags=${rustflags%%[[:space:]]*} ;;
+            esac
             if [[ ${rustflags} =~ ${short_form} || ${rustflags} =~ ${long_form} ]]; then
                 return 0
             fi
         fi
-    done <<<"${unquoted}"
+    done <<<"${source}"
 
     return 1
 }
@@ -338,7 +352,9 @@ for warning_denial_mutation in \
     'RUSTFLAGS=-Dwarnings rtk cargo clippy' \
     'RUSTFLAGS="-D warnings" rtk cargo clippy' \
     "RUSTFLAGS='--deny warnings' rtk cargo clippy" \
-    "RUSTFLAGS='--deny=warnings' rtk cargo clippy"; do
+    "RUSTFLAGS='--deny=warnings' rtk cargo clippy" \
+    'CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings rtk cargo clippy' \
+    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="--deny warnings" rtk cargo clippy'; do
     if ! contains_blanket_warning_denial "${warning_denial_mutation}"; then
         printf 'gate contract: warning-denial mutation survived (%s)\n' \
             "${warning_denial_mutation}" >&2
@@ -346,7 +362,7 @@ for warning_denial_mutation in \
     fi
 done
 if contains_blanket_warning_denial \
-    'RUSTFLAGS="-C target-cpu=native -D dead_code" rtk cargo clippy'; then
+    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="-C target-cpu=native -D dead_code" rtk cargo clippy'; then
     printf '%s\n' "gate contract: narrow lint denial was mistaken for blanket warning denial" >&2
     exit 1
 fi
