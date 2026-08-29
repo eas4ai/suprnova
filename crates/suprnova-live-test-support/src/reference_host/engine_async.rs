@@ -953,7 +953,7 @@ impl EngineAsyncFixture {
         .map_err(|_| "engine envelope")
     }
 
-    pub(super) fn reauthorize(&self, authorization: &AuthorizedTransportSubscription) {
+    pub(super) fn commit_reauthorization(&self, authorization: &AuthorizedTransportSubscription) {
         self.registry.activate(authorization.subscription().clone());
     }
 

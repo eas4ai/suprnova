@@ -335,28 +335,45 @@ impl AsyncRuntime {
             return Err("transport_retired");
         }
         if let Some(transport_id) = state.by_kind.get(&kind).cloned() {
-            if let Some((subscription, _)) = replay_from {
-                let authorization = state
+            let response = {
+                let transport = state
                     .transports
                     .get(&transport_id)
-                    .and_then(|transport| transport.memberships.get(subscription))
-                    .map(|membership| membership.engine_authorization.clone())
+                    .ok_or("transport_authority_invalid")?;
+                if transport.kind != kind || transport.generation != request.transport_generation {
+                    return Err("transport_generation_invalid");
+                }
+                transport_response(&transport_id, transport, state.engine.as_ref(), replay_from)?
+            };
+            if let Some((subscription, _)) = replay_from {
+                // The state lock stays held from continuity validation through this
+                // final identity check and activation. A concurrent replacement
+                // therefore cannot commit authority for a different transport
+                // generation or membership after the validated response was built.
+                if state.by_kind.get(&kind) != Some(&transport_id) {
+                    return Err("transport_authority_invalid");
+                }
+                let transport = state
+                    .transports
+                    .get(&transport_id)
+                    .filter(|transport| {
+                        transport.kind == kind
+                            && transport.generation == request.transport_generation
+                    })
+                    .ok_or("transport_authority_invalid")?;
+                let membership = transport
+                    .memberships
+                    .get(subscription)
+                    .filter(|membership| {
+                        membership.generation == request.transport_generation
+                            && membership.authority.origin() == origin
+                    })
                     .ok_or("membership_authority_invalid")?;
-                state.engine.reauthorize(&authorization);
+                state
+                    .engine
+                    .commit_reauthorization(&membership.engine_authorization);
             }
-            let transport = state
-                .transports
-                .get(&transport_id)
-                .ok_or("transport_authority_invalid")?;
-            if transport.generation != request.transport_generation {
-                return Err("transport_generation_invalid");
-            }
-            return transport_response(
-                &transport_id,
-                transport,
-                state.engine.as_ref(),
-                replay_from,
-            );
+            return Ok(response);
         }
         if state.transports.len() >= MAX_DOCUMENT_TRANSPORTS {
             return Err("transport_capacity_exceeded");

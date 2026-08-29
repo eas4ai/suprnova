@@ -50,6 +50,7 @@ const ADVERSARIAL_PROVIDER_PORT: u16 = 4_203;
 const REAL_ASYNC_MATRIX_PORT: u16 = 4_204;
 const REAL_UPLOAD_RACE_PORT: u16 = 4_205;
 const FINALIZER_SCOPE_PORT: u16 = 4_206;
+const REAUTH_REJECTION_PORT: u16 = 4_207;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -1945,6 +1946,243 @@ async fn async_adversarial_controls_execute_the_real_delivery_owners() {
         host.shutdown()
             .await
             .expect("real-owner matrix host shutdown");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_reauthorization_cannot_restore_revoked_membership_authority() {
+    for (case, transport_generation, position, prior_subscription, expected) in [
+        (
+            "stale-generation",
+            2,
+            json!({"epoch": "1", "sequence": "1"}),
+            None,
+            "transport_generation_invalid",
+        ),
+        (
+            "future-position",
+            1,
+            json!({"epoch": "1", "sequence": "9007199254740991"}),
+            None,
+            "future_position_rejected",
+        ),
+        (
+            "malformed-position",
+            1,
+            json!({"epoch": "1", "sequence": "not-a-sequence"}),
+            None,
+            "sequence_invalid",
+        ),
+        (
+            "wrong-subscription",
+            1,
+            json!({"epoch": "1", "sequence": "1"}),
+            Some("orders-wrong-scope"),
+            "transport_facts_invalid",
+        ),
+    ] {
+        let root = TestRoot::new(&format!("reauth-rejection-{case}"));
+        let host = start_host(REAUTH_REJECTION_PORT, &root, ReferenceFaultSchedule::None).await;
+        let (status, _, created) = json_request(
+            &host,
+            Method::POST,
+            "/__live/async/transports",
+            json!({"kind": "sse", "subscription": "orders", "transport_generation": 1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{case}: {created}");
+        let transport = created["transport"].as_str().expect("transport");
+        let memberships = created["memberships"].as_array().expect("memberships");
+        for (index, membership) in memberships.iter().enumerate() {
+            let subscription = membership["subscription"].as_str().expect("subscription");
+            let (status, _, acknowledgment) = json_request(
+                &host,
+                Method::POST,
+                &format!("/__live/async/transports/{transport}/subscriptions/{subscription}"),
+                json!({
+                    "authority": membership["authority"],
+                    "control_nonce": format!("reauth-initial-{case}-{index}"),
+                    "operation": "subscribe",
+                    "transport_generation": 1
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {acknowledgment}");
+        }
+
+        let (status, _, loss) = json_request(
+            &host,
+            Method::POST,
+            "/__test/iteration-004/control/async/adversarial/revoked-authorization",
+            json!({"transport": transport}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {loss}");
+        assert_eq!(loss["disposition"], "authorization_lost", "{case}");
+        assert_eq!(loss["transport_generation_before"], 1, "{case}");
+        assert_eq!(loss["transport_generation_after"], 1, "{case}");
+        assert_eq!(loss["sibling_open_before"], true, "{case}");
+        assert_eq!(loss["sibling_open_after"], true, "{case}");
+        assert_eq!(loss["document_memberships_before"], 2, "{case}");
+        assert_eq!(loss["document_memberships_after"], 1, "{case}");
+        assert_eq!(loss["logical_memberships_before"], 2, "{case}");
+        assert_eq!(loss["logical_memberships_after"], 1, "{case}");
+        let after_loss = host.inspection_handle().snapshot();
+        let affected = loss["affected_subscription"]
+            .as_str()
+            .expect("affected subscription");
+        let affected_membership = memberships
+            .iter()
+            .find(|membership| membership["subscription"] == affected)
+            .expect("affected membership");
+        let rejected_prior = prior_subscription.unwrap_or(affected);
+        let (status, _, rejected) = json_request(
+            &host,
+            Method::POST,
+            "/__live/async/transports",
+            json!({
+                "kind": "sse",
+                "position": position,
+                "prior_subscription": rejected_prior,
+                "subscription": "orders",
+                "transport_generation": transport_generation
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {rejected}");
+        assert_eq!(rejected["error"], expected, "{case}");
+
+        let membership_path =
+            format!("/__live/async/transports/{transport}/subscriptions/{affected}");
+        let (status, _, still_revoked) = json_request(
+            &host,
+            Method::POST,
+            &membership_path,
+            json!({
+                "authority": affected_membership["authority"],
+                "control_nonce": format!("reauth-rejected-probe-{case}"),
+                "operation": "subscribe",
+                "transport_generation": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{case}: {still_revoked}");
+        assert_eq!(
+            still_revoked["error"], "engine_membership_rejected",
+            "{case}"
+        );
+        let after_rejection = host.inspection_handle().snapshot();
+        assert_eq!(
+            after_rejection.logical_memberships, after_loss.logical_memberships,
+            "{case}"
+        );
+        assert_eq!(
+            after_rejection.active_physical_transports, after_loss.active_physical_transports,
+            "{case}"
+        );
+        assert_eq!(
+            after_rejection.open_sockets, after_loss.open_sockets,
+            "{case}"
+        );
+
+        let accepted_sequence = loss["accepted_sequence"]
+            .as_u64()
+            .expect("accepted sequence");
+        let (status, _, reauthorized) = json_request(
+            &host,
+            Method::POST,
+            "/__live/async/transports",
+            json!({
+                "kind": "sse",
+                "position": {"epoch": "1", "sequence": accepted_sequence.to_string()},
+                "prior_subscription": affected,
+                "subscription": "orders",
+                "transport_generation": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{case}: {reauthorized}");
+        assert_eq!(reauthorized["transport"], transport, "{case}");
+        assert_eq!(reauthorized["transport_generation"], 1, "{case}");
+        let refreshed_memberships = reauthorized["memberships"]
+            .as_array()
+            .expect("refreshed memberships");
+        let refreshed_affected = refreshed_memberships
+            .iter()
+            .find(|membership| membership["subscription"] == affected)
+            .expect("refreshed affected membership");
+        assert_eq!(
+            refreshed_affected["browser_authorization"]["baseline"]["sequence"],
+            accepted_sequence.to_string(),
+            "{case}"
+        );
+        let sibling = loss["sibling_subscription"]
+            .as_str()
+            .expect("sibling subscription");
+        let refreshed_sibling = refreshed_memberships
+            .iter()
+            .find(|membership| membership["subscription"] == sibling)
+            .expect("refreshed sibling membership");
+        assert_eq!(
+            refreshed_sibling["browser_authorization"]["baseline"]["sequence"],
+            loss["sibling_accepted_sequence_after"]
+                .as_u64()
+                .expect("sibling sequence")
+                .to_string(),
+            "{case}"
+        );
+        let (status, _, reopened) = json_request(
+            &host,
+            Method::POST,
+            &membership_path,
+            json!({
+                "authority": affected_membership["authority"],
+                "control_nonce": format!("reauth-accepted-{case}"),
+                "operation": "subscribe",
+                "transport_generation": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {reopened}");
+        assert_eq!(reopened["operation"], "subscribe", "{case}");
+        let after_reauthorization = host.inspection_handle().snapshot();
+        assert_eq!(after_reauthorization.logical_memberships, 2, "{case}");
+        assert_eq!(
+            after_reauthorization.active_physical_transports, after_loss.active_physical_transports,
+            "{case}"
+        );
+
+        let (status, _, duplicate) = json_request(
+            &host,
+            Method::POST,
+            &membership_path,
+            json!({
+                "authority": affected_membership["authority"],
+                "control_nonce": format!("reauth-duplicate-{case}"),
+                "operation": "subscribe",
+                "transport_generation": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{case}: {duplicate}");
+        assert_eq!(duplicate["error"], "membership_authority_invalid", "{case}");
+        assert_eq!(
+            host.inspection_handle().snapshot().logical_memberships,
+            2,
+            "{case}"
+        );
+
+        let (status, _, action) = json_request(
+            &host,
+            Method::POST,
+            "/scenario/iteration004/action",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}: {action}");
+        host.shutdown()
+            .await
+            .expect("clean rejected-reauthorization host shutdown");
     }
 }
 
