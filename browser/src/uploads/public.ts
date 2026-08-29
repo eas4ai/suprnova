@@ -5,6 +5,8 @@ export type {
   UploadApplicationPort,
   UploadFileIdentity,
   UploadHandle,
+  UploadManagerResourceSnapshot,
+  UploadResourceObserver,
   UploadTransport,
   UploadTransportRequest,
   UploadTransportResponse,

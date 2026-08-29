@@ -1,10 +1,10 @@
 {
   "exploratoryReference": {
     "artifact": {
-      "brotliBytes": 14584,
+      "brotliBytes": 14954,
       "file": "suprnova-live.uploads.esm.js",
       "role": "uploads-esm",
-      "sha256": "cb9bf0f53f809aa6fc8104528d97a28105fd7c7643254eeaa665ae459cec9d6a"
+      "sha256": "4eabbe618a6b42909eebf5d630b842f10c37ea027146f8b4a5fff3a0d2475709"
     },
     "browser": {
       "bounds": {
@@ -37,21 +37,131 @@
       "measurements": {
         "activeTransfers": 4,
         "liveChunkBuffers": 2,
-        "managerOwnedBytes": 262144,
+        "managerChunkBuffers": 1,
+        "managerOwnedBytes": 10418,
+        "managerOwnedCategories": {
+          "activeLeases": 4,
+          "bindings": 1,
+          "cleanupObligations": 0,
+          "entries": 4,
+          "generationFields": 1,
+          "observers": 1,
+          "ownedResources": 4,
+          "pendingChunkBuffers": 1,
+          "pendingChunkBytes": 262144,
+          "queuedBytes": 0,
+          "queuedItems": 0,
+          "retainedStringCodeUnits": 505,
+          "waitingPermits": 0
+        },
         "maxChunksPerTransfer": 2,
         "maxConcurrentTransfers": 4,
         "maxQueueDepth": 4,
         "progressP50Milliseconds": 0,
-        "progressP95Milliseconds": 0.5999999940395355,
-        "retainedBytes": 786432,
+        "progressP95Milliseconds": 0.5,
+        "retainedBytes": 534706,
         "slicedBytes": 67108864,
-        "slices": 256
+        "slices": 256,
+        "transportChunkBuffers": 1
       },
       "methodology": {
         "independentRuns": 1,
         "measuredSamples": 267,
         "warmupIterations": 5
       },
+      "runs": [
+        {
+          "artifactSha256": "4eabbe618a6b42909eebf5d630b842f10c37ea027146f8b4a5fff3a0d2475709",
+          "environment": {
+            "architecture": "x86_64",
+            "browser": "chromium",
+            "browserRevision": "149.0.7827.55 @ /home/shawn/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+            "classification": "unqualified",
+            "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+            "cpuThrottleRate": 4,
+            "dedicatedVcpusAttested": false,
+            "extensions": false,
+            "kernel": "Linux 7.0.0-30-generic",
+            "memoryBytes": 100993044480,
+            "operatingSystem": "linux",
+            "playwrightVersion": "1.62.1",
+            "profile": "B1",
+            "qualificationRequirementsMet": false,
+            "selectedCpuCount": 8,
+            "viewport": {
+              "height": 720,
+              "width": 1280
+            },
+            "warmHttpCache": true
+          },
+          "measurements": {
+            "activeTransfers": 4,
+            "liveChunkBuffers": 2,
+            "managerChunkBuffers": 1,
+            "managerOwnedBytes": 10418,
+            "managerOwnedCategories": {
+              "activeLeases": 4,
+              "bindings": 1,
+              "cleanupObligations": 0,
+              "entries": 4,
+              "generationFields": 1,
+              "observers": 1,
+              "ownedResources": 4,
+              "pendingChunkBuffers": 1,
+              "pendingChunkBytes": 262144,
+              "queuedBytes": 0,
+              "queuedItems": 0,
+              "retainedStringCodeUnits": 505,
+              "waitingPermits": 0
+            },
+            "maxChunksPerTransfer": 2,
+            "maxConcurrentTransfers": 4,
+            "maxQueueDepth": 4,
+            "progressDurationsMilliseconds": [
+              0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0.10000000894069672,
+              0.10000000894069672, 0, 0, 0, 0.7000000029802322, 0.20000000298023224, 0, 0, 0, 0, 0,
+              0, 0, 2.5, 0.10000000894069672, 0, 0, 0, 0.5, 0, 0, 0, 0.10000000894069672,
+              0.6000000089406967, 0, 0, 0, 0, 0.20000000298023224, 0, 0, 0.10000000894069672, 0,
+              0.10000000894069672, 0, 0, 0, 0.20000000298023224, 0, 0, 0, 0, 0, 0,
+              0.7999999970197678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0,
+              0, 0, 0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0.10000000894069672, 0,
+              0.20000000298023224, 0, 0, 0, 0, 0.09999999403953552, 0.09999999403953552, 0,
+              0.7000000029802322, 0, 0.09999999403953552, 0, 0, 0.5999999940395355, 0,
+              0.10000000894069672, 0.09999999403953552, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0,
+              0, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0.5, 0, 0.10000000894069672,
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.29999999701976776, 0, 0, 0.09999999403953552,
+              0.29999999701976776, 0, 0, 0, 0, 0, 0, 0.7999999970197678, 0, 0.7000000029802322, 0,
+              0, 0, 0, 0, 0, 0.10000000894069672, 0.09999999403953552, 0, 0, 0, 0,
+              0.20000000298023224, 0, 0, 0.7000000029802322, 0, 0, 0, 2.2999999970197678, 0, 0, 0,
+              0.20000000298023224, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.10000000894069672, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0,
+              0.29999999701976776, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5999999940395355, 0, 0,
+              0.29999999701976776, 0.09999999403953552, 0.09999999403953552, 0, 0.09999999403953552,
+              0.20000000298023224, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0, 0, 0,
+              0.5999999940395355, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0.4000000059604645, 0,
+              0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0
+            ],
+            "progressP50Milliseconds": 0,
+            "progressP95Milliseconds": 0.5,
+            "retainedBytes": 534706,
+            "slicedBytes": 67108864,
+            "slices": 256,
+            "transportChunkBuffers": 1
+          },
+          "methodology": {
+            "measuredSamples": 267,
+            "warmupIterations": 5
+          },
+          "runIndex": 1,
+          "workload": {
+            "activeTransfers": 4,
+            "chunkBytes": 262144,
+            "fileBytes": 16777216,
+            "files": 4
+          }
+        }
+      ],
       "workload": {
         "activeTransfers": 4,
         "chunkBytes": 262144,
@@ -59,7 +169,7 @@
         "files": 4
       }
     },
-    "recordedAt": "2026-08-29T10:50:51.072Z",
+    "recordedAt": "2026-08-29T11:46:30.030Z",
     "schemaVersion": 1,
     "server": {
       "bounds": {
@@ -91,14 +201,22 @@
           "provider": 0,
           "scanner": 0
         },
-        "liveChunkBuffers": 0,
-        "managerOwnedBytes": 0,
-        "maxChunksPerTransfer": 0,
-        "maxConcurrentTransfers": 0,
-        "maxQueueDepth": 0,
-        "p50Microseconds": 15.222,
-        "p95Microseconds": 16.158,
-        "retainedBytes": 0
+        "liveChunkBuffers": 8,
+        "managerOwnedBytes": 4240,
+        "managerOwnedCategories": {
+          "activePermits": 4,
+          "chunkQueueEntries": 8,
+          "permitSlots": 4,
+          "queueControlRecords": 2,
+          "retainedHandleBytes": 144,
+          "transferQueueEntries": 4
+        },
+        "maxChunksPerTransfer": 2,
+        "maxConcurrentTransfers": 4,
+        "maxQueueDepth": 4,
+        "p50Microseconds": 15.395000000000001,
+        "p95Microseconds": 19.9,
+        "retainedBytes": 2101536
       },
       "methodology": {
         "measuredSamples": 40,

@@ -176,6 +176,30 @@ export interface UploadManagerSnapshot {
   readonly uploads: readonly UploadTransferSnapshot[];
 }
 
+/** Count-only upload ownership metrics suitable for bounded observability. */
+export interface UploadManagerResourceSnapshot {
+  readonly activeLeases: number;
+  readonly bindings: number;
+  readonly cleanupObligations: number;
+  readonly entries: number;
+  readonly generationFields: number;
+  readonly observers: number;
+  readonly ownedResources: number;
+  readonly pendingChunkBuffers: number;
+  readonly pendingChunkBytes: number;
+  readonly queuedBytes: number;
+  readonly queuedItems: number;
+  readonly retainedStringCodeUnits: number;
+  readonly waitingPermits: number;
+}
+
+/** Optional count-only observers. Implementations do not enter production artifacts. */
+export interface UploadResourceObserver {
+  progressApplicationCompleted(): void;
+  progressApplicationStarted(): void;
+  resources(snapshot: UploadManagerResourceSnapshot): void;
+}
+
 export interface UploadManagerOptions {
   readonly application?: UploadApplicationPort | undefined;
   readonly chunkBytes: number;
@@ -184,6 +208,7 @@ export interface UploadManagerOptions {
   readonly maxItems: number;
   readonly maxQueueBytes: number;
   readonly randomness: UploadRandomness;
+  readonly resourceObserver?: UploadResourceObserver | undefined;
   readonly transport: UploadTransport;
 }
 

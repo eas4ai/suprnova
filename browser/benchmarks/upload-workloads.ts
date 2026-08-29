@@ -1,24 +1,20 @@
-import { UploadManager } from "../src/uploads/manager.js";
-import { createUploadProgressView, UploadProgressPresenter } from "../src/uploads/progress.js";
-import type {
-  UploadHandle,
-  UploadHandleProposal,
-  UploadIslandPort,
-  UploadManagerSnapshot,
-  UploadTransport,
-  UploadTransportRequest,
-  UploadTransportResponse,
-} from "../src/uploads/types.js";
+import {
+  assertUploadArtifactNamespace,
+  estimateUploadManagerOwnedBytes,
+  type ObservedUploadManagerResources,
+  type UploadArtifactNamespace,
+  UPLOAD_BUDGET_OBSERVER_MARKER,
+} from "./upload-accounting.js";
 import { U4_16, summarizeUploadSamples } from "./upload-schema.js";
 
-const MANAGER_BYTES = 256 * 1024;
 const WARMUP_PROGRESS_APPLICATIONS = 5;
-export const UPLOAD_BUDGET_OBSERVER_MARKER = "suprnova-upload-budget-observer-v1";
 
 interface UploadWorkloadMeasurement {
   readonly activeTransfers: number;
   readonly liveChunkBuffers: number;
+  readonly managerChunkBuffers: number;
   readonly managerOwnedBytes: number;
+  readonly managerOwnedCategories: ObservedUploadManagerResources;
   readonly maxChunksPerTransfer: number;
   readonly maxConcurrentTransfers: number;
   readonly maxQueueDepth: number;
@@ -29,11 +25,27 @@ interface UploadWorkloadMeasurement {
   readonly retainedBytes: number;
   readonly slicedBytes: number;
   readonly slices: number;
+  readonly transportChunkBuffers: number;
 }
 
 interface FileSliceObservation {
   bytes: number;
   calls: number;
+}
+
+interface UploadTransportRequest {
+  readonly bytes?: ArrayBuffer;
+  readonly expectedRevision?: string;
+  readonly handle?: string;
+  readonly operation: "cancel" | "complete" | "create" | "put_chunk" | "status";
+}
+
+interface UploadTransportResponse {
+  readonly grant?: string;
+  readonly handle?: string;
+  readonly nextChunkIndex?: number;
+  readonly revision: string;
+  readonly state: string;
 }
 
 class ObservedFile extends File {
@@ -56,19 +68,38 @@ class ObservedFile extends File {
   }
 }
 
-class ImmediateUploadTransport implements UploadTransport {
-  readonly #revisions = new Map<UploadHandle, bigint>();
-  readonly #activeChunks = new Map<UploadHandle, ArrayBuffer>();
+class ImmediateUploadTransport {
+  readonly #revisions = new Map<string, bigint>();
+  readonly #activeChunks = new Map<string, ArrayBuffer>();
+  readonly #completed: Promise<void>;
+  #completeCount = 0;
   #created = 0;
   #maximumConcurrentTransfers = 0;
   #observeResources: (() => void) | null = null;
+  #resolveCompleted!: () => void;
+
+  constructor() {
+    this.#completed = new Promise<void>((resolve) => {
+      this.#resolveCompleted = resolve;
+    });
+  }
 
   observeResources(observer: () => void): void {
     this.#observeResources = observer;
   }
 
-  activeChunkBuffers(): ReadonlyMap<UploadHandle, ArrayBuffer> {
-    return this.#activeChunks;
+  activeChunkBytes(): number {
+    let bytes = 0;
+    for (const chunk of this.#activeChunks.values()) bytes += chunk.byteLength;
+    return bytes;
+  }
+
+  activeChunkBuffers(): number {
+    return this.#activeChunks.size;
+  }
+
+  completed(): Promise<void> {
+    return this.#completed;
   }
 
   maximumConcurrentTransfers(): number {
@@ -90,8 +121,11 @@ class ImmediateUploadTransport implements UploadTransport {
         });
       }
       case "put_chunk": {
+        if (request.handle === undefined || request.bytes === undefined) {
+          throw new Error("upload_budget_request_invalid");
+        }
         const current = this.#revisions.get(request.handle);
-        if (current?.toString() !== request.expectedRevision) {
+        if (current === undefined || current.toString() !== request.expectedRevision) {
           throw new Error("upload_budget_revision_mismatch");
         }
         this.#activeChunks.set(request.handle, request.bytes);
@@ -108,15 +142,19 @@ class ImmediateUploadTransport implements UploadTransport {
         return Object.freeze({ revision: next.toString(), state: "transferring" });
       }
       case "complete": {
+        if (request.handle === undefined) throw new Error("upload_budget_request_invalid");
         const current = this.#revisions.get(request.handle);
-        if (current?.toString() !== request.expectedRevision) {
+        if (current === undefined || current.toString() !== request.expectedRevision) {
           throw new Error("upload_budget_revision_mismatch");
         }
         const next = current + 1n;
         this.#revisions.set(request.handle, next);
+        this.#completeCount += 1;
+        if (this.#completeCount === U4_16.files) this.#resolveCompleted();
         return Object.freeze({ revision: next.toString(), state: "ready" });
       }
       case "status": {
+        if (request.handle === undefined) throw new Error("upload_budget_request_invalid");
         const current = this.#revisions.get(request.handle);
         if (current === undefined) throw new Error("upload_budget_handle_missing");
         return Object.freeze({
@@ -126,6 +164,7 @@ class ImmediateUploadTransport implements UploadTransport {
         });
       }
       case "cancel": {
+        if (request.handle === undefined) throw new Error("upload_budget_request_invalid");
         const current = this.#revisions.get(request.handle);
         if (current === undefined) throw new Error("upload_budget_handle_missing");
         const next = current + 1n;
@@ -136,97 +175,156 @@ class ImmediateUploadTransport implements UploadTransport {
   }
 }
 
-function chunkHighWater(
-  snapshot: UploadManagerSnapshot,
-  active: ReadonlyMap<UploadHandle, ArrayBuffer>,
-): Readonly<{ live: number; perTransfer: number }> {
-  let live = active.size;
-  let perTransfer = active.size === 0 ? 0 : 1;
-  for (const transfer of snapshot.uploads) {
-    live += transfer.retainedChunks;
-    const transport = transfer.handle === null || !active.has(transfer.handle) ? 0 : 1;
-    perTransfer = Math.max(perTransfer, transfer.retainedChunks + transport);
-  }
-  return Object.freeze({ live, perTransfer });
+function filesOn(input: HTMLInputElement, files: readonly File[]): void {
+  Object.defineProperty(input, "files", {
+    configurable: true,
+    value: Object.freeze([...files]),
+  });
 }
 
-/**
- * Runs the exact U4/16 browser path through production manager, File slicing,
- * checksum, transport validation, and progress presentation code. This module
- * is compiled only into the benchmark harness and is never a production entry.
- */
-export async function measureU4_16(): Promise<UploadWorkloadMeasurement> {
+function blankResources(): ObservedUploadManagerResources {
+  return Object.freeze({
+    activeLeases: 0,
+    bindings: 0,
+    cleanupObligations: 0,
+    entries: 0,
+    generationFields: 0,
+    observers: 0,
+    ownedResources: 0,
+    pendingChunkBuffers: 0,
+    pendingChunkBytes: 0,
+    queuedBytes: 0,
+    queuedItems: 0,
+    retainedStringCodeUnits: 0,
+    waitingPermits: 0,
+  });
+}
+
+/** Executes U4/16 only through the exact imported production artifact surface. */
+export async function measureU4_16(artifactValue: unknown): Promise<UploadWorkloadMeasurement> {
+  assertUploadArtifactNamespace(artifactValue);
+  const artifact: UploadArtifactNamespace = artifactValue;
+  const islandElement = document.createElement("section");
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
-  const islandElement = document.createElement("section");
+  input.setAttribute("live:upload", "attachments");
   const progress = document.createElement("div");
-  document.body.replaceChildren(islandElement, input, progress);
+  progress.setAttribute("live:progress", "attachments");
+  islandElement.append(input, progress);
+  document.body.replaceChildren(islandElement);
 
   const proposals: unknown[] = [];
-  const island: UploadIslandPort = Object.freeze({
-    element: islandElement,
-    identity: Object.freeze({
-      component: "benchmark.uploads",
-      documentKey: "u4-16",
-      slot: "uploads",
-    }),
-    proposeUploadHandle(_field: string, proposal: UploadHandleProposal) {
-      proposals.push(proposal);
-      return "accepted";
-    },
-  });
-  let randomness = 0;
   const transport = new ImmediateUploadTransport();
-  const manager = new UploadManager({
-    chunkBytes: U4_16.chunkBytes,
-    connectivity: { online: () => true },
-    maxActive: U4_16.activeTransfers,
-    maxItems: U4_16.files,
-    maxQueueBytes: MANAGER_BYTES,
-    randomness: {
-      idempotencyKey() {
-        randomness += 1;
-        return `u4-16-${String(randomness)}`;
-      },
-    },
-    transport,
-  });
-  const presenter = new UploadProgressPresenter({ announceEveryMs: 0 });
   const progressSamples: number[] = [];
   let progressApplications = 0;
-  let maxQueueDepth = 0;
+  let progressApplicationStartedAt = 0;
+  let latestResources = blankResources();
+  let managerOwnedBytes = 0;
+  let managerOwnedCategories = latestResources;
   let liveChunkBuffers = 0;
+  let managerChunkBuffers = 0;
   let maxChunksPerTransfer = 0;
   let maxConcurrentTransfers = 0;
+  let maxQueueDepth = 0;
+  let retainedBytes = 0;
+  let transportChunkBuffers = 0;
 
   const observeResources = (): void => {
-    const snapshot = manager.islandSnapshot(island, "attachments");
-    const chunks = chunkHighWater(snapshot, transport.activeChunkBuffers());
-    liveChunkBuffers = Math.max(liveChunkBuffers, chunks.live);
-    maxChunksPerTransfer = Math.max(maxChunksPerTransfer, chunks.perTransfer);
+    const managerBytes = estimateUploadManagerOwnedBytes(latestResources);
+    const activeTransportBuffers = transport.activeChunkBuffers();
+    const chunks = latestResources.pendingChunkBuffers + activeTransportBuffers;
+    if (managerBytes >= managerOwnedBytes) {
+      managerOwnedBytes = managerBytes;
+      managerOwnedCategories = latestResources;
+    }
+    if (chunks >= liveChunkBuffers) {
+      liveChunkBuffers = chunks;
+      managerChunkBuffers = latestResources.pendingChunkBuffers;
+      transportChunkBuffers = activeTransportBuffers;
+    }
+    maxChunksPerTransfer = Math.max(
+      maxChunksPerTransfer,
+      Math.min(
+        2,
+        Number(latestResources.pendingChunkBuffers > 0) + Number(activeTransportBuffers > 0),
+      ),
+    );
     maxConcurrentTransfers = Math.max(
       maxConcurrentTransfers,
-      snapshot.uploads.filter(
-        ({ state }) => state === "transferring" || state === "verifying" || state === "finalizing",
-      ).length,
+      latestResources.activeLeases,
+      transport.maximumConcurrentTransfers(),
     );
-    maxQueueDepth = Math.max(
-      maxQueueDepth,
-      snapshot.uploads.filter(({ state }) => state === "queued").length,
+    maxQueueDepth = Math.max(maxQueueDepth, latestResources.queuedItems);
+    retainedBytes = Math.max(
+      retainedBytes,
+      managerBytes + latestResources.pendingChunkBytes + transport.activeChunkBytes(),
     );
   };
   transport.observeResources(observeResources);
-  const stopObserving = manager.observeIsland(island, (snapshot) => {
-    observeResources();
-    const view = createUploadProgressView(snapshot.uploads);
-    if (view === null) return;
-    const started = performance.now();
-    presenter.render(progress, view);
-    const elapsed = performance.now() - started;
-    progressApplications += 1;
-    if (progressApplications > WARMUP_PROGRESS_APPLICATIONS) progressSamples.push(elapsed);
+  artifact.configureUploads({
+    chunkBytes: U4_16.chunkBytes,
+    connectivity: Object.freeze({ online: () => true }),
+    maxActive: U4_16.activeTransfers,
+    maxItems: U4_16.files,
+    maxQueueBytes: 256 * 1024,
+    randomness: Object.freeze({
+      idempotencyKey: (() => {
+        let next = 0;
+        return () => {
+          next += 1;
+          return `u4-16-${String(next)}`;
+        };
+      })(),
+    }),
+    resourceObserver: Object.freeze({
+      progressApplicationCompleted() {
+        const durationMilliseconds = performance.now() - progressApplicationStartedAt;
+        progressApplications += 1;
+        if (progressApplications > WARMUP_PROGRESS_APPLICATIONS) {
+          progressSamples.push(durationMilliseconds);
+        }
+      },
+      progressApplicationStarted() {
+        progressApplicationStartedAt = performance.now();
+      },
+      resources(snapshot: ObservedUploadManagerResources) {
+        latestResources = snapshot;
+        observeResources();
+      },
+    }),
+    transport,
   });
+
+  const drive = artifact.uploadsFeature[5];
+  const documentConnected = drive(
+    0,
+    Object.freeze({
+      diagnose() {
+        return undefined;
+      },
+      onDispose() {
+        return undefined;
+      },
+    }),
+  );
+  const islandConnected = drive(
+    1,
+    Object.freeze({
+      element: islandElement,
+      identity: Object.freeze({
+        component: "benchmark.uploads",
+        documentKey: "u4-16",
+        slot: "uploads",
+      }),
+      proposeUploadHandle(_field: string, proposal: unknown) {
+        proposals.push(proposal);
+        return "accepted";
+      },
+    }),
+  );
+  if (!documentConnected || !islandConnected)
+    throw new Error("upload_budget_artifact_drive_failed");
 
   const slices: FileSliceObservation = { bytes: 0, calls: 0 };
   const files = Array.from(
@@ -234,19 +332,25 @@ export async function measureU4_16(): Promise<UploadWorkloadMeasurement> {
     (_, index) => new ObservedFile(`u4-16-${String(index)}.bin`, slices),
   );
   try {
-    await manager.select({ field: "attachments", input, island }, files);
+    filesOn(input, files);
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await transport.completed();
+    for (
+      let turn = 0;
+      turn < 64 && progress.getAttribute("data-live-upload-state") !== "ready";
+      turn += 1
+    ) {
+      await Promise.resolve();
+    }
     observeResources();
-    const final = manager.islandSnapshot(island, "attachments");
     if (
-      final.uploads.length !== U4_16.files ||
-      final.uploads.some(
-        ({ sentBytes, size, state }) =>
-          sentBytes !== U4_16.fileBytes || size !== U4_16.fileBytes || state !== "ready",
-      ) ||
+      progress.getAttribute("data-live-upload-state") !== "ready" ||
+      progress.getAttribute("data-live-upload-loaded") !== String(U4_16.files * U4_16.fileBytes) ||
       proposals.length < U4_16.files ||
       slices.calls !== U4_16.files * (U4_16.fileBytes / U4_16.chunkBytes) ||
       slices.bytes !== U4_16.files * U4_16.fileBytes ||
-      progressSamples.length < 30
+      progressSamples.length < 30 ||
+      maxConcurrentTransfers !== U4_16.activeTransfers
     ) {
       throw new Error("upload_budget_workload_incomplete");
     }
@@ -254,7 +358,9 @@ export async function measureU4_16(): Promise<UploadWorkloadMeasurement> {
     return Object.freeze({
       activeTransfers: U4_16.activeTransfers,
       liveChunkBuffers,
-      managerOwnedBytes: MANAGER_BYTES,
+      managerChunkBuffers,
+      managerOwnedBytes,
+      managerOwnedCategories,
       maxChunksPerTransfer,
       maxConcurrentTransfers,
       maxQueueDepth,
@@ -262,13 +368,15 @@ export async function measureU4_16(): Promise<UploadWorkloadMeasurement> {
       progressP95Milliseconds: progressSummary.p95,
       progressDurationsMilliseconds: Object.freeze([...progressSamples]),
       progressSamples: progressSamples.length,
-      retainedBytes: liveChunkBuffers * U4_16.chunkBytes + MANAGER_BYTES,
+      retainedBytes,
       slicedBytes: slices.bytes,
       slices: slices.calls,
+      transportChunkBuffers,
     });
   } finally {
-    stopObserving();
-    manager.dispose();
-    presenter.clear(progress);
+    drive(4, islandElement);
+    drive(5, null);
   }
 }
+
+export { UPLOAD_BUDGET_OBSERVER_MARKER };

@@ -5,6 +5,7 @@ mod component_support;
 
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -14,17 +15,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
-use suprnova_live::identity::{KeyId, ModelField, UnixMillis};
+use suprnova_live::identity::{ActionName, KeyId, ModelField, UnixMillis};
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
+use suprnova_live::resource::{Permit, ResourceBounds, ResourceOwner};
 use suprnova_live::upload::{
     AcceptedChunk, ApplicationValidationDecision, ApplicationValidationInput, ChunkBody,
-    IntegrityEvidence, PrepareTransfer, QuarantineBytes, ReadUpload, ScanDisposition, ScanInput,
-    TransferGrant, TransferGrantCodec, TransferGrantRequest, TransferGrantScope, TransferPlan,
-    TransitionDisposition, UploadApplicationValidator, UploadError, UploadErrorKind, UploadFuture,
-    UploadHandle, UploadLedger, UploadOperation, UploadProtocolCodec, UploadProvider, UploadRecord,
-    UploadRevision, UploadScanner, UploadService, UploadState, UploadTransition,
-    UploadTransitionAdmission, UploadTransitionRequest, VerifyTransfer,
+    ClientUploadMetadata, IntegrityEvidence, PrepareTransfer, QuarantineBytes, ReadUpload,
+    ScanDisposition, ScanFailurePolicy, ScanInput, TransferGrant, TransferGrantCodec,
+    TransferGrantRequest, TransferGrantScope, TransferPlan, TransitionDisposition,
+    UploadApplicationValidator, UploadChecksum, UploadDimensionLimits, UploadError,
+    UploadErrorKind, UploadFieldPolicy, UploadFuture, UploadHandle, UploadIdempotencyKey,
+    UploadLedger, UploadMediaType, UploadOperation, UploadProtocolCodec, UploadProvider,
+    UploadRecord, UploadReplacementPolicy, UploadRevision, UploadScanPolicy, UploadScanner,
+    UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
+    UploadTransitionRequest, UploadValidationDisposition, UploadValidationRequest,
+    UploadValidationService, UploadValidationStore, ValidatedUpload, ValidationStoreDisposition,
+    VerifyTransfer,
 };
 use suprnova_live_test_support::{ControlledUploadAuthorization, MemoryUploadLedger};
 
@@ -64,6 +72,9 @@ impl ChunkBody for NullChunkBody {
 
 struct NullProvider {
     counters: Arc<ExcludedPortCounters>,
+    bytes: QuarantineBytes,
+    checksum: UploadChecksum,
+    handle: UploadHandle,
 }
 
 impl UploadProvider for NullProvider {
@@ -77,18 +88,36 @@ impl UploadProvider for NullProvider {
 
     fn verify<'a>(
         &'a self,
-        _request: VerifyTransfer<'a>,
+        request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
         self.counters.provider.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(UploadError::new(UploadErrorKind::ProviderUnavailable)) })
+        Box::pin(async move {
+            if request.handle() != &self.handle || request.checksum() != &self.checksum {
+                return Err(UploadError::new(UploadErrorKind::ChecksumMismatch));
+            }
+            Ok(IntegrityEvidence::from_provider(
+                self.bytes.len() as u64,
+                self.checksum.clone(),
+            ))
+        })
     }
 
     fn read<'a>(
         &'a self,
-        _request: ReadUpload<'a>,
+        request: ReadUpload<'a>,
     ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
         self.counters.provider.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(UploadError::new(UploadErrorKind::ProviderUnavailable)) })
+        Box::pin(async move {
+            if request.handle() != &self.handle || request.maximum_bytes() == 0 {
+                return Err(UploadError::new(UploadErrorKind::ScopeMismatch));
+            }
+            let start = usize::try_from(request.offset())
+                .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
+            let end = start
+                .saturating_add(request.maximum_bytes())
+                .min(self.bytes.len());
+            Ok(self.bytes.slice(start..end))
+        })
     }
 
     fn cancel<'a>(
@@ -118,7 +147,7 @@ impl UploadScanner for NullScanner {
         _input: ScanInput<'a>,
     ) -> UploadFuture<'a, Result<ScanDisposition, UploadError>> {
         self.counters.scanner.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(UploadError::new(UploadErrorKind::ProviderUnavailable)) })
+        Box::pin(async { Ok(ScanDisposition::Clean) })
     }
 }
 
@@ -134,35 +163,65 @@ impl UploadApplicationValidator for NullApplicationValidator {
         self.counters
             .application_validation
             .fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(UploadError::new(UploadErrorKind::ProviderUnavailable)) })
+        Box::pin(async { Ok(ApplicationValidationDecision::Allow) })
+    }
+}
+
+struct NullValidationStore;
+
+impl UploadValidationStore for NullValidationStore {
+    fn put<'a>(
+        &'a self,
+        _evidence: ValidatedUpload,
+    ) -> UploadFuture<'a, Result<ValidationStoreDisposition, UploadError>> {
+        Box::pin(async { Ok(ValidationStoreDisposition::Stored) })
+    }
+
+    fn load<'a>(
+        &'a self,
+        _upload: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<Option<ValidatedUpload>, UploadError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _upload: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
 struct NullExternalPorts {
-    _application: Arc<dyn UploadApplicationValidator>,
-    _body: NullChunkBody,
-    _provider: Arc<dyn UploadProvider>,
-    _scanner: Arc<dyn UploadScanner>,
+    application: Arc<dyn UploadApplicationValidator>,
+    body: NullChunkBody,
+    provider: Arc<dyn UploadProvider>,
+    scanner: Arc<dyn UploadScanner>,
     counters: Arc<ExcludedPortCounters>,
+    handle: UploadHandle,
 }
 
 impl NullExternalPorts {
-    fn new() -> Self {
+    fn new(handle: UploadHandle, bytes: QuarantineBytes, checksum: UploadChecksum) -> Self {
         let counters = Arc::new(ExcludedPortCounters::default());
         Self {
-            _application: Arc::new(NullApplicationValidator {
+            application: Arc::new(NullApplicationValidator {
                 counters: Arc::clone(&counters),
             }),
-            _body: NullChunkBody {
+            body: NullChunkBody {
                 counters: Arc::clone(&counters),
             },
-            _provider: Arc::new(NullProvider {
+            provider: Arc::new(NullProvider {
                 counters: Arc::clone(&counters),
+                bytes,
+                checksum,
+                handle: handle.clone(),
             }),
-            _scanner: Arc::new(NullScanner {
+            scanner: Arc::new(NullScanner {
                 counters: Arc::clone(&counters),
             }),
             counters,
+            handle,
         }
     }
 
@@ -202,6 +261,41 @@ struct ExcludedCalls {
     scanner: usize,
 }
 
+fn validation_png() -> Vec<u8> {
+    let mut bytes = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+    ];
+    bytes.extend_from_slice(&320_u32.to_be_bytes());
+    bytes.extend_from_slice(&240_u32.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0]);
+    bytes
+}
+
+fn checksum(bytes: &[u8]) -> Result<UploadChecksum, UploadError> {
+    let mut encoded = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
+    }
+    UploadChecksum::parse(&encoded)
+}
+
+fn validation_policy() -> Result<UploadFieldPolicy, UploadError> {
+    UploadFieldPolicy::new(
+        FILES,
+        FILE_BYTES as u64,
+        UploadReplacementPolicy::RetirePrevious,
+        vec![UploadMediaType::Png],
+        Some(UploadDimensionLimits::new(1_024, 1_024, 1_048_576)?),
+        UploadScanPolicy::Required {
+            on_timeout: ScanFailurePolicy::Retry,
+            on_unavailable: ScanFailurePolicy::Reject,
+        },
+        ActionName::parse("upload_budget_validate")
+            .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?,
+    )
+}
+
 struct Fixture {
     service: UploadService,
     context: suprnova_live::host::TrustedLiveRequestContext,
@@ -210,6 +304,19 @@ struct Fixture {
     codec: UploadProtocolCodec,
     authorization: Arc<ControlledUploadAuthorization>,
     excluded: NullExternalPorts,
+    validation_request: Option<UploadValidationRequest>,
+    validation_service: UploadValidationService,
+}
+
+#[allow(
+    dead_code,
+    reason = "non-control variants are deliberate mutation probes for excluded external work"
+)]
+enum HarnessOperation {
+    BodyIo,
+    Control,
+    Provider,
+    Validation,
 }
 
 impl Fixture {
@@ -245,6 +352,50 @@ impl Fixture {
         )?)?;
         let service_ledger: Arc<dyn UploadLedger> = ledger;
         let service = UploadService::new(service_ledger, codec, limits)?;
+        let validation_bytes = validation_png();
+        let validation_checksum = checksum(&validation_bytes)?;
+        let excluded = NullExternalPorts::new(
+            handle.clone(),
+            QuarantineBytes::copy_from_slice(&validation_bytes),
+            validation_checksum.clone(),
+        );
+        let validation_ledger = Arc::new(MemoryUploadLedger::new(limits)?);
+        validation_ledger.seed(UploadRecord::new(
+            TransferGrantScope::new(
+                handle.clone(),
+                context.mount().component().clone(),
+                ModelField::parse("serial")?,
+                component_support::fixture_host_scope(),
+                1,
+            ),
+            UploadState::Verifying,
+            UploadRevision::new(7),
+            UnixMillis::new(1_000),
+            EXPIRES_AT,
+        )?)?;
+        let validation_authority = Arc::new(UploadService::new(
+            validation_ledger,
+            grant_codec()?,
+            limits,
+        )?);
+        let validation_service = UploadValidationService::new(
+            validation_authority,
+            Arc::clone(&excluded.provider),
+            Arc::new(NullValidationStore),
+            Some(Arc::clone(&excluded.scanner)),
+            Some(Arc::clone(&excluded.application)),
+            limits,
+        )?;
+        let validation_request = UploadValidationRequest::new(
+            handle.clone(),
+            ModelField::parse("serial")?,
+            UploadRevision::new(7),
+            UploadIdempotencyKey::parse(&format!("u4-16-validation-{index}"))?,
+            ClientUploadMetadata::new("u4-16.png", Some("image/png"))?,
+            validation_bytes.len() as u64,
+            validation_checksum,
+            validation_policy()?,
+        );
         let request = serde_json_canonicalizer::to_vec(&serde_json::json!({
             "checksum": "ab".repeat(32),
             "chunk_index": 0,
@@ -262,11 +413,47 @@ impl Fixture {
             request,
             codec: UploadProtocolCodec::v1(),
             authorization,
-            excluded: NullExternalPorts::new(),
+            excluded,
+            validation_request: Some(validation_request),
+            validation_service,
         })
     }
 
-    async fn process_once(&self) -> Result<(), Box<dyn Error>> {
+    async fn process_once(&mut self) -> Result<(), Box<dyn Error>> {
+        self.dispatch(HarnessOperation::Control).await
+    }
+
+    async fn dispatch(&mut self, operation: HarnessOperation) -> Result<(), Box<dyn Error>> {
+        match operation {
+            HarnessOperation::Control => self.process_control().await,
+            HarnessOperation::BodyIo => {
+                let _ = self.excluded.body.next_chunk(CHUNK_BYTES).await;
+                Ok(())
+            }
+            HarnessOperation::Provider => {
+                let _ = self.excluded.provider.cancel(&self.excluded.handle).await;
+                Ok(())
+            }
+            HarnessOperation::Validation => {
+                let request = self
+                    .validation_request
+                    .take()
+                    .ok_or_else(|| std::io::Error::other("validation probe already consumed"))?;
+                let outcome = self
+                    .validation_service
+                    .validate(&self.context, request, NOW)
+                    .await?;
+                if outcome.disposition() != UploadValidationDisposition::Ready {
+                    return Err(
+                        std::io::Error::other("validation probe did not reach Ready").into(),
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn process_control(&self) -> Result<(), Box<dyn Error>> {
         let operation = self.codec.decode(&self.request)?;
         let UploadOperation::PutChunk(chunk) = operation else {
             return Err(std::io::Error::other("U4/16 control did not decode as put_chunk").into());
@@ -340,6 +527,117 @@ fn grant_codec() -> Result<TransferGrantCodec, Box<dyn Error>> {
     )?))
 }
 
+struct ServerResourceEnvelope {
+    chunk_buffers: ResourceOwner<QuarantineBytes>,
+    permits: Vec<Permit>,
+    transfer_handles: ResourceOwner<UploadHandle>,
+}
+
+impl ServerResourceEnvelope {
+    fn new(service: &UploadService, active_transfers: usize) -> Result<Self, Box<dyn Error>> {
+        let chunk_count = active_transfers
+            .checked_mul(2)
+            .ok_or_else(|| std::io::Error::other("upload resource count overflow"))?;
+        let chunk_bytes = chunk_count
+            .checked_mul(CHUNK_BYTES)
+            .ok_or_else(|| std::io::Error::other("upload resource byte overflow"))?;
+        let chunk_buffers = ResourceOwner::new(ResourceBounds::new(chunk_count, chunk_bytes)?);
+        let transfer_handles = ResourceOwner::new(ResourceBounds::new(
+            active_transfers,
+            active_transfers.saturating_mul(64),
+        )?);
+        let mut permits = Vec::with_capacity(active_transfers);
+        for transfer in 0..active_transfers {
+            permits.push(service.transfer_permits().try_acquire()?);
+            let handle = UploadHandle::parse(&format!("018f47c1-2af0-7cc4-b001-{transfer:012}"))?;
+            let handle_bytes = handle.to_string().len();
+            transfer_handles.queue().try_push(handle_bytes, handle)?;
+            for _ in 0..2 {
+                chunk_buffers
+                    .queue()
+                    .try_push(CHUNK_BYTES, QuarantineBytes::from(vec![0_u8; CHUNK_BYTES]))?;
+            }
+        }
+        Ok(Self {
+            chunk_buffers,
+            permits,
+            transfer_handles,
+        })
+    }
+
+    fn snapshot(&self) -> ServerResourceSnapshot {
+        let categories = ServerManagerOwnedCategories {
+            active_permits: self.permits.len(),
+            chunk_queue_entries: self.chunk_buffers.queue().len(),
+            permit_slots: self.permits.capacity(),
+            queue_control_records: 2,
+            retained_handle_bytes: self.transfer_handles.queue().retained_bytes(),
+            transfer_queue_entries: self.transfer_handles.queue().len(),
+        };
+        let manager_owned_bytes = estimate_server_manager_owned_bytes(categories);
+        let active_transfers = self.permits.len();
+        ServerResourceSnapshot {
+            live_chunk_buffers: categories.chunk_queue_entries,
+            manager_owned_bytes,
+            manager_owned_categories: categories,
+            max_chunks_per_transfer: categories
+                .chunk_queue_entries
+                .checked_div(active_transfers)
+                .unwrap_or(0),
+            max_concurrent_transfers: active_transfers,
+            max_queue_depth: categories.transfer_queue_entries,
+            retained_bytes: self
+                .chunk_buffers
+                .queue()
+                .retained_bytes()
+                .saturating_add(self.transfer_handles.queue().retained_bytes())
+                .saturating_add(manager_owned_bytes),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct ServerManagerOwnedCategories {
+    #[serde(rename = "activePermits")]
+    active_permits: usize,
+    #[serde(rename = "chunkQueueEntries")]
+    chunk_queue_entries: usize,
+    #[serde(rename = "permitSlots")]
+    permit_slots: usize,
+    #[serde(rename = "queueControlRecords")]
+    queue_control_records: usize,
+    #[serde(rename = "retainedHandleBytes")]
+    retained_handle_bytes: usize,
+    #[serde(rename = "transferQueueEntries")]
+    transfer_queue_entries: usize,
+}
+
+fn estimate_server_manager_owned_bytes(categories: ServerManagerOwnedCategories) -> usize {
+    // Counting model: 512 bytes per production queue/owner control record,
+    // 256 per queued transfer, 128 per queued chunk descriptor, 128 per
+    // active permit and reserved permit slot, plus exact retained UTF-8 handle
+    // bytes. Chunk payload bytes are excluded here and reported in retainedBytes.
+    categories
+        .queue_control_records
+        .saturating_mul(512)
+        .saturating_add(categories.transfer_queue_entries.saturating_mul(256))
+        .saturating_add(categories.chunk_queue_entries.saturating_mul(128))
+        .saturating_add(categories.active_permits.saturating_mul(128))
+        .saturating_add(categories.permit_slots.saturating_mul(128))
+        .saturating_add(categories.retained_handle_bytes)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ServerResourceSnapshot {
+    live_chunk_buffers: usize,
+    manager_owned_bytes: usize,
+    manager_owned_categories: ServerManagerOwnedCategories,
+    max_chunks_per_transfer: usize,
+    max_concurrent_transfers: usize,
+    max_queue_depth: usize,
+    retained_bytes: usize,
+}
+
 #[derive(Serialize)]
 struct ServerBudgetResult {
     bounds: ServerBounds,
@@ -367,6 +665,8 @@ struct ServerMeasurements {
     live_chunk_buffers: usize,
     #[serde(rename = "managerOwnedBytes")]
     manager_owned_bytes: usize,
+    #[serde(rename = "managerOwnedCategories")]
+    manager_owned_categories: ServerManagerOwnedCategories,
     #[serde(rename = "maxChunksPerTransfer")]
     max_chunks_per_transfer: usize,
     #[serde(rename = "maxConcurrentTransfers")]
@@ -493,11 +793,18 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
     for index in 1..=WARMUP_ITERATIONS + MEASURED_SAMPLES {
         fixtures.push(Fixture::new(index)?);
     }
-    for fixture in fixtures.iter().take(WARMUP_ITERATIONS) {
+    let resource_envelope = ServerResourceEnvelope::new(
+        &fixtures
+            .first()
+            .ok_or_else(|| std::io::Error::other("upload fixture set is empty"))?
+            .service,
+        ACTIVE_TRANSFERS,
+    )?;
+    for fixture in fixtures.iter_mut().take(WARMUP_ITERATIONS) {
         black_box(fixture.process_once().await?);
     }
     let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
-    for fixture in fixtures.iter().skip(WARMUP_ITERATIONS) {
+    for fixture in fixtures.iter_mut().skip(WARMUP_ITERATIONS) {
         let started = Instant::now();
         black_box(fixture.process_once().await?);
         samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
@@ -506,6 +813,20 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
     let p50 = percentile(&samples, 0.50);
     let p95 = percentile(&samples, 0.95);
     let environment = EnvironmentEvidence::collect();
+    let resources = resource_envelope.snapshot();
+    let excluded_calls = fixtures
+        .iter()
+        .fold(ExcludedCalls::default(), |mut total, fixture| {
+            let calls = fixture.excluded.counters.snapshot();
+            total.application_validation += calls.application_validation;
+            total.body_io += calls.body_io;
+            total.provider += calls.provider;
+            total.scanner += calls.scanner;
+            total
+        });
+    if excluded_calls != ExcludedCalls::default() {
+        return Err(std::io::Error::other("excluded work entered measured control samples").into());
+    }
     let result = ServerBudgetResult {
         bounds: ServerBounds {
             max_chunks_per_active_transfer: 2,
@@ -514,15 +835,16 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
         },
         environment,
         measurements: ServerMeasurements {
-            excluded_calls: ExcludedCalls::default(),
-            live_chunk_buffers: 0,
-            manager_owned_bytes: 0,
-            max_chunks_per_transfer: 0,
-            max_concurrent_transfers: 0,
-            max_queue_depth: 0,
+            excluded_calls,
+            live_chunk_buffers: resources.live_chunk_buffers,
+            manager_owned_bytes: resources.manager_owned_bytes,
+            manager_owned_categories: resources.manager_owned_categories,
+            max_chunks_per_transfer: resources.max_chunks_per_transfer,
+            max_concurrent_transfers: resources.max_concurrent_transfers,
+            max_queue_depth: resources.max_queue_depth,
             p50_microseconds: p50,
             p95_microseconds: p95,
-            retained_bytes: 0,
+            retained_bytes: resources.retained_bytes,
         },
         methodology: Methodology {
             measured_samples: MEASURED_SAMPLES,
@@ -542,6 +864,12 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
     );
     if p95 > P95_CAP_MICROSECONDS {
         return Err(std::io::Error::other("upload control exceeded the 2 ms p95 ceiling").into());
+    }
+    if resources.live_chunk_buffers > ACTIVE_TRANSFERS * 2
+        || resources.max_chunks_per_transfer > 2
+        || resources.manager_owned_bytes > 512 * 1024
+    {
+        return Err(std::io::Error::other("upload server resource ceiling exceeded").into());
     }
     if std::env::var_os("SUPRNOVA_LIVE_REQUIRE_S1").is_some()
         && !result.environment.qualification_requirements_met
@@ -632,4 +960,68 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "cargo bench compiles cfg(test) without the integration test harness"
+)]
+mod integrity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn selected_control_operation_keeps_all_external_ports_at_zero() {
+        let mut fixture = Fixture::new(1).expect("fixture");
+        fixture.process_once().await.expect("measured control path");
+        assert_eq!(
+            fixture.excluded.counters.snapshot(),
+            ExcludedCalls::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_operations_reach_every_injected_external_port() {
+        let mut body = Fixture::new(2).expect("body fixture");
+        body.dispatch(HarnessOperation::BodyIo)
+            .await
+            .expect("body mutation");
+        assert_eq!(body.excluded.counters.snapshot().body_io, 1);
+
+        let mut provider = Fixture::new(3).expect("provider fixture");
+        provider
+            .dispatch(HarnessOperation::Provider)
+            .await
+            .expect("provider mutation");
+        assert_eq!(provider.excluded.counters.snapshot().provider, 1);
+
+        let mut validation = Fixture::new(4).expect("validation fixture");
+        validation
+            .dispatch(HarnessOperation::Validation)
+            .await
+            .expect("validation mutation");
+        let calls = validation.excluded.counters.snapshot();
+        assert!(calls.provider > 0);
+        assert_eq!(calls.scanner, 1);
+        assert_eq!(calls.application_validation, 1);
+    }
+
+    #[test]
+    fn resource_measurement_comes_from_live_production_owners() {
+        let four_fixture = Fixture::new(5).expect("four fixture");
+        let five_fixture = Fixture::new(6).expect("five fixture");
+        let four =
+            ServerResourceEnvelope::new(&four_fixture.service, 4).expect("four active transfers");
+        let five =
+            ServerResourceEnvelope::new(&five_fixture.service, 5).expect("five active transfers");
+        let four_snapshot = four.snapshot();
+        let five_snapshot = five.snapshot();
+
+        assert_eq!(four_snapshot.max_concurrent_transfers, 4);
+        assert_eq!(four_snapshot.live_chunk_buffers, 8);
+        assert_eq!(four_snapshot.max_chunks_per_transfer, 2);
+        assert!(five_snapshot.manager_owned_bytes > four_snapshot.manager_owned_bytes);
+        assert!(five_snapshot.retained_bytes > four_snapshot.retained_bytes);
+        assert!(five_snapshot.max_queue_depth > four_snapshot.max_queue_depth);
+    }
 }

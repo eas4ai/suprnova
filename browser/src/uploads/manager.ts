@@ -21,6 +21,7 @@ import {
   type UploadHandle,
   type UploadIslandPort,
   type UploadManagerOptions,
+  type UploadManagerResourceSnapshot,
   type UploadManagerSnapshot,
   type UploadSecretSnapshot,
   type UploadSelection,
@@ -121,6 +122,14 @@ export class UploadManager {
       maxItems: options.maxItems,
     });
     this.#queueItemBytes = Math.floor(options.maxQueueBytes / options.maxItems);
+    if (
+      options.resourceObserver !== undefined &&
+      (typeof options.resourceObserver.resources !== "function" ||
+        typeof options.resourceObserver.progressApplicationCompleted !== "function" ||
+        typeof options.resourceObserver.progressApplicationStarted !== "function")
+    ) {
+      throw new TypeError("upload_resource_observer_invalid");
+    }
   }
 
   async select(selection: UploadSelection, files: readonly File[]): Promise<void> {
@@ -250,6 +259,7 @@ export class UploadManager {
       throw new Error("upload_manager_observer_limit");
     }
     observers.add(observer);
+    this.#notifyResources();
     this.#notifyObserver(observer, this.islandSnapshot(island));
     let active = true;
     return () => {
@@ -260,6 +270,7 @@ export class UploadManager {
         candidates.delete(observer);
         if (candidates.size === 0) this.#observers.delete(candidate);
       }
+      this.#notifyResources();
     };
   }
 
@@ -347,6 +358,58 @@ export class UploadManager {
         [...this.#entries.values()].map(({ transfer }) => transfer.snapshot()),
       ),
     });
+  }
+
+  resourceSnapshot(): UploadManagerResourceSnapshot {
+    const owner = this.#owner.snapshot();
+    let bindings = 0;
+    for (const fields of this.#bindings.values()) bindings += fields.size;
+    let observers = 0;
+    for (const candidates of this.#observers.values()) observers += candidates.size;
+    let pendingChunkBuffers = 0;
+    let pendingChunkBytes = 0;
+    let retainedStringCodeUnits = 0;
+    for (const { transfer } of this.#entries.values()) {
+      const resource = transfer.resourceSnapshot();
+      pendingChunkBuffers += resource.pendingChunkBuffers;
+      pendingChunkBytes += resource.pendingChunkBytes;
+      retainedStringCodeUnits += resource.retainedStringCodeUnits;
+    }
+    return Object.freeze({
+      activeLeases: owner.active,
+      bindings,
+      cleanupObligations: this.#cleanupOwner.size(),
+      entries: this.#entries.size,
+      generationFields: this.#generationFields,
+      observers,
+      ownedResources: owner.ownedResources,
+      pendingChunkBuffers,
+      pendingChunkBytes,
+      queuedBytes: owner.queuedBytes,
+      queuedItems: owner.queuedItems,
+      retainedStringCodeUnits,
+      waitingPermits: owner.waitingPermits,
+    });
+  }
+
+  hasResourceObserver(): boolean {
+    return this.#options.resourceObserver !== undefined;
+  }
+
+  observeProgressApplicationStarted(): void {
+    try {
+      this.#options.resourceObserver?.progressApplicationStarted();
+    } catch {
+      // Count-only observability cannot affect upload behavior.
+    }
+  }
+
+  observeProgressApplicationCompleted(): void {
+    try {
+      this.#options.resourceObserver?.progressApplicationCompleted();
+    } catch {
+      // Count-only observability cannot affect upload behavior.
+    }
   }
 
   inspectSecrets(): UploadSecretSnapshot {
@@ -485,10 +548,19 @@ export class UploadManager {
   }
 
   #notify(island: UploadIslandPort): void {
+    this.#notifyResources();
     const observers = this.#islandObservers(island);
     if (observers === null || observers.size === 0) return;
     const snapshot = this.islandSnapshot(island);
     for (const observer of [...observers]) this.#notifyObserver(observer, snapshot);
+  }
+
+  #notifyResources(): void {
+    try {
+      this.#options.resourceObserver?.resources(this.resourceSnapshot());
+    } catch {
+      // Count-only observability cannot affect upload behavior.
+    }
   }
 
   #notifyObserver(observer: UploadManagerObserver, snapshot: UploadManagerSnapshot): void {

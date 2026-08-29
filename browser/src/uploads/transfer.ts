@@ -57,6 +57,12 @@ export interface UploadCancellationCleanup {
   readonly transport: UploadTransport;
 }
 
+export interface UploadTransferResourceSnapshot {
+  readonly pendingChunkBytes: number;
+  readonly pendingChunkBuffers: number;
+  readonly retainedStringCodeUnits: number;
+}
+
 export type UploadCleanupScheduler = (cleanup: UploadCancellationCleanup) => void;
 
 const ignoreDetachedUploadCancellationFailure = (): void => undefined;
@@ -332,6 +338,24 @@ export class UploadTransfer {
       chunks: this.#pending === null ? 0 : 1,
       files: this.#file === null ? 0 : 1,
       grants: this.#grant === null ? 0 : 1,
+    });
+  }
+
+  resourceSnapshot(): UploadTransferResourceSnapshot {
+    return Object.freeze({
+      pendingChunkBytes: this.#pending?.bytes.byteLength ?? 0,
+      pendingChunkBuffers: this.#pending === null ? 0 : 1,
+      retainedStringCodeUnits:
+        this.#field.length +
+        this.#identity.name.length +
+        this.#identity.type.length +
+        (this.#grant?.length ?? 0) +
+        (this.#handle?.length ?? 0) +
+        (this.#revision?.length ?? 0) +
+        (this.#completeKey?.length ?? 0) +
+        this.#createKey.length +
+        (this.#pending?.checksum.length ?? 0) +
+        (this.#pending?.idempotencyKey.length ?? 0),
     });
   }
 

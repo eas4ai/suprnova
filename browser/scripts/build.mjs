@@ -554,6 +554,26 @@ export interface UploadTransport {
 }
 export interface UploadConnectivity { online(): boolean; }
 export interface UploadRandomness { idempotencyKey(): string; }
+export interface UploadManagerResourceSnapshot {
+  readonly activeLeases: number;
+  readonly bindings: number;
+  readonly cleanupObligations: number;
+  readonly entries: number;
+  readonly generationFields: number;
+  readonly observers: number;
+  readonly ownedResources: number;
+  readonly pendingChunkBuffers: number;
+  readonly pendingChunkBytes: number;
+  readonly queuedBytes: number;
+  readonly queuedItems: number;
+  readonly retainedStringCodeUnits: number;
+  readonly waitingPermits: number;
+}
+export interface UploadResourceObserver {
+  progressApplicationCompleted(): void;
+  progressApplicationStarted(): void;
+  resources(snapshot: UploadManagerResourceSnapshot): void;
+}
 export interface UploadFeatureOptions {
   readonly application?: UploadApplicationPort;
   readonly chunkBytes?: number;
@@ -562,6 +582,7 @@ export interface UploadFeatureOptions {
   readonly maxItems?: number;
   readonly maxQueueBytes?: number;
   readonly randomness?: UploadRandomness;
+  readonly resourceObserver?: UploadResourceObserver;
   readonly transport?: UploadTransport;
 }
 export interface ReacquiredUpload {

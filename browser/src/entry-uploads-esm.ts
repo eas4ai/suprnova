@@ -11,6 +11,8 @@ export type {
   UploadFeatureOptions,
   UploadFileIdentity,
   UploadHandle,
+  UploadManagerResourceSnapshot,
+  UploadResourceObserver,
   UploadTransport,
   UploadTransportRequest,
   UploadTransportResponse,

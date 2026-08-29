@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { estimateUploadManagerOwnedBytes } from "../benchmarks/upload-accounting.js";
 import { UploadManager } from "../src/uploads/manager.js";
 import type {
   UploadApplicationPort,
   UploadConnectivity,
   UploadIslandPort,
   UploadRandomness,
+  UploadManagerResourceSnapshot,
   UploadTransport,
   UploadTransportRequest,
   UploadTransportResponse,
@@ -180,6 +182,45 @@ function manager(transport = new MemoryTransport(), maxActive = 4) {
 }
 
 describe("current-document upload manager", () => {
+  it("reports manager-owned string growth from the live production transfer state", async () => {
+    const maximumObservedBytes = async (files: readonly File[]): Promise<number> => {
+      const snapshots: UploadManagerResourceSnapshot[] = [];
+      const fixture = new UploadManager({
+        chunkBytes: 256 * KIB,
+        connectivity: new Online(),
+        maxActive: 4,
+        maxItems: 64,
+        maxQueueBytes: 256 * KIB,
+        randomness: new Sequence(),
+        resourceObserver: {
+          progressApplicationCompleted() {
+            return undefined;
+          },
+          progressApplicationStarted() {
+            return undefined;
+          },
+          resources(snapshot) {
+            snapshots.push(snapshot);
+          },
+        },
+        transport: new MemoryTransport(),
+      });
+      const owner = island("resource-accounting");
+      await fixture.select({ field: "attachment", input: input(true), island: owner.port }, files);
+      fixture.dispose();
+      return Math.max(...snapshots.map(estimateUploadManagerOwnedBytes));
+    };
+
+    const ordinary = await maximumObservedBytes([file("ordinary.bin", 1)]);
+    const mutated = await maximumObservedBytes(
+      Array.from({ length: 64 }, (_, index) =>
+        file(`${"x".repeat(1_000)}-${String(index)}.bin`, 1),
+      ),
+    );
+    expect(mutated).toBeGreaterThan(ordinary);
+    expect(mutated).toBeGreaterThan(150 * KIB);
+  });
+
   it("publishes field-scoped progress changes and stops after observer disposal", async () => {
     const fixture = manager();
     const owner = island("progress-observer");

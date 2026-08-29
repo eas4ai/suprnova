@@ -1,3 +1,5 @@
+import { estimateUploadManagerOwnedBytes } from "./upload-accounting.js";
+
 export const U4_16 = Object.freeze({
   activeTransfers: 4,
   chunkBytes: 256 * 1024,
@@ -68,6 +70,58 @@ export interface UploadBudgetServerEnvironment {
   readonly warmFilesystemCache: boolean;
 }
 
+export interface UploadBudgetManagerOwnedCategories {
+  readonly activeLeases: number;
+  readonly bindings: number;
+  readonly cleanupObligations: number;
+  readonly entries: number;
+  readonly generationFields: number;
+  readonly observers: number;
+  readonly ownedResources: number;
+  readonly pendingChunkBuffers: number;
+  readonly pendingChunkBytes: number;
+  readonly queuedBytes: number;
+  readonly queuedItems: number;
+  readonly retainedStringCodeUnits: number;
+  readonly waitingPermits: number;
+}
+
+export interface UploadBudgetServerManagerOwnedCategories {
+  readonly activePermits: number;
+  readonly chunkQueueEntries: number;
+  readonly permitSlots: number;
+  readonly queueControlRecords: number;
+  readonly retainedHandleBytes: number;
+  readonly transferQueueEntries: number;
+}
+
+export interface UploadBudgetBrowserMeasurements {
+  readonly activeTransfers: number;
+  readonly liveChunkBuffers: number;
+  readonly managerChunkBuffers: number;
+  readonly managerOwnedBytes: number;
+  readonly managerOwnedCategories: UploadBudgetManagerOwnedCategories;
+  readonly maxChunksPerTransfer: number;
+  readonly maxConcurrentTransfers: number;
+  readonly maxQueueDepth: number;
+  readonly progressP50Milliseconds: number;
+  readonly progressP95Milliseconds: number;
+  readonly retainedBytes: number;
+  readonly slicedBytes: number;
+  readonly slices: number;
+  readonly transportChunkBuffers: number;
+}
+
+export interface UploadBudgetBrowserRun {
+  readonly artifactSha256: string;
+  readonly environment: UploadBudgetBrowserEnvironment;
+  readonly measurements: UploadBudgetBrowserMeasurements &
+    Readonly<{ progressDurationsMilliseconds: readonly number[] }>;
+  readonly methodology: UploadBudgetMethodology;
+  readonly runIndex: number;
+  readonly workload: UploadBudgetWorkload;
+}
+
 export interface UploadBudgetEvidence {
   readonly schemaVersion: 1;
   readonly workload: "U4/16";
@@ -79,20 +133,9 @@ export interface UploadBudgetEvidence {
       maxProgressP95Milliseconds: 16;
     }>;
     environment: UploadBudgetBrowserEnvironment;
-    measurements: Readonly<{
-      activeTransfers: number;
-      liveChunkBuffers: number;
-      managerOwnedBytes: number;
-      maxChunksPerTransfer: number;
-      maxConcurrentTransfers: number;
-      maxQueueDepth: number;
-      progressP50Milliseconds: number;
-      progressP95Milliseconds: number;
-      retainedBytes: number;
-      slicedBytes: number;
-      slices: number;
-    }>;
+    measurements: UploadBudgetBrowserMeasurements;
     methodology: UploadBudgetBrowserMethodology;
+    runs: readonly UploadBudgetBrowserRun[];
     workload: UploadBudgetWorkload;
   }>;
   readonly recordedAt: string;
@@ -112,6 +155,7 @@ export interface UploadBudgetEvidence {
       }>;
       liveChunkBuffers: number;
       managerOwnedBytes: number;
+      managerOwnedCategories: UploadBudgetServerManagerOwnedCategories;
       maxChunksPerTransfer: number;
       maxConcurrentTransfers: number;
       maxQueueDepth: number;
@@ -164,8 +208,10 @@ type EvidenceKey =
   | "independentRuns"
   | "kernel"
   | "liveChunkBuffers"
+  | "managerChunkBuffers"
   | "loopbackProviders"
   | "managerOwnedBytes"
+  | "managerOwnedCategories"
   | "maxChunksPerActiveTransfer"
   | "maxChunksPerTransfer"
   | "maxConcurrentTransfers"
@@ -198,6 +244,7 @@ type EvidenceKey =
   | "sha256"
   | "slicedBytes"
   | "slices"
+  | "transportChunkBuffers"
   | "viewport"
   | "warmFilesystemCache"
   | "warmHttpCache"
@@ -205,7 +252,7 @@ type EvidenceKey =
   | "width"
   | "workload";
 
-type EvidenceRecord = Record<string, unknown> & Record<EvidenceKey, unknown>;
+type EvidenceRecord = Record<string, unknown> & Partial<Record<EvidenceKey, unknown>>;
 
 function fail(): never {
   throw new Error("upload_budget_evidence_invalid");
@@ -379,12 +426,130 @@ function serverEnvironment(value: unknown): UploadBudgetServerEnvironment {
   return candidate as unknown as UploadBudgetServerEnvironment;
 }
 
-function validateBrowser(value: unknown): UploadBudgetEvidence["browser"] {
+function managerCategories(value: unknown): UploadBudgetManagerOwnedCategories {
   const candidate = record(value);
-  exact(candidate, ["bounds", "environment", "measurements", "methodology", "workload"]);
+  exact(candidate, [
+    "activeLeases",
+    "bindings",
+    "cleanupObligations",
+    "entries",
+    "generationFields",
+    "observers",
+    "ownedResources",
+    "pendingChunkBuffers",
+    "pendingChunkBytes",
+    "queuedBytes",
+    "queuedItems",
+    "retainedStringCodeUnits",
+    "waitingPermits",
+  ]);
+  for (const value of Object.values(candidate)) integer(value);
+  return candidate as unknown as UploadBudgetManagerOwnedCategories;
+}
+
+function serverManagerCategories(value: unknown): UploadBudgetServerManagerOwnedCategories {
+  const candidate = record(value);
+  exact(candidate, [
+    "activePermits",
+    "chunkQueueEntries",
+    "permitSlots",
+    "queueControlRecords",
+    "retainedHandleBytes",
+    "transferQueueEntries",
+  ]);
+  for (const value of Object.values(candidate)) integer(value);
+  return candidate as unknown as UploadBudgetServerManagerOwnedCategories;
+}
+
+function estimateServerManagerOwnedBytes(
+  categories: UploadBudgetServerManagerOwnedCategories,
+): number {
+  return (
+    categories.queueControlRecords * 512 +
+    categories.transferQueueEntries * 256 +
+    categories.chunkQueueEntries * 128 +
+    categories.activePermits * 128 +
+    categories.permitSlots * 128 +
+    categories.retainedHandleBytes
+  );
+}
+
+function browserMeasurements(
+  value: unknown,
+  samplesRequired: boolean,
+): UploadBudgetBrowserMeasurements {
+  const candidate = record(value);
+  exact(candidate, [
+    "activeTransfers",
+    "liveChunkBuffers",
+    "managerChunkBuffers",
+    "managerOwnedBytes",
+    "managerOwnedCategories",
+    "maxChunksPerTransfer",
+    "maxConcurrentTransfers",
+    "maxQueueDepth",
+    "progressP50Milliseconds",
+    "progressP95Milliseconds",
+    ...(samplesRequired ? ["progressDurationsMilliseconds"] : []),
+    "retainedBytes",
+    "slicedBytes",
+    "slices",
+    "transportChunkBuffers",
+  ]);
+  literal(candidate.activeTransfers, U4_16.activeTransfers);
+  const liveChunkBuffers = integer(candidate.liveChunkBuffers, 1);
+  const managerChunkBuffers = integer(candidate.managerChunkBuffers, 1);
+  const transportChunkBuffers = integer(candidate.transportChunkBuffers, 1);
+  if (
+    liveChunkBuffers !== managerChunkBuffers + transportChunkBuffers ||
+    liveChunkBuffers > U4_16.activeTransfers * 2
+  ) {
+    fail();
+  }
+  const categories = managerCategories(candidate.managerOwnedCategories);
+  literal(candidate.managerOwnedBytes, estimateUploadManagerOwnedBytes(categories));
+  literal(candidate.maxChunksPerTransfer, 2);
+  literal(candidate.maxConcurrentTransfers, U4_16.activeTransfers);
+  literal(candidate.maxQueueDepth, U4_16.files);
+  number(candidate.progressP50Milliseconds);
+  number(candidate.progressP95Milliseconds);
+  integer(candidate.retainedBytes);
+  literal(candidate.slicedBytes, U4_16.files * U4_16.fileBytes);
+  literal(candidate.slices, U4_16.files * (U4_16.fileBytes / U4_16.chunkBytes));
+  if (number(candidate.progressP50Milliseconds) > number(candidate.progressP95Milliseconds)) fail();
+  const minimumRetained =
+    liveChunkBuffers * U4_16.chunkBytes + integer(candidate.managerOwnedBytes);
+  if (integer(candidate.retainedBytes) < minimumRetained) fail();
+  if (samplesRequired) {
+    if (!Array.isArray(candidate["progressDurationsMilliseconds"])) fail();
+    const samples = candidate["progressDurationsMilliseconds"].map(number);
+    const summary = summarizeUploadSamples(samples);
+    if (
+      summary.p50 !== candidate.progressP50Milliseconds ||
+      summary.p95 !== candidate.progressP95Milliseconds
+    ) {
+      fail();
+    }
+  }
+  return candidate as unknown as UploadBudgetBrowserMeasurements;
+}
+
+function equalBrowserEnvironment(
+  left: UploadBudgetBrowserEnvironment,
+  right: UploadBudgetBrowserEnvironment,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEvidence["browser"] {
+  const candidate = record(value);
+  exact(candidate, ["bounds", "environment", "measurements", "methodology", "runs", "workload"]);
   workload(candidate.workload);
-  methodology(candidate.methodology, true);
-  browserEnvironment(candidate.environment);
+  const aggregateMethodology = methodology(
+    candidate.methodology,
+    true,
+  ) as UploadBudgetBrowserMethodology;
+  const aggregateEnvironment = browserEnvironment(candidate.environment);
 
   const bounds = record(candidate.bounds);
   exact(bounds, [
@@ -396,39 +561,59 @@ function validateBrowser(value: unknown): UploadBudgetEvidence["browser"] {
   literal(bounds.maxManagerOwnedBytes, 256 * 1024);
   literal(bounds.maxProgressP95Milliseconds, 16);
 
-  const measurements = record(candidate.measurements);
-  exact(measurements, [
-    "activeTransfers",
+  const measurements = browserMeasurements(candidate.measurements, false);
+  if (!Array.isArray(candidate["runs"]) || candidate["runs"].length < 1) fail();
+  if (candidate["runs"].length !== aggregateMethodology.independentRuns) fail();
+  if (aggregateEnvironment.classification === "qualified" && candidate["runs"].length !== 3) fail();
+  const runs = candidate["runs"].map((value, index): UploadBudgetBrowserRun => {
+    const run = record(value);
+    exact(run, [
+      "artifactSha256",
+      "environment",
+      "measurements",
+      "methodology",
+      "runIndex",
+      "workload",
+    ]);
+    literal(run["runIndex"], index + 1);
+    literal(run["artifactSha256"], artifactSha256);
+    workload(run.workload);
+    const runEnvironment = browserEnvironment(run.environment);
+    if (!equalBrowserEnvironment(runEnvironment, aggregateEnvironment)) fail();
+    const runMethodology = methodology(run.methodology, false);
+    literal(runMethodology.warmupIterations, 5);
+    const runMeasurements = browserMeasurements(
+      run.measurements,
+      true,
+    ) as UploadBudgetBrowserRun["measurements"];
+    if (runMeasurements.progressDurationsMilliseconds.length !== runMethodology.measuredSamples)
+      fail();
+    return run as unknown as UploadBudgetBrowserRun;
+  });
+  const samples = runs.flatMap((run) => run.measurements.progressDurationsMilliseconds);
+  literal(aggregateMethodology.measuredSamples, samples.length);
+  literal(aggregateMethodology.warmupIterations, 5);
+  const aggregate = summarizeUploadSamples(samples);
+  if (
+    aggregate.p50 !== measurements.progressP50Milliseconds ||
+    aggregate.p95 !== measurements.progressP95Milliseconds
+  ) {
+    fail();
+  }
+  const maximum = (key: keyof UploadBudgetBrowserMeasurements): number =>
+    Math.max(...runs.map((run) => run.measurements[key] as number));
+  for (const key of [
     "liveChunkBuffers",
+    "managerChunkBuffers",
     "managerOwnedBytes",
     "maxChunksPerTransfer",
     "maxConcurrentTransfers",
     "maxQueueDepth",
-    "progressP50Milliseconds",
-    "progressP95Milliseconds",
     "retainedBytes",
-    "slicedBytes",
-    "slices",
-  ]);
-  literal(measurements.activeTransfers, 4);
-  literal(measurements.liveChunkBuffers, 2);
-  literal(measurements.managerOwnedBytes, 256 * 1024);
-  literal(measurements.maxChunksPerTransfer, 2);
-  integer(measurements.maxConcurrentTransfers);
-  literal(measurements.maxQueueDepth, U4_16.files);
-  number(measurements.progressP50Milliseconds);
-  number(measurements.progressP95Milliseconds);
-  integer(measurements.retainedBytes);
-  literal(measurements.slicedBytes, U4_16.files * U4_16.fileBytes);
-  literal(measurements.slices, U4_16.files * (U4_16.fileBytes / U4_16.chunkBytes));
-  literal(measurements.maxConcurrentTransfers, U4_16.activeTransfers);
-  if (number(measurements.progressP50Milliseconds) > number(measurements.progressP95Milliseconds)) {
-    fail();
+    "transportChunkBuffers",
+  ] as const) {
+    if (measurements[key] !== maximum(key)) fail();
   }
-  const minimumRetained =
-    integer(measurements.liveChunkBuffers) * U4_16.chunkBytes +
-    integer(measurements.managerOwnedBytes);
-  if (integer(measurements.retainedBytes) < minimumRetained) fail();
   return candidate as unknown as UploadBudgetEvidence["browser"];
 }
 
@@ -454,6 +639,7 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
     "excludedCalls",
     "liveChunkBuffers",
     "managerOwnedBytes",
+    "managerOwnedCategories",
     "maxChunksPerTransfer",
     "maxConcurrentTransfers",
     "maxQueueDepth",
@@ -467,19 +653,25 @@ function validateServer(value: unknown): UploadBudgetEvidence["server"] {
   literal(excluded.bodyIo, 0);
   literal(excluded.provider, 0);
   literal(excluded.scanner, 0);
-  literal(measurements.liveChunkBuffers, 0);
-  literal(measurements.managerOwnedBytes, 0);
-  literal(measurements.maxChunksPerTransfer, 0);
-  literal(measurements.maxConcurrentTransfers, 0);
-  literal(measurements.maxQueueDepth, 0);
+  literal(measurements.liveChunkBuffers, U4_16.activeTransfers * 2);
+  const categories = serverManagerCategories(measurements.managerOwnedCategories);
+  literal(categories.activePermits, U4_16.activeTransfers);
+  literal(categories.chunkQueueEntries, U4_16.activeTransfers * 2);
+  literal(categories.permitSlots, U4_16.activeTransfers);
+  literal(categories.queueControlRecords, 2);
+  literal(categories.transferQueueEntries, U4_16.activeTransfers);
+  literal(measurements.managerOwnedBytes, estimateServerManagerOwnedBytes(categories));
+  literal(measurements.maxChunksPerTransfer, 2);
+  literal(measurements.maxConcurrentTransfers, U4_16.activeTransfers);
+  literal(measurements.maxQueueDepth, U4_16.activeTransfers);
   number(measurements.p50Microseconds);
   number(measurements.p95Microseconds);
-  literal(measurements.retainedBytes, 0);
+  const expectedRetained =
+    U4_16.activeTransfers * 2 * U4_16.chunkBytes +
+    integer(measurements.managerOwnedBytes) +
+    categories.retainedHandleBytes;
+  literal(measurements.retainedBytes, expectedRetained);
   if (number(measurements.p50Microseconds) > number(measurements.p95Microseconds)) fail();
-  const minimumRetained =
-    integer(measurements.liveChunkBuffers) * U4_16.chunkBytes +
-    integer(measurements.managerOwnedBytes);
-  if (integer(measurements.retainedBytes) < minimumRetained) fail();
   return candidate as unknown as UploadBudgetEvidence["server"];
 }
 
@@ -497,7 +689,7 @@ export function validateUploadBudgetEvidence(value: unknown): UploadBudgetEviden
   literal(artifact.role, "uploads-esm");
   if (!/^[0-9a-f]{64}$/u.test(string(artifact.sha256))) fail();
 
-  const browser = validateBrowser(candidate.browser);
+  const browser = validateBrowser(candidate.browser, string(artifact.sha256));
   const server = validateServer(candidate.server);
   if (
     browser.environment.classification === "qualified" &&
@@ -566,8 +758,14 @@ export function summarizeUploadSamples(
   return Object.freeze({ p50: percentile(0.5), p95: percentile(0.95) });
 }
 
-function regression(candidate: number, baseline: number): boolean {
-  return candidate > baseline * 1.15;
+export function regressionAtLeast15Percent(candidate: number, baseline: number): boolean {
+  if (!Number.isFinite(candidate) || candidate < 0 || !Number.isFinite(baseline) || baseline < 0) {
+    fail();
+  }
+  if (baseline === 0) return candidate > 0;
+  const candidateUnits = BigInt(Math.round(candidate * 1_000_000_000));
+  const baselineUnits = BigInt(Math.round(baseline * 1_000_000_000));
+  return candidateUnits * 10_000n >= baselineUnits * 11_500n;
 }
 
 function sameEnvironment(candidate: UploadBudgetEvidence, baseline: UploadBudgetEvidence): boolean {
@@ -638,14 +836,48 @@ export function evaluateUploadBudget(
       issues.push("upload_budget:baseline_environment_mismatch");
     } else {
       if (
-        regression(
+        regressionAtLeast15Percent(
           browser.progressP95Milliseconds,
           baseline.browser.measurements.progressP95Milliseconds,
         )
       ) {
         issues.push("upload_budget:browser:progress_p95_regression");
       }
-      if (regression(server.p95Microseconds, baseline.server.measurements.p95Microseconds)) {
+      if (candidate.browser.runs.length !== baseline.browser.runs.length) {
+        issues.push("upload_budget:browser:run_count_mismatch");
+      } else {
+        for (let index = 0; index < candidate.browser.runs.length; index += 1) {
+          const candidateRun = candidate.browser.runs[index];
+          const baselineRun = baseline.browser.runs[index];
+          if (candidateRun === undefined || baselineRun === undefined) fail();
+          if (
+            candidateRun.artifactSha256 !== candidate.artifact.sha256 ||
+            baselineRun.artifactSha256 !== baseline.artifact.sha256 ||
+            !equalBrowserEnvironment(candidateRun.environment, baselineRun.environment) ||
+            candidateRun.methodology.measuredSamples !==
+              candidateRun.measurements.progressDurationsMilliseconds.length ||
+            baselineRun.methodology.measuredSamples !==
+              baselineRun.measurements.progressDurationsMilliseconds.length
+          ) {
+            issues.push(`upload_budget:browser:run_${String(index + 1)}:evidence_mismatch`);
+            continue;
+          }
+          if (
+            regressionAtLeast15Percent(
+              candidateRun.measurements.progressP95Milliseconds,
+              baselineRun.measurements.progressP95Milliseconds,
+            )
+          ) {
+            issues.push(`upload_budget:browser:run_${String(index + 1)}:progress_p95_regression`);
+          }
+        }
+      }
+      if (
+        regressionAtLeast15Percent(
+          server.p95Microseconds,
+          baseline.server.measurements.p95Microseconds,
+        )
+      ) {
         issues.push("upload_budget:server:control_p95_regression");
       }
     }

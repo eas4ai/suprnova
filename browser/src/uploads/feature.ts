@@ -22,6 +22,7 @@ import {
   type UploadApplicationPort,
   type UploadManagerOptions,
   type UploadRandomness,
+  type UploadResourceObserver,
   type UploadTransport,
   type UploadTransportRequest,
   type UploadTransportResponse,
@@ -41,6 +42,7 @@ export interface UploadFeatureOptions {
   readonly maxItems?: number;
   readonly maxQueueBytes?: number;
   readonly randomness?: UploadRandomness;
+  readonly resourceObserver?: UploadResourceObserver;
   readonly transport?: UploadTransport;
 }
 
@@ -226,6 +228,9 @@ function snapshotOptions(options: UploadFeatureOptions): UploadFeatureOptions {
     ...(options.maxItems === undefined ? {} : { maxItems: options.maxItems }),
     ...(options.maxQueueBytes === undefined ? {} : { maxQueueBytes: options.maxQueueBytes }),
     ...(options.randomness === undefined ? {} : { randomness: options.randomness }),
+    ...(options.resourceObserver === undefined
+      ? {}
+      : { resourceObserver: options.resourceObserver }),
     ...(options.transport === undefined ? {} : { transport: options.transport }),
   });
 }
@@ -240,6 +245,9 @@ function resolveOptions(options: UploadFeatureOptions): UploadManagerOptions {
     maxItems: options.maxItems ?? MAX_UPLOAD_FILES_PER_DOCUMENT,
     maxQueueBytes: options.maxQueueBytes ?? DEFAULT_MANAGER_BYTES,
     randomness: options.randomness ?? new BrowserRandomness(),
+    ...(options.resourceObserver === undefined
+      ? {}
+      : { resourceObserver: options.resourceObserver }),
     transport: options.transport ?? new FetchUploadTransport(fetchPort.bind(globalThis)),
   });
 }
@@ -324,7 +332,18 @@ export function connectUploadIsland(
     for (const field of fields) {
       const view = createUploadProgressView(manager.islandSnapshot(port, field).uploads);
       if (view !== null) {
-        for (const root of progressRoots(field)) presenter.render(root, view);
+        for (const root of progressRoots(field)) {
+          if (manager.hasResourceObserver()) {
+            manager.observeProgressApplicationStarted();
+            try {
+              presenter.render(root, view);
+            } finally {
+              manager.observeProgressApplicationCompleted();
+            }
+          } else {
+            presenter.render(root, view);
+          }
+        }
       }
       projectControls(field, view);
     }

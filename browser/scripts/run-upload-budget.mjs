@@ -34,11 +34,14 @@ export function argumentsFrom(argv) {
     baseline: DEFAULT_BASELINE,
     output: DEFAULT_OUTPUT,
     profile: "reduced",
+    recordExploratory: false,
     serverResult: DEFAULT_SERVER,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (["--baseline", "--output", "--profile", "--server-result"].includes(argument)) {
+    if (argument === "--record-exploratory") {
+      options.recordExploratory = true;
+    } else if (["--baseline", "--output", "--profile", "--server-result"].includes(argument)) {
       const value = argv[index + 1];
       if (value === undefined) fail("usage");
       index += 1;
@@ -50,6 +53,9 @@ export function argumentsFrom(argv) {
   }
   if (options.profile !== "reduced" && options.profile !== "qualified") fail("profile_invalid");
   if (options.output === options.baseline) fail("baseline_overwrite_forbidden");
+  if (options.recordExploratory && options.profile !== "reduced") {
+    fail("exploratory_record_requires_reduced_profile");
+  }
   return Object.freeze(options);
 }
 
@@ -71,7 +77,7 @@ async function boundedJson(path, missingAllowed = false) {
   }
 }
 
-async function bundledModule(entryPoint, platformName, format, globalName) {
+export async function bundledModule(entryPoint, platformName, format, globalName) {
   const result = await build({
     absWorkingDir: browserRoot,
     bundle: true,
@@ -79,6 +85,7 @@ async function bundledModule(entryPoint, platformName, format, globalName) {
     format,
     globalName,
     legalComments: "none",
+    metafile: true,
     minify: true,
     platform: platformName,
     target: platformName === "browser" ? ["chrome111"] : "node20",
@@ -87,11 +94,16 @@ async function bundledModule(entryPoint, platformName, format, globalName) {
   });
   const output = result.outputFiles[0];
   if (output === undefined) fail("benchmark_bundle_missing");
-  return output.text;
+  return Object.freeze({ inputs: Object.keys(result.metafile.inputs), source: output.text });
 }
 
 async function schemaModule() {
-  const source = await bundledModule("benchmarks/upload-schema.ts", "node", "esm");
+  const { source } = await bundledModule("benchmarks/upload-schema.ts", "node", "esm");
+  return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+}
+
+async function accountingModule() {
+  const { source } = await bundledModule("benchmarks/upload-accounting.ts", "node", "esm");
   return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 }
 
@@ -163,7 +175,7 @@ async function browserEnvironment(browser, dedicated) {
   });
 }
 
-async function measureRun(browser, artifactSource, workloadSource) {
+export async function measureRun(browser, artifactSource, workloadSource) {
   const context = await browser.newContext({ viewport: { height: 720, width: 1280 } });
   const page = await context.newPage();
   const session = await context.newCDPSession(page);
@@ -172,7 +184,11 @@ async function measureRun(browser, artifactSource, workloadSource) {
     await page.goto("about:blank");
     await page.evaluate(async (source) => {
       const encoded = btoa(String.fromCodePoint(...new TextEncoder().encode(source)));
-      await import(`data:text/javascript;base64,${encoded}`);
+      const artifactNamespace = await import(`data:text/javascript;base64,${encoded}`);
+      Object.defineProperty(globalThis, "SuprnovaUploadBudgetArtifact", {
+        configurable: true,
+        value: artifactNamespace,
+      });
     }, artifactSource);
     await page.addScriptTag({ content: workloadSource });
     return await page.evaluate(async () => {
@@ -180,7 +196,8 @@ async function measureRun(browser, artifactSource, workloadSource) {
       if (benchmark?.UPLOAD_BUDGET_OBSERVER_MARKER !== "suprnova-upload-budget-observer-v1") {
         throw new Error("upload_budget_observer_missing");
       }
-      return benchmark.measureU4_16();
+      const artifactNamespace = Reflect.get(globalThis, "SuprnovaUploadBudgetArtifact");
+      return benchmark.measureU4_16(artifactNamespace);
     });
   } finally {
     await session.detach();
@@ -199,13 +216,20 @@ async function main() {
     const artifactPath = resolve(browserRoot, "dist/suprnova-live.uploads.esm.js");
     const artifact = await readFile(artifactPath);
     if (artifact.includes(OBSERVER_MARKER)) fail("benchmark_observer_in_production_artifact");
-    const workloadSource = await bundledModule(
+    const workloadBundle = await bundledModule(
       "benchmarks/upload-workloads.ts",
       "browser",
       "iife",
       "SuprnovaUploadBudget",
     );
+    const workloadSource = workloadBundle.source;
     if (!workloadSource.includes(OBSERVER_MARKER)) fail("benchmark_observer_bundle_invalid");
+    const accounting = await accountingModule();
+    try {
+      accounting.assertUploadBenchmarkBundleInputs(workloadBundle.inputs);
+    } catch {
+      fail("benchmark_bundle_contains_production_implementation");
+    }
     const runsRequired = options.profile === "qualified" ? 3 : 1;
     const dedicated = process.env.SUPRNOVA_LIVE_B1_DEDICATED === "1";
     let environment;
@@ -226,6 +250,23 @@ async function main() {
     const progressSamples = runs.flatMap((run) => run.progressDurationsMilliseconds);
     const schema = await schemaModule();
     const progress = schema.summarizeUploadSamples(progressSamples);
+    const artifactEvidence = {
+      brotliBytes: brotliCompressSync(artifact, {
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
+      }).byteLength,
+      file: "suprnova-live.uploads.esm.js",
+      role: "uploads-esm",
+      sha256: createHash("sha256").update(artifact).digest("hex"),
+    };
+    const workload = {
+      activeTransfers: 4,
+      chunkBytes: 256 * 1024,
+      fileBytes: 16 * 1024 * 1024,
+      files: 4,
+    };
+    const managerHighWater = runs.reduce((selected, run) =>
+      run.managerOwnedBytes > selected.managerOwnedBytes ? run : selected,
+    );
     const browserEvidence = {
       bounds: {
         maxChunksPerActiveTransfer: 2,
@@ -236,7 +277,9 @@ async function main() {
       measurements: {
         activeTransfers: 4,
         liveChunkBuffers: maximum(runs, "liveChunkBuffers"),
+        managerChunkBuffers: maximum(runs, "managerChunkBuffers"),
         managerOwnedBytes: maximum(runs, "managerOwnedBytes"),
+        managerOwnedCategories: managerHighWater.managerOwnedCategories,
         maxChunksPerTransfer: maximum(runs, "maxChunksPerTransfer"),
         maxConcurrentTransfers: maximum(runs, "maxConcurrentTransfers"),
         maxQueueDepth: maximum(runs, "maxQueueDepth"),
@@ -245,28 +288,49 @@ async function main() {
         retainedBytes: maximum(runs, "retainedBytes"),
         slicedBytes: runs[0].slicedBytes,
         slices: runs[0].slices,
+        transportChunkBuffers: maximum(runs, "transportChunkBuffers"),
       },
       methodology: {
         independentRuns: runsRequired,
         measuredSamples: progressSamples.length,
         warmupIterations: 5,
       },
-      workload: {
-        activeTransfers: 4,
-        chunkBytes: 256 * 1024,
-        fileBytes: 16 * 1024 * 1024,
-        files: 4,
-      },
+      runs: runs.map((run, index) => ({
+        artifactSha256: artifactEvidence.sha256,
+        environment,
+        measurements: {
+          activeTransfers: run.activeTransfers,
+          liveChunkBuffers: run.liveChunkBuffers,
+          managerChunkBuffers: run.managerChunkBuffers,
+          managerOwnedBytes: run.managerOwnedBytes,
+          managerOwnedCategories: run.managerOwnedCategories,
+          maxChunksPerTransfer: run.maxChunksPerTransfer,
+          maxConcurrentTransfers: run.maxConcurrentTransfers,
+          maxQueueDepth: run.maxQueueDepth,
+          progressDurationsMilliseconds: run.progressDurationsMilliseconds,
+          progressP50Milliseconds: run.progressP50Milliseconds,
+          progressP95Milliseconds: run.progressP95Milliseconds,
+          retainedBytes: run.retainedBytes,
+          slicedBytes: run.slicedBytes,
+          slices: run.slices,
+          transportChunkBuffers: run.transportChunkBuffers,
+        },
+        methodology: {
+          measuredSamples: run.progressSamples,
+          warmupIterations: 5,
+        },
+        runIndex: index + 1,
+        workload,
+      })),
+      workload,
     };
+    if (process.env.SUPRNOVA_LIVE_UPLOAD_BUDGET_DEBUG === "1") {
+      process.stdout.write(
+        `${JSON.stringify({ measurements: browserEvidence.measurements, runs: browserEvidence.runs.map(({ measurements }) => ({ ...measurements, progressDurationsMilliseconds: `[${String(measurements.progressDurationsMilliseconds.length)} samples]` })) }, null, 2)}\n`,
+      );
+    }
     const result = schema.validateUploadBudgetEvidence({
-      artifact: {
-        brotliBytes: brotliCompressSync(artifact, {
-          params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
-        }).byteLength,
-        file: "suprnova-live.uploads.esm.js",
-        role: "uploads-esm",
-        sha256: createHash("sha256").update(artifact).digest("hex"),
-      },
+      artifact: artifactEvidence,
       browser: browserEvidence,
       recordedAt: new Date().toISOString(),
       schemaVersion: 1,
@@ -274,14 +338,42 @@ async function main() {
       workload: "U4/16",
     });
     const baselineValue = await boundedJson(options.baseline, true);
-    const baseline =
-      baselineValue === null ? null : schema.validateUploadBudgetBaseline(baselineValue);
+    let baseline;
+    if (options.recordExploratory) {
+      const qualifiedBaseline =
+        baselineValue !== null &&
+        typeof baselineValue === "object" &&
+        baselineValue !== null &&
+        "qualifiedBaseline" in baselineValue
+          ? baselineValue.qualifiedBaseline
+          : null;
+      if (qualifiedBaseline !== null) {
+        const qualified = schema.validateUploadBudgetEvidence(qualifiedBaseline);
+        if (
+          qualified.browser.environment.classification !== "qualified" ||
+          qualified.server.environment.classification !== "qualified"
+        ) {
+          fail("qualified_baseline_invalid");
+        }
+      }
+      baseline = schema.validateUploadBudgetBaseline({
+        exploratoryReference: result,
+        qualifiedBaseline,
+        schemaVersion: 1,
+        workload: "U4/16",
+      });
+    } else {
+      baseline = baselineValue === null ? null : schema.validateUploadBudgetBaseline(baselineValue);
+    }
     const evaluation = schema.evaluateUploadBudget(
       result,
       options.profile === "qualified" ? (baseline?.qualifiedBaseline ?? null) : null,
       { artifactSha256: result.artifact.sha256, release: options.profile === "qualified" },
     );
     await writeFile(options.output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    if (options.recordExploratory && evaluation.issues.length === 0 && baseline !== null) {
+      await writeFile(options.baseline, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
+    }
     process.stdout.write(
       `U4/16 upload budget classification=${evaluation.classification} browser_p50=${String(result.browser.measurements.progressP50Milliseconds)}ms browser_p95=${String(result.browser.measurements.progressP95Milliseconds)}ms server_p50=${String(result.server.measurements.p50Microseconds)}us server_p95=${String(result.server.measurements.p95Microseconds)}us chunks=${String(result.browser.measurements.liveChunkBuffers)} manager=${String(result.browser.measurements.managerOwnedBytes)}B artifact=${result.artifact.sha256} output=${options.output}\n`,
     );
