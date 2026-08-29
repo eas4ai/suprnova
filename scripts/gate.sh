@@ -39,6 +39,15 @@ rtk env CARGO_INCREMENTAL=0 cargo test --test security_boundaries
 rtk env CARGO_INCREMENTAL=0 cargo test --test security_hostile_context
 rtk env CARGO_INCREMENTAL=0 cargo test -p suprnova-live-macros --test ui
 
+phase "iteration 004 Rust boundaries"
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --test iteration_004_conformance \
+    --test iteration_004_adversarial \
+    --test iteration_004_exhaustion
+
+phase "iteration 004 reference host"
+rtk env CARGO_INCREMENTAL=0 cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1
+
 phase "Rust all-target and documentation tests"
 rtk env CARGO_INCREMENTAL=0 cargo test --workspace --all-targets --all-features --no-fail-fast
 rtk env CARGO_INCREMENTAL=0 cargo test --workspace --doc --all-features
@@ -58,16 +67,36 @@ phase "browser dependency and conformance gates"
     rtk npm run format:check
     rtk npm run lint
     rtk npm run typecheck
+    phase "iteration 004 browser unit boundaries"
+    rtk npm run test:unit -- \
+        tests/golden-fixtures.test.ts \
+        tests/upload-protocol.test.ts \
+        tests/upload-manager.test.ts \
+        tests/async-envelope.test.ts \
+        tests/async-feature.test.ts \
+        tests/async-dispatch.test.ts \
+        tests/bounded-resources.test.ts
     rtk npm run test:unit -- \
         tests/feature-host.test.ts \
         tests/document-lifecycle.test.ts \
         tests/optional-artifacts.test.ts \
         tests/build-contract.test.ts \
         tests/budget-contract.test.ts
+    phase "browser broad unit suite"
     rtk npm run test:unit
     rtk npm run build
     rtk npm run build:check
+    phase "iteration 004 browser matrix"
+    rtk npm run test:browser -- \
+        e2e/iteration-004-integration.spec.ts \
+        e2e/iteration-004-adversarial.spec.ts \
+        e2e/iteration-004-lifecycle.spec.ts \
+        e2e/iteration-004-accessibility.spec.ts \
+        --project=chromium \
+        --project=firefox \
+        --project=webkit
     rtk npm run test:browser -- e2e/csp.spec.ts --project=chromium
+    phase "browser broad matrix"
     rtk npm run test:browser -- \
         --project=chromium \
         --project=firefox \
@@ -95,18 +124,19 @@ rtk env \
     SUPRNOVA_LIVE_BENCH_RESULT="${local_action_result}" \
     scripts/run-action-budget.sh
 
+phase "iteration 004 reduced deterministic budgets"
 phase "U4/16 upload framework and browser budget"
-if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
-    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh
-else
-    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
-fi
+rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
 
 phase "E100/1K and R100 async continuity budgets"
-if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
+rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
+
+if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then
+    phase "U4/16 qualified upload budget"
+    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh
+
+    phase "E100/1K and R100 qualified async budgets"
     rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh
-else
-    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
 fi
 
 phase "macro expansion and isolated compile budget"
