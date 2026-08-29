@@ -205,4 +205,9 @@ require_text THIRD_PARTY_LICENSES.md \
 require_text THIRD_PARTY_LICENSES.md \
     "Playwright test dependency" '| npm | @playwright/test | 1.62.1 | Test only |'
 
+# The shared data-driven semantic contract also runs in this shell gate. Its
+# in-memory mutation cases prove that one critical inversion in each Iteration
+# 004 guide and one broken README link are detected.
+rtk node "${repository_root}/scripts/check-implementation-docs.mjs" --semantic-only
+
 printf '%s\n' "documentation contract ok"

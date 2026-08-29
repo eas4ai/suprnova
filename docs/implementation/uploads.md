@@ -80,10 +80,10 @@ It is not proof that the bearer may read, mutate, or finalize the upload.
 A `TransferGrant` is secret bearer authority. Its signed scope binds the handle,
 component, field, principal, session, tenant, host scope, protocol version, and
 expiry. The browser retains it only inside the upload manager and sends it only
-as the upload authorization credential. A grant is never component state,
-rendered HTML, a URL, local or persistent storage, a diagnostic field, or an
-application log value. Debug representations and public observers expose
-redacted values or counts, never the token.
+as the upload authorization credential. A grant is never persisted, rendered,
+or logged. It is never component state, a URL, local or persistent storage, or a
+diagnostic field. Debug representations and public observers expose redacted
+values or counts, never the token.
 
 Creation and every control operation reauthorize current trusted request
 context. The reference limit profile admits at most 16 files per field, 128
@@ -168,17 +168,25 @@ plus the exact Ready revision and an idempotency key.
 1. `prepare` idempotently binds a host operation token to the validated request.
 2. `commit` idempotently produces one `DurableUpload` application/storage
    identity.
-3. `compensate` cleans partially prepared work after commit or preparation
+3. `compensate` cleans an invalid prepared result or prepared work after commit
    failure.
 4. `reconcile` discovers a durable outcome when an external commit may have
    succeeded but the upload ledger did not record it.
 
 Only a coherent Ready/Finalizing/Finalized revision may enter that sequence.
-Exact replays return `FinalizeDisposition::ExistingOutcome`. A failed prepare or
-commit attempts compensation; inability to confirm compensation returns
-`CompensationFailed`. If durable work may exist, the engine returns
-`ReconciliationRequired` and requires idempotent reconciliation. It never lies
-by rolling the upload back to Ready and blindly repeating an external effect.
+The begin transition commits `Finalizing` before the finalizer port runs. A
+prepare error propagates while the upload remains `Finalizing`; it does not call
+`compensate`. That state permits a later retry to reconcile first and then
+prepare again when no durable outcome exists.
+
+Compensation is attempted only for an invalid prepared result or a commit
+failure. If that compensation cannot be confirmed, the engine returns
+`CompensationFailed` and the host must reconcile the external operation before
+deciding retry or cleanup. A durable result that does not match the request, or
+a durable commit whose ledger transition is lost, returns
+`ReconciliationRequired`. Exact replays return
+`FinalizeDisposition::ExistingOutcome`. The engine never lies by rolling the
+upload back to Ready and blindly repeating an external effect.
 
 ## Current-document resume
 

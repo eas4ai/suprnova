@@ -20,6 +20,7 @@ const files = [
     .map((name) => path.join("docs", "implementation", name)),
 ];
 const failures = [];
+const semanticOnly = process.argv.slice(2).includes("--semantic-only");
 const requiredHeadings = new Map([
   [
     "docs/implementation/uploads.md",
@@ -55,11 +56,262 @@ const requiredHeadings = new Map([
     ],
   ],
 ]);
+const semanticRequirements = new Map([
+  [
+    "README.md",
+    [
+      {
+        id: "readme_uploads_link",
+        pattern: /\[Uploads\]\(docs\/implementation\/uploads\.md\)/u,
+      },
+      {
+        id: "readme_async_link",
+        pattern:
+          /\[asynchronous updates\]\(docs\/implementation\/async-updates\.md\)/u,
+      },
+      {
+        id: "readme_operations_link",
+        pattern:
+          /\[Iteration 004 operations\]\(docs\/implementation\/iteration-004-operations\.md\)/u,
+      },
+    ],
+  ],
+  [
+    "docs/implementation/uploads.md",
+    [
+      {
+        id: "upload_handle_is_not_grant",
+        pattern:
+          /`UploadHandle` is[\s\S]{0,500}not proof[\s\S]{0,500}`TransferGrant` is secret bearer authority/u,
+      },
+      {
+        id: "upload_grant_secret_hygiene",
+        pattern: /A grant is never persisted, rendered, or logged/u,
+      },
+      {
+        id: "upload_provider_modes",
+        pattern: /In reverse-proxy mode[\s\S]{0,2000}In direct-provider mode/u,
+      },
+      {
+        id: "upload_quarantine_media_scanner",
+        pattern:
+          /temporary quarantine data[\s\S]{0,3000}media parsers[\s\S]{0,1200}`UploadScanner`/u,
+      },
+      {
+        id: "upload_prepare_failure",
+        pattern:
+          /A prepare error propagates while the upload remains `Finalizing`; it does not call `compensate`\./u,
+      },
+      {
+        id: "upload_compensation_scope",
+        pattern:
+          /Compensation is attempted only for an invalid prepared result or a commit failure\./u,
+      },
+      {
+        id: "upload_reacquire_application_route",
+        pattern: /authenticated\s+application route outside `\/__live\/`/u,
+      },
+      {
+        id: "upload_cleanup_lifecycle",
+        pattern:
+          /Cancel is a conditional idempotent lifecycle transition[\s\S]{0,2000}bounded cleanup worker/u,
+      },
+    ],
+  ],
+  [
+    "docs/implementation/async-updates.md",
+    [
+      {
+        id: "async_typed_event_schema",
+        pattern: /Events are Rust types[\s\S]{0,500}closed payload contract/u,
+      },
+      {
+        id: "async_signed_authorization_exact_origin",
+        pattern: /signs it under[\s\S]{0,2500}exact\s+configured origin match/u,
+      },
+      {
+        id: "async_multiplexed_document_transport",
+        pattern:
+          /one physical[\s\S]{0,300}transport[\s\S]{0,700}logical memberships/u,
+      },
+      {
+        id: "async_poll_push_hybrid",
+        pattern:
+          /Polling is an ordinary fresh-render request[\s\S]{0,2200}`live:stream\.push-only/u,
+      },
+      {
+        id: "async_replay_truthful_prefix",
+        pattern:
+          /Replay prevalidation and admission are atomic for the complete transcript\.[\s\S]{0,500}Dispatch then commits each successful event in order; if a later dispatch fails, recovery reports and preserves the truthful committed prefix/u,
+      },
+      {
+        id: "async_membership_local_auth_loss",
+        pattern:
+          /Authorization loss removes that membership only; it does not tear down healthy\s+siblings/u,
+      },
+      {
+        id: "async_degraded_fresh_render",
+        pattern: /`degraded` means[\s\S]{0,1200}fresh render proves/u,
+      },
+      {
+        id: "async_document_backpressure",
+        pattern: /bounded to 64 unapplied envelopes and 256 KiB/u,
+      },
+      {
+        id: "async_fanout_replay_distinction",
+        pattern:
+          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is 1,024/u,
+      },
+      {
+        id: "async_freeze_offline_lifecycle",
+        pattern: /document freeze[\s\S]{0,700}Offline state pauses/u,
+      },
+    ],
+  ],
+  [
+    "docs/implementation/iteration-004-operations.md",
+    [
+      {
+        id: "operations_exact_artifacts",
+        pattern:
+          /`suprnova-live\.esm\.js`[\s\S]{0,500}`suprnova-live\.classic\.js`[\s\S]{0,500}`suprnova-live\.stimulus\.esm\.js`[\s\S]{0,500}`suprnova-live\.stimulus\.classic\.js`[\s\S]{0,500}`suprnova-live\.uploads\.esm\.js`[\s\S]{0,500}`suprnova-live\.uploads\.classic\.js`[\s\S]{0,500}`suprnova-live\.async\.esm\.js`[\s\S]{0,500}`suprnova-live\.async\.classic\.js`[\s\S]{0,800}Choose ESM or classic/u,
+      },
+      {
+        id: "operations_fixture_protocol_versions",
+        pattern:
+          /`fixtures\/v4\/`[\s\S]{0,300}Upload protocol\s+v1[\s\S]{0,300}async envelope\/subscription protocol v1/u,
+      },
+      {
+        id: "operations_optional_selection_csp",
+        pattern:
+          /Trusted checked render metadata\s+selects optional roles[\s\S]{0,1800}`script-src\s+'self'`/u,
+      },
+      {
+        id: "operations_limits_observability",
+        pattern:
+          /The engine rejects unbounded configuration[\s\S]{0,3500}## Observability/u,
+      },
+      {
+        id: "operations_qualified_baseline",
+        pattern: /`qualifiedBaseline` is `null`/u,
+      },
+      {
+        id: "operations_named_workloads",
+        pattern: /`U4\/16`[\s\S]{0,1800}`E100\/1K`[\s\S]{0,1400}`R100`/u,
+      },
+      {
+        id: "operations_conformance_boundary",
+        pattern:
+          /thin Rust reference host[\s\S]{0,1400}Node host owns only static[\s\S]{0,1400}`DirectProviderConformanceAdapter`[\s\S]{0,800}conformance/u,
+      },
+      {
+        id: "operations_future_suprnova_ownership",
+        pattern:
+          /Suprnova\s+application layer will own real router[\s\S]{0,1400}broadcaster\/event-source adapters/u,
+      },
+      {
+        id: "operations_async_size_review_not_cap",
+        pattern:
+          /Async has no absolute\s+cap[\s\S]{0,500}15 percent[\s\S]{0,300}review trigger/u,
+      },
+      {
+        id: "operations_fanout_replay_distinction",
+        pattern:
+          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is 1,024/u,
+      },
+      {
+        id: "operations_warning_policy",
+        pattern:
+          /Clippy warnings are reviewed; the gate does not blanket-deny warnings/u,
+      },
+    ],
+  ],
+]);
 
-for (const [relativeFile, headings] of requiredHeadings) {
+function semanticFailures(relativeFile, text) {
+  const requirements = semanticRequirements.get(relativeFile) ?? [];
+  const normalized = text.replace(/\s+/gu, " ");
+  return requirements
+    .filter(({ pattern }) => !pattern.test(normalized))
+    .map(({ id }) => `${relativeFile}: missing semantic contract: ${id}`);
+}
+
+function mutationSelfTest(documents) {
+  const cases = [
+    {
+      file: "docs/implementation/uploads.md",
+      pattern: /it does not call\s+`compensate`/u,
+      replacement: "it calls `compensate`",
+      requirement: "upload_prepare_failure",
+    },
+    {
+      file: "docs/implementation/async-updates.md",
+      pattern: /truthful committed prefix/u,
+      replacement: "all-or-nothing dispatch",
+      requirement: "async_replay_truthful_prefix",
+    },
+    {
+      file: "docs/implementation/iteration-004-operations.md",
+      pattern: /effective end-to-end\s+event fanout ceiling is 256/u,
+      replacement: "effective end-to-end event fanout ceiling is 1,024",
+      requirement: "operations_fanout_replay_distinction",
+    },
+    {
+      file: "README.md",
+      pattern: /docs\/implementation\/uploads\.md/u,
+      replacement: "docs/implementation/upload.md",
+      requirement: "readme_uploads_link",
+    },
+  ];
+  const mutationFailures = [];
+  for (const mutation of cases) {
+    const original = documents.get(mutation.file);
+    if (original === undefined || !mutation.pattern.test(original)) {
+      mutationFailures.push(
+        `semantic mutation anchor missing: ${mutation.requirement}`,
+      );
+      continue;
+    }
+    const mutated = original.replace(mutation.pattern, mutation.replacement);
+    const detected = semanticFailures(mutation.file, mutated).some((failure) =>
+      failure.endsWith(mutation.requirement),
+    );
+    if (!detected)
+      mutationFailures.push(
+        `semantic mutation escaped: ${mutation.requirement}`,
+      );
+  }
+  return { cases: cases.length, failures: mutationFailures };
+}
+
+const semanticDocuments = new Map();
+for (const relativeFile of semanticRequirements.keys()) {
   const fullPath = path.join(repositoryRoot, relativeFile);
   if (!fs.existsSync(fullPath)) {
-    failures.push(`${relativeFile}: required implementation document is missing`);
+    failures.push(`${relativeFile}: required semantic document is missing`);
+    continue;
+  }
+  const text = fs.readFileSync(fullPath, "utf8");
+  semanticDocuments.set(relativeFile, text);
+  failures.push(...semanticFailures(relativeFile, text));
+}
+
+if (failures.length === 0) {
+  const mutation = mutationSelfTest(semanticDocuments);
+  failures.push(...mutation.failures);
+  if (mutation.failures.length === 0) {
+    console.log(
+      `implementation-doc semantic mutation self-test ok cases=${mutation.cases}`,
+    );
+  }
+}
+
+for (const [relativeFile, headings] of semanticOnly ? [] : requiredHeadings) {
+  const fullPath = path.join(repositoryRoot, relativeFile);
+  if (!fs.existsSync(fullPath)) {
+    failures.push(
+      `${relativeFile}: required implementation document is missing`,
+    );
     continue;
   }
 
@@ -71,7 +323,7 @@ for (const [relativeFile, headings] of requiredHeadings) {
   }
 }
 
-for (const relativeFile of files) {
+for (const relativeFile of semanticOnly ? [] : files) {
   const fullPath = path.join(repositoryRoot, relativeFile);
   const text = fs.readFileSync(fullPath, "utf8");
 
@@ -131,4 +383,8 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`implementation-doc-check ok files=${files.length}`);
+console.log(
+  semanticOnly
+    ? `implementation-doc-semantics ok files=${semanticRequirements.size}`
+    : `implementation-doc-check ok files=${files.length}`,
+);

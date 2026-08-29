@@ -159,9 +159,13 @@ a storm.
 Every authorized stream position is `(epoch, sequence)`. Delivery is ordered
 per source. Exact duplicates are ignored, a successor advances the current
 position, and stale epochs, sequence gaps, or unproved replay coverage cannot be
-applied as if current. A replay transcript is bounded and all-or-nothing: it is
-accepted only when its first position covers the requested successor and its
-last position proves continuity through the advertised high-water mark.
+applied as if current. Replay prevalidation and admission are atomic for the
+complete transcript. Invalid scope, epoch, sequence, coverage, authority, or
+resource bounds therefore enter no replay dispatch. Dispatch then commits each
+successful event in order; if a later dispatch fails, recovery reports and
+preserves the truthful committed prefix, current position, degraded state, and
+retained high-water mark. It resumes only the undispatched suffix after new
+authority proves recovery.
 
 On reconnect the browser supplies its last committed position. The server may
 resume with a complete bounded replay, announce that the subscriber is already
@@ -202,11 +206,15 @@ presentation only and never changes freshness semantics.
 ## Backpressure
 
 The server queue is bounded to 64 unapplied envelopes and 256 KiB of canonical
-envelope bytes per document delivery owner. A payload is at most 32 KiB, an
-event declares at most 16 targets and fanout at most 1,024, a component declares
-at most 32 subscriptions, and one server document transport owns at most 128
-logical memberships. Browser-side logical membership and diagnostic/resource
-collections have their own closed bounds.
+envelope bytes per document delivery owner. A payload is at most 32 KiB and an
+event declares at most 16 target scopes. Although the internal Rust metadata
+type can represent fanout up to 1,024, browser authorization and registered-event
+admission reject a contract above 256. The effective end-to-end event fanout
+ceiling is 256 and signed registration or deployment policy may lower it. The
+independent replay transcript limit is 1,024 envelopes; it is not a fanout
+allowance. A component declares at most 32 subscriptions, and one server
+document transport owns at most 128 logical memberships. Browser-side logical
+membership and diagnostic/resource collections have their own closed bounds.
 
 Replaceable refresh and presentation-signal work may coalesce only under the
 same fully authorized key. Registered browser events are not silently dropped

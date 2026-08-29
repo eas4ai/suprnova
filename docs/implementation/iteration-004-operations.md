@@ -67,15 +67,20 @@ Its public ceilings are 64 files and handles per document, 16 active transfers,
 The default `FetchUploadTransport` accepts at most 16 KiB of response JSON and
 sends grants only in its upload authorization header.
 
-Async subscription metadata permits 16 targets and fanout 1,024 per event, 32
-subscriptions per component, 32 topics and 64 event names per subscription, and
-the two closed transport modes. Descriptors live at most 300 seconds, fallback
-polling is 1-300 seconds with at most 100 percent configured jitter, and reconnect
-attempts are capped at 16. Canonical envelopes are 64 KiB with 32 KiB payloads.
-The server document queue is 64 events/256 KiB and owns at most 128 logical
-memberships. The browser connection pool applies its own 256-membership ceiling,
-one physical transport per compatible document key, eight concurrent WebSocket
-handshakes per origin, and one queued plus one in-flight refresh per island.
+Async subscription metadata permits 16 target scopes. The internal Rust
+metadata type can represent fanout up to 1,024, but browser authorization and
+registered-event admission reject values above 256. The effective end-to-end
+event fanout ceiling is 256, further bounded by signed registration and
+deployment policy. The independent replay transcript limit is 1,024 envelopes;
+it is not event fanout. A component permits 32 subscriptions, with 32 topics and
+64 event names per subscription, across the two closed transport modes.
+Descriptors live at most 300 seconds, fallback polling is 1-300 seconds with at
+most 100 percent configured jitter, and reconnect attempts are capped at 16.
+Canonical envelopes are 64 KiB with 32 KiB payloads. The server document queue
+is 64 events/256 KiB and owns at most 128 logical memberships. The browser
+connection pool applies its own 256-membership ceiling, one physical transport
+per compatible document key, eight concurrent WebSocket handshakes per origin,
+and one queued plus one in-flight refresh per island.
 
 Creation, chunk, status, completion, cancellation, reacquisition, validation,
 finalization, cleanup, descriptor issue, credential rotation, transport create,
@@ -181,6 +186,7 @@ rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 create dedicated-runner attestations. A release runner must also provide the S1
 and B1 environment controls required by the invoked scripts. Fabricating those
 flags on a shared workstation does not make the resulting evidence qualified.
+Clippy warnings are reviewed; the gate does not blanket-deny warnings.
 
 ## Reference-host boundary
 
