@@ -59,6 +59,8 @@ export interface UploadCancellationCleanup {
 
 export type UploadCleanupScheduler = (cleanup: UploadCancellationCleanup) => void;
 
+const ignoreDetachedUploadCancellationFailure = (): void => undefined;
+
 export async function settleUploadCancellation(cleanup: UploadCancellationCleanup): Promise<void> {
   try {
     const response = await cleanup.transport.send(cleanup.request);
@@ -70,7 +72,7 @@ export async function settleUploadCancellation(cleanup: UploadCancellationCleanu
 
 export function detachUploadCancellation(cleanup: UploadCancellationCleanup): void {
   try {
-    void cleanup.transport.send(cleanup.request);
+    void cleanup.transport.send(cleanup.request).catch(ignoreDetachedUploadCancellationFailure);
   } catch {
     // Dispatch is best-effort after local authority is released.
   }

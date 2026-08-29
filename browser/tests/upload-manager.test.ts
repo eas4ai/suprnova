@@ -134,6 +134,36 @@ class NeverSettlingCancellationTransport extends MemoryTransport {
   }
 }
 
+class RejectingDetachedCancellationTransport extends MemoryTransport {
+  detachedCatchCalls = 0;
+  readonly #holdFirstCancellation: boolean;
+  #cancellations = 0;
+
+  constructor(holdFirstCancellation = false) {
+    super();
+    this.#holdFirstCancellation = holdFirstCancellation;
+  }
+
+  override send(request: UploadTransportRequest): Promise<UploadTransportResponse> {
+    if (request.operation !== "cancel") return super.send(request);
+    this.requests.push(request);
+    this.#cancellations += 1;
+    if (this.#holdFirstCancellation && this.#cancellations === 1) {
+      return new Promise(() => undefined);
+    }
+
+    const rejection = Promise.reject<UploadTransportResponse>(
+      new Error("detached_upload_cancel_rejected"),
+    );
+    const consume = rejection.catch.bind(rejection);
+    rejection.catch = ((onRejected) => {
+      this.detachedCatchCalls += 1;
+      return consume(onRejected);
+    }) as typeof rejection.catch;
+    return rejection;
+  }
+}
+
 function manager(transport = new MemoryTransport(), maxActive = 4) {
   return {
     manager: new UploadManager({
@@ -261,6 +291,61 @@ describe("current-document upload manager", () => {
 
     fixture.dispose();
     expect(fixture.snapshot().cleanupObligations).toBe(2);
+    expect(fixture.snapshot().uploads).toEqual([]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+  });
+
+  it("consumes a rejected detached cancellation when the cleanup owner is saturated", async () => {
+    const transport = new RejectingDetachedCancellationTransport(true);
+    const fixture = new UploadManager({
+      chunkBytes: 256 * KIB,
+      connectivity: new Online(),
+      maxActive: 1,
+      maxItems: 1,
+      maxQueueBytes: 256 * KIB,
+      randomness: new Sequence(),
+      transport,
+    });
+    const owner = island("saturated-rejected-cancel");
+
+    for (let index = 0; index < 2; index += 1) {
+      await fixture.select({ field: "attachment", input: input(), island: owner.port }, [
+        file(`rejected-${String(index)}.bin`, 1),
+      ]);
+      await fixture.remove(owner.port, "attachment");
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(transport.requests.filter(({ operation }) => operation === "cancel")).toHaveLength(2);
+    expect(transport.detachedCatchCalls).toBe(1);
+    expect(fixture.snapshot().cleanupObligations).toBe(1);
+    expect(fixture.snapshot().uploads).toEqual([]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+    fixture.dispose();
+  });
+
+  it("consumes a rejected detached cancellation after the cleanup owner retires", async () => {
+    const transport = new RejectingDetachedCancellationTransport();
+    const fixture = new UploadManager({
+      chunkBytes: 256 * KIB,
+      connectivity: new Online(),
+      maxActive: 1,
+      maxItems: 1,
+      maxQueueBytes: 256 * KIB,
+      randomness: new Sequence(),
+      transport,
+    });
+    const owner = island("retired-rejected-cancel");
+    await fixture.select({ field: "attachment", input: input(), island: owner.port }, [
+      file("retired.bin", 1),
+    ]);
+
+    fixture.dispose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(transport.requests.filter(({ operation }) => operation === "cancel")).toHaveLength(1);
+    expect(transport.detachedCatchCalls).toBe(1);
+    expect(fixture.snapshot().cleanupObligations).toBe(0);
     expect(fixture.snapshot().uploads).toEqual([]);
     expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
   });

@@ -328,11 +328,11 @@ export class UploadManager {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#cleanupOwner.retire();
     for (const bindings of [...this.#bindings.values()]) {
       for (const binding of [...bindings.values()]) this.#dropBinding(binding, true);
     }
     this.#owner.retire();
-    this.#cleanupOwner.retire();
     this.#entries.clear();
     this.#bindings.clear();
     this.#generations.clear();
