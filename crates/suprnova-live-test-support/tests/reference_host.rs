@@ -1113,6 +1113,26 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
     assert_eq!(status, StatusCode::CREATED, "{canceled}");
     let canceled_handle = canceled["handle"].as_str().expect("canceled handle");
     let canceled_grant = canceled["grant"].as_str().expect("canceled grant");
+    let canceled_revision = canceled["revision"].as_u64().expect("canceled revision");
+    let selected_terminal_request = serde_json::to_vec(&json!({
+        "handle": canceled_handle,
+        "upload_revision": canceled_revision,
+    }))
+    .expect("terminalized selected pause request");
+    let (status, _, selected_terminal) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/pause-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        selected_terminal_request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let selected_terminal: Value =
+        serde_json::from_slice(&selected_terminal).expect("terminalized selected pause response");
+    let selected_terminal_generation = selected_terminal["pause_generation"]
+        .as_u64()
+        .expect("terminalized selected pause generation");
     let (status, _, _) = upload_request(
         &host,
         Method::POST,
@@ -1122,6 +1142,23 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(host.inspection_handle().snapshot().open_timers, 1);
+    let resume = serde_json::to_vec(&json!({
+        "pause_generation": selected_terminal_generation,
+    }))
+    .expect("resume terminalized selected pause");
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/resume-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        resume,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(host.inspection_handle().snapshot().open_timers, 0);
     let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     host.shutdown().await.expect("clean upload-window shutdown");

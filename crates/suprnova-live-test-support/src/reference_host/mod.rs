@@ -1248,6 +1248,7 @@ async fn iteration_004_pause_upload(
     match state
         .uploads
         .pause_chunk(&request.handle, request.upload_revision)
+        .await
     {
         Ok(generation) => Json(json!({"pause_generation": generation})).into_response(),
         Err(code) => error(StatusCode::CONFLICT, code),
@@ -1261,6 +1262,7 @@ async fn iteration_004_pause_finalize(
     match state
         .uploads
         .pause_finalize(&request.handle, request.upload_revision)
+        .await
     {
         Ok(generation) => Json(json!({"pause_generation": generation})).into_response(),
         Err(code) => error(StatusCode::CONFLICT, code),

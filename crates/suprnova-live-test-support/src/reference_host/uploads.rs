@@ -325,6 +325,11 @@ impl UploadOperationPause {
         )
     }
 
+    fn has_authority(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.selected.is_some() || state.active.is_some()
+    }
+
     #[cfg(test)]
     async fn wait_until_entered(&self, generation: u64) {
         loop {
@@ -1256,11 +1261,12 @@ impl UploadRuntime {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
 
-    pub(super) fn pause_chunk(
+    pub(super) async fn pause_chunk(
         &self,
         handle: &str,
         operation_generation: u64,
     ) -> Result<u64, &'static str> {
+        let _creation_window_guard = self.creation_window_gate.lock().await;
         let records = self
             .uploads
             .records
@@ -1286,11 +1292,12 @@ impl UploadRuntime {
         self.operation_pause.resume(generation)
     }
 
-    pub(super) fn pause_finalize(
+    pub(super) async fn pause_finalize(
         &self,
         handle: &str,
         operation_generation: u64,
     ) -> Result<u64, &'static str> {
+        let _creation_window_guard = self.creation_window_gate.lock().await;
         let records = self
             .uploads
             .records
@@ -1375,8 +1382,10 @@ impl UploadRuntime {
             UploadSlot::Ready(upload) => !upload.state.is_terminal(),
             UploadSlot::Busy { .. } => true,
         });
-        let ledger_is_terminal = self.ledger.reset_creation_window_if_all_terminal();
-        if !slots_are_terminal || !ledger_is_terminal {
+        if !slots_are_terminal || self.operation_pause.has_authority() {
+            return Err("upload_window_not_quiescent");
+        }
+        if !self.ledger.reset_creation_window_if_all_terminal() {
             return Err("upload_window_not_quiescent");
         }
         Ok(())
@@ -2038,6 +2047,7 @@ mod tests {
         let revision = created["revision"].as_u64().expect("revision");
         let generation = runtime
             .pause_chunk(&handle, revision)
+            .await
             .expect("scoped pause generation");
         assert_eq!(timers.current(), 1);
         assert_eq!(
@@ -2045,7 +2055,7 @@ mod tests {
             Err("upload_pause_generation_invalid")
         );
         assert_eq!(
-            runtime.pause_chunk("wrong-handle", revision),
+            runtime.pause_chunk("wrong-handle", revision).await,
             Err("upload_pause_scope_invalid")
         );
         tokio::task::yield_now().await;
@@ -2060,6 +2070,7 @@ mod tests {
 
         let generation = runtime
             .pause_chunk(&handle, revision)
+            .await
             .expect("second scoped pause generation");
         let operation_runtime = Arc::clone(&runtime);
         let operation_handle = handle.clone();
