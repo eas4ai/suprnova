@@ -44,6 +44,7 @@ const ASYNC_EMISSION_PORT: u16 = 4_197;
 const DIRECT_FLOW_PORT: u16 = 4_198;
 const ORDINARY_ACTION_PORT: u16 = 4_199;
 const UPLOAD_WINDOW_PORT: u16 = 4_200;
+const ADVERSARIAL_ORIGIN_PORT: u16 = 4_201;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -1432,6 +1433,54 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_upgrade_rejects_every_hostile_origin_shape_before_transport_lookup() {
+    let root = TestRoot::new("adversarial-origin");
+    let host = start_host(ADVERSARIAL_ORIGIN_PORT, &root, ReferenceFaultSchedule::None).await;
+    let application_origin = host.origin().to_owned();
+    let cases = [
+        ("missing", Vec::new()),
+        ("null", vec!["null"]),
+        ("wildcard", vec!["*"]),
+        ("malformed", vec!["https://user@example.test/path"]),
+        ("unapproved", vec!["https://cross-site.example"]),
+        (
+            "duplicate",
+            vec![application_origin.as_str(), application_origin.as_str()],
+        ),
+    ];
+
+    for (name, origins) in cases {
+        let response = websocket_upgrade_with_origins(&host, &origins, "unknown-transport").await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "{name} origin was not rejected before transport lookup: {response}"
+        );
+        assert!(
+            response.contains("websocket_origin_rejected"),
+            "{name} origin did not receive the closed rejection: {response}"
+        );
+        assert!(
+            response.len() <= 4_096,
+            "{name} response exceeded its bound"
+        );
+    }
+
+    let (status, _, bytes) = request(
+        &host,
+        Method::GET,
+        "/suprnova-live.assets.json",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.len() <= 64 * 1024);
+    host.shutdown()
+        .await
+        .expect("clean adversarial-host shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_emission_control_is_generation_bound_and_explicit() {
     let root = TestRoot::new("async-emission");
     let host = start_host(ASYNC_EMISSION_PORT, &root, ReferenceFaultSchedule::None).await;
@@ -1940,12 +1989,24 @@ async fn read_stream_text(stream: &mut TcpStream) -> String {
 }
 
 async fn websocket_upgrade(host: &ReferenceHost, origin: &str, transport: &str) -> String {
+    websocket_upgrade_with_origins(host, &[origin], transport).await
+}
+
+async fn websocket_upgrade_with_origins(
+    host: &ReferenceHost,
+    origins: &[&str],
+    transport: &str,
+) -> String {
     let mut stream = TcpStream::connect(host.address())
         .await
         .expect("connect WebSocket");
+    let origin_headers = origins
+        .iter()
+        .map(|origin| format!("Origin: {origin}\r\n"))
+        .collect::<String>();
     let request = format!(
-        "GET /__live/async/ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: {origin}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Transport: {transport}\r\n\r\n",
-        host.address()
+        "GET /__live/async/ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin_headers}Authorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Transport: {transport}\r\n\r\n",
+        host.address(),
     );
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = vec![0_u8; 4_096];

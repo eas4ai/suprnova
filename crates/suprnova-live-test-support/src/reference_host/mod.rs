@@ -983,7 +983,7 @@ async fn websocket(
     if let Some(response) = websocket_session_error(&headers) {
         return response;
     }
-    if header(&headers, ORIGIN.as_str()) != Some(state.origin.as_str()) {
+    if single_header(&headers, ORIGIN.as_str()) != Some(state.origin.as_str()) {
         return error(StatusCode::FORBIDDEN, "websocket_origin_rejected");
     }
     let protocol = header(&headers, SEC_WEBSOCKET_PROTOCOL.as_str()).and_then(|value| {
@@ -1542,6 +1542,15 @@ fn websocket_session_error(headers: &HeaderMap) -> Option<Response> {
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.to_str().ok()
 }
 
 fn async_result(result: Result<Value, &'static str>, status: StatusCode) -> Response {
