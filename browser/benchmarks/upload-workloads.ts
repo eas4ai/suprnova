@@ -38,13 +38,13 @@ interface TransferChunkHighWater {
   readonly currentManagerBuffers: number;
   readonly currentTotalBuffers: number;
   readonly currentTransportBuffers: number;
-  readonly handle: string;
   readonly managerHighWater: number;
   readonly managerHighWaterBytes: number;
   readonly totalHighWater: number;
   readonly totalHighWaterBytes: number;
   readonly transportHighWater: number;
   readonly transportHighWaterBytes: number;
+  readonly slot: number;
 }
 
 interface FileSliceObservation {
@@ -124,6 +124,7 @@ class ObservedFile extends File {
 
 export class ImmediateUploadTransport {
   readonly #revisions = new Map<string, bigint>();
+  readonly #slotsByHandle = new Map<string, number>();
   readonly #activeChunks = new Map<string, Readonly<{ bytes: ArrayBuffer; handle: string }>>();
   readonly #completed: Promise<void>;
   readonly #waitForReceipt: (request: UploadTransportRequest, token: string) => Promise<void>;
@@ -162,20 +163,22 @@ export class ImmediateUploadTransport {
   activeChunksByTransfer(): readonly Readonly<{
     bytes: number;
     buffers: number;
-    handle: string;
+    slot: number;
   }>[] {
-    const byHandle = new Map<string, { buffers: number; bytes: number }>();
+    const bySlot = new Map<number, { buffers: number; bytes: number }>();
     for (const operation of this.#activeChunks.values()) {
-      const prior = byHandle.get(operation.handle) ?? { buffers: 0, bytes: 0 };
-      byHandle.set(operation.handle, {
+      const slot = this.#slotsByHandle.get(operation.handle);
+      if (slot === undefined) throw new Error("upload_budget_transfer_slot_missing");
+      const prior = bySlot.get(slot) ?? { buffers: 0, bytes: 0 };
+      bySlot.set(slot, {
         buffers: prior.buffers + 1,
         bytes: prior.bytes + operation.bytes.byteLength,
       });
     }
     return Object.freeze(
-      [...byHandle.entries()]
-        .map(([handle, ownership]) => Object.freeze({ ...ownership, handle }))
-        .sort((left, right) => left.handle.localeCompare(right.handle)),
+      [...bySlot.entries()]
+        .map(([slot, ownership]) => Object.freeze({ ...ownership, slot }))
+        .sort((left, right) => left.slot - right.slot),
     );
   }
 
@@ -202,6 +205,7 @@ export class ImmediateUploadTransport {
         const suffix = String(this.#created).padStart(12, "0");
         const handle = `018f47c1-2af0-7cc4-a001-${suffix}`;
         this.#revisions.set(handle, 1n);
+        this.#slotsByHandle.set(handle, this.#created - 1);
         return Object.freeze({
           grant: `benchmark-grant-${String(this.#created)}`,
           handle,
@@ -364,7 +368,7 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       latestResources.transferChunks.map((transfer) => ({
         buffers: transfer.pendingChunkBuffers,
         bytes: transfer.pendingChunkBytes,
-        handle: transfer.handle,
+        slot: transfer.slot,
       })),
       transport.activeChunksByTransfer(),
     );

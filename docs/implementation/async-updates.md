@@ -115,11 +115,19 @@ removing a membership is descriptor-, binding-, stream-, and generation-bound.
 Authorization loss removes that membership only; it does not tear down healthy
 siblings unless the physical transport itself is no longer valid.
 
-Server-sent events are same-origin. A WebSocket handshake requires an exact
-configured origin match plus the host's authenticated cookie or bearer policy;
-missing, malformed, unlisted, cross-site, or opaque origins fail closed before
-upgrade. Browser-chosen topics, arbitrary origin reflection, query-string
-credentials, and wildcard production origins are not accepted.
+Server-sent events are same-origin. The built-in `BrowserWebSocketAdapter`
+accepts only `session_cookie` authorization. Browser WebSocket cannot attach an
+arbitrary `Authorization` header, and the built-in adapter rejects every other
+authorization kind. Fetch-based SSE and polling may use bearer authorization
+when the host policy permits it. Bearer-authorized or cross-origin WebSocket
+requires an application-supplied custom transport that still satisfies the
+signed subscription and exact Origin and authentication contracts.
+
+Every WebSocket handshake requires an exact configured origin match plus its
+accepted authentication policy; missing, malformed, unlisted, cross-site, or
+opaque origins fail closed before upgrade. Browser-chosen topics, arbitrary
+origin reflection, query-string credentials, and wildcard production origins
+are not accepted.
 
 ## Polling and push modes
 

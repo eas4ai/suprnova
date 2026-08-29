@@ -178,9 +178,9 @@ export interface UploadManagerSnapshot {
 
 /** Exact per-transfer ownership for manager-retained chunk payloads. */
 export interface UploadTransferChunkResourceSnapshot {
-  readonly handle: UploadHandle;
   readonly pendingChunkBuffers: number;
   readonly pendingChunkBytes: number;
+  readonly slot: number;
 }
 
 /** Count-only upload ownership metrics suitable for bounded observability. */

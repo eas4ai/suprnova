@@ -7,8 +7,6 @@ export const U4_16 = Object.freeze({
   files: 4,
 });
 
-const UPLOAD_HANDLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-
 export interface UploadBudgetArtifact {
   readonly brotliBytes: number;
   readonly file: "suprnova-live.uploads.esm.js";
@@ -111,9 +109,9 @@ export interface UploadBudgetBrowserTransferChunkBuffers {
   readonly currentManagerBuffers: number;
   readonly currentTotalBuffers: number;
   readonly currentTransportBuffers: number;
-  readonly handle: string;
   readonly managerHighWater: number;
   readonly managerHighWaterBytes: number;
+  readonly slot: number;
   readonly totalHighWater: number;
   readonly totalHighWaterBytes: number;
   readonly transportHighWater: number;
@@ -126,8 +124,8 @@ export interface UploadBudgetServerTransferChunkBuffers {
   readonly currentBytes: number;
   readonly currentProviderBuffers: number;
   readonly currentTotalBuffers: number;
-  readonly handle: string;
   readonly providerHighWater: number;
+  readonly slot: number;
   readonly totalHighWater: number;
   readonly totalHighWaterBytes: number;
 }
@@ -171,9 +169,9 @@ export interface UploadBudgetServerMeasurements {
     acceptedChunks: number;
     duplicateDisposition: "existing_outcome";
     finalRevision: number;
-    handle: string;
     providerCheckpointChunks: number;
     providerCommittedBytes: number;
+    slot: number;
   }>[];
   readonly excludedCalls: Readonly<{
     applicationValidation: 0;
@@ -285,7 +283,6 @@ type EvidenceKey =
   | "fileBytes"
   | "files"
   | "height"
-  | "handle"
   | "independentRuns"
   | "kernel"
   | "liveChunkBuffers"
@@ -344,6 +341,7 @@ type EvidenceKey =
   | "sha256"
   | "slicedBytes"
   | "slices"
+  | "slot"
   | "transportChunkBuffers"
   | "transportHighWater"
   | "transportHighWaterBytes"
@@ -593,7 +591,7 @@ function browserTransferChunkBuffers(
   value: unknown,
 ): readonly UploadBudgetBrowserTransferChunkBuffers[] {
   if (!Array.isArray(value) || value.length !== U4_16.activeTransfers) fail();
-  const seen = new Set<string>();
+  const seen = new Set<number>();
   const transfers = value.map((entry): UploadBudgetBrowserTransferChunkBuffers => {
     const candidate = record(entry);
     exact(candidate, [
@@ -601,17 +599,17 @@ function browserTransferChunkBuffers(
       "currentManagerBuffers",
       "currentTotalBuffers",
       "currentTransportBuffers",
-      "handle",
       "managerHighWater",
       "managerHighWaterBytes",
+      "slot",
       "totalHighWater",
       "totalHighWaterBytes",
       "transportHighWater",
       "transportHighWaterBytes",
     ]);
-    const handle = string(candidate.handle);
-    if (!UPLOAD_HANDLE.test(handle) || seen.has(handle)) fail();
-    seen.add(handle);
+    const slot = integer(candidate.slot);
+    if (slot >= U4_16.activeTransfers || seen.has(slot)) fail();
+    seen.add(slot);
     const currentBytes = integer(candidate.currentBytes);
     const currentManagerBuffers = integer(candidate.currentManagerBuffers);
     const currentTransportBuffers = integer(candidate.currentTransportBuffers);
@@ -637,9 +635,9 @@ function browserTransferChunkBuffers(
     }
     return candidate as unknown as UploadBudgetBrowserTransferChunkBuffers;
   });
-  const suppliedHandles = transfers.map(({ handle }) => handle);
-  transfers.sort((left, right) => left.handle.localeCompare(right.handle));
-  if (transfers.some((entry, index) => entry.handle !== suppliedHandles[index])) fail();
+  const suppliedSlots = transfers.map(({ slot }) => slot);
+  transfers.sort((left, right) => left.slot - right.slot);
+  if (transfers.some((entry, index) => entry.slot !== suppliedSlots[index])) fail();
   return Object.freeze(transfers);
 }
 
@@ -647,7 +645,7 @@ function serverTransferChunkBuffers(
   value: unknown,
 ): readonly UploadBudgetServerTransferChunkBuffers[] {
   if (!Array.isArray(value) || value.length !== U4_16.activeTransfers) fail();
-  const seen = new Set<string>();
+  const seen = new Set<number>();
   const transfers = value.map((entry): UploadBudgetServerTransferChunkBuffers => {
     const candidate = record(entry);
     exact(candidate, [
@@ -656,14 +654,14 @@ function serverTransferChunkBuffers(
       "currentBytes",
       "currentProviderBuffers",
       "currentTotalBuffers",
-      "handle",
       "providerHighWater",
+      "slot",
       "totalHighWater",
       "totalHighWaterBytes",
     ]);
-    const handle = string(candidate.handle);
-    if (!UPLOAD_HANDLE.test(handle) || seen.has(handle)) fail();
-    seen.add(handle);
+    const slot = integer(candidate.slot);
+    if (slot >= U4_16.activeTransfers || seen.has(slot)) fail();
+    seen.add(slot);
     const bodyHighWater = integer(candidate.bodyHighWater);
     const currentBodyBuffers = integer(candidate.currentBodyBuffers);
     const currentBytes = integer(candidate.currentBytes);
@@ -685,9 +683,9 @@ function serverTransferChunkBuffers(
     }
     return candidate as unknown as UploadBudgetServerTransferChunkBuffers;
   });
-  const suppliedHandles = transfers.map(({ handle }) => handle);
-  transfers.sort((left, right) => left.handle.localeCompare(right.handle));
-  if (transfers.some((entry, index) => entry.handle !== suppliedHandles[index])) fail();
+  const suppliedSlots = transfers.map(({ slot }) => slot);
+  transfers.sort((left, right) => left.slot - right.slot);
+  if (transfers.some((entry, index) => entry.slot !== suppliedSlots[index])) fail();
   return Object.freeze(transfers);
 }
 
@@ -696,12 +694,12 @@ function completedServerTransfers(value: unknown): readonly Readonly<{
   acceptedChunks: number;
   duplicateDisposition: "existing_outcome";
   finalRevision: number;
-  handle: string;
   providerCheckpointChunks: number;
   providerCommittedBytes: number;
+  slot: number;
 }>[] {
   if (!Array.isArray(value) || value.length !== U4_16.activeTransfers) fail();
-  const seen = new Set<string>();
+  const seen = new Set<number>();
   const transfers = value.map((entry) => {
     const candidate = record(entry);
     exact(candidate, [
@@ -709,13 +707,13 @@ function completedServerTransfers(value: unknown): readonly Readonly<{
       "acceptedChunks",
       "duplicateDisposition",
       "finalRevision",
-      "handle",
       "providerCheckpointChunks",
       "providerCommittedBytes",
+      "slot",
     ]);
-    const handle = string(candidate.handle);
-    if (!UPLOAD_HANDLE.test(handle) || seen.has(handle)) fail();
-    seen.add(handle);
+    const slot = integer(candidate.slot);
+    if (slot >= U4_16.activeTransfers || seen.has(slot)) fail();
+    seen.add(slot);
     literal(candidate.acceptedBytes, U4_16.fileBytes);
     literal(candidate.acceptedChunks, U4_16.fileBytes / U4_16.chunkBytes);
     literal(candidate.duplicateDisposition, "existing_outcome");
@@ -727,14 +725,14 @@ function completedServerTransfers(value: unknown): readonly Readonly<{
       acceptedChunks: number;
       duplicateDisposition: "existing_outcome";
       finalRevision: number;
-      handle: string;
       providerCheckpointChunks: number;
       providerCommittedBytes: number;
+      slot: number;
     }>;
   });
-  const supplied = transfers.map(({ handle }) => handle);
-  transfers.sort((left, right) => left.handle.localeCompare(right.handle));
-  if (transfers.some(({ handle }, index) => handle !== supplied[index])) fail();
+  const supplied = transfers.map(({ slot }) => slot);
+  transfers.sort((left, right) => left.slot - right.slot);
+  if (transfers.some(({ slot }, index) => slot !== supplied[index])) fail();
   return Object.freeze(transfers);
 }
 
@@ -905,7 +903,7 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
         const aggregateTransfer = aggregateTransferChunks[index];
         if (aggregateTransfer === undefined) return false;
         return (
-          transfer.handle === aggregateTransfer.handle &&
+          transfer.slot === aggregateTransfer.slot &&
           transfer.currentBytes === aggregateTransfer.currentBytes &&
           transfer.currentManagerBuffers === aggregateTransfer.currentManagerBuffers &&
           transfer.currentTotalBuffers === aggregateTransfer.currentTotalBuffers &&
@@ -917,7 +915,7 @@ function validateBrowser(value: unknown, artifactSha256: string): UploadBudgetEv
   for (const [index, aggregateTransfer] of aggregateTransferChunks.entries()) {
     const runTransfers = runs.map((run) => run.measurements.chunkBuffersByTransfer[index]);
     if (
-      runTransfers.some((transfer) => transfer?.handle !== aggregateTransfer.handle) ||
+      runTransfers.some((transfer) => transfer?.slot !== aggregateTransfer.slot) ||
       aggregateTransfer.managerHighWater !==
         Math.max(...runTransfers.map((transfer) => transfer?.managerHighWater ?? -1)) ||
       aggregateTransfer.managerHighWaterBytes !==

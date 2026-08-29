@@ -13,16 +13,16 @@ asset set. The manifest records engine version `0.1.0`, runtime contract version
 content type, script kind, preload relation, compatibility range, and immutable
 cache policy.
 
-| Trusted role | File | Capability | Selection |
-|---|---|---|---|
-| `core-esm` | `suprnova-live.esm.js` | `core@1` | Required module runtime |
-| `core-classic` | `suprnova-live.classic.js` | `core@1` | Required classic alternative |
-| `stimulus-esm` | `suprnova-live.stimulus.esm.js` | `stimulus@1` | Optional module bridge |
-| `stimulus-classic` | `suprnova-live.stimulus.classic.js` | `stimulus@1` | Optional classic bridge |
-| `uploads-esm` | `suprnova-live.uploads.esm.js` | `uploads@1` | Optional upload feature |
-| `uploads-classic` | `suprnova-live.uploads.classic.js` | `uploads@1` | Optional upload feature |
-| `async-esm` | `suprnova-live.async.esm.js` | `async@1` | Optional async feature |
-| `async-classic` | `suprnova-live.async.classic.js` | `async@1` | Optional async feature |
+| Trusted role       | File                                | Capability   | Selection                    |
+| ------------------ | ----------------------------------- | ------------ | ---------------------------- |
+| `core-esm`         | `suprnova-live.esm.js`              | `core@1`     | Required module runtime      |
+| `core-classic`     | `suprnova-live.classic.js`          | `core@1`     | Required classic alternative |
+| `stimulus-esm`     | `suprnova-live.stimulus.esm.js`     | `stimulus@1` | Optional module bridge       |
+| `stimulus-classic` | `suprnova-live.stimulus.classic.js` | `stimulus@1` | Optional classic bridge      |
+| `uploads-esm`      | `suprnova-live.uploads.esm.js`      | `uploads@1`  | Optional upload feature      |
+| `uploads-classic`  | `suprnova-live.uploads.classic.js`  | `uploads@1`  | Optional upload feature      |
+| `async-esm`        | `suprnova-live.async.esm.js`        | `async@1`    | Optional async feature       |
+| `async-classic`    | `suprnova-live.async.classic.js`    | `async@1`    | Optional async feature       |
 
 Choose ESM or classic for a document, not both. Trusted checked render metadata
 selects optional roles; element attributes cannot supply an artifact URL. An
@@ -104,8 +104,10 @@ No observer, span, metric, diagnostic, failure message, or benchmark record may
 contain a transfer grant, transport credential, descriptor body, cookie, bearer
 token, client file path, uploaded bytes, raw handle, topic, event payload,
 authorization memo, island HTML, snapshot, or provider signature. Public browser
-observers are count-only. Diagnostics are closed, capped at 256 records, and
-redact hostile values before retention.
+upload-resource observers use bounded document-local numeric slots for stable
+per-transfer accounting; these slots are non-identifying and carry no upload
+authority. Diagnostics are closed, capped at 256 records, and redact hostile
+values before retention.
 
 Reference-host inspection and compiled fault schedules are test controls. The
 host refuses arbitrary request-selected fault injection and reports only bounded
@@ -225,9 +227,9 @@ or Suprnova application deployment.
 
 Development remains in this repository. Iteration 004 does not edit or register
 inside the active Suprnova checkout. The Rust reference host, Node static host,
-direct-provider bridge, fault controls, and benchmark harnesses are conformance
-and test tools. They are neither the future Suprnova integration nor vendor
-integration.
+direct-provider bridge, fault controls, and benchmark harnesses are
+conformance-only test tools, not production administration APIs. They are
+neither the future Suprnova integration nor vendor integration.
 
 A confirmed atomic integration iteration will move product code, normative
 specifications, and their checker together into Suprnova. The Suprnova
@@ -238,6 +240,9 @@ and provider clients, scanner service, finalizer/domain transaction wiring,
 cleanup scheduling, broadcaster/event-source adapters, and operational tracing.
 The engine remains behind `suprnova::live`; applications do not depend on this
 internal development crate directly.
+
+The future Suprnova application integration will own routes, authentication,
+session, configuration, provider, scanner, storage, and broadcast wiring.
 
 That later adapter must preserve the shipped protocols and conformance suites.
 It must not copy the reference host into production, expose its example

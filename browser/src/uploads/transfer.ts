@@ -58,7 +58,6 @@ export interface UploadCancellationCleanup {
 }
 
 export interface UploadTransferResourceSnapshot {
-  readonly handle: UploadHandle | null;
   readonly pendingChunkBytes: number;
   readonly pendingChunkBuffers: number;
   readonly retainedStringCodeUnits: number;
@@ -344,7 +343,6 @@ export class UploadTransfer {
 
   resourceSnapshot(): UploadTransferResourceSnapshot {
     return Object.freeze({
-      handle: this.#handle,
       pendingChunkBytes: this.#pending?.bytes.byteLength ?? 0,
       pendingChunkBuffers: this.#pending === null ? 0 : 1,
       retainedStringCodeUnits:

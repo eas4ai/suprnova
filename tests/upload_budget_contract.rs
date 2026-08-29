@@ -20,6 +20,11 @@ fn checked_upload_budget_locks_workload_bounds_and_exclusions() {
     let bytes = fs::read(root().join("browser/benchmarks/baselines/upload-budget-v1.json"))
         .expect("checked upload budget evidence");
     let value: Value = serde_json::from_slice(&bytes).expect("upload budget JSON");
+    let encoded = String::from_utf8(bytes).expect("UTF-8 upload budget JSON");
+
+    assert!(!encoded.contains("\"handle\""));
+    assert!(!encoded.contains("018f47c1-2af0-7cc4-"));
+    assert!(!encoded.contains("benchmark-grant-"));
 
     assert_eq!(pointer(&value, "/schemaVersion"), 1);
     assert_eq!(pointer(&value, "/workload"), "U4/16");

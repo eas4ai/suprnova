@@ -19,9 +19,9 @@ export interface ObservedUploadManagerResources {
   readonly queuedItems: number;
   readonly retainedStringCodeUnits: number;
   readonly transferChunks: readonly Readonly<{
-    readonly handle: string;
     readonly pendingChunkBuffers: number;
     readonly pendingChunkBytes: number;
+    readonly slot: number;
   }>[];
   readonly waitingPermits: number;
 }
@@ -34,7 +34,7 @@ export type UploadManagerAccountingCategories = Omit<
 export interface ObservedTransferChunkOwnership {
   readonly buffers: number;
   readonly bytes: number;
-  readonly handle: string;
+  readonly slot: number;
 }
 
 export interface ObservedTransferChunkHighWater {
@@ -42,13 +42,13 @@ export interface ObservedTransferChunkHighWater {
   readonly currentManagerBuffers: number;
   readonly currentTotalBuffers: number;
   readonly currentTransportBuffers: number;
-  readonly handle: string;
   readonly managerHighWater: number;
   readonly managerHighWaterBytes: number;
   readonly totalHighWater: number;
   readonly totalHighWaterBytes: number;
   readonly transportHighWater: number;
   readonly transportHighWaterBytes: number;
+  readonly slot: number;
 }
 
 export interface UploadTransferChunkObservation {
@@ -59,30 +59,31 @@ export interface UploadTransferChunkObservation {
   readonly transportChunkBuffers: number;
 }
 
-function ownershipByHandle(
+function ownershipBySlot(
   ownership: readonly ObservedTransferChunkOwnership[],
-): ReadonlyMap<string, ObservedTransferChunkOwnership> {
-  const byHandle = new Map<string, ObservedTransferChunkOwnership>();
+): ReadonlyMap<number, ObservedTransferChunkOwnership> {
+  const bySlot = new Map<number, ObservedTransferChunkOwnership>();
   for (const entry of ownership) {
     if (
-      entry.handle.length === 0 ||
+      !Number.isSafeInteger(entry.slot) ||
+      entry.slot < 0 ||
       !Number.isSafeInteger(entry.buffers) ||
       entry.buffers < 0 ||
       !Number.isSafeInteger(entry.bytes) ||
       entry.bytes < 0 ||
-      byHandle.has(entry.handle)
+      bySlot.has(entry.slot)
     ) {
       throw new Error("upload_budget_transfer_chunk_ownership_invalid");
     }
-    byHandle.set(entry.handle, entry);
+    bySlot.set(entry.slot, entry);
   }
-  return byHandle;
+  return bySlot;
 }
 
 /** Tracks exact current and per-transfer high-water ownership without averaging. */
 export class UploadTransferChunkObserver {
   readonly #currentAtDocumentHigh = new Map<
-    string,
+    number,
     Readonly<{
       currentBytes: number;
       currentManagerBuffers: number;
@@ -90,7 +91,7 @@ export class UploadTransferChunkObserver {
       currentTransportBuffers: number;
     }>
   >();
-  readonly #highs = new Map<string, ObservedTransferChunkHighWater>();
+  readonly #highs = new Map<number, ObservedTransferChunkHighWater>();
   #liveChunkBuffers = 0;
   #managerChunkBuffers = 0;
   #transportChunkBuffers = 0;
@@ -99,8 +100,8 @@ export class UploadTransferChunkObserver {
     managerOwnership: readonly ObservedTransferChunkOwnership[],
     transportOwnership: readonly ObservedTransferChunkOwnership[],
   ): void {
-    const manager = ownershipByHandle(managerOwnership);
-    const transport = ownershipByHandle(transportOwnership);
+    const manager = ownershipBySlot(managerOwnership);
+    const transport = ownershipBySlot(transportOwnership);
     const managerChunkBuffers = [...manager.values()].reduce(
       (sum, entry) => sum + entry.buffers,
       0,
@@ -115,11 +116,11 @@ export class UploadTransferChunkObserver {
       this.#managerChunkBuffers = managerChunkBuffers;
       this.#transportChunkBuffers = transportChunkBuffers;
       this.#currentAtDocumentHigh.clear();
-      for (const handle of new Set([...manager.keys(), ...transport.keys()])) {
-        const managerEntry = manager.get(handle);
-        const transportEntry = transport.get(handle);
+      for (const slot of new Set([...manager.keys(), ...transport.keys()])) {
+        const managerEntry = manager.get(slot);
+        const transportEntry = transport.get(slot);
         this.#currentAtDocumentHigh.set(
-          handle,
+          slot,
           Object.freeze({
             currentBytes: (managerEntry?.bytes ?? 0) + (transportEntry?.bytes ?? 0),
             currentManagerBuffers: managerEntry?.buffers ?? 0,
@@ -129,20 +130,19 @@ export class UploadTransferChunkObserver {
         );
       }
     }
-    for (const handle of new Set([...manager.keys(), ...transport.keys()])) {
-      const managerBuffers = manager.get(handle)?.buffers ?? 0;
-      const managerBytes = manager.get(handle)?.bytes ?? 0;
-      const transportBuffers = transport.get(handle)?.buffers ?? 0;
-      const transportBytes = transport.get(handle)?.bytes ?? 0;
-      const prior = this.#highs.get(handle);
+    for (const slot of new Set([...manager.keys(), ...transport.keys()])) {
+      const managerBuffers = manager.get(slot)?.buffers ?? 0;
+      const managerBytes = manager.get(slot)?.bytes ?? 0;
+      const transportBuffers = transport.get(slot)?.buffers ?? 0;
+      const transportBytes = transport.get(slot)?.bytes ?? 0;
+      const prior = this.#highs.get(slot);
       this.#highs.set(
-        handle,
+        slot,
         Object.freeze({
           currentBytes: 0,
           currentManagerBuffers: 0,
           currentTotalBuffers: 0,
           currentTransportBuffers: 0,
-          handle,
           managerHighWater: Math.max(prior?.managerHighWater ?? 0, managerBuffers),
           managerHighWaterBytes: Math.max(prior?.managerHighWaterBytes ?? 0, managerBytes),
           totalHighWater: Math.max(prior?.totalHighWater ?? 0, managerBuffers + transportBuffers),
@@ -152,6 +152,7 @@ export class UploadTransferChunkObserver {
           ),
           transportHighWater: Math.max(prior?.transportHighWater ?? 0, transportBuffers),
           transportHighWaterBytes: Math.max(prior?.transportHighWaterBytes ?? 0, transportBytes),
+          slot,
         }),
       );
     }
@@ -163,7 +164,7 @@ export class UploadTransferChunkObserver {
         .map((high) =>
           Object.freeze({
             ...high,
-            ...(this.#currentAtDocumentHigh.get(high.handle) ?? {
+            ...(this.#currentAtDocumentHigh.get(high.slot) ?? {
               currentBytes: 0,
               currentManagerBuffers: 0,
               currentTotalBuffers: 0,
@@ -171,7 +172,7 @@ export class UploadTransferChunkObserver {
             }),
           }),
         )
-        .sort((left, right) => left.handle.localeCompare(right.handle)),
+        .sort((left, right) => left.slot - right.slot),
     );
     return Object.freeze({
       chunkBuffersByTransfer,

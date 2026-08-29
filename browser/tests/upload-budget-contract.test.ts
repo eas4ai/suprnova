@@ -15,20 +15,17 @@ import {
 import { estimateUploadManagerOwnedBytes } from "../benchmarks/upload-accounting.js";
 
 const SHA256 = "a".repeat(64);
-const HANDLES = Array.from(
-  { length: U4_16.activeTransfers },
-  (_, index) => `018f47c1-2af0-7cc4-a001-${String(index + 1).padStart(12, "0")}`,
-);
+const SLOTS = Array.from({ length: U4_16.activeTransfers }, (_, index) => index);
 
 function browserChunkDistribution(): Record<string, unknown>[] {
-  return HANDLES.map((handle, index) => ({
+  return SLOTS.map((slot, index) => ({
     currentBytes: index === 0 ? 2 * U4_16.chunkBytes : 0,
     currentManagerBuffers: index === 0 ? 1 : 0,
     currentTotalBuffers: index === 0 ? 2 : 0,
     currentTransportBuffers: index === 0 ? 1 : 0,
-    handle,
     managerHighWater: 1,
     managerHighWaterBytes: U4_16.chunkBytes,
+    slot,
     totalHighWater: 2,
     totalHighWaterBytes: 2 * U4_16.chunkBytes,
     transportHighWater: 1,
@@ -37,14 +34,14 @@ function browserChunkDistribution(): Record<string, unknown>[] {
 }
 
 function serverChunkDistribution(): Record<string, unknown>[] {
-  return HANDLES.map((handle) => ({
+  return SLOTS.map((slot) => ({
     bodyHighWater: 1,
     currentBodyBuffers: 1,
     currentBytes: U4_16.chunkBytes + 64 * 1024,
     currentProviderBuffers: 1,
     currentTotalBuffers: 2,
-    handle,
     providerHighWater: 1,
+    slot,
     totalHighWater: 2,
     totalHighWaterBytes: U4_16.chunkBytes + 64 * 1024,
   }));
@@ -159,14 +156,14 @@ function evidence(): Record<string, unknown> {
         chunkBuffersByTransfer: serverChunkDistribution(),
         completedBytes: 4 * 16 * 1024 * 1024,
         completedChunks: 4 * 64,
-        completedTransfers: HANDLES.map((handle) => ({
+        completedTransfers: SLOTS.map((slot) => ({
           acceptedBytes: 16 * 1024 * 1024,
           acceptedChunks: 64,
           duplicateDisposition: "existing_outcome",
           finalRevision: 71,
-          handle,
           providerCheckpointChunks: 64,
           providerCommittedBytes: 16 * 1024 * 1024,
+          slot,
         })),
         excludedCalls: {
           applicationValidation: 0,
@@ -338,15 +335,54 @@ function setServerRunP95s(value: Record<string, unknown>, p95Values: readonly nu
 
 describe("U4/16 evidence schema", () => {
   it("validates the checked exploratory envelope without inventing a qualified baseline", async () => {
-    const checked: unknown = JSON.parse(
-      await readFile(
-        new URL("../benchmarks/baselines/upload-budget-v1.json", import.meta.url),
-        "utf8",
-      ),
-    ) as unknown;
+    const encoded = await readFile(
+      new URL("../benchmarks/baselines/upload-budget-v1.json", import.meta.url),
+      "utf8",
+    );
+    const checked: unknown = JSON.parse(encoded) as unknown;
     const baseline = validateUploadBudgetBaseline(checked);
     expect(baseline.exploratoryReference.workload).toBe("U4/16");
     expect(baseline.qualifiedBaseline).toBeNull();
+    expect(encoded).not.toContain('"handle"');
+    expect(encoded).not.toMatch(/018f47c1-2af0-7cc4-/u);
+    expect(encoded).not.toContain("benchmark-grant-");
+  });
+
+  it.each([
+    [
+      "browser chunk ownership",
+      (value: Record<string, unknown>) =>
+        (
+          value["browser"] as {
+            measurements: { chunkBuffersByTransfer: Record<string, unknown>[] };
+          }
+        ).measurements.chunkBuffersByTransfer[0],
+    ],
+    [
+      "server chunk ownership",
+      (value: Record<string, unknown>) =>
+        (
+          value["server"] as {
+            measurements: { chunkBuffersByTransfer: Record<string, unknown>[] };
+          }
+        ).measurements.chunkBuffersByTransfer[0],
+    ],
+    [
+      "server completion",
+      (value: Record<string, unknown>) =>
+        (
+          value["server"] as {
+            measurements: { completedTransfers: Record<string, unknown>[] };
+          }
+        ).measurements.completedTransfers[0],
+    ],
+  ])("rejects a raw handle field in %s evidence", (_name, select) => {
+    const value = evidence();
+    const transfer = select(value);
+    if (transfer === undefined) throw new Error("fixture_transfer_missing");
+    delete transfer["slot"];
+    transfer["handle"] = "018f47c1-2af0-7cc4-a001-000000000001";
+    expect(() => validateUploadBudgetEvidence(value)).toThrow("upload_budget_evidence_invalid");
   });
 
   it("locks the exact workload, hard bounds, sample counts, and artifact binding", () => {

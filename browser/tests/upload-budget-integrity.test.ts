@@ -104,23 +104,20 @@ describe("U4/16 benchmark integrity", () => {
   });
 
   it("detects three buffers held by one transfer while the document average remains two", () => {
-    const handles = Array.from(
-      { length: 4 },
-      (_, index) => `018f47c1-2af0-7cc4-a001-${String(index + 1).padStart(12, "0")}`,
-    );
+    const slots = Array.from({ length: 4 }, (_, index) => index);
     const observer = new UploadTransferChunkObserver();
     observer.observe(
-      handles.map((handle) => ({ buffers: 1, bytes: 256 * 1024, handle })),
+      slots.map((slot) => ({ buffers: 1, bytes: 256 * 1024, slot })),
       [
-        { buffers: 2, bytes: 2 * 256 * 1024, handle: handles[0] ?? "" },
-        { buffers: 0, bytes: 0, handle: handles[1] ?? "" },
-        { buffers: 1, bytes: 256 * 1024, handle: handles[2] ?? "" },
-        { buffers: 1, bytes: 256 * 1024, handle: handles[3] ?? "" },
+        { buffers: 2, bytes: 2 * 256 * 1024, slot: slots[0] ?? -1 },
+        { buffers: 0, bytes: 0, slot: slots[1] ?? -1 },
+        { buffers: 1, bytes: 256 * 1024, slot: slots[2] ?? -1 },
+        { buffers: 1, bytes: 256 * 1024, slot: slots[3] ?? -1 },
       ],
     );
     const snapshot = observer.snapshot();
     expect(snapshot.liveChunkBuffers).toBe(8);
-    expect(snapshot.liveChunkBuffers / handles.length).toBe(2);
+    expect(snapshot.liveChunkBuffers / slots.length).toBe(2);
     expect(snapshot.maxChunksPerTransfer).toBe(3);
     expect(snapshot.chunkBuffersByTransfer[0]?.totalHighWater).toBe(3);
   });
@@ -148,7 +145,7 @@ describe("U4/16 benchmark integrity", () => {
 
     expect(releases.size).toBe(3);
     expect(transport.activeChunksByTransfer()).toEqual([
-      { buffers: 3, bytes: 3 * 256 * 1024, handle },
+      { buffers: 3, bytes: 3 * 256 * 1024, slot: 0 },
     ]);
     expect(transport.maximumConcurrentOperations()).toBe(3);
     expect(transport.maximumConcurrentTransfers()).toBe(1);
@@ -157,7 +154,7 @@ describe("U4/16 benchmark integrity", () => {
     releases.get(tokens[1] ?? "")?.();
     await pending[1];
     expect(transport.activeChunksByTransfer()).toEqual([
-      { buffers: 2, bytes: 2 * 256 * 1024, handle },
+      { buffers: 2, bytes: 2 * 256 * 1024, slot: 0 },
     ]);
     releases.get(tokens[0] ?? "")?.();
     releases.get(tokens[2] ?? "")?.();

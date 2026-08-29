@@ -130,6 +130,11 @@ const semanticRequirements = new Map([
         pattern: /signs it under[\s\S]{0,2500}exact\s+configured origin match/u,
       },
       {
+        id: "async_builtin_websocket_cookie_only",
+        pattern:
+          /The built-in `BrowserWebSocketAdapter` accepts only `session_cookie` authorization\.[\s\S]{0,700}Fetch-based SSE and polling may use bearer authorization[\s\S]{0,700}Bearer-authorized or cross-origin WebSocket requires an application-supplied custom transport[\s\S]{0,500}signed subscription and exact Origin and authentication contracts/u,
+      },
+      {
         id: "async_multiplexed_document_transport",
         pattern:
           /one physical[\s\S]{0,300}transport[\s\S]{0,700}logical memberships/u,
@@ -202,12 +207,12 @@ const semanticRequirements = new Map([
       {
         id: "operations_conformance_boundary",
         pattern:
-          /thin Rust reference host[\s\S]{0,1400}Node host owns only static[\s\S]{0,1400}`DirectProviderConformanceAdapter`[\s\S]{0,800}conformance/u,
+          /The Rust reference host, Node static host, direct-provider bridge, fault controls, and benchmark harnesses are conformance-only test tools, not production administration APIs\.[\s\S]{0,300}They are neither the future Suprnova integration nor vendor integration\./u,
       },
       {
         id: "operations_future_suprnova_ownership",
         pattern:
-          /Suprnova\s+application layer will own real router[\s\S]{0,1400}broadcaster\/event-source adapters/u,
+          /The future Suprnova application integration will own routes, authentication, session, configuration, provider, scanner, storage, and broadcast wiring\./u,
       },
       {
         id: "operations_async_size_review_not_cap",
@@ -251,10 +256,32 @@ function mutationSelfTest(documents) {
       requirement: "async_replay_truthful_prefix",
     },
     {
+      file: "docs/implementation/async-updates.md",
+      pattern:
+        /The built-in `BrowserWebSocketAdapter`\s+accepts only `session_cookie` authorization\./u,
+      replacement:
+        "The built-in `BrowserWebSocketAdapter` accepts `session_cookie` or bearer authorization.",
+      requirement: "async_builtin_websocket_cookie_only",
+    },
+    {
       file: "docs/implementation/iteration-004-operations.md",
       pattern: /effective end-to-end\s+event fanout ceiling is 256/u,
       replacement: "effective end-to-end event fanout ceiling is 1,024",
       requirement: "operations_fanout_replay_distinction",
+    },
+    {
+      file: "docs/implementation/iteration-004-operations.md",
+      pattern: /not production administration APIs/u,
+      replacement: "production administration APIs",
+      requirement: "operations_conformance_boundary",
+    },
+    {
+      file: "docs/implementation/iteration-004-operations.md",
+      pattern:
+        /They are\s+neither the future Suprnova integration nor vendor integration\./u,
+      replacement:
+        "They are both the future Suprnova integration and vendor integration.",
+      requirement: "operations_conformance_boundary",
     },
     {
       file: "README.md",

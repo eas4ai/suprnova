@@ -559,13 +559,36 @@ struct TransferChunkState {
 
 #[derive(Default)]
 struct ServerChunkTracker {
-    transfers: Mutex<HashMap<UploadHandle, TransferChunkState>>,
+    transfers: Mutex<HashMap<UploadHandle, TrackedTransferChunkState>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TrackedTransferChunkState {
+    slot: usize,
+    state: TransferChunkState,
 }
 
 impl ServerChunkTracker {
+    fn register(&self, handle: &UploadHandle, slot: usize) {
+        let prior = lock_unpoisoned(&self.transfers).insert(
+            handle.clone(),
+            TrackedTransferChunkState {
+                slot,
+                state: TransferChunkState::default(),
+            },
+        );
+        assert!(
+            prior.is_none(),
+            "upload benchmark transfer registered twice"
+        );
+    }
+
     fn body_started(&self, handle: &UploadHandle, bytes: usize) {
         let mut transfers = lock_unpoisoned(&self.transfers);
-        let state = transfers.entry(handle.clone()).or_default();
+        let state = &mut transfers
+            .get_mut(handle)
+            .expect("upload benchmark transfer must be registered")
+            .state;
         state.body_buffers = 1;
         state.body_bytes = bytes;
         Self::record_highs(state);
@@ -573,7 +596,10 @@ impl ServerChunkTracker {
 
     fn body_finished(&self, handle: &UploadHandle) {
         let mut transfers = lock_unpoisoned(&self.transfers);
-        let state = transfers.entry(handle.clone()).or_default();
+        let state = &mut transfers
+            .get_mut(handle)
+            .expect("upload benchmark transfer must be registered")
+            .state;
         state.body_buffers = 0;
         state.body_bytes = 0;
         Self::record_highs(state);
@@ -581,7 +607,10 @@ impl ServerChunkTracker {
 
     fn provider_started(&self, handle: &UploadHandle, buffers: usize, bytes: usize) {
         let mut transfers = lock_unpoisoned(&self.transfers);
-        let state = transfers.entry(handle.clone()).or_default();
+        let state = &mut transfers
+            .get_mut(handle)
+            .expect("upload benchmark transfer must be registered")
+            .state;
         state.provider_buffers = buffers;
         state.provider_bytes = bytes;
         Self::record_highs(state);
@@ -589,7 +618,10 @@ impl ServerChunkTracker {
 
     fn provider_finished(&self, handle: &UploadHandle) {
         let mut transfers = lock_unpoisoned(&self.transfers);
-        let state = transfers.entry(handle.clone()).or_default();
+        let state = &mut transfers
+            .get_mut(handle)
+            .expect("upload benchmark transfer must be registered")
+            .state;
         state.provider_buffers = 0;
         state.provider_bytes = 0;
         Self::record_highs(state);
@@ -608,22 +640,28 @@ impl ServerChunkTracker {
 
     fn snapshot(&self) -> Vec<ServerTransferChunkBuffers> {
         let transfers = lock_unpoisoned(&self.transfers);
-        let mut observed = transfers
-            .iter()
-            .map(|(handle, state)| ServerTransferChunkBuffers {
-                body_high_water: state.body_high_water,
-                current_body_buffers: state.body_buffers,
-                current_bytes: state.body_bytes.saturating_add(state.provider_bytes),
-                current_provider_buffers: state.provider_buffers,
-                current_total_buffers: state.body_buffers.saturating_add(state.provider_buffers),
-                handle: handle.to_string(),
-                provider_high_water: state.provider_high_water,
-                total_high_water: state.total_high_water,
-                total_high_water_bytes: state.total_high_water_bytes,
+        let mut ordered = transfers.values().collect::<Vec<_>>();
+        ordered.sort_by_key(|transfer| transfer.slot);
+        ordered
+            .into_iter()
+            .map(|transfer| ServerTransferChunkBuffers {
+                slot: transfer.slot,
+                body_high_water: transfer.state.body_high_water,
+                current_body_buffers: transfer.state.body_buffers,
+                current_bytes: transfer
+                    .state
+                    .body_bytes
+                    .saturating_add(transfer.state.provider_bytes),
+                current_provider_buffers: transfer.state.provider_buffers,
+                current_total_buffers: transfer
+                    .state
+                    .body_buffers
+                    .saturating_add(transfer.state.provider_buffers),
+                provider_high_water: transfer.state.provider_high_water,
+                total_high_water: transfer.state.total_high_water,
+                total_high_water_bytes: transfer.state.total_high_water_bytes,
             })
-            .collect::<Vec<_>>();
-        observed.sort_by(|left, right| left.handle.cmp(&right.handle));
-        observed
+            .collect()
     }
 }
 
@@ -914,17 +952,18 @@ struct ServerCompletedTransfer {
     duplicate_disposition: &'static str,
     #[serde(rename = "finalRevision")]
     final_revision: u64,
-    handle: String,
     #[serde(rename = "providerCheckpointChunks")]
     provider_checkpoint_chunks: usize,
     #[serde(rename = "providerCommittedBytes")]
     provider_committed_bytes: usize,
+    slot: usize,
 }
 
 struct ResourceTaskCompletion {
     duplicate_disposition: &'static str,
     final_revision: u64,
     handle: UploadHandle,
+    slot: usize,
 }
 
 async fn cleanup_resource_tasks(
@@ -1034,6 +1073,7 @@ async fn run_server_resource_workload_with_watchdog(
             .map_err(ResourceBenchmarkFailure::setup)?,
     );
     for transfer in &transfers {
+        tracker.register(&transfer.handle, transfer.ordinal);
         provider
             .prepare(PrepareTransfer::new(
                 &transfer.handle,
@@ -1150,6 +1190,7 @@ async fn run_server_resource_workload_with_watchdog(
                 duplicate_disposition,
                 final_revision,
                 handle: transfer.handle,
+                slot: transfer.ordinal,
             })
         }));
     }
@@ -1295,12 +1336,12 @@ async fn run_server_resource_workload_with_watchdog(
             accepted_chunks: checkpoint.chunks().len(),
             duplicate_disposition: completion.duplicate_disposition,
             final_revision: completion.final_revision,
-            handle: completion.handle.to_string(),
             provider_checkpoint_chunks: checkpoint.chunks().len(),
             provider_committed_bytes: checkpoint.committed_bytes() as usize,
+            slot: completion.slot,
         });
     }
-    completed.sort_by(|left, right| left.handle.cmp(&right.handle));
+    completed.sort_by_key(|transfer| transfer.slot);
     Ok(ServerResourceSnapshot {
         completed_bytes: completed.iter().map(|item| item.accepted_bytes).sum(),
         completed_chunks: completed.iter().map(|item| item.accepted_chunks).sum(),
@@ -1459,9 +1500,9 @@ struct ServerTransferChunkBuffers {
     current_provider_buffers: usize,
     #[serde(rename = "currentTotalBuffers")]
     current_total_buffers: usize,
-    handle: String,
     #[serde(rename = "providerHighWater")]
     provider_high_water: usize,
+    slot: usize,
     #[serde(rename = "totalHighWater")]
     total_high_water: usize,
     #[serde(rename = "totalHighWaterBytes")]
@@ -1981,6 +2022,26 @@ mod integrity_tests {
         let snapshot = run_server_resource_workload(ResourceWorkloadMutation::None)
             .await
             .expect("four active transfers");
+
+        let encoded = serde_json::to_string(&ServerMeasurements {
+            chunk_buffers_by_transfer: snapshot.chunk_buffers_by_transfer.clone(),
+            completed_bytes: snapshot.completed_bytes,
+            completed_chunks: snapshot.completed_chunks,
+            completed_transfers: snapshot.completed_transfers.clone(),
+            excluded_calls: ExcludedCalls::default(),
+            live_chunk_buffers: snapshot.live_chunk_buffers,
+            manager_owned_bytes: snapshot.manager_owned_bytes,
+            manager_owned_categories: snapshot.manager_owned_categories,
+            max_chunks_per_transfer: snapshot.max_chunks_per_transfer,
+            max_concurrent_transfers: snapshot.max_concurrent_transfers,
+            max_queue_depth: snapshot.max_queue_depth,
+            p50_microseconds: 1.0,
+            p95_microseconds: 1.0,
+            retained_bytes: snapshot.retained_bytes,
+        })
+        .expect("serialize server evidence");
+        assert!(!encoded.contains("\"handle\""));
+        assert!(!encoded.contains("018f47c1-2af0-7cc4-"));
 
         assert_eq!(snapshot.max_concurrent_transfers, 4);
         assert_eq!(snapshot.live_chunk_buffers, 8);

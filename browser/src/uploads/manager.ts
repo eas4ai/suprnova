@@ -38,6 +38,7 @@ interface Binding {
 interface Entry {
   readonly binding: Binding;
   readonly resource: BoundedDisposable;
+  readonly resourceSlot: number;
   readonly transfer: UploadTransfer;
   handle: UploadHandle | null;
   lease: BoundedLease | null;
@@ -96,6 +97,7 @@ export class UploadManager {
   readonly #generations = new Map<UploadIslandPort, Map<string, object>>();
   readonly #observers = new Map<UploadIslandPort, Set<UploadManagerObserver>>();
   readonly #queueItemBytes: number;
+  readonly #resourceSlots = new Set<number>();
   #disposed = false;
   #generationFields = 0;
 
@@ -345,6 +347,7 @@ export class UploadManager {
     }
     this.#owner.retire();
     this.#entries.clear();
+    this.#resourceSlots.clear();
     this.#bindings.clear();
     this.#generations.clear();
     this.#observers.clear();
@@ -370,22 +373,20 @@ export class UploadManager {
     let pendingChunkBytes = 0;
     let retainedStringCodeUnits = 0;
     const transferChunks = [];
-    for (const { transfer } of this.#entries.values()) {
+    for (const { resourceSlot, transfer } of this.#entries.values()) {
       const resource = transfer.resourceSnapshot();
       pendingChunkBuffers += resource.pendingChunkBuffers;
       pendingChunkBytes += resource.pendingChunkBytes;
       retainedStringCodeUnits += resource.retainedStringCodeUnits;
-      if (resource.handle !== null) {
-        transferChunks.push(
-          Object.freeze({
-            handle: resource.handle,
-            pendingChunkBuffers: resource.pendingChunkBuffers,
-            pendingChunkBytes: resource.pendingChunkBytes,
-          }),
-        );
-      }
+      transferChunks.push(
+        Object.freeze({
+          pendingChunkBuffers: resource.pendingChunkBuffers,
+          pendingChunkBytes: resource.pendingChunkBytes,
+          slot: resourceSlot,
+        }),
+      );
     }
-    transferChunks.sort((left, right) => left.handle.localeCompare(right.handle));
+    transferChunks.sort((left, right) => left.slot - right.slot);
     return Object.freeze({
       activeLeases: owner.active,
       bindings,
@@ -461,13 +462,21 @@ export class UploadManager {
       },
       transport: this.#options.transport,
     });
-    const resource = this.#owner.track(transfer);
+    const resourceSlot = this.#allocateResourceSlot();
+    let resource: BoundedDisposable;
+    try {
+      resource = this.#owner.track(transfer);
+    } catch (error: unknown) {
+      this.#resourceSlots.delete(resourceSlot);
+      throw error;
+    }
     const entry: Entry = {
       binding,
       handle: null,
       lease: null,
       permit: null,
       resource,
+      resourceSlot,
       settle: null,
       settled: null,
       transfer,
@@ -489,6 +498,7 @@ export class UploadManager {
       entry.resource.dispose();
       entry.binding.transfers.splice(entry.binding.transfers.indexOf(entry), 1);
       this.#entries.delete(entry.transfer);
+      this.#resourceSlots.delete(entry.resourceSlot);
       entry.settle?.();
       this.#safeProposal(entry.binding.island, entry.binding.field, null);
     }
@@ -519,6 +529,9 @@ export class UploadManager {
         transfer.dispose();
         entry.resource.dispose();
         this.#entries.delete(transfer);
+        this.#resourceSlots.delete(entry.resourceSlot);
+        const bindingIndex = entry.binding.transfers.indexOf(entry);
+        if (bindingIndex !== -1) entry.binding.transfers.splice(bindingIndex, 1);
         entry.settle?.();
       }
     }
@@ -644,12 +657,22 @@ export class UploadManager {
       void entry.transfer.cancel();
       entry.resource.dispose();
       this.#entries.delete(entry.transfer);
+      this.#resourceSlots.delete(entry.resourceSlot);
     }
     binding.transfers.length = 0;
     this.#bindings.get(binding.island)?.delete(binding.field);
     if (clearInput) this.#clearNativeSelection(binding.input);
     this.#safeProposal(binding.island, binding.field, null);
     this.#notify(binding.island);
+  }
+
+  #allocateResourceSlot(): number {
+    for (let slot = 0; slot < this.#options.maxItems; slot += 1) {
+      if (this.#resourceSlots.has(slot)) continue;
+      this.#resourceSlots.add(slot);
+      return slot;
+    }
+    throw new Error("upload_resource_slot_limit");
   }
 
   #propose(binding: Binding): void {

@@ -309,22 +309,20 @@ function maximum(runs, key) {
 }
 
 function maximumTransferChunkDistribution(runs, currentRun) {
-  const currentByHandle = new Map(
-    currentRun.chunkBuffersByTransfer.map((transfer) => [transfer.handle, transfer]),
+  const currentBySlot = new Map(
+    currentRun.chunkBuffersByTransfer.map((transfer) => [transfer.slot, transfer]),
   );
-  const byHandle = new Map();
+  const bySlot = new Map();
   for (const run of runs) {
     for (const transfer of run.chunkBuffersByTransfer) {
-      const prior = byHandle.get(transfer.handle);
-      byHandle.set(
-        transfer.handle,
+      const prior = bySlot.get(transfer.slot);
+      bySlot.set(
+        transfer.slot,
         Object.freeze({
-          currentBytes: currentByHandle.get(transfer.handle)?.currentBytes ?? 0,
-          currentManagerBuffers: currentByHandle.get(transfer.handle)?.currentManagerBuffers ?? 0,
-          currentTotalBuffers: currentByHandle.get(transfer.handle)?.currentTotalBuffers ?? 0,
-          currentTransportBuffers:
-            currentByHandle.get(transfer.handle)?.currentTransportBuffers ?? 0,
-          handle: transfer.handle,
+          currentBytes: currentBySlot.get(transfer.slot)?.currentBytes ?? 0,
+          currentManagerBuffers: currentBySlot.get(transfer.slot)?.currentManagerBuffers ?? 0,
+          currentTotalBuffers: currentBySlot.get(transfer.slot)?.currentTotalBuffers ?? 0,
+          currentTransportBuffers: currentBySlot.get(transfer.slot)?.currentTransportBuffers ?? 0,
           managerHighWater: Math.max(prior?.managerHighWater ?? 0, transfer.managerHighWater),
           managerHighWaterBytes: Math.max(
             prior?.managerHighWaterBytes ?? 0,
@@ -340,13 +338,12 @@ function maximumTransferChunkDistribution(runs, currentRun) {
             prior?.transportHighWaterBytes ?? 0,
             transfer.transportHighWaterBytes,
           ),
+          slot: transfer.slot,
         }),
       );
     }
   }
-  return Object.freeze(
-    [...byHandle.values()].sort((left, right) => left.handle.localeCompare(right.handle)),
-  );
+  return Object.freeze([...bySlot.values()].sort((left, right) => left.slot - right.slot));
 }
 
 async function main() {

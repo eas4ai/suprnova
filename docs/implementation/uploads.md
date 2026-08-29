@@ -24,7 +24,7 @@ attributes. A current upload field can be authored as follows:
   live:upload="avatar"
   data-suprnova-live-key="avatar-input"
   aria-describedby="avatar-status avatar-error"
->
+/>
 <div
   id="avatar-status"
   live:progress="avatar"
@@ -232,5 +232,8 @@ obligation for later cleanup rather than dropping it.
 Finalized application data follows host retention policy, not temporary-upload
 cleanup. The engine can clean the temporary quarantine object and authority
 record only after durable commit/reconciliation makes that safe. Metrics expose
-bounded counts and lifecycle/error categories, never handles, client filenames,
+bounded counts and lifecycle/error categories. Browser resource observers key
+per-transfer buffer accounting with bounded document-local numeric slots, not
+handles; the slots are stable only for the local entry lifetime and carry no
+authority. Metrics and observers never expose handles, client filenames,
 checksums, grants, provider URLs, or uploaded bytes.

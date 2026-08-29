@@ -182,6 +182,47 @@ function manager(transport = new MemoryTransport(), maxActive = 4) {
 }
 
 describe("current-document upload manager", () => {
+  it("keeps upload authority out of resource-observer snapshots", async () => {
+    const snapshots: UploadManagerResourceSnapshot[] = [];
+    const fixture = new UploadManager({
+      chunkBytes: 256 * KIB,
+      connectivity: new Online(),
+      maxActive: 4,
+      maxItems: 64,
+      maxQueueBytes: 256 * KIB,
+      randomness: new Sequence(),
+      resourceObserver: {
+        progressApplicationCompleted() {
+          return undefined;
+        },
+        progressApplicationStarted() {
+          return undefined;
+        },
+        resources(snapshot) {
+          snapshots.push(snapshot);
+        },
+      },
+      transport: new MemoryTransport(),
+    });
+    const owner = island("resource-secrecy");
+
+    await fixture.select({ field: "attachment", input: input(), island: owner.port }, [
+      file("secret-bound.bin", 1),
+    ]);
+
+    const encoded = JSON.stringify(snapshots);
+    expect(encoded).not.toContain(`${HANDLE_PREFIX}000000000001`);
+    expect(encoded).not.toContain("secret-grant-1");
+    expect(encoded).not.toContain('"handle"');
+    const slots = snapshots.flatMap(({ transferChunks }) =>
+      transferChunks.map((transfer) => Reflect.get(transfer, "slot")),
+    );
+    expect(slots.length).toBeGreaterThan(0);
+    expect(slots.every((slot) => Number.isSafeInteger(slot) && slot >= 0 && slot < 64)).toBe(true);
+    expect(new Set(slots)).toEqual(new Set([0]));
+    fixture.dispose();
+  });
+
   it("reports manager-owned string growth from the live production transfer state", async () => {
     const maximumObservedBytes = async (files: readonly File[]): Promise<number> => {
       const snapshots: UploadManagerResourceSnapshot[] = [];
