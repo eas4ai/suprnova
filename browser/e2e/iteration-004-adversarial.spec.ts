@@ -3,6 +3,8 @@ import { connect } from "node:net";
 
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
 
+import { forgeCanonicalGrantSignature } from "./support/grant-mutation.js";
+
 const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
 const AUTHORIZATION = "Bearer task1-reference-session";
 
@@ -426,86 +428,88 @@ for (const format of ["esm", "classic"] as const) {
     let previousAction = await runOrdinaryAction(page);
 
     for (const [name, expectedStatus, expectedCode] of cases) {
-      let intercepted: InterceptedUploadFailure | null = null;
-      const routePattern = "**/__live/uploads/**/chunks/**";
-      await page.route(routePattern, async (route, request) => {
-        if (intercepted !== null) {
-          await route.continue();
-          return;
-        }
-        const originalHeaders = request.headers();
-        const grant = originalHeaders["x-live-upload-grant"];
-        if (grant === undefined || grant.length === 0) {
-          await route.abort("failed");
-          throw new Error("production_upload_grant_not_observed");
-        }
-        const headers = { ...originalHeaders };
-        let body = request.postDataBuffer() ?? Buffer.alloc(0);
-        let url = request.url();
-        if (name === "forged-grant") {
-          const final = grant.endsWith("A") ? "B" : "A";
-          headers["x-live-upload-grant"] = `${grant.slice(0, -1)}${final}`;
-        } else if (name === "cross-scope-handle") {
-          url = url.replace(
-            /\/uploads\/[^/]+\/chunks\//u,
-            "/uploads/018f47c1-2af0-7cc4-a001-000000000099/chunks/",
-          );
-        } else if (name === "oversized-chunk") {
-          body = Buffer.alloc(262_145, 0x61);
-          headers["x-live-chunk-bytes"] = String(body.byteLength);
-          headers["x-live-chunk-sha256"] = createHash("sha256").update(body).digest("hex");
-        } else if (name === "truncated-chunk") {
-          body = Buffer.alloc(4, 0x61);
-        } else {
-          url = url.replace(/\/chunks\/0$/u, "/chunks/1");
-        }
-        const hostile = await route.fetch({ headers, postData: body, url });
-        const responseBody = await hostile.text();
-        intercepted = {
-          body: responseBody,
-          grant,
-          status: hostile.status(),
-        };
-        await route.fulfill({ body: responseBody, response: hostile });
-      });
+      const repetitions = name === "forged-grant" ? 20 : 1;
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        let intercepted: InterceptedUploadFailure | null = null;
+        const routePattern = "**/__live/uploads/**/chunks/**";
+        await page.route(routePattern, async (route, request) => {
+          if (intercepted !== null) {
+            await route.continue();
+            return;
+          }
+          const originalHeaders = request.headers();
+          const grant = originalHeaders["x-live-upload-grant"];
+          if (grant === undefined || grant.length === 0) {
+            await route.abort("failed");
+            throw new Error("production_upload_grant_not_observed");
+          }
+          const headers = { ...originalHeaders };
+          let body = request.postDataBuffer() ?? Buffer.alloc(0);
+          let url = request.url();
+          if (name === "forged-grant") {
+            headers["x-live-upload-grant"] = forgeCanonicalGrantSignature(grant);
+          } else if (name === "cross-scope-handle") {
+            url = url.replace(
+              /\/uploads\/[^/]+\/chunks\//u,
+              "/uploads/018f47c1-2af0-7cc4-a001-000000000099/chunks/",
+            );
+          } else if (name === "oversized-chunk") {
+            body = Buffer.alloc(262_145, 0x61);
+            headers["x-live-chunk-bytes"] = String(body.byteLength);
+            headers["x-live-chunk-sha256"] = createHash("sha256").update(body).digest("hex");
+          } else if (name === "truncated-chunk") {
+            body = Buffer.alloc(4, 0x61);
+          } else {
+            url = url.replace(/\/chunks\/0$/u, "/chunks/1");
+          }
+          const hostile = await route.fetch({ headers, postData: body, url });
+          const responseBody = await hostile.text();
+          intercepted = {
+            body: responseBody,
+            grant,
+            status: hostile.status(),
+          };
+          await route.fulfill({ body: responseBody, response: hostile });
+        });
 
-      await page.getByLabel("Iteration 004 file").setInputFiles({
-        buffer: Buffer.alloc(8, 0x61),
-        mimeType: "application/octet-stream",
-        name: `${name}.bin`,
-      });
-      const progress = page.locator("#iteration-upload-progress");
-      await expect(progress, name).toHaveAttribute("data-live-upload-state", "failed");
-      await page.unroute(routePattern);
-      expect(intercepted, name).not.toBeNull();
-      const failure = intercepted as unknown as InterceptedUploadFailure;
-      expect(failure.status, name).toBe(expectedStatus);
-      expect(Buffer.byteLength(failure.body), name).toBeLessThanOrEqual(4_096);
-      expect(JSON.parse(failure.body), name).toEqual({ error: expectedCode });
-      expect(sentinels, name).not.toContain(failure.grant);
-      sentinels.push(failure.grant);
-      expect(new Set(sentinels).size, name).toBe(sentinels.length);
-      await expect(progress, name).toHaveAttribute("aria-invalid", "true");
-      await expect(progress, name).toHaveAttribute("aria-errormessage", "iteration-upload-error");
-      await expect(page.locator("#iteration-upload-error"), name).toBeVisible();
-      await expect(page.locator("#iteration-upload-error"), name).toContainText("Upload failed");
-      await assertNoGrantLeak(page, sentinels);
-      for (const sentinel of sentinels) {
-        expect(consoleDiagnostics.join("\n"), name).not.toContain(sentinel);
-        expect(pageDiagnostics.join("\n"), name).not.toContain(sentinel);
+        await page.getByLabel("Iteration 004 file").setInputFiles({
+          buffer: Buffer.alloc(8, 0x61),
+          mimeType: "application/octet-stream",
+          name: `${name}.bin`,
+        });
+        const progress = page.locator("#iteration-upload-progress");
+        await expect(progress, name).toHaveAttribute("data-live-upload-state", "failed");
+        await page.unroute(routePattern);
+        expect(intercepted, name).not.toBeNull();
+        const failure = intercepted as unknown as InterceptedUploadFailure;
+        expect(failure.status, name).toBe(expectedStatus);
+        expect(Buffer.byteLength(failure.body), name).toBeLessThanOrEqual(4_096);
+        expect(JSON.parse(failure.body), name).toEqual({ error: expectedCode });
+        expect(sentinels, name).not.toContain(failure.grant);
+        sentinels.push(failure.grant);
+        expect(new Set(sentinels).size, name).toBe(sentinels.length);
+        await expect(progress, name).toHaveAttribute("aria-invalid", "true");
+        await expect(progress, name).toHaveAttribute("aria-errormessage", "iteration-upload-error");
+        await expect(page.locator("#iteration-upload-error"), name).toBeVisible();
+        await expect(page.locator("#iteration-upload-error"), name).toContainText("Upload failed");
+        await assertNoGrantLeak(page, sentinels);
+        for (const sentinel of sentinels) {
+          expect(consoleDiagnostics.join("\n"), name).not.toContain(sentinel);
+          expect(pageDiagnostics.join("\n"), name).not.toContain(sentinel);
+        }
+
+        await page.getByRole("button", { name: "Retry upload" }).click();
+        await expect(progress, name).toHaveAttribute("data-live-upload-state", "ready");
+        await expect(page.locator("#iteration-upload-error"), name).toBeHidden();
+        const nextAction = await runOrdinaryAction(page);
+        expect(nextAction.revision, name).toBe(previousAction.revision + 1);
+        expect(nextAction.domain_count, name).toBe(previousAction.domain_count + 1);
+        previousAction = nextAction;
+        await assertNoGrantLeak(page, sentinels);
+
+        await page.getByRole("button", { name: "Remove upload" }).click();
+        await resetUploadCreationWindow(page);
       }
-
-      await page.getByRole("button", { name: "Retry upload" }).click();
-      await expect(progress, name).toHaveAttribute("data-live-upload-state", "ready");
-      await expect(page.locator("#iteration-upload-error"), name).toBeHidden();
-      const nextAction = await runOrdinaryAction(page);
-      expect(nextAction.revision, name).toBe(previousAction.revision + 1);
-      expect(nextAction.domain_count, name).toBe(previousAction.domain_count + 1);
-      previousAction = nextAction;
-      await assertNoGrantLeak(page, sentinels);
-
-      await page.getByRole("button", { name: "Remove upload" }).click();
-      await resetUploadCreationWindow(page);
     }
 
     expect((await snapshot(page)).errors).toEqual([]);

@@ -1,5 +1,7 @@
 //! Upload transfer-authority and redaction contract tests.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
@@ -60,6 +62,26 @@ fn issue() -> (TransferGrantCodec, TransferGrantScope, TransferGrant) {
         .expect("issue grant");
     let grant = TransferGrant::parse(issued.grant().expose_bearer()).expect("wire round trip");
     (codec, authority, grant)
+}
+
+fn canonically_tamper_signature(
+    grant: &TransferGrant,
+    byte_index: usize,
+    bit: u8,
+) -> TransferGrant {
+    let mut parts = grant.expose_bearer().split('.').collect::<Vec<_>>();
+    assert_eq!(parts.len(), 4);
+    let encoded = parts[3];
+    let mut signature = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("canonical signature");
+    assert_eq!(signature.len(), 32);
+    assert_eq!(URL_SAFE_NO_PAD.encode(&signature), encoded);
+    signature[byte_index] ^= bit;
+    let forged = URL_SAFE_NO_PAD.encode(signature);
+    assert_eq!(forged.len(), encoded.len());
+    parts[3] = &forged;
+    TransferGrant::parse(&parts.join(".")).expect("canonical forged transfer grant")
 }
 
 #[test]
@@ -171,15 +193,7 @@ fn transfer_grant_expiry_protocol_and_tampering_fail_closed() {
         UploadErrorKind::ScopeMismatch
     );
 
-    let mut parts = grant
-        .expose_bearer()
-        .split('.')
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(parts.len(), 4);
-    let replacement = if parts[3].starts_with('A') { "B" } else { "A" };
-    parts[3].replace_range(0..1, replacement);
-    let tampered = TransferGrant::parse(&parts.join(".")).expect("syntactically valid token");
+    let tampered = canonically_tamper_signature(&grant, 0, 0x01);
     assert_eq!(
         codec
             .verify(&tampered, &authority, UnixMillis::new(1_001))
@@ -187,6 +201,25 @@ fn transfer_grant_expiry_protocol_and_tampering_fail_closed() {
             .kind(),
         UploadErrorKind::InvalidGrant
     );
+}
+
+#[test]
+fn every_canonical_signature_bit_mutation_reaches_exact_mac_rejection() {
+    let (codec, authority, grant) = issue();
+
+    for byte_index in 0..32 {
+        for bit in [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80] {
+            let tampered = canonically_tamper_signature(&grant, byte_index, bit);
+            assert_eq!(
+                codec
+                    .verify(&tampered, &authority, UnixMillis::new(1_001))
+                    .expect_err("canonical signature mutation must fail MAC verification")
+                    .kind(),
+                UploadErrorKind::InvalidGrant,
+                "byte {byte_index} bit {bit:#04x}"
+            );
+        }
+    }
 }
 
 #[test]
