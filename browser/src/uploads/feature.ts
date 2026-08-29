@@ -185,10 +185,11 @@ export class FetchUploadTransport implements UploadTransport {
       cache: "no-store",
       credentials: "same-origin",
       headers,
+      keepalive: request.operation === "cancel",
       method: "POST",
       redirect: "error",
       referrerPolicy: "same-origin",
-      signal: request.signal,
+      ...(request.operation === "cancel" ? {} : { signal: request.signal }),
     });
     if (!response.ok) {
       throw new UploadHttpError(
@@ -328,6 +329,20 @@ export function connectUploadIsland(
       projectControls(field, view);
     }
   };
+  const restoreControlFocus = (field: string, role: "cancel" | "remove" | "retry"): void => {
+    const preferredRoles =
+      role === "cancel" ? ["remove"] : role === "retry" ? ["cancel", "remove"] : [null];
+    for (const preferred of preferredRoles) {
+      const target = ownerships.find(({ directive, element }) => {
+        if (directive.name !== "upload" || directive.value !== field) return false;
+        if (directive.role !== preferred) return false;
+        return !(element instanceof HTMLButtonElement) || !element.disabled;
+      })?.element;
+      if (!(target instanceof HTMLElement) || !target.isConnected) continue;
+      target.focus();
+      return;
+    }
+  };
   const installListeners = (): void => {
     clearListeners();
     for (const ownership of ownerships) {
@@ -358,18 +373,29 @@ export function connectUploadIsland(
           report(context);
           continue;
         }
+        const role = directive.role;
+        if (role !== "cancel" && role !== "retry" && role !== "remove") {
+          report(context);
+          continue;
+        }
         eventType = "click";
         listener = (event) => {
           if (!event.isTrusted) return;
+          const restoreFocus = element.ownerDocument.activeElement === element;
           const operation =
-            directive.role === "cancel"
+            role === "cancel"
               ? manager.cancel(port, directive.value)
-              : directive.role === "retry"
+              : role === "retry"
                 ? manager.retry(port, directive.value)
                 : manager.remove(port, directive.value);
-          void operation.catch(() => {
-            report(context);
-          });
+          void operation
+            .then(() => {
+              if (restoreFocus) restoreControlFocus(directive.value, role);
+            })
+            .catch(() => {
+              report(context);
+              if (restoreFocus) restoreControlFocus(directive.value, role);
+            });
         };
       }
       element.addEventListener(eventType, listener);

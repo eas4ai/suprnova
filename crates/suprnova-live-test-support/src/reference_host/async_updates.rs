@@ -29,6 +29,7 @@ use super::{ResourceCounter, ResourceLease};
 const NOW: UnixMillis = UnixMillis::new(1_000);
 const MEMBERSHIP_IDS: [&str; 2] = ["c3Vic2NyaXB0aW9uLTAwMQ", "c3Vic2NyaXB0aW9uLTAwMg"];
 const MAX_DOCUMENT_TRANSPORTS: usize = 2;
+const MAX_BROWSER_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum TransportKind {
@@ -43,6 +44,7 @@ pub(super) struct TransportCreateRequest {
     position: Option<TransportPosition>,
     prior_subscription: Option<String>,
     subscription: String,
+    transport_generation: u64,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +60,7 @@ pub(super) struct MembershipRequest {
     authority: String,
     control_nonce: String,
     operation: String,
+    transport_generation: u64,
 }
 
 pub(super) struct PollRequest {
@@ -81,6 +84,7 @@ struct IssuedMembership {
 struct IssuedTransport {
     kind: TransportKind,
     generation: u64,
+    pending_emissions: usize,
     reader_active: bool,
     document: DocumentTransportSession,
     memberships: BTreeMap<String, IssuedMembership>,
@@ -147,12 +151,20 @@ pub(super) struct AsyncRuntime {
     maximum_memberships: AtomicUsize,
     logical_memberships: Arc<ResourceCounter>,
     phase_pause: Arc<AsyncPhasePause>,
+    emission_changed: Arc<Notify>,
 }
 
 pub(super) struct TransportReaderLease {
     state: Arc<Mutex<AsyncState>>,
+    emission_changed: Arc<Notify>,
     transport: String,
     generation: u64,
+}
+
+impl TransportReaderLease {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 impl Drop for TransportReaderLease {
@@ -182,6 +194,7 @@ impl Drop for TransportReaderLease {
                 .insert((kind, subscription), membership.authority);
         }
         drop(state);
+        self.emission_changed.notify_waiters();
         tokio::spawn(async move {
             let _ = transport.document.close().await;
         });
@@ -226,6 +239,7 @@ impl AsyncRuntime {
             maximum_memberships: AtomicUsize::new(0),
             logical_memberships,
             phase_pause: Arc::new(AsyncPhasePause::default()),
+            emission_changed: Arc::new(Notify::new()),
         })
     }
 
@@ -241,6 +255,11 @@ impl AsyncRuntime {
         };
         if request.subscription != AsyncReferenceScenario::lifecycle().stream {
             return Err("transport_facts_invalid");
+        }
+        if request.transport_generation == 0
+            || request.transport_generation > MAX_BROWSER_SAFE_INTEGER
+        {
+            return Err("transport_generation_invalid");
         }
         let replay_from = match (&request.prior_subscription, &request.position) {
             (None, None) => None,
@@ -260,6 +279,9 @@ impl AsyncRuntime {
                 .transports
                 .get(&transport_id)
                 .ok_or("transport_authority_invalid")?;
+            if transport.generation != request.transport_generation {
+                return Err("transport_generation_invalid");
+            }
             return transport_response(
                 &transport_id,
                 transport,
@@ -298,8 +320,12 @@ impl AsyncRuntime {
                 state.engine.credential().to_owned(),
                 state.engine.expires_at(),
             )?;
-            let authority_transport =
-                authority.open_transport(origin, state.engine.credential(), 1, NOW)?;
+            let authority_transport = authority.open_transport(
+                origin,
+                state.engine.credential(),
+                request.transport_generation,
+                NOW,
+            )?;
             let credential = state.engine.credential().to_owned();
             let descriptor = state.engine.descriptor().to_owned();
             let binding = state.engine.descriptor_binding().to_owned();
@@ -311,7 +337,7 @@ impl AsyncRuntime {
                     credential,
                     descriptor,
                     binding,
-                    generation: 1,
+                    generation: request.transport_generation,
                     engine_authorization,
                     open: false,
                     control_in_flight: false,
@@ -323,7 +349,8 @@ impl AsyncRuntime {
             transport_id.clone(),
             IssuedTransport {
                 kind,
-                generation: 1,
+                generation: request.transport_generation,
+                pending_emissions: 0,
                 reader_active: false,
                 document,
                 memberships,
@@ -360,6 +387,11 @@ impl AsyncRuntime {
             if request.authority != membership.credential {
                 return Err("membership_authority_invalid");
             }
+            if request.transport_generation != transport.generation
+                || request.transport_generation != membership.generation
+            {
+                return Err("membership_authority_invalid");
+            }
             (
                 AsyncReferenceMembershipRequest {
                     control_nonce: request.control_nonce,
@@ -371,7 +403,7 @@ impl AsyncRuntime {
                     session: ASYNC_REFERENCE_SESSION.to_owned(),
                     stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
                     subscription_id: subscription.to_owned(),
-                    transport_generation: membership.generation,
+                    transport_generation: request.transport_generation,
                 },
                 membership.engine_authorization.clone(),
                 transport.generation,
@@ -600,12 +632,23 @@ impl AsyncRuntime {
         endpoint.initial_html().to_owned()
     }
 
-    pub(super) async fn reset_fresh_render(&self) -> Result<(), String> {
+    pub(super) async fn execute_ordinary_action(&self) -> Result<Value, &'static str> {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.execute_ordinary_action().await
+    }
+
+    pub(super) async fn reset_fresh_render_for_upload_morph(
+        &self,
+        replace_upload_on_successor: bool,
+    ) -> Result<(), String> {
         let engine = {
             let state = self.state.lock().expect("async runtime lock");
             Arc::clone(&state.engine)
         };
-        engine.reset_fresh_render().await
+        engine.reset_fresh_render(replace_upload_on_successor).await
     }
 
     pub(super) fn pause_fresh_render(&self) {
@@ -630,6 +673,14 @@ impl AsyncRuntime {
             state.engine.fresh_render_endpoint()
         };
         endpoint.resume_render();
+    }
+
+    pub(super) fn fresh_render_paused(&self) -> bool {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.render_paused()
     }
 
     pub(super) async fn execute_fresh_render_direct(
@@ -955,9 +1006,64 @@ impl AsyncRuntime {
         transport.reader_active = true;
         Ok(TransportReaderLease {
             state: Arc::clone(&self.state),
+            emission_changed: Arc::clone(&self.emission_changed),
             transport: transport_id.to_owned(),
             generation: transport.generation,
         })
+    }
+
+    pub(super) fn request_emission(
+        &self,
+        transport_id: &str,
+        generation: u64,
+    ) -> Result<(), &'static str> {
+        const MAX_PENDING_EMISSIONS: usize = 8;
+        let mut state = self.state.lock().expect("async runtime lock");
+        if state.retired {
+            return Err("transport_retired");
+        }
+        let transport = state
+            .transports
+            .get_mut(transport_id)
+            .ok_or("transport_authority_invalid")?;
+        if generation != transport.generation {
+            return Err("transport_generation_invalid");
+        }
+        if transport.pending_emissions >= MAX_PENDING_EMISSIONS {
+            return Err("emission_capacity_exceeded");
+        }
+        transport.pending_emissions += 1;
+        drop(state);
+        self.emission_changed.notify_waiters();
+        Ok(())
+    }
+
+    pub(super) async fn wait_for_emission(
+        &self,
+        transport_id: &str,
+        generation: u64,
+    ) -> Result<(), &'static str> {
+        loop {
+            let changed = self.emission_changed.notified();
+            {
+                let mut state = self.state.lock().expect("async runtime lock");
+                if state.retired {
+                    return Err("transport_retired");
+                }
+                let transport = state
+                    .transports
+                    .get_mut(transport_id)
+                    .ok_or("transport_authority_invalid")?;
+                if generation != transport.generation {
+                    return Err("transport_generation_invalid");
+                }
+                if transport.pending_emissions > 0 {
+                    transport.pending_emissions -= 1;
+                    return Ok(());
+                }
+            }
+            changed.await;
+        }
     }
 
     pub(super) fn websocket_batch(&self, transport_id: &str) -> Result<Vec<Vec<u8>>, &'static str> {
@@ -1014,6 +1120,7 @@ impl AsyncRuntime {
             state.by_kind.clear();
             std::mem::take(&mut state.transports)
         };
+        self.emission_changed.notify_waiters();
         let mut first_error = None;
         for transport in transports.values_mut() {
             for membership in transport.memberships.values_mut() {
@@ -1162,6 +1269,7 @@ mod tests {
                     position: None,
                     prior_subscription: None,
                     subscription: "orders".to_owned(),
+                    transport_generation: 7,
                 },
                 "http://127.0.0.1:4197",
             )
@@ -1173,19 +1281,38 @@ mod tests {
         let binding = membership["descriptor_binding"]
             .as_str()
             .expect("descriptor binding");
+        let stale_control = serde_json::to_vec(&json!({
+            "control_nonce": "0000000000000000",
+            "descriptor_binding": binding,
+            "kind": "subscribe",
+            "stream": "orders",
+            "subscription": subscription,
+            "transport_generation": 6,
+        }))
+        .expect("stale control JSON");
+        assert_eq!(
+            runtime
+                .websocket_control(transport, &stale_control)
+                .await
+                .err(),
+            Some("membership_authority_invalid")
+        );
         let control = serde_json::to_vec(&json!({
             "control_nonce": "0000000000000001",
             "descriptor_binding": binding,
             "kind": "subscribe",
             "stream": "orders",
             "subscription": subscription,
-            "transport_generation": 1,
+            "transport_generation": 7,
         }))
         .expect("control JSON");
         let initial = runtime
             .websocket_control(transport, &control)
             .await
             .expect("subscribe control");
+        let acknowledgment: Value =
+            serde_json::from_slice(&initial.messages[0]).expect("membership acknowledgment");
+        assert_eq!(acknowledgment["transport_generation"], 7);
         let initial: Value =
             serde_json::from_slice(&initial.messages[1]).expect("initial engine envelope");
         let ongoing = runtime.websocket_batch(transport).expect("ongoing batch");
@@ -1218,6 +1345,7 @@ mod tests {
                     position: None,
                     prior_subscription: None,
                     subscription: "orders".to_owned(),
+                    transport_generation: 11,
                 },
                 origin,
             )
@@ -1256,6 +1384,7 @@ mod tests {
                         authority: stalled_authority,
                         control_nonce: "paused-subscribe".to_owned(),
                         operation: "subscribe".to_owned(),
+                        transport_generation: 11,
                     },
                 )
                 .await
@@ -1275,6 +1404,7 @@ mod tests {
                     authority: second_authority,
                     control_nonce: "sibling-subscribe".to_owned(),
                     operation: "subscribe".to_owned(),
+                    transport_generation: 11,
                 },
             ),
         )
@@ -1298,11 +1428,107 @@ mod tests {
                     authority: first_authority,
                     control_nonce: "paused-subscribe".to_owned(),
                     operation: "subscribe".to_owned(),
+                    transport_generation: 11,
                 },
             )
             .await
             .expect("canceled external authority remains retryable");
         assert_eq!(resources.current(), 2);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transport_generation_is_server_bound_and_stale_controls_are_rejected() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "sse".to_owned(),
+                    position: None,
+                    prior_subscription: None,
+                    subscription: "orders".to_owned(),
+                    transport_generation: 19,
+                },
+                "http://127.0.0.1:4197",
+            )
+            .await
+            .expect("transport");
+        assert_eq!(created["transport_generation"], 19);
+        let transport = created["transport"].as_str().expect("transport");
+        let membership = &created["memberships"][0];
+        let subscription = membership["subscription"].as_str().expect("subscription");
+        let authority = membership["authority"].as_str().expect("authority");
+        let stale = runtime
+            .membership(
+                transport,
+                subscription,
+                MembershipRequest {
+                    authority: authority.to_owned(),
+                    control_nonce: "stale-generation".to_owned(),
+                    operation: "subscribe".to_owned(),
+                    transport_generation: 18,
+                },
+            )
+            .await;
+        assert_eq!(stale, Err("membership_authority_invalid"));
+        let acknowledged = runtime
+            .membership(
+                transport,
+                subscription,
+                MembershipRequest {
+                    authority: authority.to_owned(),
+                    control_nonce: "current-generation".to_owned(),
+                    operation: "subscribe".to_owned(),
+                    transport_generation: 19,
+                },
+            )
+            .await
+            .expect("current generation");
+        assert_eq!(acknowledged["transportGeneration"], 19);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn physical_emission_requires_an_explicit_current_generation_step() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = Arc::new(
+            AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+                .await
+                .expect("async runtime"),
+        );
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "sse".to_owned(),
+                    position: None,
+                    prior_subscription: None,
+                    subscription: "orders".to_owned(),
+                    transport_generation: 23,
+                },
+                "http://127.0.0.1:4197",
+            )
+            .await
+            .expect("transport");
+        let transport = created["transport"].as_str().expect("transport").to_owned();
+        assert_eq!(
+            runtime.request_emission(&transport, 22),
+            Err("transport_generation_invalid")
+        );
+        runtime
+            .request_emission(&transport, 23)
+            .expect("current generation schedules one emission");
+        timeout(
+            Duration::from_secs(1),
+            runtime.wait_for_emission(&transport, 23),
+        )
+        .await
+        .expect("emission barrier")
+        .expect("emission scheduled");
         runtime.retire().await.expect("runtime retires");
         assert_eq!(resources.current(), 0);
     }

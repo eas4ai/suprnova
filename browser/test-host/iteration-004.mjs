@@ -1,21 +1,36 @@
-/* global document, HTMLElement, window */
+/* global document, window */
 
 const REFERENCE_AUTHORIZATION = "Bearer task1-reference-session";
 const INTERNAL_RESOURCE_COUNTS = Symbol.for("suprnova.live.internal.resource-counts.v1");
 const FEATURE_SYMBOL = Symbol.for("suprnova.live.features.v1");
 const features = document.documentElement.getAttribute("data-iteration-004-features") ?? "core";
 const format = document.documentElement.getAttribute("data-iteration-004-format") ?? "esm";
-const artifact = document.documentElement.getAttribute("data-iteration-004-artifact") ?? "current";
+const uploadArtifact =
+  document.documentElement.getAttribute("data-iteration-004-upload-artifact") ?? "current";
+const asyncArtifact =
+  document.documentElement.getAttribute("data-iteration-004-async-artifact") ?? "current";
 const transportKind =
   document.documentElement.getAttribute("data-iteration-004-transport") ?? "sse";
 const syntheticLifecycle =
   document.documentElement.getAttribute("data-iteration-004-synthetic-lifecycle") === "true";
 const controlledClock =
   document.documentElement.getAttribute("data-iteration-004-controlled-clock") === "true";
+const controlledUploadClock =
+  document.documentElement.getAttribute("data-iteration-004-controlled-upload-clock") === "true";
+const uploadChunkBytes = Number(
+  document.documentElement.getAttribute("data-iteration-004-upload-chunk-bytes") ?? "262144",
+);
+if (uploadChunkBytes !== 262_144 && uploadChunkBytes !== 262_145) {
+  throw new Error("iteration_004_upload_chunk_bytes_invalid");
+}
 const hasUploads = features === "uploads" || features === "both";
 const hasAsync = features === "async" || features === "both";
 const originalFetch = window.fetch.bind(window);
 const issuedByKind = new Map();
+const requestedGenerationByKind = new Map([
+  ["sse", 1],
+  ["websocket", 1],
+]);
 const activePorts = new Set();
 const observations = {
   authorizations: [],
@@ -34,10 +49,22 @@ const observations = {
 };
 const heldEnvelopes = [];
 let holdNextEnvelope = false;
+let persistedRestart = false;
 let runtime = null;
 let readyUpload = null;
+let pauseNextUploadChunk = false;
+let pauseEveryUploadChunk = false;
+let uploadPauseGeneration = null;
 const controlledTimerRecords = new Map();
 let controlledTimerHandle = 1_000_000;
+let uploadClockNow = 0;
+
+if (controlledUploadClock) {
+  Object.defineProperty(performance, "now", {
+    configurable: true,
+    value: () => uploadClockNow,
+  });
+}
 
 function runtimeResourceCounts() {
   if (runtime === null) return {};
@@ -74,9 +101,17 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 window.addEventListener("pagehide", (event) => {
   boundedPush(observations.pagehidePersisted, event.persisted === true);
+  pauseNextUploadChunk = false;
+  pauseEveryUploadChunk = false;
+  uploadPauseGeneration = null;
+  if (event.persisted === true) persistedRestart = true;
 });
 window.addEventListener("pageshow", (event) => {
   boundedPush(observations.pageshowPersisted, event.persisted === true);
+  if (event.persisted === true) {
+    const kind = transportKind === "websocket" ? "websocket" : "sse";
+    requestedGenerationByKind.set(kind, 1);
+  }
 });
 
 function grantFrom(headers) {
@@ -97,6 +132,24 @@ function mappedUploadResponse(operation, value) {
   }
   if (operation === "status") response.nextChunkIndex = value.next_part;
   return response;
+}
+
+async function pauseUploadChunk(handle, uploadRevision) {
+  if (uploadPauseGeneration !== null) {
+    throw new Error("iteration_004_upload_pause_in_use");
+  }
+  const pause = await originalFetch("/__test/iteration-004/control/upload/pause-chunk", {
+    body: JSON.stringify({ handle, upload_revision: uploadRevision }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  if (!pause.ok) {
+    const detail = await pause.text();
+    boundedPush(observations.errors, `reference_upload_pause_failed:${detail}`);
+    throw new Error("reference_upload_pause_failed");
+  }
+  const control = await pause.json();
+  uploadPauseGeneration = control.pause_generation;
 }
 
 async function referenceUploadFetch(input, init = {}) {
@@ -161,6 +214,7 @@ async function referenceUploadFetch(input, init = {}) {
         Authorization: REFERENCE_AUTHORIZATION,
         "X-Live-Upload-Grant": grantFrom(headers),
       },
+      keepalive: init.keepalive === true,
       method: "POST",
       signal: init.signal,
     });
@@ -179,10 +233,27 @@ async function referenceUploadFetch(input, init = {}) {
   if (!response.ok) return response;
   const value = await response.json();
   if (operation === "create") {
-    readyUpload = { handle: value.handle, readyRevision: null };
+    readyUpload = {
+      expectedBytes: value.expected_bytes,
+      handle: value.handle,
+      readyRevision: null,
+    };
+    if (pauseNextUploadChunk || pauseEveryUploadChunk) {
+      pauseNextUploadChunk = false;
+      await pauseUploadChunk(value.handle, value.revision);
+    }
+  } else if (
+    operation === "put_chunk" &&
+    pauseEveryUploadChunk &&
+    value.received_bytes < value.expected_bytes
+  ) {
+    await pauseUploadChunk(value.handle, value.revision);
   } else if (operation === "complete" && readyUpload?.handle === body.handle) {
+    pauseEveryUploadChunk = false;
     readyUpload.readyRevision = value.revision;
   } else if (operation === "cancel" && readyUpload?.handle === body.handle) {
+    pauseEveryUploadChunk = false;
+    uploadPauseGeneration = null;
     readyUpload = null;
   }
   return new Response(JSON.stringify(mappedUploadResponse(operation, value)), {
@@ -201,6 +272,10 @@ function membershipRecord(issued, subscriptionId) {
 
 async function issueAuthorization(request) {
   const kind = transportKind === "websocket" ? "websocket" : "sse";
+  const transportGeneration = requestedGenerationByKind.get(kind);
+  if (!Number.isSafeInteger(transportGeneration) || transportGeneration < 1) {
+    throw new Error("reference_transport_generation_invalid");
+  }
   const response = await originalFetch("/__live/async/transports", {
     body: JSON.stringify({
       kind,
@@ -213,6 +288,7 @@ async function issueAuthorization(request) {
             },
       prior_subscription: request.prior?.subscriptionId ?? null,
       subscription: request.stream,
+      transport_generation: transportGeneration,
     }),
     headers: {
       Authorization: REFERENCE_AUTHORIZATION,
@@ -241,6 +317,8 @@ async function issueAuthorization(request) {
           },
     subscription: membership.subscription,
     transport: issued.transport,
+    requestedGeneration: transportGeneration,
+    serverGeneration: issued.transport_generation,
     replay: source.replay.length,
   });
   return Object.freeze({
@@ -287,6 +365,7 @@ function deliverEnvelope(port, request, encoded) {
     holdNextEnvelope = false;
     observations.heldEnvelopes += 1;
     heldEnvelopes.push({ port, request, encoded });
+    return;
   }
   if (port.closed) return;
   observations.forwardedEnvelopes += 1;
@@ -304,6 +383,10 @@ class ReferenceSsePort {
     this.controlTail = Promise.resolve();
     this.readerStarted = false;
     if (this.issued === undefined) throw new Error("reference_sse_transport_missing");
+    if (this.issued.transport_generation !== request.transportGeneration) {
+      throw new Error("reference_sse_transport_generation_mismatch");
+    }
+    persistedRestart = false;
     observations.portsCreated += 1;
     activePorts.add(this);
     queueMicrotask(() => {
@@ -333,6 +416,7 @@ class ReferenceSsePort {
           authority: membership.authority,
           control_nonce: controlNonce,
           operation: "subscribe",
+          transport_generation: this.request.transportGeneration,
         }),
         headers: {
           Authorization: REFERENCE_AUTHORIZATION,
@@ -353,10 +437,7 @@ class ReferenceSsePort {
       });
     }
     const acknowledged = await response.json();
-    return Object.freeze({
-      ...acknowledged,
-      transportGeneration: this.request.transportGeneration,
-    });
+    return Object.freeze(acknowledged);
   }
 
   unsubscribe(subscriptionId) {
@@ -371,6 +452,7 @@ class ReferenceSsePort {
           authority: membership.authority,
           control_nonce: controlNonce,
           operation: "unsubscribe",
+          transport_generation: this.request.transportGeneration,
         }),
         headers: {
           Authorization: REFERENCE_AUTHORIZATION,
@@ -387,6 +469,10 @@ class ReferenceSsePort {
     this.closed = true;
     this.abort.abort();
     activePorts.delete(this);
+    requestedGenerationByKind.set(
+      "sse",
+      persistedRestart ? 1 : this.request.transportGeneration + 1,
+    );
   }
 
   async read() {
@@ -441,10 +527,15 @@ class ReferenceWebSocketPort {
     this.issued = issuedByKind.get("websocket");
     this.nextControl = 0;
     if (this.issued === undefined) throw new Error("reference_websocket_transport_missing");
+    if (this.issued.transport_generation !== request.transportGeneration) {
+      throw new Error("reference_websocket_transport_generation_mismatch");
+    }
+    persistedRestart = false;
     const transportSequence = Number.parseInt(this.issued.transport.slice("transport-".length), 10);
     if (!Number.isSafeInteger(transportSequence) || transportSequence < 1) {
       throw new Error("reference_websocket_transport_invalid");
     }
+    observations.portsCreated += 1;
     this.controlSequenceBase = BigInt(transportSequence) * 65_536n;
     this.socket = new WebSocket("/__live/async/ws", `suprnova-live-v1.${this.issued.transport}`);
     activePorts.add(this);
@@ -470,7 +561,7 @@ class ReferenceWebSocketPort {
               kind: "authenticated",
               stream: value.stream,
               subscriptionId: value.subscription,
-              transportGeneration: this.request.transportGeneration,
+              transportGeneration: value.transport_generation,
             }),
           );
         }
@@ -487,6 +578,7 @@ class ReferenceWebSocketPort {
   }
 
   subscribe(subscription) {
+    observations.subscriptionAttempts += 1;
     return new Promise((resolve) => {
       if (this.closed) {
         resolve(Object.freeze({ kind: "rejected", reason: "closed" }));
@@ -525,6 +617,10 @@ class ReferenceWebSocketPort {
     this.pending.clear();
     this.socket.close(1000, "suprnova_live_async_closed");
     activePorts.delete(this);
+    requestedGenerationByKind.set(
+      "websocket",
+      persistedRestart ? 1 : this.request.transportGeneration + 1,
+    );
   }
 }
 
@@ -572,39 +668,24 @@ const asyncOptions = Object.freeze({
   }),
 });
 
-function installIncompatibleArtifact() {
-  const driver = Object.freeze([
-    Symbol.for("suprnova.live.feature-driver.v1"),
-    1,
+function installScenarioControls() {
+  document.querySelector("#remove-second-island")?.addEventListener("click", () => {
+    document.querySelector('[data-suprnova-live-document-key="iteration-004-secondary"]')?.remove();
+  });
+}
+
+function registerIncompatibleFeature(slot) {
+  const surface = Reflect.get(window, FEATURE_SYMBOL);
+  if (surface === undefined) throw new Error("iteration_004_feature_surface_missing");
+  const feature = Object.freeze([
+    Symbol.for("suprnova.live.feature.v1"),
+    slot === "async" ? 1 : 0,
+    99,
     0,
     Object.freeze({}),
     () => true,
   ]);
-  const surface = {
-    configureAsync() {},
-    register() {
-      return "incompatible";
-    },
-    version: 1,
-  };
-  Object.defineProperty(surface, Symbol.for("suprnova.live.features.v1.adopt"), {
-    value: () => driver,
-  });
-  Object.defineProperty(window, FEATURE_SYMBOL, { value: Object.freeze(surface) });
-}
-
-function installNativeFallback() {
-  const button = document.querySelector("#native-disclosure");
-  const panel = document.querySelector("#native-fallback");
-  button?.addEventListener("click", () => {
-    if (!(button instanceof HTMLElement) || !(panel instanceof HTMLElement)) return;
-    const expanded = button.getAttribute("aria-expanded") !== "true";
-    button.setAttribute("aria-expanded", String(expanded));
-    panel.hidden = !expanded;
-  });
-  document.querySelector("#remove-second-island")?.addEventListener("click", () => {
-    document.querySelector('[data-suprnova-live-document-key="iteration-004-secondary"]')?.remove();
-  });
+  boundedPush(observations.featureRegistrations, `${slot}:${surface.register(feature)}`);
 }
 
 if (syntheticLifecycle && !("onfreeze" in document)) {
@@ -613,27 +694,35 @@ if (syntheticLifecycle && !("onfreeze" in document)) {
 if (syntheticLifecycle && !("onresume" in document)) {
   Object.defineProperty(document, "onresume", { configurable: true, value: null, writable: true });
 }
-installNativeFallback();
+installScenarioControls();
 window.fetch = referenceUploadFetch;
 
-if (artifact === "incompatible") installIncompatibleArtifact();
-
 if (format === "esm") {
-  if (artifact === "current" && hasUploads) {
+  if (uploadArtifact === "current" && hasUploads) {
     const uploads = await import("/suprnova-live.uploads.esm.js");
     boundedPush(observations.featureRegistrations, `uploads:${uploads.uploadsRegistration}`);
-    uploads.configureUploads({ chunkBytes: 256 * 1024, maxActive: 1, maxItems: 8 });
+    uploads.configureUploads({ chunkBytes: uploadChunkBytes, maxActive: 1, maxItems: 8 });
   }
-  if (artifact === "current" && hasAsync) {
+  if (asyncArtifact === "current" && hasAsync) {
     const asynchronous = await import("/suprnova-live.async.esm.js");
     boundedPush(observations.featureRegistrations, `async:${asynchronous.asyncRegistration}`);
     asynchronous.configureAsync(asyncOptions);
   }
+  if (uploadArtifact === "incompatible" && hasUploads) registerIncompatibleFeature("uploads");
+  if (asyncArtifact === "incompatible" && hasAsync) registerIncompatibleFeature("async");
   const core = await import("/suprnova-live.esm.js");
   runtime = core.boot();
 } else {
   const surface = Reflect.get(window, FEATURE_SYMBOL);
-  if (artifact === "current" && hasAsync) surface.configureAsync(asyncOptions);
+  const registrationProbe = Reflect.get(window, "__suprnovaIteration004ClassicRegistrationProbe");
+  registrationProbe?.restore();
+  for (const registration of registrationProbe?.registrations ?? []) {
+    boundedPush(observations.featureRegistrations, registration);
+  }
+  for (const registration of Reflect.get(window, "__suprnovaIteration004Incompatible") ?? []) {
+    boundedPush(observations.featureRegistrations, registration);
+  }
+  if (asyncArtifact === "current" && hasAsync) surface.configureAsync(asyncOptions);
   runtime = window.SuprnovaLive.boot();
 }
 
@@ -641,7 +730,13 @@ Reflect.set(
   window,
   "__suprnovaIteration004",
   Object.freeze({
-    advanceGapReauthorization() {
+    advanceUploadClock(milliseconds) {
+      if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+        throw new Error("iteration_004_upload_clock_step_invalid");
+      }
+      uploadClockNow += milliseconds;
+    },
+    advanceTransportReconnect() {
       fireControlledTimer(125);
     },
     async finalizeSelectedUpload() {
@@ -665,6 +760,9 @@ Reflect.set(
       return value.state;
     },
     freeze() {
+      pauseNextUploadChunk = false;
+      pauseEveryUploadChunk = false;
+      uploadPauseGeneration = null;
       document.dispatchEvent(new Event("freeze"));
     },
     freshnessStates() {
@@ -673,6 +771,32 @@ Reflect.set(
     holdNextEnvelope() {
       holdNextEnvelope = true;
     },
+    pauseNextUpload() {
+      if (uploadPauseGeneration !== null || pauseNextUploadChunk || pauseEveryUploadChunk) {
+        throw new Error("iteration_004_upload_pause_in_use");
+      }
+      pauseNextUploadChunk = true;
+    },
+    pauseEveryUploadChunk() {
+      if (uploadPauseGeneration !== null || pauseNextUploadChunk || pauseEveryUploadChunk) {
+        throw new Error("iteration_004_upload_pause_in_use");
+      }
+      pauseEveryUploadChunk = true;
+    },
+    async emitNextEnvelope() {
+      const kind = transportKind === "websocket" ? "websocket" : "sse";
+      const issued = issuedByKind.get(kind);
+      if (issued === undefined) throw new Error("iteration_004_transport_missing");
+      const response = await originalFetch("/__test/iteration-004/control/async/emit", {
+        body: JSON.stringify({
+          transport: issued.transport,
+          transport_generation: issued.transport_generation,
+        }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      if (!response.ok) throw new Error("iteration_004_emit_failed");
+    },
     releaseRetiredEnvelopes() {
       for (const held of heldEnvelopes.splice(0)) {
         observations.retiredEnvelopeAttempts += 1;
@@ -680,7 +804,22 @@ Reflect.set(
       }
     },
     resume() {
+      const kind = transportKind === "websocket" ? "websocket" : "sse";
+      requestedGenerationByKind.set(kind, 1);
       document.dispatchEvent(new Event("resume"));
+    },
+    async resumePausedUpload() {
+      if (!Number.isSafeInteger(uploadPauseGeneration)) {
+        throw new Error("iteration_004_upload_pause_missing");
+      }
+      const generation = uploadPauseGeneration;
+      uploadPauseGeneration = null;
+      const response = await originalFetch("/__test/iteration-004/control/upload/resume-chunk", {
+        body: JSON.stringify({ pause_generation: generation }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      if (!response.ok) throw new Error("iteration_004_upload_resume_failed");
     },
     async shutdown() {
       runtime.stop();

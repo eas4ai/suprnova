@@ -1,9 +1,10 @@
 //! Production async-transport fixture owned by the deterministic reference host.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
@@ -11,6 +12,12 @@ use axum::body::Bytes;
 use axum::http::Method;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use suprnova_live::action::{
+    ActionArgumentSchema, ActionAuthorizationPort, ActionAuthorizationRequest, ActionEntry,
+    ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget, AuthorizationDecision,
+    AuthorizationRequirement, AuthorizedAction, PreparedActionArguments, RawActionArguments,
+    TransactionPolicy,
+};
 use suprnova_live::async_updates::{
     AsyncEnvelope, AsyncEventSession, AsyncEventSource, AsyncMembershipRegistryPort,
     AsyncMembershipRequest, AsyncMembershipValidation, AsyncTransportAuthorityPort,
@@ -51,8 +58,8 @@ use suprnova_live::host::{
     ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    BuildId, ComponentName, ContentDigest, IslandSlot, KeyId, RouteIdentity, ScopeFingerprint,
-    UnixMillis, ViewName,
+    ActionName, BuildId, ComponentName, ContentDigest, IslandSlot, KeyId, ModelField,
+    RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
@@ -61,21 +68,25 @@ use suprnova_live::ledger::{
 };
 use suprnova_live::limits::InputLimits;
 use suprnova_live::metadata::{
-    ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
+    ActionMetadata, ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
+    FieldMetadata,
 };
 use suprnova_live::protocol::{
     OperationV2, ProtocolLimitConfig, ProtocolLimits, SemanticIdempotencyInputV1, SnapshotInput,
     VersionedUpdateRequest, semantic_idempotency_digest_v1,
 };
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
-use suprnova_live::snapshot::state::{SnapshotSchemaSet, StateSchema};
+use suprnova_live::snapshot::state::{
+    FieldCategory, FieldSpec, SnapshotSchemaSet, StateCodec, StateSchema,
+};
 use suprnova_live::snapshot::{
     ComponentContract, ExpectedInstanceV1, ExpectedSeedV1, SnapshotLimits,
 };
+use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::{ComponentHarness, ComponentHarnessConfig, HarnessServices};
+use crate::{ComponentHarness, ComponentHarnessConfig, HarnessRequestIdentity, HarnessServices};
 
 type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -90,11 +101,14 @@ impl EventPayloadMetadata for OrdersUpdated {
     const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
 }
 
-struct FreshRenderFactory;
+struct FreshRenderFactory {
+    replace_upload_on_successor: bool,
+}
 
 #[derive(Default)]
 struct FreshRenderPause {
     enabled: AtomicBool,
+    entered_commit: AtomicBool,
     entered: Notify,
     release: Notify,
 }
@@ -104,18 +118,77 @@ impl ComponentFactory for FreshRenderFactory {
         &'a self,
         _context: &'a MountContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
+        Box::pin(async move {
+            Ok(Box::new(FreshRenderComponent {
+                domain_count: 0,
+                replace_upload_on_successor: self.replace_upload_on_successor,
+            }) as Box<dyn ComponentInstance>)
+        })
     }
 
     fn hydrate<'a>(
         &'a self,
-        _context: &'a HydrationContext<'a>,
+        context: &'a HydrationContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
+        Box::pin(async move {
+            let CanonicalValue::Object(fields) = context.state() else {
+                return Err(ComponentError::contract_failure());
+            };
+            let Some(CanonicalValue::String(domain_count)) = fields.get("domain_count") else {
+                return Err(ComponentError::contract_failure());
+            };
+            let domain_count = domain_count
+                .parse::<u64>()
+                .map_err(|_| ComponentError::contract_failure())?;
+            Ok(Box::new(FreshRenderComponent {
+                domain_count,
+                replace_upload_on_successor: self.replace_upload_on_successor,
+            }) as Box<dyn ComponentInstance>)
+        })
     }
 }
 
-struct FreshRenderComponent;
+struct FreshRenderComponent {
+    domain_count: u64,
+    replace_upload_on_successor: bool,
+}
+
+fn upload_controls(replacement: bool) -> String {
+    let suffix = if replacement { "-replacement" } else { "" };
+    let key_suffix = if replacement { "replacement" } else { "stable" };
+    format!(
+        "<label for=\"attachment-input{suffix}\">Attachment</label><input id=\"attachment-input{suffix}\" type=\"file\" live:upload=\"attachment\" data-suprnova-live-key=\"attachment-input-{key_suffix}\"><div id=\"attachment-progress{suffix}\" live:progress=\"attachment\" data-suprnova-live-key=\"attachment-progress-{key_suffix}\" role=\"progressbar\" aria-label=\"Attachment upload progress\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-valuenow=\"0\"></div><button id=\"attachment-cancel{suffix}\" type=\"button\" live:upload.cancel=\"attachment\" data-suprnova-live-key=\"attachment-cancel-{key_suffix}\">Cancel upload</button><button id=\"attachment-retry{suffix}\" type=\"button\" live:upload.retry=\"attachment\" data-suprnova-live-key=\"attachment-retry-{key_suffix}\">Retry upload</button><button id=\"attachment-remove{suffix}\" type=\"button\" live:upload.remove=\"attachment\" data-suprnova-live-key=\"attachment-remove-{key_suffix}\">Remove upload</button>"
+    )
+}
+
+struct EngineActionAuthorization;
+
+impl ActionAuthorizationPort for EngineActionAuthorization {
+    fn authorize<'a>(
+        &'a self,
+        _request: ActionAuthorizationRequest<'a>,
+    ) -> ActionFuture<'a, Result<AuthorizationDecision, ActionError>> {
+        Box::pin(async { Ok(AuthorizationDecision::Allow) })
+    }
+}
+
+fn increment_domain<'a>(
+    target: &'a mut dyn ActionTarget,
+    _authorization: &'a AuthorizedAction,
+    _arguments: &'a PreparedActionArguments,
+) -> ActionFuture<'a, Result<ActionResult, ActionError>> {
+    Box::pin(async move {
+        let target = target
+            .as_any_mut()
+            .downcast_mut::<FreshRenderComponent>()
+            .ok_or_else(ActionError::dispatcher_contract)?;
+        target.domain_count = target
+            .domain_count
+            .checked_add(1)
+            .ok_or_else(ActionError::dispatcher_contract)?;
+        Ok(ActionResult::render())
+    })
+}
 
 impl ComponentInstance for FreshRenderComponent {
     fn metadata(&self) -> &'static ComponentMetadata {
@@ -132,9 +205,13 @@ impl ComponentInstance for FreshRenderComponent {
             } else {
                 ("fresh-render-replacement", "article")
             };
+            let replace_upload = self.replace_upload_on_successor && context.revision().get() > 0;
+            let upload_controls = upload_controls(replace_upload);
             Ok(IslandRender {
                 body: Bytes::from(format!(
-                    "<button id=\"fresh-render-preserved\" type=\"button\" data-suprnova-live-key=\"fresh-render-preserved\">Preserved focus target</button><{replacement_tag} id=\"{replacement_id}\" data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></{replacement_tag}>",
+                    "<button id=\"fresh-render-preserved\" type=\"button\" data-suprnova-live-key=\"fresh-render-preserved\">Preserved focus target</button><output data-live-domain-count=\"{}\">{}</output>{upload_controls}<{replacement_tag} id=\"{replacement_id}\" data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></{replacement_tag}>",
+                    self.domain_count,
+                    self.domain_count,
                     context.revision().get(),
                 )),
                 assets: AssetSet::empty(),
@@ -147,7 +224,10 @@ impl ComponentInstance for FreshRenderComponent {
         &self,
         _exposure: suprnova_live::snapshot::state::StateExposure,
     ) -> Result<CanonicalValue, ComponentError> {
-        Ok(CanonicalValue::Object(Default::default()))
+        Ok(CanonicalValue::Object(BTreeMap::from([(
+            "domain_count".to_owned(),
+            CanonicalValue::String(self.domain_count.to_string()),
+        )])))
     }
 
     fn dehydrate_memo(&self) -> Result<CanonicalValue, ComponentError> {
@@ -183,8 +263,10 @@ impl LiveInstanceLedger for RollbackableFreshRenderLedger {
         outcome: AcceptedOutcome,
     ) -> Result<(), LedgerError> {
         if self.pause.enabled.load(Ordering::Acquire) {
+            self.pause.entered_commit.store(true, Ordering::Release);
             self.pause.entered.notify_one();
             self.pause.release.notified().await;
+            self.pause.entered_commit.store(false, Ordering::Release);
         }
         self.inner.commit(claim, outcome).await
     }
@@ -371,17 +453,30 @@ pub(super) struct ReferenceFreshRender {
     initial_html: String,
     ports: Arc<EngineSubscriptionPorts>,
     pause: Arc<FreshRenderPause>,
+    action_sequence: AtomicU64,
 }
 
 impl ReferenceFreshRender {
-    async fn new(ports: Arc<EngineSubscriptionPorts>) -> Result<Self, String> {
+    async fn new(
+        ports: Arc<EngineSubscriptionPorts>,
+        replace_upload_on_successor: bool,
+    ) -> Result<Self, String> {
         let metadata = engine_metadata().clone();
         let (context, _) = engine_context(metadata.clone(), ports.clone())?;
         let pause = Arc::new(FreshRenderPause::default());
+        let actions = ActionTable::new(vec![ActionEntry::new(
+            increment_action_metadata(),
+            increment_domain,
+        )])
+        .map_err(|_| "fresh render actions")?;
         let descriptor = ComponentDescriptor::with_hooks(
             metadata.clone(),
-            ComponentHooks::new(Arc::new(FreshRenderFactory)),
-        );
+            ComponentHooks::new(Arc::new(FreshRenderFactory {
+                replace_upload_on_successor,
+            })),
+        )
+        .with_actions(actions)
+        .map_err(|_| "fresh render actions")?;
         let expected = ExpectedInstanceV1::new(
             ComponentContract::new(
                 metadata.identity().clone(),
@@ -451,7 +546,49 @@ impl ReferenceFreshRender {
             initial_html,
             ports,
             pause,
+            action_sequence: AtomicU64::new(0),
         })
+    }
+
+    pub(super) async fn execute_ordinary_action(&self) -> Result<Value, &'static str> {
+        let sequence = self.action_sequence.fetch_add(1, Ordering::SeqCst);
+        let seed = u8::try_from(sequence)
+            .ok()
+            .and_then(|value| value.checked_add(0xa0))
+            .ok_or("ordinary action capacity")?;
+        let mut harness = self.harness.lock().await;
+        let result = harness
+            .execute_action(
+                &ActionName::parse("increment").map_err(|_| "ordinary action identity")?,
+                RawActionArguments::empty(),
+                None,
+                HarnessRequestIdentity::from_seed(seed),
+            )
+            .await
+            .map_err(|_| "ordinary action execution")?;
+        let ExecutionResult::Accepted(accepted) = result else {
+            return Err("ordinary action rejected");
+        };
+        if !accepted.action_executed() {
+            return Err("ordinary action not executed");
+        }
+        let html = accepted
+            .render()
+            .and_then(|render| String::from_utf8(render.body.to_vec()).ok())
+            .ok_or("ordinary action render")?;
+        let revision = accepted.revision().get();
+        let marker = "data-live-domain-count=\"";
+        let domain_count = html
+            .split_once(marker)
+            .and_then(|(_, tail)| tail.split_once('\"'))
+            .and_then(|(value, _)| value.parse::<u64>().ok())
+            .ok_or("ordinary action domain state")?;
+        Ok(json!({
+            "action": "increment",
+            "domain_count": domain_count,
+            "html": html,
+            "revision": revision,
+        }))
     }
 
     pub(super) async fn request(
@@ -516,6 +653,10 @@ impl ReferenceFreshRender {
     pub(super) fn resume_render(&self) {
         self.pause.enabled.store(false, Ordering::Release);
         self.pause.release.notify_waiters();
+    }
+
+    pub(super) fn render_paused(&self) -> bool {
+        self.pause.entered_commit.load(Ordering::Acquire)
     }
 }
 
@@ -673,7 +814,7 @@ impl EngineAsyncFixture {
             )
             .await
             .map_err(|_| "engine subscription connect")?;
-        let fresh_render = Arc::new(ReferenceFreshRender::new(ports).await?);
+        let fresh_render = Arc::new(ReferenceFreshRender::new(ports, false).await?);
         let claims = authorized.verified().claims();
         let registry = Arc::new(EngineMembershipRegistry {
             subscriptions: Mutex::new(Vec::new()),
@@ -772,9 +913,13 @@ impl EngineAsyncFixture {
         Arc::clone(&self.fresh_render.lock().expect("fresh render fixture lock"))
     }
 
-    pub(super) async fn reset_fresh_render(&self) -> Result<(), String> {
+    pub(super) async fn reset_fresh_render(
+        &self,
+        replace_upload_on_successor: bool,
+    ) -> Result<(), String> {
         let ports = Arc::clone(&self.fresh_render_endpoint().ports);
-        let replacement = Arc::new(ReferenceFreshRender::new(ports).await?);
+        let replacement =
+            Arc::new(ReferenceFreshRender::new(ports, replace_upload_on_successor).await?);
         *self.fresh_render.lock().expect("fresh render fixture lock") = replacement;
         Ok(())
     }
@@ -858,8 +1003,13 @@ fn engine_metadata() -> &'static ComponentMetadata {
             ComponentName::parse("reference.uploads").expect("engine component"),
             ViewName::parse("reference/uploads.html").expect("engine view"),
             ContractVersions::new(1, 1, 1, 1, 1).expect("engine versions"),
-            vec![],
-            vec![],
+            vec![FieldMetadata::new(
+                ModelField::parse("domain_count").expect("engine domain field"),
+                FieldCategory::State,
+                StateCodec::Json,
+                true,
+            )],
+            vec![increment_action_metadata()],
             vec![event],
             vec![],
             vec![subscription],
@@ -877,9 +1027,28 @@ fn engine_modes() -> SubscriptionModes {
     .expect("engine modes")
 }
 
+fn increment_action_metadata() -> ActionMetadata {
+    ActionMetadata::new_with_contract(
+        ActionName::parse("increment").expect("engine action"),
+        1,
+        ActionArgumentSchema::empty(),
+        AuthorizationRequirement::Current,
+        ValidationSelection::ComponentAndArguments,
+        TransactionPolicy::None,
+    )
+    .expect("engine action metadata")
+}
+
 fn engine_schemas() -> Result<SnapshotSchemaSet, &'static str> {
     SnapshotSchemaSet::new(
-        StateSchema::new(1, vec![]).map_err(|_| "engine state schema")?,
+        StateSchema::new(
+            1,
+            vec![
+                FieldSpec::new("domain_count", StateCodec::Json, FieldCategory::State, true)
+                    .map_err(|_| "engine domain field")?,
+            ],
+        )
+        .map_err(|_| "engine state schema")?,
         StateSchema::new(1, vec![]).map_err(|_| "engine memo schema")?,
         StateSchema::new(1, vec![]).map_err(|_| "engine mount schema")?,
     )
@@ -967,6 +1136,7 @@ fn engine_context(
         Some(TenantFingerprint::from_bytes(&[0x34; 32]).map_err(|_| "engine tenant")?),
     );
     let capabilities = HostCapabilities::bound_to(scope.clone())
+        .with_action_authorization(Arc::new(EngineActionAuthorization))
         .with_subscription_registry(ports.clone())
         .with_subscription_continuity(ports.clone())
         .with_subscription_authorization(ports.clone())

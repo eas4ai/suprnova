@@ -1538,10 +1538,10 @@ export class DocumentConnectionPool {
     ) {
       return;
     }
-    // Retire this physical callback generation before invoking any adapter
-    // cleanup. A hostile/reentrant close callback is therefore inert.
+    // Backoff retires this physical callback before invoking adapter cleanup.
+    // The next connect advances the generation exactly once, so its server-
+    // authenticated generation is the immediate physical successor.
     group.state = "backoff";
-    group.generation += 1;
     this.#releaseHandshake(group);
     const handshake = group.handshake;
     group.handshake = null;

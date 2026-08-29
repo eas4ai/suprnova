@@ -181,6 +181,9 @@ describe("current-document upload manager", () => {
     expect(fixture.manager.retireIncompatible(owner.port, [])).toEqual(["attachment"]);
     expect(fixture.manager.retireIncompatible(owner.port, [])).toEqual([]);
     expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(
+      fixture.transport.requests.filter(({ operation }) => operation === "cancel"),
+    ).toHaveLength(1);
     expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
     expect(owner.proposals[owner.proposals.length - 1]).toBeNull();
     fixture.manager.dispose();
@@ -198,8 +201,29 @@ describe("current-document upload manager", () => {
     fixture.manager.retireIsland(owner.port);
 
     expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(
+      fixture.transport.requests.filter(({ operation }) => operation === "cancel"),
+    ).toHaveLength(1);
     expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
     fixture.manager.dispose();
+  });
+
+  it("issues one cleanup cancellation when document shutdown retires an owned upload", async () => {
+    const fixture = manager();
+    const owner = island("document-shutdown");
+    const native = observedInput();
+    await fixture.manager.select({ field: "attachment", input: native.input, island: owner.port }, [
+      file("shutdown.bin", 1),
+    ]);
+
+    fixture.manager.dispose();
+    fixture.manager.dispose();
+
+    expect(
+      fixture.transport.requests.filter(({ operation }) => operation === "cancel"),
+    ).toHaveLength(1);
+    expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
   });
 
   it("suspends for bfcache as interrupted without losing the file, then clears on navigation", async () => {

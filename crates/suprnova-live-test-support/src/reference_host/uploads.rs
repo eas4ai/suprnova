@@ -6,7 +6,7 @@ use std::sync::Mutex as SyncMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use http_body_util::BodyExt as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -32,12 +32,13 @@ use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SnapshotSchemaSet};
 use suprnova_live::upload::{
-    AcceptedChunk, AcceptedUploadType, AuthoritativeUploadType, ChunkBody, ClientUploadMetadata,
-    DetectedUploadType, DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest,
-    FinalizeToken, FinalizeUploadRequest, PrepareTransfer, PreparedFinalize, QuarantineBytes,
-    QuarantinedFileProvider, ReverseProxyUploadProvider, TransferGrant, TransferGrantCodec,
-    TransferGrantRequest, TransferGrantScope, TrustedProviderOrigin, UploadChecksum,
-    UploadCreationRequest, UploadError, UploadErrorKind, UploadFieldPolicy,
+    AcceptedChunk, AcceptedUploadType, AuthoritativeUploadType, ChunkBody, ChunkDisposition,
+    ClientUploadMetadata, DetectedUploadType, DirectTransferInstruction, DirectUploadProvider,
+    DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken,
+    FinalizeUploadRequest, PrepareTransfer, PreparedFinalize, QuarantineBytes,
+    QuarantinedFileProvider, ReportDirectPart, ReverseProxyUploadProvider, TransferGrant,
+    TransferGrantCodec, TransferGrantRequest, TransferGrantScope, TrustedProviderOrigin,
+    UploadChecksum, UploadCreationRequest, UploadError, UploadErrorKind, UploadFieldPolicy,
     UploadFinalizationService, UploadFinalizer, UploadFuture, UploadHandle, UploadIdempotencyKey,
     UploadInspection, UploadProvider, UploadReplacementPolicy, UploadRevision, UploadScanPolicy,
     UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
@@ -57,6 +58,8 @@ use super::faults::ReferenceFaultSchedule;
 use super::{ResourceCounter, ResourceLease};
 
 const CREATED_AT: UnixMillis = UnixMillis::new(1_000);
+const UPLOAD_PAUSE_DEADLINE: Duration = Duration::from_secs(2);
+const MAX_BROWSER_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferMode {
@@ -77,6 +80,8 @@ struct StoredUpload {
     grant: TransferGrant,
     revision: UploadRevision,
     whole_hasher: Sha256,
+    direct_instruction: Option<DirectTransferInstruction>,
+    direct_checksum: Option<UploadChecksum>,
     active_lease: Option<ResourceLease>,
 }
 
@@ -102,6 +107,7 @@ impl ActionAuthorizationPort for ReferenceActionAuthorization {
 struct UploadSlots {
     records: SyncMutex<HashMap<String, UploadSlot>>,
     retired: AtomicBool,
+    changed: Notify,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,44 +119,236 @@ enum UploadPausePoint {
     Reacquire,
 }
 
-#[derive(Default)]
 struct UploadOperationPause {
-    target: SyncMutex<Option<UploadPausePoint>>,
+    state: SyncMutex<UploadPauseState>,
     entered: Notify,
-    release: Notify,
+    changed: Notify,
+    timers: Arc<ResourceCounter>,
+}
+
+struct UploadPauseState {
+    selected: Option<UploadPauseSelection>,
+    active: Option<UploadPauseSelection>,
+    next_generation: u64,
+    last_retired_generation: u64,
+    retired: bool,
+}
+
+struct UploadPauseSelection {
+    point: UploadPausePoint,
+    handle: String,
+    operation_generation: u64,
+    control_generation: u64,
+    _timer_lease: ResourceLease,
+}
+
+struct ActivePauseGuard {
+    pause: std::sync::Weak<UploadOperationPause>,
+    generation: u64,
+}
+
+impl Drop for ActivePauseGuard {
+    fn drop(&mut self) {
+        if let Some(pause) = self.pause.upgrade() {
+            pause.expire(self.generation);
+        }
+    }
 }
 
 impl UploadOperationPause {
-    async fn pause_if_selected(&self, point: UploadPausePoint) {
-        if *self
-            .target
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            == Some(point)
-        {
-            self.entered.notify_one();
-            self.release.notified().await;
+    fn new(timers: Arc<ResourceCounter>) -> Self {
+        Self {
+            state: SyncMutex::new(UploadPauseState {
+                selected: None,
+                active: None,
+                next_generation: 0,
+                last_retired_generation: 0,
+                retired: false,
+            }),
+            entered: Notify::new(),
+            changed: Notify::new(),
+            timers,
         }
     }
 
-    fn select(&self, point: UploadPausePoint) {
-        *self
-            .target
+    fn select(
+        self: &Arc<Self>,
+        point: UploadPausePoint,
+        handle: &str,
+        operation_generation: u64,
+    ) -> Result<u64, &'static str> {
+        if handle.is_empty() || operation_generation == 0 {
+            return Err("upload_pause_scope_invalid");
+        }
+        let timer_lease = self.timers.acquire().ok_or("upload_pause_retired")?;
+        let generation = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.retired {
+                return Err("upload_pause_retired");
+            }
+            if state.selected.is_some() || state.active.is_some() {
+                return Err("upload_pause_in_use");
+            }
+            let generation = state
+                .next_generation
+                .checked_add(1)
+                .filter(|generation| *generation <= MAX_BROWSER_SAFE_INTEGER)
+                .ok_or("upload_pause_capacity_exceeded")?;
+            state.next_generation = generation;
+            state.selected = Some(UploadPauseSelection {
+                point,
+                handle: handle.to_owned(),
+                operation_generation,
+                control_generation: generation,
+                _timer_lease: timer_lease,
+            });
+            generation
+        };
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(UPLOAD_PAUSE_DEADLINE).await;
+            if let Some(pause) = weak.upgrade() {
+                pause.expire(generation);
+            }
+        });
+        Ok(generation)
+    }
+
+    async fn pause_if_selected(
+        self: &Arc<Self>,
+        point: UploadPausePoint,
+        handle: &str,
+        operation_generation: u64,
+    ) {
+        let generation = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let selected = state.selected.as_ref().filter(|selected| {
+                selected.point == point
+                    && selected.handle == handle
+                    && selected.operation_generation == operation_generation
+            });
+            let Some(generation) = selected.map(|selected| selected.control_generation) else {
+                return;
+            };
+            state.active = state.selected.take();
+            generation
+        };
+        let guard = ActivePauseGuard {
+            pause: Arc::downgrade(self),
+            generation,
+        };
+        self.entered.notify_waiters();
+        loop {
+            let changed = self.changed.notified();
+            if !self.is_active(generation) {
+                break;
+            }
+            changed.await;
+        }
+        drop(guard);
+    }
+
+    fn resume(&self, generation: u64) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let selected = state
+            .selected
+            .as_ref()
+            .is_some_and(|selected| selected.control_generation == generation);
+        let active = state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.control_generation == generation);
+        if !selected && !active {
+            return Err(if generation <= state.last_retired_generation {
+                "upload_pause_generation_stale"
+            } else {
+                "upload_pause_generation_invalid"
+            });
+        }
+        if selected {
+            drop(state.selected.take());
+        }
+        if active {
+            drop(state.active.take());
+        }
+        state.last_retired_generation = state.last_retired_generation.max(generation);
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    fn expire(&self, generation: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let selected = state
+            .selected
+            .as_ref()
+            .is_some_and(|selected| selected.control_generation == generation);
+        let active = state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.control_generation == generation);
+        if selected {
+            drop(state.selected.take());
+        }
+        if active {
+            drop(state.active.take());
+        }
+        if selected || active {
+            state.last_retired_generation = state.last_retired_generation.max(generation);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    fn is_active(&self, generation: u64) -> bool {
+        self.state
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(point);
+            .unwrap_or_else(|error| error.into_inner())
+            .active
+            .as_ref()
+            .is_some_and(|active| active.control_generation == generation)
+    }
+
+    fn active_count(&self) -> usize {
+        usize::from(
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active
+                .is_some(),
+        )
+    }
+
+    fn pending_count(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        usize::from(state.selected.is_some()) + usize::from(state.active.is_some())
     }
 
     #[cfg(test)]
-    async fn wait_until_entered(&self) {
-        self.entered.notified().await;
+    async fn wait_until_entered(&self, generation: u64) {
+        loop {
+            let entered = self.entered.notified();
+            if self.is_active(generation) {
+                return;
+            }
+            entered.await;
+        }
     }
 
-    fn resume(&self) {
-        *self
-            .target
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        self.release.notify_waiters();
+    fn retire(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.retired = true;
+        if let Some(selected) = state.selected.take() {
+            state.last_retired_generation = state
+                .last_retired_generation
+                .max(selected.control_generation);
+        }
+        if let Some(active) = state.active.take() {
+            state.last_retired_generation =
+                state.last_retired_generation.max(active.control_generation);
+        }
+        drop(state);
+        self.changed.notify_waiters();
     }
 }
 
@@ -168,6 +366,13 @@ impl UploadOperation {
     fn upload_mut(&mut self) -> &mut StoredUpload {
         self.upload.as_mut().expect("active upload operation")
     }
+
+    fn pause_scope(&self) -> (String, u64) {
+        (
+            self.upload().handle.to_string(),
+            self.upload().revision.get(),
+        )
+    }
 }
 
 impl Drop for UploadOperation {
@@ -183,6 +388,8 @@ impl Drop for UploadOperation {
         if !self.slots.retired.load(Ordering::Acquire) {
             records.insert(self.key.clone(), UploadSlot::Ready(Box::new(upload)));
         }
+        drop(records);
+        self.slots.changed.notify_waiters();
     }
 }
 
@@ -327,6 +534,7 @@ pub(super) struct UploadRuntime {
     limits: UploadLimits,
     file: Arc<QuarantinedFileProvider<TokioFileQuarantineStore>>,
     direct: Arc<DirectProviderConformanceAdapter>,
+    ledger: Arc<MemoryUploadLedger>,
     service: Arc<UploadService>,
     validation: Arc<ReferenceValidationStore>,
     finalization: UploadFinalizationService,
@@ -349,6 +557,7 @@ impl UploadRuntime {
         fault: ReferenceFaultSchedule,
         shutdown: watch::Receiver<bool>,
         active_uploads: Arc<ResourceCounter>,
+        open_timers: Arc<ResourceCounter>,
     ) -> Result<Self, String> {
         let limits = UploadLimits::new(UploadLimitConfig::reference())
             .map_err(|error| format!("upload limits: {error:?}"))?;
@@ -377,8 +586,9 @@ impl UploadRuntime {
         let ledger = Arc::new(
             MemoryUploadLedger::new(limits).map_err(|error| format!("upload ledger: {error:?}"))?,
         );
+        let service_ledger: Arc<dyn suprnova_live::upload::UploadLedger> = ledger.clone();
         let service = Arc::new(
-            UploadService::new(ledger, grant_codec(), limits)
+            UploadService::new(service_ledger, grant_codec(), limits)
                 .map_err(|error| format!("upload service: {error:?}"))?,
         );
         let validation = Arc::new(ReferenceValidationStore::default());
@@ -391,6 +601,7 @@ impl UploadRuntime {
             limits,
             file,
             direct,
+            ledger,
             service,
             validation,
             finalization,
@@ -400,6 +611,7 @@ impl UploadRuntime {
             uploads: Arc::new(UploadSlots {
                 records: SyncMutex::new(HashMap::new()),
                 retired: AtomicBool::new(false),
+                changed: Notify::new(),
             }),
             service_calls: AtomicUsize::new(0),
             grant_sequence: AtomicU64::new(0),
@@ -407,7 +619,7 @@ impl UploadRuntime {
             fault_applied: AtomicBool::new(false),
             shutdown,
             active_uploads,
-            operation_pause: Arc::new(UploadOperationPause::default()),
+            operation_pause: Arc::new(UploadOperationPause::new(open_timers)),
         })
     }
 
@@ -499,23 +711,11 @@ impl UploadRuntime {
                     .await?
             }
         };
-        let instruction = plan
+        let direct_instruction = plan
             .instructions()
             .find_map(|instruction| instruction.as_direct())
-            .map(|instruction| {
-                json!({
-                    "method": instruction.method().as_str(),
-                    "url": instruction.endpoint().as_str(),
-                    "headers": instruction.required_headers().iter().map(|(name, value)| {
-                        (name.as_str().to_owned(), Value::String(value.to_owned()))
-                    }).collect::<serde_json::Map<_, _>>(),
-                    "part": instruction.part().index(),
-                    "offset": instruction.part().offset(),
-                    "maximum_bytes": instruction.maximum_bytes(),
-                    "expires_at": instruction.expires_at().get(),
-                    "reference": instruction.reference().as_str(),
-                })
-            });
+            .cloned();
+        let instruction = direct_instruction.as_ref().map(direct_instruction_json);
         let stored = StoredUpload {
             handle: handle.clone(),
             field,
@@ -529,6 +729,8 @@ impl UploadRuntime {
             grant: grant.clone(),
             revision,
             whole_hasher: Sha256::new(),
+            direct_instruction,
+            direct_checksum: None,
             active_lease: Some(active_lease),
         };
         let insert_conflict = {
@@ -574,8 +776,9 @@ impl UploadRuntime {
     ) -> Result<Value, UploadError> {
         self.record_call();
         let mut operation = self.take_upload(handle)?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
-            .pause_if_selected(UploadPausePoint::Chunk)
+            .pause_if_selected(UploadPausePoint::Chunk, &pause_handle, pause_generation)
             .await;
         let result = self
             .write_chunk_inner(
@@ -627,6 +830,7 @@ impl UploadRuntime {
             body,
             upload.whole_hasher.clone(),
             interrupt_after_first,
+            usize::try_from(size).map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?,
             self.shutdown.clone(),
         );
         let receipt = self
@@ -655,11 +859,111 @@ impl UploadRuntime {
         Ok(())
     }
 
+    pub(super) fn store_direct_part(&self, handle: &str, bytes: &[u8]) -> Result<(), UploadError> {
+        self.record_call();
+        let mut operation = self.take_upload(handle)?;
+        let upload = operation.upload_mut();
+        let instruction = upload
+            .direct_instruction
+            .as_ref()
+            .filter(|_| upload.mode == TransferMode::Direct && !upload.state.is_terminal())
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let disposition = self
+            .direct
+            .store_part_for_test(instruction, bytes, CREATED_AT)?;
+        if disposition == ChunkDisposition::Stored {
+            upload.whole_hasher.update(bytes);
+            upload.direct_checksum =
+                Some(UploadChecksum::parse(&hex_digest(Sha256::digest(bytes)))?);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn report_direct_part(
+        &self,
+        handle: &str,
+        request: CompleteUploadRequest,
+    ) -> Result<Value, UploadError> {
+        self.record_call();
+        let mut operation = self.take_upload(handle)?;
+        self.require_current_grant(operation.upload(), &request.grant)?;
+        let upload = operation.upload_mut();
+        let instruction = upload
+            .direct_instruction
+            .clone()
+            .filter(|_| upload.mode == TransferMode::Direct && !upload.state.is_terminal())
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let checksum = upload
+            .direct_checksum
+            .clone()
+            .ok_or_else(|| UploadError::new(UploadErrorKind::IncompleteTransfer))?;
+        let receipt = self
+            .direct
+            .report_part(ReportDirectPart::new(
+                &upload.handle,
+                instruction.part().clone(),
+                instruction.reference().clone(),
+                CREATED_AT,
+            ))
+            .await?;
+        if upload.state == UploadState::Created {
+            self.transition(upload, UploadTransition::Queue, "direct-queue")
+                .await?;
+            self.transition(
+                upload,
+                UploadTransition::BeginTransfer,
+                "direct-begin-transfer",
+            )
+            .await?;
+        }
+        if receipt.index() != upload.next_part || receipt.offset() != upload.received_bytes {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        upload.received_bytes = upload
+            .received_bytes
+            .checked_add(receipt.bytes())
+            .ok_or_else(|| UploadError::new(UploadErrorKind::InputTooLarge))?;
+        upload.next_part = upload
+            .next_part
+            .checked_add(1)
+            .ok_or_else(|| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+        self.transition(
+            upload,
+            UploadTransition::PutChunk(AcceptedChunk::new(
+                receipt.index(),
+                receipt.bytes(),
+                checksum,
+            )?),
+            &format!("direct-put-{}", receipt.index()),
+        )
+        .await?;
+        upload.direct_instruction = receipt
+            .next_instruction()
+            .and_then(|next| next.as_direct())
+            .cloned();
+        upload.direct_checksum = None;
+        let mut response = status_json(upload);
+        response["receipt"] = json!({
+            "part": receipt.index(),
+            "offset": receipt.offset(),
+            "bytes": receipt.bytes(),
+            "disposition": match receipt.disposition() {
+                ChunkDisposition::Stored => "stored",
+                ChunkDisposition::ExistingOutcome => "existing_outcome",
+            },
+        });
+        if let Some(instruction) = upload.direct_instruction.as_ref() {
+            response["instruction"] = direct_instruction_json(instruction);
+        }
+        Ok(response)
+    }
+
     pub(super) async fn status(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
         self.record_call();
         let operation = self.take_upload(handle)?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
-            .pause_if_selected(UploadPausePoint::Status)
+            .pause_if_selected(UploadPausePoint::Status, &pause_handle, pause_generation)
             .await;
         let presented = self.require_current_grant(operation.upload(), grant)?;
         self.service
@@ -681,8 +985,9 @@ impl UploadRuntime {
     ) -> Result<Value, UploadError> {
         self.record_call();
         let mut operation = self.take_upload(handle)?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
-            .pause_if_selected(UploadPausePoint::Complete)
+            .pause_if_selected(UploadPausePoint::Complete, &pause_handle, pause_generation)
             .await;
         let result = self
             .complete_inner(operation.upload_mut(), &request.grant)
@@ -696,7 +1001,7 @@ impl UploadRuntime {
         grant: &str,
     ) -> Result<(), UploadError> {
         self.require_current_grant(upload, grant)?;
-        if upload.mode != TransferMode::File || upload.received_bytes != upload.expected_bytes {
+        if upload.received_bytes != upload.expected_bytes {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
         if upload.state == UploadState::Ready {
@@ -711,9 +1016,18 @@ impl UploadRuntime {
             self.transition(upload, UploadTransition::Complete, "complete")
                 .await?;
         }
-        self.file
-            .verify(VerifyTransfer::new(&upload.handle, &checksum))
-            .await?;
+        match upload.mode {
+            TransferMode::File => {
+                self.file
+                    .verify(VerifyTransfer::new(&upload.handle, &checksum))
+                    .await?;
+            }
+            TransferMode::Direct => {
+                self.direct
+                    .verify(VerifyTransfer::new(&upload.handle, &checksum))
+                    .await?;
+            }
+        }
         self.transition(upload, UploadTransition::Accept, "accept")
             .await?;
         if let (Some(client), Some(policy)) = (&upload.client, &upload.policy) {
@@ -796,13 +1110,67 @@ impl UploadRuntime {
 
     pub(super) async fn cancel(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let mut operation = self.take_upload(handle)?;
+        let mut operation = self.take_upload_after_inflight(handle).await?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
-            .pause_if_selected(UploadPausePoint::Cancel)
+            .pause_if_selected(UploadPausePoint::Cancel, &pause_handle, pause_generation)
             .await;
         self.require_current_grant(operation.upload(), grant)?;
         let result = self.cancel_inner(operation.upload_mut()).await;
         result.map(|()| status_json(operation.upload()))
+    }
+
+    async fn take_upload_after_inflight(
+        &self,
+        handle: &str,
+    ) -> Result<UploadOperation, UploadError> {
+        let mut shutdown = self.shutdown.clone();
+        loop {
+            let changed = self.uploads.changed.notified();
+            let upload = {
+                let mut uploads = self
+                    .uploads
+                    .records
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if self.uploads.retired.load(Ordering::Acquire) {
+                    return Err(UploadError::new(UploadErrorKind::UploadConflict));
+                }
+                match uploads.remove(handle) {
+                    Some(UploadSlot::Ready(upload)) => {
+                        let upload = *upload;
+                        uploads.insert(
+                            handle.to_owned(),
+                            UploadSlot::Busy {
+                                handle: upload.handle.clone(),
+                                mode: upload.mode,
+                            },
+                        );
+                        Some(upload)
+                    }
+                    Some(busy @ UploadSlot::Busy { .. }) => {
+                        uploads.insert(handle.to_owned(), busy);
+                        None
+                    }
+                    None => return Err(UploadError::new(UploadErrorKind::UploadConflict)),
+                }
+            };
+            if let Some(upload) = upload {
+                return Ok(UploadOperation {
+                    slots: Arc::clone(&self.uploads),
+                    key: handle.to_owned(),
+                    upload: Some(upload),
+                });
+            }
+            tokio::select! {
+                () = changed => {}
+                result = shutdown.changed() => {
+                    if result.is_err() || *shutdown.borrow() {
+                        return Err(UploadError::new(UploadErrorKind::UploadConflict));
+                    }
+                }
+            }
+        }
     }
 
     async fn cancel_inner(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
@@ -819,8 +1187,9 @@ impl UploadRuntime {
     pub(super) async fn reacquire(&self, handle: &str) -> Result<Value, UploadError> {
         self.record_call();
         let mut operation = self.take_upload(handle)?;
+        let (pause_handle, pause_generation) = operation.pause_scope();
         self.operation_pause
-            .pause_if_selected(UploadPausePoint::Reacquire)
+            .pause_if_selected(UploadPausePoint::Reacquire, &pause_handle, pause_generation)
             .await;
         self.reacquire_inner(operation.upload_mut()).await
     }
@@ -867,16 +1236,52 @@ impl UploadRuntime {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
 
-    pub(super) fn pause_chunk(&self) {
-        self.operation_pause.select(UploadPausePoint::Chunk);
+    pub(super) fn pause_chunk(
+        &self,
+        handle: &str,
+        operation_generation: u64,
+    ) -> Result<u64, &'static str> {
+        let records = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = records.get(handle).and_then(|slot| match slot {
+            UploadSlot::Ready(upload)
+                if upload.mode == TransferMode::File && !upload.state.is_terminal() =>
+            {
+                Some(upload.revision.get())
+            }
+            UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+        });
+        if current != Some(operation_generation) {
+            return Err("upload_pause_scope_invalid");
+        }
+        drop(records);
+        self.operation_pause
+            .select(UploadPausePoint::Chunk, handle, operation_generation)
     }
 
-    pub(super) fn resume_chunk(&self) {
-        self.operation_pause.resume();
+    pub(super) fn resume_chunk(&self, generation: u64) -> Result<(), &'static str> {
+        self.operation_pause.resume(generation)
+    }
+
+    pub(super) fn paused_operations(&self) -> usize {
+        self.operation_pause.active_count()
+    }
+
+    pub(super) fn reset_creation_window(&self) -> Result<(), &'static str> {
+        if self.active_uploads.current() != 0 || self.operation_pause.pending_count() != 0 {
+            return Err("upload_window_not_quiescent");
+        }
+        self.ledger.reset_creation_window();
+        Ok(())
     }
 
     pub(super) async fn retire(&self) -> Result<(), String> {
+        self.operation_pause.retire();
         self.uploads.retired.store(true, Ordering::Release);
+        self.uploads.changed.notify_waiters();
         let pending = {
             let mut uploads = self
                 .uploads
@@ -1025,6 +1430,21 @@ fn status_json(upload: &StoredUpload) -> Value {
         "received_bytes": upload.received_bytes,
         "next_part": upload.next_part,
         "revision": upload.revision.get(),
+    })
+}
+
+fn direct_instruction_json(instruction: &DirectTransferInstruction) -> Value {
+    json!({
+        "method": instruction.method().as_str(),
+        "url": instruction.endpoint().as_str(),
+        "headers": instruction.required_headers().iter().map(|(name, value)| {
+            (name.as_str().to_owned(), Value::String(value.to_owned()))
+        }).collect::<serde_json::Map<_, _>>(),
+        "part": instruction.part().index(),
+        "offset": instruction.part().offset(),
+        "maximum_bytes": instruction.maximum_bytes(),
+        "expires_at": instruction.expires_at().get(),
+        "reference": instruction.reference().as_str(),
     })
 }
 
@@ -1197,6 +1617,8 @@ struct AxumChunkBody {
     body: Body,
     hasher: Sha256,
     interrupt_after_first: bool,
+    maximum_body_bytes: usize,
+    pending: Option<Bytes>,
     yielded_chunks: usize,
     shutdown: watch::Receiver<bool>,
 }
@@ -1206,12 +1628,15 @@ impl AxumChunkBody {
         body: Body,
         hasher: Sha256,
         interrupt_after_first: bool,
+        maximum_body_bytes: usize,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
             body,
             hasher,
             interrupt_after_first,
+            maximum_body_bytes,
+            pending: None,
             yielded_chunks: 0,
             shutdown,
         }
@@ -1235,6 +1660,15 @@ impl ChunkBody for AxumChunkBody {
                 return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
             }
             loop {
+                if let Some(mut pending) = self.pending.take() {
+                    let selected = pending.split_to(pending.len().min(maximum_bytes));
+                    if !pending.is_empty() {
+                        self.pending = Some(pending);
+                    }
+                    self.hasher.update(&selected);
+                    self.yielded_chunks = self.yielded_chunks.saturating_add(1);
+                    return Ok(Some(QuarantineBytes::copy_from_slice(&selected)));
+                }
                 let frame = tokio::select! {
                     biased;
                     changed = self.shutdown.changed() => {
@@ -1252,12 +1686,11 @@ impl ChunkBody for AxumChunkBody {
                     if data.is_empty() {
                         continue;
                     }
-                    if data.len() > maximum_bytes {
+                    if data.len() > self.maximum_body_bytes {
                         return Err(UploadError::new(UploadErrorKind::InputTooLarge));
                     }
-                    self.hasher.update(&data);
-                    self.yielded_chunks = self.yielded_chunks.saturating_add(1);
-                    return Ok(Some(QuarantineBytes::copy_from_slice(&data)));
+                    self.pending = Some(data);
+                    continue;
                 }
             }
         })
@@ -1287,12 +1720,14 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.expect("test root");
         let (_shutdown, shutdown) = watch::channel(false);
         let active = Arc::new(ResourceCounter::default());
+        let timers = Arc::new(ResourceCounter::default());
         let runtime = Arc::new(
             UploadRuntime::open(
                 &root,
                 ReferenceFaultSchedule::None,
                 shutdown,
                 Arc::clone(&active),
+                Arc::clone(&timers),
             )
             .await
             .expect("upload runtime"),
@@ -1317,7 +1752,11 @@ mod tests {
                 .expect("created upload");
             let handle = created["handle"].as_str().expect("handle").to_owned();
             let grant = created["grant"].as_str().expect("grant").to_owned();
-            runtime.operation_pause.select(point);
+            let revision = created["revision"].as_u64().expect("revision");
+            let pause_generation = runtime
+                .operation_pause
+                .select(point, &handle, revision)
+                .expect("scoped pause");
             let operation_runtime = Arc::clone(&runtime);
             let operation_handle = handle.clone();
             let operation_grant = grant.clone();
@@ -1363,13 +1802,16 @@ mod tests {
             });
             timeout(
                 Duration::from_secs(1),
-                runtime.operation_pause.wait_until_entered(),
+                runtime.operation_pause.wait_until_entered(pause_generation),
             )
             .await
             .expect("operation reached cancellation point");
             task.abort();
             assert!(task.await.expect_err("operation aborted").is_cancelled());
-            runtime.operation_pause.resume();
+            assert_eq!(
+                runtime.operation_pause.resume(pause_generation),
+                Err("upload_pause_generation_stale")
+            );
 
             let coherent = runtime
                 .status(&handle, &grant)
@@ -1392,5 +1834,104 @@ mod tests {
         tokio::fs::remove_dir(&root)
             .await
             .expect("remove empty test root");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_pause_is_exact_generation_bounded_and_auto_retires() {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).expect("test root entropy");
+        let root = std::env::temp_dir().join(format!(
+            "suprnova-live-upload-pause-{}",
+            u64::from_le_bytes(random)
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("test root");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let active = Arc::new(ResourceCounter::default());
+        let timers = Arc::new(ResourceCounter::default());
+        let runtime = Arc::new(
+            UploadRuntime::open(
+                &root,
+                ReferenceFaultSchedule::None,
+                shutdown,
+                Arc::clone(&active),
+                Arc::clone(&timers),
+            )
+            .await
+            .expect("upload runtime"),
+        );
+        let created = runtime
+            .create(CreateUploadRequest {
+                field: "serial".to_owned(),
+                filename: "pause.bin".to_owned(),
+                content_type: "application/octet-stream".to_owned(),
+                expected_bytes: 8,
+                mode: "file".to_owned(),
+            })
+            .await
+            .expect("created upload");
+        let handle = created["handle"].as_str().expect("handle").to_owned();
+        let revision = created["revision"].as_u64().expect("revision");
+        let generation = runtime
+            .pause_chunk(&handle, revision)
+            .expect("scoped pause generation");
+        assert_eq!(timers.current(), 1);
+        assert_eq!(
+            runtime.resume_chunk(generation + 1),
+            Err("upload_pause_generation_invalid")
+        );
+        assert_eq!(
+            runtime.pause_chunk("wrong-handle", revision),
+            Err("upload_pause_scope_invalid")
+        );
+        tokio::task::yield_now().await;
+        tokio::time::advance(UPLOAD_PAUSE_DEADLINE + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            runtime.resume_chunk(generation),
+            Err("upload_pause_generation_stale")
+        );
+        assert_eq!(runtime.paused_operations(), 0);
+        assert_eq!(timers.current(), 0);
+
+        let generation = runtime
+            .pause_chunk(&handle, revision)
+            .expect("second scoped pause generation");
+        let operation_runtime = Arc::clone(&runtime);
+        let operation_handle = handle.clone();
+        let grant = created["grant"].as_str().expect("grant").to_owned();
+        let operation = tokio::spawn(async move {
+            let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+            operation_runtime
+                .write_chunk(
+                    &operation_handle,
+                    0,
+                    &grant,
+                    &checksum,
+                    Some(8),
+                    Body::from("abcdefgh"),
+                )
+                .await
+        });
+        runtime.operation_pause.wait_until_entered(generation).await;
+        assert_eq!(runtime.paused_operations(), 1);
+        assert_eq!(timers.current(), 1);
+        tokio::time::advance(UPLOAD_PAUSE_DEADLINE + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        let result = operation
+            .await
+            .expect("timed operation")
+            .expect("chunk result");
+        assert_eq!(result["state"], "transferring");
+        assert_eq!(runtime.paused_operations(), 0);
+        assert_eq!(timers.current(), 0);
+        assert_eq!(
+            runtime.resume_chunk(generation),
+            Err("upload_pause_generation_stale")
+        );
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(active.current(), 0);
+        tokio::fs::remove_dir_all(&root)
+            .await
+            .expect("remove test root");
     }
 }

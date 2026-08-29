@@ -14,20 +14,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::StreamExt as _;
 use http_body_util::{BodyExt as _, Empty, Limited};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use suprnova_live::limits::InputLimits;
 use suprnova_live::protocol::{
@@ -76,13 +77,25 @@ pub const FRESH_RENDER_SCENARIO: &str = "/scenario/referenceFreshRender";
 const ITERATION_004_SCENARIO: &str = "/scenario/iteration004";
 const ITERATION_004_DESTINATION: &str = "/scenario/iteration004Destination";
 const ITERATION_004_DRIVER: &str = "/scenario/iteration004-driver.js";
+const REFERENCE_FRESH_RENDER_DRIVER: &str = "/scenario/reference-fresh-render-driver.js";
+const ITERATION_004_INCOMPATIBLE_FEATURE: &str = "/scenario/iteration004-incompatible-feature.js";
+const ITERATION_004_CLASSIC_REGISTRATION_PROBE: &str =
+    "/scenario/iteration004-classic-registration-probe.js";
 const ITERATION_004_AXE: &str = "/scenario/iteration004-axe.js";
+const ITERATION_004_STYLES: &str = "/scenario/iteration004.css";
 const ITERATION_004_FINALIZE_UPLOAD: &str = "/scenario/iteration004/finalize-upload";
+const ITERATION_004_ACTION: &str = "/scenario/iteration004/action";
 const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
 const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
 const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/resume-chunk";
+const ITERATION_004_RESET_UPLOAD_WINDOW: &str =
+    "/__test/iteration-004/control/upload/reset-creation-window";
+const ITERATION_004_RESUME_FRESH_RENDER: &str = "/__test/iteration-004/control/fresh-render/resume";
 const ITERATION_004_RESET_SEQUENCE_GAP: &str =
     "/__test/iteration-004/control/async/reset-sequence-gap";
+const ITERATION_004_EMIT_ASYNC: &str = "/__test/iteration-004/control/async/emit";
+const ITERATION_004_DIRECT_STORE: &str = "/__test/iteration-004/direct/:handle/store";
+const ITERATION_004_DIRECT_REPORT: &str = "/__test/iteration-004/direct/:handle/report";
 const MAX_STATIC_SCENARIO_BYTES: usize = 2 * 1024 * 1024;
 const REFERENCE_WEBSOCKET_COOKIE: &str = "suprnova_live_reference_session=task1-reference-session";
 
@@ -154,6 +167,8 @@ pub struct ReferenceHostInspection {
     pub open_timers: usize,
     /// Currently pending uploads.
     pub active_uploads: usize,
+    /// Currently entered bounded upload operation pauses.
+    pub paused_upload_operations: usize,
     /// Currently authenticated logical memberships.
     pub logical_memberships: usize,
     /// Currently owned browser-facing physical document transports.
@@ -322,6 +337,7 @@ impl HostState {
             open_files: self.inspection.resources.open_files.current(),
             open_timers: self.inspection.resources.open_timers.current(),
             active_uploads: self.inspection.resources.active_uploads.current(),
+            paused_upload_operations: self.uploads.paused_operations(),
             logical_memberships: self.inspection.resources.logical_memberships.current(),
             active_physical_transports: self
                 .inspection
@@ -361,6 +377,7 @@ impl ReferenceHost {
             config.fault_schedule,
             request_shutdown_receiver.clone(),
             Arc::clone(&inspection.resources.active_uploads),
+            Arc::clone(&inspection.resources.open_timers),
         )
         .await?;
         let listener = TcpListener::bind(config.address)
@@ -552,13 +569,30 @@ fn router(state: Arc<HostState>) -> Router {
             get(static_scenario_proxy).head(static_scenario_proxy),
         )
         .route(
+            REFERENCE_FRESH_RENDER_DRIVER,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_INCOMPATIBLE_FEATURE,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_CLASSIC_REGISTRATION_PROBE,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
             ITERATION_004_AXE,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_STYLES,
             get(static_scenario_proxy).head(static_scenario_proxy),
         )
         .route(
             ITERATION_004_FINALIZE_UPLOAD,
             post(iteration_004_finalize_upload),
         )
+        .route(ITERATION_004_ACTION, post(iteration_004_action))
         .route(ITERATION_004_INSPECTION, get(iteration_004_inspection))
         .route(ITERATION_004_PAUSE_UPLOAD, post(iteration_004_pause_upload))
         .route(
@@ -566,8 +600,22 @@ fn router(state: Arc<HostState>) -> Router {
             post(iteration_004_resume_upload),
         )
         .route(
+            ITERATION_004_RESET_UPLOAD_WINDOW,
+            post(iteration_004_reset_upload_window),
+        )
+        .route(
+            ITERATION_004_RESUME_FRESH_RENDER,
+            post(iteration_004_resume_fresh_render),
+        )
+        .route(
             ITERATION_004_RESET_SEQUENCE_GAP,
             post(iteration_004_reset_sequence_gap),
+        )
+        .route(ITERATION_004_EMIT_ASYNC, post(iteration_004_emit_async))
+        .route(ITERATION_004_DIRECT_STORE, put(iteration_004_direct_store))
+        .route(
+            ITERATION_004_DIRECT_REPORT,
+            post(iteration_004_direct_report),
         )
         .fallback(get(static_asset).head(static_asset))
         .with_state(state)
@@ -830,6 +878,7 @@ async fn sse(
         Ok(reader) => reader,
         Err(code) => return error(StatusCode::CONFLICT, code),
     };
+    let generation = reader.generation();
     match state.async_runtime.sse_batch(&transport).await {
         Ok(first_event) => {
             let Some(socket_lease) = state.inspection.resources.open_sockets.acquire() else {
@@ -867,7 +916,14 @@ async fn sse(
                         let event = match first {
                             Some(event) => event,
                             None => {
-                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                if state
+                                    .async_runtime
+                                    .wait_for_emission(&transport, generation)
+                                    .await
+                                    .is_err()
+                                {
+                                    return None;
+                                }
                                 match state.async_runtime.sse_batch(&transport).await {
                                     Ok(event) => event,
                                     Err(_) => return None,
@@ -926,6 +982,7 @@ async fn websocket(
         Ok(reader) => reader,
         Err(code) => return error(StatusCode::CONFLICT, code),
     };
+    let generation = reader.generation();
     let Some(timer_lease) = state.inspection.resources.open_timers.acquire() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
     };
@@ -953,31 +1010,36 @@ async fn websocket(
             websocket_session(
                 state,
                 transport,
+                generation,
                 socket,
-                socket_lease,
-                timer_lease,
-                physical_lease,
-                reader,
+                WebSocketSessionResources {
+                    _physical: physical_lease,
+                    _reader: reader,
+                    _socket: socket_lease,
+                    _timer: timer_lease,
+                },
             )
         })
         .into_response()
 }
 
+struct WebSocketSessionResources {
+    _physical: ResourceLease,
+    _reader: async_updates::TransportReaderLease,
+    _socket: ResourceLease,
+    _timer: ResourceLease,
+}
+
 async fn websocket_session(
     state: Arc<HostState>,
     transport: String,
+    generation: u64,
     mut socket: WebSocket,
-    _socket_lease: ResourceLease,
-    _timer_lease: ResourceLease,
-    _physical_lease: ResourceLease,
-    _reader: async_updates::TransportReaderLease,
+    _resources: WebSocketSessionResources,
 ) {
     const MAX_CONTROLS_PER_CONNECTION: usize = 64;
     let mut accepted = 0_usize;
     let mut shutdown = state.request_shutdown.clone();
-    let mut events = tokio::time::interval(Duration::from_millis(25));
-    events.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    events.tick().await;
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -986,7 +1048,10 @@ async fn websocket_session(
                     break;
                 }
             }
-            _ = events.tick() => {
+            ready = state.async_runtime.wait_for_emission(&transport, generation) => {
+                if ready.is_err() {
+                    break;
+                }
                 let Ok(messages) = state.async_runtime.websocket_batch(&transport) else {
                     break;
                 };
@@ -1138,7 +1203,9 @@ async fn iteration_004_inspection(State(state): State<Arc<HostState>>) -> Respon
     Json(json!({
         "active_physical_transports": snapshot.active_physical_transports,
         "active_uploads": snapshot.active_uploads,
+        "paused_upload_operations": snapshot.paused_upload_operations,
         "compiled_faults_applied": snapshot.compiled_faults_applied,
+        "fresh_render_paused": state.async_runtime.fresh_render_paused(),
         "logical_memberships": snapshot.logical_memberships,
         "maximum_logical_memberships": snapshot.maximum_logical_memberships,
         "open_files": snapshot.open_files,
@@ -1151,13 +1218,55 @@ async fn iteration_004_inspection(State(state): State<Arc<HostState>>) -> Respon
     .into_response()
 }
 
-async fn iteration_004_pause_upload(State(state): State<Arc<HostState>>) -> StatusCode {
-    state.uploads.pause_chunk();
-    StatusCode::NO_CONTENT
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseUploadRequest {
+    handle: String,
+    upload_revision: u64,
 }
 
-async fn iteration_004_resume_upload(State(state): State<Arc<HostState>>) -> StatusCode {
-    state.uploads.resume_chunk();
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeUploadRequest {
+    pause_generation: u64,
+}
+
+async fn iteration_004_pause_upload(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<PauseUploadRequest>,
+) -> Response {
+    match state
+        .uploads
+        .pause_chunk(&request.handle, request.upload_revision)
+    {
+        Ok(generation) => Json(json!({"pause_generation": generation})).into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_resume_upload(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<ResumeUploadRequest>,
+) -> Response {
+    match state.uploads.resume_chunk(request.pause_generation) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_reset_upload_window(State(state): State<Arc<HostState>>) -> StatusCode {
+    if state.uploads.reset_creation_window().is_ok() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
+}
+
+async fn iteration_004_resume_fresh_render(State(state): State<Arc<HostState>>) -> StatusCode {
+    if !state.async_runtime.fresh_render_paused() {
+        return StatusCode::CONFLICT;
+    }
+    state.async_runtime.resume_fresh_render();
     StatusCode::NO_CONTENT
 }
 
@@ -1175,6 +1284,16 @@ async fn iteration_004_finalize_upload(
     }
 }
 
+async fn iteration_004_action(State(state): State<Arc<HostState>>, headers: HeaderMap) -> Response {
+    if let Some(response) = session_error(&headers) {
+        return response;
+    }
+    match state.async_runtime.execute_ordinary_action().await {
+        Ok(value) => Json(value).into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
 async fn iteration_004_reset_sequence_gap(State(state): State<Arc<HostState>>) -> StatusCode {
     let snapshot = state.snapshot();
     if snapshot.active_physical_transports != 0 || snapshot.logical_memberships != 0 {
@@ -1187,12 +1306,84 @@ async fn iteration_004_reset_sequence_gap(State(state): State<Arc<HostState>>) -
     }
 }
 
-async fn fresh_render_scenario(State(state): State<Arc<HostState>>) -> Response {
-    if state.async_runtime.reset_fresh_render().await.is_err() {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmitAsyncRequest {
+    transport: String,
+    transport_generation: u64,
+}
+
+async fn iteration_004_emit_async(
+    State(state): State<Arc<HostState>>,
+    Json(request): Json<EmitAsyncRequest>,
+) -> Response {
+    match state
+        .async_runtime
+        .request_emission(&request.transport, request.transport_generation)
+    {
+        Ok(()) => Json(json!({"scheduled": true})).into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
+async fn iteration_004_direct_store(
+    State(state): State<Arc<HostState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(response) = session_error(&headers) {
+        return response;
+    }
+    match state.uploads.store_direct_part(&handle, &body) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => upload_error(error),
+    }
+}
+
+async fn iteration_004_direct_report(
+    State(state): State<Arc<HostState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CompleteUploadRequest>,
+) -> Response {
+    if let Some(response) = session_error(&headers) {
+        return response;
+    }
+    match state.uploads.report_direct_part(&handle, request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => upload_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FreshRenderScenarioQuery {
+    upload_morph: Option<String>,
+}
+
+async fn fresh_render_scenario(
+    State(state): State<Arc<HostState>>,
+    Query(query): Query<FreshRenderScenarioQuery>,
+) -> Response {
+    let replace_upload = match query.upload_morph.as_deref() {
+        None | Some("preserve") => false,
+        Some("replace") => true,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "fresh_render_scenario_invalid"),
+    };
+    if state
+        .async_runtime
+        .reset_fresh_render_for_upload_morph(replace_upload)
+        .await
+        .is_err()
+    {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "fresh_render_fixture_unavailable",
         );
+    }
+    if query.upload_morph.is_some() {
+        state.async_runtime.pause_fresh_render();
     }
     let island = state.async_runtime.fresh_render_document().await;
     let body = format!(
@@ -1202,59 +1393,18 @@ async fn fresh_render_scenario(State(state): State<Arc<HostState>>) -> Response 
 <body>
 <script id="suprnova-live-config" type="application/json">{{"asset_identity":"reference-host","credentials":"same-origin","endpoint":"/__live/async/poll","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":65536,"protocol":{{"maximum":2,"minimum":2}},"request_timeout_ms":5000,"runtime_contract_version":1}}</script>
 {island}
-<script type="module">
-import {{ configureAsync }} from "/suprnova-live.async.esm.js";
-import {{ boot }} from "/suprnova-live.esm.js";
-const issued = await fetch("/__live/async/transports", {{
-  body: JSON.stringify({{ kind: "sse", subscription: "orders" }}),
-  headers: {{ "Authorization": "{REFERENCE_AUTHORIZATION}", "Content-Type": "application/json" }},
-  method: "POST"
-}}).then((response) => response.json());
-const membership = issued.memberships[0];
-const initialIsland = document.querySelector("[data-suprnova-live-island]");
-const initialPreserved = document.querySelector('#fresh-render-preserved');
-const initialReplacement = document.querySelector('#fresh-render-replacement-old');
-if (!(initialPreserved instanceof HTMLElement)) throw new Error("fresh_render_focus_target_missing");
-initialPreserved.focus();
-const evidence = {{
-  acceptedRevision: null,
-  initialIsland,
-  initialPreserved,
-  initialReplacement,
-  requests: 0
-}};
-Object.defineProperty(window, "__suprnovaFreshRender", {{ value: evidence }});
-configureAsync({{
-  clock: {{ now: () => Date.now() }},
-  randomness: {{ number: () => 0.5 }},
-  timers: {{
-    clearTimeout: (handle) => window.clearTimeout(handle),
-    timeout: (callback, milliseconds) => window.setTimeout(callback, milliseconds)
-  }}
-}});
-boot({{
-  diagnostics: "verbose",
-  transport: {{
-    async fetch(input, init) {{
-      const headers = new Headers(init?.headers);
-      headers.set("Authorization", "{REFERENCE_AUTHORIZATION}");
-      headers.set("X-Live-Subscription", membership.subscription);
-      headers.set("X-Live-Subscription-Authority", membership.authority);
-      evidence.requests += 1;
-      const response = await window.fetch(input, {{ ...init, headers }});
-      if (response.ok) {{
-        const value = await response.clone().json();
-        evidence.acceptedRevision = value.accepted_revision;
-      }}
-      return response;
-    }}
-  }}
-}});
-</script>
+<script type="module" src="{REFERENCE_FRESH_RENDER_DRIVER}"></script>
 </body>
 </html>"#
     );
-    exact_bytes(body.into_bytes(), "text/html; charset=utf-8", "no-store")
+    let mut response = exact_bytes(body.into_bytes(), "text/html; charset=utf-8", "no-store");
+    response.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'",
+        ),
+    );
+    response
 }
 
 fn exact_bytes(bytes: Vec<u8>, content_type: &str, cache_control: &str) -> Response {

@@ -318,6 +318,64 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
+  if (target.pathname === "/scenario/reference-fresh-render-driver.js") {
+    try {
+      const body = await readFile(new URL("test-host/reference-fresh-render.mjs", browserRoot));
+      respond(response, 200, body, {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      });
+    } catch {
+      respond(response, 404, "reference fresh-render driver unavailable");
+    }
+    return;
+  }
+  if (target.pathname === "/scenario/iteration004-incompatible-feature.js") {
+    respond(
+      response,
+      200,
+      `(() => {
+        const slot = document.currentScript?.dataset.featureSlot;
+        const surface = globalThis[Symbol.for("suprnova.live.features.v1")];
+        const result = surface?.register(Object.freeze([Symbol.for("suprnova.live.feature.v1"), slot === "async" ? 1 : 0, 99, 0, Object.freeze({}), () => true]));
+        globalThis.__suprnovaIteration004Incompatible ??= [];
+        globalThis.__suprnovaIteration004Incompatible.push(slot + ":" + result);
+      })();`,
+      {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      },
+    );
+    return;
+  }
+  if (target.pathname === "/scenario/iteration004-classic-registration-probe.js") {
+    respond(
+      response,
+      200,
+      `(() => {
+        const nativeApply = Reflect.apply;
+        const registrations = [];
+        Reflect.apply = function iteration004ObservedApply(target, thisArgument, argumentsList) {
+          const result = nativeApply(target, thisArgument, argumentsList);
+          const feature = argumentsList?.[0];
+          const surface = globalThis[Symbol.for("suprnova.live.features.v1")];
+          if (thisArgument === surface && Array.isArray(feature) && feature[0] === Symbol.for("suprnova.live.feature.v1") && (feature[1] === 0 || feature[1] === 1)) {
+            registrations.push((feature[1] === 0 ? "uploads:" : "async:") + result);
+          }
+          return result;
+        };
+        globalThis.__suprnovaIteration004ClassicRegistrationProbe = Object.freeze({
+          registrations,
+          restore() { Reflect.apply = nativeApply; },
+        });
+      })();`,
+      {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      },
+    );
+    return;
+  }
   if (target.pathname === "/scenario/iteration004-axe.js") {
     try {
       const body = await readFile(new URL("node_modules/axe-core/axe.min.js", browserRoot));
@@ -328,6 +386,20 @@ const server = createServer(async (request, response) => {
     } catch {
       respond(response, 404, "iteration 004 axe asset unavailable");
     }
+    return;
+  }
+  if (target.pathname === "/scenario/iteration004.css") {
+    respond(
+      response,
+      200,
+      `#iteration-upload-error { display: none; }
+#iteration-upload-progress[data-live-upload-state="failed"] ~ #iteration-upload-error,
+#iteration-upload-progress[data-live-upload-state="expired"] ~ #iteration-upload-error { display: block; }`,
+      {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/css; charset=utf-8",
+      },
+    );
     return;
   }
   if (target.pathname === "/navigation/download") {

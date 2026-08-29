@@ -304,6 +304,12 @@ impl MemoryUploadLedger {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Clears only the deterministic creation-rate window for a quiescent
+    /// compiled test host. Authoritative upload records remain unchanged.
+    pub fn reset_creation_window(&self) {
+        lock(&self.state).creations.clear();
+    }
 }
 
 impl UploadLedger for MemoryUploadLedger {

@@ -40,6 +40,10 @@ const UPLOAD_ABORT_PORT: u16 = 4_193;
 const TRANSPORT_BOUND_PORT: u16 = 4_194;
 const WEBSOCKET_STREAM_PORT: u16 = 4_195;
 const FRESH_CANCEL_PORT: u16 = 4_196;
+const ASYNC_EMISSION_PORT: u16 = 4_197;
+const DIRECT_FLOW_PORT: u16 = 4_198;
+const ORDINARY_ACTION_PORT: u16 = 4_199;
+const UPLOAD_WINDOW_PORT: u16 = 4_200;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -134,6 +138,21 @@ async fn json_request(
     .await;
     let value = serde_json::from_slice(&body).expect("JSON response");
     (status, headers, value)
+}
+
+async fn emit_async(host: &ReferenceHost, transport: &str, transport_generation: u64) {
+    let (status, _, body) = json_request(
+        host,
+        Method::POST,
+        "/__test/iteration-004/control/async/emit",
+        json!({
+            "transport": transport,
+            "transport_generation": transport_generation,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["scheduled"], true);
 }
 
 async fn upload_request(
@@ -781,6 +800,151 @@ async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructio
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_transfer_stores_reports_verifies_completes_and_finalizes() {
+    let root = TestRoot::new("direct-flow");
+    let host = start_host(DIRECT_FLOW_PORT, &root, ReferenceFaultSchedule::None).await;
+    let bytes = b"direct!!";
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "evidence",
+            "filename": "evidence.bin",
+            "content_type": "application/octet-stream",
+            "expected_bytes": bytes.len(),
+            "mode": "direct"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("handle");
+    let grant = created["grant"].as_str().expect("grant");
+
+    let (status, _, stored) = request(
+        &host,
+        Method::PUT,
+        &format!("/__test/iteration-004/direct/{handle}/store"),
+        &[(AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION)],
+        bytes.as_slice(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "provider storage failed: {}",
+        String::from_utf8_lossy(&stored)
+    );
+
+    let (status, _, reported) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__test/iteration-004/direct/{handle}/report"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reported}");
+    assert_eq!(reported["state"], "transferring");
+    assert_eq!(reported["received_bytes"], bytes.len());
+    assert_eq!(reported["next_part"], 1);
+    assert_eq!(reported["receipt"]["part"], 0);
+    assert_eq!(reported["receipt"]["bytes"], bytes.len());
+
+    let (status, _, completed) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+
+    let (status, _, finalized) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({"handle": handle, "ready_revision": completed["revision"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finalized}");
+    assert_eq!(finalized["state"], "finalized");
+    assert_eq!(host.inspection().active_uploads, 0);
+    host.shutdown().await.expect("clean direct-flow shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_application_action_uses_registered_component_and_advances_domain_revision() {
+    let root = TestRoot::new("ordinary-action");
+    let host = start_host(ORDINARY_ACTION_PORT, &root, ReferenceFaultSchedule::None).await;
+    let (status, _, first) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["action"], "increment");
+    assert_eq!(first["revision"], 1);
+    assert_eq!(first["domain_count"], 1);
+    let (status, _, second) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/action",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["revision"], 2);
+    assert_eq!(second["domain_count"], 2);
+    host.shutdown()
+        .await
+        .expect("clean ordinary-action shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
+    let root = TestRoot::new("upload-window");
+    let host = start_host(UPLOAD_WINDOW_PORT, &root, ReferenceFaultSchedule::None).await;
+    let reset = "/__test/iteration-004/control/upload/reset-creation-window";
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "window.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 1,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let handle = created["handle"].as_str().expect("handle");
+    let grant = created["grant"].as_str().expect("grant");
+    let (status, _, _) = upload_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/cancel"),
+        Some(grant),
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    host.shutdown().await.expect("clean upload-window shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     let root = TestRoot::new("async");
     let host = start_host(ASYNC_PORT, &root, ReferenceFaultSchedule::SequenceGapOnce).await;
@@ -789,7 +953,7 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         &host,
         Method::POST,
         "/__live/async/transports",
-        json!({"kind": "sse", "subscription": "orders"}),
+        json!({"kind": "sse", "subscription": "orders", "transport_generation": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{transport}");
@@ -807,7 +971,8 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
             json!({
                 "authority": membership["authority"],
                 "control_nonce": "",
-                "operation": "subscribe"
+                "operation": "subscribe",
+                "transport_generation": 1
             }),
         )
         .await;
@@ -819,7 +984,8 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
             json!({
                 "authority": membership["authority"],
                 "control_nonce": format!("sse-subscribe-{index}"),
-                "operation": "subscribe"
+                "operation": "subscribe",
+                "transport_generation": 1
             }),
         )
         .await;
@@ -951,7 +1117,8 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         json!({
             "authority": removed["authority"],
             "control_nonce": "",
-            "operation": "unsubscribe"
+            "operation": "unsubscribe",
+            "transport_generation": 1
         }),
     )
     .await;
@@ -963,12 +1130,14 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         json!({
             "authority": removed["authority"],
             "control_nonce": "sse-unsubscribe-1",
-            "operation": "unsubscribe"
+            "operation": "unsubscribe",
+            "transport_generation": 1
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{acknowledgment}");
     assert_eq!(acknowledgment["operation"], "unsubscribe");
+    emit_async(&host, transport_id, 1).await;
     let next_sse = read_stream_text(&mut sse_stream).await;
     assert!(next_sse.contains(subscription), "{next_sse}");
     assert!(!next_sse.contains(removed_subscription), "{next_sse}");
@@ -979,7 +1148,7 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         &host,
         Method::POST,
         "/__live/async/transports",
-        json!({"kind": "websocket", "subscription": "orders"}),
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{websocket_transport}");
@@ -1008,6 +1177,47 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_emission_control_is_generation_bound_and_explicit() {
+    let root = TestRoot::new("async-emission");
+    let host = start_host(ASYNC_EMISSION_PORT, &root, ReferenceFaultSchedule::None).await;
+    let (status, _, transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({
+            "kind": "sse",
+            "subscription": "orders",
+            "transport_generation": 41
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{transport}");
+    assert_eq!(transport["transport_generation"], 41);
+    let transport_id = transport["transport"].as_str().expect("transport");
+
+    let (status, _, stale) = json_request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/async/emit",
+        json!({"transport": transport_id, "transport_generation": 40}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["error"], "transport_generation_invalid");
+
+    let (status, _, emitted) = json_request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/async/emit",
+        json!({"transport": transport_id, "transport_generation": 41}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{emitted}");
+    assert_eq!(emitted["scheduled"], true);
+    host.shutdown().await.expect("clean emission-host shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn document_transports_are_deduplicated_bounded_and_allow_one_physical_reader() {
     let root = TestRoot::new("transport-bounds");
     let host = start_host(TRANSPORT_BOUND_PORT, &root, ReferenceFaultSchedule::None).await;
@@ -1017,7 +1227,7 @@ async fn document_transports_are_deduplicated_bounded_and_allow_one_physical_rea
             &host,
             Method::POST,
             "/__live/async/transports",
-            json!({"kind": kind, "subscription": "orders"}),
+            json!({"kind": kind, "subscription": "orders", "transport_generation": 1}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{transport}");
@@ -1044,7 +1254,8 @@ async fn document_transports_are_deduplicated_bounded_and_allow_one_physical_rea
             json!({
                 "authority": membership["authority"],
                 "control_nonce": format!("reader-subscribe-{index}"),
-                "operation": "subscribe"
+                "operation": "subscribe",
+                "transport_generation": 1
             }),
         )
         .await;
@@ -1073,7 +1284,7 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
         &host,
         Method::POST,
         "/__live/async/transports",
-        json!({"kind": "websocket", "subscription": "orders"}),
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{transport}");
@@ -1143,6 +1354,7 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
     let second_subscription = memberships[1]["subscription"]
         .as_str()
         .expect("second subscription");
+    emit_async(&host, transport_id, 1).await;
     let ongoing = loop {
         let frame = read_websocket_frame(&mut socket, &mut buffered).await;
         if frame.contains(second_subscription) {
@@ -1218,7 +1430,7 @@ async fn poll_rejects_a_fresh_render_for_the_wrong_island() {
         &host,
         Method::POST,
         "/__live/async/transports",
-        json!({"kind": "sse", "subscription": "orders"}),
+        json!({"kind": "sse", "subscription": "orders", "transport_generation": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{transport}");
@@ -1308,7 +1520,7 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
         &host,
         Method::POST,
         "/__live/async/transports",
-        json!({"kind": "sse", "subscription": "orders"}),
+        json!({"kind": "sse", "subscription": "orders", "transport_generation": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{transport}");
@@ -1323,7 +1535,8 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
         json!({
             "authority": membership["authority"],
             "control_nonce": "shutdown-subscribe",
-            "operation": "subscribe"
+            "operation": "subscribe",
+            "transport_generation": 1
         }),
     )
     .await;

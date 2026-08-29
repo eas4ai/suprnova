@@ -4,12 +4,15 @@ test.use({ trace: "off" });
 
 const SCENARIO =
   "http://127.0.0.1:4175/scenario/iteration004?features=async&format=esm&transport=sse&lifecycle=true&hybrid=true";
+const BOTH_SCENARIO = SCENARIO.replace("features=async", "features=both");
 
 interface LifecycleSnapshot {
   readonly authorizations: readonly Readonly<{
     readonly baseline: Readonly<{ readonly epoch: string; readonly sequence: string }>;
     readonly position: Readonly<{ readonly epoch: string; readonly sequence: string }> | null;
     readonly replay: number;
+    readonly requestedGeneration: number;
+    readonly serverGeneration: number;
     readonly subscription: string;
     readonly transport: string;
   }>[];
@@ -19,8 +22,12 @@ interface LifecycleSnapshot {
   readonly heldEnvelopes: number;
   readonly host: Readonly<{
     readonly active_physical_transports: number;
+    readonly active_uploads: number;
     readonly logical_memberships: number;
+    readonly open_timers: number;
+    readonly paused_upload_operations: number;
     readonly physical_sse_connections: number;
+    readonly physical_websocket_connections: number;
   }>;
   readonly pagehidePersisted: readonly boolean[];
   readonly pageshowPersisted: readonly boolean[];
@@ -60,6 +67,24 @@ async function command(page: Page, name: string): Promise<void> {
   }, name);
 }
 
+async function selectPausedUpload(page: Page, name: string): Promise<void> {
+  await command(page, "pauseNextUpload");
+  await page.locator("#iteration-upload").setInputFiles({
+    buffer: Buffer.from(`active-${name}`),
+    mimeType: "text/plain",
+    name: `${name}.txt`,
+  });
+  await expect
+    .poll(async () => {
+      const current = await snapshot(page);
+      return {
+        paused: current.host.paused_upload_operations,
+        uploads: current.host.active_uploads,
+      };
+    })
+    .toEqual({ paused: 1, uploads: 1 });
+}
+
 async function freshnessStates(page: Page): Promise<readonly string[]> {
   return page.evaluate(() => {
     const probe: unknown = Reflect.get(window, "__suprnovaIteration004");
@@ -92,32 +117,174 @@ async function waitForHostQuiescent(page: Page, origin = "http://127.0.0.1:4175"
       };
     })
     .toEqual({ physical: 0, memberships: 0 });
+  const reset = await page.request.post(
+    `${origin}/__test/iteration-004/control/upload/reset-creation-window`,
+  );
+  expect(reset.status()).toBe(204);
 }
 
-test("real bfcache restoration retires the old physical generation and reauthorizes from current position", async ({
+for (const bfcacheTransport of ["sse", "websocket"] as const) {
+  test(`real bfcache restoration retires the old ${bfcacheTransport} generation and reauthorizes from current position`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name !== "chrome-bfcache",
+      "Persisted PageTransitionEvent proof runs in dedicated stable Chrome.",
+    );
+    await waitForHostQuiescent(page);
+    await page.goto(BOTH_SCENARIO.replace("transport=sse", `transport=${bfcacheTransport}`));
+    try {
+      await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+        "data-live-stream-state",
+        "current",
+      );
+    } catch {
+      throw new Error(JSON.stringify(await snapshot(page)));
+    }
+    await expect.poll(async () => (await snapshot(page)).forwardedEnvelopes).toBe(1);
+    await selectPausedUpload(page, `bfcache-${bfcacheTransport}`);
+    const beforeHold = await snapshot(page);
+    await command(page, "holdNextEnvelope");
+    await command(page, "emitNextEnvelope");
+    await expect.poll(async () => (await snapshot(page)).heldEnvelopes).toBe(1);
+    expect((await snapshot(page)).forwardedEnvelopes).toBe(beforeHold.forwardedEnvelopes);
+    const before = await snapshot(page);
+    const beforePresentation = await page
+      .locator("[data-live-stream-state]")
+      .getAttribute("data-live-stream-state");
+    expect(before.host).toMatchObject({
+      active_physical_transports: 1,
+      logical_memberships: 1,
+    });
+
+    await page.getByRole("link", { name: "Ordinary destination" }).click();
+    await expect(page.getByRole("heading", { name: "Iteration 004 destination" })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          "http://127.0.0.1:4175/__test/iteration-004/inspection",
+        );
+        if (!response.ok()) return null;
+        const value = (await response.json()) as {
+          active_physical_transports: number;
+          active_uploads: number;
+          logical_memberships: number;
+          open_timers: number;
+          paused_upload_operations: number;
+        };
+        return {
+          memberships: value.logical_memberships,
+          physical: value.active_physical_transports,
+          pausedUploads: value.paused_upload_operations,
+          timers: value.open_timers,
+          uploads: value.active_uploads,
+        };
+      })
+      .toEqual({ memberships: 0, physical: 0, pausedUploads: 0, timers: 0, uploads: 1 });
+    await page.goBack({ waitUntil: "commit" });
+    await expect
+      .poll(async () => {
+        try {
+          return (await snapshot(page)).pageshowPersisted.includes(true);
+        } catch {
+          return false;
+        }
+      })
+      .toBe(true);
+    await expect
+      .poll(async () => (await snapshot(page)).authorizations.length)
+      .toBe(before.authorizations.length + 1);
+    try {
+      await expect
+        .poll(async () => (await snapshot(page)).portsCreated)
+        .toBe(before.portsCreated + 1);
+    } catch {
+      throw new Error(JSON.stringify(await snapshot(page)));
+    }
+    await expect
+      .poll(async () => (await snapshot(page)).subscriptionAttempts)
+      .toBe(before.subscriptionAttempts + 1);
+    expect((await snapshot(page)).transportFailures).toEqual([]);
+    await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);
+    await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+      "data-live-stream-state",
+      "current",
+    );
+
+    await expect
+      .poll(async () => (await snapshot(page)).forwardedEnvelopes)
+      .toBe(before.forwardedEnvelopes + 1);
+    const beforeRelease = await snapshot(page);
+    const beforeReleaseDom = await page
+      .locator("[data-suprnova-live-island]")
+      .evaluate((node) => node.outerHTML);
+    const beforeReleasePresentation = await page
+      .locator("[data-live-stream-state]")
+      .getAttribute("data-live-stream-state");
+    await command(page, "releaseRetiredEnvelopes");
+    await expect.poll(async () => (await snapshot(page)).retiredEnvelopeAttempts).toBe(1);
+    const restored = await snapshot(page);
+    expect(restored.pagehidePersisted).toContain(true);
+    expect(restored.pageshowPersisted).toContain(true);
+    const connectionKey =
+      bfcacheTransport === "sse" ? "physical_sse_connections" : "physical_websocket_connections";
+    expect(restored.host[connectionKey]).toBe(before.host[connectionKey] + 1);
+    expect(restored.authorizations.length).toBe(before.authorizations.length + 1);
+    expect(last(restored.authorizations)?.position).not.toBeNull();
+    expect(restored.authorizations[0]?.requestedGeneration).toBe(
+      restored.authorizations[0]?.serverGeneration,
+    );
+    expect(last(restored.authorizations)?.requestedGeneration).toBe(
+      last(restored.authorizations)?.serverGeneration,
+    );
+    expect(last(restored.authorizations)?.transport).not.toBe(
+      restored.authorizations[0]?.transport,
+    );
+    expect(restored.forwardedEnvelopes).toBe(beforeRelease.forwardedEnvelopes);
+    expect(restored.freshnessStates).toEqual(beforeRelease.freshnessStates);
+    expect(restored.authorizations).toEqual(beforeRelease.authorizations);
+    expect(restored.host).toEqual(beforeRelease.host);
+    expect(restored.runtimeResources).toEqual(beforeRelease.runtimeResources);
+    expect(
+      await page.locator("[data-suprnova-live-island]").evaluate((node) => node.outerHTML),
+    ).toBe(beforeReleaseDom);
+    expect(
+      await page.locator("[data-live-stream-state]").getAttribute("data-live-stream-state"),
+    ).toBe(beforeReleasePresentation);
+    expect(beforeReleasePresentation).toBe(beforePresentation);
+    await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+      "data-live-upload-state",
+      "interrupted",
+    );
+    expect(
+      await page.locator("#iteration-upload").evaluate((input) => {
+        return input instanceof HTMLInputElement ? input.files?.length : null;
+      }),
+    ).toBe(1);
+    await page.getByRole("button", { name: "Retry upload" }).click();
+    await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+      "data-live-upload-state",
+      "ready",
+    );
+    await command(page, "finalizeSelectedUpload");
+    await expect.poll(async () => (await snapshot(page)).host.active_uploads).toBe(0);
+  });
+}
+
+test("ordinary navigation cancels an active upload and retires every document resource", async ({
   page,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chrome-bfcache",
-    "Persisted PageTransitionEvent proof runs in dedicated stable Chrome.",
+    testInfo.project.name === "chrome-bfcache",
+    "Persisted navigation has a dedicated proof.",
   );
   await waitForHostQuiescent(page);
-  await page.goto(SCENARIO);
+  await page.goto(BOTH_SCENARIO);
   await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
     "data-live-stream-state",
     "current",
   );
-  const beforeHold = await snapshot(page);
-  await command(page, "holdNextEnvelope");
-  await expect.poll(async () => (await snapshot(page)).heldEnvelopes).toBe(1);
-  await expect
-    .poll(async () => (await snapshot(page)).forwardedEnvelopes)
-    .toBeGreaterThanOrEqual(beforeHold.forwardedEnvelopes + 2);
-  const before = await snapshot(page);
-  expect(before.host).toMatchObject({
-    active_physical_transports: 1,
-    logical_memberships: 1,
-  });
+  await selectPausedUpload(page, "navigation");
 
   await page.getByRole("link", { name: "Ordinary destination" }).click();
   await expect(page.getByRole("heading", { name: "Iteration 004 destination" })).toBeVisible();
@@ -126,46 +293,85 @@ test("real bfcache restoration retires the old physical generation and reauthori
       const response = await page.request.get(
         "http://127.0.0.1:4175/__test/iteration-004/inspection",
       );
-      return response.ok()
-        ? ((await response.json()) as { active_physical_transports: number })
-            .active_physical_transports
-        : -1;
+      const value = (await response.json()) as LifecycleSnapshot["host"];
+      return {
+        memberships: value.logical_memberships,
+        physical: value.active_physical_transports,
+        pausedUploads: value.paused_upload_operations,
+        timers: value.open_timers,
+        uploads: value.active_uploads,
+      };
     })
-    .toBe(0);
-  await page.goBack({ waitUntil: "commit" });
-  await expect
-    .poll(async () => {
-      try {
-        return (await snapshot(page)).pageshowPersisted.includes(true);
-      } catch {
-        return false;
-      }
-    })
-    .toBe(true);
-  await expect
-    .poll(async () => (await snapshot(page)).authorizations.length)
-    .toBe(before.authorizations.length + 1);
-  await expect.poll(async () => (await snapshot(page)).portsCreated).toBe(before.portsCreated + 1);
-  await expect
-    .poll(async () => (await snapshot(page)).subscriptionAttempts)
-    .toBe(before.subscriptionAttempts + 1);
-  expect((await snapshot(page)).transportFailures).toEqual([]);
-  await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);
+    .toEqual({ memberships: 0, physical: 0, pausedUploads: 0, timers: 0, uploads: 0 });
+});
+
+test("freeze and resume preserve active upload retry authority while shutdown cancels it", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "chrome-bfcache",
+    "Persisted lifecycle has a dedicated proof.",
+  );
+  await waitForHostQuiescent(page);
+  await page.goto(`${BOTH_SCENARIO}&synthetic-lifecycle=true`);
   await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
     "data-live-stream-state",
     "current",
   );
+  await selectPausedUpload(page, "freeze-resume");
 
-  await command(page, "releaseRetiredEnvelopes");
-  const restored = await snapshot(page);
-  expect(restored.pagehidePersisted).toContain(true);
-  expect(restored.pageshowPersisted).toContain(true);
-  expect(restored.host.physical_sse_connections).toBe(before.host.physical_sse_connections + 1);
-  expect(restored.authorizations.length).toBe(before.authorizations.length + 1);
-  expect(last(restored.authorizations)?.position).not.toBeNull();
-  expect(restored.retiredEnvelopeAttempts).toBeGreaterThanOrEqual(1);
-  expect(restored.forwardedEnvelopes).toBeGreaterThan(before.forwardedEnvelopes);
-  expect(restored.runtimeResources).toEqual(before.runtimeResources);
+  await command(page, "freeze");
+  await expect
+    .poll(async () => {
+      const current = await snapshot(page);
+      return {
+        physical: current.host.active_physical_transports,
+        pausedUploads: current.host.paused_upload_operations,
+        uploads: current.host.active_uploads,
+      };
+    })
+    .toEqual({ physical: 0, pausedUploads: 0, uploads: 1 });
+  await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+    "data-live-upload-state",
+    "interrupted",
+  );
+  expect(
+    await page.locator("#iteration-upload").evaluate((input) => {
+      return input instanceof HTMLInputElement ? input.files?.length : null;
+    }),
+  ).toBe(1);
+
+  await command(page, "resume");
+  await expect(page.locator("[data-live-stream-state]")).toHaveAttribute(
+    "data-live-stream-state",
+    "current",
+  );
+  await page.getByRole("button", { name: "Retry upload" }).click();
+  await expect(page.locator("#iteration-upload-progress")).toHaveAttribute(
+    "data-live-upload-state",
+    "ready",
+  );
+  await command(page, "finalizeSelectedUpload");
+  await expect.poll(async () => (await snapshot(page)).host.active_uploads).toBe(0);
+
+  await selectPausedUpload(page, "shutdown");
+  await command(page, "shutdown");
+  await expect
+    .poll(async () => {
+      const current = await snapshot(page);
+      return {
+        memberships: current.host.logical_memberships,
+        physical: current.host.active_physical_transports,
+        pausedUploads: current.host.paused_upload_operations,
+        uploads: current.host.active_uploads,
+      };
+    })
+    .toEqual({ memberships: 0, physical: 0, pausedUploads: 0, uploads: 0 });
+  expect(
+    await page.locator("#iteration-upload").evaluate((input) => {
+      return input instanceof HTMLInputElement ? input.files?.length : null;
+    }),
+  ).toBe(0);
 });
 
 test("offline freshness preserves ordinary interaction and shutdown retires bounded resources", async ({
@@ -187,7 +393,7 @@ test("offline freshness preserves ordinary interaction and shutdown retires boun
   await expect(page.getByText("Local details are available")).toBeVisible();
   await page.context().setOffline(false);
   await expect.poll(async () => last((await snapshot(page)).freshnessStates)).toBe("current");
-  expect((await snapshot(page)).host.active_physical_transports).toBeLessThanOrEqual(1);
+  expect((await snapshot(page)).host.active_physical_transports).toBe(1);
   await command(page, "shutdown");
   await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(0);
   await expect.poll(async () => (await snapshot(page)).host.logical_memberships).toBe(0);
@@ -228,9 +434,13 @@ test("a sequence gap activates bounded fallback then replays onto one replacemen
   await expect
     .poll(async () => (await snapshot(page)).controlledTimerDelays)
     .toEqual(expect.arrayContaining([125, 10_000, 30_000]));
-  await command(page, "advanceGapReauthorization");
+  await command(page, "advanceTransportReconnect");
   await expect.poll(async () => (await snapshot(page)).authorizations.length).toBe(2);
-  await expect.poll(async () => (await snapshot(page)).portsCreated).toBe(2);
+  try {
+    await expect.poll(async () => (await snapshot(page)).portsCreated).toBe(2);
+  } catch {
+    throw new Error(JSON.stringify(await snapshot(page)));
+  }
   await expect.poll(async () => (await snapshot(page)).subscriptionAttempts).toBe(2);
   try {
     await expect.poll(async () => (await snapshot(page)).host.active_physical_transports).toBe(1);

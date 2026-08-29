@@ -277,6 +277,7 @@ describe("multiplexed document transports", () => {
     timers.flush();
     for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
     expect(sources).toHaveLength(2);
+    expect(sources.map(({ request }) => request.transportGeneration)).toEqual([1, 2]);
     expect(states).toHaveBeenCalledWith("reconnecting");
   });
 

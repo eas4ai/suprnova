@@ -936,8 +936,8 @@ function uploadsScenario() {
 function iteration004UploadControls() {
   return `<label for="iteration-upload">Iteration 004 file</label>
     <input id="iteration-upload" type="file" live:upload="attachment" data-suprnova-live-key="iteration-upload" aria-describedby="iteration-upload-error">
-    <div id="iteration-upload-progress" live:progress="attachment" data-suprnova-live-key="iteration-upload-progress" role="progressbar" aria-label="Iteration 004 upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
-    <p id="iteration-upload-error" hidden>Iteration 004 upload failed.</p>
+    <div id="iteration-upload-progress" live:progress="attachment" data-suprnova-live-key="iteration-upload-progress" role="progressbar" aria-label="Iteration 004 upload progress" aria-errormessage="iteration-upload-error" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+    <p id="iteration-upload-error" role="alert">Upload failed. Retry or remove this file.</p>
     <button type="button" live:upload.cancel="attachment">Cancel upload</button>
     <button type="button" live:upload.retry="attachment">Retry upload</button>
     <button type="button" live:upload.remove="attachment">Remove upload</button>`;
@@ -951,11 +951,19 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
   const artifact = ["missing", "incompatible"].includes(searchParams.get("artifact"))
     ? searchParams.get("artifact")
     : "current";
+  const uploadArtifact = ["missing", "incompatible"].includes(searchParams.get("upload-artifact"))
+    ? searchParams.get("upload-artifact")
+    : artifact;
+  const asyncArtifact = ["missing", "incompatible"].includes(searchParams.get("async-artifact"))
+    ? searchParams.get("async-artifact")
+    : artifact;
   const transport = searchParams.get("transport") === "websocket" ? "websocket" : "sse";
   const islands = searchParams.get("islands") === "2" ? 2 : 1;
   const lifecycle = searchParams.get("lifecycle") === "true";
   const hybrid = searchParams.get("hybrid") === "true";
   const controlledClock = searchParams.get("controlled-clock") === "true";
+  const controlledUploadClock = searchParams.get("controlled-upload-clock") === "true";
+  const uploadChunkBytes = searchParams.get("upload-chunk-bytes") === "262145" ? 262145 : 262144;
   const syntheticLifecycle = searchParams.get("synthetic-lifecycle") === "true";
   const hasUploads = features === "uploads" || features === "both";
   const hasAsync = features === "async" || features === "both";
@@ -965,8 +973,7 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
   const primaryBody = `<h1>Iteration 004 integration</h1>
     <button type="button" live:toggle="details">Toggle local details</button>
     <p hidden aria-hidden="true" inert live:show="details">Local details are available</p>
-    <button id="native-disclosure" type="button" aria-expanded="false" aria-controls="native-fallback">Native disclosure</button>
-    <p id="native-fallback" hidden>Native fallback details</p>
+    <details id="native-disclosure"><summary>Native disclosure</summary><p>Native fallback details</p></details>
     ${hasAsync ? '<p data-live-stream-status aria-label="Order updates">Updates disconnected</p>' : ""}
     ${hasUploads ? iteration004UploadControls() : ""}`;
   const primary = island({
@@ -994,25 +1001,35 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
           slot: "iteration-004-secondary",
         })
       : "";
-  const classicFeatures =
-    artifact === "current"
-      ? `${hasUploads ? '<script src="/suprnova-live.uploads.classic.js"></script>' : ""}${hasAsync ? '<script src="/suprnova-live.async.classic.js"></script>' : ""}`
-      : "";
-  const scripts = `${
+  const incompatibleClassicArtifact = (slot) =>
+    `<script src="/scenario/iteration004-incompatible-feature.js" data-feature-slot="${slot}"></script>`;
+  const classicFeatures = `${
+    hasUploads && uploadArtifact === "current"
+      ? '<script src="/suprnova-live.uploads.classic.js"></script>'
+      : ""
+  }${
+    hasAsync && asyncArtifact === "current"
+      ? '<script src="/suprnova-live.async.classic.js"></script>'
+      : ""
+  }${
+    hasUploads && uploadArtifact === "incompatible" ? incompatibleClassicArtifact("uploads") : ""
+  }${hasAsync && asyncArtifact === "incompatible" ? incompatibleClassicArtifact("async") : ""}`;
+  const scripts = `<link rel="stylesheet" href="/scenario/iteration004.css">${
     format === "classic"
-      ? `${classicFeatures}<script src="/suprnova-live.classic.js"></script>`
+      ? `<script src="/scenario/iteration004-classic-registration-probe.js"></script>${classicFeatures}<script src="/suprnova-live.classic.js"></script>`
       : ""
   }<script type="module" src="/scenario/iteration004-driver.js"></script>`;
   const page = document(
     `${primary}${secondary}
       ${secondary.length === 0 ? "" : '<button id="remove-second-island" type="button">Remove second island</button>'}
-      <a href="/scenario/iteration004Destination">Ordinary destination</a>`,
+      <a href="/scenario/iteration004Destination">Ordinary destination</a>
+      <form action="/scenario/iteration004Destination" method="get"><button type="submit">Continue ordinarily</button></form>`,
     scripts,
     { endpoint: "/__live/async/poll" },
   );
   return page.replace(
     '<html lang="en">',
-    `<html lang="en" data-iteration-004-features="${features}" data-iteration-004-format="${format}" data-iteration-004-artifact="${artifact}" data-iteration-004-transport="${transport}" data-iteration-004-lifecycle="${String(lifecycle)}" data-iteration-004-synthetic-lifecycle="${String(syntheticLifecycle)}" data-iteration-004-controlled-clock="${String(controlledClock)}">`,
+    `<html lang="en" data-iteration-004-features="${features}" data-iteration-004-format="${format}" data-iteration-004-upload-artifact="${uploadArtifact}" data-iteration-004-async-artifact="${asyncArtifact}" data-iteration-004-transport="${transport}" data-iteration-004-lifecycle="${String(lifecycle)}" data-iteration-004-synthetic-lifecycle="${String(syntheticLifecycle)}" data-iteration-004-controlled-clock="${String(controlledClock)}" data-iteration-004-controlled-upload-clock="${String(controlledUploadClock)}" data-iteration-004-upload-chunk-bytes="${uploadChunkBytes}">`,
   );
 }
 

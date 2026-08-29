@@ -290,7 +290,9 @@ export class UploadManager {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    for (const entry of this.#entries.values()) entry.settle?.();
+    for (const bindings of [...this.#bindings.values()]) {
+      for (const binding of [...bindings.values()]) this.#dropBinding(binding, true);
+    }
     this.#owner.retire();
     this.#entries.clear();
     this.#bindings.clear();
@@ -512,7 +514,7 @@ export class UploadManager {
       entry.permit?.dispose();
       entry.lease?.dispose();
       entry.settle?.();
-      entry.transfer.dispose();
+      void entry.transfer.cancel();
       entry.resource.dispose();
       this.#entries.delete(entry.transfer);
     }
