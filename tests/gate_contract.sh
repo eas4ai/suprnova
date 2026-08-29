@@ -602,12 +602,26 @@ correctness_sleep_files=(
     "${repository_root}"/crates/suprnova-live-test-support/tests/reference_host.rs
     "${repository_root}"/browser/tests/async-*.test.ts
     "${repository_root}"/browser/tests/upload-*.test.ts
+    "${repository_root}"/browser/tests/bounded-resources.test.ts
     "${repository_root}"/browser/e2e/iteration-004*.spec.ts
+    "${repository_root}"/browser/e2e/async-lifecycle.spec.ts
+    "${repository_root}"/browser/e2e/uploads.spec.ts
+    "${repository_root}"/browser/test-host/async-lifecycle.mjs
+    "${repository_root}"/browser/test-host/iteration-004.mjs
 )
 for correctness_sleep_file in "${correctness_sleep_files[@]}"; do
     correctness_sleep_source=$(<"${correctness_sleep_file}")
+    correctness_sleep_compact=${correctness_sleep_source//[[:space:]]/}
     if [[ ${correctness_sleep_source} =~ tokio::time::sleep|std::thread::sleep|thread::sleep|waitForTimeout\( ]]; then
         printf 'gate contract: correctness sleep is forbidden (%s)\n' \
+            "${correctness_sleep_file#"${repository_root}/"}" >&2
+        exit 1
+    fi
+    if [[ ${correctness_sleep_compact} == *'newPromise((resolve)=>window.setTimeout(resolve,'* ||
+          ${correctness_sleep_compact} == *'newPromise((resolve)=>setTimeout(resolve,'* ||
+          ${correctness_sleep_compact} == *'newPromise(resolve=>window.setTimeout(resolve,'* ||
+          ${correctness_sleep_compact} == *'newPromise(resolve=>setTimeout(resolve,'* ]]; then
+        printf 'gate contract: timeout-resolved correctness promise is forbidden (%s)\n' \
             "${correctness_sleep_file#"${repository_root}/"}" >&2
         exit 1
     fi

@@ -563,9 +563,33 @@ window.addEventListener("pageshow", onPageShow);
 observations.resources.listeners += 1;
 recordResourcePeak("listeners");
 
-async function shutdown() {
+function shutdownBarrier() {
+  const status = runtime.status();
+  const runtimeResources = runtimeResourceCounts(runtime);
+  const activeRuntimeResources = Object.entries(runtimeResources).filter(
+    ([, count]) => count !== 0,
+  );
+  const activeHostResources = Object.entries({
+    activeAuthorizations: observations.resources.activeAuthorizations,
+    buffers: observations.resources.buffers,
+    connections: observations.resources.connections,
+    queuedWork: observations.resources.queuedWork,
+    timers: observations.resources.timers,
+  }).filter(([, count]) => count !== 0);
+  if (
+    status !== "stopped" ||
+    observations.activeConnections !== 0 ||
+    activeRuntimeResources.length !== 0 ||
+    activeHostResources.length !== 0
+  ) {
+    throw new Error("async_runtime_shutdown_incomplete");
+  }
+  return Object.freeze({ runtimeResources, status });
+}
+
+function shutdown() {
   runtime.stop();
-  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  return shutdownBarrier();
 }
 
 Reflect.set(
