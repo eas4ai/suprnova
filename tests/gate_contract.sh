@@ -48,6 +48,58 @@ require_order() {
     fi
 }
 
+contains_blanket_warning_denial() {
+    local source=$1
+    local short_form='(^|[[:space:]])-D[[:space:]]*warnings([[:space:]]|$)'
+    local long_form='(^|[[:space:]])--deny([=[:space:]]+)warnings([[:space:]]|$)'
+
+    [[ ${source} =~ ${short_form} || ${source} =~ ${long_form} ]]
+}
+
+trace_count() {
+    local trace_path=$1
+    local expected=$2
+    local count=0
+    local invocation
+
+    while IFS= read -r invocation; do
+        if [[ ${invocation} == "${expected}" ]]; then
+            count=$((count + 1))
+        fi
+    done <"${trace_path}"
+    printf '%s' "${count}"
+}
+
+require_trace_count() {
+    local description=$1
+    local trace_path=$2
+    local expected_invocation=$3
+    local expected_count=$4
+    local actual_count
+    actual_count=$(trace_count "${trace_path}" "${expected_invocation}")
+    if [[ ${actual_count} != "${expected_count}" ]]; then
+        printf 'gate contract: %s expected %s executable invocation(s), observed %s\n' \
+            "${description}" "${expected_count}" "${actual_count}" >&2
+        exit 1
+    fi
+}
+
+run_gate_probe() {
+    local release_mode=$1
+    local trace_path=$2
+    local output_path=$3
+
+    : >"${trace_path}"
+    if ! PATH="${probe_root}:${PATH}" \
+        SUPRNOVA_LIVE_GATE_TRACE="${trace_path}" \
+        SUPRNOVA_LIVE_RELEASE="${release_mode}" \
+        bash "${gate_path}" >"${output_path}" 2>&1; then
+        printf 'gate contract: stubbed gate execution failed in release mode %s\n' \
+            "${release_mode}" >&2
+        exit 1
+    fi
+}
+
 require_text "incremental-build disablement" "CARGO_INCREMENTAL=0"
 require_text "exact browser lockfile install" "npm ci"
 require_text "browser contract generation drift" "npm run generate:check"
@@ -140,8 +192,25 @@ require_file "upload media-header fuzz target" "fuzz/fuzz_targets/upload_media_h
 require_file "async envelope fuzz target" "fuzz/fuzz_targets/async_envelope.rs"
 require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 
-if [[ ${gate_source} == *"-D warnings"* ]]; then
+if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
+    exit 1
+fi
+
+for warning_denial_mutation in \
+    'rtk cargo clippy -- -D warnings' \
+    'rtk cargo clippy -- -Dwarnings' \
+    'rtk cargo clippy -- --deny warnings' \
+    $'rtk cargo clippy -- --deny\twarnings' \
+    'rtk cargo clippy -- --deny=warnings'; do
+    if ! contains_blanket_warning_denial "${warning_denial_mutation}"; then
+        printf 'gate contract: warning-denial mutation survived (%s)\n' \
+            "${warning_denial_mutation}" >&2
+        exit 1
+    fi
+done
+if contains_blanket_warning_denial 'rtk cargo clippy -- -D dead_code'; then
+    printf '%s\n' "gate contract: narrow lint denial was mistaken for blanket warning denial" >&2
     exit 1
 fi
 
@@ -186,5 +255,50 @@ require_order "iteration 004 reference host" 'phase "iteration 004 reference hos
     "broad Rust suite" 'phase "Rust all-target and documentation tests"'
 require_order "deterministic browser build" "npm run build:check" \
     "reduced deterministic budgets" 'phase "iteration 004 reduced deterministic budgets"'
+
+probe_root=$(mktemp -d)
+trap 'rm -rf -- "${probe_root}"' EXIT
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'printf '\''%s\n'\'' "$*" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+    >"${probe_root}/rtk"
+chmod +x "${probe_root}/rtk"
+
+ordinary_trace=${probe_root}/ordinary.trace
+ordinary_output=${probe_root}/ordinary.output
+release_trace=${probe_root}/release.trace
+release_output=${probe_root}/release.output
+run_gate_probe 0 "${ordinary_trace}" "${ordinary_output}"
+run_gate_probe 1 "${release_trace}" "${release_output}"
+
+reduced_upload='env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh'
+reduced_async='env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh'
+qualified_upload='env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh'
+qualified_async='env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh'
+
+require_trace_count "ordinary reduced U4/16" "${ordinary_trace}" "${reduced_upload}" 1
+require_trace_count "ordinary reduced E100/1K and R100" "${ordinary_trace}" "${reduced_async}" 1
+require_trace_count "ordinary qualified U4/16 exclusion" "${ordinary_trace}" "${qualified_upload}" 0
+require_trace_count "ordinary qualified E100/1K and R100 exclusion" \
+    "${ordinary_trace}" "${qualified_async}" 0
+require_trace_count "release reduced U4/16" "${release_trace}" "${reduced_upload}" 1
+require_trace_count "release reduced E100/1K and R100" "${release_trace}" "${reduced_async}" 1
+require_trace_count "release qualified U4/16" "${release_trace}" "${qualified_upload}" 1
+require_trace_count "release qualified E100/1K and R100" \
+    "${release_trace}" "${qualified_async}" 1
+
+ordinary_phase_output=$(<"${ordinary_output}")
+release_phase_output=$(<"${release_output}")
+if [[ ${ordinary_phase_output} == *"U4/16 qualified upload budget"* ||
+      ${ordinary_phase_output} == *"E100/1K and R100 qualified async budgets"* ]]; then
+    printf '%s\n' "gate contract: ordinary mode executed a qualified phase" >&2
+    exit 1
+fi
+if [[ ${release_phase_output} != *"U4/16 qualified upload budget"* ||
+      ${release_phase_output} != *"E100/1K and R100 qualified async budgets"* ]]; then
+    printf '%s\n' "gate contract: release mode omitted a qualified phase" >&2
+    exit 1
+fi
 
 printf '%s\n' "gate contract ok"
