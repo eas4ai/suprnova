@@ -119,15 +119,17 @@ Server-sent events are same-origin. The built-in `BrowserWebSocketAdapter`
 accepts only `session_cookie` authorization. Browser WebSocket cannot attach an
 arbitrary `Authorization` header, and the built-in adapter rejects every other
 authorization kind. Fetch-based SSE and polling may use bearer authorization
-when the host policy permits it. Bearer-authorized or cross-origin WebSocket
-requires an application-supplied custom transport that still satisfies the
-signed subscription and exact Origin and authentication contracts.
+when the host policy permits it.
 
-Every WebSocket handshake requires an exact configured origin match plus its
-accepted authentication policy; missing, malformed, unlisted, cross-site, or
-opaque origins fail closed before upgrade. Browser-chosen topics, arbitrary
-origin reflection, query-string credentials, and wildcard production origins
-are not accepted.
+A custom bearer-authorized or cross-origin WebSocket transport requires an
+explicit non-wildcard Origin allowlist and separate non-cookie credentials. It
+must still satisfy the signed subscription, exact Origin, and authentication
+contracts. Every WebSocket handshake requires an exact configured or allowlisted
+origin match plus its accepted authentication policy. Missing, malformed,
+unlisted, or opaque origins fail closed. Unapproved cross-site origins and every
+attempt to use cookie authority cross-site fail closed before upgrade.
+Browser-chosen topics, arbitrary origin reflection, query-string credentials,
+and wildcard production origins are not accepted.
 
 ## Polling and push modes
 

@@ -176,14 +176,14 @@ export interface UploadManagerSnapshot {
   readonly uploads: readonly UploadTransferSnapshot[];
 }
 
-/** Exact per-transfer ownership for manager-retained chunk payloads. */
+/** Bounded, non-identifying per-transfer ownership evidence for retained chunks. */
 export interface UploadTransferChunkResourceSnapshot {
   readonly pendingChunkBuffers: number;
   readonly pendingChunkBytes: number;
   readonly slot: number;
 }
 
-/** Count-only upload ownership metrics suitable for bounded observability. */
+/** Bounded, non-identifying upload resource evidence suitable for observability. */
 export interface UploadManagerResourceSnapshot {
   readonly activeLeases: number;
   readonly bindings: number;
@@ -201,7 +201,7 @@ export interface UploadManagerResourceSnapshot {
   readonly waitingPermits: number;
 }
 
-/** Optional count-only observers. Implementations do not enter production artifacts. */
+/** Optional bounded-resource observers. Implementations do not enter production artifacts. */
 export interface UploadResourceObserver {
   progressApplicationCompleted(): void;
   progressApplicationStarted(): void;

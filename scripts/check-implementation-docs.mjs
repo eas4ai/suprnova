@@ -127,12 +127,18 @@ const semanticRequirements = new Map([
       },
       {
         id: "async_signed_authorization_exact_origin",
-        pattern: /signs it under[\s\S]{0,2500}exact\s+configured origin match/u,
+        pattern:
+          /signs it under[\s\S]{0,2500}exact configured or allowlisted origin match/u,
       },
       {
         id: "async_builtin_websocket_cookie_only",
         pattern:
-          /The built-in `BrowserWebSocketAdapter` accepts only `session_cookie` authorization\.[\s\S]{0,700}Fetch-based SSE and polling may use bearer authorization[\s\S]{0,700}Bearer-authorized or cross-origin WebSocket requires an application-supplied custom transport[\s\S]{0,500}signed subscription and exact Origin and authentication contracts/u,
+          /The built-in `BrowserWebSocketAdapter` accepts only `session_cookie` authorization\.[\s\S]{0,700}Fetch-based SSE and polling may use bearer authorization/u,
+      },
+      {
+        id: "async_custom_websocket_cross_origin_credentials",
+        pattern:
+          /A custom bearer-authorized or cross-origin WebSocket transport requires an explicit non-wildcard Origin allowlist and separate non-cookie credentials\.[\s\S]{0,500}Unapproved cross-site origins and every attempt to use cookie authority cross-site fail closed before upgrade\./u,
       },
       {
         id: "async_multiplexed_document_transport",
@@ -262,6 +268,12 @@ function mutationSelfTest(documents) {
       replacement:
         "The built-in `BrowserWebSocketAdapter` accepts `session_cookie` or bearer authorization.",
       requirement: "async_builtin_websocket_cookie_only",
+    },
+    {
+      file: "docs/implementation/async-updates.md",
+      pattern: /separate non-cookie credentials/u,
+      replacement: "cross-site cookie authority",
+      requirement: "async_custom_websocket_cross_origin_credentials",
     },
     {
       file: "docs/implementation/iteration-004-operations.md",
