@@ -52,36 +52,178 @@ contains_blanket_warning_denial() {
     local source=$1
     local short_form='(^|[[:space:]])-D[[:space:]]*warnings([[:space:]]|$)'
     local long_form='(^|[[:space:]])--deny([=[:space:]]+)warnings([[:space:]]|$)'
+    local unquoted=${source//\"/}
+    local line
+    local rustflags
 
-    [[ ${source} =~ ${short_form} || ${source} =~ ${long_form} ]]
-}
+    unquoted=${unquoted//\'/}
+    if [[ ${unquoted} =~ ${short_form} || ${unquoted} =~ ${long_form} ]]; then
+        return 0
+    fi
 
-trace_count() {
-    local trace_path=$1
-    local expected=$2
-    local count=0
-    local invocation
-
-    while IFS= read -r invocation; do
-        if [[ ${invocation} == "${expected}" ]]; then
-            count=$((count + 1))
+    while IFS= read -r line; do
+        if [[ ${line} =~ (^|[[:space:]])RUSTFLAGS[[:space:]]*= ]]; then
+            rustflags=${line#*=}
+            if [[ ${rustflags} =~ ${short_form} || ${rustflags} =~ ${long_form} ]]; then
+                return 0
+            fi
         fi
-    done <"${trace_path}"
-    printf '%s' "${count}"
+    done <<<"${unquoted}"
+
+    return 1
 }
 
-require_trace_count() {
-    local description=$1
+budget_trace_is_valid() {
+    local release_mode=$1
     local trace_path=$2
-    local expected_invocation=$3
-    local expected_count=$4
-    local actual_count
-    actual_count=$(trace_count "${trace_path}" "${expected_invocation}")
-    if [[ ${actual_count} != "${expected_count}" ]]; then
-        printf 'gate contract: %s expected %s executable invocation(s), observed %s\n' \
-            "${description}" "${expected_count}" "${actual_count}" >&2
+    local reduced_upload=0
+    local reduced_async=0
+    local qualified_upload=0
+    local qualified_async=0
+    local invalid=0
+    local inherited_profile
+    local profile
+    local runner
+    local runner_index
+    local first
+    local first_base
+    local token
+    local token_base
+    local executable
+    local index
+    local -a fields
+
+    while IFS=$'\t' read -r -a fields; do
+        if (( ${#fields[@]} < 2 )); then
+            continue
+        fi
+
+        inherited_profile=${fields[0]#profile=}
+        profile=${inherited_profile}
+        runner=
+        runner_index=-1
+        for ((index = 1; index < ${#fields[@]}; index += 1)); do
+            token=${fields[index]}
+            token_base=${token##*/}
+            case ${token_base} in
+                run-upload-budget.sh)
+                    runner=upload
+                    runner_index=${index}
+                    ;;
+                run-async-budget.sh)
+                    runner=async
+                    runner_index=${index}
+                    ;;
+            esac
+        done
+
+        if (( runner_index < 0 )); then
+            continue
+        fi
+
+        profile=${inherited_profile}
+        for ((index = 1; index < runner_index; index += 1)); do
+            token=${fields[index]}
+            if [[ ${token} == SUPRNOVA_LIVE_BUDGET_PROFILE=* ]]; then
+                profile=${token#*=}
+            fi
+        done
+
+        executable=0
+        first=${fields[1]}
+        first_base=${first##*/}
+        if (( runner_index == 1 )); then
+            executable=1
+        elif [[ ${first_base} == env ]]; then
+            executable=1
+            for ((index = 2; index < runner_index; index += 1)); do
+                token=${fields[index]}
+                token_base=${token##*/}
+                if [[ ${token} == *=* || ${token} == -- || ${token} == -* ]]; then
+                    continue
+                fi
+                if [[ (${token_base} == bash || ${token_base} == sh) &&
+                      ${index} == $((runner_index - 1)) ]]; then
+                    continue
+                fi
+                executable=0
+                break
+            done
+        elif [[ (${first_base} == bash || ${first_base} == sh || ${first_base} == proxy) &&
+                ${runner_index} == 2 ]]; then
+            executable=1
+        fi
+
+        if (( executable == 0 )); then
+            invalid=$((invalid + 1))
+            continue
+        fi
+
+        case ${runner}:${profile} in
+            upload:reduced) reduced_upload=$((reduced_upload + 1)) ;;
+            async:reduced) reduced_async=$((reduced_async + 1)) ;;
+            upload:qualified) qualified_upload=$((qualified_upload + 1)) ;;
+            async:qualified) qualified_async=$((qualified_async + 1)) ;;
+            *) invalid=$((invalid + 1)) ;;
+        esac
+    done <"${trace_path}"
+
+    if [[ ${release_mode} == 0 ]]; then
+        (( invalid == 0 && reduced_upload == 1 && reduced_async == 1 &&
+            qualified_upload == 0 && qualified_async == 0 ))
+    else
+        (( invalid == 0 && reduced_upload == 1 && reduced_async == 1 &&
+            qualified_upload == 1 && qualified_async == 1 ))
+    fi
+}
+
+require_budget_trace_contract() {
+    local description=$1
+    local release_mode=$2
+    local trace_path=$3
+    if ! budget_trace_is_valid "${release_mode}" "${trace_path}"; then
+        printf 'gate contract: %s has invalid executable budget invocations\n' \
+            "${description}" >&2
         exit 1
     fi
+}
+
+qualified_runner_fails_closed() {
+    local runner_path=$1
+    local trace_path=$2
+    local output_path=$3
+    local status
+
+    : >"${trace_path}"
+    if env \
+        -u SUPRNOVA_LIVE_S1_DEDICATED \
+        -u SUPRNOVA_LIVE_B1_DEDICATED \
+        PATH="${probe_root}:${PATH}" \
+        SUPRNOVA_LIVE_GATE_TRACE="${trace_path}" \
+        SUPRNOVA_LIVE_BUDGET_PROFILE=qualified \
+        bash "${runner_path}" >"${output_path}" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+
+    (( status != 0 )) && [[ ! -s ${trace_path} ]]
+}
+
+write_exit_bypass_mutant() {
+    local source_path=$1
+    local destination_path=$2
+    local source
+    local mutated
+
+    source=$(<"${source_path}")
+    mutated=${source/"exit 1"/":"}
+    if [[ ${mutated} == "${source}" ]]; then
+        printf 'gate contract: could not create exit-bypass mutation for %s\n' \
+            "${source_path}" >&2
+        exit 1
+    fi
+    printf '%s\n' "${mutated}" >"${destination_path}"
 }
 
 run_gate_probe() {
@@ -159,19 +301,9 @@ require_text "iteration 004 browser integration matrix" "e2e/iteration-004-integ
 require_text "iteration 004 browser adversarial matrix" "e2e/iteration-004-adversarial.spec.ts"
 require_text "iteration 004 browser lifecycle matrix" "e2e/iteration-004-lifecycle.spec.ts"
 require_text "iteration 004 browser accessibility matrix" "e2e/iteration-004-accessibility.spec.ts"
-require_text "reduced upload workload" \
-    "SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh"
-require_text "reduced async workloads" \
-    "SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh"
 require_text "qualified U4/16 release phase" 'phase "U4/16 qualified upload budget"'
-require_text "qualified U4/16 release workload" \
-    "SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh"
 require_text "qualified E100/1K and R100 release phase" \
     'phase "E100/1K and R100 qualified async budgets"'
-require_text "qualified E100/1K and R100 release workloads" \
-    "SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh"
-require_text "release workload guard" \
-    'if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then'
 
 require_file "CSP Playwright coverage" "browser/e2e/csp.spec.ts"
 require_file "accessibility Playwright coverage" "browser/e2e/accessibility.spec.ts"
@@ -202,41 +334,20 @@ for warning_denial_mutation in \
     'rtk cargo clippy -- -Dwarnings' \
     'rtk cargo clippy -- --deny warnings' \
     $'rtk cargo clippy -- --deny\twarnings' \
-    'rtk cargo clippy -- --deny=warnings'; do
+    'rtk cargo clippy -- --deny=warnings' \
+    'RUSTFLAGS=-Dwarnings rtk cargo clippy' \
+    'RUSTFLAGS="-D warnings" rtk cargo clippy' \
+    "RUSTFLAGS='--deny warnings' rtk cargo clippy" \
+    "RUSTFLAGS='--deny=warnings' rtk cargo clippy"; do
     if ! contains_blanket_warning_denial "${warning_denial_mutation}"; then
         printf 'gate contract: warning-denial mutation survived (%s)\n' \
             "${warning_denial_mutation}" >&2
         exit 1
     fi
 done
-if contains_blanket_warning_denial 'rtk cargo clippy -- -D dead_code'; then
+if contains_blanket_warning_denial \
+    'RUSTFLAGS="-C target-cpu=native -D dead_code" rtk cargo clippy'; then
     printf '%s\n' "gate contract: narrow lint denial was mistaken for blanket warning denial" >&2
-    exit 1
-fi
-
-upload_runner_source=$(<"${upload_runner_path}")
-async_runner_source=$(<"${async_runner_path}")
-if [[ ${upload_runner_source} != *"SUPRNOVA_LIVE_S1_DEDICATED"* ||
-      ${upload_runner_source} != *"SUPRNOVA_LIVE_B1_DEDICATED"* ||
-      ${async_runner_source} != *"SUPRNOVA_LIVE_B1_DEDICATED"* ]]; then
-    printf '%s\n' \
-        "gate contract: qualified workloads must fail closed without B1/S1 attestation" >&2
-    exit 1
-fi
-
-budget_source=${gate_source#*'phase "iteration 004 reduced deterministic budgets"'}
-before_release=${budget_source%%'if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then'*}
-release_source=${budget_source#*'if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then'}
-release_source=${release_source%%$'\nfi'*}
-if [[ ${before_release} != *"SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh"* ||
-      ${before_release} != *"SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh"* ]]; then
-    printf '%s\n' "gate contract: ordinary mode must run both reduced workloads" >&2
-    exit 1
-fi
-if [[ ${release_source} != *"SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh"* ||
-      ${release_source} != *"SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh"* ]]; then
-    printf '%s\n' \
-        "gate contract: release mode cannot substitute reduced evidence for qualified workloads" >&2
     exit 1
 fi
 
@@ -257,11 +368,23 @@ require_order "deterministic browser build" "npm run build:check" \
     "reduced deterministic budgets" 'phase "iteration 004 reduced deterministic budgets"'
 
 probe_root=$(mktemp -d)
-trap 'rm -rf -- "${probe_root}"' EXIT
+mutant_runners=()
+cleanup_probes() {
+    local mutant_runner
+    rm -rf -- "${probe_root}"
+    for mutant_runner in "${mutant_runners[@]}"; do
+        rm -f -- "${mutant_runner}"
+    done
+}
+trap cleanup_probes EXIT
 printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
-    'printf '\''%s\n'\'' "$*" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+    'printf '\''profile=%s'\'' "${SUPRNOVA_LIVE_BUDGET_PROFILE-}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+    'for argument in "$@"; do' \
+    '    printf '\''\t%s'\'' "${argument}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+    'done' \
+    'printf '\''\n'\'' >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
     >"${probe_root}/rtk"
 chmod +x "${probe_root}/rtk"
 
@@ -272,21 +395,64 @@ release_output=${probe_root}/release.output
 run_gate_probe 0 "${ordinary_trace}" "${ordinary_output}"
 run_gate_probe 1 "${release_trace}" "${release_output}"
 
-reduced_upload='env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh'
-reduced_async='env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh'
-qualified_upload='env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh'
-qualified_async='env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh'
+require_budget_trace_contract "ordinary gate" 0 "${ordinary_trace}"
+require_budget_trace_contract "release gate" 1 "${release_trace}"
 
-require_trace_count "ordinary reduced U4/16" "${ordinary_trace}" "${reduced_upload}" 1
-require_trace_count "ordinary reduced E100/1K and R100" "${ordinary_trace}" "${reduced_async}" 1
-require_trace_count "ordinary qualified U4/16 exclusion" "${ordinary_trace}" "${qualified_upload}" 0
-require_trace_count "ordinary qualified E100/1K and R100 exclusion" \
-    "${ordinary_trace}" "${qualified_async}" 0
-require_trace_count "release reduced U4/16" "${release_trace}" "${reduced_upload}" 1
-require_trace_count "release reduced E100/1K and R100" "${release_trace}" "${reduced_async}" 1
-require_trace_count "release qualified U4/16" "${release_trace}" "${qualified_upload}" 1
-require_trace_count "release qualified E100/1K and R100" \
-    "${release_trace}" "${qualified_async}" 1
+alternate_path_ordinary_trace=${probe_root}/alternate-path-ordinary.trace
+printf '%s\n' \
+    $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t./scripts/run-upload-budget.sh' \
+    $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t../suprnova-live/scripts/run-async-budget.sh' \
+    $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t./scripts/run-upload-budget.sh' \
+    >"${alternate_path_ordinary_trace}"
+if budget_trace_is_valid 0 "${alternate_path_ordinary_trace}"; then
+    printf '%s\n' \
+        "gate contract: alternate-path qualified invocation survived ordinary mode" >&2
+    exit 1
+fi
+
+alternate_path_release_trace=${probe_root}/alternate-path-release.trace
+printf '%s\n' \
+    $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t./scripts/run-upload-budget.sh' \
+    $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t../suprnova-live/scripts/run-async-budget.sh' \
+    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${repository_root}/scripts/run-upload-budget.sh" \
+    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${repository_root}/scripts/run-async-budget.sh" \
+    >"${alternate_path_release_trace}"
+if ! budget_trace_is_valid 1 "${alternate_path_release_trace}"; then
+    printf '%s\n' "gate contract: harmless alternate runner paths were not normalized" >&2
+    exit 1
+fi
+
+upload_fail_trace=${probe_root}/upload-qualified-fail.trace
+upload_fail_output=${probe_root}/upload-qualified-fail.output
+async_fail_trace=${probe_root}/async-qualified-fail.trace
+async_fail_output=${probe_root}/async-qualified-fail.output
+if ! qualified_runner_fails_closed \
+    "${upload_runner_path}" "${upload_fail_trace}" "${upload_fail_output}"; then
+    printf '%s\n' "gate contract: qualified upload runner did not fail before workload" >&2
+    exit 1
+fi
+if ! qualified_runner_fails_closed \
+    "${async_runner_path}" "${async_fail_trace}" "${async_fail_output}"; then
+    printf '%s\n' "gate contract: qualified async runner did not fail before workload" >&2
+    exit 1
+fi
+
+upload_mutant=$(mktemp "${repository_root}/scripts/.gate-contract-upload-mutant.XXXXXX")
+mutant_runners+=("${upload_mutant}")
+async_mutant=$(mktemp "${repository_root}/scripts/.gate-contract-async-mutant.XXXXXX")
+mutant_runners+=("${async_mutant}")
+write_exit_bypass_mutant "${upload_runner_path}" "${upload_mutant}"
+write_exit_bypass_mutant "${async_runner_path}" "${async_mutant}"
+if qualified_runner_fails_closed \
+    "${upload_mutant}" "${probe_root}/upload-mutant.trace" "${probe_root}/upload-mutant.output"; then
+    printf '%s\n' "gate contract: upload qualification exit-bypass mutation survived" >&2
+    exit 1
+fi
+if qualified_runner_fails_closed \
+    "${async_mutant}" "${probe_root}/async-mutant.trace" "${probe_root}/async-mutant.output"; then
+    printf '%s\n' "gate contract: async qualification exit-bypass mutation survived" >&2
+    exit 1
+fi
 
 ordinary_phase_output=$(<"${ordinary_output}")
 release_phase_output=$(<"${release_output}")
