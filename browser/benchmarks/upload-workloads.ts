@@ -18,9 +18,11 @@ interface UploadWorkloadMeasurement {
   readonly managerChunkBuffers: number;
   readonly managerOwnedBytes: number;
   readonly managerOwnedCategories: UploadManagerAccountingCategories;
+  readonly maxActiveManagerTransfers: number;
   readonly maxChunksPerTransfer: number;
-  readonly maxConcurrentTransfers: number;
   readonly maxQueueDepth: number;
+  readonly maxSimultaneousTransportOperations: number;
+  readonly maxSimultaneousTransportTransfers: number;
   readonly progressP50Milliseconds: number;
   readonly progressP95Milliseconds: number;
   readonly progressDurationsMilliseconds: readonly number[];
@@ -50,7 +52,7 @@ interface FileSliceObservation {
   calls: number;
 }
 
-interface UploadTransportRequest {
+export interface UploadTransportRequest {
   readonly bytes?: ArrayBuffer;
   readonly expectedRevision?: string;
   readonly handle?: string;
@@ -63,6 +65,41 @@ interface UploadTransportResponse {
   readonly nextChunkIndex?: number;
   readonly revision: string;
   readonly state: string;
+}
+
+/** Releases each deterministic receipt wave as soon as its distinct transfers are present. */
+export class ControlledImmediateReceiptWaves {
+  readonly #activeTransfers: number;
+  readonly #pending = new Map<
+    string,
+    Readonly<{ handle: string; reject: (error: Error) => void; resolve: () => void }>
+  >();
+
+  constructor(activeTransfers: number) {
+    if (!Number.isSafeInteger(activeTransfers) || activeTransfers < 1) {
+      throw new Error("upload_budget_receipt_wave_invalid");
+    }
+    this.#activeTransfers = activeTransfers;
+  }
+
+  wait(request: UploadTransportRequest, token: string): Promise<void> {
+    if (request.handle === undefined || this.#pending.has(token)) {
+      return Promise.reject(new Error("upload_budget_receipt_wave_invalid"));
+    }
+    const handle = request.handle;
+    return new Promise<void>((resolve, reject) => {
+      this.#pending.set(token, Object.freeze({ handle, reject, resolve }));
+      if (this.#pending.size !== this.#activeTransfers) return;
+      const wave = [...this.#pending.values()];
+      this.#pending.clear();
+      if (new Set(wave.map(({ handle }) => handle)).size !== this.#activeTransfers) {
+        const error = new Error("upload_budget_receipt_wave_not_distinct");
+        for (const pending of wave) pending.reject(error);
+        return;
+      }
+      for (const pending of wave) pending.resolve();
+    });
+  }
 }
 
 class ObservedFile extends File {
@@ -85,17 +122,24 @@ class ObservedFile extends File {
   }
 }
 
-class ImmediateUploadTransport {
+export class ImmediateUploadTransport {
   readonly #revisions = new Map<string, bigint>();
-  readonly #activeChunks = new Map<string, ArrayBuffer>();
+  readonly #activeChunks = new Map<string, Readonly<{ bytes: ArrayBuffer; handle: string }>>();
   readonly #completed: Promise<void>;
+  readonly #waitForReceipt: (request: UploadTransportRequest, token: string) => Promise<void>;
   #completeCount = 0;
   #created = 0;
+  #maximumConcurrentOperations = 0;
   #maximumConcurrentTransfers = 0;
+  #nextOperation = 0;
   #observeResources: (() => void) | null = null;
   #resolveCompleted!: () => void;
 
-  constructor() {
+  constructor(
+    waitForReceipt: (request: UploadTransportRequest, token: string) => Promise<void> = async () =>
+      Promise.resolve(),
+  ) {
+    this.#waitForReceipt = waitForReceipt;
     this.#completed = new Promise<void>((resolve) => {
       this.#resolveCompleted = resolve;
     });
@@ -107,7 +151,7 @@ class ImmediateUploadTransport {
 
   activeChunkBytes(): number {
     let bytes = 0;
-    for (const chunk of this.#activeChunks.values()) bytes += chunk.byteLength;
+    for (const chunk of this.#activeChunks.values()) bytes += chunk.bytes.byteLength;
     return bytes;
   }
 
@@ -120,9 +164,17 @@ class ImmediateUploadTransport {
     buffers: number;
     handle: string;
   }>[] {
+    const byHandle = new Map<string, { buffers: number; bytes: number }>();
+    for (const operation of this.#activeChunks.values()) {
+      const prior = byHandle.get(operation.handle) ?? { buffers: 0, bytes: 0 };
+      byHandle.set(operation.handle, {
+        buffers: prior.buffers + 1,
+        bytes: prior.bytes + operation.bytes.byteLength,
+      });
+    }
     return Object.freeze(
-      [...this.#activeChunks.entries()]
-        .map(([handle, bytes]) => Object.freeze({ bytes: bytes.byteLength, buffers: 1, handle }))
+      [...byHandle.entries()]
+        .map(([handle, ownership]) => Object.freeze({ ...ownership, handle }))
         .sort((left, right) => left.handle.localeCompare(right.handle)),
     );
   }
@@ -133,6 +185,14 @@ class ImmediateUploadTransport {
 
   maximumConcurrentTransfers(): number {
     return this.#maximumConcurrentTransfers;
+  }
+
+  maximumConcurrentOperations(): number {
+    return this.#maximumConcurrentOperations;
+  }
+
+  activeOperationCount(): number {
+    return this.#activeChunks.size;
   }
 
   async send(request: UploadTransportRequest): Promise<UploadTransportResponse> {
@@ -157,17 +217,29 @@ class ImmediateUploadTransport {
         if (current === undefined || current.toString() !== request.expectedRevision) {
           throw new Error("upload_budget_revision_mismatch");
         }
-        this.#activeChunks.set(request.handle, request.bytes);
-        this.#maximumConcurrentTransfers = Math.max(
-          this.#maximumConcurrentTransfers,
+        this.#nextOperation += 1;
+        const operationToken = `upload-operation-${String(this.#nextOperation)}`;
+        this.#activeChunks.set(
+          operationToken,
+          Object.freeze({ bytes: request.bytes, handle: request.handle }),
+        );
+        this.#maximumConcurrentOperations = Math.max(
+          this.#maximumConcurrentOperations,
           this.#activeChunks.size,
         );
+        this.#maximumConcurrentTransfers = Math.max(
+          this.#maximumConcurrentTransfers,
+          new Set([...this.#activeChunks.values()].map(({ handle }) => handle)).size,
+        );
         this.#observeResources?.();
-        await Promise.resolve();
+        try {
+          await this.#waitForReceipt(request, operationToken);
+        } finally {
+          this.#activeChunks.delete(operationToken);
+          this.#observeResources?.();
+        }
         const next = current + 1n;
         this.#revisions.set(request.handle, next);
-        this.#activeChunks.delete(request.handle);
-        this.#observeResources?.();
         return Object.freeze({ revision: next.toString(), state: "transferring" });
       }
       case "complete": {
@@ -265,7 +337,10 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
   document.body.replaceChildren(islandElement);
 
   const proposals: unknown[] = [];
-  const transport = new ImmediateUploadTransport();
+  const receiptWaves = new ControlledImmediateReceiptWaves(U4_16.activeTransfers);
+  const transport = new ImmediateUploadTransport((request, token) =>
+    receiptWaves.wait(request, token),
+  );
   const progressSamples: number[] = [];
   let progressApplications = 0;
   let progressApplicationStartedAt = 0;
@@ -273,7 +348,9 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
   let managerOwnedBytes = 0;
   let managerOwnedCategories = accountingCategories(latestResources);
   const chunkObserver = new UploadTransferChunkObserver();
-  let maxConcurrentTransfers = 0;
+  let maxActiveManagerTransfers = 0;
+  let maxSimultaneousTransportOperations = 0;
+  let maxSimultaneousTransportTransfers = 0;
   let maxQueueDepth = 0;
   let retainedBytes = 0;
 
@@ -291,9 +368,13 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       })),
       transport.activeChunksByTransfer(),
     );
-    maxConcurrentTransfers = Math.max(
-      maxConcurrentTransfers,
-      latestResources.activeLeases,
+    maxActiveManagerTransfers = Math.max(maxActiveManagerTransfers, latestResources.activeLeases);
+    maxSimultaneousTransportOperations = Math.max(
+      maxSimultaneousTransportOperations,
+      transport.maximumConcurrentOperations(),
+    );
+    maxSimultaneousTransportTransfers = Math.max(
+      maxSimultaneousTransportTransfers,
       transport.maximumConcurrentTransfers(),
     );
     maxQueueDepth = Math.max(maxQueueDepth, latestResources.queuedItems);
@@ -391,9 +472,23 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       slices.calls !== U4_16.files * (U4_16.fileBytes / U4_16.chunkBytes) ||
       slices.bytes !== U4_16.files * U4_16.fileBytes ||
       progressSamples.length < 30 ||
-      maxConcurrentTransfers !== U4_16.activeTransfers
+      maxActiveManagerTransfers !== U4_16.activeTransfers ||
+      maxSimultaneousTransportOperations !== U4_16.activeTransfers ||
+      maxSimultaneousTransportTransfers !== U4_16.activeTransfers
     ) {
-      throw new Error("upload_budget_workload_incomplete");
+      throw new Error(
+        `upload_budget_workload_incomplete:${JSON.stringify({
+          loaded: progress.getAttribute("data-live-upload-loaded"),
+          managerTransfers: maxActiveManagerTransfers,
+          progressSamples: progressSamples.length,
+          proposals: proposals.length,
+          slices: slices.calls,
+          slicedBytes: slices.bytes,
+          state: progress.getAttribute("data-live-upload-state"),
+          transportOperations: maxSimultaneousTransportOperations,
+          transportTransfers: maxSimultaneousTransportTransfers,
+        })}`,
+      );
     }
     const progressSummary = summarizeUploadSamples(progressSamples);
     const chunks = chunkObserver.snapshot();
@@ -408,9 +503,11 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
       managerChunkBuffers: chunks.managerChunkBuffers,
       managerOwnedBytes,
       managerOwnedCategories,
+      maxActiveManagerTransfers,
       maxChunksPerTransfer: chunks.maxChunksPerTransfer,
-      maxConcurrentTransfers,
       maxQueueDepth,
+      maxSimultaneousTransportOperations,
+      maxSimultaneousTransportTransfers,
       progressP50Milliseconds: progressSummary.p50,
       progressP95Milliseconds: progressSummary.p95,
       progressDurationsMilliseconds: Object.freeze([...progressSamples]),

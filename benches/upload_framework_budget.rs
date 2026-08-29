@@ -5,9 +5,11 @@ mod component_support;
 
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
+use std::fmt;
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::hint::black_box;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,14 +24,15 @@ use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::upload::{
     AcceptedChunk, ApplicationValidationDecision, ApplicationValidationInput, ChunkBody,
     ChunkDisposition, ClientUploadMetadata, IntegrityEvidence, PrepareTransfer, QuarantineBytes,
-    QuarantineObject, QuarantineOperation, QuarantineStore, QuarantinedFileProvider, ReadUpload,
-    RemoveDisposition, ReverseProxyUploadProvider, ScanDisposition, ScanFailurePolicy, ScanInput,
-    TransferGrant, TransferGrantCodec, TransferGrantRequest, TransferGrantScope, TransferPlan,
-    TransitionDisposition, UploadApplicationValidator, UploadChecksum, UploadDimensionLimits,
-    UploadError, UploadErrorKind, UploadFieldPolicy, UploadFuture, UploadHandle,
-    UploadIdempotencyKey, UploadLedger, UploadMediaType, UploadOperation, UploadProtocolCodec,
-    UploadProvider, UploadRecord, UploadReplacementPolicy, UploadRevision, UploadScanPolicy,
-    UploadScanner, UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
+    QuarantineCompletion, QuarantineObject, QuarantineOperation, QuarantineStore,
+    QuarantinedFileProvider, ReadUpload, RemoveDisposition, ReverseProxyUploadProvider,
+    ScanDisposition, ScanFailurePolicy, ScanInput, TransferGrant, TransferGrantCodec,
+    TransferGrantRequest, TransferGrantScope, TransferPlan, TransitionDisposition,
+    UploadApplicationValidator, UploadChecksum, UploadDimensionLimits, UploadError,
+    UploadErrorKind, UploadFieldPolicy, UploadFuture, UploadHandle, UploadIdempotencyKey,
+    UploadLedger, UploadMediaType, UploadOperation, UploadProtocolCodec, UploadProvider,
+    UploadRecord, UploadReplacementPolicy, UploadRevision, UploadScanPolicy, UploadScanner,
+    UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
     UploadTransitionRequest, UploadValidationDisposition, UploadValidationRequest,
     UploadValidationService, UploadValidationStore, ValidatedUpload, ValidationStoreDisposition,
     VerifyTransfer, WriteChunk,
@@ -47,6 +50,7 @@ const P95_CAP_MICROSECONDS: f64 = 2_000.0;
 const NOW: UnixMillis = UnixMillis::new(1_001);
 const EXPIRES_AT: UnixMillis = UnixMillis::new(1_900);
 const ROOT_SECRET: &[u8] = b"upload-budget-root-secret-000000";
+static EVIDENCE_TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 struct ExcludedPortCounters {
@@ -537,6 +541,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 enum ResourceWorkloadMutation {
     ExtraTransfer,
     None,
+    PreBodyFailure,
     SkewFirst,
 }
 
@@ -625,9 +630,6 @@ impl ServerChunkTracker {
 struct ControlledChunkBody {
     bytes: QuarantineBytes,
     offset: usize,
-    block_before_second_segment: bool,
-    entered: Arc<tokio::sync::Barrier>,
-    release: Arc<tokio::sync::Barrier>,
 }
 
 impl ChunkBody for ControlledChunkBody {
@@ -638,11 +640,6 @@ impl ChunkBody for ControlledChunkBody {
         Box::pin(async move {
             if self.offset >= self.bytes.len() {
                 return Ok(None);
-            }
-            if self.block_before_second_segment && self.offset > 0 {
-                self.block_before_second_segment = false;
-                self.entered.wait().await;
-                self.release.wait().await;
             }
             let end = self
                 .offset
@@ -655,13 +652,19 @@ impl ChunkBody for ControlledChunkBody {
     }
 }
 
+struct PendingStoreWrite {
+    completion: QuarantineCompletion<()>,
+    handle: UploadHandle,
+    provider_buffer_counted: bool,
+    retained: Vec<QuarantineBytes>,
+}
+
 struct ControlledQuarantineStore {
     bindings: Mutex<HashMap<String, UploadHandle>>,
-    entered: Arc<tokio::sync::Barrier>,
-    first_writes: Mutex<BTreeSet<String>>,
+    hold_at_offset: Option<u64>,
     mutation: ResourceWorkloadMutation,
     objects: Mutex<HashMap<String, u64>>,
-    release: Arc<tokio::sync::Barrier>,
+    pending: Mutex<Vec<PendingStoreWrite>>,
     tracker: Arc<ServerChunkTracker>,
     unbound: Mutex<Vec<String>>,
 }
@@ -670,16 +673,14 @@ impl ControlledQuarantineStore {
     fn new(
         mutation: ResourceWorkloadMutation,
         tracker: Arc<ServerChunkTracker>,
-        entered: Arc<tokio::sync::Barrier>,
-        release: Arc<tokio::sync::Barrier>,
+        hold_at_offset: Option<u64>,
     ) -> Self {
         Self {
             bindings: Mutex::new(HashMap::new()),
-            entered,
-            first_writes: Mutex::new(BTreeSet::new()),
+            hold_at_offset,
             mutation,
             objects: Mutex::new(HashMap::new()),
-            release,
+            pending: Mutex::new(Vec::new()),
             tracker,
             unbound: Mutex::new(Vec::new()),
         }
@@ -699,6 +700,21 @@ impl ControlledQuarantineStore {
 
     fn is_skewed_first(handle: &UploadHandle) -> bool {
         handle.to_string().ends_with("000000000000")
+    }
+
+    fn pending_count(&self) -> usize {
+        lock_unpoisoned(&self.pending).len()
+    }
+
+    fn release_all(&self, result: Result<(), UploadError>) {
+        let pending = std::mem::take(&mut *lock_unpoisoned(&self.pending));
+        for write in pending {
+            if write.provider_buffer_counted {
+                self.tracker.provider_finished(&write.handle);
+            }
+            drop(write.retained);
+            write.completion.complete(result);
+        }
     }
 }
 
@@ -734,15 +750,15 @@ impl QuarantineStore for ControlledQuarantineStore {
         if let Some(length) = lock_unpoisoned(&self.objects).get_mut(&key) {
             *length = (*length).max(end);
         }
-        let first = lock_unpoisoned(&self.first_writes).insert(key);
-        if !first {
+        if self.hold_at_offset != Some(offset) {
             return QuarantineOperation::ready(Ok(()));
         }
 
-        if self.mutation == ResourceWorkloadMutation::SkewFirst && Self::is_skewed_second(&handle) {
+        let skewed_second =
+            self.mutation == ResourceWorkloadMutation::SkewFirst && Self::is_skewed_second(&handle);
+        if skewed_second {
             self.tracker.provider_started(&handle, 1, bytes.len());
             self.tracker.provider_finished(&handle);
-            return QuarantineOperation::ready(Ok(()));
         }
 
         let extra = usize::from(
@@ -751,21 +767,20 @@ impl QuarantineStore for ControlledQuarantineStore {
         let retained = (0..extra)
             .map(|_| QuarantineBytes::copy_from_slice(bytes))
             .collect::<Vec<_>>();
-        self.tracker.provider_started(
-            &handle,
-            1 + retained.len(),
-            bytes.len().saturating_mul(1 + retained.len()),
-        );
+        if !skewed_second {
+            self.tracker.provider_started(
+                &handle,
+                1 + retained.len(),
+                bytes.len().saturating_mul(1 + retained.len()),
+            );
+        }
+        let provider_buffer_counted = !skewed_second;
         let (operation, completion) = QuarantineOperation::pending();
-        let entered = Arc::clone(&self.entered);
-        let release = Arc::clone(&self.release);
-        let tracker = Arc::clone(&self.tracker);
-        tokio::spawn(async move {
-            entered.wait().await;
-            release.wait().await;
-            drop(retained);
-            tracker.provider_finished(&handle);
-            completion.complete(Ok(()));
+        lock_unpoisoned(&self.pending).push(PendingStoreWrite {
+            completion,
+            handle,
+            provider_buffer_counted,
+            retained,
         });
         operation
     }
@@ -810,31 +825,166 @@ struct ResourceTransfer {
     checksum: UploadChecksum,
     grant: TransferGrant,
     handle: UploadHandle,
-    idempotency_key: UploadIdempotencyKey,
+    ordinal: usize,
 }
 
-async fn run_server_resource_workload(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceBenchmarkFailureKind {
+    SetupFailed,
+    TaskFailed,
+    Watchdog,
+}
+
+#[derive(Debug)]
+struct ResourceBenchmarkFailure {
+    kind: ResourceBenchmarkFailureKind,
+    message: String,
+    residual_pending_operations: usize,
+    residual_provider_resources: usize,
+    residual_service_permits: usize,
+    residual_tasks: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "mutation-only residual accessors are exercised by the integration harness"
+)]
+impl ResourceBenchmarkFailure {
+    fn setup(error: impl fmt::Display) -> Self {
+        Self {
+            kind: ResourceBenchmarkFailureKind::SetupFailed,
+            message: error.to_string(),
+            residual_pending_operations: 0,
+            residual_provider_resources: 0,
+            residual_service_permits: 0,
+            residual_tasks: 0,
+        }
+    }
+
+    #[cfg(test)]
+    const fn kind(&self) -> ResourceBenchmarkFailureKind {
+        self.kind
+    }
+
+    #[cfg(test)]
+    const fn residual_pending_operations(&self) -> usize {
+        self.residual_pending_operations
+    }
+
+    #[cfg(test)]
+    const fn residual_provider_resources(&self) -> usize {
+        self.residual_provider_resources
+    }
+
+    #[cfg(test)]
+    const fn residual_service_permits(&self) -> usize {
+        self.residual_service_permits
+    }
+
+    #[cfg(test)]
+    const fn residual_tasks(&self) -> usize {
+        self.residual_tasks
+    }
+}
+
+impl fmt::Display for ResourceBenchmarkFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:?}: {} (tasks={}, pending={}, permits={}, provider={})",
+            self.kind,
+            self.message,
+            self.residual_tasks,
+            self.residual_pending_operations,
+            self.residual_service_permits,
+            self.residual_provider_resources,
+        )
+    }
+}
+
+impl Error for ResourceBenchmarkFailure {}
+
+#[derive(Clone, Debug, Serialize)]
+struct ServerCompletedTransfer {
+    #[serde(rename = "acceptedBytes")]
+    accepted_bytes: usize,
+    #[serde(rename = "acceptedChunks")]
+    accepted_chunks: usize,
+    #[serde(rename = "duplicateDisposition")]
+    duplicate_disposition: &'static str,
+    #[serde(rename = "finalRevision")]
+    final_revision: u64,
+    handle: String,
+    #[serde(rename = "providerCheckpointChunks")]
+    provider_checkpoint_chunks: usize,
+    #[serde(rename = "providerCommittedBytes")]
+    provider_committed_bytes: usize,
+}
+
+struct ResourceTaskCompletion {
+    duplicate_disposition: &'static str,
+    final_revision: u64,
+    handle: UploadHandle,
+}
+
+async fn cleanup_resource_tasks(
+    tasks: &mut Vec<tokio::task::JoinHandle<Result<ResourceTaskCompletion, UploadError>>>,
+    store: &ControlledQuarantineStore,
+    provider: &QuarantinedFileProvider<ControlledQuarantineStore>,
+    service: &UploadService,
+    kind: ResourceBenchmarkFailureKind,
+    message: impl Into<String>,
+) -> ResourceBenchmarkFailure {
+    for task in tasks.iter() {
+        task.abort();
+    }
+    store.release_all(Err(UploadError::new(UploadErrorKind::TransferCanceled)));
+    for task in tasks.drain(..) {
+        let _ = task.await;
+    }
+    let _ = provider.retire_and_cleanup().await;
+    let status = provider.retirement_status();
+    ResourceBenchmarkFailure {
+        kind,
+        message: message.into(),
+        residual_pending_operations: store.pending_count(),
+        residual_provider_resources: status
+            .active_operations()
+            .saturating_add(status.active_descriptors())
+            .saturating_add(status.active_chunks())
+            .saturating_add(status.owned_transfers()),
+        residual_service_permits: service.transfer_permits().active(),
+        residual_tasks: tasks.len(),
+    }
+}
+
+async fn run_server_resource_workload_with_watchdog(
     mutation: ResourceWorkloadMutation,
-) -> Result<ServerResourceSnapshot, Box<dyn Error>> {
+    watchdog_steps: usize,
+) -> Result<ServerResourceSnapshot, ResourceBenchmarkFailure> {
     let active_transfers = if mutation == ResourceWorkloadMutation::ExtraTransfer {
         ACTIVE_TRANSFERS + 1
     } else {
         ACTIVE_TRANSFERS
     };
-    let limits = UploadLimits::new(UploadLimitConfig::reference())?;
+    let limits = UploadLimits::new(UploadLimitConfig::reference())
+        .map_err(ResourceBenchmarkFailure::setup)?;
     let authorization = Arc::new(ControlledUploadAuthorization::new());
-    let context = component_support::trusted_context_with_upload_authorization(Arc::clone(
-        &authorization,
-    )
-        as Arc<dyn suprnova_live::upload::UploadAuthorizationPort>);
-    let ledger = Arc::new(MemoryUploadLedger::new(limits)?);
-    let codec = grant_codec()?;
-    let field = ModelField::parse("serial")?;
+    let context = Arc::new(
+        component_support::trusted_context_with_upload_authorization(
+            Arc::clone(&authorization) as Arc<dyn suprnova_live::upload::UploadAuthorizationPort>
+        ),
+    );
+    let ledger =
+        Arc::new(MemoryUploadLedger::new(limits).map_err(ResourceBenchmarkFailure::setup)?);
+    let codec = grant_codec().map_err(ResourceBenchmarkFailure::setup)?;
+    let field = ModelField::parse("serial").map_err(ResourceBenchmarkFailure::setup)?;
     let chunk = QuarantineBytes::from(vec![0_u8; CHUNK_BYTES]);
-    let chunk_checksum = checksum(&chunk)?;
+    let chunk_checksum = checksum(&chunk).map_err(ResourceBenchmarkFailure::setup)?;
     let mut transfers = Vec::with_capacity(active_transfers);
     for index in 0..active_transfers {
-        let handle = UploadHandle::parse(&format!("018f47c1-2af0-7cc4-b001-{index:012}"))?;
+        let handle = UploadHandle::parse(&format!("018f47c1-2af0-7cc4-b001-{index:012}"))
+            .map_err(ResourceBenchmarkFailure::setup)?;
         let authority = TransferGrantScope::new(
             handle.clone(),
             context.mount().component().clone(),
@@ -842,36 +992,47 @@ async fn run_server_resource_workload(
             component_support::fixture_host_scope(),
             1,
         );
-        let issued = codec.issue(
-            TransferGrantRequest::new(authority.clone(), EXPIRES_AT),
-            UnixMillis::new(1_000),
-        )?;
-        ledger.seed(UploadRecord::new(
-            authority,
-            UploadState::Transferring,
-            UploadRevision::new(7),
-            UnixMillis::new(1_000),
-            EXPIRES_AT,
-        )?)?;
+        let issued = codec
+            .issue(
+                TransferGrantRequest::new(authority.clone(), EXPIRES_AT),
+                UnixMillis::new(1_000),
+            )
+            .map_err(ResourceBenchmarkFailure::setup)?;
+        ledger
+            .seed(
+                UploadRecord::new(
+                    authority,
+                    UploadState::Transferring,
+                    UploadRevision::new(7),
+                    UnixMillis::new(1_000),
+                    EXPIRES_AT,
+                )
+                .map_err(ResourceBenchmarkFailure::setup)?,
+            )
+            .map_err(ResourceBenchmarkFailure::setup)?;
         transfers.push(ResourceTransfer {
             checksum: chunk_checksum.clone(),
-            grant: TransferGrant::parse(issued.grant().expose_bearer())?,
+            grant: TransferGrant::parse(issued.grant().expose_bearer())
+                .map_err(ResourceBenchmarkFailure::setup)?,
             handle,
-            idempotency_key: UploadIdempotencyKey::parse(&format!("u4-resource-{index}"))?,
+            ordinal: index,
         });
     }
     let service_ledger: Arc<dyn UploadLedger> = ledger;
-    let service = Arc::new(UploadService::new(service_ledger, codec, limits)?);
-    let entered = Arc::new(tokio::sync::Barrier::new(active_transfers + 1));
-    let release = Arc::new(tokio::sync::Barrier::new(active_transfers + 1));
+    let service = Arc::new(
+        UploadService::new(service_ledger, codec, limits)
+            .map_err(ResourceBenchmarkFailure::setup)?,
+    );
     let tracker = Arc::new(ServerChunkTracker::default());
     let store = Arc::new(ControlledQuarantineStore::new(
         mutation,
         Arc::clone(&tracker),
-        Arc::clone(&entered),
-        Arc::clone(&release),
+        Some((FILE_BYTES - CHUNK_BYTES) as u64),
     ));
-    let provider = Arc::new(QuarantinedFileProvider::new(Arc::clone(&store), limits)?);
+    let provider = Arc::new(
+        QuarantinedFileProvider::new(Arc::clone(&store), limits)
+            .map_err(ResourceBenchmarkFailure::setup)?,
+    );
     for transfer in &transfers {
         provider
             .prepare(PrepareTransfer::new(
@@ -880,8 +1041,11 @@ async fn run_server_resource_workload(
                 "u4-16.bin",
                 NOW,
             ))
-            .await?;
-        store.bind_latest(&transfer.handle)?;
+            .await
+            .map_err(ResourceBenchmarkFailure::setup)?;
+        store
+            .bind_latest(&transfer.handle)
+            .map_err(ResourceBenchmarkFailure::setup)?;
     }
 
     let mut tasks = Vec::with_capacity(active_transfers);
@@ -889,46 +1053,154 @@ async fn run_server_resource_workload(
         let provider = Arc::clone(&provider);
         let service = Arc::clone(&service);
         let tracker = Arc::clone(&tracker);
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
         let bytes = chunk.clone();
+        let field = field.clone();
+        let context = context.clone();
         tasks.push(tokio::spawn(async move {
             let permit = service
                 .transfer_permits()
                 .try_acquire()
                 .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
-            tracker.body_started(&transfer.handle, bytes.len());
-            let mut body = ControlledChunkBody {
-                bytes,
-                offset: 0,
-                block_before_second_segment: mutation == ResourceWorkloadMutation::SkewFirst
-                    && ControlledQuarantineStore::is_skewed_second(&transfer.handle),
-                entered,
-                release,
-            };
-            let result = provider
-                .write_chunk(
-                    WriteChunk::new(
-                        &transfer.handle,
-                        0,
-                        0,
+            if mutation == ResourceWorkloadMutation::PreBodyFailure && transfer.ordinal == 0 {
+                return Err(UploadError::new(UploadErrorKind::ProviderUnavailable));
+            }
+            let mut final_revision = 7_u64;
+            let mut duplicate_disposition = "not_observed";
+            for chunk_index in 0..FILE_BYTES / CHUNK_BYTES {
+                tracker.body_started(&transfer.handle, bytes.len());
+                let mut body = ControlledChunkBody {
+                    bytes: bytes.clone(),
+                    offset: 0,
+                };
+                let receipt = provider
+                    .write_chunk(
+                        WriteChunk::new(
+                            &transfer.handle,
+                            chunk_index as u32,
+                            (chunk_index * CHUNK_BYTES) as u64,
+                            CHUNK_BYTES as u64,
+                            &transfer.checksum,
+                        ),
+                        &mut body,
+                    )
+                    .await;
+                tracker.body_finished(&transfer.handle);
+                let receipt = receipt?;
+                if receipt.disposition() != ChunkDisposition::Stored {
+                    return Err(UploadError::new(UploadErrorKind::UploadConflict));
+                }
+                let idempotency_key = UploadIdempotencyKey::parse(&format!(
+                    "u4-resource-{}-{chunk_index}",
+                    transfer.ordinal
+                ))?;
+                let transition = UploadTransitionRequest::new(
+                    transfer.handle.clone(),
+                    UploadRevision::new(final_revision),
+                    idempotency_key.clone(),
+                    UploadTransition::PutChunk(AcceptedChunk::new(
+                        chunk_index as u32,
                         CHUNK_BYTES as u64,
-                        &transfer.checksum,
-                    ),
-                    &mut body,
-                )
-                .await;
-            tracker.body_finished(&transfer.handle);
+                        transfer.checksum.clone(),
+                    )?),
+                );
+                let outcome = service
+                    .transition(
+                        &context,
+                        UploadTransitionAdmission::new(
+                            transfer.grant.clone(),
+                            field.clone(),
+                            transition,
+                        ),
+                        NOW,
+                    )
+                    .await?;
+                if outcome.disposition() != TransitionDisposition::Applied {
+                    return Err(UploadError::new(UploadErrorKind::UploadConflict));
+                }
+                final_revision = outcome.revision().get();
+                if chunk_index + 1 == FILE_BYTES / CHUNK_BYTES {
+                    let duplicate = service
+                        .transition(
+                            &context,
+                            UploadTransitionAdmission::new(
+                                transfer.grant.clone(),
+                                field.clone(),
+                                UploadTransitionRequest::new(
+                                    transfer.handle.clone(),
+                                    UploadRevision::new(final_revision - 1),
+                                    idempotency_key,
+                                    UploadTransition::PutChunk(AcceptedChunk::new(
+                                        chunk_index as u32,
+                                        CHUNK_BYTES as u64,
+                                        transfer.checksum.clone(),
+                                    )?),
+                                ),
+                            ),
+                            NOW,
+                        )
+                        .await?;
+                    if duplicate.disposition() != TransitionDisposition::ExistingOutcome {
+                        return Err(UploadError::new(UploadErrorKind::UploadConflict));
+                    }
+                    duplicate_disposition = "existing_outcome";
+                }
+            }
             drop(permit);
-            result.map(|receipt| (transfer, receipt))
+            Ok(ResourceTaskCompletion {
+                duplicate_disposition,
+                final_revision,
+                handle: transfer.handle,
+            })
         }));
     }
 
-    entered.wait().await;
+    let mut reached_resource_barrier = false;
+    for _ in 0..watchdog_steps {
+        if store.pending_count() == active_transfers {
+            reached_resource_barrier = true;
+            break;
+        }
+        if tasks.iter().any(tokio::task::JoinHandle::is_finished) {
+            return Err(cleanup_resource_tasks(
+                &mut tasks,
+                &store,
+                &provider,
+                &service,
+                ResourceBenchmarkFailureKind::TaskFailed,
+                "resource task terminated before the controlled final-chunk barrier",
+            )
+            .await);
+        }
+        tokio::task::yield_now().await;
+    }
+    if !reached_resource_barrier {
+        return Err(cleanup_resource_tasks(
+            &mut tasks,
+            &store,
+            &provider,
+            &service,
+            ResourceBenchmarkFailureKind::Watchdog,
+            "resource tasks did not reach the controlled final-chunk barrier",
+        )
+        .await);
+    }
+
     let provider_status = provider.retirement_status();
     let chunk_buffers_by_transfer = tracker.snapshot();
+    let provider_accepted_chunk_records = transfers
+        .iter()
+        .try_fold(0_usize, |total, transfer| {
+            provider
+                .transfer_accounting(&transfer.handle)
+                .map(|accounting| {
+                    debug_assert!(accounting.pending_chunk());
+                    total.saturating_add(accounting.accepted_chunk_records())
+                })
+        })
+        .map_err(ResourceBenchmarkFailure::setup)?;
     let categories = ServerManagerOwnedCategories {
         active_service_permits: service.transfer_permits().active(),
+        provider_accepted_chunk_records,
         provider_active_chunks: provider_status.active_chunks(),
         provider_active_descriptors: provider_status.active_descriptors(),
         provider_active_operations: provider_status.active_operations(),
@@ -963,44 +1235,180 @@ async fn run_server_resource_workload(
         max_concurrent_transfers: categories.active_service_permits,
         max_queue_depth: categories.provider_owned_transfers,
         retained_bytes: retained_chunk_bytes.saturating_add(manager_owned_bytes),
+        completed_bytes: 0,
+        completed_chunks: 0,
+        completed_transfers: Vec::new(),
     };
-    release.wait().await;
 
-    for task in tasks {
-        let (transfer, receipt) = task.await??;
-        if receipt.disposition() != ChunkDisposition::Stored {
-            return Err(std::io::Error::other("resource provider did not store the chunk").into());
+    store.release_all(Ok(()));
+    let mut all_finished = false;
+    for _ in 0..watchdog_steps {
+        if tasks.iter().all(tokio::task::JoinHandle::is_finished) {
+            all_finished = true;
+            break;
         }
-        let transition = UploadTransitionRequest::new(
-            transfer.handle.clone(),
-            UploadRevision::new(7),
-            transfer.idempotency_key,
-            UploadTransition::PutChunk(AcceptedChunk::new(
-                0,
-                CHUNK_BYTES as u64,
-                transfer.checksum,
-            )?),
-        );
-        let outcome = service
-            .transition(
-                &context,
-                UploadTransitionAdmission::new(transfer.grant, field.clone(), transition),
-                NOW,
+        tokio::task::yield_now().await;
+    }
+    if !all_finished {
+        return Err(cleanup_resource_tasks(
+            &mut tasks,
+            &store,
+            &provider,
+            &service,
+            ResourceBenchmarkFailureKind::Watchdog,
+            "resource tasks did not finish after controlled receipts were released",
+        )
+        .await);
+    }
+    let mut completed = Vec::with_capacity(active_transfers);
+    while let Some(task) = tasks.pop() {
+        let completion = match task.await {
+            Ok(Ok(completion)) => completion,
+            Ok(Err(error)) => {
+                return Err(cleanup_resource_tasks(
+                    &mut tasks,
+                    &store,
+                    &provider,
+                    &service,
+                    ResourceBenchmarkFailureKind::TaskFailed,
+                    error.to_string(),
+                )
+                .await);
+            }
+            Err(error) => {
+                return Err(cleanup_resource_tasks(
+                    &mut tasks,
+                    &store,
+                    &provider,
+                    &service,
+                    ResourceBenchmarkFailureKind::TaskFailed,
+                    error.to_string(),
+                )
+                .await);
+            }
+        };
+        let checkpoint = provider
+            .checkpoint(&completion.handle)
+            .map_err(ResourceBenchmarkFailure::setup)?;
+        completed.push(ServerCompletedTransfer {
+            accepted_bytes: checkpoint.committed_bytes() as usize,
+            accepted_chunks: checkpoint.chunks().len(),
+            duplicate_disposition: completion.duplicate_disposition,
+            final_revision: completion.final_revision,
+            handle: completion.handle.to_string(),
+            provider_checkpoint_chunks: checkpoint.chunks().len(),
+            provider_committed_bytes: checkpoint.committed_bytes() as usize,
+        });
+    }
+    completed.sort_by(|left, right| left.handle.cmp(&right.handle));
+    Ok(ServerResourceSnapshot {
+        completed_bytes: completed.iter().map(|item| item.accepted_bytes).sum(),
+        completed_chunks: completed.iter().map(|item| item.accepted_chunks).sum(),
+        completed_transfers: completed,
+        ..snapshot
+    })
+}
+
+async fn run_server_resource_workload(
+    mutation: ResourceWorkloadMutation,
+) -> Result<ServerResourceSnapshot, Box<dyn Error>> {
+    run_server_resource_workload_with_watchdog(mutation, 100_000)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+#[allow(
+    dead_code,
+    reason = "the metadata pressure probe is exercised by the integration harness"
+)]
+struct ProviderAcceptedMetadataMeasurement {
+    accepted_bytes: usize,
+    accepted_chunk_records: usize,
+    manager_owned_bytes: usize,
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the metadata pressure probe is exercised by the integration harness"
+)]
+impl ProviderAcceptedMetadataMeasurement {
+    const fn exceeds_resource_ceiling(self) -> bool {
+        self.manager_owned_bytes > 512 * 1024
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the metadata pressure probe is exercised by the integration harness"
+)]
+async fn measure_provider_accepted_metadata(
+    limits: UploadLimits,
+    records: usize,
+) -> Result<ProviderAcceptedMetadataMeasurement, UploadError> {
+    let tracker = Arc::new(ServerChunkTracker::default());
+    let store = Arc::new(ControlledQuarantineStore::new(
+        ResourceWorkloadMutation::None,
+        tracker,
+        None,
+    ));
+    let provider = QuarantinedFileProvider::new(Arc::clone(&store), limits)?;
+    let handle = UploadHandle::parse("018f47c1-2af0-7cc4-b002-000000000000")?;
+    provider
+        .prepare(PrepareTransfer::new(
+            &handle,
+            records as u64,
+            "metadata-cardinality.bin",
+            NOW,
+        ))
+        .await?;
+    store.bind_latest(&handle)?;
+    let byte = QuarantineBytes::from(vec![0_u8]);
+    let byte_checksum = checksum(&byte)?;
+    for index in 0..records {
+        let mut body = ControlledChunkBody {
+            bytes: byte.clone(),
+            offset: 0,
+        };
+        let receipt = provider
+            .write_chunk(
+                WriteChunk::new(&handle, index as u32, index as u64, 1, &byte_checksum),
+                &mut body,
             )
             .await?;
-        if outcome.disposition() != TransitionDisposition::Applied {
-            return Err(
-                std::io::Error::other("resource control transition was not applied").into(),
-            );
+        if receipt.disposition() != ChunkDisposition::Stored {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
     }
-    Ok(snapshot)
+    let accounting = provider.transfer_accounting(&handle)?;
+    let status = provider.retirement_status();
+    let categories = ServerManagerOwnedCategories {
+        active_service_permits: 0,
+        provider_accepted_chunk_records: accounting.accepted_chunk_records(),
+        provider_active_chunks: status.active_chunks(),
+        provider_active_descriptors: status.active_descriptors(),
+        provider_active_operations: status.active_operations(),
+        provider_control_records: 1,
+        provider_owned_transfers: status.owned_transfers(),
+        retained_handle_bytes: handle.to_string().len(),
+        service_control_records: 0,
+    };
+    Ok(ProviderAcceptedMetadataMeasurement {
+        accepted_bytes: accounting.committed_bytes() as usize,
+        accepted_chunk_records: accounting.accepted_chunk_records(),
+        manager_owned_bytes: estimate_server_manager_owned_bytes(categories),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 struct ServerManagerOwnedCategories {
     #[serde(rename = "activeServicePermits")]
     active_service_permits: usize,
+    #[serde(rename = "providerAcceptedChunkRecords")]
+    provider_accepted_chunk_records: usize,
     #[serde(rename = "providerActiveChunks")]
     provider_active_chunks: usize,
     #[serde(rename = "providerActiveDescriptors")]
@@ -1026,6 +1434,11 @@ fn estimate_server_manager_owned_bytes(categories: ServerManagerOwnedCategories)
         .service_control_records
         .saturating_mul(512)
         .saturating_add(categories.provider_control_records.saturating_mul(512))
+        .saturating_add(
+            categories
+                .provider_accepted_chunk_records
+                .saturating_mul(192),
+        )
         .saturating_add(categories.provider_owned_transfers.saturating_mul(256))
         .saturating_add(categories.active_service_permits.saturating_mul(128))
         .saturating_add(categories.provider_active_operations.saturating_mul(128))
@@ -1058,6 +1471,9 @@ struct ServerTransferChunkBuffers {
 #[derive(Clone, Debug)]
 struct ServerResourceSnapshot {
     chunk_buffers_by_transfer: Vec<ServerTransferChunkBuffers>,
+    completed_bytes: usize,
+    completed_chunks: usize,
+    completed_transfers: Vec<ServerCompletedTransfer>,
     live_chunk_buffers: usize,
     manager_owned_bytes: usize,
     manager_owned_categories: ServerManagerOwnedCategories,
@@ -1098,6 +1514,12 @@ struct ServerBounds {
 struct ServerMeasurements {
     #[serde(rename = "chunkBuffersByTransfer")]
     chunk_buffers_by_transfer: Vec<ServerTransferChunkBuffers>,
+    #[serde(rename = "completedBytes")]
+    completed_bytes: usize,
+    #[serde(rename = "completedChunks")]
+    completed_chunks: usize,
+    #[serde(rename = "completedTransfers")]
+    completed_transfers: Vec<ServerCompletedTransfer>,
     #[serde(rename = "excludedCalls")]
     excluded_calls: ExcludedCalls,
     #[serde(rename = "liveChunkBuffers")]
@@ -1268,6 +1690,9 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
         environment,
         measurements: ServerMeasurements {
             chunk_buffers_by_transfer: resources.chunk_buffers_by_transfer.clone(),
+            completed_bytes: resources.completed_bytes,
+            completed_chunks: resources.completed_chunks,
+            completed_transfers: resources.completed_transfers.clone(),
             excluded_calls,
             live_chunk_buffers: resources.live_chunk_buffers,
             manager_owned_bytes: resources.manager_owned_bytes,
@@ -1324,19 +1749,112 @@ fn result_path() -> PathBuf {
 }
 
 fn write_result(result: &ServerBudgetResult, path: PathBuf) -> Result<(), Box<dyn Error>> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    atomic_write_evidence(
+        &path,
+        &serde_json::to_vec_pretty(result)?,
+        &upload_budget_baseline_path(),
+        EvidenceWriteFault::None,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvidenceWriteFault {
+    #[cfg(test)]
+    AfterPartialWrite,
+    #[cfg(test)]
+    BeforeRename,
+    None,
+}
+
+fn upload_budget_baseline_path() -> PathBuf {
+    std::env::var_os("SUPRNOVA_LIVE_UPLOAD_BUDGET_BASELINE").map_or_else(
+        || PathBuf::from("browser/benchmarks/baselines/upload-budget-v1.json"),
+        PathBuf::from,
+    )
+}
+
+fn reject_evidence_alias(destination: &Path, protected: &Path) -> Result<(), Box<dyn Error>> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::other("upload evidence output has no parent"))?;
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(destination).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::other("checked baseline overwrite is forbidden").into());
     }
-    let temporary = temporary_path(&path);
-    fs::write(&temporary, serde_json::to_vec_pretty(result)?)?;
-    fs::rename(temporary, path)?;
+    let protected_canonical = fs::canonicalize(protected)?;
+    let destination_canonical = if destination.exists() {
+        fs::canonicalize(destination)?
+    } else {
+        fs::canonicalize(parent)?.join(
+            destination
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("upload evidence output has no filename"))?,
+        )
+    };
+    if destination_canonical == protected_canonical {
+        return Err(std::io::Error::other("checked baseline overwrite is forbidden").into());
+    }
+    #[cfg(unix)]
+    if destination.exists() {
+        use std::os::unix::fs::MetadataExt;
+
+        let destination_metadata = fs::metadata(destination)?;
+        let protected_metadata = fs::metadata(protected)?;
+        if destination_metadata.dev() == protected_metadata.dev()
+            && destination_metadata.ino() == protected_metadata.ino()
+        {
+            return Err(std::io::Error::other("checked baseline overwrite is forbidden").into());
+        }
+    }
     Ok(())
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_owned();
-    value.push(".tmp");
-    PathBuf::from(value)
+fn atomic_write_evidence(
+    destination: &Path,
+    contents: &[u8],
+    protected: &Path,
+    fault: EvidenceWriteFault,
+) -> Result<(), Box<dyn Error>> {
+    reject_evidence_alias(destination, protected)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::other("upload evidence output has no parent"))?;
+    let filename = destination
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| std::io::Error::other("upload evidence output filename is not UTF-8"))?;
+    let temporary = parent.join(format!(
+        ".{filename}.tmp-{}-{}",
+        std::process::id(),
+        EVIDENCE_TEMP_SEQUENCE.fetch_add(1, Ordering::SeqCst),
+    ));
+    let outcome = (|| -> Result<(), Box<dyn Error>> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        #[cfg(test)]
+        if fault == EvidenceWriteFault::AfterPartialWrite {
+            file.write_all(&contents[..contents.len().div_ceil(2)])?;
+            return Err(std::io::Error::other("injected partial evidence write").into());
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(test)]
+        if fault == EvidenceWriteFault::BeforeRename {
+            return Err(std::io::Error::other("injected evidence rename failure").into());
+        }
+        #[cfg(not(test))]
+        let _ = fault;
+        fs::rename(&temporary, destination)?;
+        OpenOptions::new().read(true).open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if outcome.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    outcome
 }
 
 fn read_labeled_value(path: &str, label: &str) -> Option<String> {
@@ -1475,11 +1993,31 @@ mod integrity_tests {
             snapshot.manager_owned_categories.provider_owned_transfers,
             4
         );
-        assert_eq!(snapshot.manager_owned_bytes, 4_240);
+        assert_eq!(
+            snapshot
+                .manager_owned_categories
+                .provider_accepted_chunk_records,
+            ACTIVE_TRANSFERS * 63
+        );
+        assert_eq!(snapshot.manager_owned_bytes, 52_624);
         assert_eq!(
             snapshot.retained_bytes,
-            ACTIVE_TRANSFERS * (CHUNK_BYTES + 64 * 1024) + 4_240
+            ACTIVE_TRANSFERS * (CHUNK_BYTES + 64 * 1024) + 52_624
         );
+        assert_eq!(snapshot.completed_transfers.len(), ACTIVE_TRANSFERS);
+        assert!(snapshot.completed_transfers.iter().all(|transfer| {
+            transfer.accepted_chunks == FILE_BYTES / CHUNK_BYTES
+                && transfer.accepted_bytes == FILE_BYTES
+                && transfer.provider_checkpoint_chunks == FILE_BYTES / CHUNK_BYTES
+                && transfer.provider_committed_bytes == FILE_BYTES
+                && transfer.final_revision == 71
+                && transfer.duplicate_disposition == "existing_outcome"
+        }));
+        assert_eq!(
+            snapshot.completed_chunks,
+            ACTIVE_TRANSFERS * FILE_BYTES / CHUNK_BYTES
+        );
+        assert_eq!(snapshot.completed_bytes, ACTIVE_TRANSFERS * FILE_BYTES);
         assert!(!snapshot.exceeds_resource_ceiling());
     }
 
@@ -1542,5 +2080,110 @@ mod integrity_tests {
         assert!(five.manager_owned_bytes > four.manager_owned_bytes);
         assert!(five.retained_bytes > four.retained_bytes);
         assert!(five.max_queue_depth > four.max_queue_depth);
+    }
+
+    #[tokio::test]
+    async fn accepted_chunk_cardinality_is_actual_provider_metadata_and_can_trip_the_cap() {
+        let observed = measure_provider_accepted_metadata(
+            UploadLimits::new(UploadLimitConfig::reference()).expect("reference limits"),
+            4_096,
+        )
+        .await
+        .expect("actual provider metadata workload");
+
+        assert_eq!(observed.accepted_chunk_records, 4_096);
+        assert_eq!(observed.accepted_bytes, 4_096);
+        assert!(observed.manager_owned_bytes > 512 * 1024);
+        assert!(observed.exceeds_resource_ceiling());
+    }
+
+    #[tokio::test]
+    async fn pre_body_failure_is_bounded_and_reclaims_every_owned_resource() {
+        let failure = run_server_resource_workload_with_watchdog(
+            ResourceWorkloadMutation::PreBodyFailure,
+            64,
+        )
+        .await
+        .expect_err("pre-body failure must be terminal");
+
+        assert_eq!(failure.kind(), ResourceBenchmarkFailureKind::TaskFailed);
+        assert_eq!(failure.residual_tasks(), 0);
+        assert_eq!(failure.residual_pending_operations(), 0);
+        assert_eq!(failure.residual_service_permits(), 0);
+        assert_eq!(failure.residual_provider_resources(), 0);
+    }
+
+    #[test]
+    fn server_evidence_write_is_atomic_and_never_aliases_the_checked_baseline() {
+        let root = std::env::temp_dir().join(format!(
+            "suprnova-upload-evidence-{}-{}",
+            std::process::id(),
+            EVIDENCE_TEMP_SEQUENCE.fetch_add(1, Ordering::SeqCst),
+        ));
+        fs::create_dir_all(&root).expect("temporary evidence directory");
+        let baseline = root.join("baseline.json");
+        let output = root.join("candidate.json");
+        fs::write(&baseline, b"baseline\n").expect("baseline fixture");
+        fs::write(&output, b"old\n").expect("candidate fixture");
+
+        let partial = atomic_write_evidence(
+            &output,
+            b"new\n",
+            &baseline,
+            EvidenceWriteFault::AfterPartialWrite,
+        );
+        assert!(partial.is_err());
+        assert_eq!(fs::read(&output).expect("preserved candidate"), b"old\n");
+        assert_eq!(
+            fs::read(&baseline).expect("preserved baseline"),
+            b"baseline\n"
+        );
+
+        let before_rename = atomic_write_evidence(
+            &output,
+            b"new\n",
+            &baseline,
+            EvidenceWriteFault::BeforeRename,
+        );
+        assert!(before_rename.is_err());
+        assert_eq!(fs::read(&output).expect("preserved candidate"), b"old\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let hardlink = root.join("hardlink.json");
+            fs::hard_link(&baseline, &hardlink).expect("hardlink fixture");
+            assert!(
+                atomic_write_evidence(
+                    &hardlink,
+                    b"forbidden\n",
+                    &baseline,
+                    EvidenceWriteFault::None,
+                )
+                .is_err()
+            );
+
+            let symlink_output = root.join("symlink.json");
+            symlink(&baseline, &symlink_output).expect("symlink fixture");
+            assert!(
+                atomic_write_evidence(
+                    &symlink_output,
+                    b"forbidden\n",
+                    &baseline,
+                    EvidenceWriteFault::None,
+                )
+                .is_err()
+            );
+        }
+
+        atomic_write_evidence(&output, b"new\n", &baseline, EvidenceWriteFault::None)
+            .expect("safe atomic output");
+        assert_eq!(fs::read(&output).expect("new candidate"), b"new\n");
+        assert_eq!(
+            fs::read(&baseline).expect("preserved baseline"),
+            b"baseline\n"
+        );
+        fs::remove_dir_all(root).expect("temporary evidence cleanup");
     }
 }

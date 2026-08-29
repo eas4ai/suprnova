@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
@@ -10,7 +12,11 @@ import {
   estimateUploadManagerOwnedBytes,
   UploadTransferChunkObserver,
 } from "../benchmarks/upload-accounting.js";
-import { argumentsFrom } from "../scripts/run-upload-budget.mjs";
+import {
+  ControlledImmediateReceiptWaves,
+  ImmediateUploadTransport,
+} from "../benchmarks/upload-workloads.js";
+import { argumentsFrom, atomicWriteEvidence } from "../scripts/run-upload-budget.mjs";
 
 const execFileAsync = promisify(execFile);
 const runnerUrl = new URL("../scripts/run-upload-budget.mjs", import.meta.url).href;
@@ -119,6 +125,72 @@ describe("U4/16 benchmark integrity", () => {
     expect(snapshot.chunkBuffersByTransfer[0]?.totalHighWater).toBe(3);
   });
 
+  it("tracks every same-handle transport operation by token through out-of-order completion", async () => {
+    const releases = new Map<string, () => void>();
+    const transport = new ImmediateUploadTransport(
+      (_request, token) =>
+        new Promise<void>((resolve) => {
+          releases.set(token, resolve);
+        }),
+    );
+    const created = await transport.send({ operation: "create" });
+    const handle = created.handle;
+    if (handle === undefined) throw new Error("fixture_handle_missing");
+    const pending = Array.from({ length: 3 }, () =>
+      transport.send({
+        bytes: new ArrayBuffer(256 * 1024),
+        expectedRevision: "1",
+        handle,
+        operation: "put_chunk",
+      }),
+    );
+    await Promise.resolve();
+
+    expect(releases.size).toBe(3);
+    expect(transport.activeChunksByTransfer()).toEqual([
+      { buffers: 3, bytes: 3 * 256 * 1024, handle },
+    ]);
+    expect(transport.maximumConcurrentOperations()).toBe(3);
+    expect(transport.maximumConcurrentTransfers()).toBe(1);
+
+    const tokens = [...releases.keys()];
+    releases.get(tokens[1] ?? "")?.();
+    await pending[1];
+    expect(transport.activeChunksByTransfer()).toEqual([
+      { buffers: 2, bytes: 2 * 256 * 1024, handle },
+    ]);
+    releases.get(tokens[0] ?? "")?.();
+    releases.get(tokens[2] ?? "")?.();
+    await Promise.all(pending);
+    expect(transport.activeChunksByTransfer()).toEqual([]);
+    expect(transport.activeOperationCount()).toBe(0);
+  });
+
+  it("holds controlled immediate receipts until four distinct transfers are in flight", async () => {
+    const receipts = new ControlledImmediateReceiptWaves(4);
+    const transport = new ImmediateUploadTransport((request, token) =>
+      receipts.wait(request, token),
+    );
+    const creations = await Promise.all(
+      Array.from({ length: 4 }, () => transport.send({ operation: "create" })),
+    );
+    const pending = creations.map(({ handle }) => {
+      if (handle === undefined) throw new Error("fixture_handle_missing");
+      return transport.send({
+        bytes: new ArrayBuffer(256 * 1024),
+        expectedRevision: "1",
+        handle,
+        operation: "put_chunk",
+      });
+    });
+    await Promise.resolve();
+
+    expect(transport.maximumConcurrentOperations()).toBe(4);
+    expect(transport.maximumConcurrentTransfers()).toBe(4);
+    await Promise.all(pending);
+    expect(transport.activeOperationCount()).toBe(0);
+  });
+
   it("loads the artifact namespace and passes it into the workload", async () => {
     const runner = await readFile(
       new URL("../scripts/run-upload-budget.mjs", import.meta.url),
@@ -191,5 +263,99 @@ describe("U4/16 benchmark integrity", () => {
       }
     `);
     expect(output).toBe("corruption-rejected");
+  });
+
+  it("bounds a never-completing artifact workload and closes its browser context", async () => {
+    const output = await nativeRunner(`
+      import { chromium } from "@playwright/test";
+      import { bundledModule, measureRun } from ${JSON.stringify(runnerUrl)};
+      const workload = await bundledModule(
+        "benchmarks/upload-workloads.ts",
+        "browser",
+        "iife",
+        "SuprnovaUploadBudget",
+      );
+      const neverCompletes = \`
+        export function configureUploads() {}
+        export const uploadsFeature = Object.freeze([
+          Symbol.for("suprnova.live.feature.v1"),
+          0,
+          1,
+          1099511758848,
+          Object.freeze({}),
+          () => true,
+        ]);
+      \`;
+      const browser = await chromium.launch({ headless: true });
+      try {
+        try {
+          await measureRun(browser, neverCompletes, workload.source, { watchdogMilliseconds: 25 });
+          throw new Error("never_completing_workload_succeeded");
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("upload_budget_browser_watchdog")) {
+            throw error;
+          }
+        }
+        if (browser.contexts().length !== 0) throw new Error("browser_context_leaked");
+        process.stdout.write("watchdog-clean");
+      } finally {
+        await browser.close();
+      }
+    `);
+    expect(output).toBe("watchdog-clean");
+  });
+
+  it("writes evidence atomically and rejects canonical baseline aliases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "suprnova-upload-budget-"));
+    try {
+      const baselineDirectory = join(root, "checked");
+      const baseline = join(baselineDirectory, "baseline.json");
+      const output = join(root, "candidate.json");
+      await writeFile(baseline, "baseline\n", { encoding: "utf8", flag: "wx" }).catch(
+        async (error: unknown) => {
+          if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
+            throw error;
+          const { mkdir } = await import("node:fs/promises");
+          await mkdir(baselineDirectory, { recursive: true });
+          await writeFile(baseline, "baseline\n", { encoding: "utf8", flag: "wx" });
+        },
+      );
+      await writeFile(output, "old\n", "utf8");
+
+      await expect(
+        atomicWriteEvidence(output, "new\n", baseline, { failStage: "after_partial_write" }),
+      ).rejects.toThrow("evidence_write_failed");
+      expect(await readFile(output, "utf8")).toBe("old\n");
+      expect(await readFile(baseline, "utf8")).toBe("baseline\n");
+
+      await expect(
+        atomicWriteEvidence(output, "new\n", baseline, { failStage: "before_rename" }),
+      ).rejects.toThrow("evidence_rename_failed");
+      expect(await readFile(output, "utf8")).toBe("old\n");
+
+      const hardlink = join(root, "hardlink.json");
+      await link(baseline, hardlink);
+      await expect(atomicWriteEvidence(hardlink, "new\n", baseline)).rejects.toThrow(
+        "baseline_overwrite_forbidden",
+      );
+
+      const aliasParent = join(root, "alias");
+      await symlink(baselineDirectory, aliasParent, "dir");
+      await expect(
+        atomicWriteEvidence(join(aliasParent, "baseline.json"), "new\n", baseline),
+      ).rejects.toThrow("baseline_overwrite_forbidden");
+
+      const symlinkOutput = join(root, "symlink.json");
+      await symlink(baseline, symlinkOutput);
+      await expect(atomicWriteEvidence(symlinkOutput, "new\n", baseline)).rejects.toThrow(
+        "baseline_overwrite_forbidden",
+      );
+
+      await atomicWriteEvidence(output, "new\n", baseline);
+      expect(await readFile(output, "utf8")).toBe("new\n");
+      expect(await readFile(baseline, "utf8")).toBe("baseline\n");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 });

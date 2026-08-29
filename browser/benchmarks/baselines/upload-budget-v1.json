@@ -27,7 +27,7 @@
         "playwrightVersion": "1.62.1",
         "profile": "B1",
         "qualificationRequirementsMet": false,
-        "selectedCpuCount": 8,
+        "selectedCpuCount": 32,
         "viewport": {
           "height": 720,
           "width": 1280
@@ -38,10 +38,10 @@
         "activeTransfers": 4,
         "chunkBuffersByTransfer": [
           {
-            "currentBytes": 0,
-            "currentManagerBuffers": 0,
-            "currentTotalBuffers": 0,
-            "currentTransportBuffers": 0,
+            "currentBytes": 524288,
+            "currentManagerBuffers": 1,
+            "currentTotalBuffers": 2,
+            "currentTransportBuffers": 1,
             "handle": "018f47c1-2af0-7cc4-a001-000000000001",
             "managerHighWater": 1,
             "managerHighWaterBytes": 262144,
@@ -51,10 +51,10 @@
             "transportHighWaterBytes": 262144
           },
           {
-            "currentBytes": 0,
-            "currentManagerBuffers": 0,
-            "currentTotalBuffers": 0,
-            "currentTransportBuffers": 0,
+            "currentBytes": 524288,
+            "currentManagerBuffers": 1,
+            "currentTotalBuffers": 2,
+            "currentTransportBuffers": 1,
             "handle": "018f47c1-2af0-7cc4-a001-000000000002",
             "managerHighWater": 1,
             "managerHighWaterBytes": 262144,
@@ -64,10 +64,10 @@
             "transportHighWaterBytes": 262144
           },
           {
-            "currentBytes": 0,
-            "currentManagerBuffers": 0,
-            "currentTotalBuffers": 0,
-            "currentTransportBuffers": 0,
+            "currentBytes": 524288,
+            "currentManagerBuffers": 1,
+            "currentTotalBuffers": 2,
+            "currentTransportBuffers": 1,
             "handle": "018f47c1-2af0-7cc4-a001-000000000003",
             "managerHighWater": 1,
             "managerHighWaterBytes": 262144,
@@ -90,9 +90,9 @@
             "transportHighWaterBytes": 262144
           }
         ],
-        "liveChunkBuffers": 2,
-        "managerChunkBuffers": 1,
-        "managerOwnedBytes": 10418,
+        "liveChunkBuffers": 8,
+        "managerChunkBuffers": 4,
+        "managerOwnedBytes": 10856,
         "managerOwnedCategories": {
           "activeLeases": 4,
           "bindings": 1,
@@ -101,26 +101,29 @@
           "generationFields": 1,
           "observers": 1,
           "ownedResources": 4,
-          "pendingChunkBuffers": 1,
-          "pendingChunkBytes": 262144,
+          "pendingChunkBuffers": 4,
+          "pendingChunkBytes": 1048576,
           "queuedBytes": 0,
           "queuedItems": 0,
-          "retainedStringCodeUnits": 505,
+          "retainedStringCodeUnits": 724,
           "waitingPermits": 0
         },
+        "maxActiveManagerTransfers": 4,
         "maxChunksPerTransfer": 2,
-        "maxConcurrentTransfers": 4,
         "maxQueueDepth": 4,
+        "maxSimultaneousTransportOperations": 4,
+        "maxSimultaneousTransportTransfers": 4,
         "progressP50Milliseconds": 0,
         "progressP95Milliseconds": 0.5,
-        "retainedBytes": 534706,
+        "retainedBytes": 2108008,
         "slicedBytes": 67108864,
         "slices": 256,
-        "transportChunkBuffers": 1
+        "transportChunkBuffers": 4
       },
       "methodology": {
         "independentRuns": 1,
         "measuredSamples": 267,
+        "regressionReference": "median_run_p95_v1",
         "warmupIterations": 5
       },
       "runs": [
@@ -141,7 +144,7 @@
             "playwrightVersion": "1.62.1",
             "profile": "B1",
             "qualificationRequirementsMet": false,
-            "selectedCpuCount": 8,
+            "selectedCpuCount": 32,
             "viewport": {
               "height": 720,
               "width": 1280
@@ -152,10 +155,10 @@
             "activeTransfers": 4,
             "chunkBuffersByTransfer": [
               {
-                "currentBytes": 0,
-                "currentManagerBuffers": 0,
-                "currentTotalBuffers": 0,
-                "currentTransportBuffers": 0,
+                "currentBytes": 524288,
+                "currentManagerBuffers": 1,
+                "currentTotalBuffers": 2,
+                "currentTransportBuffers": 1,
                 "handle": "018f47c1-2af0-7cc4-a001-000000000001",
                 "managerHighWater": 1,
                 "managerHighWaterBytes": 262144,
@@ -165,10 +168,10 @@
                 "transportHighWaterBytes": 262144
               },
               {
-                "currentBytes": 0,
-                "currentManagerBuffers": 0,
-                "currentTotalBuffers": 0,
-                "currentTransportBuffers": 0,
+                "currentBytes": 524288,
+                "currentManagerBuffers": 1,
+                "currentTotalBuffers": 2,
+                "currentTransportBuffers": 1,
                 "handle": "018f47c1-2af0-7cc4-a001-000000000002",
                 "managerHighWater": 1,
                 "managerHighWaterBytes": 262144,
@@ -178,10 +181,10 @@
                 "transportHighWaterBytes": 262144
               },
               {
-                "currentBytes": 0,
-                "currentManagerBuffers": 0,
-                "currentTotalBuffers": 0,
-                "currentTransportBuffers": 0,
+                "currentBytes": 524288,
+                "currentManagerBuffers": 1,
+                "currentTotalBuffers": 2,
+                "currentTransportBuffers": 1,
                 "handle": "018f47c1-2af0-7cc4-a001-000000000003",
                 "managerHighWater": 1,
                 "managerHighWaterBytes": 262144,
@@ -204,9 +207,9 @@
                 "transportHighWaterBytes": 262144
               }
             ],
-            "liveChunkBuffers": 2,
-            "managerChunkBuffers": 1,
-            "managerOwnedBytes": 10418,
+            "liveChunkBuffers": 8,
+            "managerChunkBuffers": 4,
+            "managerOwnedBytes": 10856,
             "managerOwnedCategories": {
               "activeLeases": 4,
               "bindings": 1,
@@ -215,52 +218,52 @@
               "generationFields": 1,
               "observers": 1,
               "ownedResources": 4,
-              "pendingChunkBuffers": 1,
-              "pendingChunkBytes": 262144,
+              "pendingChunkBuffers": 4,
+              "pendingChunkBytes": 1048576,
               "queuedBytes": 0,
               "queuedItems": 0,
-              "retainedStringCodeUnits": 505,
+              "retainedStringCodeUnits": 724,
               "waitingPermits": 0
             },
+            "maxActiveManagerTransfers": 4,
             "maxChunksPerTransfer": 2,
-            "maxConcurrentTransfers": 4,
             "maxQueueDepth": 4,
+            "maxSimultaneousTransportOperations": 4,
+            "maxSimultaneousTransportTransfers": 4,
             "progressDurationsMilliseconds": [
-              0, 0, 0, 0, 0.4000000059604645, 0, 0, 0, 0, 0, 0.09999999403953552,
-              0.29999999701976776, 0, 0, 0, 0.5, 0.5, 0.09999999403953552, 0, 0, 0, 0, 0, 0,
-              0.20000000298023224, 2.2999999970197678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.5999999940395355, 0, 0, 0, 0.5, 0.10000000894069672, 0.29999999701976776, 0, 0, 0,
-              0, 0, 0, 0, 0.09999999403953552, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-              0, 0, 0.19999998807907104, 0, 0.09999999403953552, 0.5999999940395355, 0,
+              0.09999999403953552, 0, 0, 0, 0.7000000029802322, 0, 0, 0, 0, 0.5, 0,
+              0.09999999403953552, 0, 0, 0, 0, 0.5, 0, 0.29999999701976776, 0, 0, 0, 0, 0,
+              2.7000000029802322, 0.7000000029802322, 0, 0, 0, 0, 0.10000000894069672, 0,
+              0.09999999403953552, 0.7000000029802322, 0, 0, 0, 0.09999999403953552, 0,
+              0.10000000894069672, 0, 0, 0.29999999701976776, 0.20000000298023224,
+              0.09999999403953552, 0.5, 0, 0.20000000298023224, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.4000000059604645, 0, 0, 0.10000000894069672, 0, 0, 0, 0.09999999403953552, 0, 0, 0,
+              0, 0.10000000894069672, 0, 0, 0.09999999403953552, 0, 0, 0, 0, 0, 0.10000000894069672,
+              0.10000000894069672, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0, 0,
+              0, 0, 0, 0, 0, 0, 0, 0, 0.10000000894069672, 0, 0, 0, 0, 0.5999999940395355, 0, 0, 0,
+              0, 0, 0, 0.5, 0.09999999403953552, 0.10000000894069672, 0.6000000089406967,
+              0.09999999403953552, 0.09999999403953552, 0.09999999403953552, 0, 0.5,
+              0.10000000894069672, 0, 0, 0, 0.7999999970197678, 0, 0.09999999403953552,
+              0.4000000059604645, 0, 0, 0.5999999940395355, 0.10000000894069672,
+              0.09999999403953552, 0, 0, 0, 0.09999999403953552, 0, 0.09999999403953552, 0, 0, 0, 0,
+              0.29999999701976776, 0, 0, 0, 0, 0.5, 0, 0, 0.20000000298023224, 0,
+              0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0.10000000894069672, 0, 0,
+              0.09999999403953552, 0, 1.9000000059604645, 0, 0, 0, 0.5, 0.09999999403953552, 0, 0,
+              0, 0, 0, 0.3999999910593033, 0.10000000894069672, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
               0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0.5999999940395355, 0,
-              0.09999999403953552, 0.5, 0, 0, 0.29999999701976776, 0, 0, 0, 0, 0, 0,
-              0.10000000894069672, 0, 0, 0.5999999940395355, 0.3999999910593033, 0, 0, 0,
-              0.20000000298023224, 0.10000000894069672, 0.09999999403953552, 0, 0.10000000894069672,
-              0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0, 0.10000000894069672, 0,
-              0, 0, 0.5, 0, 0.09999999403953552, 0.7999999970197678, 0, 0, 0, 0, 0, 0, 0, 0,
-              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0.20000000298023224, 0, 0.4000000059604645,
-              0.20000000298023224, 0, 0.5, 0.29999999701976776, 0.10000000894069672, 0,
-              0.10000000894069672, 0, 0.09999999403953552, 0.7999999970197678, 0, 0, 0, 0, 0, 0, 0,
-              0, 0, 0.09999999403953552, 0.10000000894069672, 0, 0, 2.5999999940395355, 0,
-              0.09999999403953552, 0, 0.6000000089406967, 0.09999999403953552, 0,
-              0.10000000894069672, 0, 0, 0, 0, 0, 0.4000000059604645, 0.7000000029802322,
-              0.10000000894069672, 0.09999999403953552, 0.10000000894069672, 0, 0,
-              0.09999999403953552, 0, 0.20000000298023224, 0, 0.29999999701976776,
-              0.09999999403953552, 0, 0, 0.10000000894069672, 0.29999999701976776, 0, 0.5, 0, 0, 0,
-              0.4000000059604645, 0, 0, 0, 0, 0, 0, 0.29999999701976776, 0.20000000298023224, 0,
-              0.5, 0, 0, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0, 0, 0.7000000029802322,
-              0.09999999403953552, 0, 0, 0, 0, 0, 0.09999999403953552, 0, 0.5, 0, 0, 0, 0, 0, 0, 0,
-              0, 0, 0, 0.09999999403953552, 0, 0.10000000894069672, 0, 0, 0.4000000059604645,
-              0.09999999403953552, 0.29999999701976776, 0.09999999403953552, 0.09999999403953552, 0,
-              0.20000000298023224, 0, 0, 0, 0, 0, 0.09999999403953552, 0.7000000029802322, 0,
-              0.7000000029802322
+              0.09999999403953552, 0, 0, 0, 0, 0, 0, 0, 0, 0.3999999910593033, 0, 0, 0, 0,
+              0.10000000894069672, 0, 0.3999999910593033, 0, 0, 0, 0.5, 0, 0.10000000894069672,
+              0.6000000089406967, 0, 0.10000000894069672, 0.7000000029802322, 0.09999999403953552,
+              0, 0, 0, 0, 0, 0, 0, 0, 0.4000000059604645, 0, 0, 0, 0.3999999910593033, 0, 0, 0, 0,
+              0.20000000298023224, 0, 0.29999999701976776, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0.09999999403953552, 0, 0, 0, 0
             ],
             "progressP50Milliseconds": 0,
             "progressP95Milliseconds": 0.5,
-            "retainedBytes": 534706,
+            "retainedBytes": 2108008,
             "slicedBytes": 67108864,
             "slices": 256,
-            "transportChunkBuffers": 1
+            "transportChunkBuffers": 4
           },
           "methodology": {
             "measuredSamples": 267,
@@ -282,7 +285,7 @@
         "files": 4
       }
     },
-    "recordedAt": "2026-08-29T12:56:19.419Z",
+    "recordedAt": "2026-08-29T14:16:08.288Z",
     "schemaVersion": 1,
     "server": {
       "bounds": {
@@ -354,6 +357,46 @@
             "totalHighWaterBytes": 327680
           }
         ],
+        "completedBytes": 67108864,
+        "completedChunks": 256,
+        "completedTransfers": [
+          {
+            "acceptedBytes": 16777216,
+            "acceptedChunks": 64,
+            "duplicateDisposition": "existing_outcome",
+            "finalRevision": 71,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000000",
+            "providerCheckpointChunks": 64,
+            "providerCommittedBytes": 16777216
+          },
+          {
+            "acceptedBytes": 16777216,
+            "acceptedChunks": 64,
+            "duplicateDisposition": "existing_outcome",
+            "finalRevision": 71,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000001",
+            "providerCheckpointChunks": 64,
+            "providerCommittedBytes": 16777216
+          },
+          {
+            "acceptedBytes": 16777216,
+            "acceptedChunks": 64,
+            "duplicateDisposition": "existing_outcome",
+            "finalRevision": 71,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000002",
+            "providerCheckpointChunks": 64,
+            "providerCommittedBytes": 16777216
+          },
+          {
+            "acceptedBytes": 16777216,
+            "acceptedChunks": 64,
+            "duplicateDisposition": "existing_outcome",
+            "finalRevision": 71,
+            "handle": "018f47c1-2af0-7cc4-b001-000000000003",
+            "providerCheckpointChunks": 64,
+            "providerCommittedBytes": 16777216
+          }
+        ],
         "excludedCalls": {
           "applicationValidation": 0,
           "bodyIo": 0,
@@ -361,9 +404,10 @@
           "scanner": 0
         },
         "liveChunkBuffers": 8,
-        "managerOwnedBytes": 4240,
+        "managerOwnedBytes": 52624,
         "managerOwnedCategories": {
           "activeServicePermits": 4,
+          "providerAcceptedChunkRecords": 252,
           "providerActiveChunks": 4,
           "providerActiveDescriptors": 4,
           "providerActiveOperations": 4,
@@ -375,9 +419,9 @@
         "maxChunksPerTransfer": 2,
         "maxConcurrentTransfers": 4,
         "maxQueueDepth": 4,
-        "p50Microseconds": 15.424,
-        "p95Microseconds": 16.503,
-        "retainedBytes": 1314960
+        "p50Microseconds": 15.633000000000001,
+        "p95Microseconds": 16.323,
+        "retainedBytes": 1363344
       },
       "methodology": {
         "measuredSamples": 40,

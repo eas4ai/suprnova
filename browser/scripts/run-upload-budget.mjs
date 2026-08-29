@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { arch, cpus, platform, release, totalmem } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
@@ -18,7 +18,7 @@ const DEFAULT_SERVER = resolve(repositoryRoot, "benchmarks/local/upload-server-v
 const OBSERVER_MARKER = "suprnova-upload-budget-observer-v1";
 const MAX_JSON_BYTES = 1_048_576;
 
-class UploadBudgetRunnerError extends Error {
+export class UploadBudgetRunnerError extends Error {
   constructor(code) {
     super(code);
     this.code = code;
@@ -27,6 +27,88 @@ class UploadBudgetRunnerError extends Error {
 
 function fail(code) {
   throw new UploadBudgetRunnerError(code);
+}
+
+async function optionalMetadata(path, operation) {
+  try {
+    return await operation(path);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function rejectBaselineAlias(destination, protectedPath) {
+  if (protectedPath === null) return;
+  await mkdir(dirname(destination), { recursive: true });
+  const destinationLink = await optionalMetadata(destination, lstat);
+  if (destinationLink?.isSymbolicLink()) fail("baseline_overwrite_forbidden");
+  const protectedReal = await realpath(protectedPath);
+  const destinationReal =
+    destinationLink === null
+      ? join(await realpath(dirname(destination)), basename(destination))
+      : await realpath(destination);
+  if (destinationReal === protectedReal) fail("baseline_overwrite_forbidden");
+  const destinationStat = await optionalMetadata(destination, stat);
+  const protectedStat = await stat(protectedPath);
+  if (
+    destinationStat !== null &&
+    destinationStat.dev === protectedStat.dev &&
+    destinationStat.ino === protectedStat.ino
+  ) {
+    fail("baseline_overwrite_forbidden");
+  }
+}
+
+export async function atomicWriteEvidence(
+  destination,
+  contents,
+  protectedPath,
+  { failStage = "none" } = {},
+) {
+  await rejectBaselineAlias(destination, protectedPath);
+  const parent = dirname(destination);
+  await mkdir(parent, { recursive: true });
+  const temporary = join(
+    parent,
+    `.${basename(destination)}.tmp-${String(process.pid)}-${randomBytes(8).toString("hex")}`,
+  );
+  let handle;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    if (failStage === "after_partial_write") {
+      const bytes = Buffer.from(contents);
+      await handle.writeFile(bytes.subarray(0, Math.max(1, Math.floor(bytes.byteLength / 2))));
+      fail("evidence_write_failed");
+    }
+    await handle.writeFile(contents);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    if (failStage === "before_rename") fail("evidence_rename_failed");
+    await rename(temporary, destination);
+    try {
+      const directory = await open(parent, "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        !["EINVAL", "ENOTSUP", "EISDIR"].includes(error.code)
+      ) {
+        throw error;
+      }
+    }
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+    await unlink(temporary).catch((error) => {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+    });
+  }
 }
 
 export function argumentsFrom(argv) {
@@ -175,7 +257,12 @@ async function browserEnvironment(browser, dedicated) {
   });
 }
 
-export async function measureRun(browser, artifactSource, workloadSource) {
+export async function measureRun(
+  browser,
+  artifactSource,
+  workloadSource,
+  { watchdogMilliseconds = 60_000 } = {},
+) {
   const context = await browser.newContext({ viewport: { height: 720, width: 1280 } });
   const page = await context.newPage();
   const session = await context.newCDPSession(page);
@@ -191,7 +278,7 @@ export async function measureRun(browser, artifactSource, workloadSource) {
       });
     }, artifactSource);
     await page.addScriptTag({ content: workloadSource });
-    return await page.evaluate(async () => {
+    const measurement = page.evaluate(async () => {
       const benchmark = globalThis.SuprnovaUploadBudget;
       if (benchmark?.UPLOAD_BUDGET_OBSERVER_MARKER !== "suprnova-upload-budget-observer-v1") {
         throw new Error("upload_budget_observer_missing");
@@ -199,6 +286,18 @@ export async function measureRun(browser, artifactSource, workloadSource) {
       const artifactNamespace = Reflect.get(globalThis, "SuprnovaUploadBudgetArtifact");
       return benchmark.measureU4_16(artifactNamespace);
     });
+    let watchdog;
+    const deadline = new Promise((_, reject) => {
+      watchdog = setTimeout(
+        () => reject(new UploadBudgetRunnerError("upload_budget_browser_watchdog")),
+        watchdogMilliseconds,
+      );
+    });
+    try {
+      return await Promise.race([measurement, deadline]);
+    } finally {
+      clearTimeout(watchdog);
+    }
   } finally {
     await session.detach();
     await context.close();
@@ -325,9 +424,11 @@ async function main() {
         managerChunkBuffers: chunkHighWater.managerChunkBuffers,
         managerOwnedBytes: maximum(runs, "managerOwnedBytes"),
         managerOwnedCategories: managerHighWater.managerOwnedCategories,
+        maxActiveManagerTransfers: maximum(runs, "maxActiveManagerTransfers"),
         maxChunksPerTransfer: maximum(runs, "maxChunksPerTransfer"),
-        maxConcurrentTransfers: maximum(runs, "maxConcurrentTransfers"),
         maxQueueDepth: maximum(runs, "maxQueueDepth"),
+        maxSimultaneousTransportOperations: maximum(runs, "maxSimultaneousTransportOperations"),
+        maxSimultaneousTransportTransfers: maximum(runs, "maxSimultaneousTransportTransfers"),
         progressP50Milliseconds: progress.p50,
         progressP95Milliseconds: progress.p95,
         retainedBytes: maximum(runs, "retainedBytes"),
@@ -338,6 +439,7 @@ async function main() {
       methodology: {
         independentRuns: runsRequired,
         measuredSamples: progressSamples.length,
+        regressionReference: "median_run_p95_v1",
         warmupIterations: 5,
       },
       runs: runs.map((run, index) => ({
@@ -350,9 +452,11 @@ async function main() {
           managerChunkBuffers: run.managerChunkBuffers,
           managerOwnedBytes: run.managerOwnedBytes,
           managerOwnedCategories: run.managerOwnedCategories,
+          maxActiveManagerTransfers: run.maxActiveManagerTransfers,
           maxChunksPerTransfer: run.maxChunksPerTransfer,
-          maxConcurrentTransfers: run.maxConcurrentTransfers,
           maxQueueDepth: run.maxQueueDepth,
+          maxSimultaneousTransportOperations: run.maxSimultaneousTransportOperations,
+          maxSimultaneousTransportTransfers: run.maxSimultaneousTransportTransfers,
           progressDurationsMilliseconds: run.progressDurationsMilliseconds,
           progressP50Milliseconds: run.progressP50Milliseconds,
           progressP95Milliseconds: run.progressP95Milliseconds,
@@ -416,9 +520,13 @@ async function main() {
       options.profile === "qualified" ? (baseline?.qualifiedBaseline ?? null) : null,
       { artifactSha256: result.artifact.sha256, release: options.profile === "qualified" },
     );
-    await writeFile(options.output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    await atomicWriteEvidence(
+      options.output,
+      `${JSON.stringify(result, null, 2)}\n`,
+      options.baseline,
+    );
     if (options.recordExploratory && evaluation.issues.length === 0 && baseline !== null) {
-      await writeFile(options.baseline, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
+      await atomicWriteEvidence(options.baseline, `${JSON.stringify(baseline, null, 2)}\n`, null);
     }
     process.stdout.write(
       `U4/16 upload budget classification=${evaluation.classification} browser_p50=${String(result.browser.measurements.progressP50Milliseconds)}ms browser_p95=${String(result.browser.measurements.progressP95Milliseconds)}ms server_p50=${String(result.server.measurements.p50Microseconds)}us server_p95=${String(result.server.measurements.p95Microseconds)}us chunks=${String(result.browser.measurements.liveChunkBuffers)} manager=${String(result.browser.measurements.managerOwnedBytes)}B artifact=${result.artifact.sha256} output=${options.output}\n`,

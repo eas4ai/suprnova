@@ -682,6 +682,34 @@ pub struct ProviderRetirementStatus {
     active_chunks: usize,
 }
 
+/// Exact bounded metadata ownership for one provider-held transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderTransferAccounting {
+    accepted_chunk_records: usize,
+    committed_bytes: u64,
+    pending_chunk: bool,
+}
+
+impl ProviderTransferAccounting {
+    /// Returns the accepted `BTreeMap` record cardinality.
+    #[must_use]
+    pub const fn accepted_chunk_records(self) -> usize {
+        self.accepted_chunk_records
+    }
+
+    /// Returns bytes represented by accepted provider metadata.
+    #[must_use]
+    pub const fn committed_bytes(self) -> u64 {
+        self.committed_bytes
+    }
+
+    /// Returns whether one conditional chunk record is currently pending.
+    #[must_use]
+    pub const fn pending_chunk(self) -> bool {
+        self.pending_chunk
+    }
+}
+
 impl ProviderRetirementStatus {
     /// Returns operations that still own an admission token.
     #[must_use]
@@ -1203,6 +1231,22 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             chunks: entry.chunks.clone(),
             committed_bytes: entry.committed_bytes,
             evidence: entry.evidence.clone(),
+        })
+    }
+
+    /// Returns exact count-only ownership evidence without exposing paths or payload bytes.
+    pub fn transfer_accounting(
+        &self,
+        handle: &UploadHandle,
+    ) -> Result<ProviderTransferAccounting, UploadError> {
+        let transfers = lock(&self.transfers);
+        let entry = transfers
+            .get(handle)
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        Ok(ProviderTransferAccounting {
+            accepted_chunk_records: entry.chunks.len(),
+            committed_bytes: entry.committed_bytes,
+            pending_chunk: entry.pending.is_some(),
         })
     }
 

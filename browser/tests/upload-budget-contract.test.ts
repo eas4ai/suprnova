@@ -104,9 +104,11 @@ function evidence(): Record<string, unknown> {
           retainedStringCodeUnits: 512,
           waitingPermits: 0,
         },
+        maxActiveManagerTransfers: 4,
         maxChunksPerTransfer: 2,
-        maxConcurrentTransfers: 4,
         maxQueueDepth: 4,
+        maxSimultaneousTransportOperations: 4,
+        maxSimultaneousTransportTransfers: 4,
         progressP50Milliseconds: 1,
         progressP95Milliseconds: 2,
         retainedBytes: 2 * 256 * 1024 + 10_432,
@@ -117,6 +119,7 @@ function evidence(): Record<string, unknown> {
       methodology: {
         independentRuns: 1,
         measuredSamples: 30,
+        regressionReference: "median_run_p95_v1",
         warmupIterations: 5,
       },
       workload: {
@@ -152,6 +155,17 @@ function evidence(): Record<string, unknown> {
       },
       measurements: {
         chunkBuffersByTransfer: serverChunkDistribution(),
+        completedBytes: 4 * 16 * 1024 * 1024,
+        completedChunks: 4 * 64,
+        completedTransfers: HANDLES.map((handle) => ({
+          acceptedBytes: 16 * 1024 * 1024,
+          acceptedChunks: 64,
+          duplicateDisposition: "existing_outcome",
+          finalRevision: 71,
+          handle,
+          providerCheckpointChunks: 64,
+          providerCommittedBytes: 16 * 1024 * 1024,
+        })),
         excludedCalls: {
           applicationValidation: 0,
           bodyIo: 0,
@@ -159,9 +173,10 @@ function evidence(): Record<string, unknown> {
           scanner: 0,
         },
         liveChunkBuffers: 8,
-        managerOwnedBytes: 4_240,
+        managerOwnedBytes: 52_624,
         managerOwnedCategories: {
           activeServicePermits: 4,
+          providerAcceptedChunkRecords: 252,
           providerActiveChunks: 4,
           providerActiveDescriptors: 4,
           providerActiveOperations: 4,
@@ -175,7 +190,7 @@ function evidence(): Record<string, unknown> {
         maxQueueDepth: 4,
         p50Microseconds: 50,
         p95Microseconds: 100,
-        retainedBytes: 4 * (256 * 1024 + 64 * 1024) + 4_240,
+        retainedBytes: 4 * (256 * 1024 + 64 * 1024) + 52_624,
       },
       methodology: {
         measuredSamples: 40,
@@ -687,6 +702,118 @@ describe("U4/16 evidence schema", () => {
     );
     expect(evaluation.issues).not.toContain("upload_budget:browser:progress_p95_regression");
     expect(evaluation.observations).toEqual([]);
+  });
+
+  it("compares every candidate run to one permutation-invariant baseline median", () => {
+    const baselineValue = evidence();
+    qualifyThreeRuns(baselineValue);
+    const baselineRuns = (baselineValue["browser"] as { runs: Record<string, unknown>[] }).runs;
+    const baselineP95 = [1.5, 2, 2.5];
+    baselineRuns.forEach((run, index) => {
+      const measurements = run["measurements"] as {
+        progressDurationsMilliseconds: number[];
+        progressP50Milliseconds: number;
+        progressP95Milliseconds: number;
+      };
+      const value = baselineP95[index] ?? 2;
+      measurements.progressDurationsMilliseconds.fill(value);
+      measurements.progressP50Milliseconds = value;
+      measurements.progressP95Milliseconds = value;
+    });
+    const baselineBrowser = baselineValue["browser"] as {
+      measurements: { progressP50Milliseconds: number; progressP95Milliseconds: number };
+    };
+    const baselineSummary = summarizeUploadSamples(
+      baselineRuns.flatMap(
+        (run) =>
+          (run["measurements"] as { progressDurationsMilliseconds: number[] })
+            .progressDurationsMilliseconds,
+      ),
+    );
+    baselineBrowser.measurements.progressP50Milliseconds = baselineSummary.p50;
+    baselineBrowser.measurements.progressP95Milliseconds = baselineSummary.p95;
+
+    const candidateValue = structuredClone(baselineValue);
+    const candidateRuns = (candidateValue["browser"] as { runs: Record<string, unknown>[] }).runs;
+    for (const run of candidateRuns) {
+      const measurements = run["measurements"] as {
+        progressDurationsMilliseconds: number[];
+        progressP50Milliseconds: number;
+        progressP95Milliseconds: number;
+      };
+      measurements.progressDurationsMilliseconds.fill(2.3);
+      measurements.progressP50Milliseconds = 2.3;
+      measurements.progressP95Milliseconds = 2.3;
+    }
+    const candidateBrowser = candidateValue["browser"] as {
+      measurements: { progressP50Milliseconds: number; progressP95Milliseconds: number };
+    };
+    candidateBrowser.measurements.progressP50Milliseconds = 2.3;
+    candidateBrowser.measurements.progressP95Milliseconds = 2.3;
+    const permutations = <T>(values: readonly T[]): T[][] =>
+      values.length === 0
+        ? [[]]
+        : values.flatMap((value, index) =>
+            permutations(values.filter((_, candidateIndex) => candidateIndex !== index)).map(
+              (tail) => [value, ...tail],
+            ),
+          );
+    const outcomes = new Set<string>();
+    for (const baselinePermutation of permutations(baselineRuns)) {
+      for (const candidatePermutation of permutations(candidateRuns)) {
+        const permutedBaseline = structuredClone(baselineValue);
+        (permutedBaseline["browser"] as { runs: Record<string, unknown>[] }).runs =
+          structuredClone(baselinePermutation);
+        const permutedCandidate = structuredClone(candidateValue);
+        (permutedCandidate["browser"] as { runs: Record<string, unknown>[] }).runs =
+          structuredClone(candidatePermutation);
+        const evaluation = evaluateUploadBudget(
+          validateUploadBudgetEvidence(permutedCandidate),
+          validateUploadBudgetEvidence(permutedBaseline),
+        );
+        outcomes.add(
+          JSON.stringify({
+            issues: evaluation.issues,
+            observations: evaluation.observations,
+          }),
+        );
+      }
+    }
+    expect(outcomes).toEqual(
+      new Set([
+        JSON.stringify({
+          issues: ["upload_budget:browser:progress_p95_regression"],
+          observations: ["upload_budget:browser:progress_p95_regression_3_of_3"],
+        }),
+      ]),
+    );
+  });
+
+  it("rejects serialized transport even when four manager leases are active", () => {
+    const serialized = nestedMutation((value) => {
+      const browser = value["browser"] as {
+        measurements: {
+          maxSimultaneousTransportOperations: number;
+          maxSimultaneousTransportTransfers: number;
+        };
+        runs: {
+          measurements: {
+            maxSimultaneousTransportOperations: number;
+            maxSimultaneousTransportTransfers: number;
+          };
+        }[];
+      };
+      for (const measurements of [
+        browser.measurements,
+        ...browser.runs.map((run) => run.measurements),
+      ]) {
+        measurements.maxSimultaneousTransportOperations = 1;
+        measurements.maxSimultaneousTransportTransfers = 1;
+      }
+    });
+    expect(() => validateUploadBudgetEvidence(serialized)).toThrow(
+      "upload_budget_evidence_invalid",
+    );
   });
 
   it("applies hard latency caps to every independent browser run", () => {
