@@ -12,6 +12,32 @@ export interface AsyncRetainedHeapMeasurement {
   readonly retainedBytes: number;
 }
 
+export interface AsyncSubscriptionOwnerObservation {
+  readonly authorizationBytes: number;
+  readonly currentPayloadBytes: number;
+  readonly currentPayloadOwners: number;
+  readonly id: string;
+  readonly queuedPayloadBytes: number;
+  readonly queuedPayloadOwners: number;
+}
+
+export interface AsyncPostWorkloadRetention {
+  readonly baseline: readonly AsyncHeapUsageSample[];
+  readonly cleanup: readonly AsyncHeapUsageSample[];
+  readonly cleanupResidualBytes: number;
+  readonly postWorkload: readonly AsyncHeapUsageSample[];
+  readonly sharedAmortizedBytes: number;
+  readonly sharedStructuralBytes: number;
+  readonly subscriptions: readonly Readonly<
+    AsyncSubscriptionOwnerObservation & {
+      readonly ownedBytes: number;
+      readonly retainedBytes: number;
+    }
+  >[];
+  readonly totalOwnedBytes: number;
+  readonly totalRetainedBytes: number;
+}
+
 export interface AsyncSampleSummary {
   readonly durationsMilliseconds: readonly number[];
   readonly p50Milliseconds: number;
@@ -48,6 +74,82 @@ export function deriveRetainedHeapMeasurement(
   const retainedBytes = Math.max(...after.map(heapBytes)) - Math.min(...before.map(heapBytes));
   if (!boundedInteger(retainedBytes)) throw new Error("async_heap_delta_invalid");
   return Object.freeze({ after, before, retainedBytes });
+}
+
+/** Attributes live post-workload heap without replacing any workloaded controller. */
+export function derivePostWorkloadRetention(
+  input: Readonly<{
+    baseline: readonly AsyncHeapUsageSample[];
+    cleanup: readonly AsyncHeapUsageSample[];
+    postWorkload: readonly AsyncHeapUsageSample[];
+    subscriptions: readonly AsyncSubscriptionOwnerObservation[];
+  }>,
+): AsyncPostWorkloadRetention {
+  if (
+    input.baseline.length === 0 ||
+    input.cleanup.length !== input.baseline.length ||
+    input.postWorkload.length !== input.baseline.length ||
+    input.subscriptions.length === 0
+  ) {
+    throw new Error("async_heap_sample_set_invalid");
+  }
+  const baseline = Object.freeze(input.baseline.map((sample) => Object.freeze({ ...sample })));
+  const cleanup = Object.freeze(input.cleanup.map((sample) => Object.freeze({ ...sample })));
+  const postWorkload = Object.freeze(
+    input.postWorkload.map((sample) => Object.freeze({ ...sample })),
+  );
+  const baselineMinimum = Math.min(...baseline.map(heapBytes));
+  const totalRetainedBytes = Math.max(...postWorkload.map(heapBytes)) - baselineMinimum;
+  const cleanupResidualBytes = Math.max(0, Math.max(...cleanup.map(heapBytes)) - baselineMinimum);
+  if (!boundedInteger(totalRetainedBytes) || !boundedInteger(cleanupResidualBytes)) {
+    throw new Error("async_heap_delta_invalid");
+  }
+  const observed = input.subscriptions.map((subscription) => {
+    if (
+      typeof subscription.id !== "string" ||
+      subscription.id.length === 0 ||
+      !boundedInteger(subscription.authorizationBytes) ||
+      !boundedInteger(subscription.currentPayloadBytes) ||
+      !boundedInteger(subscription.currentPayloadOwners) ||
+      subscription.currentPayloadOwners > 1 ||
+      !boundedInteger(subscription.queuedPayloadBytes) ||
+      !boundedInteger(subscription.queuedPayloadOwners) ||
+      subscription.queuedPayloadOwners > 1
+    ) {
+      throw new Error("async_owner_observation_invalid");
+    }
+    const ownedBytes =
+      subscription.authorizationBytes +
+      subscription.currentPayloadBytes +
+      subscription.queuedPayloadBytes;
+    if (!boundedInteger(ownedBytes)) throw new Error("async_owner_observation_invalid");
+    return Object.freeze({ ...subscription, ownedBytes });
+  });
+  const totalOwnedBytes = observed.reduce((sum, subscription) => {
+    const next = sum + subscription.ownedBytes;
+    if (!boundedInteger(next)) throw new Error("async_owner_observation_invalid");
+    return next;
+  }, 0);
+  const sharedStructuralBytes = Math.max(0, totalRetainedBytes - totalOwnedBytes);
+  const sharedAmortizedBytes = Math.ceil(sharedStructuralBytes / observed.length);
+  const subscriptions = Object.freeze(
+    observed.map((subscription) => {
+      const retainedBytes = sharedAmortizedBytes + subscription.ownedBytes;
+      if (!boundedInteger(retainedBytes)) throw new Error("async_owner_observation_invalid");
+      return Object.freeze({ ...subscription, retainedBytes });
+    }),
+  );
+  return Object.freeze({
+    baseline,
+    cleanup,
+    cleanupResidualBytes,
+    postWorkload,
+    sharedAmortizedBytes,
+    sharedStructuralBytes,
+    subscriptions,
+    totalOwnedBytes,
+    totalRetainedBytes,
+  });
 }
 
 function rounded(value: number): number {

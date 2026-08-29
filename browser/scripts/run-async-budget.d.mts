@@ -17,7 +17,34 @@ export interface AsyncBudgetArguments {
 
 export class AsyncBudgetRunnerError extends Error {
   readonly code: string;
+  constructor(code: string, options?: Readonly<{ cause?: unknown }>);
 }
+
+export function withAsyncBudgetBrowserResources<Server, Browser, Context, Result>(
+  dependencies: Readonly<{
+    closeBrowser(browser: Browser): Promise<unknown>;
+    closeContext(context: Context): Promise<unknown>;
+    closeServer(server: Server): Promise<unknown>;
+    createServer(): Server;
+    launch(): Promise<Browser>;
+    listen(server: Server): Promise<string>;
+    newContext(browser: Browser): Promise<Context>;
+  }>,
+  operation: (
+    resources: Readonly<{ baseUrl: string; browser: Browser; context: Context }>,
+  ) => Promise<Result>,
+): Promise<Result>;
+
+export function withAsyncBudgetPageResources<Context, Page, Session, Result>(
+  context: Context,
+  dependencies: Readonly<{
+    closePage(page: Page): Promise<unknown>;
+    detachSession(session: Session): Promise<unknown>;
+    newPage(context: Context): Promise<Page>;
+    newSession(context: Context, page: Page): Promise<Session>;
+  }>,
+  operation: (resources: Readonly<{ page: Page; session: Session }>) => Promise<Result>,
+): Promise<Result>;
 
 export function argumentsFrom(arguments_: readonly string[]): AsyncBudgetArguments;
 

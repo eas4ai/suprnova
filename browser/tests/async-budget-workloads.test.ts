@@ -45,6 +45,74 @@ describe("async budget evidence helpers", () => {
     expect(Reflect.has(asyncBudgetWorkloads, "estimateAsyncRetainedBytes")).toBe(false);
   });
 
+  it("attributes live post-workload heap to shared structure and actual island owners", () => {
+    const helper = Reflect.get(asyncBudgetWorkloads, "derivePostWorkloadRetention") as
+      ((value: unknown) => unknown) | undefined;
+    expect(helper).toBeTypeOf("function");
+    const samples = (usedSize: number) =>
+      Array.from({ length: 5 }, () => ({
+        backingStorageSize: 10,
+        embedderHeapUsedSize: 20,
+        usedSize,
+      }));
+    expect(
+      helper?.({
+        baseline: samples(970),
+        cleanup: samples(1_020),
+        postWorkload: samples(26_146),
+        subscriptions: [
+          {
+            authorizationBytes: 10,
+            currentPayloadBytes: 0,
+            currentPayloadOwners: 0,
+            id: "subscription-000",
+            queuedPayloadBytes: 0,
+            queuedPayloadOwners: 0,
+          },
+          {
+            authorizationBytes: 20,
+            currentPayloadBytes: 0,
+            currentPayloadOwners: 0,
+            id: "subscription-001",
+            queuedPayloadBytes: 24_576,
+            queuedPayloadOwners: 1,
+          },
+        ],
+      }),
+    ).toEqual({
+      baseline: samples(970),
+      cleanup: samples(1_020),
+      cleanupResidualBytes: 50,
+      postWorkload: samples(26_146),
+      sharedAmortizedBytes: 285,
+      sharedStructuralBytes: 570,
+      subscriptions: [
+        {
+          authorizationBytes: 10,
+          currentPayloadBytes: 0,
+          currentPayloadOwners: 0,
+          id: "subscription-000",
+          ownedBytes: 10,
+          queuedPayloadBytes: 0,
+          queuedPayloadOwners: 0,
+          retainedBytes: 295,
+        },
+        {
+          authorizationBytes: 20,
+          currentPayloadBytes: 0,
+          currentPayloadOwners: 0,
+          id: "subscription-001",
+          ownedBytes: 24_596,
+          queuedPayloadBytes: 24_576,
+          queuedPayloadOwners: 1,
+          retainedBytes: 24_881,
+        },
+      ],
+      totalOwnedBytes: 24_606,
+      totalRetainedBytes: 25_176,
+    });
+  });
+
   it("computes deterministic nearest-rank p50/p95 without changing sample order", () => {
     const samples = [4, 1, 3, 2];
     expect(summarizeAsyncSamples(samples)).toEqual({

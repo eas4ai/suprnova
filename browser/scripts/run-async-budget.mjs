@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
@@ -30,14 +30,95 @@ const RETENTION_MUTATIONS = new Set([
 ]);
 
 export class AsyncBudgetRunnerError extends Error {
-  constructor(code) {
-    super(code);
+  constructor(code, options) {
+    super(code, options);
     this.code = code;
   }
 }
 
 function fail(code) {
   throw new AsyncBudgetRunnerError(code);
+}
+
+function retainedPrimaryError(primary, cleanupErrors) {
+  if (cleanupErrors.length === 0) return primary;
+  const cause = new AggregateError(
+    [primary, ...cleanupErrors],
+    "async_budget_cleanup_after_failure",
+  );
+  return primary instanceof AsyncBudgetRunnerError
+    ? new AsyncBudgetRunnerError(primary.code, { cause })
+    : new AggregateError([primary, ...cleanupErrors], "async_budget_operation_and_cleanup_failed", {
+        cause: primary,
+      });
+}
+
+async function cleanupResources(steps, primary) {
+  const cleanupErrors = [];
+  for (const step of steps) {
+    if (step.resource === null) continue;
+    try {
+      await step.close(step.resource);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (primary !== null) throw retainedPrimaryError(primary, cleanupErrors);
+  if (cleanupErrors.length > 0) {
+    throw new AsyncBudgetRunnerError("async_budget_cleanup_failed", {
+      cause: new AggregateError(cleanupErrors, "async_budget_cleanup_failed"),
+    });
+  }
+}
+
+export async function withAsyncBudgetBrowserResources(dependencies, operation) {
+  let server = null;
+  let browser = null;
+  let context = null;
+  let result;
+  let primary = null;
+  try {
+    server = dependencies.createServer();
+    const baseUrl = await dependencies.listen(server);
+    browser = await dependencies.launch();
+    context = await dependencies.newContext(browser);
+    result = await operation({ baseUrl, browser, context });
+  } catch (error) {
+    primary = error;
+  } finally {
+    await cleanupResources(
+      [
+        { close: dependencies.closeContext, resource: context },
+        { close: dependencies.closeBrowser, resource: browser },
+        { close: dependencies.closeServer, resource: server },
+      ],
+      primary,
+    );
+  }
+  return result;
+}
+
+export async function withAsyncBudgetPageResources(context, dependencies, operation) {
+  let page = null;
+  let session = null;
+  let result;
+  let primary = null;
+  try {
+    page = await dependencies.newPage(context);
+    session = await dependencies.newSession(context, page);
+    result = await operation({ page, session });
+  } catch (error) {
+    primary = error;
+  } finally {
+    await cleanupResources(
+      [
+        { close: dependencies.detachSession, resource: session },
+        { close: dependencies.closePage, resource: page },
+      ],
+      primary,
+    );
+  }
+  return result;
 }
 
 export function argumentsFrom(argv) {
@@ -184,6 +265,28 @@ async function closeServer(server) {
   });
 }
 
+async function cpuGovernor() {
+  try {
+    const entries = await readdir("/sys/devices/system/cpu", { withFileTypes: true });
+    const governors = new Set();
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^cpu[0-9]+$/u.test(entry.name)) continue;
+      try {
+        governors.add(
+          (
+            await readFile(`/sys/devices/system/cpu/${entry.name}/cpufreq/scaling_governor`, "utf8")
+          ).trim(),
+        );
+      } catch {
+        // CPUs without cpufreq support do not qualify but do not hide other governors.
+      }
+    }
+    return governors.size === 0 ? "unavailable" : [...governors].sort().join("+");
+  } catch {
+    return "unavailable";
+  }
+}
+
 async function heapSamples(session) {
   const samples = [];
   for (let index = 0; index < HEAP_SAMPLES_PER_STATE; index += 1) {
@@ -212,35 +315,34 @@ async function retentionSession(page) {
   });
 }
 
-async function measureRetention(page, session, phase, subscriptionIndices) {
+async function measureRetention(page, session, phase, baseline) {
   await retentionSession(page);
-  const initialResources = await page.evaluate(() =>
-    Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").resources(),
-  );
-  const subscriptions = [];
-  for (const index of subscriptionIndices) {
-    await page.evaluate(
-      (subscriptionIndex) =>
-        Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").disconnect(subscriptionIndex),
-      index,
+  let postWorkload;
+  let liveResources;
+  try {
+    postWorkload = await heapSamples(session);
+    liveResources = await page.evaluate(() =>
+      Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").resources(),
     );
-    const before = await heapSamples(session);
-    await page.evaluate(
-      (subscriptionIndex) =>
-        Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").connect(subscriptionIndex),
-      index,
-    );
-    const after = await heapSamples(session);
-    subscriptions.push({
-      after,
-      before,
-      id: `subscription-${String(index).padStart(3, "0")}`,
-    });
+  } finally {
+    await page.evaluate(() => Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").cleanup());
   }
-  const finalResources = await page.evaluate(() =>
+  const cleanupResources = await page.evaluate(() =>
     Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").resources(),
   );
-  return Object.freeze({ finalResources, initialResources, phase, subscriptions });
+  await page.evaluate(() => {
+    Reflect.deleteProperty(globalThis, "__suprnovaBudgetAsyncRetention");
+    Reflect.deleteProperty(globalThis, "__suprnovaBudgetAsyncRetentionGate");
+  });
+  const cleanup = await heapSamples(session);
+  return Object.freeze({
+    baseline,
+    cleanup,
+    cleanupResources,
+    liveResources,
+    phase,
+    postWorkload,
+  });
 }
 
 async function measurePage(
@@ -248,108 +350,125 @@ async function measurePage(
   baseUrl,
   artifactSha256,
   workloadSource,
-  options = { checkpoint: null, retentionIndices: null, retentionMutation: "none" },
+  options = { checkpoint: null, retentionMutation: "none" },
 ) {
-  const page = await context.newPage();
-  const session = await context.newCDPSession(page);
-  try {
-    await session.send("Emulation.setCPUThrottlingRate", { rate: 4 });
-    const version = await session.send("Browser.getVersion");
-    if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
-      fail("async_cdp_version_unavailable");
-    }
-    await page.goto(`${baseUrl}/health`);
-    await page.setContent(
-      `<!doctype html><html lang="en"><body>${Array.from(
-        { length: 100 },
-        (_, index) => `<section data-async-benchmark-index="${String(index)}"></section>`,
-      ).join("")}</body></html>`,
-      { waitUntil: "domcontentloaded" },
-    );
-    await page.addScriptTag({ content: workloadSource });
-    const measurement = await page.evaluate(
-      async ({ artifactUrl, checkpoint, expectedArtifactSha256, retentionMutation }) => {
-        const benchmark = globalThis.SuprnovaAsyncBudgetDriver;
-        if (benchmark?.ASYNC_BUDGET_DRIVER_MARKER !== "SUPRNOVA_ASYNC_BUDGET_DRIVER_V1") {
-          throw new Error("async_budget_driver_missing");
-        }
-        const input = {
-          artifactUrl,
-          expectedArtifactSha256,
-          eventEnvelopeBytes: 1_024,
-          multiDocumentCount: 16,
-          presentationEventCount: 1_000,
-          refreshInvalidationCount: 100,
-          scheduledDurationMs: 10_000,
-          subscriptionCount: 100,
-        };
-        await benchmark.measureAsyncWorkloads({ ...input, prepare: true });
-        return benchmark.measureAsyncWorkloads({
-          ...input,
-          ...(checkpoint === null ? {} : { retentionCheckpoint: checkpoint }),
-          retentionMutation,
-        });
-      },
-      {
-        artifactUrl: `${baseUrl}/suprnova-live.async.esm.js`,
-        checkpoint: options.checkpoint,
-        expectedArtifactSha256: artifactSha256,
-        retentionMutation: options.retentionMutation,
-      },
-    );
-    const retention =
-      options.checkpoint === null
-        ? null
-        : await measureRetention(
-            page,
-            session,
-            options.checkpoint,
-            options.retentionIndices ?? Array.from({ length: 100 }, (_, index) => index),
-          );
-    return Object.freeze({
-      measurement,
-      protocol: Object.freeze({
-        method: "Runtime.getHeapUsage",
-        product: version.product,
-        protocolVersion: version.protocolVersion,
-      }),
-      retention,
-    });
-  } finally {
-    await session.detach();
-    await page.close();
-  }
-}
-
-function singleRetentionProbe(result, phase) {
-  const retention = result.retention;
-  if (retention?.phase !== phase || retention.subscriptions.length !== 1) {
-    fail("async_retention_mutation_probe_invalid");
-  }
-  const probe = retention.subscriptions[0];
-  if (probe?.id !== "subscription-000") fail("async_retention_mutation_probe_invalid");
-  return probe;
+  return withAsyncBudgetPageResources(
+    context,
+    {
+      closePage: (page) => page.close(),
+      detachSession: (session) => session.detach(),
+      newPage: (owner) => owner.newPage(),
+      newSession: (owner, page) => owner.newCDPSession(page),
+    },
+    async ({ page, session }) => {
+      await session.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+      const version = await session.send("Browser.getVersion");
+      if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+        fail("async_cdp_version_unavailable");
+      }
+      await page.goto(`${baseUrl}/health`);
+      await page.setContent(
+        `<!doctype html><html lang="en"><body>${Array.from(
+          { length: 100 },
+          (_, index) => `<section data-async-benchmark-index="${String(index)}"></section>`,
+        ).join("")}</body></html>`,
+        { waitUntil: "domcontentloaded" },
+      );
+      await page.addScriptTag({ content: workloadSource });
+      const measurementPromise = page.evaluate(
+        async ({ artifactUrl, checkpoint, expectedArtifactSha256, retentionMutation }) => {
+          const benchmark = globalThis.SuprnovaAsyncBudgetDriver;
+          if (benchmark?.ASYNC_BUDGET_DRIVER_MARKER !== "SUPRNOVA_ASYNC_BUDGET_DRIVER_V1") {
+            throw new Error("async_budget_driver_missing");
+          }
+          const input = {
+            artifactUrl,
+            expectedArtifactSha256,
+            eventEnvelopeBytes: 1_024,
+            multiDocumentCount: 16,
+            presentationEventCount: 1_000,
+            refreshInvalidationCount: 100,
+            scheduledDurationMs: 10_000,
+            subscriptionCount: 100,
+          };
+          await benchmark.measureAsyncWorkloads({ ...input, prepare: true });
+          if (checkpoint !== null) {
+            let release;
+            const released = new Promise((resolvePromise) => {
+              release = resolvePromise;
+            });
+            const gate = {
+              ready: false,
+              release() {
+                release();
+              },
+              wait() {
+                gate.ready = true;
+                return released;
+              },
+            };
+            Reflect.set(globalThis, "__suprnovaBudgetAsyncRetentionGate", gate);
+          }
+          return benchmark.measureAsyncWorkloads({
+            ...input,
+            ...(checkpoint === null ? {} : { retentionCheckpoint: checkpoint }),
+            retentionMutation,
+          });
+        },
+        {
+          artifactUrl: `${baseUrl}/suprnova-live.async.esm.js`,
+          checkpoint: options.checkpoint,
+          expectedArtifactSha256: artifactSha256,
+          retentionMutation: options.retentionMutation,
+        },
+      );
+      let baseline = null;
+      if (options.checkpoint !== null) {
+        const ready = page.waitForFunction(
+          () => Reflect.get(globalThis, "__suprnovaBudgetAsyncRetentionGate")?.ready === true,
+        );
+        await Promise.race([
+          ready,
+          measurementPromise.then(() => fail("async_retention_baseline_gate_skipped")),
+        ]);
+        baseline = await heapSamples(session);
+        await page.evaluate(() =>
+          Reflect.get(globalThis, "__suprnovaBudgetAsyncRetentionGate").release(),
+        );
+      }
+      const measurement = await measurementPromise;
+      const retention =
+        options.checkpoint === null
+          ? null
+          : await measureRetention(page, session, options.checkpoint, baseline);
+      return Object.freeze({
+        measurement,
+        protocol: Object.freeze({
+          method: "Runtime.getHeapUsage",
+          product: version.product,
+          protocolVersion: version.protocolVersion,
+        }),
+        retention,
+      });
+    },
+  );
 }
 
 async function measureMutationProofs(context, baseUrl, artifactSha256, workloadSource, protocol) {
   const largeIslandBuffer = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
     checkpoint: "e100",
-    retentionIndices: [0],
     retentionMutation: "large_island_buffer",
   });
   const predecessorTransport = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
     checkpoint: "r100",
-    retentionIndices: [],
     retentionMutation: "predecessor_transport",
   });
   const staleCurrentPayload = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
     checkpoint: "r100",
-    retentionIndices: [0],
     retentionMutation: "stale_current_payload",
   });
   const staleQueuedPayload = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
     checkpoint: "r100",
-    retentionIndices: [0],
     retentionMutation: "stale_queued_payload",
   });
   const mutationRuns = [
@@ -363,13 +482,11 @@ async function measureMutationProofs(context, baseUrl, artifactSha256, workloadS
   }
   const predecessorMeasurement = predecessorTransport.measurement.R100;
   if (predecessorMeasurement === null) fail("async_retention_mutation_probe_invalid");
-  const predecessorResources = predecessorTransport.retention?.finalResources;
-  const currentResources = staleCurrentPayload.retention?.finalResources;
-  const queuedResources = staleQueuedPayload.retention?.finalResources;
   if (
-    predecessorResources === undefined ||
-    currentResources === undefined ||
-    queuedResources === undefined
+    predecessorTransport.retention === null ||
+    staleCurrentPayload.retention === null ||
+    staleQueuedPayload.retention === null ||
+    largeIslandBuffer.retention === null
   ) {
     fail("async_retention_mutation_probe_invalid");
   }
@@ -378,29 +495,29 @@ async function measureMutationProofs(context, baseUrl, artifactSha256, workloadS
       artifactSha256,
       documentTransports: largeIslandBuffer.measurement.E100.physicalConnectionCount,
       phase: "E100",
-      retention: singleRetentionProbe(largeIslandBuffer, "e100"),
+      productPath: "AsyncSubscription.pending",
+      retention: largeIslandBuffer.retention,
       subscriptionId: "subscription-000",
     }),
     predecessorTransport: Object.freeze({
-      activeTransportOwners: predecessorResources.activeTransportOwners,
       artifactSha256,
       physicalTransportsAfterCurrent: predecessorMeasurement.physicalTransportsAfterCurrent,
-      predecessorContinuityOwners: predecessorResources.predecessorContinuityOwners,
-      predecessorTransportOwners: predecessorResources.predecessorTransportOwners,
+      productPath: "AsyncDocumentOwner.transport",
       reconnectHandshakes: predecessorMeasurement.documentReconnectHandshakes,
+      retention: predecessorTransport.retention,
     }),
     staleCurrentPayload: Object.freeze({
       artifactSha256,
-      currentPayloadOwners: currentResources.currentPayloadOwners,
       phase: "R100",
-      retention: singleRetentionProbe(staleCurrentPayload, "r100"),
+      productPath: "AsyncSubscription.activeRefresh",
+      retention: staleCurrentPayload.retention,
       subscriptionId: "subscription-000",
     }),
     staleQueuedPayload: Object.freeze({
       artifactSha256,
       phase: "R100",
-      queuedPayloadOwners: queuedResources.queuedPayloadOwners,
-      retention: singleRetentionProbe(staleQueuedPayload, "r100"),
+      productPath: "AsyncSubscription.pending",
+      retention: staleQueuedPayload.retention,
       subscriptionId: "subscription-000",
     }),
   });
@@ -423,32 +540,47 @@ async function childMeasurement(artifactPath, retentionMutation, verifyRetention
   ) {
     fail("benchmark_bundle_contains_production_implementation");
   }
-  const server = createServer((request, response) => {
-    if (request.url === "/suprnova-live.async.esm.js") {
-      response.writeHead(200, {
-        "cache-control": "public, max-age=31536000, immutable",
-        "content-type": "text/javascript; charset=utf-8",
+  return withAsyncBudgetBrowserResources(
+    {
+      closeBrowser: (browser) => browser.close(),
+      closeContext: (context) => context.close(),
+      closeServer,
+      createServer: () =>
+        createServer((request, response) => {
+          if (request.url === "/suprnova-live.async.esm.js") {
+            response.writeHead(200, {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "text/javascript; charset=utf-8",
+            });
+            response.end(artifact);
+            return;
+          }
+          if (request.url === "/health") {
+            response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+            response.end("ok");
+            return;
+          }
+          response.writeHead(404);
+          response.end();
+        }),
+      launch: () => chromium.launch({ headless: true }),
+      listen,
+      newContext: (browser) => browser.newContext({ viewport: { height: 720, width: 1_280 } }),
+    },
+    async ({ baseUrl, browser, context }) => {
+      const baseEnvironment = await browserEnvironment(
+        browser,
+        process.env.SUPRNOVA_LIVE_B1_DEDICATED === "1",
+      );
+      const governor = await cpuGovernor();
+      const qualified = baseEnvironment.qualificationRequirementsMet && governor === "performance";
+      const environment = Object.freeze({
+        ...baseEnvironment,
+        classification: qualified ? "qualified" : "unqualified",
+        governor,
+        providerProfile: "rust-owner-browser-measured-source-v1",
+        qualificationRequirementsMet: qualified,
       });
-      response.end(artifact);
-      return;
-    }
-    if (request.url === "/health") {
-      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      response.end("ok");
-      return;
-    }
-    response.writeHead(404);
-    response.end();
-  });
-  const baseUrl = await listen(server);
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const environment = await browserEnvironment(
-      browser,
-      process.env.SUPRNOVA_LIVE_B1_DEDICATED === "1",
-    );
-    const context = await browser.newContext({ viewport: { height: 720, width: 1_280 } });
-    try {
       await measurePage(context, baseUrl, artifactSha256, workload.source);
       const e100 = await measurePage(context, baseUrl, artifactSha256, workload.source, {
         checkpoint: "e100",
@@ -485,13 +617,8 @@ async function childMeasurement(artifactPath, retentionMutation, verifyRetention
         protocol: e100.protocol,
         retention: Object.freeze({ E100: e100.retention, R100: r100.retention }),
       });
-    } finally {
-      await context.close();
-    }
-  } finally {
-    await browser.close();
-    await closeServer(server);
-  }
+    },
+  );
 }
 
 function runChild(artifactPath, retentionMutation, verifyRetentionMutations) {
@@ -557,14 +684,51 @@ function sameProtocol(runs) {
   return runs[0].protocol;
 }
 
-function retainedMeasurement(runs, phase, id, helpers) {
-  const candidates = runs.map((run) => {
-    const entry = run.retention?.[phase]?.subscriptions?.find((value) => value.id === id);
-    if (entry === undefined) fail("async_retention_subscription_missing");
-    return helpers.deriveRetainedHeapMeasurement(entry);
+function derivedRetention(raw, helpers) {
+  if (
+    raw === null ||
+    raw.liveResources?.subscriptions === undefined ||
+    raw.cleanupResources?.subscriptions === undefined
+  ) {
+    fail("async_retention_measurement_missing");
+  }
+  const cleanupSubscriptions = raw.cleanupResources.subscriptions;
+  if (
+    raw.cleanupResources.activeTransportOwners !== 0 ||
+    raw.cleanupResources.currentPayloadOwners !== 0 ||
+    raw.cleanupResources.predecessorContinuityOwners !== 0 ||
+    raw.cleanupResources.predecessorTransportOwners !== 0 ||
+    raw.cleanupResources.queuedPayloadOwners !== 0 ||
+    cleanupSubscriptions.some(
+      (entry) =>
+        entry.authorizationBytes !== 0 ||
+        entry.currentPayloadBytes !== 0 ||
+        entry.currentPayloadOwners !== 0 ||
+        entry.queuedPayloadBytes !== 0 ||
+        entry.queuedPayloadOwners !== 0,
+    )
+  ) {
+    fail("async_retention_cleanup_incomplete");
+  }
+  return Object.freeze({
+    ...helpers.derivePostWorkloadRetention({
+      baseline: raw.baseline,
+      cleanup: raw.cleanup,
+      postWorkload: raw.postWorkload,
+      subscriptions: raw.liveResources.subscriptions,
+    }),
+    cleanupResources: raw.cleanupResources,
+    liveResources: raw.liveResources,
   });
+}
+
+function selectedRetention(runs, phase, helpers) {
+  const candidates = runs.map((run) => derivedRetention(run.retention?.[phase], helpers));
   return candidates.reduce((selected, candidate) =>
-    candidate.retainedBytes > selected.retainedBytes ? candidate : selected,
+    Math.max(...candidate.subscriptions.map((entry) => entry.retainedBytes)) >
+    Math.max(...selected.subscriptions.map((entry) => entry.retainedBytes))
+      ? candidate
+      : selected,
   );
 }
 
@@ -579,16 +743,19 @@ function mutationProofEvidence(runs, artifactSha256, helpers) {
   return Object.freeze({
     largeIslandBuffer: Object.freeze({
       ...proof.largeIslandBuffer,
-      retention: helpers.deriveRetainedHeapMeasurement(proof.largeIslandBuffer.retention),
+      retention: derivedRetention(proof.largeIslandBuffer.retention, helpers),
     }),
-    predecessorTransport: proof.predecessorTransport,
+    predecessorTransport: Object.freeze({
+      ...proof.predecessorTransport,
+      retention: derivedRetention(proof.predecessorTransport.retention, helpers),
+    }),
     staleCurrentPayload: Object.freeze({
       ...proof.staleCurrentPayload,
-      retention: helpers.deriveRetainedHeapMeasurement(proof.staleCurrentPayload.retention),
+      retention: derivedRetention(proof.staleCurrentPayload.retention, helpers),
     }),
     staleQueuedPayload: Object.freeze({
       ...proof.staleQueuedPayload,
-      retention: helpers.deriveRetainedHeapMeasurement(proof.staleQueuedPayload.retention),
+      retention: derivedRetention(proof.staleQueuedPayload.retention, helpers),
     }),
   });
 }
@@ -651,13 +818,15 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
   const timeToCurrent = helpers.summarizeAsyncSamples(
     recoveryRun.measurement.R100.recoverySamplesMs,
   );
+  const e100Retention = selectedRetention(runs, "E100", helpers);
+  const r100Retention = selectedRetention(runs, "R100", helpers);
   const subscriptions = dispatchRun.measurement.E100.subscriptions.map((subscription) => ({
     ...subscription,
-    retention: retainedMeasurement(runs, "E100", subscription.id, helpers),
+    retention: e100Retention.subscriptions.find((entry) => entry.id === subscription.id),
   }));
   const recovery = recoveryRun.measurement.R100.recovery.map((entry) => ({
     ...entry,
-    retention: retainedMeasurement(runs, "R100", entry.id, helpers),
+    retention: r100Retention.subscriptions.find((candidate) => candidate.id === entry.id),
   }));
   const pollCounts = new Map();
   for (const due of recoveryRun.measurement.R100.pollDueMilliseconds) {
@@ -681,26 +850,18 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       measurements: {
         dispatch,
         document: {
-          activeTransportOwners: maximum(
-            runs,
-            (run) => run.retention.E100.finalResources.activeTransportOwners,
-          ),
-          currentPayloadOwners: maximum(
-            runs,
-            (run) => run.retention.E100.finalResources.currentPayloadOwners,
-          ),
+          activeTransportOwners: e100Retention.liveResources.activeTransportOwners,
+          currentPayloadOwners: e100Retention.liveResources.currentPayloadOwners,
           fairnessMaximumLead: maximum(runs, (run) => run.measurement.E100.fairnessMaximumLead),
           handshakes: maximum(runs, (run) => run.measurement.E100.handshakeCount),
           maxQueuedBytes: maximum(runs, (run) => run.measurement.E100.queuedBytePeak),
           maxQueuedEvents: maximum(runs, (run) => run.measurement.E100.queuedEventPeak),
           physicalTransports: maximum(runs, (run) => run.measurement.E100.physicalConnectionCount),
-          queuedPayloadOwners: maximum(
-            runs,
-            (run) => run.retention.E100.finalResources.queuedPayloadOwners,
-          ),
+          queuedPayloadOwners: e100Retention.liveResources.queuedPayloadOwners,
           starvedSubscriptions:
             100 - Math.min(...runs.map((run) => run.measurement.E100.currentSubscriptionCount)),
         },
+        retention: e100Retention,
         rustOwner: serverEvidence,
         subscriptions,
       },
@@ -718,14 +879,19 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       controlledTimeline: true,
       retainedHeap: {
         api: "Chromium CDP Runtime.getHeapUsage",
-        beforeState:
-          "same page, DOM, benchmark harness, and native document transport with target island disconnected",
-        derivation: "max_after_total_minus_min_before_total",
-        exclusions: ["native_transport", "DOM", "current_payload"],
+        baselineState:
+          "same page, DOM, benchmark harness, loaded production artifact, and provider scaffolding before original controller activation",
+        cleanupState:
+          "all original controllers disposed, all transport and payload owners released, retention session removed",
+        derivation:
+          "total=max(post_workload)-min(baseline); shared=max(0,total-actual_owner_bytes); per_island=ceil(shared/100)+actual_owner_bytes",
+        exclusions: ["DOM", "benchmark_harness", "released_current_payload"],
         garbageCollection: "HeapProfiler.collectGarbage",
         harnessTreatment:
-          "control harness is retained in both states; connected controller and port are conservatively included",
+          "same-page DOM and harness exist in baseline and post-workload; unmatched runtime/native transport growth is conservatively included in shared structural bytes",
         phaseSamples: HEAP_SAMPLES_PER_STATE,
+        postWorkloadState:
+          "all 100 original workloaded controllers remain live and current before any disposal",
         product: protocol.product,
         protocolVersion: protocol.protocolVersion,
         unavailable: "fail_closed",
@@ -756,10 +922,7 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       },
       measurements: {
         document: {
-          currentPayloadOwners: maximum(
-            runs,
-            (run) => run.retention.R100.finalResources.currentPayloadOwners,
-          ),
+          currentPayloadOwners: r100Retention.liveResources.currentPayloadOwners,
           generationAfter: recoveryRun.measurement.R100.generationAfter,
           generationBefore: recoveryRun.measurement.R100.generationBefore,
           maximumConcurrentReauthorizations: maximum(
@@ -768,18 +931,9 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
           ),
           physicalTransportsAfterCurrent:
             recoveryRun.measurement.R100.physicalTransportsAfterCurrent,
-          predecessorContinuityOwners: maximum(
-            runs,
-            (run) => run.retention.R100.finalResources.predecessorContinuityOwners,
-          ),
-          predecessorTransportOwners: maximum(
-            runs,
-            (run) => run.retention.R100.finalResources.predecessorTransportOwners,
-          ),
-          queuedPayloadOwners: maximum(
-            runs,
-            (run) => run.retention.R100.finalResources.queuedPayloadOwners,
-          ),
+          predecessorContinuityOwners: r100Retention.liveResources.predecessorContinuityOwners,
+          predecessorTransportOwners: r100Retention.liveResources.predecessorTransportOwners,
+          queuedPayloadOwners: r100Retention.liveResources.queuedPayloadOwners,
           reconnectHandshakes: maximum(
             runs,
             (run) => run.measurement.R100.documentReconnectHandshakes,
@@ -806,6 +960,7 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
           handshakes: recoveryRun.measurement.R100.documentReconnectHandshakes,
         },
         recovery,
+        retention: r100Retention,
         timeToCurrent,
       },
       workload: {
@@ -823,6 +978,11 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       return {
         artifactSha256: artifactEvidence.sha256,
         dispatchP95Milliseconds: dispatchSummary.p95Milliseconds,
+        e100RetainedMaximumBytes: Math.max(
+          ...derivedRetention(run.retention.E100, helpers).subscriptions.map(
+            (entry) => entry.retainedBytes,
+          ),
+        ),
         evidenceSha256: sha256(
           Buffer.from(
             JSON.stringify({
@@ -833,6 +993,11 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
           ),
         ),
         processId: run.processId,
+        r100RetainedMaximumBytes: Math.max(
+          ...derivedRetention(run.retention.R100, helpers).subscriptions.map(
+            (entry) => entry.retainedBytes,
+          ),
+        ),
         recoveryP95Milliseconds: recoverySummary.p95Milliseconds,
         runIndex: index + 1,
       };

@@ -1,3 +1,5 @@
+import type { AsyncSubscriptionOwnerObservation } from "./async-budget-workloads.js";
+
 export interface AsyncWorkloadInput {
   readonly artifactUrl: string;
   readonly expectedArtifactSha256: string;
@@ -138,14 +140,14 @@ interface BenchmarkOwner {
 
 interface BenchmarkRetentionSession {
   readonly phase: "e100" | "r100";
-  connect(index: number): Promise<void>;
-  disconnect(index: number): Promise<void>;
+  cleanup(): Promise<void>;
   resources(): Readonly<{
     activeTransportOwners: number;
     currentPayloadOwners: number;
     predecessorContinuityOwners: number;
     predecessorTransportOwners: number;
     queuedPayloadOwners: number;
+    subscriptions: readonly AsyncSubscriptionOwnerObservation[];
   }>;
 }
 
@@ -258,7 +260,7 @@ export async function measureAsyncWorkloads(
   }
 
   class MeasuredSource implements BenchmarkSource {
-    readonly subscriptions = new Set<string>();
+    readonly subscriptions = new Map<string, BenchmarkAuthorization>();
     closed = false;
     private requestValue: BenchmarkConnectRequest | null;
 
@@ -280,6 +282,10 @@ export async function measureAsyncWorkloads(
 
     close(): void {
       if (this.retainAfterClose) return;
+      this.release();
+    }
+
+    release(): void {
       this.closed = true;
       this.subscriptions.clear();
       this.requestValue = null;
@@ -301,7 +307,7 @@ export async function measureAsyncWorkloads(
     }
 
     subscribe(subscription: BenchmarkAuthorization): Readonly<Record<string, unknown>> {
-      this.subscriptions.add(subscription.subscriptionId);
+      this.subscriptions.set(subscription.subscriptionId, subscription);
       return Object.freeze({
         descriptorBinding: subscription.descriptorBinding,
         kind: "authenticated",
@@ -383,8 +389,10 @@ export async function measureAsyncWorkloads(
   const dispatchCounts = new Array<number>(input.subscriptionCount).fill(0);
   const maxQueuedRefreshes = new Array<number>(input.subscriptionCount).fill(0);
   const maxInFlightRefreshes = new Array<number>(input.subscriptionCount).fill(0);
-  const currentPayloadMutationOwners = new Set<number>();
-  const queuedPayloadMutationOwners = new Set<number>();
+  const currentInFlightRefreshes = new Array<number>(input.subscriptionCount).fill(0);
+  const currentPayloadBytes = new Array<number>(input.subscriptionCount).fill(0);
+  const currentQueuedRefreshes = new Array<number>(input.subscriptionCount).fill(0);
+  const queuedPayloadBytes = new Array<number>(input.subscriptionCount).fill(0);
   let recoveryStarted = 0;
   let activeReauthorizations = 0;
   let maximumConcurrentReauthorizations = 0;
@@ -397,14 +405,21 @@ export async function measureAsyncWorkloads(
   let maximumInFlightRefreshesPerIsland = 0;
   let pollingRandom = 0;
   let fairnessMaximumLead = 0;
-  let observedRefreshIndex: number | null = null;
-  const withObservedRefreshIndex = <Result>(index: number, operation: () => Result): Result => {
-    if (observedRefreshIndex !== null) throw new Error("async_benchmark_queue_owner_overlap");
-    observedRefreshIndex = index;
+  let observedQueueIndex: number | null = null;
+  let observedPayloadBytes = 0;
+  const withObservedQueueOwner = <Result>(
+    index: number,
+    encodedBytes: number,
+    operation: () => Result,
+  ): Result => {
+    if (observedQueueIndex !== null) throw new Error("async_benchmark_queue_owner_overlap");
+    observedQueueIndex = index;
+    observedPayloadBytes = encodedBytes;
     try {
       return operation();
     } finally {
-      observedRefreshIndex = null;
+      observedQueueIndex = null;
+      observedPayloadBytes = 0;
     }
   };
 
@@ -502,6 +517,7 @@ export async function measureAsyncWorkloads(
         ) {
           throw new Error("async_benchmark_queue_observation_invalid");
         }
+        const previousQueuedBytes = currentQueuedBytes;
         queuedEventPeak = Math.max(queuedEventPeak, queuedEvents);
         queuedBytePeak = Math.max(queuedBytePeak, queuedBytes);
         currentQueuedEvents = queuedEvents;
@@ -514,9 +530,23 @@ export async function measureAsyncWorkloads(
           maximumInFlightRefreshesPerIsland,
           inFlightRefreshes,
         );
-        const index = observedRefreshIndex;
+        const index = observedQueueIndex;
         if (index === null) {
           throw new Error("async_benchmark_queue_owner_invalid");
+        }
+        const previousInFlight = currentInFlightRefreshes[index] ?? 0;
+        const queuedDelta = queuedBytes - previousQueuedBytes;
+        const nextIslandQueuedBytes = (queuedPayloadBytes[index] ?? 0) + queuedDelta;
+        if (!Number.isSafeInteger(nextIslandQueuedBytes) || nextIslandQueuedBytes < 0) {
+          throw new Error("async_benchmark_queue_byte_owner_invalid");
+        }
+        queuedPayloadBytes[index] = nextIslandQueuedBytes;
+        currentQueuedRefreshes[index] = queuedRefreshes;
+        currentInFlightRefreshes[index] = inFlightRefreshes;
+        if (previousInFlight === 0 && inFlightRefreshes > 0) {
+          currentPayloadBytes[index] = observedPayloadBytes;
+        } else if (previousInFlight > 0 && inFlightRefreshes === 0) {
+          currentPayloadBytes[index] = 0;
         }
         maxQueuedRefreshes[index] = Math.max(maxQueuedRefreshes[index] ?? 0, queuedRefreshes);
         maxInFlightRefreshes[index] = Math.max(maxInFlightRefreshes[index] ?? 0, inFlightRefreshes);
@@ -578,19 +608,7 @@ export async function measureAsyncWorkloads(
     pendingStarts.set(index, pendingStarts.get(index) ?? []);
     refreshCompletions.set(index, refreshCompletions.get(index) ?? []);
     const stream = `benchmark-${String(index).padStart(3, "0")}`;
-    const mutationBytes =
-      index === 0 &&
-      (("retentionCheckpoint" in input &&
-        input.retentionCheckpoint === "e100" &&
-        input.retentionMutation === "large_island_buffer") ||
-        ("retentionCheckpoint" in input &&
-          input.retentionCheckpoint === "r100" &&
-          (input.retentionMutation === "stale_current_payload" ||
-            input.retentionMutation === "stale_queued_payload")))
-        ? new Uint8Array(64 * 1_024)
-        : null;
     const port = Object.freeze({
-      ...(mutationBytes === null ? {} : { __suprnovaBenchmarkRetainedMutation: mutationBytes }),
       consumeRegisteredEventCapability: () => Object.freeze({}),
       dispatchRegisteredEvent: (_capability: unknown, candidate: unknown) => {
         const event = candidate as Readonly<{ event: string; payload: unknown }>;
@@ -628,12 +646,6 @@ export async function measureAsyncWorkloads(
       writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
     });
     handles[index] = owner.connectIsland(port);
-    if (index === 0 && input.retentionMutation === "stale_current_payload") {
-      currentPayloadMutationOwners.add(index);
-    }
-    if (index === 0 && input.retentionMutation === "stale_queued_payload") {
-      queuedPayloadMutationOwners.add(index);
-    }
   };
 
   const installRetentionSession = (
@@ -641,65 +653,98 @@ export async function measureAsyncWorkloads(
     activeSource: MeasuredSource,
     predecessorSource: MeasuredSource | null,
   ): void => {
-    if (currentQueuedEvents !== 0 || currentQueuedBytes !== 0) {
+    if (
+      input.retentionMutation === "none" &&
+      (currentQueuedEvents !== 0 || currentQueuedBytes !== 0)
+    ) {
       throw new Error("async_benchmark_retention_queue_not_drained");
     }
-    if ([...pendingStarts.values()].some((entries) => entries.length !== 0)) {
+    if (
+      input.retentionMutation === "none" &&
+      [...pendingStarts.values()].some((entries) => entries.length !== 0)
+    ) {
       throw new Error("async_benchmark_retention_payload_not_released");
     }
+    const authorizationBytes = (index: number): number => {
+      const value = authorizations.get(`subscription-${String(index).padStart(3, "0")}`);
+      if (value === undefined) return 0;
+      return new TextEncoder().encode(
+        JSON.stringify(value, (_key: string, candidate: unknown): unknown =>
+          typeof candidate === "bigint" ? candidate.toString() : candidate,
+        ),
+      ).byteLength;
+    };
     const session: BenchmarkRetentionSession = Object.freeze({
       phase,
-      async connect(index: number) {
-        if (!Number.isSafeInteger(index) || index < 0 || index >= input.subscriptionCount) {
-          throw new Error("async_benchmark_retention_index_invalid");
+      async cleanup() {
+        for (let index = 0; index < handles.length; index += 1) {
+          withObservedQueueOwner(index, 0, () => {
+            handles[index]?.dispose();
+          });
+          handles[index] = null;
         }
-        pendingStarts.set(index, []);
-        refreshCompletions.set(index, []);
-        connectIsland(index);
-        const id = `subscription-${String(index).padStart(3, "0")}`;
+        owner.dispose();
+        for (const source of sources) source.release();
+        authorizations.clear();
+        states.clear();
+        recoveryAt.clear();
+        pendingStarts.clear();
+        refreshCompletions.clear();
+        currentQueuedEvents = 0;
+        currentQueuedBytes = 0;
         await settleUntil(
           () =>
-            activeSource.membershipCount === input.subscriptionCount &&
-            states.get(id) === "current",
-          "async_benchmark_retention_reconnect_incomplete",
-        );
-      },
-      async disconnect(index: number) {
-        if (!Number.isSafeInteger(index) || index < 0 || index >= input.subscriptionCount) {
-          throw new Error("async_benchmark_retention_index_invalid");
-        }
-        const handle = handles[index] ?? null;
-        if (handle === null) throw new Error("async_benchmark_retention_island_missing");
-        handle.dispose();
-        handles[index] = null;
-        currentPayloadMutationOwners.delete(index);
-        queuedPayloadMutationOwners.delete(index);
-        const id = `subscription-${String(index).padStart(3, "0")}`;
-        authorizations.delete(id);
-        pendingStarts.delete(index);
-        refreshCompletions.delete(index);
-        states.delete(id);
-        await settleUntil(
-          () => activeSource.membershipCount === input.subscriptionCount - 1,
-          "async_benchmark_retention_disconnect_incomplete",
+            sources.every((source) => source.closed && source.membershipCount === 0) &&
+            handles.every((handle) => handle === null),
+          "async_benchmark_retention_cleanup_incomplete",
         );
       },
       resources() {
+        const subscriptions = Object.freeze(
+          Array.from({ length: input.subscriptionCount }, (_, index) =>
+            Object.freeze({
+              authorizationBytes: authorizationBytes(index),
+              currentPayloadBytes: currentPayloadBytes[index] ?? 0,
+              currentPayloadOwners: Number((currentInFlightRefreshes[index] ?? 0) > 0),
+              id: `subscription-${String(index).padStart(3, "0")}`,
+              queuedPayloadBytes: queuedPayloadBytes[index] ?? 0,
+              queuedPayloadOwners: Number(
+                (currentQueuedRefreshes[index] ?? 0) > 0 || (queuedPayloadBytes[index] ?? 0) > 0,
+              ),
+            }),
+          ),
+        );
         const predecessorTransportOwners =
           predecessorSource === null ? 0 : Number(!predecessorSource.closed);
         const predecessorContinuityOwners =
           predecessorSource === null ? 0 : predecessorSource.membershipCount;
         return Object.freeze({
           activeTransportOwners: sources.filter((source) => !source.closed).length,
-          currentPayloadOwners: currentPayloadMutationOwners.size,
+          currentPayloadOwners: subscriptions.reduce(
+            (sum, subscription) => sum + subscription.currentPayloadOwners,
+            0,
+          ),
           predecessorContinuityOwners,
           predecessorTransportOwners,
-          queuedPayloadOwners: currentQueuedEvents + queuedPayloadMutationOwners.size,
+          queuedPayloadOwners: subscriptions.reduce(
+            (sum, subscription) => sum + subscription.queuedPayloadOwners,
+            0,
+          ),
+          subscriptions,
         });
       },
     });
     Reflect.set(globalThis, "__suprnovaBudgetAsyncRetention", session);
   };
+
+  if ("retentionCheckpoint" in input) {
+    const gate = Reflect.get(globalThis, "__suprnovaBudgetAsyncRetentionGate") as
+      Readonly<{ wait(): Promise<void> }> | undefined;
+    if (typeof gate?.wait !== "function") {
+      throw new Error("async_benchmark_retention_gate_missing");
+    }
+    await gate.wait();
+  }
 
   for (let index = 0; index < input.subscriptionCount; index += 1) {
     connectIsland(index);
@@ -727,7 +772,12 @@ export async function measureAsyncWorkloads(
     if (value === undefined) throw new Error("e100_membership_missing");
     return value;
   };
-  const presentationEnvelope = (index: number, sequence: number, eventIndex: number): string => {
+  const presentationEnvelope = (
+    index: number,
+    sequence: number,
+    eventIndex: number,
+    targetBytes: number = input.eventEnvelopeBytes,
+  ): string => {
     const current = membership(index);
     const encode = (padding: string): string =>
       canonicalize({
@@ -744,10 +794,10 @@ export async function measureAsyncWorkloads(
         subscription: current.subscriptionId,
       });
     const empty = encode("");
-    const padding = input.eventEnvelopeBytes - new TextEncoder().encode(empty).byteLength;
+    const padding = targetBytes - new TextEncoder().encode(empty).byteLength;
     if (padding < 0) throw new Error("e100_envelope_overflow");
     const encoded = encode("x".repeat(padding));
-    if (new TextEncoder().encode(encoded).byteLength !== input.eventEnvelopeBytes) {
+    if (new TextEncoder().encode(encoded).byteLength !== targetBytes) {
       throw new Error("e100_envelope_size");
     }
     return encoded;
@@ -765,14 +815,18 @@ export async function measureAsyncWorkloads(
   const emitPresentation = (index: number): void => {
     const next = presentationEventCount + 1;
     timers.advanceTo((next * input.scheduledDurationMs) / input.presentationEventCount);
+    const encoded = presentationEnvelope(index, nextSequence(index), next);
     pendingStarts.get(index)?.push(performance.now());
-    primarySource.emit(presentationEnvelope(index, nextSequence(index), next));
+    withObservedQueueOwner(index, new TextEncoder().encode(encoded).byteLength, () => {
+      primarySource.emit(encoded);
+    });
     presentationCounts[index] = (presentationCounts[index] ?? 0) + 1;
     presentationEventCount = next;
   };
   const emitRefresh = (index: number): void => {
-    withObservedRefreshIndex(index, () => {
-      primarySource.emit(refreshEnvelope(index, nextSequence(index)));
+    const encoded = refreshEnvelope(index, nextSequence(index));
+    withObservedQueueOwner(index, new TextEncoder().encode(encoded).byteLength, () => {
+      primarySource.emit(encoded);
     });
     refreshCounts[index] = (refreshCounts[index] ?? 0) + 1;
     refreshInvalidationCount += 1;
@@ -790,7 +844,7 @@ export async function measureAsyncWorkloads(
     for (let index = first; index < end; index += 1) {
       const completion = refreshCompletions.get(index)?.shift();
       if (completion === undefined) throw new Error("e100_refresh_missing");
-      withObservedRefreshIndex(index, () => {
+      withObservedQueueOwner(index, 0, () => {
         completion("succeeded");
       });
     }
@@ -846,7 +900,30 @@ export async function measureAsyncWorkloads(
     subscriptions,
   });
 
+  const applyRetentionMutation = (activeSource: MeasuredSource, phase: "e100" | "r100"): void => {
+    const mutation = input.retentionMutation ?? "none";
+    const holdCurrent = phase === "r100" && mutation === "stale_current_payload";
+    const holdQueued =
+      (phase === "e100" && mutation === "large_island_buffer") ||
+      (phase === "r100" && mutation === "stale_queued_payload");
+    if (!holdCurrent && !holdQueued) return;
+    const index = 0;
+    const refresh = refreshEnvelope(index, nextSequence(index));
+    withObservedQueueOwner(index, new TextEncoder().encode(refresh).byteLength, () => {
+      activeSource.emit(refresh);
+    });
+    if (!holdQueued) return;
+    for (let count = 0; count < 16; count += 1) {
+      const queued = presentationEnvelope(index, nextSequence(index), 1_001 + count);
+      pendingStarts.get(index)?.push(performance.now());
+      withObservedQueueOwner(index, new TextEncoder().encode(queued).byteLength, () => {
+        activeSource.emit(queued);
+      });
+    }
+  };
+
   if ("retentionCheckpoint" in input && input.retentionCheckpoint === "e100") {
+    applyRetentionMutation(primarySource, "e100");
     installRetentionSession("e100", primarySource, null);
     return Object.freeze({ E100: e100Measurement, R100: null });
   }
@@ -948,6 +1025,7 @@ export async function measureAsyncWorkloads(
     }),
   });
   if ("retentionCheckpoint" in input) {
+    applyRetentionMutation(successorSource, "r100");
     installRetentionSession("r100", successorSource, primarySource);
   }
   return measurement;
