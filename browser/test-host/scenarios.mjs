@@ -933,6 +933,89 @@ function uploadsScenario() {
   });
 }
 
+function iteration004UploadControls() {
+  return `<label for="iteration-upload">Iteration 004 file</label>
+    <input id="iteration-upload" type="file" live:upload="attachment" data-suprnova-live-key="iteration-upload" aria-describedby="iteration-upload-error">
+    <div id="iteration-upload-progress" live:progress="attachment" data-suprnova-live-key="iteration-upload-progress" role="progressbar" aria-label="Iteration 004 upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+    <p id="iteration-upload-error" hidden>Iteration 004 upload failed.</p>
+    <button type="button" live:upload.cancel="attachment">Cancel upload</button>
+    <button type="button" live:upload.retry="attachment">Retry upload</button>
+    <button type="button" live:upload.remove="attachment">Remove upload</button>`;
+}
+
+function iteration004Scenario(searchParams = new URLSearchParams()) {
+  const features = ["core", "uploads", "async", "both"].includes(searchParams.get("features"))
+    ? searchParams.get("features")
+    : "core";
+  const format = searchParams.get("format") === "classic" ? "classic" : "esm";
+  const artifact = ["missing", "incompatible"].includes(searchParams.get("artifact"))
+    ? searchParams.get("artifact")
+    : "current";
+  const transport = searchParams.get("transport") === "websocket" ? "websocket" : "sse";
+  const islands = searchParams.get("islands") === "2" ? 2 : 1;
+  const lifecycle = searchParams.get("lifecycle") === "true";
+  const hybrid = searchParams.get("hybrid") === "true";
+  const controlledClock = searchParams.get("controlled-clock") === "true";
+  const syntheticLifecycle = searchParams.get("synthetic-lifecycle") === "true";
+  const hasUploads = features === "uploads" || features === "both";
+  const hasAsync = features === "async" || features === "both";
+  const rootAttributes = hasAsync
+    ? ` live:stream${hybrid ? ".hybrid" : ""}="orders" live:signal="details:false" aria-busy="false" data-live-stream-state="disconnected" data-live-stream-motion="allowed"`
+    : ' live:signal="details:false"';
+  const primaryBody = `<h1>Iteration 004 integration</h1>
+    <button type="button" live:toggle="details">Toggle local details</button>
+    <p hidden aria-hidden="true" inert live:show="details">Local details are available</p>
+    <button id="native-disclosure" type="button" aria-expanded="false" aria-controls="native-fallback">Native disclosure</button>
+    <p id="native-fallback" hidden>Native fallback details</p>
+    ${hasAsync ? '<p data-live-stream-status aria-label="Order updates">Updates disconnected</p>' : ""}
+    ${hasUploads ? iteration004UploadControls() : ""}`;
+  const primary = island({
+    body: primaryBody,
+    documentKey: "iteration-004-primary",
+    protocolMinimum: "2",
+    rootAttributes,
+  });
+  const secondary =
+    hasAsync && islands === 2
+      ? island({
+          body: '<h2>Second stream island</h2><p data-live-stream-status aria-label="Second order updates">Updates disconnected</p>',
+          documentKey: "iteration-004-secondary",
+          envelope: {
+            ...instanceEnvelope,
+            body: {
+              ...instanceEnvelope.body,
+              instance_id: "EBESExQVFhcYGRobHB0eHw",
+              slot: "iteration-004-secondary",
+            },
+          },
+          instanceId: "EBESExQVFhcYGRobHB0eHw",
+          protocolMinimum: "2",
+          rootAttributes,
+          slot: "iteration-004-secondary",
+        })
+      : "";
+  const classicFeatures =
+    artifact === "current"
+      ? `${hasUploads ? '<script src="/suprnova-live.uploads.classic.js"></script>' : ""}${hasAsync ? '<script src="/suprnova-live.async.classic.js"></script>' : ""}`
+      : "";
+  const scripts = `${
+    format === "classic"
+      ? `${classicFeatures}<script src="/suprnova-live.classic.js"></script>`
+      : ""
+  }<script type="module" src="/scenario/iteration004-driver.js"></script>`;
+  const page = document(
+    `${primary}${secondary}
+      ${secondary.length === 0 ? "" : '<button id="remove-second-island" type="button">Remove second island</button>'}
+      <a href="/scenario/iteration004Destination">Ordinary destination</a>`,
+    scripts,
+    { endpoint: "/__live/async/poll" },
+  );
+  return page.replace(
+    '<html lang="en">',
+    `<html lang="en" data-iteration-004-features="${features}" data-iteration-004-format="${format}" data-iteration-004-artifact="${artifact}" data-iteration-004-transport="${transport}" data-iteration-004-lifecycle="${String(lifecycle)}" data-iteration-004-synthetic-lifecycle="${String(syntheticLifecycle)}" data-iteration-004-controlled-clock="${String(controlledClock)}">`,
+  );
+}
+
 export const scenarios = Object.freeze({
   accessibility: { html: accessibilityScenario() },
   asyncLifecycle: {
@@ -944,6 +1027,20 @@ export const scenarios = Object.freeze({
     html: asyncLifecycleScenario(),
   },
   fullFlow: { html: fullFlowScenario() },
+  iteration004: {
+    headers: {
+      "cache-control": "private, max-age=60",
+      "content-security-policy":
+        "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; form-action 'self'; base-uri 'none'",
+    },
+    html: iteration004Scenario,
+  },
+  iteration004Destination: {
+    headers: { "cache-control": "private, max-age=60" },
+    html: document(
+      '<h1>Iteration 004 destination</h1><a href="/scenario/iteration004?features=async&format=esm&transport=sse&lifecycle=true">Return to integration</a>',
+    ),
+  },
   hostileMalformedUtf8: { html: hostileScenario("hostile-malformed-utf8") },
   hostileHugeJson: { html: hostileScenario("hostile-huge-json") },
   hostilePrototypeKey: { html: hostileScenario("hostile-prototype-key") },

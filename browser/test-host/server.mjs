@@ -306,6 +306,30 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
+  if (target.pathname === "/scenario/iteration004-driver.js") {
+    try {
+      const body = await readFile(new URL("test-host/iteration-004.mjs", browserRoot));
+      respond(response, 200, body, {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      });
+    } catch {
+      respond(response, 404, "iteration 004 driver unavailable");
+    }
+    return;
+  }
+  if (target.pathname === "/scenario/iteration004-axe.js") {
+    try {
+      const body = await readFile(new URL("node_modules/axe-core/axe.min.js", browserRoot));
+      respond(response, 200, body, {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      });
+    } catch {
+      respond(response, 404, "iteration 004 axe asset unavailable");
+    }
+    return;
+  }
   if (target.pathname === "/navigation/download") {
     respond(response, 200, "downloaded report", {
       "content-disposition": 'attachment; filename="report.txt"',
@@ -336,7 +360,8 @@ const server = createServer(async (request, response) => {
     }
     const scenarioHeaders =
       typeof scenario.headers === "function" ? scenario.headers() : (scenario.headers ?? {});
-    const scenarioHtml = typeof scenario.html === "function" ? scenario.html() : scenario.html;
+    const scenarioHtml =
+      typeof scenario.html === "function" ? scenario.html(target.searchParams) : scenario.html;
     respond(response, scenario.status ?? 200, scenarioHtml, {
       "content-type": "text/html; charset=utf-8",
       ...scenarioHeaders,

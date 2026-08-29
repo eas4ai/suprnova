@@ -11,7 +11,11 @@ use http_body_util::BodyExt as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use suprnova_live::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
+use suprnova_live::action::{
+    ActionArgumentSchema, ActionAuthorizationPort, ActionAuthorizationRequest, ActionDispatchFn,
+    ActionEntry, ActionError, ActionFuture, ActionTable, AuthorizationDecision,
+    AuthorizationRequirement, TransactionPolicy,
+};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
     HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
@@ -28,12 +32,17 @@ use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SnapshotSchemaSet};
 use suprnova_live::upload::{
-    AcceptedChunk, ChunkBody, PrepareTransfer, QuarantineBytes, QuarantinedFileProvider,
-    ReverseProxyUploadProvider, TransferGrant, TransferGrantCodec, TransferGrantRequest,
-    TransferGrantScope, TrustedProviderOrigin, UploadChecksum, UploadCreationRequest, UploadError,
-    UploadErrorKind, UploadHandle, UploadIdempotencyKey, UploadProvider, UploadRevision,
+    AcceptedChunk, AcceptedUploadType, AuthoritativeUploadType, ChunkBody, ClientUploadMetadata,
+    DetectedUploadType, DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest,
+    FinalizeToken, FinalizeUploadRequest, PrepareTransfer, PreparedFinalize, QuarantineBytes,
+    QuarantinedFileProvider, ReverseProxyUploadProvider, TransferGrant, TransferGrantCodec,
+    TransferGrantRequest, TransferGrantScope, TrustedProviderOrigin, UploadChecksum,
+    UploadCreationRequest, UploadError, UploadErrorKind, UploadFieldPolicy,
+    UploadFinalizationService, UploadFinalizer, UploadFuture, UploadHandle, UploadIdempotencyKey,
+    UploadInspection, UploadProvider, UploadReplacementPolicy, UploadRevision, UploadScanPolicy,
     UploadService, UploadState, UploadTransition, UploadTransitionAdmission,
-    UploadTransitionRequest, VerifyTransfer, WriteChunk,
+    UploadTransitionRequest, UploadValidationStore, ValidatedUpload, ValidationStoreDisposition,
+    VerifyTransfer, WriteChunk,
 };
 use suprnova_live::validation::ValidationSelection;
 use tokio::sync::{Notify, watch};
@@ -58,6 +67,8 @@ enum TransferMode {
 struct StoredUpload {
     handle: UploadHandle,
     field: ModelField,
+    client: Option<ClientUploadMetadata>,
+    policy: Option<UploadFieldPolicy>,
     expected_bytes: u64,
     received_bytes: u64,
     next_part: u32,
@@ -70,11 +81,22 @@ struct StoredUpload {
 }
 
 enum UploadSlot {
-    Ready(StoredUpload),
+    Ready(Box<StoredUpload>),
     Busy {
         handle: UploadHandle,
         mode: TransferMode,
     },
+}
+
+struct ReferenceActionAuthorization;
+
+impl ActionAuthorizationPort for ReferenceActionAuthorization {
+    fn authorize<'a>(
+        &'a self,
+        _request: ActionAuthorizationRequest<'a>,
+    ) -> ActionFuture<'a, Result<AuthorizationDecision, ActionError>> {
+        Box::pin(async { Ok(AuthorizationDecision::Allow) })
+    }
 }
 
 struct UploadSlots {
@@ -111,7 +133,6 @@ impl UploadOperationPause {
         }
     }
 
-    #[cfg(test)]
     fn select(&self, point: UploadPausePoint) {
         *self
             .target
@@ -124,7 +145,6 @@ impl UploadOperationPause {
         self.entered.notified().await;
     }
 
-    #[cfg(test)]
     fn resume(&self) {
         *self
             .target
@@ -161,7 +181,7 @@ impl Drop for UploadOperation {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !self.slots.retired.load(Ordering::Acquire) {
-            records.insert(self.key.clone(), UploadSlot::Ready(upload));
+            records.insert(self.key.clone(), UploadSlot::Ready(Box::new(upload)));
         }
     }
 }
@@ -180,11 +200,136 @@ pub(super) struct CompleteUploadRequest {
     grant: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct FinalizeUploadRequestBody {
+    pub(super) handle: String,
+    pub(super) ready_revision: u64,
+}
+
+#[derive(Default)]
+struct ReferenceValidationStore {
+    evidence: SyncMutex<HashMap<String, ValidatedUpload>>,
+}
+
+impl UploadValidationStore for ReferenceValidationStore {
+    fn put<'a>(
+        &'a self,
+        evidence: ValidatedUpload,
+    ) -> UploadFuture<'a, Result<ValidationStoreDisposition, UploadError>> {
+        Box::pin(async move {
+            let key = evidence.handle().to_string();
+            let mut stored = self
+                .evidence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match stored.get(&key) {
+                Some(existing) if existing == &evidence => {
+                    Ok(ValidationStoreDisposition::ExistingOutcome)
+                }
+                Some(_) => Err(UploadError::new(UploadErrorKind::UploadConflict)),
+                None => {
+                    stored.insert(key, evidence);
+                    Ok(ValidationStoreDisposition::Stored)
+                }
+            }
+        })
+    }
+
+    fn load<'a>(
+        &'a self,
+        upload: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<Option<ValidatedUpload>, UploadError>> {
+        Box::pin(async move {
+            Ok(self
+                .evidence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&upload.to_string())
+                .cloned())
+        })
+    }
+
+    fn remove<'a>(&'a self, upload: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            self.evidence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&upload.to_string());
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
+struct ReferenceFinalizer {
+    durable: SyncMutex<HashMap<String, DurableUpload>>,
+}
+
+impl UploadFinalizer for ReferenceFinalizer {
+    fn prepare<'a>(
+        &'a self,
+        request: FinalizeRequest<'a>,
+    ) -> UploadFuture<'a, Result<PreparedFinalize, UploadError>> {
+        Box::pin(async move {
+            let token = FinalizeToken::parse(&format!("prepared-{}", request.evidence().handle()))?;
+            Ok(PreparedFinalize::new(&request, token))
+        })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        prepared: PreparedFinalize,
+    ) -> UploadFuture<'a, Result<DurableUpload, UploadError>> {
+        Box::pin(async move {
+            let durable = DurableUpload::new(
+                &prepared,
+                DurableUploadId::parse(&format!("durable-{}", prepared.handle()))?,
+            );
+            let key = durable.handle().to_string();
+            let mut stored = self
+                .durable
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match stored.get(&key) {
+                Some(existing) if existing == &durable => Ok(existing.clone()),
+                Some(_) => Err(UploadError::new(UploadErrorKind::UploadConflict)),
+                None => {
+                    stored.insert(key, durable.clone());
+                    Ok(durable)
+                }
+            }
+        })
+    }
+
+    fn compensate<'a>(
+        &'a self,
+        _failed: FailedFinalize,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn reconcile<'a>(
+        &'a self,
+        request: FinalizeRequest<'a>,
+    ) -> UploadFuture<'a, Result<Option<DurableUpload>, UploadError>> {
+        Box::pin(async move {
+            Ok(self
+                .durable
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&request.evidence().handle().to_string())
+                .cloned())
+        })
+    }
+}
+
 pub(super) struct UploadRuntime {
     limits: UploadLimits,
     file: Arc<QuarantinedFileProvider<TokioFileQuarantineStore>>,
     direct: Arc<DirectProviderConformanceAdapter>,
-    service: UploadService,
+    service: Arc<UploadService>,
+    validation: Arc<ReferenceValidationStore>,
+    finalization: UploadFinalizationService,
     grants: TransferGrantCodec,
     context: TrustedLiveRequestContext,
     scope: HostScopeFacts,
@@ -232,13 +377,23 @@ impl UploadRuntime {
         let ledger = Arc::new(
             MemoryUploadLedger::new(limits).map_err(|error| format!("upload ledger: {error:?}"))?,
         );
-        let service = UploadService::new(ledger, grant_codec(), limits)
-            .map_err(|error| format!("upload service: {error:?}"))?;
+        let service = Arc::new(
+            UploadService::new(ledger, grant_codec(), limits)
+                .map_err(|error| format!("upload service: {error:?}"))?,
+        );
+        let validation = Arc::new(ReferenceValidationStore::default());
+        let finalization = UploadFinalizationService::new(
+            Arc::clone(&service),
+            validation.clone(),
+            Arc::new(ReferenceFinalizer::default()),
+        );
         Ok(Self {
             limits,
             file,
             direct,
             service,
+            validation,
+            finalization,
             grants: grant_codec(),
             context,
             scope,
@@ -304,6 +459,8 @@ impl UploadRuntime {
         let handle = UploadHandle::parse(&encoded)?;
         let field = ModelField::parse(&request.field)
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
+        let client = ClientUploadMetadata::new(&request.filename, Some(&request.content_type)).ok();
+        let policy = reference_upload_policy(&request.filename, &request.content_type).ok();
         let created = self
             .service
             .create(
@@ -362,6 +519,8 @@ impl UploadRuntime {
         let stored = StoredUpload {
             handle: handle.clone(),
             field,
+            client,
+            policy,
             expected_bytes: request.expected_bytes,
             received_bytes: 0,
             next_part: 0,
@@ -381,7 +540,7 @@ impl UploadRuntime {
             if self.uploads.retired.load(Ordering::Acquire) || uploads.contains_key(&encoded) {
                 true
             } else {
-                uploads.insert(encoded.clone(), UploadSlot::Ready(stored));
+                uploads.insert(encoded.clone(), UploadSlot::Ready(Box::new(stored)));
                 false
             }
         };
@@ -557,8 +716,82 @@ impl UploadRuntime {
             .await?;
         self.transition(upload, UploadTransition::Accept, "accept")
             .await?;
+        if let (Some(client), Some(policy)) = (&upload.client, &upload.policy) {
+            let authoritative_type = client
+                .claimed_media_type()
+                .map(AuthoritativeUploadType::application)
+                .transpose()?;
+            let inspection = UploadInspection::from_store(
+                upload.handle.clone(),
+                client.clone(),
+                DetectedUploadType::Unknown,
+                authoritative_type,
+                upload.received_bytes,
+                checksum,
+                None,
+                CREATED_AT,
+            )?;
+            let authority = TransferGrantScope::new(
+                upload.handle.clone(),
+                self.context.mount().component().clone(),
+                upload.field.clone(),
+                self.scope.clone(),
+                1,
+            );
+            self.validation
+                .put(ValidatedUpload::from_store(
+                    authority,
+                    upload.revision,
+                    policy.contract_digest().clone(),
+                    inspection,
+                )?)
+                .await?;
+        }
         drop(upload.active_lease.take());
         Ok(())
+    }
+
+    pub(super) async fn finalize(
+        &self,
+        request: FinalizeUploadRequestBody,
+    ) -> Result<Value, UploadError> {
+        self.record_call();
+        let mut operation = self.take_upload(&request.handle)?;
+        let upload = operation.upload_mut();
+        let policy = upload
+            .policy
+            .clone()
+            .ok_or_else(|| UploadError::new(UploadErrorKind::ValidationEvidenceUnavailable))?;
+        let action = ActionTable::new(vec![ActionEntry::new(
+            reference_action_metadata(),
+            unused_action_dispatcher(),
+        )])
+        .map_err(|_| UploadError::new(UploadErrorKind::AuthorizationDenied))?
+        .authorize(
+            self.context.mount().component(),
+            self.context.capabilities(),
+            policy.finalize_action(),
+        )
+        .await
+        .map_err(|_| UploadError::new(UploadErrorKind::AuthorizationDenied))?;
+        let outcome = self
+            .finalization
+            .finalize(
+                &self.context,
+                FinalizeUploadRequest::new(
+                    upload.handle.clone(),
+                    upload.field.clone(),
+                    UploadRevision::new(request.ready_revision),
+                    idempotency(&format!("finalize-{}", &request.handle[..12]))?,
+                    action,
+                    policy,
+                ),
+                CREATED_AT,
+            )
+            .await?;
+        upload.state = UploadState::Finalized;
+        upload.revision = outcome.revision();
+        Ok(status_json(upload))
     }
 
     pub(super) async fn cancel(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
@@ -634,6 +867,14 @@ impl UploadRuntime {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
 
+    pub(super) fn pause_chunk(&self) {
+        self.operation_pause.select(UploadPausePoint::Chunk);
+    }
+
+    pub(super) fn resume_chunk(&self) {
+        self.operation_pause.resume();
+    }
+
     pub(super) async fn retire(&self) -> Result<(), String> {
         self.uploads.retired.store(true, Ordering::Release);
         let pending = {
@@ -705,7 +946,7 @@ impl UploadRuntime {
         let upload = uploads
             .remove(handle)
             .and_then(|slot| match slot {
-                UploadSlot::Ready(upload) => Some(upload),
+                UploadSlot::Ready(upload) => Some(*upload),
                 busy @ UploadSlot::Busy { .. } => {
                     uploads.insert(handle.to_owned(), busy);
                     None
@@ -789,6 +1030,29 @@ fn status_json(upload: &StoredUpload) -> Value {
 
 fn idempotency(value: &str) -> Result<UploadIdempotencyKey, UploadError> {
     UploadIdempotencyKey::parse(value)
+}
+
+fn reference_upload_policy(
+    filename: &str,
+    content_type: &str,
+) -> Result<UploadFieldPolicy, UploadError> {
+    let extension = filename
+        .rsplit_once('.')
+        .map_or("bin", |(_, extension)| extension);
+    UploadFieldPolicy::new_with_accepted_types(
+        16,
+        UploadLimitConfig::reference().max_file_bytes,
+        UploadReplacementPolicy::RetirePrevious,
+        vec![AcceptedUploadType::application(content_type, &[extension])?],
+        None,
+        UploadScanPolicy::Disabled,
+        ActionName::parse("refresh")
+            .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?,
+    )
+}
+
+fn unused_action_dispatcher() -> ActionDispatchFn {
+    |_target, _authorized, _arguments| Box::pin(std::future::pending())
 }
 
 fn grant_codec() -> TransferGrantCodec {
@@ -887,6 +1151,7 @@ fn reference_upload_context(
         CREATED_AT,
         UnixMillis::new(60_000),
     )
+    .with_action_authorization(Arc::new(ReferenceActionAuthorization))
     .with_upload_authorization(authorization)
     .build()
     .map_err(|error| format!("trusted upload context: {error:?}"))?;
@@ -906,20 +1171,22 @@ fn reference_metadata() -> &'static ComponentMetadata {
                 StateCodec::Json,
                 true,
             )],
-            vec![
-                ActionMetadata::new_with_contract(
-                    ActionName::parse("refresh").expect("static action identity"),
-                    1,
-                    ActionArgumentSchema::empty(),
-                    AuthorizationRequirement::Current,
-                    ValidationSelection::ComponentAndArguments,
-                    TransactionPolicy::None,
-                )
-                .expect("static action metadata"),
-            ],
+            vec![reference_action_metadata()],
         )
         .expect("static component metadata")
     })
+}
+
+fn reference_action_metadata() -> ActionMetadata {
+    ActionMetadata::new_with_contract(
+        ActionName::parse("refresh").expect("static action identity"),
+        1,
+        ActionArgumentSchema::empty(),
+        AuthorizationRequirement::Current,
+        ValidationSelection::ComponentAndArguments,
+        TransactionPolicy::None,
+    )
+    .expect("static action metadata")
 }
 
 fn deterministic_bytes<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {

@@ -26,8 +26,15 @@ export default defineConfig({
     },
     {
       command:
-        "SUPRNOVA_LIVE_REFERENCE_PORT=4175 cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
+        "SUPRNOVA_LIVE_REFERENCE_PORT=4175 SUPRNOVA_LIVE_REFERENCE_STATIC_ORIGIN=http://127.0.0.1:4173 cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
       url: "http://127.0.0.1:4175/suprnova-live.assets.json",
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      command:
+        "SUPRNOVA_LIVE_REFERENCE_PORT=4176 SUPRNOVA_LIVE_REFERENCE_STATIC_ORIGIN=http://127.0.0.1:4173 SUPRNOVA_LIVE_REFERENCE_FAULT=sequence-gap-once cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
+      url: "http://127.0.0.1:4176/suprnova-live.assets.json",
       reuseExistingServer: false,
       timeout: 60_000,
     },
@@ -41,7 +48,7 @@ export default defineConfig({
     { name: "webkit", use: { browserName: "webkit" } },
     {
       name: "chrome-bfcache",
-      testMatch: "async-lifecycle.spec.ts",
+      testMatch: ["async-lifecycle.spec.ts", "iteration-004-lifecycle.spec.ts"],
       use: {
         browserName: "chromium",
         channel: "chrome",

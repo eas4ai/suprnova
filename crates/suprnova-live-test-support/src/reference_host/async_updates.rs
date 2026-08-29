@@ -40,7 +40,16 @@ enum TransportKind {
 #[serde(deny_unknown_fields)]
 pub(super) struct TransportCreateRequest {
     kind: String,
+    position: Option<TransportPosition>,
+    prior_subscription: Option<String>,
     subscription: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportPosition {
+    epoch: String,
+    sequence: String,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +90,7 @@ struct AsyncState {
     engine: Arc<EngineAsyncFixture>,
     transports: BTreeMap<String, IssuedTransport>,
     by_kind: BTreeMap<TransportKind, String>,
+    continuity_authorities: BTreeMap<(TransportKind, String), AsyncReferenceAuthority>,
     next_transport: u64,
     retired: bool,
 }
@@ -148,11 +158,33 @@ pub(super) struct TransportReaderLease {
 impl Drop for TransportReaderLease {
     fn drop(&mut self) {
         let mut state = self.state.lock().expect("async runtime lock");
-        if let Some(transport) = state.transports.get_mut(&self.transport)
-            && transport.generation == self.generation
-        {
-            transport.reader_active = false;
+        let Some(current) = state.transports.get(&self.transport) else {
+            return;
+        };
+        if current.generation != self.generation {
+            return;
         }
+        let kind = current.kind;
+        let Some(mut transport) = state.transports.remove(&self.transport) else {
+            return;
+        };
+        state.by_kind.remove(&kind);
+        let engine = Arc::clone(&state.engine);
+        for (subscription, mut membership) in transport.memberships {
+            membership
+                .authority
+                .close_transport(membership.authority_transport);
+            membership.open = false;
+            engine.remove(&membership.engine_authorization);
+            drop(membership.lease.take());
+            state
+                .continuity_authorities
+                .insert((kind, subscription), membership.authority);
+        }
+        drop(state);
+        tokio::spawn(async move {
+            let _ = transport.document.close().await;
+        });
     }
 }
 
@@ -185,6 +217,7 @@ impl AsyncRuntime {
                 engine: Arc::new(EngineAsyncFixture::new().await?),
                 transports: BTreeMap::new(),
                 by_kind: BTreeMap::new(),
+                continuity_authorities: BTreeMap::new(),
                 next_transport: 1,
                 retired: false,
             })),
@@ -209,6 +242,15 @@ impl AsyncRuntime {
         if request.subscription != AsyncReferenceScenario::lifecycle().stream {
             return Err("transport_facts_invalid");
         }
+        let replay_from = match (&request.prior_subscription, &request.position) {
+            (None, None) => None,
+            (Some(subscription), Some(position))
+                if MEMBERSHIP_IDS.contains(&subscription.as_str()) =>
+            {
+                Some((subscription.as_str(), position))
+            }
+            _ => return Err("transport_facts_invalid"),
+        };
         let mut state = self.state.lock().expect("async runtime lock");
         if state.retired {
             return Err("transport_retired");
@@ -218,7 +260,12 @@ impl AsyncRuntime {
                 .transports
                 .get(&transport_id)
                 .ok_or("transport_authority_invalid")?;
-            return Ok(transport_response(&transport_id, transport));
+            return transport_response(
+                &transport_id,
+                transport,
+                state.engine.as_ref(),
+                replay_from,
+            );
         }
         if state.transports.len() >= MAX_DOCUMENT_TRANSPORTS {
             return Err("transport_capacity_exceeded");
@@ -235,11 +282,16 @@ impl AsyncRuntime {
         let mut memberships = BTreeMap::new();
         for subscription_id in MEMBERSHIP_IDS {
             let engine_authorization = state.engine.authorization(subscription_id, origin)?;
-            let mut authority = AsyncReferenceAuthority::new_with_origin_subscription(
-                NOW,
-                origin.to_owned(),
-                subscription_id.to_owned(),
-            );
+            let mut authority = state
+                .continuity_authorities
+                .remove(&(kind, subscription_id.to_owned()))
+                .unwrap_or_else(|| {
+                    AsyncReferenceAuthority::new_with_origin_subscription(
+                        NOW,
+                        origin.to_owned(),
+                        subscription_id.to_owned(),
+                    )
+                });
             authority.install_external_authority(
                 state.engine.descriptor().to_owned(),
                 state.engine.descriptor_binding().to_owned(),
@@ -282,7 +334,7 @@ impl AsyncRuntime {
             .transports
             .get(&transport_id)
             .ok_or("transport_authority_invalid")?;
-        Ok(transport_response(&transport_id, transport))
+        transport_response(&transport_id, transport, state.engine.as_ref(), replay_from)
     }
 
     pub(super) async fn membership(
@@ -546,6 +598,14 @@ impl AsyncRuntime {
             state.engine.fresh_render_endpoint()
         };
         endpoint.initial_html().to_owned()
+    }
+
+    pub(super) async fn reset_fresh_render(&self) -> Result<(), String> {
+        let engine = {
+            let state = self.state.lock().expect("async runtime lock");
+            Arc::clone(&state.engine)
+        };
+        engine.reset_fresh_render().await
     }
 
     pub(super) fn pause_fresh_render(&self) {
@@ -935,6 +995,14 @@ impl AsyncRuntime {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
 
+    pub(super) fn reset_sequence_gap(&self) -> bool {
+        if self.fault != ReferenceFaultSchedule::SequenceGapOnce {
+            return false;
+        }
+        self.fault_applied.store(false, Ordering::SeqCst);
+        true
+    }
+
     pub(super) fn maximum_memberships(&self) -> usize {
         self.maximum_memberships.load(Ordering::SeqCst)
     }
@@ -966,33 +1034,114 @@ impl AsyncRuntime {
     }
 }
 
-fn transport_response(transport_id: &str, transport: &IssuedTransport) -> Value {
+fn transport_response(
+    transport_id: &str,
+    transport: &IssuedTransport,
+    engine: &EngineAsyncFixture,
+    replay_from: Option<(&str, &TransportPosition)>,
+) -> Result<Value, &'static str> {
+    let transport_kind = match transport.kind {
+        TransportKind::Sse => "sse",
+        TransportKind::WebSocket => "websocket",
+    };
     let memberships = transport
         .memberships
         .iter()
         .map(|(subscription, membership)| {
-            json!({
+            let (replay, baseline_epoch, baseline_sequence) = match replay_from {
+                Some((prior, position)) if prior == subscription => {
+                    let proof = membership.authority.poll(
+                        membership.authority.origin(),
+                        &membership.credential,
+                        &AsyncReferencePollRequest {
+                            descriptor_binding: membership.binding.clone(),
+                            position: AsyncReferencePosition {
+                                epoch: position.epoch.clone(),
+                                sequence: position.sequence.clone(),
+                            },
+                            subscription_id: subscription.clone(),
+                        },
+                        NOW,
+                    )?;
+                    let count = proof["envelopes"]
+                        .as_array()
+                        .ok_or("continuity_proof_invalid")?
+                        .len();
+                    let current = membership.authority.current_sequence();
+                    let first = current
+                        .checked_add(1)
+                        .and_then(|after| after.checked_sub(count as u64))
+                        .ok_or("continuity_proof_invalid")?;
+                    let replay = (first..=current)
+                        .map(|sequence| {
+                            let envelope =
+                                engine.envelope(&membership.engine_authorization, sequence)?;
+                            let encoded = WebSocketCodec::v1()
+                                .encode_envelope(&envelope)
+                                .map_err(|_| "engine_envelope_invalid")?;
+                            String::from_utf8(encoded).map_err(|_| "engine_envelope_invalid")
+                        })
+                        .collect::<Result<Vec<_>, &'static str>>()?;
+                    (replay, position.epoch.clone(), position.sequence.clone())
+                }
+                _ => (
+                    Vec::new(),
+                    "1".to_owned(),
+                    membership.authority.current_sequence().to_string(),
+                ),
+            };
+            Ok(json!({
                 "authority": membership.credential,
                 "descriptor": membership.descriptor,
                 "descriptor_binding": membership.binding,
                 "subscription": subscription,
-            })
+                "browser_authorization": {
+                    "authorization": {
+                        "credential": membership.credential,
+                        "kind": "bearer",
+                    },
+                    "baseline": {
+                        "epoch": baseline_epoch,
+                        "sequence": baseline_sequence,
+                    },
+                    "document": {
+                        "authorization_scope": ASYNC_REFERENCE_SCOPE,
+                        "transport": transport_kind,
+                    },
+                    "events": [],
+                    "expires_at": 60_000,
+                    "fallback_poll": {
+                        "initial": "wait",
+                        "interval_ms": 30_000,
+                        "jitter_ratio": 0,
+                        "visibility": "visible",
+                    },
+                    "heartbeat_timeout_ms": 10_000,
+                    "presentation_signals": [],
+                    "replay": replay,
+                    "reconnect": {
+                        "kind": "resume_or_refresh",
+                        "maximum_attempts": 4,
+                        "maximum_delay_ms": 1_000,
+                        "minimum_delay_ms": 250,
+                    },
+                    "stream": AsyncReferenceScenario::lifecycle().stream,
+                    "subscription_id": subscription,
+                },
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, &'static str>>()?;
     let first = memberships.first().expect("reference memberships");
-    json!({
+    Ok(json!({
         "transport": transport_id,
         "subscription": first["subscription"],
         "authority": first["authority"],
         "descriptor": first["descriptor"],
         "descriptor_binding": first["descriptor_binding"],
         "memberships": memberships,
-        "kind": match transport.kind {
-            TransportKind::Sse => "sse",
-            TransportKind::WebSocket => "websocket",
-        },
+        "kind": transport_kind,
         "transport_generation": transport.generation,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -1010,6 +1159,8 @@ mod tests {
             .create(
                 TransportCreateRequest {
                     kind: "websocket".to_owned(),
+                    position: None,
+                    prior_subscription: None,
                     subscription: "orders".to_owned(),
                 },
                 "http://127.0.0.1:4197",
@@ -1064,6 +1215,8 @@ mod tests {
             .create(
                 TransportCreateRequest {
                     kind: "sse".to_owned(),
+                    position: None,
+                    prior_subscription: None,
                     subscription: "orders".to_owned(),
                 },
                 origin,

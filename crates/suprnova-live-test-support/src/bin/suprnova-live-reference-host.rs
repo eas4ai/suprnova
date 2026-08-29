@@ -35,11 +35,14 @@ async fn run() -> Result<(), String> {
     let configured_fault = std::env::var("SUPRNOVA_LIVE_REFERENCE_FAULT").ok();
     let fault_schedule = parse_fault_schedule(configured_fault.as_deref())?;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let host = ReferenceHost::start(
-        ReferenceHostConfig::new(address, artifact_root, quarantine_root)
-            .with_fault_schedule(fault_schedule),
-    )
-    .await?;
+    let mut config = ReferenceHostConfig::new(address, artifact_root, quarantine_root)
+        .with_fault_schedule(fault_schedule);
+    if let Ok(origin) = std::env::var("SUPRNOVA_LIVE_REFERENCE_STATIC_ORIGIN")
+        && !origin.is_empty()
+    {
+        config = config.with_static_scenario_origin(origin);
+    }
+    let host = ReferenceHost::start(config).await?;
     println!("{{\"origin\":\"{}\",\"ready\":true}}", host.origin());
 
     tokio::task::spawn_blocking(|| {

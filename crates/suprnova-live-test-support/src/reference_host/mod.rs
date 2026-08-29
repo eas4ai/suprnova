@@ -15,13 +15,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
+};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt as _;
+use http_body_util::{BodyExt as _, Empty, Limited};
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
 use suprnova_live::limits::InputLimits;
 use suprnova_live::protocol::{
@@ -37,7 +43,9 @@ use tokio::time::Duration;
 use artifacts::ValidatedArtifacts;
 use async_updates::{AsyncRuntime, MembershipRequest, PollRequest, TransportCreateRequest};
 pub use faults::ReferenceFaultSchedule;
-use uploads::{CompleteUploadRequest, CreateUploadRequest, UploadRuntime};
+use uploads::{
+    CompleteUploadRequest, CreateUploadRequest, FinalizeUploadRequestBody, UploadRuntime,
+};
 
 /// Upload-creation route.
 pub const CREATE_UPLOAD: &str = "/__live/uploads";
@@ -65,6 +73,19 @@ pub const WEBSOCKET: &str = "/__live/async/ws";
 /// Physical-browser fresh-render conformance scenario.
 pub const FRESH_RENDER_SCENARIO: &str = "/scenario/referenceFreshRender";
 
+const ITERATION_004_SCENARIO: &str = "/scenario/iteration004";
+const ITERATION_004_DESTINATION: &str = "/scenario/iteration004Destination";
+const ITERATION_004_DRIVER: &str = "/scenario/iteration004-driver.js";
+const ITERATION_004_AXE: &str = "/scenario/iteration004-axe.js";
+const ITERATION_004_FINALIZE_UPLOAD: &str = "/scenario/iteration004/finalize-upload";
+const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
+const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
+const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/resume-chunk";
+const ITERATION_004_RESET_SEQUENCE_GAP: &str =
+    "/__test/iteration-004/control/async/reset-sequence-gap";
+const MAX_STATIC_SCENARIO_BYTES: usize = 2 * 1024 * 1024;
+const REFERENCE_WEBSOCKET_COOKIE: &str = "suprnova_live_reference_session=task1-reference-session";
+
 /// Static bearer used only by the closed reference host.
 pub const REFERENCE_AUTHORIZATION: &str = "Bearer task1-reference-session";
 
@@ -75,6 +96,7 @@ pub struct ReferenceHostConfig {
     artifact_root: PathBuf,
     quarantine_root: PathBuf,
     fault_schedule: ReferenceFaultSchedule,
+    static_scenario_origin: Option<String>,
 }
 
 impl ReferenceHostConfig {
@@ -90,6 +112,7 @@ impl ReferenceHostConfig {
             artifact_root,
             quarantine_root,
             fault_schedule: ReferenceFaultSchedule::None,
+            static_scenario_origin: None,
         }
     }
 
@@ -97,6 +120,13 @@ impl ReferenceHostConfig {
     #[must_use]
     pub const fn with_fault_schedule(mut self, fault_schedule: ReferenceFaultSchedule) -> Self {
         self.fault_schedule = fault_schedule;
+        self
+    }
+
+    /// Enables the closed Iteration 004 static-scenario reverse proxy.
+    #[must_use]
+    pub fn with_static_scenario_origin(mut self, origin: String) -> Self {
+        self.static_scenario_origin = Some(origin);
         self
     }
 }
@@ -126,6 +156,8 @@ pub struct ReferenceHostInspection {
     pub active_uploads: usize,
     /// Currently authenticated logical memberships.
     pub logical_memberships: usize,
+    /// Currently owned browser-facing physical document transports.
+    pub active_physical_transports: usize,
 }
 
 const RESOURCE_RETIRED: usize = 1 << (usize::BITS - 1);
@@ -194,6 +226,7 @@ struct ResourceCounters {
     open_timers: Arc<ResourceCounter>,
     active_uploads: Arc<ResourceCounter>,
     logical_memberships: Arc<ResourceCounter>,
+    active_physical_transports: Arc<ResourceCounter>,
 }
 
 impl ResourceCounters {
@@ -203,6 +236,7 @@ impl ResourceCounters {
         self.open_timers.retire();
         self.active_uploads.retire();
         self.logical_memberships.retire();
+        self.active_physical_transports.retire();
     }
 
     async fn wait_until_drained(&self) -> Result<(), String> {
@@ -213,17 +247,19 @@ impl ResourceCounters {
                 self.open_timers.wait_until_drained(),
                 self.active_uploads.wait_until_drained(),
                 self.logical_memberships.wait_until_drained(),
+                self.active_physical_transports.wait_until_drained(),
             );
         })
         .await
         .map_err(|_| {
             format!(
-                "reference host resource drain timed out: sockets={}, files={}, timers={}, uploads={}, memberships={}",
+                "reference host resource drain timed out: sockets={}, files={}, timers={}, uploads={}, memberships={}, physical_transports={}",
                 self.open_sockets.current(),
                 self.open_files.current(),
                 self.open_timers.current(),
                 self.active_uploads.current(),
                 self.logical_memberships.current(),
+                self.active_physical_transports.current(),
             )
         })
     }
@@ -258,6 +294,7 @@ struct HostState {
     async_runtime: AsyncRuntime,
     request_shutdown: watch::Receiver<bool>,
     inspection: InspectionState,
+    static_scenario_origin: Option<String>,
 }
 
 impl HostState {
@@ -286,6 +323,11 @@ impl HostState {
             open_timers: self.inspection.resources.open_timers.current(),
             active_uploads: self.inspection.resources.active_uploads.current(),
             logical_memberships: self.inspection.resources.logical_memberships.current(),
+            active_physical_transports: self
+                .inspection
+                .resources
+                .active_physical_transports
+                .current(),
         }
     }
 }
@@ -303,6 +345,11 @@ pub struct ReferenceHost {
 impl ReferenceHost {
     /// Validates production artifacts, binds the exact address, and starts serving.
     pub async fn start(config: ReferenceHostConfig) -> Result<Self, String> {
+        let static_scenario_origin = config
+            .static_scenario_origin
+            .as_deref()
+            .map(validate_static_scenario_origin)
+            .transpose()?;
         let artifacts = ValidatedArtifacts::load(&config.artifact_root).await?;
         tokio::fs::create_dir_all(&config.quarantine_root)
             .await
@@ -338,6 +385,7 @@ impl ReferenceHost {
             async_runtime,
             request_shutdown: request_shutdown_receiver,
             inspection,
+            static_scenario_origin,
         });
         let router = router(state.clone());
         let (shutdown, receiver) = oneshot::channel();
@@ -491,6 +539,36 @@ fn router(state: Arc<HostState>) -> Router {
         .route(SSE, get(sse))
         .route(WEBSOCKET, get(websocket))
         .route(FRESH_RENDER_SCENARIO, get(fresh_render_scenario))
+        .route(
+            ITERATION_004_SCENARIO,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_DESTINATION,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_DRIVER,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_AXE,
+            get(static_scenario_proxy).head(static_scenario_proxy),
+        )
+        .route(
+            ITERATION_004_FINALIZE_UPLOAD,
+            post(iteration_004_finalize_upload),
+        )
+        .route(ITERATION_004_INSPECTION, get(iteration_004_inspection))
+        .route(ITERATION_004_PAUSE_UPLOAD, post(iteration_004_pause_upload))
+        .route(
+            ITERATION_004_RESUME_UPLOAD,
+            post(iteration_004_resume_upload),
+        )
+        .route(
+            ITERATION_004_RESET_SEQUENCE_GAP,
+            post(iteration_004_reset_sequence_gap),
+        )
         .fallback(get(static_asset).head(static_asset))
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -760,6 +838,14 @@ async fn sse(
             let Some(timer_lease) = state.inspection.resources.open_timers.acquire() else {
                 return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
             };
+            let Some(physical_lease) = state
+                .inspection
+                .resources
+                .active_physical_transports
+                .acquire()
+            else {
+                return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+            };
             state
                 .inspection
                 .physical_sse_connections
@@ -767,8 +853,14 @@ async fn sse(
             let stream_state = state.clone();
             let stream_transport = transport.clone();
             let stream = futures_util::stream::unfold(
-                (Some(first_event), socket_lease, timer_lease, reader),
-                move |(first, socket_lease, timer_lease, reader)| {
+                (
+                    Some(first_event),
+                    socket_lease,
+                    timer_lease,
+                    reader,
+                    physical_lease,
+                ),
+                move |(first, socket_lease, timer_lease, reader, physical_lease)| {
                     let state = stream_state.clone();
                     let transport = stream_transport.clone();
                     async move {
@@ -784,7 +876,7 @@ async fn sse(
                         };
                         Some((
                             Ok::<_, Infallible>(axum::body::Bytes::from(event)),
-                            (None, socket_lease, timer_lease, reader),
+                            (None, socket_lease, timer_lease, reader, physical_lease),
                         ))
                     }
                 },
@@ -809,13 +901,22 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if let Some(response) = session_error(&headers) {
+    if let Some(response) = websocket_session_error(&headers) {
         return response;
     }
     if header(&headers, ORIGIN.as_str()) != Some(state.origin.as_str()) {
         return error(StatusCode::FORBIDDEN, "websocket_origin_rejected");
     }
-    let Some(transport) = header(&headers, "x-live-transport").map(ToOwned::to_owned) else {
+    let protocol = header(&headers, SEC_WEBSOCKET_PROTOCOL.as_str()).and_then(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .find_map(websocket_transport_protocol)
+    });
+    let Some(transport) = header(&headers, "x-live-transport")
+        .map(ToOwned::to_owned)
+        .or_else(|| protocol.as_ref().map(|(_, transport)| transport.clone()))
+    else {
         return error(StatusCode::UNAUTHORIZED, "transport_authority_missing");
     };
     let reader = match state.async_runtime.acquire_reader(
@@ -835,9 +936,29 @@ async fn websocket(
     let Some(socket_lease) = state.inspection.resources.open_sockets.acquire() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
     };
+    let Some(physical_lease) = state
+        .inspection
+        .resources
+        .active_physical_transports
+        .acquire()
+    else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+    };
+    let upgrade = match protocol {
+        Some((protocol, _)) => upgrade.protocols([protocol]),
+        None => upgrade,
+    };
     upgrade
         .on_upgrade(move |socket| {
-            websocket_session(state, transport, socket, socket_lease, timer_lease, reader)
+            websocket_session(
+                state,
+                transport,
+                socket,
+                socket_lease,
+                timer_lease,
+                physical_lease,
+                reader,
+            )
         })
         .into_response()
 }
@@ -848,6 +969,7 @@ async fn websocket_session(
     mut socket: WebSocket,
     _socket_lease: ResourceLease,
     _timer_lease: ResourceLease,
+    _physical_lease: ResourceLease,
     _reader: async_updates::TransportReaderLease,
 ) {
     const MAX_CONTROLS_PER_CONNECTION: usize = 64;
@@ -901,6 +1023,19 @@ async fn websocket_session(
     }
 }
 
+fn websocket_transport_protocol(value: &str) -> Option<(String, String)> {
+    let transport = value.strip_prefix("suprnova-live-v1.")?;
+    if transport.is_empty()
+        || transport.len() > 64
+        || !transport
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    Some((value.to_owned(), transport.to_owned()))
+}
+
 async fn static_asset(State(state): State<Arc<HostState>>, uri: Uri) -> Response {
     if uri.query().is_some() {
         return StatusCode::NOT_FOUND.into_response();
@@ -922,7 +1057,143 @@ async fn static_asset(State(state): State<Arc<HostState>>, uri: Uri) -> Response
     )
 }
 
+fn validate_static_scenario_origin(origin: &str) -> Result<String, String> {
+    let parsed = origin
+        .parse::<Uri>()
+        .map_err(|_| "reference static-scenario origin is invalid".to_owned())?;
+    if parsed.scheme_str() != Some("http")
+        || parsed.authority().is_none()
+        || (parsed.path() != "/" && !parsed.path().is_empty())
+        || parsed.query().is_some()
+    {
+        return Err("reference static-scenario origin must be an HTTP origin".to_owned());
+    }
+    Ok(origin.trim_end_matches('/').to_owned())
+}
+
+async fn static_scenario_proxy(State(state): State<Arc<HostState>>, uri: Uri) -> Response {
+    let Some(origin) = state.static_scenario_origin.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let target = format!(
+        "{origin}{}",
+        uri.path_and_query()
+            .map_or(uri.path(), axum::http::uri::PathAndQuery::as_str)
+    );
+    let Ok(target) = target.parse::<Uri>() else {
+        return error(StatusCode::BAD_GATEWAY, "static_scenario_unavailable");
+    };
+    let request = match hyper::Request::builder()
+        .method("GET")
+        .uri(target)
+        .body(Empty::<hyper::body::Bytes>::new())
+    {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "static_scenario_unavailable"),
+    };
+    let client: Client<HttpConnector, Empty<hyper::body::Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let response = match client.request(request).await {
+        Ok(response) => response,
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "static_scenario_unavailable"),
+    };
+    let status = response.status();
+    let content_type = response.headers().get(CONTENT_TYPE).cloned();
+    let cache_control = response.headers().get(CACHE_CONTROL).cloned();
+    let csp = response.headers().get("content-security-policy").cloned();
+    let bytes = match Limited::new(response.into_body(), MAX_STATIC_SCENARIO_BYTES)
+        .collect()
+        .await
+    {
+        Ok(bytes) => bytes.to_bytes(),
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "static_scenario_unavailable"),
+    };
+    let mut proxied = Response::new(Body::from(bytes));
+    *proxied.status_mut() = status;
+    if let Some(value) = content_type {
+        proxied.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    proxied.headers_mut().insert(
+        CACHE_CONTROL,
+        cache_control.unwrap_or_else(|| HeaderValue::from_static("no-store")),
+    );
+    if let Some(value) = csp {
+        proxied
+            .headers_mut()
+            .insert("content-security-policy", value);
+    }
+    if uri.path() == ITERATION_004_SCENARIO {
+        proxied.headers_mut().insert(
+            "set-cookie",
+            HeaderValue::from_static(
+                "suprnova_live_reference_session=task1-reference-session; Path=/__live/async/ws; HttpOnly; SameSite=Strict",
+            ),
+        );
+    }
+    proxied
+}
+
+async fn iteration_004_inspection(State(state): State<Arc<HostState>>) -> Response {
+    let snapshot = state.snapshot();
+    Json(json!({
+        "active_physical_transports": snapshot.active_physical_transports,
+        "active_uploads": snapshot.active_uploads,
+        "compiled_faults_applied": snapshot.compiled_faults_applied,
+        "logical_memberships": snapshot.logical_memberships,
+        "maximum_logical_memberships": snapshot.maximum_logical_memberships,
+        "open_files": snapshot.open_files,
+        "open_sockets": snapshot.open_sockets,
+        "open_timers": snapshot.open_timers,
+        "physical_sse_connections": snapshot.physical_sse_connections,
+        "physical_websocket_connections": snapshot.physical_websocket_connections,
+        "upload_service_calls": snapshot.upload_service_calls,
+    }))
+    .into_response()
+}
+
+async fn iteration_004_pause_upload(State(state): State<Arc<HostState>>) -> StatusCode {
+    state.uploads.pause_chunk();
+    StatusCode::NO_CONTENT
+}
+
+async fn iteration_004_resume_upload(State(state): State<Arc<HostState>>) -> StatusCode {
+    state.uploads.resume_chunk();
+    StatusCode::NO_CONTENT
+}
+
+async fn iteration_004_finalize_upload(
+    State(state): State<Arc<HostState>>,
+    headers: HeaderMap,
+    Json(request): Json<FinalizeUploadRequestBody>,
+) -> Response {
+    if let Some(response) = session_error(&headers) {
+        return response;
+    }
+    match state.uploads.finalize(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => upload_error(error),
+    }
+}
+
+async fn iteration_004_reset_sequence_gap(State(state): State<Arc<HostState>>) -> StatusCode {
+    let snapshot = state.snapshot();
+    if snapshot.active_physical_transports != 0 || snapshot.logical_memberships != 0 {
+        return StatusCode::CONFLICT;
+    }
+    if state.async_runtime.reset_sequence_gap() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
+}
+
 async fn fresh_render_scenario(State(state): State<Arc<HostState>>) -> Response {
+    if state.async_runtime.reset_fresh_render().await.is_err() {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fresh_render_fixture_unavailable",
+        );
+    }
     let island = state.async_runtime.fresh_render_document().await;
     let body = format!(
         r#"<!doctype html>
@@ -940,7 +1211,18 @@ const issued = await fetch("/__live/async/transports", {{
   method: "POST"
 }}).then((response) => response.json());
 const membership = issued.memberships[0];
-const evidence = {{ acceptedRevision: null, requests: 0 }};
+const initialIsland = document.querySelector("[data-suprnova-live-island]");
+const initialPreserved = document.querySelector('#fresh-render-preserved');
+const initialReplacement = document.querySelector('#fresh-render-replacement-old');
+if (!(initialPreserved instanceof HTMLElement)) throw new Error("fresh_render_focus_target_missing");
+initialPreserved.focus();
+const evidence = {{
+  acceptedRevision: null,
+  initialIsland,
+  initialPreserved,
+  initialReplacement,
+  requests: 0
+}};
 Object.defineProperty(window, "__suprnovaFreshRender", {{ value: evidence }});
 configureAsync({{
   clock: {{ now: () => Date.now() }},
@@ -994,6 +1276,21 @@ fn exact_bytes(bytes: Vec<u8>, content_type: &str, cache_control: &str) -> Respo
 
 fn session_error(headers: &HeaderMap) -> Option<Response> {
     if header(headers, AUTHORIZATION.as_str()) == Some(REFERENCE_AUTHORIZATION) {
+        None
+    } else {
+        Some(error(StatusCode::UNAUTHORIZED, "session_authority_invalid"))
+    }
+}
+
+fn websocket_session_error(headers: &HeaderMap) -> Option<Response> {
+    if session_error(headers).is_none()
+        || header(headers, "cookie").is_some_and(|cookies| {
+            cookies
+                .split(';')
+                .map(str::trim)
+                .any(|cookie| cookie == REFERENCE_WEBSOCKET_COOKIE)
+        })
+    {
         None
     } else {
         Some(error(StatusCode::UNAUTHORIZED, "session_authority_invalid"))

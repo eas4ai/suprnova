@@ -717,6 +717,23 @@ async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructio
     assert_eq!(status, StatusCode::OK, "{reacquired}");
     assert_ne!(reacquired["grant"], grant);
 
+    let (status, _, finalized) = json_request(
+        &host,
+        Method::POST,
+        "/scenario/iteration004/finalize-upload",
+        json!({
+            "handle": handle,
+            "ready_revision": completed["revision"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finalized}");
+    assert_eq!(finalized["state"], "finalized");
+    assert_eq!(
+        finalized["revision"].as_u64(),
+        completed["revision"].as_u64().map(|revision| revision + 2)
+    );
+
     let (status, _, direct) = json_request(
         &host,
         Method::POST,

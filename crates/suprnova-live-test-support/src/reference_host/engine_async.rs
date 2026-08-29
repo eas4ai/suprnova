@@ -127,10 +127,15 @@ impl ComponentInstance for FreshRenderComponent {
         context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<IslandRender, ComponentError>> {
         Box::pin(async move {
+            let (replacement_id, replacement_tag) = if context.revision().get() == 0 {
+                ("fresh-render-replacement-old", "section")
+            } else {
+                ("fresh-render-replacement", "article")
+            };
             Ok(IslandRender {
                 body: Bytes::from(format!(
-                    "<section data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></section>",
-                    context.revision().get()
+                    "<button id=\"fresh-render-preserved\" type=\"button\" data-suprnova-live-key=\"fresh-render-preserved\">Preserved focus target</button><{replacement_tag} id=\"{replacement_id}\" data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></{replacement_tag}>",
+                    context.revision().get(),
                 )),
                 assets: AssetSet::empty(),
                 children: Vec::new(),
@@ -614,7 +619,7 @@ pub(super) struct EngineAsyncFixture {
     descriptor_binding: String,
     credential: String,
     expires_at: UnixMillis,
-    fresh_render: Arc<ReferenceFreshRender>,
+    fresh_render: Mutex<Arc<ReferenceFreshRender>>,
 }
 
 impl EngineAsyncFixture {
@@ -689,7 +694,7 @@ impl EngineAsyncFixture {
             authorized,
             registry,
             document_scope,
-            fresh_render,
+            fresh_render: Mutex::new(fresh_render),
         })
     }
 
@@ -764,7 +769,14 @@ impl EngineAsyncFixture {
     }
 
     pub(super) fn fresh_render_endpoint(&self) -> Arc<ReferenceFreshRender> {
-        Arc::clone(&self.fresh_render)
+        Arc::clone(&self.fresh_render.lock().expect("fresh render fixture lock"))
+    }
+
+    pub(super) async fn reset_fresh_render(&self) -> Result<(), String> {
+        let ports = Arc::clone(&self.fresh_render_endpoint().ports);
+        let replacement = Arc::new(ReferenceFreshRender::new(ports).await?);
+        *self.fresh_render.lock().expect("fresh render fixture lock") = replacement;
+        Ok(())
     }
 }
 
