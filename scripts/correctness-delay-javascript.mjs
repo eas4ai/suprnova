@@ -14,6 +14,8 @@ const delayPrimitives = new Set([
   "setTimeout",
   "waitForTimeout",
 ]);
+const dynamicTextMarker = "__SUPRNOVA_DYNAMIC_TEXT_EXPRESSION__";
+const inertScriptTypes = new Set(["application/json", "application/ld+json"]);
 
 export function loadTypeScript(repositoryRoot) {
   return require(
@@ -129,59 +131,130 @@ function isDestructuringAssignmentProperty(ts, node) {
   return false;
 }
 
-function reconstructedLiteral(ts, sourceFile, node) {
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+function reconstructedTextAssembly(ts, sourceFile, node) {
+  const current = unwrap(ts, node);
+  if (
+    ts.isStringLiteral(current) ||
+    ts.isNoSubstitutionTemplateLiteral(current)
+  ) {
     return {
-      start: node.getStart(sourceFile) + 1,
-      text: node.text,
+      dynamic: false,
+      start: current.getStart(sourceFile) + 1,
+      text: current.text,
     };
   }
-  if (!ts.isTemplateExpression(node)) return null;
-  let text = node.head.text;
-  for (const span of node.templateSpans) {
-    const expression = sourceFile.text.slice(
-      span.expression.getStart(sourceFile),
-      span.expression.getEnd(),
-    );
-    text += `undefined${"\n".repeat(expression.split("\n").length - 1)}`;
-    text += span.literal.text;
+  if (ts.isTemplateExpression(current)) {
+    let dynamic = false;
+    let text = current.head.text;
+    for (const span of current.templateSpans) {
+      const expression = reconstructedTextAssembly(
+        ts,
+        sourceFile,
+        span.expression,
+      );
+      if (expression === null) {
+        const raw = sourceFile.text.slice(
+          span.expression.getStart(sourceFile),
+          span.expression.getEnd(),
+        );
+        dynamic = true;
+        text += `${dynamicTextMarker}${"\n".repeat(raw.split("\n").length - 1)}`;
+      } else {
+        dynamic ||= expression.dynamic;
+        text += expression.text;
+      }
+      text += span.literal.text;
+    }
+    return { dynamic, start: current.getStart(sourceFile) + 1, text };
   }
-  return { start: node.getStart(sourceFile) + 1, text };
+  if (
+    !ts.isBinaryExpression(current) ||
+    current.operatorToken.kind !== ts.SyntaxKind.PlusToken
+  ) {
+    return null;
+  }
+  const left = reconstructedTextAssembly(ts, sourceFile, current.left);
+  const right = reconstructedTextAssembly(ts, sourceFile, current.right);
+  if (left === null && right === null) return null;
+  return {
+    dynamic:
+      left === null || right === null || left.dynamic || right.dynamic,
+    start: current.getStart(sourceFile),
+    text: `${left?.text ?? dynamicTextMarker}${right?.text ?? dynamicTextMarker}`,
+  };
+}
+
+function isNestedTextAssembly(ts, node) {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  return (
+    (ts.isBinaryExpression(parent) &&
+      parent.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
+    (ts.isTemplateSpan(parent) && parent.expression === node)
+  );
+}
+
+function attributeValue(attributes, name) {
+  const expression = new RegExp(
+    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\u0060]+))`,
+    "iu",
+  );
+  const match = expression.exec(attributes);
+  return match === null ? null : (match[1] ?? match[2] ?? match[3] ?? "");
 }
 
 function executableInlineScripts(ts, sourceFile) {
   const scripts = [];
+  const violations = [];
   const expression = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/giu;
   function visit(node) {
-    const literal = reconstructedLiteral(ts, sourceFile, node);
-    if (literal !== null && literal.text.includes("<script")) {
-      for (const match of literal.text.matchAll(expression)) {
+    const assembly = isNestedTextAssembly(ts, node)
+      ? null
+      : reconstructedTextAssembly(ts, sourceFile, node);
+    if (assembly !== null) {
+      const withoutDynamicText = assembly.text.replaceAll(dynamicTextMarker, "");
+      const hasPotentialScript = /<script\b/iu.test(withoutDynamicText);
+      let matchedScript = false;
+      for (const match of assembly.text.matchAll(expression)) {
+        matchedScript = true;
         const attributes = match[1] ?? "";
-        const type = attributes.match(/\btype\s*=\s*["']?([^\s"'>]+)/iu)?.[1];
+        const body = match[2] ?? "";
+        const bodyOffset = (match.index ?? 0) + match[0].indexOf(body);
+        const beforeBody = assembly.text.slice(0, bodyOffset);
+        const line =
+          sourceFile.getLineAndCharacterOfPosition(assembly.start).line +
+          1 +
+          (beforeBody.split("\n").length - 1);
+        const dynamic = match[0].includes(dynamicTextMarker);
+        const source = attributeValue(attributes, "src");
+        if (source !== null && !source.includes(dynamicTextMarker)) continue;
+
+        const type = attributeValue(attributes, "type");
         if (
-          type !== undefined &&
-          !new Set(["application/javascript", "module", "text/javascript"]).has(
-            type.toLowerCase(),
-          )
+          type !== null &&
+          !type.includes(dynamicTextMarker) &&
+          inertScriptTypes.has(type.trim().toLowerCase())
         ) {
           continue;
         }
-        const body = match[2] ?? "";
-        const bodyOffset = (match.index ?? 0) + match[0].indexOf(body);
-        const beforeBody = literal.text.slice(0, bodyOffset);
+        if (dynamic) violations.push({ kind: "inline-script-assembly", line });
         scripts.push({
+          line,
+          source: body.replaceAll(dynamicTextMarker, "undefined"),
+        });
+      }
+      if (hasPotentialScript && !matchedScript) {
+        violations.push({
+          kind: "inline-script-assembly",
           line:
-            sourceFile.getLineAndCharacterOfPosition(literal.start).line +
-            1 +
-            (beforeBody.split("\n").length - 1),
-          source: body,
+            sourceFile.getLineAndCharacterOfPosition(assembly.start).line + 1,
         });
       }
     }
     ts.forEachChild(node, visit);
   }
   visit(sourceFile);
-  return scripts;
+  return { scripts, violations };
 }
 
 function isPromiseResolveCall(ts, expression) {
@@ -284,6 +357,13 @@ export function scanJavaScript(ts, filePath, source, scanEmbedded = true) {
       violations.push({ kind, line });
     }
   };
+  const addAtLine = (kind, line) => {
+    const key = `${kind}:${String(line)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      violations.push({ kind, line });
+    }
+  };
 
   function visit(node) {
     const referencedModule = moduleReference(ts, node);
@@ -357,7 +437,11 @@ export function scanJavaScript(ts, filePath, source, scanEmbedded = true) {
 
   visit(sourceFile);
   if (scanEmbedded) {
-    for (const embedded of executableInlineScripts(ts, sourceFile)) {
+    const embeddedScripts = executableInlineScripts(ts, sourceFile);
+    for (const violation of embeddedScripts.violations) {
+      addAtLine(violation.kind, violation.line);
+    }
+    for (const embedded of embeddedScripts.scripts) {
       const scanned = scanJavaScript(ts, filePath, embedded.source, false);
       sourceComments.push(
         ...scanned.comments.map((comment) => ({
@@ -367,11 +451,7 @@ export function scanJavaScript(ts, filePath, source, scanEmbedded = true) {
       );
       for (const violation of scanned.violations) {
         const line = embedded.line + violation.line - 1;
-        const key = `${violation.kind}:${String(line)}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          violations.push({ ...violation, line });
-        }
+        addAtLine(violation.kind, line);
       }
     }
   }

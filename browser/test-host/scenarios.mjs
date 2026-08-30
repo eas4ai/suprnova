@@ -289,7 +289,13 @@ function document(body, scripts = "", configOverrides = {}) {
 }
 
 function moduleBoot(attributes = "") {
-  return `<script type="module"${attributes}>${bootSource}</script>`;
+  if (attributes === "") {
+    return '<script type="module">import { boot } from "/assets/suprnova-live.esm.js"; boot();</script>';
+  }
+  if (attributes === ' nonce="suprnova-test"') {
+    return '<script type="module" nonce="suprnova-test">import { boot } from "/assets/suprnova-live.esm.js"; boot();</script>';
+  }
+  throw new Error("unsupported_module_boot_attributes");
 }
 
 function extensionBoot() {
@@ -381,8 +387,10 @@ function morphFailureBoot() {
 }
 
 function transitionBoot(disableAnimations = false) {
-  return `<script type="module">
-    ${disableAnimations ? 'Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: undefined });' : ""}
+  const disableAnimationsScript = disableAnimations
+    ? '<script>Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: undefined });</script>'
+    : "";
+  return `${disableAnimationsScript}<script type="module">
     const trace = [];
     window.__suprnovaTransitionTrace = trace;
     new MutationObserver((records) => {
@@ -395,7 +403,7 @@ function transitionBoot(disableAnimations = false) {
       attributes: true,
       subtree: true,
     });
-    ${bootSource}
+    import { boot } from "/assets/suprnova-live.esm.js"; boot();
   </script>`;
 }
 
@@ -597,17 +605,13 @@ function hashPolicy() {
 }
 
 function navigationBoot({ captureFailure = false, unsupported = false } = {}) {
-  return `<script>
-    ${
-      captureFailure
-        ? 'const originalSetProperty = CSSStyleDeclaration.prototype.setProperty; CSSStyleDeclaration.prototype.setProperty = function(name, value, priority) { if (name === "view-transition-name") throw new Error("capture failed"); return originalSetProperty.call(this, name, value, priority); };'
-        : ""
-    }
-    ${
-      unsupported
-        ? 'Object.defineProperty(document, "startViewTransition", { configurable: true, value: undefined });'
-        : ""
-    }
+  const captureFailureScript = captureFailure
+    ? '<script>const originalSetProperty = CSSStyleDeclaration.prototype.setProperty; CSSStyleDeclaration.prototype.setProperty = function(name, value, priority) { if (name === "view-transition-name") throw new Error("capture failed"); return originalSetProperty.call(this, name, value, priority); };</script>'
+    : "";
+  const unsupportedScript = unsupported
+    ? '<script>Object.defineProperty(document, "startViewTransition", { configurable: true, value: undefined });</script>'
+    : "";
+  return `${captureFailureScript}${unsupportedScript}<script>
     document.documentElement.dataset.documentToken = crypto.randomUUID();
     document.addEventListener("input", (event) => {
       if (event.target?.id === "dirty-input") {

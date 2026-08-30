@@ -21,6 +21,19 @@ function violationKinds(source, language = "javascript") {
   }).map(({ kind }) => kind);
 }
 
+const scriptOpen = String.fromCharCode(60, 115, 99, 114, 105, 112, 116);
+const scriptClose = String.fromCharCode(
+  60,
+  47,
+  115,
+  99,
+  114,
+  105,
+  112,
+  116,
+  62,
+);
+
 const manifestRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "suprnova-live-verification-surfaces-"),
 );
@@ -221,11 +234,28 @@ const rejectedJavaScriptMutations = [
   },
   {
     name: "executable inline module timer",
+    source: `const html = \`${scriptOpen} type="module">await new Promise((resolve) => setTimeout(resolve, 10));${scriptClose}\`;`,
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "uppercase executable inline module timer",
+    source: `const html = \`${scriptOpen.toUpperCase()} TYPE="MODULE">setTimeout(run, 10);${scriptClose.toUpperCase()}\`;`,
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "static concatenated inline timer body",
     source:
-      "const html = `" +
-      '<script type="module">' +
-      "await new Promise((resolve) => setTimeout(resolve, 10));</scr" +
-      "ipt>`;",
+      'const html = "<scr" + "ipt type=module>" + "setTimeout(run, 10);" + "</scr" + "ipt>";',
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "data-src is not an external script exemption",
+    source: `const html = \`${scriptOpen} data-src="/scenario.js">setTimeout(run, 10);${scriptClose}\`;`,
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "data-type is not an inert script exemption",
+    source: `const html = \`${scriptOpen} data-type="application/json">setTimeout(run, 10);${scriptClose}\`;`,
     kind: "delay-primitive-reference",
   },
 ];
@@ -237,6 +267,22 @@ for (const mutation of rejectedJavaScriptMutations) {
     mutation.name,
   );
 }
+
+assert.deepEqual(
+  violationKinds(
+    `const scriptType = configuredType(); const html = \`${scriptOpen} type="\${scriptType}">setTimeout(run, 10);${scriptClose}\`;`,
+  ).sort(),
+  ["delay-primitive-reference", "inline-script-assembly"],
+  "an interpolated script type is executable and fails closed as dynamic assembly",
+);
+
+assert.deepEqual(
+  violationKinds(
+    'const body = renderBody(); const html = "<scr" + "ipt>" + body + "</scr" + "ipt>";',
+  ),
+  ["inline-script-assembly"],
+  "dynamic inline script assembly fails closed",
+);
 
 const acceptedJavaScriptFixtures = [
   {
@@ -266,6 +312,14 @@ const acceptedJavaScriptFixtures = [
   {
     name: "template interpolation without a delay",
     source: "const value = `prefix ${String(observed)} suffix`;",
+  },
+  {
+    name: "provably inert inline JSON script",
+    source: `const html = \`${scriptOpen} type="application/json">{"ready":true}${scriptClose}\`;`,
+  },
+  {
+    name: "static external script",
+    source: `const html = \`${scriptOpen} type="module" src="/scenario.js">${scriptClose}\`;`,
   },
   {
     name: "similar property name",
