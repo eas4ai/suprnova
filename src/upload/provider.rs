@@ -1252,7 +1252,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     /// Restores one quiescent checkpoint without accepting client path material.
     pub fn recover(&self, checkpoint: TransferCheckpoint) -> Result<(), UploadError> {
-        let _admission = self.admission.enter()?;
+        let admission = self.admission.enter()?;
+        self.recover_with_admission(checkpoint, admission)
+    }
+
+    fn recover_with_admission(
+        &self,
+        checkpoint: TransferCheckpoint,
+        _admission: ProviderAdmissionGuard,
+    ) -> Result<(), UploadError> {
         if checkpoint.expected_bytes > self.limits.max_file_bytes()
             || checkpoint.committed_bytes > checkpoint.expected_bytes
             || checkpoint.chunks.len() > self.limits.max_chunks_per_file()
@@ -2053,6 +2061,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod admission_tests {
+    use std::future::Future as _;
     use std::io::{Read, Seek, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2193,10 +2202,6 @@ mod admission_tests {
         count
     }
 
-    #[allow(
-        clippy::await_holding_lock,
-        reason = "the test deliberately holds the transfer lock as the recovery admission barrier"
-    )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retirement_drains_a_recovery_admitted_before_the_barrier_closed() {
         let root = TestRoot::new();
@@ -2218,39 +2223,32 @@ mod admission_tests {
         let checkpoint = first.checkpoint(&handle).expect("quiescent checkpoint");
         assert_eq!(physical_files(&root).await, 1);
 
-        let recovered =
-            Arc::new(QuarantinedFileProvider::new(store, limits).expect("recovered provider"));
-        let transfers = lock(&recovered.transfers);
-        let recovery = tokio::task::spawn_blocking({
-            let recovered = recovered.clone();
-            let checkpoint = checkpoint.clone();
-            move || recovered.recover(checkpoint)
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while recovered.admission.active() != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("recovery enters admission before retirement");
+        let recovered = Arc::new(
+            QuarantinedFileProvider::new_with_retirement_wait_steps(store, limits, 1)
+                .expect("recovered provider"),
+        );
+        let admission = recovered
+            .admission
+            .enter()
+            .expect("recovery admission remains open");
         assert_eq!(recovered.admission.active(), 1);
 
         let retirement_started = recovered.retire();
         assert!(retirement_started.canceled);
-        let retirement = tokio::spawn({
-            let recovered = recovered.clone();
-            async move { recovered.retire_and_cleanup().await }
-        });
+        let mut retirement = Box::pin(recovered.retire_and_cleanup());
+        let first_poll = poll_fn(|context| Poll::Ready(retirement.as_mut().poll(context))).await;
+        assert!(
+            first_poll.is_pending(),
+            "retirement waits for admitted recovery"
+        );
 
-        drop(transfers);
-        recovery
-            .await
-            .expect("recovery task joins")
+        recovered
+            .recover_with_admission(checkpoint.clone(), admission)
             .expect("pre-retirement recovery remains admitted");
-        retirement
+        let retirement_result = tokio::time::timeout(std::time::Duration::from_secs(1), retirement)
             .await
-            .expect("retirement task joins")
-            .expect("retirement cleanup succeeds");
+            .expect("retirement reaches a bounded outcome");
+        retirement_result.expect("retirement cleanup succeeds");
         assert_eq!(recovered.admission.active(), 0);
         assert_eq!(recovered.descriptor_permits().active(), 0);
         assert_eq!(recovered.chunk_permits().active(), 0);

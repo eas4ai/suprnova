@@ -1928,6 +1928,10 @@ impl UploadRuntime {
         self.operation_pause.active_count()
     }
 
+    pub(super) async fn wait_until_operation_paused(&self, generation: u64) {
+        self.operation_pause.wait_until_entered(generation).await;
+    }
+
     pub(super) fn advance_pause_clock(&self) -> Result<(), &'static str> {
         self.operation_pause.advance_clock()
     }

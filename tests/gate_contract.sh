@@ -304,6 +304,8 @@ write_expected_gate_commands() {
 
     printf '%s\n' \
         $'proxy\ttests/gate_contract.sh' \
+        $'node\ttests/correctness_delay_scanner.mjs' \
+        $'node\tscripts/check-correctness-delays.mjs' \
         $'proxy\ttests/documentation_contract.sh' \
         $'node\tscripts/check-implementation-docs.mjs' \
         $'node\tscripts/check-specs.mjs' \
@@ -392,6 +394,7 @@ write_expected_gate_phases() {
 
     printf '%s\n' \
         "gate contract" \
+        "correctness-delay scanner" \
         "implementation documentation contract" \
         "specification structure and archive parity" \
         "generated license inventory" \
@@ -553,6 +556,11 @@ require_text "full async release workload budget" "npm run budget:browser -- --r
 require_text "MSRV check" "cargo +1.91.1 check"
 require_text "compile-fixture MSRV check" "--manifest-path tests/fixtures/compile/Cargo.toml"
 require_text "license gate" "node scripts/generate-license-inventory.mjs --check"
+require_text "correctness-delay scanner phase" 'phase "correctness-delay scanner"'
+require_text "correctness-delay scanner self-tests" \
+    "node tests/correctness_delay_scanner.mjs"
+require_text "correctness-delay repository scan" \
+    "node scripts/check-correctness-delays.mjs"
 require_text "required phase \"U4/16 upload budget\"" 'phase "iteration 004 reduced deterministic budgets"'
 require_text "legacy U4/16 budget phase" 'phase "U4/16 upload framework and browser budget"'
 require_text "legacy async continuity budget phase" 'phase "E100/1K and R100 async continuity budgets"'
@@ -596,37 +604,9 @@ require_file "upload transition fuzz target" "fuzz/fuzz_targets/upload_state.rs"
 require_file "upload media-header fuzz target" "fuzz/fuzz_targets/upload_media_header.rs"
 require_file "async envelope fuzz target" "fuzz/fuzz_targets/async_envelope.rs"
 require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
-
-correctness_sleep_files=(
-    "${repository_root}"/src/upload/provider.rs
-    "${repository_root}"/tests/iteration_004*.rs
-    "${repository_root}"/crates/suprnova-live-test-support/tests/reference_host.rs
-    "${repository_root}"/browser/tests/async-*.test.ts
-    "${repository_root}"/browser/tests/upload-*.test.ts
-    "${repository_root}"/browser/tests/bounded-resources.test.ts
-    "${repository_root}"/browser/e2e/iteration-004*.spec.ts
-    "${repository_root}"/browser/e2e/async-lifecycle.spec.ts
-    "${repository_root}"/browser/e2e/uploads.spec.ts
-    "${repository_root}"/browser/test-host/async-lifecycle.mjs
-    "${repository_root}"/browser/test-host/iteration-004.mjs
-)
-for correctness_sleep_file in "${correctness_sleep_files[@]}"; do
-    correctness_sleep_source=$(<"${correctness_sleep_file}")
-    correctness_sleep_compact=${correctness_sleep_source//[[:space:]]/}
-    if [[ ${correctness_sleep_source} =~ tokio::time::sleep|std::thread::sleep|thread::sleep|std::thread::yield_now\(\)|waitForTimeout\( ]]; then
-        printf 'gate contract: correctness sleep is forbidden (%s)\n' \
-            "${correctness_sleep_file#"${repository_root}/"}" >&2
-        exit 1
-    fi
-    if [[ ${correctness_sleep_compact} == *'newPromise((resolve)=>window.setTimeout(resolve,'* ||
-          ${correctness_sleep_compact} == *'newPromise((resolve)=>setTimeout(resolve,'* ||
-          ${correctness_sleep_compact} == *'newPromise(resolve=>window.setTimeout(resolve,'* ||
-          ${correctness_sleep_compact} == *'newPromise(resolve=>setTimeout(resolve,'* ]]; then
-        printf 'gate contract: timeout-resolved correctness promise is forbidden (%s)\n' \
-            "${correctness_sleep_file#"${repository_root}/"}" >&2
-        exit 1
-    fi
-done
+require_file "correctness-delay scanner" "scripts/check-correctness-delays.mjs"
+require_file "correctness-delay scanner mutation tests" \
+    "tests/correctness_delay_scanner.mjs"
 
 if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
@@ -667,6 +647,10 @@ fi
 
 require_order "browser lockfile install" "npm ci" \
     "deterministic browser build" "npm run build:check"
+require_order "gate contract" 'phase "gate contract"' \
+    "correctness-delay scanner" 'phase "correctness-delay scanner"'
+require_order "correctness-delay scanner" 'phase "correctness-delay scanner"' \
+    "Rust formatting" 'phase "Rust formatting and lint review"'
 require_order "deterministic browser build" "npm run build:check" \
     "browser matrix" 'phase "iteration 004 browser matrix"'
 require_order "iteration 004 browser unit boundaries" \

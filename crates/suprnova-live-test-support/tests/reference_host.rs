@@ -622,21 +622,16 @@ async fn aborted_chunk_restores_coherent_upload_state_and_shutdown_removes_quara
         )
         .await
         .expect("start partial body");
-    timeout(Duration::from_secs(1), async {
-        while inspection.snapshot().open_files == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
+    timeout(
+        Duration::from_secs(1),
+        inspection.wait_until_open_files_at_least(1),
+    )
     .await
     .expect("chunk entered provider I/O");
     drop(stream);
-    timeout(Duration::from_secs(1), async {
-        while inspection.snapshot().open_files != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("aborted body released provider I/O");
+    timeout(Duration::from_secs(1), inspection.wait_until_open_files(0))
+        .await
+        .expect("aborted body released provider I/O");
 
     let (status, _, body) = upload_request(
         &host,
@@ -1075,11 +1070,10 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
         .expect("active pause generation");
     let inspection = host.inspection_handle();
     let active_control = async {
-        timeout(Duration::from_secs(1), async {
-            while inspection.snapshot().paused_upload_operations != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
+        timeout(
+            Duration::from_secs(1),
+            host.wait_until_upload_operation_paused(active_generation),
+        )
         .await
         .expect("transfer reached exact active barrier");
         let snapshot = inspection.snapshot();
@@ -1139,13 +1133,11 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
     let pause_generation = paused["pause_generation"]
         .as_u64()
         .expect("pause generation");
-    let inspection = host.inspection_handle();
     let control = async {
-        timeout(Duration::from_secs(1), async {
-            while inspection.snapshot().paused_upload_operations != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
+        timeout(
+            Duration::from_secs(1),
+            host.wait_until_upload_operation_paused(pause_generation),
+        )
         .await
         .expect("finalization reached exact Finalizing barrier");
         let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
@@ -2649,14 +2641,10 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
         )
         .await
         .expect("start mid-flight upload body");
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if inspection.snapshot().open_files > 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    timeout(
+        Duration::from_secs(1),
+        inspection.wait_until_open_files_at_least(1),
+    )
     .await
     .expect("file lease became observable");
     let midflight = inspection.snapshot();

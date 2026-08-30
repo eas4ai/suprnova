@@ -210,11 +210,13 @@ const RESOURCE_RETIRED: usize = 1 << (usize::BITS - 1);
 pub(super) struct ResourceCounter {
     state: AtomicUsize,
     drained: Notify,
+    changed: Notify,
 }
 
 impl ResourceCounter {
     fn acquire(self: &Arc<Self>) -> Option<ResourceLease> {
-        self.state
+        let acquired = self
+            .state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & RESOURCE_RETIRED != 0
                     || state & !RESOURCE_RETIRED == RESOURCE_RETIRED - 1
@@ -223,11 +225,13 @@ impl ResourceCounter {
                 } else {
                     Some(state + 1)
                 }
-            })
-            .ok()
-            .map(|_| ResourceLease {
-                counter: Arc::clone(self),
-            })
+            });
+        if acquired.is_ok() {
+            self.changed.notify_waiters();
+        }
+        acquired.ok().map(|_| ResourceLease {
+            counter: Arc::clone(self),
+        })
     }
 
     fn current(&self) -> usize {
@@ -247,6 +251,26 @@ impl ResourceCounter {
             drained.await;
         }
     }
+
+    async fn wait_until_at_least(&self, minimum: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.current() >= minimum {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    async fn wait_until_exactly(&self, expected: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.current() == expected {
+                return;
+            }
+            changed.await;
+        }
+    }
 }
 
 pub(super) struct ResourceLease {
@@ -260,6 +284,7 @@ impl Drop for ResourceLease {
         if previous & !RESOURCE_RETIRED == 1 {
             self.counter.drained.notify_one();
         }
+        self.counter.changed.notify_waiters();
     }
 }
 
@@ -329,6 +354,26 @@ impl ReferenceHostInspectionHandle {
     #[must_use]
     pub fn snapshot(&self) -> ReferenceHostInspection {
         self.state.snapshot()
+    }
+
+    /// Waits on the resource lifecycle until at least `minimum` file leases are owned.
+    pub async fn wait_until_open_files_at_least(&self, minimum: usize) {
+        self.state
+            .inspection
+            .resources
+            .open_files
+            .wait_until_at_least(minimum)
+            .await;
+    }
+
+    /// Waits on the resource lifecycle until exactly `expected` file leases are owned.
+    pub async fn wait_until_open_files(&self, expected: usize) {
+        self.state
+            .inspection
+            .resources
+            .open_files
+            .wait_until_exactly(expected)
+            .await;
     }
 }
 
@@ -519,6 +564,14 @@ impl ReferenceHost {
         self.state
             .async_runtime
             .wait_until_fresh_render_paused()
+            .await;
+    }
+
+    /// Waits until the selected upload-operation pause is entered.
+    pub async fn wait_until_upload_operation_paused(&self, generation: u64) {
+        self.state
+            .uploads
+            .wait_until_operation_paused(generation)
             .await;
     }
 
