@@ -1,0 +1,90 @@
+{
+  "name": "@suprnova/live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Production browser runtime and cross-language contracts for Suprnova Live",
+  "types": "./dist/index.d.ts",
+  "module": "./dist/suprnova-live.esm.js",
+  "sideEffects": [
+    "./dist/suprnova-live.classic.js",
+    "./dist/suprnova-live.stimulus.classic.js",
+    "./dist/suprnova-live.stimulus.esm.js",
+    "./dist/suprnova-live.uploads.classic.js",
+    "./dist/suprnova-live.uploads.esm.js",
+    "./dist/suprnova-live.async.classic.js",
+    "./dist/suprnova-live.async.esm.js"
+  ],
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.esm.js"
+    },
+    "./runtime": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.esm.js"
+    },
+    "./stimulus": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.stimulus.esm.js"
+    },
+    "./uploads": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.uploads.esm.js"
+    },
+    "./async": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.async.esm.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "generate": "node ../scripts/generate-browser-contracts.mjs && node scripts/generate-iteration-004-conformance.mjs",
+    "generate:check": "node ../scripts/generate-browser-contracts.mjs --check && node scripts/generate-iteration-004-conformance.mjs --check",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node scripts/run-unit-tests.mjs",
+    "pretest:browser": "npm run build",
+    "test:browser": "playwright test",
+    "test:browser:install": "playwright install chromium firefox webkit",
+    "test:host": "npm run build && cargo test --manifest-path ../Cargo.toml -p suprnova-live-test-support --test reference_host -- --test-threads=1",
+    "test": "npm run test:unit",
+    "host:static": "npm run build && node test-host/server.mjs",
+    "host:iteration-004": "npm run build && cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/check-build.mjs",
+    "budget": "node scripts/check-budget.mjs",
+    "budget:async": "node scripts/run-async-budget.mjs",
+    "budget:browser": "node scripts/run-browser-budget.mjs",
+    "budget:upload": "node scripts/run-upload-budget.mjs",
+    "compatibility:run": "node scripts/run-compatibility.mjs",
+    "compatibility:check": "node scripts/check-compatibility.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@hotwired/stimulus": "3.2.2",
+    "@playwright/test": "1.62.1",
+    "@types/node": "26.2.0",
+    "axe-core": "4.13.0",
+    "esbuild": "0.28.2",
+    "eslint": "10.9.0",
+    "fast-check": "4.9.0",
+    "globals": "17.11.0",
+    "prettier": "3.9.6",
+    "terser": "5.50.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "idiomorph": "0.7.4"
+  }
+}

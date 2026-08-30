@@ -1,0 +1,121 @@
+[package]
+name = "suprnova-live-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+suprnova-live = { path = ".." }
+
+[[bin]]
+name = "canonical_input"
+path = "fuzz_targets/canonical_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_snapshot"
+path = "fuzz_targets/signed_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_request"
+path = "fuzz_targets/update_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_response"
+path = "fuzz_targets/update_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_v2_request"
+path = "fuzz_targets/protocol_v2_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_v2_response"
+path = "fuzz_targets/protocol_v2_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "child_parameters"
+path = "fuzz_targets/child_parameters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template_checker"
+path = "fuzz_targets/template_checker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directive_contract"
+path = "fuzz_targets/directive_contract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "browser_metadata"
+path = "fuzz_targets/browser_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_media_header"
+path = "fuzz_targets/upload_media_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_protocol"
+path = "fuzz_targets/upload_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_state"
+path = "fuzz_targets/upload_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "async_envelope"
+path = "fuzz_targets/async_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "async_sequence"
+path = "fuzz_targets/async_sequence.rs"
+test = false
+doc = false
+bench = false

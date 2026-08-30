@@ -1,0 +1,125 @@
+import type { JsonValue } from "../canonical.js";
+import type { AsyncRegisteredEventContract, SubscriptionState } from "../async-updates/types.js";
+import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { StimulusBootstrapOptions } from "../stimulus/port.js";
+import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
+import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
+
+export type RuntimeFeatureRegistrationOutcome =
+  "registered" | "already_registered" | "incompatible" | "conflict" | "registry_full";
+export type RuntimeFeatureDiagnosticDetail =
+  "contract_mismatch" | "operation_rejected" | "resource_exhausted";
+export type FreshRenderReason = "poll" | "stream";
+export type FreshRenderDisposition = "queued" | "coalesced" | "retired" | "exhausted";
+export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
+export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
+export interface PartiallyDispatchedBrowserEvent {
+  readonly delivered: number;
+  readonly kind: "partially_dispatched";
+  readonly reason: "capability_rotated" | "dispatch_failed" | "source_retired" | "target_retired";
+  readonly skipped: number;
+}
+export type RegisteredBrowserEventDisposition =
+  | "dispatched"
+  | "no_target"
+  | "fanout_exceeded"
+  | "rejected"
+  | "retired"
+  | PartiallyDispatchedBrowserEvent;
+
+declare const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
+
+export interface RegisteredBrowserEventCapability {
+  readonly [REGISTERED_BROWSER_EVENT_CAPABILITY]: never;
+}
+
+export interface RegisteredBrowserEventRegistration {
+  readonly descriptorBinding: string;
+  readonly events: readonly AsyncRegisteredEventContract[];
+}
+
+export interface RegisteredBrowserEventDispatch {
+  readonly event: string;
+  readonly payload: JsonValue;
+  readonly schemaVersion: number;
+  readonly target: string;
+}
+
+export interface RuntimeFeatureDriverDocumentPort {
+  diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
+  readonly stimulus?: StimulusBootstrapOptions | undefined;
+  trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
+}
+
+export interface RuntimeFeatureDriverIslandPort {
+  readonly element: Element;
+  readonly identity: IslandExtensionIdentity;
+  authorizeRegisteredEvents(
+    registration: RegisteredBrowserEventRegistration,
+  ): RegisteredBrowserEventCapability;
+  captureAsyncStatusBaseline?(): void;
+  clearAsyncStatus?(): void;
+  dispatchRegisteredEvent(
+    capability: RegisteredBrowserEventCapability,
+    event: RegisteredBrowserEventDispatch,
+  ): RegisteredBrowserEventDisposition;
+  enqueueFreshRender(
+    reason: FreshRenderReason,
+    completion?: FreshRenderCompletionObserver,
+    completionKey?: string,
+  ): FreshRenderDisposition;
+  proposeUploadHandle(
+    field: string,
+    proposal: UploadHandleProposal,
+  ): UploadHandleProposalDisposition;
+  projectAsyncStatus?(state: SubscriptionState): void;
+  writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
+}
+
+export type RuntimeFeatureDriverValue =
+  RuntimeFeatureDriverDocumentPort | RuntimeFeatureDriverIslandPort | Element | null;
+export type RuntimeFeatureDriverCallback = (
+  event: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
+  value: RuntimeFeatureDriverValue,
+) => boolean;
+
+export const RUNTIME_FEATURE_DRIVER_FORMAT = Symbol.for("suprnova.live.feature-driver.v1");
+export const RUNTIME_FEATURE_DRIVER_CORE_RANGE = 1_099_511_758_848;
+
+export type RuntimeFeatureDriver = readonly [
+  format: typeof RUNTIME_FEATURE_DRIVER_FORMAT,
+  abiVersion: 1,
+  packedCoreRange: typeof RUNTIME_FEATURE_DRIVER_CORE_RANGE,
+  identity: object,
+  drive: RuntimeFeatureDriverCallback,
+];
+
+export type InspectedRuntimeFeatureDriver = RuntimeFeatureDriver;
+
+export interface RuntimeFeatureDriverRegistrationHost {
+  register(driver: RuntimeFeatureDriver): RuntimeFeatureRegistrationOutcome;
+}
+
+export function inspectRuntimeFeatureDriver(input: unknown): InspectedRuntimeFeatureDriver | null {
+  if (!Array.isArray(input) || !Object.isFrozen(input) || input.length !== 5) return null;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const identity: unknown = descriptors[3]?.value;
+    if (
+      Reflect.ownKeys(descriptors).length !== 6 ||
+      descriptors[0]?.value !== RUNTIME_FEATURE_DRIVER_FORMAT ||
+      descriptors[1]?.value !== 1 ||
+      descriptors[2]?.value !== RUNTIME_FEATURE_DRIVER_CORE_RANGE ||
+      (typeof identity !== "object" && typeof identity !== "function") ||
+      identity === null ||
+      !Object.isFrozen(identity) ||
+      Reflect.ownKeys(identity).length !== 0 ||
+      typeof descriptors[4]?.value !== "function"
+    ) {
+      return null;
+    }
+    return input as unknown as RuntimeFeatureDriver;
+  } catch {
+    return null;
+  }
+}

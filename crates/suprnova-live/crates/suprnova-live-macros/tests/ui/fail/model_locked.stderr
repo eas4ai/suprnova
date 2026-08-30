@@ -1,0 +1,5 @@
+error: a component field may declare only one state category
+ --> tests/ui/fail/model_locked.rs:7:5
+  |
+7 |     #[locked]
+  |     ^

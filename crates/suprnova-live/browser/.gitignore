@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+traces/
+screenshots/
+benchmarks/local/*
+!benchmarks/local/.gitignore
+compatibility/results/*
+!compatibility/results/.gitkeep

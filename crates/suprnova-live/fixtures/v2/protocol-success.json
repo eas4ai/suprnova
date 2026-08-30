@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "params-changed-request",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":{\"body\":{\"parameters\":{\"query\":\"rust\"}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{\"x_suprnova_live_document_key_v1\":\"primary\"},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"params_changed\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}"
+    },
+    {
+      "id": "lazy-complete-request",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{\"x_suprnova_live_document_key_v1\":\"primary\"},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"lazy_complete\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}"
+    },
+    {
+      "id": "fresh-render-request",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{\"x_suprnova_live_document_key_v1\":\"primary\"},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"fresh_render\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}"
+    },
+    {
+      "id": "seed-action-request",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"0\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{\"x_suprnova_live_document_key_v1\":\"primary\"},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"search\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"browser_nonce\":\"UFFSU1RVVldYWVpbXF1eXw\",\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"seed_promotion\"},\"snapshot_schema_version\":1}"
+    },
+    {
+      "id": "instance-action-request",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{\"x_suprnova_live_document_key_v1\":\"primary\"},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"search\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}"
+    },
+    {
+      "id": "child-delivery-response",
+      "kind": "response",
+      "encoded": "{\"accepted_revision\":\"8\",\"child_deliveries\":[{\"child_instance\":\"EBESExQVFhcYGRobHB0eHw\",\"envelope\":{\"body\":{\"parameters\":{\"query\":\"rust\"}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"parameter_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}],\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":2,\"render\":{\"html\":\"<div>ok</div>\",\"kind\":\"html\"},\"snapshot\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"url_intent\":null,\"validation\":{}}"
+    },
+    {
+      "id": "reflected-url-response",
+      "kind": "response",
+      "encoded": "{\"accepted_revision\":\"8\",\"child_deliveries\":[],\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":2,\"render\":{\"kind\":\"no_render\"},\"snapshot\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"url_intent\":{\"kind\":\"reflected\",\"target\":\"/catalog?q=rust\"},\"validation\":{}}"
+    },
+    {
+      "id": "navigated-url-response",
+      "kind": "response",
+      "encoded": "{\"child_deliveries\":[],\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":2,\"url_intent\":{\"kind\":\"navigated\",\"target\":\"/catalog?page=2\"},\"validation\":{}}"
+    }
+  ]
+}

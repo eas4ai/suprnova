@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://suprnova.dev/schemas/live/browser-compatibility-evidence-v1.json",
+  "title": "Suprnova Live actual-browser compatibility evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "browserProduct",
+    "browserVersion",
+    "operatingSystem",
+    "provider",
+    "runtimeSha256",
+    "fixtureManifestSha256",
+    "executedAt",
+    "result",
+    "attestation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "browserProduct": {
+      "enum": ["chrome", "edge", "firefox", "safari"]
+    },
+    "browserVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$",
+      "maxLength": 32
+    },
+    "operatingSystem": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "runtimeSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "fixtureManifestSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "executedAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "result": { "enum": ["pass", "fail"] },
+    "attestation": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 4096
+    }
+  }
+}

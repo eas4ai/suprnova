@@ -1,0 +1,5 @@
+error: URL-bound state requires a supported scalar codec
+ --> tests/ui/fail/unsupported_url_codec.rs:6:5
+  |
+6 |     #[url]
+  |     ^

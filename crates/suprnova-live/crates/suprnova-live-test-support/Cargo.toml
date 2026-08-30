@@ -1,0 +1,35 @@
+[package]
+name = "suprnova-live-test-support"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.1"
+license = "MIT"
+description = "Development-only conformance support for Suprnova Live"
+repository = "https://github.com/eas4ai/suprnova"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+async-trait = "=0.1.92"
+axum = { version = "=0.7.9", features = ["ws"] }
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
+getrandom = { version = "=0.4.3", features = ["std"] }
+http-body-util = "=0.1.3"
+hyper = { version = "=1.9.0", features = ["client", "http1"] }
+hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "tokio"] }
+sha2 = { version = "=0.11.0", features = ["zeroize"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+suprnova-live = { path = "../.." }
+syn = { version = "=2.0.117", features = ["full", "parsing"] }
+tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

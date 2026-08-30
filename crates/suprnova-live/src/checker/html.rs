@@ -1,0 +1,600 @@
+//! Bounded html5ever tokenization and strict branch-state validation.
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+
+use html5ever::TokenizerResult;
+use html5ever::tendril::SliceExt as _;
+use html5ever::tokenizer::states::RawKind;
+use html5ever::tokenizer::{BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
+
+use crate::identity::{ComponentName, ModelField};
+use crate::metadata::ComponentMetadata;
+use crate::registry::ComponentRegistry;
+
+use super::branch::{
+    CHECKED_KEY_MARKER, DYNAMIC_MARKER, LOOP_END_MARKER, LOOP_START_MARKER, RenderedBranch,
+};
+use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
+use super::directive::{
+    DirectiveContext, MorphControlKind, morph_control_kind, valid_freshness_combination,
+    validate_directive,
+};
+use super::limits::CheckerLimits;
+use super::template::TemplateCatalog;
+
+pub(crate) fn check_html_branches(
+    branches: &[RenderedBranch],
+    registry: &ComponentRegistry,
+    catalog: &TemplateCatalog,
+    root: &ComponentMetadata,
+    limits: CheckerLimits,
+    diagnostics: &mut DiagnosticCollector,
+) {
+    for branch in branches {
+        let input = BufferQueue::default();
+        input.push_back(branch.html.to_tendril());
+        let sink = CheckerSink {
+            state: RefCell::new(HtmlState::new(
+                registry,
+                catalog,
+                root,
+                branch,
+                limits,
+                diagnostics,
+            )),
+        };
+        let tokenizer = Tokenizer::new(sink, Default::default());
+        while tokenizer.feed(&input) != TokenizerResult::Done {}
+        tokenizer.end();
+        tokenizer.sink.state.into_inner().finish();
+    }
+}
+
+struct ElementFrame {
+    tag: String,
+    owner: ComponentName,
+    island_index: usize,
+    morph_control: Option<MorphControlKind>,
+}
+
+struct TeleportIntent {
+    target: String,
+    owner: ComponentName,
+    line: u64,
+}
+
+struct IslandFreshness {
+    line: u64,
+    poll: bool,
+    stream: &'static str,
+}
+
+#[derive(Default)]
+struct IslandFieldDeclarations {
+    uploads: BTreeSet<ModelField>,
+    models: BTreeSet<ModelField>,
+}
+
+struct HtmlState<'checker, 'diagnostics> {
+    registry: &'checker ComponentRegistry,
+    catalog: &'checker TemplateCatalog,
+    root: &'checker ComponentMetadata,
+    branch: &'checker RenderedBranch,
+    limits: CheckerLimits,
+    diagnostics: &'diagnostics mut DiagnosticCollector,
+    stack: Vec<ElementFrame>,
+    keys: BTreeSet<String>,
+    ids: BTreeMap<String, Vec<ComponentName>>,
+    teleports: Vec<TeleportIntent>,
+    freshness: Vec<(ComponentName, IslandFreshness)>,
+    field_declarations: Vec<IslandFieldDeclarations>,
+    tokens: usize,
+    attributes: usize,
+    loop_depth: usize,
+    stopped: bool,
+}
+
+impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
+    fn new(
+        registry: &'checker ComponentRegistry,
+        catalog: &'checker TemplateCatalog,
+        root: &'checker ComponentMetadata,
+        branch: &'checker RenderedBranch,
+        limits: CheckerLimits,
+        diagnostics: &'diagnostics mut DiagnosticCollector,
+    ) -> Self {
+        let freshness = vec![(
+            root.identity().clone(),
+            IslandFreshness {
+                line: 1,
+                poll: false,
+                stream: "absent",
+            },
+        )];
+        Self {
+            registry,
+            catalog,
+            root,
+            branch,
+            limits,
+            diagnostics,
+            stack: Vec::new(),
+            keys: BTreeSet::new(),
+            ids: BTreeMap::new(),
+            teleports: Vec::new(),
+            freshness,
+            field_declarations: vec![IslandFieldDeclarations::default()],
+            tokens: 0,
+            attributes: 0,
+            loop_depth: 0,
+            stopped: false,
+        }
+    }
+
+    fn process(&mut self, token: Token, line: u64) -> TokenSinkResult<()> {
+        if self.stopped {
+            return TokenSinkResult::Continue;
+        }
+        self.tokens = self.tokens.saturating_add(1);
+        if self.tokens > self.limits.max_html_tokens() {
+            self.push(
+                DiagnosticCode::HtmlTokenLimit,
+                DiagnosticSeverity::Error,
+                line,
+                self.root.identity(),
+            );
+            self.stopped = true;
+            return TokenSinkResult::Continue;
+        }
+        match token {
+            Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
+                self.attributes = self.attributes.saturating_add(tag.attrs.len());
+                if self.attributes > self.limits.max_attributes() {
+                    let owner = self.current_owner_name();
+                    self.push(
+                        DiagnosticCode::AttributeLimit,
+                        DiagnosticSeverity::Error,
+                        line,
+                        &owner,
+                    );
+                    self.stopped = true;
+                    return TokenSinkResult::Continue;
+                }
+                let tag_name = tag.name.as_ref().to_ascii_lowercase();
+                let attributes: Vec<(String, String)> = tag
+                    .attrs
+                    .iter()
+                    .map(|attribute| {
+                        (
+                            attribute.name.local.as_ref().to_ascii_lowercase(),
+                            attribute.value.as_ref().to_owned(),
+                        )
+                    })
+                    .collect();
+                if tag_name.contains(DYNAMIC_MARKER)
+                    || attributes
+                        .iter()
+                        .any(|(name, _)| name.contains(DYNAMIC_MARKER))
+                {
+                    let owner = self.current_owner_name();
+                    self.push(
+                        DiagnosticCode::DynamicStructureUnproved,
+                        DiagnosticSeverity::Unproved,
+                        line,
+                        &owner,
+                    );
+                }
+
+                let prior_owner = self.current_owner_name();
+                let mut owner = prior_owner.clone();
+                let mut island_index = self.current_island_index();
+                if let Some((_, component)) =
+                    attributes.iter().find(|(name, _)| name == "live:component")
+                {
+                    owner = self.resolve_component(component, &attributes, line, &prior_owner);
+                    island_index = self.freshness.len();
+                    self.freshness.push((
+                        owner.clone(),
+                        IslandFreshness {
+                            line,
+                            poll: false,
+                            stream: "absent",
+                        },
+                    ));
+                    self.field_declarations
+                        .push(IslandFieldDeclarations::default());
+                }
+                if let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") {
+                    self.ids.entry(id.clone()).or_default().push(owner.clone());
+                }
+                if let Some((_, target)) = attributes.iter().find(|(name, _)| {
+                    name.strip_prefix("live:")
+                        .is_some_and(|name| name.split('.').next() == Some("teleport"))
+                }) && let Some(target) = target.strip_prefix('#')
+                {
+                    self.teleports.push(TeleportIntent {
+                        target: target.to_owned(),
+                        owner: owner.clone(),
+                        line,
+                    });
+                }
+                self.observe_freshness(island_index, &attributes, line);
+                self.observe_upload_model_exclusivity(island_index, &attributes, line, &owner);
+                self.validate_keys(&attributes, line, &owner);
+                let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
+                    .chain(self.stack.iter().map(|frame| frame.owner.clone()))
+                    .collect();
+                let registry = self.registry;
+                let owner_metadata = registry
+                    .resolve(&owner)
+                    .ok()
+                    .map_or(self.root, |descriptor| descriptor.metadata());
+                let morph_ancestors: Vec<MorphControlKind> = self
+                    .stack
+                    .iter()
+                    .filter_map(|frame| frame.morph_control)
+                    .collect();
+                for (name, value) in &attributes {
+                    if name.starts_with("live:")
+                        && !matches!(name.as_str(), "live:component" | "live:key")
+                    {
+                        let mut context = DirectiveContext {
+                            registry,
+                            owner: owner_metadata,
+                            ancestors: &ancestors,
+                            morph_ancestors: &morph_ancestors,
+                            tag: &tag_name,
+                            attributes: &attributes,
+                            path: &self.branch.path,
+                            line: line_number(line),
+                            diagnostics: &mut *self.diagnostics,
+                        };
+                        validate_directive(name, value, &mut context);
+                    }
+                }
+                if !tag.self_closing && !void_element(&tag_name) {
+                    if self.stack.len() >= self.limits.max_stack_depth() {
+                        self.push(
+                            DiagnosticCode::StackDepthLimit,
+                            DiagnosticSeverity::Error,
+                            line,
+                            &owner,
+                        );
+                        self.stopped = true;
+                    } else {
+                        self.stack.push(ElementFrame {
+                            tag: tag_name.clone(),
+                            owner,
+                            island_index,
+                            morph_control: morph_control_kind(&attributes),
+                        });
+                    }
+                }
+                raw_text_transition(&tag_name)
+            }
+            Token::TagToken(tag) if tag.kind == TagKind::EndTag => {
+                let name = tag.name.as_ref().to_ascii_lowercase();
+                if void_element(&name) || self.stack.last().is_none_or(|frame| frame.tag != name) {
+                    self.push_stack_error(line);
+                } else {
+                    self.stack.pop();
+                }
+                TokenSinkResult::Continue
+            }
+            Token::CommentToken(comment) if comment.as_ref() == LOOP_START_MARKER => {
+                self.loop_depth = self.loop_depth.saturating_add(1);
+                TokenSinkResult::Continue
+            }
+            Token::CommentToken(comment) if comment.as_ref() == LOOP_END_MARKER => {
+                if self.loop_depth == 0 {
+                    let owner = self.current_owner_name();
+                    self.push(
+                        DiagnosticCode::HtmlSyntax,
+                        DiagnosticSeverity::Error,
+                        line,
+                        &owner,
+                    );
+                } else {
+                    self.loop_depth -= 1;
+                }
+                TokenSinkResult::Continue
+            }
+            Token::NullCharacterToken | Token::ParseError(_) => {
+                let owner = self.current_owner_name();
+                self.push(
+                    DiagnosticCode::HtmlSyntax,
+                    DiagnosticSeverity::Error,
+                    line,
+                    &owner,
+                );
+                TokenSinkResult::Continue
+            }
+            _ => TokenSinkResult::Continue,
+        }
+    }
+
+    fn current_owner_name(&self) -> ComponentName {
+        self.stack
+            .last()
+            .map_or_else(|| self.root.identity().clone(), |frame| frame.owner.clone())
+    }
+
+    fn current_island_index(&self) -> usize {
+        self.stack.last().map_or(0, |frame| frame.island_index)
+    }
+
+    fn observe_upload_model_exclusivity(
+        &mut self,
+        island_index: usize,
+        attributes: &[(String, String)],
+        line: u64,
+        owner: &ComponentName,
+    ) {
+        let fields = |directive: &str| {
+            attributes
+                .iter()
+                .filter_map(|(name, value)| {
+                    (name
+                        .strip_prefix("live:")
+                        .and_then(|suffix| suffix.split('.').next())
+                        == Some(directive)
+                        && !value.contains(DYNAMIC_MARKER))
+                    .then(|| ModelField::parse(value).ok())
+                    .flatten()
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let uploads = fields("upload");
+        let models = fields("model");
+        let declarations = self
+            .field_declarations
+            .get_mut(island_index)
+            .expect("island declaration state follows island creation");
+        let conflicts = uploads
+            .iter()
+            .any(|field| declarations.models.contains(field))
+            || models
+                .iter()
+                .any(|field| declarations.uploads.contains(field));
+        declarations.uploads.extend(uploads);
+        declarations.models.extend(models);
+        if conflicts {
+            self.push(
+                DiagnosticCode::InvalidModifier,
+                DiagnosticSeverity::Error,
+                line,
+                owner,
+            );
+        }
+    }
+
+    fn resolve_component(
+        &mut self,
+        value: &str,
+        attributes: &[(String, String)],
+        line: u64,
+        fallback: &ComponentName,
+    ) -> ComponentName {
+        let Ok(component) = ComponentName::parse(value) else {
+            self.push(
+                DiagnosticCode::UnknownComponent,
+                DiagnosticSeverity::Error,
+                line,
+                fallback,
+            );
+            return fallback.clone();
+        };
+        let Ok(descriptor) = self.registry.resolve(&component) else {
+            self.push(
+                DiagnosticCode::UnknownComponent,
+                DiagnosticSeverity::Error,
+                line,
+                fallback,
+            );
+            return fallback.clone();
+        };
+        let metadata = descriptor.metadata();
+        if !self.catalog.contains(metadata.view()) {
+            self.push(
+                DiagnosticCode::MissingView,
+                DiagnosticSeverity::Error,
+                line,
+                metadata.identity(),
+            );
+        }
+        if !attributes.iter().any(|(name, _)| name == "live:key") {
+            self.push(
+                DiagnosticCode::InvalidKey,
+                DiagnosticSeverity::Error,
+                line,
+                metadata.identity(),
+            );
+        }
+        metadata.identity().clone()
+    }
+
+    fn validate_keys(&mut self, attributes: &[(String, String)], line: u64, owner: &ComponentName) {
+        for (_, key) in attributes.iter().filter(|(name, _)| name == "live:key") {
+            let checked = key.contains(CHECKED_KEY_MARKER) && !key.contains(DYNAMIC_MARKER);
+            let valid = !key.is_empty()
+                && key.len() <= 128
+                && !key.contains(DYNAMIC_MARKER)
+                && (self.loop_depth == 0 || checked)
+                && key.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                });
+            if !valid {
+                self.push(
+                    DiagnosticCode::InvalidKey,
+                    DiagnosticSeverity::Error,
+                    line,
+                    owner,
+                );
+            } else if !checked && !self.keys.insert(key.clone()) {
+                self.push(
+                    DiagnosticCode::DuplicateKey,
+                    DiagnosticSeverity::Error,
+                    line,
+                    owner,
+                );
+            }
+        }
+    }
+
+    fn observe_freshness(
+        &mut self,
+        island_index: usize,
+        attributes: &[(String, String)],
+        line: u64,
+    ) {
+        let Some((_, entry)) = self.freshness.get_mut(island_index) else {
+            return;
+        };
+        if attributes.iter().any(|(name, _)| {
+            name.strip_prefix("live:")
+                .is_some_and(|suffix| suffix.split('.').next() == Some("poll"))
+        }) {
+            entry.poll = true;
+            entry.line = line;
+        }
+        if let Some((name, _)) = attributes.iter().find(|(name, _)| {
+            name.strip_prefix("live:")
+                .is_some_and(|suffix| suffix.split('.').next() == Some("stream"))
+        }) {
+            let candidate = if name
+                .split('.')
+                .skip(1)
+                .any(|modifier| modifier == "push-only")
+            {
+                "push-only"
+            } else if name.split('.').skip(1).any(|modifier| modifier == "hybrid") {
+                "hybrid"
+            } else {
+                "default"
+            };
+            entry.stream = if entry.stream == "absent" {
+                candidate
+            } else {
+                "invalid"
+            };
+            entry.line = line;
+        }
+    }
+
+    fn push_stack_error(&mut self, line: u64) {
+        let owner = self.current_owner_name();
+        self.push(
+            if self.branch.branched {
+                DiagnosticCode::BranchStackMismatch
+            } else {
+                DiagnosticCode::HtmlSyntax
+            },
+            DiagnosticSeverity::Error,
+            line,
+            &owner,
+        );
+    }
+
+    fn finish(mut self) {
+        if self.stopped {
+            return;
+        }
+        if !self.stack.is_empty() || self.loop_depth != 0 {
+            self.push_stack_error(1);
+            return;
+        }
+        for (owner, freshness) in std::mem::take(&mut self.freshness) {
+            if !valid_freshness_combination(freshness.poll, freshness.stream) {
+                self.push(
+                    DiagnosticCode::InvalidModifier,
+                    DiagnosticSeverity::Error,
+                    freshness.line,
+                    &owner,
+                );
+            }
+        }
+        for intent in std::mem::take(&mut self.teleports) {
+            match self.ids.get(&intent.target) {
+                Some(owners) if owners.len() == 1 && owners[0] == intent.owner => {}
+                Some(owners) if owners.len() == 1 => self.push(
+                    DiagnosticCode::OwnershipViolation,
+                    DiagnosticSeverity::Error,
+                    intent.line,
+                    &intent.owner,
+                ),
+                _ => self.push(
+                    DiagnosticCode::AccessibilityViolation,
+                    DiagnosticSeverity::Error,
+                    intent.line,
+                    &intent.owner,
+                ),
+            }
+        }
+    }
+
+    fn push(
+        &mut self,
+        code: DiagnosticCode,
+        severity: DiagnosticSeverity,
+        line: u64,
+        component: &ComponentName,
+    ) {
+        self.diagnostics.push(
+            code,
+            severity,
+            Some(&self.branch.path),
+            line_number(line),
+            1,
+            Some(component),
+        );
+    }
+}
+
+struct CheckerSink<'checker, 'diagnostics> {
+    state: RefCell<HtmlState<'checker, 'diagnostics>>,
+}
+
+impl TokenSink for CheckerSink<'_, '_> {
+    type Handle = ();
+
+    fn process_token(&self, token: Token, line: u64) -> TokenSinkResult<Self::Handle> {
+        self.state.borrow_mut().process(token, line)
+    }
+}
+
+fn line_number(line: u64) -> u32 {
+    u32::try_from(line.max(1)).unwrap_or(u32::MAX)
+}
+
+fn raw_text_transition(name: &str) -> TokenSinkResult<()> {
+    match name {
+        "title" | "textarea" => TokenSinkResult::RawData(RawKind::Rcdata),
+        "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript" => {
+            TokenSinkResult::RawData(RawKind::Rawtext)
+        }
+        "script" => TokenSinkResult::RawData(RawKind::ScriptData),
+        "plaintext" => TokenSinkResult::Plaintext,
+        _ => TokenSinkResult::Continue,
+    }
+}
+
+fn void_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}

@@ -1,0 +1,5 @@
+error: only ordinary, public, or model state can be URL-exposed
+ --> tests/ui/fail/server_only_url.rs:7:5
+  |
+7 |     #[url]
+  |     ^

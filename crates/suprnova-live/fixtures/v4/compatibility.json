@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "live_protocol_versions": [1, 2],
+  "snapshot_versions": [1],
+  "compatible_core": {"minimum": "0.1.0", "maximum_exclusive": "0.2.0"},
+  "cases": [
+    {"id":"uploads-v1-current-core","feature":"uploads","present":true,"capability_version":1,"core_version":"0.1.0","expected":"compatible"},
+    {"id":"async-v1-current-core","feature":"async","present":true,"capability_version":1,"core_version":"0.1.0","expected":"compatible"},
+    {"id":"unknown-upload-major","feature":"uploads","present":true,"capability_version":2,"core_version":"0.1.0","expected":"feature_unavailable"},
+    {"id":"core-below-range","feature":"async","present":true,"capability_version":1,"core_version":"0.0.9","expected":"feature_unavailable"},
+    {"id":"core-at-exclusive-maximum","feature":"uploads","present":true,"capability_version":1,"core_version":"0.2.0","expected":"feature_unavailable"},
+    {"id":"optional-feature-absent","feature":"async","present":false,"capability_version":null,"core_version":"0.1.0","expected":"ordinary_live_available"}
+  ]
+}

@@ -1,0 +1,23 @@
+[package]
+name = "suprnova-live-macro-fixture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.1"
+license = "MIT"
+description = "Development-only final-facade fixture for Suprnova Live macros"
+repository = "https://github.com/eas4ai/suprnova"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+suprnova-live = { path = "../.." }
+suprnova-live-macros = { path = "../suprnova-live-macros" }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

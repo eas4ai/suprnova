@@ -1,0 +1,5 @@
+error: mount parameters must use simple stable names
+  --> tests/ui/fail/mount_destructured_parameter.rs:12:18
+   |
+12 |     pub fn mount((value,): (String,)) -> Self {
+   |                  ^^^^^^^^

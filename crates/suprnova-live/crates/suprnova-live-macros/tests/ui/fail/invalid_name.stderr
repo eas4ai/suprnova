@@ -1,0 +1,5 @@
+error: registered names must use the bounded ASCII component identity grammar
+ --> tests/ui/fail/invalid_name.rs:4:15
+  |
+4 | #[live(name = "not allowed!", view = "live/example.html")]
+  |               ^^^^^^^^^^^^^^

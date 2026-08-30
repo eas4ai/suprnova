@@ -1,0 +1,776 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { canonicalize } from "../src/canonical.js";
+import {
+  BrowserAsyncTransportPorts,
+  DocumentConnectionPool,
+  OriginHandshakeScheduler,
+  type AsyncTransportPorts,
+  type BrowserAsyncTransportOptions,
+  type DocumentTransportConnectRequest,
+  type EventSourcePort,
+} from "../src/async-updates/connections.js";
+import type { AuthorizedLogicalSubscription, StreamPosition } from "../src/async-updates/types.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
+
+function position(epoch: bigint, sequence: bigint): StreamPosition {
+  return Object.freeze({ epoch, sequence });
+}
+
+function authorized(index: number, authorizationScope = "shared"): AuthorizedLogicalSubscription {
+  return Object.freeze({
+    authorization: Object.freeze({ kind: "session_cookie" as const }),
+    baseline: position(1n, 0n),
+    descriptorBinding: `binding-${String(index)}`,
+    document: Object.freeze({
+      authorizationScope,
+      origin: "https://app.example.test",
+      transport: "sse" as const,
+    }),
+    events: Object.freeze([]),
+    expiresAt: 10_000,
+    fallbackPoll: Object.freeze({
+      initial: "wait" as const,
+      intervalMs: 30_000,
+      jitterRatio: 0.2,
+      visibility: "visible" as const,
+    }),
+    heartbeatTimeoutMs: 30_000,
+    presentationSignals: Object.freeze([]),
+    reconnect: Object.freeze({
+      kind: "resume_or_refresh" as const,
+      maximumAttempts: 4,
+      maximumDelayMs: 30_000,
+      minimumDelayMs: 250,
+    }),
+    stream: `stream-${String(index)}`,
+    subscriptionId: `subscription-${String(index).padStart(3, "0")}`,
+  });
+}
+
+class FakeEventSource implements EventSourcePort {
+  readonly subscriptions: string[] = [];
+  readonly unsubscribed: string[] = [];
+  readonly close = vi.fn();
+
+  constructor(readonly request: DocumentTransportConnectRequest) {}
+
+  open(): void {
+    this.request.opened();
+  }
+
+  emit(encoded: string): void {
+    this.request.message(encoded);
+  }
+
+  fail(): void {
+    this.request.failed("transport_lost");
+  }
+
+  subscribe(subscription: AuthorizedLogicalSubscription) {
+    this.subscriptions.push(subscription.subscriptionId);
+    return Object.freeze({
+      descriptorBinding: subscription.descriptorBinding,
+      kind: "authenticated" as const,
+      stream: subscription.stream,
+      subscriptionId: subscription.subscriptionId,
+      transportGeneration: this.request.transportGeneration,
+    });
+  }
+
+  unsubscribe(subscriptionId: string): void {
+    this.unsubscribed.push(subscriptionId);
+  }
+}
+
+class FakeTimers {
+  readonly pending = new Map<number, VoidFunction>();
+  #next = 0;
+
+  readonly port = {
+    clearTimeout: (handle: number) => {
+      this.pending.delete(handle);
+    },
+    timeout: (callback: VoidFunction, milliseconds: number) => {
+      void milliseconds;
+      this.#next += 1;
+      this.pending.set(this.#next, callback);
+      return this.#next;
+    },
+  };
+
+  flush(): void {
+    const callbacks = [...this.pending.values()];
+    this.pending.clear();
+    for (const callback of callbacks) callback();
+  }
+}
+
+function harness(scheduler = new OriginHandshakeScheduler(8)) {
+  const sources: FakeEventSource[] = [];
+  const timers = new FakeTimers();
+  const transports: AsyncTransportPorts = {
+    eventSource(request) {
+      const source = new FakeEventSource(request);
+      sources.push(source);
+      return source;
+    },
+    webSocket() {
+      throw new Error("unexpected_websocket");
+    },
+  };
+  const pool = new DocumentConnectionPool({
+    handshakeScheduler: scheduler,
+    randomness: { number: () => 0.5 },
+    timers: timers.port,
+    transports,
+  });
+  return { pool, scheduler, sources, timers, transports };
+}
+
+function logicalSink(
+  envelope: (encoded: string) => void = vi.fn(),
+  state: (state: import("../src/async-updates/types.js").SubscriptionState) => void = vi.fn(),
+  reauthorize: (
+    prior: AuthorizedLogicalSubscription,
+    signal: AbortSignal,
+  ) => Promise<AuthorizedLogicalSubscription> = (prior) => Promise.resolve(prior),
+) {
+  return {
+    envelope,
+    reauthorize: async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) => {
+      const subscription = await reauthorize(prior, signal);
+      return Object.freeze({
+        commit: () => "committed" as const,
+        discard: () => undefined,
+        proof: "authoritative_no_tail" as const,
+        subscription,
+      });
+    },
+    state,
+  };
+}
+
+function sseAcknowledgment(request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0]) {
+  return Object.freeze({
+    connection: request.connection,
+    controlNonce: request.controlNonce,
+    descriptorBinding: request.subscription.descriptorBinding,
+    kind: "authenticated" as const,
+    operation: request.operation,
+    stream: request.subscription.stream,
+    subscriptionId: request.subscription.subscriptionId,
+    transportGeneration: request.transportGeneration,
+  });
+}
+
+describe("multiplexed document transports", () => {
+  it("shares exactly one physical connection across 100 logical subscriptions", () => {
+    const { pool, sources } = harness();
+    const deliveries: string[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      pool.subscribe(
+        authorized(index),
+        logicalSink((encoded) => deliveries.push(encoded)),
+      );
+    }
+
+    expect(sources).toHaveLength(1);
+    sources[0]?.open();
+    expect(sources[0]?.subscriptions).toHaveLength(100);
+    const encoded = canonicalize({
+      payload: { kind: "heartbeat" },
+      position: { epoch: "1", sequence: "1" },
+      protocol_version: 1,
+      stream: "stream-73",
+      subscription: "subscription-073",
+    });
+    sources[0]?.emit(encoded);
+    expect(deliveries).toEqual([encoded]);
+  });
+
+  it("releases a never-opening handshake so the ninth document can proceed", () => {
+    const scheduler = new OriginHandshakeScheduler(8);
+    const timers = new FakeTimers();
+    const sources: FakeEventSource[] = [];
+    const pools: DocumentConnectionPool[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: scheduler,
+        handshakeTimeoutMs: 100,
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeEventSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      });
+      pools.push(pool);
+      pool.subscribe(authorized(index, `scope-${String(index)}`), logicalSink());
+    }
+
+    expect(sources).toHaveLength(8);
+    expect(scheduler.active("https://app.example.test")).toBe(8);
+    timers.flush();
+    expect(sources).toHaveLength(9);
+    expect(scheduler.active("https://app.example.test")).toBe(1);
+    sources[8]?.open();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
+    sources[0]?.open();
+    sources[0]?.fail();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
+    for (const pool of pools) pool.dispose();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
+  });
+
+  it("routes an envelope only to its exact active subscription", () => {
+    const { pool, sources } = harness();
+    const left = vi.fn();
+    const right = vi.fn();
+    const leftHandle = pool.subscribe(authorized(1), logicalSink(left));
+    pool.subscribe(authorized(2), logicalSink(right));
+    sources[0]?.open();
+    leftHandle.close();
+
+    sources[0]?.emit(
+      canonicalize({
+        payload: { kind: "heartbeat" },
+        position: { epoch: "1", sequence: "1" },
+        protocol_version: 1,
+        stream: "stream-1",
+        subscription: "subscription-001",
+      }),
+    );
+    expect(left).not.toHaveBeenCalled();
+    expect(right).not.toHaveBeenCalled();
+    expect(sources[0]?.unsubscribed).toEqual(["subscription-001"]);
+  });
+
+  it("limits simultaneous connection handshakes to eight per origin across documents", () => {
+    const scheduler = new OriginHandshakeScheduler(8);
+    const documents = Array.from({ length: 12 }, () => harness(scheduler));
+    for (const [index, document] of documents.entries()) {
+      document.pool.subscribe(authorized(index, `scope-${String(index)}`), logicalSink());
+    }
+
+    expect(documents.reduce((total, document) => total + document.sources.length, 0)).toBe(8);
+    documents[0]?.sources[0]?.open();
+    expect(documents.reduce((total, document) => total + document.sources.length, 0)).toBe(9);
+    expect(scheduler.active("https://app.example.test")).toBe(8);
+  });
+
+  it("uses bounded full-jitter reconnect and one reconnect for all logical memberships", async () => {
+    const { pool, sources, timers } = harness();
+    const states = vi.fn();
+    for (let index = 0; index < 100; index += 1) {
+      pool.subscribe(authorized(index), logicalSink(vi.fn(), states));
+    }
+    sources[0]?.open();
+    sources[0]?.fail();
+
+    expect(timers.pending.size).toBe(1);
+    timers.flush();
+    await eventLoopBarrier();
+    expect(sources).toHaveLength(2);
+    expect(sources.map(({ request }) => request.transportGeneration)).toEqual([1, 2]);
+    expect(states).toHaveBeenCalledWith("reconnecting");
+  });
+
+  it("closes ports and timers for persisted pagehide then reauthorizes on pageshow", async () => {
+    const { pool, sources, timers } = harness();
+    const late = vi.fn();
+    const reauthorize = vi.fn((prior: AuthorizedLogicalSubscription) =>
+      Promise.resolve({
+        ...prior,
+        descriptorBinding: "binding-restored",
+      }),
+    );
+    pool.subscribe(authorized(1), logicalSink(late, vi.fn(), reauthorize));
+    sources[0]?.open();
+    sources[0]?.fail();
+    expect(timers.pending.size).toBe(1);
+
+    pool.suspend();
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+    expect(sources[0]?.close).toHaveBeenCalledWith("transport_replaced");
+    expect(timers.pending.size).toBe(0);
+    sources[0]?.emit(
+      canonicalize({
+        payload: { kind: "heartbeat" },
+        position: { epoch: "1", sequence: "1" },
+        protocol_version: 1,
+        stream: "stream-1",
+        subscription: "subscription-001",
+      }),
+    );
+    expect(late).not.toHaveBeenCalled();
+
+    await pool.resume();
+    expect(reauthorize).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(2);
+    sources[1]?.open();
+    expect(sources[1]?.subscriptions).toEqual(["subscription-001"]);
+  });
+
+  it("keeps authorization uncertainty degraded and ignores a late pre-restore port", async () => {
+    const { pool, sources } = harness();
+    const state = vi.fn();
+    const envelope = vi.fn();
+    pool.subscribe(
+      authorized(1),
+      logicalSink(envelope, state, () => Promise.reject(new Error("authorization_unavailable"))),
+    );
+    sources[0]?.open();
+    pool.suspend();
+
+    await pool.resume();
+    expect(state).toHaveBeenCalledWith("degraded");
+    sources[0]?.emit("late-data");
+    expect(envelope).not.toHaveBeenCalled();
+    expect(sources).toHaveLength(1);
+  });
+
+  it("keeps an authenticated replay pending until its real presentation completes", () => {
+    const { pool, sources } = harness();
+    const subscription = authorized(1);
+    const state = vi.fn();
+    const commit = vi.fn(() => "pending" as const);
+    const handle = pool.subscribe(
+      subscription,
+      logicalSink(vi.fn(), state),
+      Object.freeze({
+        commit,
+        discard: vi.fn(),
+        proof: "complete_replay" as const,
+        subscription,
+      }),
+    );
+
+    sources[0]?.open();
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(state).not.toHaveBeenCalledWith("degraded");
+    expect(state).not.toHaveBeenCalledWith("current");
+
+    handle.continuityProved();
+    expect(state).toHaveBeenLastCalledWith("current");
+  });
+});
+
+describe("browser SSE authorization adapters", () => {
+  function connectRequest(
+    authorization: AuthorizedLogicalSubscription["authorization"],
+    overrides: Partial<DocumentTransportConnectRequest> = {},
+  ): DocumentTransportConnectRequest {
+    return {
+      authorization,
+      failed: vi.fn(),
+      key: authorized(1).document,
+      message: vi.fn(),
+      opened: vi.fn(),
+      transportGeneration: 1,
+      ...overrides,
+    };
+  }
+
+  it("uses native EventSource only for the scoped session-cookie contract", () => {
+    const native = vi.fn<BrowserAsyncTransportOptions["eventSource"]>(() => ({ close: vi.fn() }));
+    const fetchPort = vi.fn<typeof globalThis.fetch>();
+    const membership = vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(sseAcknowledgment);
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: native,
+      fetch: fetchPort,
+      membershipTimeoutMs: 5_000,
+      sseMembership: membership,
+      timers: new FakeTimers().port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const request = connectRequest(Object.freeze({ kind: "session_cookie" as const }));
+
+    const port = ports.eventSource(request);
+    void port.subscribe(authorized(1));
+    port.unsubscribe("subscription-001");
+
+    expect(native).toHaveBeenCalledOnce();
+    expect(native.mock.calls[0]?.[0]).toBe("https://app.example.test/__live/async/events");
+    expect(native.mock.calls[0]?.[1]).toEqual({ withCredentials: true });
+    expect(fetchPort).not.toHaveBeenCalled();
+    expect(membership.mock.calls.map(([request]) => request.operation)).toEqual([
+      "subscribe",
+      "unsubscribe",
+    ]);
+  });
+
+  it("puts a bearer only in the fetch-stream authorization header and never in its URL", async () => {
+    const secret = "async-bearer-secret-sentinel";
+    let releaseResponse: ((response: Response) => void) | undefined;
+    const fetchPort = vi.fn<typeof globalThis.fetch>(
+      () =>
+        new Promise<Response>((resolve) => {
+          releaseResponse = resolve;
+        }),
+    );
+    const native = vi.fn<BrowserAsyncTransportOptions["eventSource"]>();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: native,
+      fetch: fetchPort,
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const request = connectRequest(Object.freeze({ credential: secret, kind: "bearer" as const }));
+
+    const port = ports.eventSource(request);
+    expect(fetchPort).toHaveBeenCalledOnce();
+    const [input, init] = fetchPort.mock.calls[0] ?? [];
+    const requestUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.href : (input?.url ?? "");
+    expect(requestUrl).toBe("https://app.example.test/__live/async/events");
+    expect(requestUrl).not.toContain(secret);
+    expect(new Headers(init?.headers).get("Authorization")).toBe(`SuprnovaAsync ${secret}`);
+    expect(native).not.toHaveBeenCalled();
+
+    releaseResponse?.(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            void controller;
+          },
+        }),
+        {
+          headers: { "Content-Type": "text/event-stream" },
+        },
+      ),
+    );
+    port.close("document_retired");
+    await Promise.resolve();
+  });
+
+  it("fails a bearer stream closed when one SSE record exceeds the envelope bound", async () => {
+    let signalFailure: ((reason: string) => void) | undefined;
+    const failed = new Promise<string>((resolve) => {
+      signalFailure = resolve;
+    });
+    const oversized = new TextEncoder().encode(`data:${"x".repeat(65_537)}\n\n`);
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(() =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(oversized);
+                controller.close();
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+        ),
+      ),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+
+    ports.eventSource(
+      connectRequest(Object.freeze({ credential: "bounded-bearer", kind: "bearer" as const }), {
+        failed: (reason) => signalFailure?.(reason),
+      }),
+    );
+
+    await expect(failed).resolves.toBe("protocol_invalid");
+  });
+
+  it("bounds active noncooperative SSE controls and drops queued ownership on close", () => {
+    const timers = new FakeTimers();
+    const signals: AbortSignal[] = [];
+    const failed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        signals.push(request.signal);
+        return new Promise(() => undefined);
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const port = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+    );
+
+    for (let index = 0; index < 65; index += 1) {
+      void port.subscribe(authorized(index));
+    }
+    expect(signals).toHaveLength(8);
+    expect(failed).not.toHaveBeenCalled();
+
+    port.close("page_suspended");
+    expect(signals.every(({ aborted }) => aborted)).toBe(true);
+    expect(timers.pending.size).toBe(0);
+  });
+
+  it("settles timed-out SSE controls and aborts their authority signal", () => {
+    const timers = new FakeTimers();
+    let membershipSignal: AbortSignal | undefined;
+    const failed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        membershipSignal = request.signal;
+        return new Promise(() => undefined);
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const port = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+    );
+    void port.subscribe(authorized(1));
+
+    timers.flush();
+
+    expect(membershipSignal?.aborted).toBe(true);
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed).toHaveBeenCalledWith("authorization_lost");
+    expect(timers.pending.size).toBe(0);
+    port.close("transport_replaced");
+  });
+
+  it.each(["rejected", "timeout"] as const)(
+    "settles a %s SSE unsubscribe locally without failing a sibling membership or its source",
+    async (failure) => {
+      const timers = new FakeTimers();
+      const failed = vi.fn();
+      const message = vi.fn();
+      const close = vi.fn();
+      const native: {
+        close(): void;
+        onmessage?: (event: Readonly<{ data: string }>) => void;
+      } = { close };
+      const controls: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0][] = [];
+      const ports = new BrowserAsyncTransportPorts({
+        eventSource: () => native,
+        fetch: vi.fn<typeof globalThis.fetch>(),
+        membershipTimeoutMs: 5_000,
+        sseMembership(request) {
+          controls.push(request);
+          if (request.operation === "subscribe") return sseAcknowledgment(request);
+          return failure === "rejected"
+            ? Promise.reject(new Error("unsubscribe_rejected"))
+            : new Promise(() => undefined);
+        },
+        timers: timers.port,
+        webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+      });
+      const port = ports.eventSource(
+        connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed, message }),
+      );
+      await expect(port.subscribe(authorized(1))).resolves.toMatchObject({ kind: "authenticated" });
+      await expect(port.subscribe(authorized(2))).resolves.toMatchObject({ kind: "authenticated" });
+
+      port.unsubscribe("subscription-001");
+      await Promise.resolve();
+      if (failure === "timeout") timers.flush();
+      await Promise.resolve();
+      native.onmessage?.({ data: "sibling-still-current" });
+
+      expect(controls.filter(({ operation }) => operation === "unsubscribe")).toHaveLength(1);
+      expect(failed).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(message).toHaveBeenCalledWith("sibling-still-current");
+      expect(timers.pending.size).toBe(0);
+      port.close("document_retired");
+    },
+  );
+
+  it("rejects an SSE acknowledgment echoed by a different physical document connection", async () => {
+    const timers = new FakeTimers();
+    const controls: {
+      request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0];
+      resolve(value: ReturnType<typeof sseAcknowledgment>): void;
+    }[] = [];
+    const leftFailed = vi.fn();
+    const rightFailed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        return new Promise((resolve) => controls.push({ request, resolve }));
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const left = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed: leftFailed }),
+    );
+    const right = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed: rightFailed }),
+    );
+    const leftOutcome = left.subscribe(authorized(1));
+    const rightOutcome = right.subscribe(authorized(1));
+    const leftControl = controls[0];
+    const rightControl = controls[1];
+    if (leftControl === undefined || rightControl === undefined) throw new Error("missing_control");
+
+    expect(Object.keys(leftControl.request.connection)).toEqual([]);
+    expect(leftControl.request.connection).not.toBe(rightControl.request.connection);
+    leftControl.resolve(sseAcknowledgment(rightControl.request));
+    rightControl.resolve(sseAcknowledgment(rightControl.request));
+
+    await expect(leftOutcome).resolves.toEqual({ kind: "rejected", reason: "authorization_lost" });
+    await expect(rightOutcome).resolves.toMatchObject({ kind: "authenticated" });
+    expect(leftFailed).toHaveBeenCalledWith("authorization_lost");
+    expect(rightFailed).not.toHaveBeenCalled();
+  });
+
+  it("binds a WebSocket membership acknowledgment to the exact signed descriptor", async () => {
+    const sent: string[] = [];
+    const timers = new FakeTimers();
+    const native: {
+      close(): void;
+      onmessage?: (event: Readonly<{ data: string }>) => void;
+      send(value: string): void;
+    } = {
+      close: vi.fn(),
+      send: (value) => sent.push(value),
+    };
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: timers.port,
+      webSocket: () => native,
+    });
+    const port = ports.webSocket({
+      ...connectRequest(Object.freeze({ kind: "session_cookie" as const })),
+      key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+    });
+
+    const attached = port.subscribe(authorized(1));
+
+    expect(JSON.parse(sent[0] ?? "null")).toEqual({
+      control_nonce: "0000000000000001",
+      descriptor_binding: "binding-1",
+      kind: "subscribe",
+      stream: "stream-1",
+      subscription: "subscription-001",
+      transport_generation: 1,
+    });
+    native.onmessage?.({
+      data: JSON.stringify({
+        control_nonce: "0000000000000001",
+        descriptor_binding: "binding-1",
+        kind: "membership_authenticated",
+        stream: "stream-1",
+        subscription: "subscription-001",
+        transport_generation: 1,
+      }),
+    });
+    timers.flush();
+    await expect(attached).resolves.toEqual({
+      descriptorBinding: "binding-1",
+      kind: "authenticated",
+      stream: "stream-1",
+      subscriptionId: "subscription-001",
+      transportGeneration: 1,
+    });
+  });
+
+  it("rejects an unsafe browser transport generation before opening a port", () => {
+    const webSocket = vi.fn<BrowserAsyncTransportOptions["webSocket"]>();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket,
+    });
+
+    expect(() =>
+      ports.webSocket({
+        ...connectRequest(Object.freeze({ kind: "session_cookie" as const })),
+        key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+        transportGeneration: 0,
+      }),
+    ).toThrow("async_transport_generation_invalid");
+    expect(webSocket).not.toHaveBeenCalled();
+  });
+
+  it("rejects foreign and duplicate WebSocket membership acknowledgments", async () => {
+    const failed = vi.fn();
+    const native: {
+      close(): void;
+      onmessage?: (event: Readonly<{ data: string }>) => void;
+      send(value: string): void;
+    } = { close: vi.fn(), send: vi.fn() };
+    const timers = new FakeTimers();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: timers.port,
+      webSocket: () => native,
+    });
+    const port = ports.webSocket({
+      ...connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+      key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+    });
+    const attached = port.subscribe(authorized(1));
+    const acknowledgment = {
+      control_nonce: "0000000000000001",
+      descriptor_binding: "binding-1",
+      kind: "membership_authenticated",
+      stream: "stream-1",
+      subscription: "subscription-001",
+      transport_generation: 1,
+    };
+
+    native.onmessage?.({
+      data: `{"control_nonce":"0000000000000001","descriptor_binding":"binding-1","kind":"membership_authenticated","kind":"membership_authenticated","stream":"stream-1","subscription":"subscription-001","transport_generation":1}`,
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({
+      data: JSON.stringify({ ...acknowledgment, descriptor_binding: "foreign" }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({ data: JSON.stringify({ ...acknowledgment, stream: "foreign-stream" }) });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({
+      data: JSON.stringify({ ...acknowledgment, transport_generation: 2 }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({ data: JSON.stringify(acknowledgment) });
+    await expect(attached).resolves.toMatchObject({ kind: "authenticated" });
+    native.onmessage?.({ data: JSON.stringify(acknowledgment) });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+
+    const timedOut = port.subscribe(authorized(2));
+    timers.flush();
+    await expect(timedOut).resolves.toEqual({ kind: "rejected", reason: "timeout" });
+    native.onmessage?.({
+      data: JSON.stringify({
+        ...acknowledgment,
+        control_nonce: "0000000000000002",
+        descriptor_binding: "binding-2",
+        subscription: "subscription-002",
+      }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+  });
+});

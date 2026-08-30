@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 2,
+  "maximumUnreviewedIncreaseBasisPoints": 1500,
+  "methodology": {
+    "buildCommand": "npm run build",
+    "compression": "brotli-quality-11",
+    "deterministic": true
+  },
+  "history": [
+    {
+      "review": {
+        "decision": "iteration-004-task-6",
+        "rationale": "Last reviewed complete Task 6 deterministic production artifacts before polling implementation.",
+        "recordedAt": "2026-08-26T06:27:18-04:00",
+        "sourceCommit": "499eda2287f17d6a46c9b8c306df5791b1f671d8"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 16356
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 14155
+        }
+      }
+    },
+    {
+      "review": {
+        "decision": "iteration-004-task-7-membership-budget-policy",
+        "rationale": "Lifecycle-aware committed-morph reconciliation, event-driven offline and hidden storm prevention, public freshness semantics, and exact membership-proof deferral are explicitly reviewed correctness growth.",
+        "recordedAt": "2026-08-26T10:56:00-04:00",
+        "sourceCommit": "57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61",
+        "sourceDecision": "iteration-004-task-7-membership-budget-policy",
+        "sourceDecisionPath": "docs/specs/suprnova-live/19-developer-tooling-and-testing.md"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 18713,
+          "sha256": "e030eb202f90312d002b2531dae8f42d12621910f800ff4ae29389f0dc9064ca"
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 16459,
+          "sha256": "23effe66a533065544c19bef1c88819466ba2f514e28b0271dc14c1494e82b5e"
+        }
+      }
+    },
+    {
+      "review": {
+        "decision": "iteration-004-task-10-async-evidence-integrity",
+        "rationale": "Exact production-artifact binding and real bounded count-only queue observation are reviewed production-correctness growth.",
+        "recordedAt": "2026-08-27T00:30:00-04:00",
+        "sourceCommit": "6b2ccccbeb09b079c8ea19f3c26ae9f1b4b19f54",
+        "sourceDecision": "iteration-004-task-10-async-evidence-integrity",
+        "sourceDecisionPath": "docs/specs/suprnova-live/19-developer-tooling-and-testing.md"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 21396,
+          "sha256": "df87769525273231bb905712d4c8c6e6fd12ea37a4dfba4d8c95ecf3b5c9bd83"
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 19156,
+          "sha256": "78bf379199b90ccd4c0e36460ca3b37a6623940f93d884d80902bbed3656a04b"
+        }
+      }
+    }
+  ]
+}

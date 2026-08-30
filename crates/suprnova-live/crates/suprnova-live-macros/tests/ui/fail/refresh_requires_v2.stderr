@@ -1,0 +1,5 @@
+error: refresh_on_promote requires minimum_protocol_version = 2 or newer
+ --> tests/ui/fail/refresh_requires_v2.rs:4:1
+  |
+4 | #[live(
+  | ^

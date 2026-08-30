@@ -1,0 +1,131 @@
+import { readFile } from "node:fs/promises";
+
+import { describe, expect, it } from "vitest";
+
+interface PackageManifest {
+  readonly name: string;
+  readonly private: boolean;
+  readonly types: string;
+  readonly module: string;
+  readonly sideEffects: readonly string[];
+  readonly exports: Record<string, unknown>;
+  readonly scripts: Record<string, string>;
+  readonly dependencies?: Record<string, string>;
+  readonly devDependencies: Record<string, string>;
+}
+
+const EXPECTED_SCRIPTS = [
+  "budget",
+  "budget:async",
+  "budget:browser",
+  "budget:upload",
+  "build",
+  "build:check",
+  "compatibility:check",
+  "compatibility:run",
+  "format",
+  "format:check",
+  "generate",
+  "generate:check",
+  "host:iteration-004",
+  "host:static",
+  "lint",
+  "pretest:browser",
+  "test",
+  "test:browser",
+  "test:browser:install",
+  "test:host",
+  "test:unit",
+  "typecheck",
+] as const;
+
+async function readPackageManifest(): Promise<PackageManifest> {
+  const json = await readFile(new URL("../package.json", import.meta.url), "utf8");
+  return JSON.parse(json) as PackageManifest;
+}
+
+describe("production browser package contract", () => {
+  it("pins the runtime workspace identity, entry points, tools, and scripts", async () => {
+    const manifest = await readPackageManifest();
+
+    expect(manifest.name).toBe("@suprnova/live");
+    expect(manifest.private).toBe(true);
+    expect(manifest.types).toBe("./dist/index.d.ts");
+    expect(manifest.module).toBe("./dist/suprnova-live.esm.js");
+    expect(manifest.sideEffects).toEqual([
+      "./dist/suprnova-live.classic.js",
+      "./dist/suprnova-live.stimulus.classic.js",
+      "./dist/suprnova-live.stimulus.esm.js",
+      "./dist/suprnova-live.uploads.classic.js",
+      "./dist/suprnova-live.uploads.esm.js",
+      "./dist/suprnova-live.async.classic.js",
+      "./dist/suprnova-live.async.esm.js",
+    ]);
+    expect(manifest.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.esm.js",
+      },
+      "./runtime": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.esm.js",
+      },
+      "./stimulus": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.stimulus.esm.js",
+      },
+      "./uploads": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.uploads.esm.js",
+      },
+      "./async": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.async.esm.js",
+      },
+    });
+    expect(Object.keys(manifest.scripts).sort()).toEqual(EXPECTED_SCRIPTS);
+    expect(manifest.scripts["test"]).toBe("npm run test:unit");
+    expect(manifest.scripts["test:unit"]).toBe("node scripts/run-unit-tests.mjs");
+    expect(manifest.scripts["budget:async"]).toBe("node scripts/run-async-budget.mjs");
+    expect(manifest.scripts["budget:browser"]).toBe("node scripts/run-browser-budget.mjs");
+    expect(manifest.scripts["budget:upload"]).toBe("node scripts/run-upload-budget.mjs");
+    expect(manifest.scripts["pretest:browser"]).toBe("npm run build");
+    expect(manifest.scripts["test:browser"]).toBe("playwright test");
+    expect(manifest.scripts["host:static"]).toBe("npm run build && node test-host/server.mjs");
+    expect(manifest.scripts["host:iteration-004"]?.startsWith("npm run build && ")).toBe(true);
+    expect(manifest.scripts["host:iteration-004"]).toContain("--bin suprnova-live-reference-host");
+    expect(manifest.scripts["test:host"]).toContain("--test reference_host");
+
+    expect(manifest.dependencies).toEqual({ idiomorph: "0.7.4" });
+    expect(manifest.dependencies).not.toHaveProperty("@hotwired/stimulus");
+    expect(manifest.devDependencies).toMatchObject({
+      "@hotwired/stimulus": "3.2.2",
+      "@playwright/test": "1.62.1",
+      "axe-core": "4.13.0",
+      esbuild: "0.28.2",
+      "fast-check": "4.9.0",
+    });
+  });
+
+  it("ships no unsafe evaluation path in the only production dependency", async () => {
+    const source = await readFile(
+      new URL("../node_modules/idiomorph/dist/idiomorph.esm.js", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\beval\s*\(/u);
+    expect(source).not.toMatch(/\bnew\s+Function\s*\(/u);
+  });
+
+  it("gives production builds proportional time and isolates or serializes their outputs", async () => {
+    for (const file of ["build-contract.test.ts", "optional-artifacts.test.ts"]) {
+      const source = await readFile(new URL(file, import.meta.url), "utf8");
+      expect(source).toContain("PRODUCTION_BUILD_HOOK_TIMEOUT_MS");
+      expect(source).toContain("mkdtemp");
+      expect(source).toContain("runBuild(outputDirectory)");
+    }
+    for (const file of ["budget-contract.test.ts", "compatibility-evidence.test.ts"]) {
+      const source = await readFile(new URL(file, import.meta.url), "utf8");
+      expect(source).toContain("withProductionBuildLock");
+    }
+  });
+});

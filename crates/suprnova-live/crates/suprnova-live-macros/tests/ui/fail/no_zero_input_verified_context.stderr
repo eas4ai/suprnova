@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `suprnova::live::promotion::PromotionAttestations`
+ --> tests/ui/fail/no_zero_input_verified_context.rs:1:5
+  |
+1 | use suprnova::live::promotion::PromotionAttestations;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `PromotionAttestations` in `promotion`
