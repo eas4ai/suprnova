@@ -1,4 +1,4 @@
-use suprnova::live::{LiveComponent, live};
+use suprnova::live::LiveComponent;
 
 #[derive(LiveComponent)]
 #[live(name = "search", view = "live/search.html")]
