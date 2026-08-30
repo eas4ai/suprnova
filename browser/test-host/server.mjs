@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
 
 import {
   continuityBody,
@@ -219,7 +218,7 @@ function respond(response, status, body, headers = {}) {
   response.end(body);
 }
 
-async function handleRequest(request, response) {
+async function handleRequest(runtimeAssets, request, response) {
   const target = new URL(request.url ?? "/", `http://${host}:${port}`);
   if (target.pathname === "/health") {
     respond(response, 200, "ok");
@@ -466,17 +465,16 @@ async function handleRequest(request, response) {
       respond(response, 404, "unknown asset");
       return;
     }
-    try {
-      const body = await readFile(join(dist.pathname, file));
-      const contentType = extname(file) === ".json" ? "application/json" : "text/javascript";
-      respond(response, 200, body, {
-        "access-control-allow-origin": "http://127.0.0.1:4174",
-        "cache-control": "public, max-age=31536000, immutable",
-        "content-type": `${contentType}; charset=utf-8`,
-      });
-    } catch {
+    const asset = runtimeAssets.asset(file);
+    if (asset === null) {
       respond(response, 404, "asset unavailable");
+      return;
     }
+    respond(response, 200, asset.bytes, {
+      "access-control-allow-origin": "http://127.0.0.1:4174",
+      "cache-control": asset.cacheControl,
+      "content-type": asset.contentType,
+    });
     return;
   }
   if (target.pathname === "/test-vendor/stimulus.js") {
@@ -502,7 +500,9 @@ async function handleRequest(request, response) {
   respond(response, 404, "not found");
 }
 
-const server = await afterRuntimeAssetsValidated(dist.pathname, () => createServer(handleRequest));
+const server = await afterRuntimeAssetsValidated(dist.pathname, (runtimeAssets) =>
+  createServer((request, response) => handleRequest(runtimeAssets, request, response)),
+);
 server.listen(port, host);
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

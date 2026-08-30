@@ -10,11 +10,13 @@ described as Safari.
 From `browser/`, start the built conformance host in a dedicated terminal:
 
 ```sh
-node test-host/server.mjs
+npm run host:static
 ```
 
-The host builds the production artifacts before listening on `http://127.0.0.1:4173`. Confirm
-`/health` returns `ok` before exploring a scenario.
+The wrapper builds the production artifacts once, then starts the static host. The raw
+`node test-host/server.mjs` command never builds or changes `dist`; it validates and serves an
+existing completed build and fails before binding if that build is missing, incomplete, or invalid.
+Confirm `/health` returns `ok` on `http://127.0.0.1:4173` before exploring a scenario.
 
 ## Agent-browser session
 

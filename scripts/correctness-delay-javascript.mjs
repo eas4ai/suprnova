@@ -321,21 +321,27 @@ function executableInlineScripts(ts, sourceFile) {
         if (attributes === null) {
           violations.push({ kind: "inline-script-assembly", line });
         }
-        const dynamic = assembly.text
-          .slice(tag.start, tag.end)
+        const openingDynamic = assembly.text
+          .slice(tag.start, tag.bodyOffset)
           .includes(dynamicTextMarker);
-        const source = attributes?.get("src") ?? null;
-        if (source !== null && !source.includes(dynamicTextMarker)) continue;
-
-        const type = attributes?.get("type") ?? null;
-        if (
-          type !== null &&
-          !type.includes(dynamicTextMarker) &&
-          inertScriptTypes.has(type.trim().toLowerCase())
-        ) {
+        const bodyDynamic = tag.body.includes(dynamicTextMarker);
+        if (openingDynamic) {
+          violations.push({ kind: "inline-script-assembly", line });
+          scripts.push({
+            line,
+            source: tag.body.replaceAll(dynamicTextMarker, "undefined"),
+          });
           continue;
         }
-        if (dynamic) violations.push({ kind: "inline-script-assembly", line });
+        const source = attributes?.get("src") ?? null;
+        if (source !== null && !bodyDynamic) continue;
+
+        const type = attributes?.get("type") ?? null;
+        if (type !== null && inertScriptTypes.has(type.trim().toLowerCase())) {
+          continue;
+        }
+        if (bodyDynamic)
+          violations.push({ kind: "inline-script-assembly", line });
         scripts.push({
           line,
           source: tag.body.replaceAll(dynamicTextMarker, "undefined"),

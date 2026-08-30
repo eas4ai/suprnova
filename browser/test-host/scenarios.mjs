@@ -102,34 +102,61 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-function externalModuleScript(attributes = "") {
-  return `<script type="module" src="/test-boot/module.js"${attributes}></script>`;
+const externalModuleIntegrity = "sha256-GbzlxQVWRUvoMGzXeN85n4M2pjs0UhQY+REdpluJCrw=";
+const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
+const externalClassicRuntimeIntegrity = "sha256-6G53OzNWd7paFjvWKRJQSYkyMoHyIlNmSoE0Vm9CH3Y=";
+
+function requireReviewedIntegrity(value, expected, name) {
+  if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
 }
 
-function externalClassicScripts(attributes = "") {
-  return `<script src="/assets/suprnova-live.classic.js"${attributes}></script><script src="/test-boot/classic.js"${attributes}></script>`;
+function externalModuleScript(variant = "plain") {
+  if (variant === "plain") {
+    return '<script type="module" src="/test-boot/module.js"></script>';
+  }
+  if (variant === "nonce") {
+    return '<script type="module" src="/test-boot/module.js" nonce="suprnova-test"></script>';
+  }
+  if (variant === "integrity") {
+    requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-GbzlxQVWRUvoMGzXeN85n4M2pjs0UhQY+REdpluJCrw=" crossorigin="anonymous"></script>';
+  }
+  throw new Error("unsupported_external_module_script_variant");
+}
+
+function externalClassicScripts(variant = "plain") {
+  if (variant === "plain") {
+    return '<script src="/assets/suprnova-live.classic.js"></script><script src="/test-boot/classic.js"></script>';
+  }
+  if (variant === "nonce") {
+    return '<script src="/assets/suprnova-live.classic.js" nonce="suprnova-test"></script><script src="/test-boot/classic.js" nonce="suprnova-test"></script>';
+  }
+  throw new Error("unsupported_external_classic_script_variant");
 }
 
 function hashOnlyModulePolicy() {
+  requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
   return {
-    "content-security-policy": `default-src 'none'; script-src '${integrity(externalModuleBootSource)}' 'strict-dynamic'; connect-src 'self'`,
+    "content-security-policy": `default-src 'none'; script-src '${externalModuleIntegrity}' 'strict-dynamic'; connect-src 'self'`,
   };
 }
 
 function hashOnlyClassicPolicy() {
   const runtime = readFileSync(new URL("../dist/suprnova-live.classic.js", import.meta.url));
+  requireReviewedIntegrity(runtime, externalClassicRuntimeIntegrity, "classic_runtime");
+  requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return {
-    "content-security-policy": `default-src 'none'; script-src '${integrity(runtime)}' '${integrity(externalClassicBootSource)}'; connect-src 'self'`,
+    "content-security-policy": `default-src 'none'; script-src '${externalClassicRuntimeIntegrity}' '${externalClassicBootIntegrity}'; connect-src 'self'`,
   };
 }
 
 function hashOnlyClassicDocument() {
   const runtime = readFileSync(new URL("../dist/suprnova-live.classic.js", import.meta.url));
-  const runtimeIntegrity = integrity(runtime);
-  const bootIntegrity = integrity(externalClassicBootSource);
+  requireReviewedIntegrity(runtime, externalClassicRuntimeIntegrity, "classic_runtime");
+  requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return document(
     island(),
-    `<script src="/assets/suprnova-live.classic.js" integrity="${runtimeIntegrity}" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="${bootIntegrity}" crossorigin="anonymous"></script>`,
+    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-6G53OzNWd7paFjvWKRJQSYkyMoHyIlNmSoE0Vm9CH3Y=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
   );
 }
 
@@ -929,8 +956,15 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
           slot: "iteration-004-secondary",
         })
       : "";
-  const incompatibleClassicArtifact = (slot) =>
-    `<script src="/scenario/iteration004-incompatible-feature.js" data-feature-slot="${slot}"></script>`;
+  const incompatibleClassicArtifact = (slot) => {
+    if (slot === "uploads") {
+      return '<script src="/scenario/iteration004-incompatible-feature.js" data-feature-slot="uploads"></script>';
+    }
+    if (slot === "async") {
+      return '<script src="/scenario/iteration004-incompatible-feature.js" data-feature-slot="async"></script>';
+    }
+    throw new Error("unsupported_incompatible_feature_slot");
+  };
   const classicFeatures = `${
     hasUploads && uploadArtifact === "current"
       ? '<script src="/suprnova-live.uploads.classic.js"></script>'
@@ -1498,21 +1532,18 @@ export const scenarios = Object.freeze({
       "content-security-policy":
         "default-src 'none'; script-src 'nonce-suprnova-test' 'strict-dynamic'; connect-src 'self'",
     },
-    html: document(island(), externalModuleScript(' nonce="suprnova-test"')),
+    html: document(island(), externalModuleScript("nonce")),
   },
   cspModuleHash: {
     headers: hashOnlyModulePolicy,
-    html: document(
-      island(),
-      externalModuleScript(` integrity="${integrity(externalModuleBootSource)}"`),
-    ),
+    html: document(island(), externalModuleScript("integrity")),
   },
   cspClassicNonce: {
     headers: {
       "content-security-policy":
         "default-src 'none'; script-src 'nonce-suprnova-test' 'strict-dynamic'; connect-src 'self'",
     },
-    html: document(island(), externalClassicScripts(' nonce="suprnova-test"')),
+    html: document(island(), externalClassicScripts("nonce")),
   },
   cspClassicHash: {
     headers: hashOnlyClassicPolicy,

@@ -310,6 +310,22 @@ assert.deepEqual(
   "an interpolated tag name fails closed",
 );
 
+assert.deepEqual(
+  violationKinds(
+    'const attrs = selectedAttributes(); const html = `<script ${attrs} src="/safe.js"></script>`;',
+  ),
+  ["inline-script-assembly"],
+  "a static external source cannot excuse dynamic script attributes",
+);
+
+assert.deepEqual(
+  violationKinds(
+    'const attrs = selectedAttributes(); const html = `<script ${attrs} src="/safe.js">setTimeout(run, 10);</script>`;',
+  ).sort(),
+  ["delay-primitive-reference", "inline-script-assembly"],
+  "dynamic attributes that can close and reopen a script fail before external-source exemption",
+);
+
 const acceptedJavaScriptFixtures = [
   {
     name: "line comment",

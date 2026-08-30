@@ -1,6 +1,10 @@
 export interface ValidatedRuntimeAssets {
   readonly artifactRoot: string;
-  readonly manifest: Readonly<Record<string, unknown>>;
+  asset(file: string): Readonly<{
+    bytes: Uint8Array;
+    cacheControl: string;
+    contentType: string;
+  }> | null;
 }
 
 export function validateRuntimeAssets(root: string): Promise<ValidatedRuntimeAssets>;
