@@ -304,8 +304,6 @@ write_expected_gate_commands() {
 
     printf '%s\n' \
         $'proxy\ttests/gate_contract.sh' \
-        $'node\ttests/correctness_delay_scanner.mjs' \
-        $'node\tscripts/check-correctness-delays.mjs' \
         $'proxy\ttests/documentation_contract.sh' \
         $'node\tscripts/check-implementation-docs.mjs' \
         $'node\tscripts/check-specs.mjs' \
@@ -327,6 +325,8 @@ write_expected_gate_commands() {
         $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.91.1\tcheck\t--manifest-path\ttests/fixtures/compile/Cargo.toml\t--workspace\t--all-targets' \
         $'cargo\t+nightly\tfuzz\tbuild' \
         $'npm\tci' \
+        $'node\ttests/correctness_delay_scanner.mjs' \
+        $'node\tscripts/check-correctness-delays.mjs' \
         $'npm\trun\tgenerate:check' \
         $'npm\trun\tformat:check' \
         $'npm\trun\tlint' \
@@ -394,7 +394,6 @@ write_expected_gate_phases() {
 
     printf '%s\n' \
         "gate contract" \
-        "correctness-delay scanner" \
         "implementation documentation contract" \
         "specification structure and archive parity" \
         "generated license inventory" \
@@ -406,6 +405,7 @@ write_expected_gate_phases() {
         "Rust MSRV" \
         "nightly fuzz build" \
         "browser dependency and conformance gates" \
+        "correctness-delay scanner" \
         "iteration 004 browser unit boundaries" \
         "browser broad unit suite" \
         "iteration 004 browser matrix" \
@@ -607,6 +607,14 @@ require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 require_file "correctness-delay scanner" "scripts/check-correctness-delays.mjs"
 require_file "correctness-delay scanner mutation tests" \
     "tests/correctness_delay_scanner.mjs"
+require_file "correctness-delay JavaScript parser" \
+    "scripts/correctness-delay-javascript.mjs"
+require_file "correctness-delay Rust parser" \
+    "scripts/correctness-delay-rust.mjs"
+require_file "iteration 004 verification-surface manifest" \
+    "scripts/iteration-004-verification-surfaces.mjs"
+require_file "parser-backed Rust syntax validator" \
+    "crates/suprnova-live-test-support/src/bin/correctness-delay-rust-parser.rs"
 
 if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
@@ -649,8 +657,10 @@ require_order "browser lockfile install" "npm ci" \
     "deterministic browser build" "npm run build:check"
 require_order "gate contract" 'phase "gate contract"' \
     "correctness-delay scanner" 'phase "correctness-delay scanner"'
+require_order "browser lockfile install" "npm ci" \
+    "correctness-delay scanner" 'phase "correctness-delay scanner"'
 require_order "correctness-delay scanner" 'phase "correctness-delay scanner"' \
-    "Rust formatting" 'phase "Rust formatting and lint review"'
+    "iteration 004 browser unit boundaries" 'phase "iteration 004 browser unit boundaries"'
 require_order "deterministic browser build" "npm run build:check" \
     "browser matrix" 'phase "iteration 004 browser matrix"'
 require_order "iteration 004 browser unit boundaries" \

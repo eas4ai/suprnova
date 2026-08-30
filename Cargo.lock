@@ -1225,6 +1225,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "suprnova-live",
+ "syn 2.0.117",
  "tokio",
 ]
 

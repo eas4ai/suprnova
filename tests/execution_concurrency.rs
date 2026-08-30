@@ -3,7 +3,9 @@
 mod component_support;
 
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use suprnova_live::action::{
     ActionEntry, ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget,
@@ -45,7 +47,17 @@ fn yielding_action<'a>(
             .downcast_mut::<TraceFixture>()
             .ok_or_else(ActionError::dispatcher_contract)?;
         target.record("action");
-        tokio::task::yield_now().await;
+        let mut barrier_released = false;
+        poll_fn(move |context| {
+            if barrier_released {
+                Poll::Ready(())
+            } else {
+                barrier_released = true;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
         Ok(ActionResult::render())
     })
 }

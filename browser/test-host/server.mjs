@@ -24,6 +24,7 @@ await buildRuntimeAssets(dist.pathname);
 const liveAttempts = new Map();
 
 function delay(milliseconds) {
+  // suprnova-correctness-delay-allow: product-timer -- intentional reference-host response latency selected by scenario
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 

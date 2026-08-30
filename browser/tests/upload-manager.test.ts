@@ -138,12 +138,17 @@ class NeverSettlingCancellationTransport extends MemoryTransport {
 
 class RejectingDetachedCancellationTransport extends MemoryTransport {
   detachedCatchCalls = 0;
+  readonly detachedCatchObserved: Promise<void>;
   readonly #holdFirstCancellation: boolean;
   #cancellations = 0;
+  #observeDetachedCatch!: () => void;
 
   constructor(holdFirstCancellation = false) {
     super();
     this.#holdFirstCancellation = holdFirstCancellation;
+    this.detachedCatchObserved = new Promise((resolve) => {
+      this.#observeDetachedCatch = resolve;
+    });
   }
 
   override send(request: UploadTransportRequest): Promise<UploadTransportResponse> {
@@ -160,6 +165,7 @@ class RejectingDetachedCancellationTransport extends MemoryTransport {
     const consume = rejection.catch.bind(rejection);
     rejection.catch = ((onRejected) => {
       this.detachedCatchCalls += 1;
+      this.#observeDetachedCatch();
       return consume(onRejected);
     }) as typeof rejection.catch;
     return rejection;
@@ -396,7 +402,7 @@ describe("current-document upload manager", () => {
       ]);
       await fixture.remove(owner.port, "attachment");
     }
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await transport.detachedCatchObserved;
 
     expect(transport.requests.filter(({ operation }) => operation === "cancel")).toHaveLength(2);
     expect(transport.detachedCatchCalls).toBe(1);
@@ -423,7 +429,7 @@ describe("current-document upload manager", () => {
     ]);
 
     fixture.dispose();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await transport.detachedCatchObserved;
 
     expect(transport.requests.filter(({ operation }) => operation === "cancel")).toHaveLength(1);
     expect(transport.detachedCatchCalls).toBe(1);

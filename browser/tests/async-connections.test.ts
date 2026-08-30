@@ -11,6 +11,7 @@ import {
   type EventSourcePort,
 } from "../src/async-updates/connections.js";
 import type { AuthorizedLogicalSubscription, StreamPosition } from "../src/async-updates/types.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
 function position(epoch: bigint, sequence: bigint): StreamPosition {
   return Object.freeze({ epoch, sequence });
@@ -275,7 +276,7 @@ describe("multiplexed document transports", () => {
 
     expect(timers.pending.size).toBe(1);
     timers.flush();
-    for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
     expect(sources).toHaveLength(2);
     expect(sources.map(({ request }) => request.transportGeneration)).toEqual([1, 2]);
     expect(states).toHaveBeenCalledWith("reconnecting");

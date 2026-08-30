@@ -22,6 +22,7 @@ use suprnova_live::upload::{
     UploadVolumeBucket, ValidatedUpload, ValidationStoreDisposition, VerifyTransfer,
 };
 use suprnova_live_test_support::{ControlledClock, MemoryUploadLedger};
+use tokio::sync::Barrier;
 
 use component_support::fixture_host_scope;
 
@@ -120,6 +121,7 @@ struct ControlledProvider {
     advance_clock: Mutex<HashMap<UploadHandle, (Arc<ControlledClock>, UnixMillis)>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
+    cleanup_barrier: Mutex<Option<Arc<Barrier>>>,
 }
 
 impl ControlledProvider {
@@ -149,6 +151,10 @@ impl ControlledProvider {
 
     fn max_active(&self) -> usize {
         self.max_active.load(Ordering::SeqCst)
+    }
+
+    fn synchronize_next_cleanups(&self, participants: usize) {
+        *lock(&self.cleanup_barrier) = Some(Arc::new(Barrier::new(participants)));
     }
 }
 
@@ -185,7 +191,10 @@ impl UploadProvider for ControlledProvider {
         Box::pin(async move {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
-            tokio::task::yield_now().await;
+            let cleanup_barrier = lock(&self.cleanup_barrier).clone();
+            if let Some(barrier) = cleanup_barrier {
+                barrier.wait().await;
+            }
             lock(&self.calls).push(upload.clone());
             if let Some(remaining) = lock(&self.failures).get_mut(upload)
                 && *remaining > 0
@@ -680,6 +689,7 @@ async fn concurrent_cleanup_runs_use_the_shared_permit_pool() {
         .ledger
         .seed(record(1, UploadState::Canceled, 8, 10_000))
         .expect("seed second upload");
+    fixture.provider.synchronize_next_cleanups(2);
 
     let first = fixture.service.run_once(lease("concurrent-one"));
     let second = fixture.service.run_once(lease("concurrent-two"));

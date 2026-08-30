@@ -9,6 +9,7 @@ import {
   type SseMembershipAcknowledgment,
 } from "../src/async-updates/connections.js";
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
 class Timers {
   readonly pending = new Map<number, { callback: VoidFunction; milliseconds: number }>();
@@ -80,7 +81,7 @@ function sseAcknowledgment(
 }
 
 async function settle(): Promise<void> {
-  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+  await eventLoopBarrier();
 }
 
 interface MutationModel {

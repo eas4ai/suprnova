@@ -22,6 +22,7 @@ import type {
   RuntimeFeatureDocumentContext,
   AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
 function authorization(
   sequence: bigint,
@@ -212,8 +213,8 @@ function eventCapability(): ReturnType<AsyncRuntimeIslandPort["consumeRegistered
   >;
 }
 
-async function flushMicrotasks(turns = 8): Promise<void> {
-  for (let turn = 0; turn < turns; turn += 1) await Promise.resolve();
+async function flushMicrotasks(): Promise<void> {
+  await eventLoopBarrier();
 }
 
 describe("async feature lifecycle", () => {
@@ -1729,7 +1730,7 @@ describe("async feature lifecycle", () => {
     sources[0]?.open();
     sources[0]?.request.failed("transport_lost");
     timers.fire(50);
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(sources).toHaveLength(2);
     sources[1]?.open();
@@ -1796,7 +1797,7 @@ describe("async feature lifecycle", () => {
     sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
     sources[0]?.request.failed("transport_lost");
     timers.fire(50);
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(requests[1]?.position).toEqual({ epoch: 1n, sequence: 1n });
     expect(refresh).not.toHaveBeenCalled();
@@ -1863,7 +1864,7 @@ describe("async feature lifecycle", () => {
     expect(sources[0]?.close).toHaveBeenCalledOnce();
     expect(requests).toHaveLength(1);
     timers.fire(50);
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(requests).toHaveLength(2);
     expect(requests[1]?.position).toEqual({ epoch: 1n, sequence: 0n });
@@ -1955,7 +1956,7 @@ describe("async feature lifecycle", () => {
 
     native[0]?.onerror?.();
     timers.fire(50);
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
     native[1]?.onopen?.();
     expect(refresh).toHaveBeenCalledOnce();
     const reconnectControl = controls[1];
@@ -2137,7 +2138,7 @@ describe("async feature lifecycle", () => {
       const firstRecoverySource = sources[sources.length - 1];
       firstRecoverySource?.request.failed("transport_lost");
       timers.fire(50);
-      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      await eventLoopBarrier();
       const replacement = sources[sources.length - 1];
       expect(replacement).not.toBe(firstRecoverySource);
       replacement?.open();
@@ -2220,7 +2221,7 @@ describe("async feature lifecycle", () => {
 
     expect(late).toHaveLength(3);
     late[0]?.(authorization(0n));
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
     expect(sources).toHaveLength(1);
     expect(
       [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 33_000),
@@ -2229,7 +2230,7 @@ describe("async feature lifecycle", () => {
 
     owner.dispose();
     for (const resolve of late.slice(1)) resolve(authorization(0n));
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(sources).toHaveLength(1);
     expect(timers.pending.size).toBe(0);

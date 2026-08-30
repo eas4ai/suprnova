@@ -14,10 +14,6 @@ cd "${repository_root}"
 phase "gate contract"
 rtk proxy tests/gate_contract.sh
 
-phase "correctness-delay scanner"
-rtk node tests/correctness_delay_scanner.mjs
-rtk node scripts/check-correctness-delays.mjs
-
 phase "implementation documentation contract"
 rtk proxy tests/documentation_contract.sh
 rtk node scripts/check-implementation-docs.mjs
@@ -67,6 +63,14 @@ phase "browser dependency and conformance gates"
 (
     cd browser
     rtk npm ci
+)
+
+phase "correctness-delay scanner"
+rtk node tests/correctness_delay_scanner.mjs
+rtk node scripts/check-correctness-delays.mjs
+
+(
+    cd browser
     rtk npm run generate:check
     rtk npm run format:check
     rtk npm run lint

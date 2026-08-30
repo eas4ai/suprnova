@@ -14,6 +14,7 @@ import type {
   RuntimeFeatureDirectiveOwnership,
   AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
 type Transport = "sse" | "websocket";
 
@@ -116,7 +117,7 @@ function eventCapability(
 }
 
 async function settle(): Promise<void> {
-  for (let turn = 0; turn < 32; turn += 1) await Promise.resolve();
+  await eventLoopBarrier();
 }
 
 function successfulFreshRender(
