@@ -1,9 +1,9 @@
 [package]
 name = "suprnova-live-macros"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91.1"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Internal procedural macros for Suprnova Live development"
 repository = "https://github.com/eas4ai/suprnova"
 publish = false

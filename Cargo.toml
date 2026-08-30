@@ -9,7 +9,12 @@ members = [
     "crates/suprnova-payments-stripe",
     "crates/suprnova-payments-paddle",
     "crates/suprnova-magnetar",
+    "crates/suprnova-live",
+    "crates/suprnova-live/crates/suprnova-live-macro-fixture",
+    "crates/suprnova-live/crates/suprnova-live-macros",
+    "crates/suprnova-live/crates/suprnova-live-test-support",
 ]
+exclude = ["crates/suprnova-live/fuzz"]
 
 [workspace.package]
 version = "1.3.7"

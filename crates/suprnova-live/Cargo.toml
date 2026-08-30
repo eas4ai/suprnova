@@ -1,22 +1,12 @@
 [package]
 name = "suprnova-live"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91.1"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Internal Suprnova Live interaction engine"
 repository = "https://github.com/eas4ai/suprnova"
 publish = false
-
-[workspace]
-resolver = "3"
-members = [
-    ".",
-    "crates/suprnova-live-macro-fixture",
-    "crates/suprnova-live-macros",
-    "crates/suprnova-live-test-support",
-]
-exclude = ["fuzz"]
 
 [features]
 default = []

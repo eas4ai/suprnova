@@ -1,9 +1,9 @@
 [package]
 name = "suprnova-live-macro-fixture"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91.1"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Development-only final-facade fixture for Suprnova Live macros"
 repository = "https://github.com/eas4ai/suprnova"
 publish = false
