@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn decode_hex(value: &[u8]) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 || value.len() / 2 > MAX_MEDIA_PREFIX_BYTES {
+    if !value.len().is_multiple_of(2) || value.len() / 2 > MAX_MEDIA_PREFIX_BYTES {
         return None;
     }
     value

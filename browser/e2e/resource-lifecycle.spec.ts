@@ -91,8 +91,14 @@ test("restoration and duplicate artifact execution do not multiply lifecycle lis
 
 test("an old-epoch transport response cannot mutate the restored document", async ({ page }) => {
   await page.goto("/scenario/lifecycle");
+  const oldEpochRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === "/live",
+  );
+  const oldEpochResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/live",
+  );
   await page.locator("#lifecycle-action").click();
-  await page.waitForTimeout(30);
+  await oldEpochRequest;
   await page.evaluate(() => {
     const hide = new Event("pagehide");
     Object.defineProperty(hide, "persisted", { value: true });
@@ -101,7 +107,7 @@ test("an old-epoch transport response cannot mutate the restored document", asyn
     Object.defineProperty(show, "persisted", { value: true });
     window.dispatchEvent(show);
   });
-  await page.waitForTimeout(400);
+  await oldEpochResponse;
 
   await expect(page.locator("#lifecycle-content")).toHaveText("Lifecycle original");
   await expect(page.locator("[data-suprnova-live-island]")).toHaveAttribute(
@@ -157,6 +163,7 @@ test("beforeunload exists only while an explicit dirty-work guard is active", as
 test("a model debounce scheduled before persisted hide cannot fire while suspended", async ({
   page,
 }) => {
+  await page.clock.install();
   let liveRequests = 0;
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/live") liveRequests += 1;
@@ -164,11 +171,11 @@ test("a model debounce scheduled before persisted hide cannot fire while suspend
   await page.goto("/scenario/modelsDebounce");
   await page.locator("#debounced-model").fill("suspended query");
   await dispatchPersistedTransition(page, "pagehide");
-  await page.waitForTimeout(250);
+  await page.clock.fastForward(250);
 
   expect(liveRequests).toBe(0);
   await dispatchPersistedTransition(page, "pageshow");
-  await page.waitForTimeout(150);
+  await page.clock.fastForward(150);
   expect(liveRequests).toBe(0);
 });
 
@@ -200,7 +207,7 @@ test("an old-epoch transition is rejected before one fresh render recovers the i
 
   await dispatchPersistedTransition(page, "pagehide");
   await dispatchPersistedTransition(page, "pageshow");
-  await page.waitForTimeout(250);
+  await expect.poll(() => operationKinds).toEqual(["invoke_action", "fresh_render"]);
 
   expect(operationKinds).toEqual(["invoke_action", "fresh_render"]);
   await expect(island).toHaveAttribute("data-suprnova-live-revision", "8");

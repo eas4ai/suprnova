@@ -13,9 +13,12 @@ test("immediate and debounced models enter only their owning island scheduler", 
   await expect(page).toHaveURL(/#immediate-fallback$/u);
 
   await runtime.open("modelsDebounce");
+  const debouncedRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === "/live",
+  );
   await page.locator("#debounced-model").fill("r");
   await page.locator("#debounced-model").fill("rust");
-  await page.waitForTimeout(150);
+  await debouncedRequest;
   await page.locator("#debounced-after").click();
   await page.locator("#debounced-after").click();
   await expect(page).toHaveURL(/#debounced-fallback$/u);

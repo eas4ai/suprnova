@@ -787,6 +787,7 @@ const timers = Object.freeze({
       controlledTimerRecords.set(controlledTimerHandle, { callback, milliseconds });
       return controlledTimerHandle;
     }
+    // suprnova-correctness-delay-allow: product-timer -- uncontrolled scenarios exercise the runtime's real scheduling port
     return window.setTimeout(() => {
       callback();
     }, milliseconds);

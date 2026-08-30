@@ -3,9 +3,8 @@
 mod component_support;
 
 use std::collections::BTreeMap;
-use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::time::Duration;
 
 use suprnova_live::action::{
     ActionEntry, ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget,
@@ -31,10 +30,12 @@ use suprnova_live::validation::{
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use component_support::{
-    FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes, digest,
-    idempotency, install, key_ring, ledger, metadata, schema_set, snapshot_limits,
+    ActionGate, FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes,
+    digest, idempotency, install, key_ring, ledger, metadata, schema_set, snapshot_limits,
     trusted_context_with_authorization,
 };
+
+const COMPLETION_WATCHDOG: Duration = Duration::from_secs(5);
 
 fn yielding_action<'a>(
     target: &'a mut dyn ActionTarget,
@@ -47,17 +48,11 @@ fn yielding_action<'a>(
             .downcast_mut::<TraceFixture>()
             .ok_or_else(ActionError::dispatcher_contract)?;
         target.record("action");
-        let mut barrier_released = false;
-        poll_fn(move |context| {
-            if barrier_released {
-                Poll::Ready(())
-            } else {
-                barrier_released = true;
-                context.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await;
+        let gate = target
+            .action_gate()
+            .ok_or_else(ActionError::dispatcher_contract)?;
+        gate.mark_entered();
+        gate.wait_for_release().await;
         Ok(ActionResult::render())
     })
 }
@@ -98,7 +93,8 @@ impl ExecutionTracePort for Trace {
 
 #[tokio::test]
 async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_bytes() {
-    let control = FixtureControl::new(FailurePoint::None);
+    let action_gate = Arc::new(ActionGate::new());
+    let control = FixtureControl::new_with_action_gate(FailurePoint::None, action_gate.clone());
     let table = ActionTable::new(vec![ActionEntry::new(
         metadata().actions()[0].clone(),
         yielding_action,
@@ -209,6 +205,18 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
             &first_trace,
         ),
     ));
+    let mut first = Box::pin(first);
+    tokio::time::timeout(COMPLETION_WATCHDOG, async {
+        tokio::select! {
+            () = action_gate.wait_until_entered() => {}
+            _result = &mut first => {
+                panic!("first action completed before the externally controlled release")
+            }
+        }
+    })
+    .await
+    .expect("first action must reach the admission barrier");
+
     let second = service.execute_instanced(InstancedActionRequest::new(
         &descriptor,
         &context,
@@ -227,8 +235,13 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
             &second_trace,
         ),
     ));
-
-    let (first, second) = tokio::join!(first, second);
+    let second = tokio::time::timeout(COMPLETION_WATCHDOG, second)
+        .await
+        .expect("duplicate request must reach a bounded outcome");
+    action_gate.release();
+    let first = tokio::time::timeout(COMPLETION_WATCHDOG, first)
+        .await
+        .expect("admitted action must finish after explicit release");
     let ExecutionResult::Accepted(first) = first else {
         panic!("first request must be accepted");
     };

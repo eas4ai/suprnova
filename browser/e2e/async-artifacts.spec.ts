@@ -126,8 +126,10 @@ async function installAsyncHarness(page: Page, delayInitialAuthority = false): P
         clearTimeout: (handle: number) => {
           window.clearTimeout(handle);
         },
-        timeout: (callback: () => void, milliseconds: number) =>
-          window.setTimeout(callback, milliseconds),
+        timeout: (callback: () => void, milliseconds: number) => {
+          // suprnova-correctness-delay-allow: product-timer -- injected runtime timer exercises observable reconnect policy rather than test synchronization
+          return window.setTimeout(callback, milliseconds);
+        },
       }),
       transports: Object.freeze({
         eventSource(request: PhysicalConnection["request"]) {

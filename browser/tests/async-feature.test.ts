@@ -330,13 +330,11 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => immediateHybridOwnership(root),
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(refresh).not.toHaveBeenCalled();
     sources[0]?.open();
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(refresh).not.toHaveBeenCalled();
     expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
@@ -808,17 +806,14 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     owner.suspend();
     expect(sources[0]?.close).toHaveBeenCalledOnce();
     await owner.resume();
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(sources).toHaveLength(1);
     expect(refresh).not.toHaveBeenCalled();
@@ -873,11 +868,9 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [pushOnlyOwnership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(freshness).toEqual(["current"]);
     sources[0]?.emit(envelope(2n, { kind: "heartbeat" }));
@@ -1054,11 +1047,9 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
     expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
@@ -1114,8 +1105,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => ownerships,
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
     await Promise.resolve();
     sources[0]?.emit(envelope(3n, { kind: "heartbeat" }));
@@ -1271,8 +1261,7 @@ describe("async feature lifecycle", () => {
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: (_element, _name, value) => value,
       });
-      await Promise.resolve();
-      await Promise.resolve();
+      await eventLoopBarrier();
       sources[0]?.open();
 
       sources[0]?.emit(envelope(0n, { kind: "heartbeat" }));
@@ -1329,8 +1318,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
 
     expect(sources).toHaveLength(1);
     expect(refresh).not.toHaveBeenCalled();
@@ -1408,8 +1396,7 @@ describe("async feature lifecycle", () => {
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: signal,
       });
-      await Promise.resolve();
-      await Promise.resolve();
+      await eventLoopBarrier();
 
       const staged = stages[0];
       if (staged === undefined) throw new Error("missing staged replay authorization");
@@ -1488,8 +1475,7 @@ describe("async feature lifecycle", () => {
     });
 
     const controller = owner.connectIsland(port);
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     expect(sources).toHaveLength(1);
     sources[0]?.open();
     sources[0]?.emit(envelope(1n, { kind: "refresh", name: "refresh" }));
@@ -1650,8 +1636,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
     owner.suspend();
     await owner.resume();
@@ -1725,8 +1710,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
     sources[0]?.request.failed("transport_lost");
     timers.fire(50);
@@ -1791,8 +1775,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
     sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
     sources[0]?.request.failed("transport_lost");
@@ -1855,8 +1838,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
 
     sources[0]?.emit(envelope(3n, { kind: "heartbeat" }));
@@ -1934,8 +1916,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     native[0]?.onopen?.();
     expect(refresh).not.toHaveBeenCalled();
     const control = controls[0];
@@ -1950,8 +1931,7 @@ describe("async feature lifecycle", () => {
       subscriptionId: control.request.subscription.subscriptionId,
       transportGeneration: control.request.transportGeneration,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     expect(refresh).toHaveBeenCalledOnce();
 
     native[0]?.onerror?.();
@@ -1971,8 +1951,7 @@ describe("async feature lifecycle", () => {
       subscriptionId: reconnectControl.request.subscription.subscriptionId,
       transportGeneration: reconnectControl.request.transportGeneration,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     expect(refresh).toHaveBeenCalledTimes(2);
     owner.dispose();
   });
@@ -2042,8 +2021,7 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sockets[0]?.onopen?.();
     expect(refresh).not.toHaveBeenCalled();
     const request = JSON.parse(sent[0] ?? "null") as Record<string, unknown>;
@@ -2057,8 +2035,7 @@ describe("async feature lifecycle", () => {
         transport_generation: Number(request["transport_generation"]),
       }),
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     expect(refresh).toHaveBeenCalledOnce();
     owner.dispose();
   });
@@ -2125,8 +2102,7 @@ describe("async feature lifecycle", () => {
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: (_element, _name, value) => value,
       });
-      await Promise.resolve();
-      await Promise.resolve();
+      await eventLoopBarrier();
       sources[0]?.open();
 
       if (lifecycle === "bfcache resume") {
@@ -2199,20 +2175,19 @@ describe("async feature lifecycle", () => {
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     sources[0]?.open();
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       owner.suspend();
       const resumed = owner.resume();
-      await Promise.resolve();
+      await eventLoopBarrier();
       expect(
         [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 5_000),
       ).toHaveLength(2);
       timers.fire(5_000);
       await resumed;
-      await Promise.resolve();
+      await eventLoopBarrier();
       expect(signals[attempt]?.aborted).toBe(true);
       expect(
         [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 33_000),
@@ -2285,8 +2260,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland(port);
-    await Promise.resolve();
-    await Promise.resolve();
+    await eventLoopBarrier();
     expect(sources).toHaveLength(1);
     sources[0]?.open();
     owner.suspend();

@@ -28,6 +28,18 @@ rtk node scripts/generate-license-inventory.mjs --check
 phase "Rust formatting and lint review"
 rtk cargo fmt --all -- --check
 rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features
+rtk node tests/correctness_delay_clippy.mjs
+rtk env CARGO_INCREMENTAL=0 cargo clippy \
+    --workspace \
+    --all-targets \
+    --all-features \
+    -- \
+    -D clippy::disallowed_methods
+rtk env CARGO_INCREMENTAL=0 cargo clippy \
+    --manifest-path fuzz/Cargo.toml \
+    --all-targets \
+    -- \
+    -D clippy::disallowed_methods
 
 phase "Rust fixture, checker, protocol, and security boundaries"
 rtk env CARGO_INCREMENTAL=0 cargo test \

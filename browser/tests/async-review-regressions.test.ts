@@ -13,6 +13,7 @@ import {
   type LogicalSubscriptionSink,
 } from "../src/async-updates/connections.js";
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
+import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
 function authorization(
   index: number,
@@ -164,9 +165,7 @@ function sseAcknowledgment(request: Parameters<BrowserAsyncTransportOptions["sse
 }
 
 async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await eventLoopBarrier();
 }
 
 function heartbeat(index: number, sequence: number): string {

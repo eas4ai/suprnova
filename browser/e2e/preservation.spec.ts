@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { RuntimePage } from "./support/runtime-page.js";
+import { browserTaskBarrier } from "./support/event-loop-barrier.js";
 
 test("morph controls preserve their distinct identities and lifecycle across repeated updates", async ({
   page,
@@ -89,7 +90,7 @@ test("morph controls preserve their distinct identities and lifecycle across rep
     document.body.insertAdjacentHTML("beforeend", '<div id="late-target"></div>');
   });
   await page.locator("#forged-action").click();
-  await page.waitForTimeout(100);
+  await browserTaskBarrier(page);
   expect(liveRequests).toBe(2);
   await expect(runtime.island()).toHaveAttribute("data-suprnova-live-revision", "9");
   await expect(page.locator("#forged-island")).not.toHaveAttribute(

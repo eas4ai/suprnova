@@ -2,6 +2,18 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
+const delayModules = new Set([
+  "node:timers",
+  "node:timers/promises",
+  "timers",
+  "timers/promises",
+]);
+const delayPrimitives = new Set([
+  "setImmediate",
+  "setInterval",
+  "setTimeout",
+  "waitForTimeout",
+]);
 
 export function loadTypeScript(repositoryRoot) {
   return require(
@@ -26,196 +38,83 @@ function unwrap(ts, expression) {
   return current;
 }
 
-function propertyName(ts, expression) {
-  const current = unwrap(ts, expression);
-  if (ts.isPropertyAccessExpression(current)) return current.name.text;
+function literalText(ts, node) {
+  const current = node === undefined ? undefined : unwrap(ts, node);
+  return current !== undefined &&
+    (ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current))
+    ? current.text
+    : null;
+}
+
+function selectedName(ts, node) {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node))
+    return literalText(ts, node.argumentExpression);
+  return null;
+}
+
+function moduleReference(ts, node) {
   if (
-    ts.isElementAccessExpression(current) &&
-    current.argumentExpression !== undefined &&
-    (ts.isStringLiteral(current.argumentExpression) ||
-      ts.isNoSubstitutionTemplateLiteral(current.argumentExpression))
+    (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+    node.moduleSpecifier !== undefined
   ) {
-    return current.argumentExpression.text;
+    return literalText(ts, node.moduleSpecifier);
   }
-  return null;
-}
-
-function rootName(ts, expression) {
-  let current = unwrap(ts, expression);
-  while (
-    ts.isPropertyAccessExpression(current) ||
-    ts.isElementAccessExpression(current)
+  if (
+    ts.isImportEqualsDeclaration(node) &&
+    ts.isExternalModuleReference(node.moduleReference)
   ) {
-    current = unwrap(ts, current.expression);
+    return literalText(ts, node.moduleReference.expression);
   }
-  return ts.isIdentifier(current) ? current.text : null;
-}
-
-class Scope {
-  constructor(parent = null) {
-    this.parent = parent;
-    this.bindings = new Map();
-  }
-
-  bind(name, kind) {
-    this.bindings.set(name, kind);
-  }
-
-  lookup(name) {
-    if (this.bindings.has(name)) return this.bindings.get(name);
-    if (this.parent !== null) return this.parent.lookup(name);
-    if (name === "Promise") return "promise";
-    if (name === "setTimeout") return "timeout";
-    if (name === "setImmediate") return "turn";
-    return null;
-  }
-}
-
-function expressionKind(ts, expression, scope) {
-  const current = unwrap(ts, expression);
-  if (ts.isIdentifier(current)) return scope.lookup(current.text);
-  const property = propertyName(ts, current);
-  if (property === null) return null;
-  if (property === "waitForTimeout") return "playwright-timeout";
-  const root = rootName(ts, current);
-  if (root === "globalThis" || root === "window" || root === "self") {
-    if (property === "Promise") return "promise";
-    if (property === "setTimeout") return "timeout";
-    if (property === "setImmediate") return "turn";
-  }
-  return null;
-}
-
-function bindName(ts, name, initializer, scope, sourceKind = null) {
-  if (name === undefined || ts.isOmittedExpression(name)) return;
-  if (ts.isIdentifier(name)) {
-    scope.bind(
-      name.text,
-      initializer === undefined
-        ? sourceKind
-        : expressionKind(ts, initializer, scope),
-    );
-    return;
-  }
-  if (!ts.isObjectBindingPattern(name)) {
-    for (const element of name.elements)
-      bindName(ts, element.name, undefined, scope, null);
-    return;
-  }
-  const initializerRoot =
-    initializer === undefined ? null : rootName(ts, initializer);
-  const globalObject =
-    initializerRoot === "globalThis" ||
-    initializerRoot === "window" ||
-    initializerRoot === "self";
-  for (const element of name.elements) {
-    if (element.dotDotDotToken !== undefined) {
-      bindName(ts, element.name, undefined, scope, null);
-      continue;
-    }
-    const selected = element.propertyName ?? element.name;
-    const selectedName =
-      ts.isIdentifier(selected) || ts.isStringLiteral(selected)
-        ? selected.text
-        : null;
-    const kind =
-      globalObject && selectedName === "setTimeout"
-        ? "timeout"
-        : globalObject && selectedName === "setImmediate"
-          ? "turn"
-          : globalObject && selectedName === "Promise"
-            ? "promise"
-            : selectedName === "waitForTimeout"
-              ? "playwright-timeout"
-              : null;
-    bindName(ts, element.name, undefined, scope, kind);
-  }
-}
-
-function bindDeclaration(ts, node, scope) {
-  if (ts.isVariableDeclaration(node))
-    bindName(ts, node.name, node.initializer, scope);
-  if (ts.isImportSpecifier(node)) {
-    const imported = node.propertyName?.text ?? node.name.text;
-    const moduleName = node.parent.parent.parent.moduleSpecifier.text;
-    const timerModule = new Set([
-      "node:timers",
-      "timers",
-      "node:timers/promises",
-    ]);
-    const kind =
-      moduleName === "node:timers/promises" && imported === "setTimeout"
-        ? "promise-timeout"
-        : timerModule.has(moduleName) && imported === "setTimeout"
-          ? "timeout"
-          : timerModule.has(moduleName) && imported === "setImmediate"
-            ? "turn"
-            : null;
-    scope.bind(node.name.text, kind);
-  }
-  if (ts.isImportClause(node) && node.name !== undefined)
-    scope.bind(node.name.text, null);
-  if (ts.isFunctionDeclaration(node) && node.name !== undefined)
-    scope.bind(node.name.text, null);
-  if (ts.isClassDeclaration(node) && node.name !== undefined)
-    scope.bind(node.name.text, null);
-}
-
-function nestedScope(ts, node, parent) {
-  return ts.isFunctionLike(node) || ts.isBlock(node) || ts.isCatchClause(node)
-    ? new Scope(parent)
-    : parent;
-}
-
-function containsCall(ts, node, initialScope, expectedKinds) {
-  let found = false;
-  function visit(current, inherited) {
-    if (found) return;
-    const scope =
-      current === node ? inherited : nestedScope(ts, current, inherited);
-    bindDeclaration(ts, current, scope);
-    if (ts.isParameter(current))
-      bindName(ts, current.name, undefined, scope, null);
+  if (ts.isCallExpression(node) && node.arguments.length === 1) {
+    const expression = unwrap(ts, node.expression);
     if (
-      ts.isCallExpression(current) &&
-      expectedKinds.has(expressionKind(ts, current.expression, scope))
+      (ts.isIdentifier(expression) && expression.text === "require") ||
+      expression.kind === ts.SyntaxKind.ImportKeyword
     ) {
-      found = true;
-      return;
+      return literalText(ts, node.arguments[0]);
     }
-    ts.forEachChild(current, (child) => visit(child, scope));
   }
-  visit(node, initialScope);
-  return found;
+  return null;
 }
 
-function isPromiseResolve(ts, node, scope) {
-  if (!ts.isCallExpression(node)) return false;
-  const expression = unwrap(ts, node.expression);
-  if (propertyName(ts, expression) !== "resolve") return false;
+function isPropertyNamePosition(ts, node) {
+  const parent = node.parent;
+  return (
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isPropertyAssignment(parent) && parent.name === node) ||
+    (ts.isMethodDeclaration(parent) && parent.name === node) ||
+    (ts.isPropertyDeclaration(parent) && parent.name === node) ||
+    (ts.isPropertySignature(parent) && parent.name === node) ||
+    (ts.isMethodSignature(parent) && parent.name === node) ||
+    (ts.isBindingElement(parent) && parent.propertyName === node) ||
+    (ts.isImportSpecifier(parent) && parent.propertyName === node) ||
+    (ts.isExportSpecifier(parent) && parent.propertyName === node)
+  );
+}
+
+function isPromiseResolveCall(ts, expression) {
+  const current = unwrap(ts, expression);
+  if (!ts.isCallExpression(current)) return false;
+  const callee = unwrap(ts, current.expression);
+  if (selectedName(ts, callee) !== "resolve") return false;
   if (
-    !ts.isPropertyAccessExpression(expression) &&
-    !ts.isElementAccessExpression(expression)
+    !ts.isPropertyAccessExpression(callee) &&
+    !ts.isElementAccessExpression(callee)
   ) {
     return false;
   }
-  return expressionKind(ts, expression.expression, scope) === "promise";
+  const owner = unwrap(ts, callee.expression);
+  if (ts.isIdentifier(owner)) return owner.text === "Promise";
+  return selectedName(ts, owner) === "Promise";
 }
 
-function loopContainsPromiseTurn(ts, loop, initialScope) {
-  const statements = ts.isBlock(loop.statement)
-    ? loop.statement.statements
-    : [loop.statement];
+function isAwaitedPromiseTurn(ts, statement) {
+  if (!ts.isExpressionStatement(statement)) return false;
+  const expression = unwrap(ts, statement.expression);
   return (
-    statements.length > 0 &&
-    statements.every((statement) => {
-      if (!ts.isExpressionStatement(statement)) return false;
-      const expression = unwrap(ts, statement.expression);
-      return (
-        ts.isAwaitExpression(expression) &&
-        isPromiseResolve(ts, unwrap(ts, expression.expression), initialScope)
-      );
-    })
+    ts.isAwaitExpression(expression) &&
+    isPromiseResolveCall(ts, expression.expression)
   );
 }
 
@@ -261,7 +160,9 @@ export function scanJavaScript(ts, filePath, source) {
     source,
     ts.ScriptTarget.Latest,
     true,
-    filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    filePath.endsWith(".tsx") || filePath.endsWith(".jsx")
+      ? ts.ScriptKind.TSX
+      : ts.ScriptKind.TS,
   );
   const parseDiagnostics = sourceFile.parseDiagnostics ?? [];
   if (parseDiagnostics.length > 0) {
@@ -292,39 +193,54 @@ export function scanJavaScript(ts, filePath, source) {
     }
   };
 
-  function visit(node, inherited) {
-    const scope = nestedScope(ts, node, inherited);
-    bindDeclaration(ts, node, scope);
-    if (ts.isParameter(node)) bindName(ts, node.name, undefined, scope, null);
-    if (
-      ts.isCallExpression(node) &&
-      expressionKind(ts, node.expression, scope) === "playwright-timeout"
-    ) {
-      add("playwright-timeout", node);
+  function visit(node) {
+    const referencedModule = moduleReference(ts, node);
+    if (referencedModule !== null && delayModules.has(referencedModule)) {
+      add("delay-module-reference", node);
+    }
+
+    const property = selectedName(ts, node);
+    if (property !== null && delayPrimitives.has(property)) {
+      add("delay-primitive-reference", node);
     }
     if (
       ts.isCallExpression(node) &&
-      expressionKind(ts, node.expression, scope) === "promise-timeout"
+      selectedName(ts, unwrap(ts, node.expression)) === "get" &&
+      literalText(ts, node.arguments[1]) !== null &&
+      delayPrimitives.has(literalText(ts, node.arguments[1]))
     ) {
-      add("promise-timeout", node);
+      add("delay-primitive-reference", node);
     }
     if (
-      ts.isNewExpression(node) &&
-      expressionKind(ts, node.expression, scope) === "promise"
+      ts.isBindingElement(node) &&
+      node.propertyName !== undefined &&
+      delayPrimitives.has(
+        literalText(ts, node.propertyName) ??
+          node.propertyName.getText(sourceFile),
+      )
     ) {
-      const executor = node.arguments?.[0];
-      if (
-        executor !== undefined &&
-        containsCall(ts, executor, scope, new Set(["timeout"]))
-      ) {
-        add("promise-timeout", node);
+      add("delay-primitive-reference", node);
+    }
+    if (
+      ts.isIdentifier(node) &&
+      delayPrimitives.has(node.text) &&
+      !isPropertyNamePosition(ts, node)
+    ) {
+      add("delay-primitive-reference", node);
+    }
+    if (ts.isBlock(node) || ts.isSourceFile(node)) {
+      let consecutiveTurns = [];
+      for (const statement of node.statements) {
+        if (isAwaitedPromiseTurn(ts, statement)) {
+          consecutiveTurns.push(statement);
+        } else {
+          if (consecutiveTurns.length > 1)
+            add("promise-turn-loop", consecutiveTurns[0]);
+          consecutiveTurns = [];
+        }
       }
-      if (
-        executor !== undefined &&
-        containsCall(ts, executor, scope, new Set(["turn"]))
-      ) {
-        add("promise-turn-wait", node);
-      }
+      if (consecutiveTurns.length > 1)
+        add("promise-turn-loop", consecutiveTurns[0]);
     }
     if (
       (ts.isForStatement(node) ||
@@ -332,13 +248,17 @@ export function scanJavaScript(ts, filePath, source) {
         ts.isForOfStatement(node) ||
         ts.isWhileStatement(node) ||
         ts.isDoStatement(node)) &&
-      loopContainsPromiseTurn(ts, node, scope)
+      (ts.isBlock(node.statement)
+        ? node.statement.statements.some((statement) =>
+            isAwaitedPromiseTurn(ts, statement),
+          )
+        : isAwaitedPromiseTurn(ts, node.statement))
     ) {
       add("promise-turn-loop", node);
     }
-    ts.forEachChild(node, (child) => visit(child, scope));
+    ts.forEachChild(node, visit);
   }
 
-  visit(sourceFile, new Scope());
+  visit(sourceFile);
   return { comments: comments(ts, sourceFile), violations };
 }

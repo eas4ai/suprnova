@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,72 +21,117 @@ function violationKinds(source, language = "javascript") {
   }).map(({ kind }) => kind);
 }
 
+const manifestRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), "suprnova-live-verification-surfaces-"),
+);
+try {
+  const expectedNestedSurfaces = [
+    "tests/nested/upload/regression.rs",
+    "crates/suprnova-live-test-support/src/bin/nested/harness.rs",
+    "crates/suprnova-live-test-support/tests/nested/host.rs",
+    "browser/tests/nested/unit.test.ts",
+    "browser/e2e/nested/lifecycle.spec.ts",
+    "browser/test-host/nested/scenario.mjs",
+    "src/nested/inline_tests.rs",
+    "fuzz/fuzz_targets/nested/upload.rs",
+    "benches/nested/async_budget.rs",
+  ];
+  for (const relative of expectedNestedSurfaces) {
+    const absolute = path.join(manifestRoot, relative);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, "// verification fixture\n", "utf8");
+  }
+  const generatedSurface = "tests/fixtures/compile/target/generated.rs";
+  const generatedAbsolute = path.join(manifestRoot, generatedSurface);
+  fs.mkdirSync(path.dirname(generatedAbsolute), { recursive: true });
+  fs.writeFileSync(generatedAbsolute, "// generated fixture\n", "utf8");
+  const discovered = new Set(
+    iteration004VerificationSurfaces(manifestRoot).map(({ filePath }) =>
+      path.relative(manifestRoot, filePath),
+    ),
+  );
+  for (const relative of expectedNestedSurfaces) {
+    assert.equal(
+      discovered.has(relative),
+      true,
+      `recursive verification ownership must discover ${relative}`,
+    );
+  }
+  assert.equal(
+    discovered.has(generatedSurface),
+    false,
+    "generated build output is not verification-owned source",
+  );
+} finally {
+  fs.rmSync(manifestRoot, { force: true, recursive: true });
+}
+
 const rejectedJavaScriptMutations = [
   {
     name: "direct timeout-resolved promise",
     source: "await new Promise((resolve) => setTimeout(resolve, 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "callback timeout-resolved promise",
     source: "await new Promise((resolve) => setTimeout(() => resolve(), 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "window-qualified timeout-resolved promise",
     source:
       "await new Promise((resolve) => window.setTimeout(() => resolve(), 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "Playwright wall-clock wait",
     source: "await page.waitForTimeout(10);",
-    kind: "playwright-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "global Promise and optional qualified timer",
     source:
       "await new globalThis.Promise((resolve) => globalThis?.setTimeout?.(resolve, 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "aliased timer",
     source:
       "const later = window.setTimeout; await new Promise((resolve) => later(resolve, 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "destructured timer",
     source:
       "const { setTimeout: later } = globalThis; await new Promise((resolve) => later(resolve, 10));",
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "computed qualified timer alias",
     source:
       'const later = globalThis["setTimeout"]; await new Promise((resolve) => later(resolve, 10));',
-    kind: "promise-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "timers promises import alias",
     source:
       'import { setTimeout as delay } from "node:timers/promises"; await delay(10);',
-    kind: "promise-timeout",
+    kind: "delay-module-reference",
   },
   {
     name: "aliased Playwright wait",
     source: "const wait = page.waitForTimeout; await wait(10);",
-    kind: "playwright-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "destructured Playwright wait",
     source: "const { waitForTimeout: wait } = page; await wait(10);",
-    kind: "playwright-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "optional Playwright wait",
     source: "await page?.waitForTimeout?.(10);",
-    kind: "playwright-timeout",
+    kind: "delay-primitive-reference",
   },
   {
     name: "fixed Promise.resolve turn loop",
@@ -95,7 +142,65 @@ const rejectedJavaScriptMutations = [
   {
     name: "setImmediate correctness turn",
     source: "await new Promise((resolve) => setImmediate(resolve));",
-    kind: "promise-turn-wait",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "timer reference is rejected before alias flow matters",
+    source: "const later = globalThis.setTimeout; observe(later);",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "bound timer wrapper",
+    source:
+      "const later = globalThis.setTimeout.bind(globalThis); observe(later);",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "nested global-object timer path",
+    source: "const later = globalThis.window?.setTimeout; observe(later);",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "Reflect timer lookup",
+    source: 'const later = Reflect.get(window, "setTimeout"); observe(later);',
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "timer module namespace import",
+    source: 'import * as timers from "node:timers"; observe(timers);',
+    kind: "delay-module-reference",
+  },
+  {
+    name: "timer module default import",
+    source: 'import timers from "timers"; observe(timers);',
+    kind: "delay-module-reference",
+  },
+  {
+    name: "timer module side-effect import",
+    source: 'import "node:timers/promises";',
+    kind: "delay-module-reference",
+  },
+  {
+    name: "timer module require",
+    source: 'const timers = require("node:timers"); observe(timers);',
+    kind: "delay-module-reference",
+  },
+  {
+    name: "timer module dynamic import",
+    source:
+      'const timers = await import("node:timers/promises"); observe(timers);',
+    kind: "delay-module-reference",
+  },
+  {
+    name: "shadowed timer remains conservatively forbidden",
+    source:
+      "async function test(setTimeout) { await new Promise((resolve) => setTimeout(resolve)); }",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "locally declared Playwright-shaped delay remains forbidden",
+    source: "function waitForTimeout(milliseconds) { observe(milliseconds); }",
+    kind: "delay-primitive-reference",
   },
 ];
 
@@ -141,26 +246,31 @@ const acceptedJavaScriptFixtures = [
     source: "await page.waitForTimeoutBudget(10);",
   },
   {
-    name: "shadowed timer parameter",
-    source:
-      "async function test(setTimeout) { await new Promise((resolve) => setTimeout(resolve)); }",
-  },
-  {
-    name: "destructured deterministic scheduler callback",
-    source:
-      "const { setTimeout: schedule } = fakeScheduler; await new Promise((resolve) => schedule(resolve));",
-  },
-  {
-    name: "product timer",
-    source: "const timer = window.setTimeout(expireLease, leaseTtlMs);",
-  },
-  {
-    name: "non-Playwright helper declaration",
-    source: "function waitForTimeout(milliseconds) { schedule(milliseconds); }",
-  },
-  {
     name: "deterministic fake clock",
     source: "scheduler.advanceBy(10);",
+  },
+  {
+    name: "reasoned fake scheduler primitive",
+    source: `
+// suprnova-correctness-delay-allow: fake-clock -- deterministic scheduler installation for controlled virtual time
+const { setTimeout: schedule } = fakeScheduler;
+observe(schedule);
+`,
+  },
+  {
+    name: "reasoned product timer",
+    source: `
+// suprnova-correctness-delay-allow: product-timer -- lease expiry is observable behavior rather than test synchronization
+const timer = window.setTimeout(expireLease, leaseTtlMs);
+observe(timer);
+`,
+  },
+  {
+    name: "reasoned Playwright watchdog configuration",
+    source: `
+// suprnova-correctness-delay-allow: watchdog -- suite deadline is a failure bound rather than correctness synchronization
+test.setTimeout(60_000);
+`,
   },
 ];
 
@@ -172,86 +282,9 @@ assert.deepEqual(
   violationKinds(
     "const pattern = /ignored \\/\\/ comment text/u; await page.waitForTimeout(10);",
   ),
-  ["playwright-timeout"],
+  ["delay-primitive-reference"],
   "a regular expression cannot hide executable code that follows it",
 );
-
-const rejectedRustMutations = [
-  [
-    "Tokio sleep",
-    "tokio::time::sleep(Duration::from_millis(10)).await;",
-    "rust-sleep",
-  ],
-  [
-    "standard sleep",
-    "std::thread::sleep(Duration::from_millis(10));",
-    "rust-sleep",
-  ],
-  [
-    "imported thread sleep",
-    "thread::sleep(Duration::from_millis(10));",
-    "rust-sleep",
-  ],
-  ["standard yield spin", "std::thread::yield_now();", "rust-spin-wait"],
-  ["Tokio yield spin", "tokio::task::yield_now().await;", "rust-spin-wait"],
-  ["hint spin loop", "std::hint::spin_loop();", "rust-spin-wait"],
-  [
-    "imported Tokio sleep",
-    "use tokio::time::sleep; sleep(Duration::from_millis(10)).await;",
-    "rust-sleep",
-  ],
-  [
-    "aliased Tokio sleep",
-    "use tokio::time::sleep as nap; nap(Duration::from_millis(10)).await;",
-    "rust-sleep",
-  ],
-  [
-    "grouped aliased thread yield",
-    "use std::thread::{sleep as nap, yield_now as yield_thread}; yield_thread();",
-    "rust-spin-wait",
-  ],
-  [
-    "module-aliased thread sleep",
-    "use std::thread as worker; worker::sleep(Duration::from_millis(10));",
-    "rust-sleep",
-  ],
-  [
-    "imported core spin",
-    "use core::hint::spin_loop as spin; spin();",
-    "rust-spin-wait",
-  ],
-];
-
-for (const [name, source, kind] of rejectedRustMutations) {
-  assert.deepEqual(violationKinds(source, "rust"), [kind], name);
-}
-
-const acceptedRustFixtures = [
-  [
-    "line comment",
-    "// std::thread::sleep(Duration::from_secs(1));\nobserve();",
-  ],
-  [
-    "nested block comment",
-    "/* outer /* tokio::time::sleep(delay).await; */ outer */\nobserve();",
-  ],
-  ["quoted source", 'let mutation = "std::thread::yield_now()";'],
-  ["raw quoted source", 'let mutation = r#"tokio::task::yield_now().await"#;'],
-  ["bounded watchdog", "tokio::time::timeout(deadline, task).await?;"],
-  ["condition notification", "condition.notified().await;"],
-  [
-    "unrelated imported sleep name",
-    "use crate::fixture::sleep; sleep(assertion_state);",
-  ],
-  [
-    "similar function name",
-    "tokio::time::sleep_until_observed(condition).await;",
-  ],
-];
-
-for (const [name, source] of acceptedRustFixtures) {
-  assert.deepEqual(violationKinds(source, "rust"), [], name);
-}
 
 assert.deepEqual(
   violationKinds(`
@@ -276,8 +309,6 @@ function retry() {
 for (const malformed of [
   { language: "javascript", source: "await new Promise((resolve) => {" },
   { language: "javascript", source: "const value = `unterminated ${work();" },
-  { language: "rust", source: "use tokio::time::{sleep as nap;" },
-  { language: "rust", source: 'let value = r#"unterminated;' },
 ]) {
   assert.deepEqual(
     violationKinds(malformed.source, malformed.language),
@@ -332,17 +363,11 @@ assert.equal(
 );
 
 assert.deepEqual(
-  scanRepository(repositoryRoot),
-  [],
-  "the complete owned verification surface is free of correctness delays",
-);
-
-assert.deepEqual(
   violationKinds(`
 // suprnova-correctness-delay-allow: anything -- this category is not approved
 await new Promise((resolve) => setTimeout(resolve, 10));
 `),
-  ["invalid-allow", "promise-timeout"],
+  ["invalid-allow", "delay-primitive-reference"],
   "an unknown exception category fails closed",
 );
 
@@ -351,7 +376,7 @@ assert.deepEqual(
 // suprnova-correctness-delay-allow: watchdog -- short
 await new Promise((resolve) => setTimeout(resolve, 10));
 `),
-  ["invalid-allow", "promise-timeout"],
+  ["invalid-allow", "delay-primitive-reference"],
   "an unexplained exception fails closed",
 );
 
@@ -368,11 +393,19 @@ assert.deepEqual(
   violationKinds(
     "const source = `ignored ${await new Promise((resolve) => setTimeout(resolve, 10))}`;",
   ),
-  ["promise-timeout"],
+  ["delay-primitive-reference"],
   "executable template interpolation remains visible",
 );
 
-printf("correctness-delay scanner tests ok\n");
+printf("correctness-delay scanner fixtures ok\n");
+
+assert.deepEqual(
+  scanRepository(repositoryRoot),
+  [],
+  "the complete owned verification surface is free of correctness delays",
+);
+
+printf("correctness-delay repository scan ok\n");
 
 function printf(message) {
   process.stdout.write(message);

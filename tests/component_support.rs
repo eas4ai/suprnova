@@ -47,6 +47,7 @@ use suprnova_live::upload::UploadAuthorizationPort;
 use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
+use tokio::sync::Notify;
 
 #[path = "ledger_support.rs"]
 mod ledger_support;
@@ -86,6 +87,36 @@ pub(crate) enum FailurePoint {
     DropPanic,
 }
 
+pub(crate) struct ActionGate {
+    entered: Notify,
+    release: Notify,
+}
+
+impl ActionGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    pub(crate) fn mark_entered(&self) {
+        self.entered.notify_one();
+    }
+
+    pub(crate) async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    pub(crate) async fn wait_for_release(&self) {
+        self.release.notified().await;
+    }
+}
+
 struct DropPanicRenderFuture {
     output: Option<IslandRender>,
 }
@@ -118,11 +149,16 @@ pub(crate) struct TraceFixture {
     pub(crate) failure: FailurePoint,
     pub(crate) serial: u64,
     pub(crate) metadata: &'static ComponentMetadata,
+    pub(crate) action_gate: Option<Arc<ActionGate>>,
 }
 
 impl TraceFixture {
     pub(crate) fn record(&self, value: &'static str) {
         self.trace.lock().expect("trace lock").push(value);
+    }
+
+    pub(crate) fn action_gate(&self) -> Option<Arc<ActionGate>> {
+        self.action_gate.clone()
     }
 
     fn fail(&self, point: FailurePoint) -> Result<(), ComponentError> {
@@ -307,6 +343,7 @@ pub(crate) struct FixtureControl {
     pub(crate) failure: FailurePoint,
     pub(crate) next_serial: std::sync::atomic::AtomicU64,
     pub(crate) metadata: &'static ComponentMetadata,
+    pub(crate) action_gate: Option<Arc<ActionGate>>,
 }
 
 impl FixtureControl {
@@ -316,6 +353,20 @@ impl FixtureControl {
             failure,
             next_serial: std::sync::atomic::AtomicU64::new(1),
             metadata: metadata(),
+            action_gate: None,
+        })
+    }
+
+    pub(crate) fn new_with_action_gate(
+        failure: FailurePoint,
+        action_gate: Arc<ActionGate>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            failure,
+            next_serial: std::sync::atomic::AtomicU64::new(1),
+            metadata: metadata(),
+            action_gate: Some(action_gate),
         })
     }
 
@@ -328,6 +379,7 @@ impl FixtureControl {
             failure,
             next_serial: std::sync::atomic::AtomicU64::new(1),
             metadata: component_metadata,
+            action_gate: None,
         })
     }
 
@@ -343,6 +395,7 @@ impl FixtureControl {
                 .next_serial
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             metadata: self.metadata,
+            action_gate: self.action_gate.clone(),
         }
     }
 }

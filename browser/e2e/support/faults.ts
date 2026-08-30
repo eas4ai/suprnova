@@ -94,12 +94,17 @@ export async function installResourceInstrumentation(page: Page): Promise<void> 
       }
     };
 
+    // suprnova-correctness-delay-allow: fake-clock -- resource instrumentation resolves the native timer without waiting for correctness
     const timeout: unknown = Reflect.get(window, "setTimeout");
     const clear: unknown = Reflect.get(window, "clearTimeout");
     if (typeof timeout !== "function" || typeof clear !== "function") {
       throw new Error("timer_instrumentation_unavailable");
     }
-    window.setTimeout = ((handler: TimerHandler, delay?: number, ...arguments_: unknown[]) => {
+    const instrumentedTimeout = (
+      handler: TimerHandler,
+      delay?: number,
+      ...arguments_: unknown[]
+    ): number => {
       let handle = 0;
       const wrapped = (): void => {
         state.timers.delete(handle);
@@ -108,7 +113,8 @@ export async function installResourceInstrumentation(page: Page): Promise<void> 
       handle = Number(Reflect.apply(timeout, window, [wrapped, delay]));
       state.timers.add(handle);
       return handle;
-    }) as typeof window.setTimeout;
+    };
+    Reflect.set(window, "setTimeout", instrumentedTimeout);
     window.clearTimeout = ((handle?: number) => {
       if (typeof handle === "number") state.timers.delete(handle);
       Reflect.apply(clear, window, [handle]);

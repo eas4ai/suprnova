@@ -33,6 +33,7 @@ test("canonical browser workloads remain executable without changing engine clai
   if (browserName !== "chromium") return;
   if (baseURL === undefined) throw new Error("benchmark base URL missing");
   const recording = process.env["SUPRNOVA_BROWSER_BUDGET_RECORD"] === "1";
+  // suprnova-correctness-delay-allow: watchdog -- Playwright deadline bounds the benchmark process and never establishes correctness
   test.setTimeout(recording ? 15 * 60_000 : 60_000);
   const result = await runBrowserBudget({
     browser,

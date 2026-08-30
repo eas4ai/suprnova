@@ -207,6 +207,7 @@ const timers = Object.freeze({
   },
   timeout(callback, milliseconds) {
     let handle = 0;
+    // suprnova-correctness-delay-allow: product-timer -- host timer is the observable runtime scheduling port under lifecycle tests
     handle = window.setTimeout(() => {
       if (timeoutHandles.delete(handle)) observations.resources.timers -= 1;
       callback();

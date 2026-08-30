@@ -9,7 +9,6 @@ import {
   loadTypeScript,
   scanJavaScript,
 } from "./correctness-delay-javascript.mjs";
-import { rustCfgTestSource, scanRust } from "./correctness-delay-rust.mjs";
 import { iteration004VerificationSurfaces } from "./iteration-004-verification-surfaces.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -55,14 +54,14 @@ function allowPolicy(comments, violations) {
 
 export function scanSource({
   filePath,
-  language,
   source,
   repositoryRoot = defaultRepositoryRoot,
 }) {
-  const scanned =
-    language === "rust"
-      ? scanRust(source)
-      : scanJavaScript(loadTypeScript(repositoryRoot), filePath, source);
+  const scanned = scanJavaScript(
+    loadTypeScript(repositoryRoot),
+    filePath,
+    source,
+  );
   return allowPolicy(scanned.comments, scanned.violations).map((failure) => ({
     ...failure,
     filePath,
@@ -108,14 +107,15 @@ export function scanRepository(repositoryRoot) {
       failures.push({ filePath: relative, kind: "missing-surface", line: 1 });
       continue;
     }
-    let source = fs.readFileSync(surface.filePath, "utf8");
+    const source = fs.readFileSync(surface.filePath, "utf8");
     const rust = surface.filePath.endsWith(".rs");
-    if (rust) rustCandidates.push({ file_path: relative, source });
-    if (surface.region === "rust-cfg-test") source = rustCfgTestSource(source);
+    if (rust) {
+      rustCandidates.push({ file_path: relative, source });
+      continue;
+    }
     failures.push(
       ...scanSource({
         filePath: relative,
-        language: rust ? "rust" : "javascript",
         repositoryRoot,
         source,
       }),

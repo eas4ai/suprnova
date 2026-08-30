@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -703,6 +703,7 @@ struct ControlledQuarantineStore {
     mutation: ResourceWorkloadMutation,
     objects: Mutex<HashMap<String, u64>>,
     pending: Mutex<Vec<PendingStoreWrite>>,
+    pending_changed: tokio::sync::Notify,
     tracker: Arc<ServerChunkTracker>,
     unbound: Mutex<Vec<String>>,
 }
@@ -719,6 +720,7 @@ impl ControlledQuarantineStore {
             mutation,
             objects: Mutex::new(HashMap::new()),
             pending: Mutex::new(Vec::new()),
+            pending_changed: tokio::sync::Notify::new(),
             tracker,
             unbound: Mutex::new(Vec::new()),
         }
@@ -742,6 +744,16 @@ impl ControlledQuarantineStore {
 
     fn pending_count(&self) -> usize {
         lock_unpoisoned(&self.pending).len()
+    }
+
+    async fn wait_for_pending_count(&self, expected: usize) {
+        loop {
+            let changed = self.pending_changed.notified();
+            if self.pending_count() == expected {
+                return;
+            }
+            changed.await;
+        }
     }
 
     fn release_all(&self, result: Result<(), UploadError>) {
@@ -820,6 +832,7 @@ impl QuarantineStore for ControlledQuarantineStore {
             provider_buffer_counted,
             retained,
         });
+        self.pending_changed.notify_waiters();
         operation
     }
 
@@ -966,6 +979,14 @@ struct ResourceTaskCompletion {
     slot: usize,
 }
 
+struct ResourceTaskFinished(Arc<tokio::sync::Notify>);
+
+impl Drop for ResourceTaskFinished {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 async fn cleanup_resource_tasks(
     tasks: &mut Vec<tokio::task::JoinHandle<Result<ResourceTaskCompletion, UploadError>>>,
     store: &ControlledQuarantineStore,
@@ -999,7 +1020,7 @@ async fn cleanup_resource_tasks(
 
 async fn run_server_resource_workload_with_watchdog(
     mutation: ResourceWorkloadMutation,
-    watchdog_steps: usize,
+    watchdog: Duration,
 ) -> Result<ServerResourceSnapshot, ResourceBenchmarkFailure> {
     let active_transfers = if mutation == ResourceWorkloadMutation::ExtraTransfer {
         ACTIVE_TRANSFERS + 1
@@ -1088,6 +1109,7 @@ async fn run_server_resource_workload_with_watchdog(
             .map_err(ResourceBenchmarkFailure::setup)?;
     }
 
+    let task_finished = Arc::new(tokio::sync::Notify::new());
     let mut tasks = Vec::with_capacity(active_transfers);
     for transfer in transfers.iter().cloned() {
         let provider = Arc::clone(&provider);
@@ -1096,7 +1118,9 @@ async fn run_server_resource_workload_with_watchdog(
         let bytes = chunk.clone();
         let field = field.clone();
         let context = context.clone();
+        let task_finished = Arc::clone(&task_finished);
         tasks.push(tokio::spawn(async move {
+            let _finished = ResourceTaskFinished(task_finished);
             let permit = service
                 .transfer_permits()
                 .try_acquire()
@@ -1195,13 +1219,16 @@ async fn run_server_resource_workload_with_watchdog(
         }));
     }
 
-    let mut reached_resource_barrier = false;
-    for _ in 0..watchdog_steps {
-        if store.pending_count() == active_transfers {
-            reached_resource_barrier = true;
-            break;
+    let reached_resource_barrier = tokio::time::timeout(watchdog, async {
+        tokio::select! {
+            () = store.wait_for_pending_count(active_transfers) => true,
+            () = task_finished.notified() => false,
         }
-        if tasks.iter().any(tokio::task::JoinHandle::is_finished) {
+    })
+    .await;
+    match reached_resource_barrier {
+        Ok(true) => {}
+        Ok(false) => {
             return Err(cleanup_resource_tasks(
                 &mut tasks,
                 &store,
@@ -1212,18 +1239,17 @@ async fn run_server_resource_workload_with_watchdog(
             )
             .await);
         }
-        tokio::task::yield_now().await;
-    }
-    if !reached_resource_barrier {
-        return Err(cleanup_resource_tasks(
-            &mut tasks,
-            &store,
-            &provider,
-            &service,
-            ResourceBenchmarkFailureKind::Watchdog,
-            "resource tasks did not reach the controlled final-chunk barrier",
-        )
-        .await);
+        Err(_) => {
+            return Err(cleanup_resource_tasks(
+                &mut tasks,
+                &store,
+                &provider,
+                &service,
+                ResourceBenchmarkFailureKind::Watchdog,
+                "resource tasks did not reach the controlled final-chunk barrier",
+            )
+            .await);
+        }
     }
 
     let provider_status = provider.retirement_status();
@@ -1282,30 +1308,24 @@ async fn run_server_resource_workload_with_watchdog(
     };
 
     store.release_all(Ok(()));
-    let mut all_finished = false;
-    for _ in 0..watchdog_steps {
-        if tasks.iter().all(tokio::task::JoinHandle::is_finished) {
-            all_finished = true;
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    if !all_finished {
-        return Err(cleanup_resource_tasks(
-            &mut tasks,
-            &store,
-            &provider,
-            &service,
-            ResourceBenchmarkFailureKind::Watchdog,
-            "resource tasks did not finish after controlled receipts were released",
-        )
-        .await);
-    }
     let mut completed = Vec::with_capacity(active_transfers);
-    while let Some(task) = tasks.pop() {
-        let completion = match task.await {
-            Ok(Ok(completion)) => completion,
-            Ok(Err(error)) => {
+    while let Some(mut task) = tasks.pop() {
+        let completion = match tokio::time::timeout(watchdog, &mut task).await {
+            Err(_) => {
+                task.abort();
+                tasks.push(task);
+                return Err(cleanup_resource_tasks(
+                    &mut tasks,
+                    &store,
+                    &provider,
+                    &service,
+                    ResourceBenchmarkFailureKind::Watchdog,
+                    "resource task did not finish after controlled receipts were released",
+                )
+                .await);
+            }
+            Ok(Ok(Ok(completion))) => completion,
+            Ok(Ok(Err(error))) => {
                 return Err(cleanup_resource_tasks(
                     &mut tasks,
                     &store,
@@ -1316,7 +1336,7 @@ async fn run_server_resource_workload_with_watchdog(
                 )
                 .await);
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 return Err(cleanup_resource_tasks(
                     &mut tasks,
                     &store,
@@ -1353,7 +1373,7 @@ async fn run_server_resource_workload_with_watchdog(
 async fn run_server_resource_workload(
     mutation: ResourceWorkloadMutation,
 ) -> Result<ServerResourceSnapshot, Box<dyn Error>> {
-    run_server_resource_workload_with_watchdog(mutation, 100_000)
+    run_server_resource_workload_with_watchdog(mutation, Duration::from_secs(5))
         .await
         .map_err(Into::into)
 }
@@ -2184,7 +2204,7 @@ mod integrity_tests {
     async fn pre_body_failure_is_bounded_and_reclaims_every_owned_resource() {
         let failure = run_server_resource_workload_with_watchdog(
             ResourceWorkloadMutation::PreBodyFailure,
-            64,
+            Duration::from_secs(5),
         )
         .await
         .expect_err("pre-body failure must be terminal");

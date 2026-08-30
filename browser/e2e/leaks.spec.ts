@@ -5,6 +5,7 @@ import {
   installResourceInstrumentation,
   resourceSnapshot,
 } from "./support/faults.js";
+import { browserTaskBarrier } from "./support/event-loop-barrier.js";
 
 test("repeated suspend and restore cycles return observed resources to baseline", async ({
   page,
@@ -13,7 +14,6 @@ test("repeated suspend and restore cycles return observed resources to baseline"
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await installResourceInstrumentation(page);
   await page.goto("/scenario/lifecycle");
-  await page.waitForTimeout(100);
   expect(pageErrors).toEqual([]);
   await expect(page.locator('[data-suprnova-live-document-key="primary"]')).toHaveAttribute(
     "data-suprnova-live-status",
@@ -84,13 +84,22 @@ test("connect, replace, and remove leave no retired callback authority", async (
     }
     const main = document.querySelector("main");
     if (main === null) throw new Error("dynamic_host_missing");
-    const waitForStatus = async (candidate: Element, expected: string | null): Promise<void> => {
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (candidate.getAttribute("data-suprnova-live-status") === expected) return;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error("dynamic_status_timeout");
-    };
+    const waitForStatus = (candidate: Element, expected: string | null): Promise<void> =>
+      new Promise((resolve) => {
+        if (candidate.getAttribute("data-suprnova-live-status") === expected) {
+          resolve();
+          return;
+        }
+        const observer = new MutationObserver(() => {
+          if (candidate.getAttribute("data-suprnova-live-status") !== expected) return;
+          observer.disconnect();
+          resolve();
+        });
+        observer.observe(candidate, {
+          attributeFilter: ["data-suprnova-live-status"],
+          attributes: true,
+        });
+      });
 
     main.append(first);
     await waitForStatus(first, "connected");
@@ -105,7 +114,7 @@ test("connect, replace, and remove leave no retired callback authority", async (
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     }
   });
-  await page.waitForTimeout(100);
+  await browserTaskBarrier(page);
 
   expect(liveRequests).toBe(0);
   expect(await resourceSnapshot(page)).toEqual(baseline);

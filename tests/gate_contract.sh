@@ -311,6 +311,9 @@ write_expected_gate_commands() {
         $'node\tscripts/generate-license-inventory.mjs\t--check' \
         $'cargo\tfmt\t--all\t--\t--check' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--workspace\t--all-targets\t--all-features' \
+        $'node\ttests/correctness_delay_clippy.mjs' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--workspace\t--all-targets\t--all-features\t--\t-D\tclippy::disallowed_methods' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\tfuzz/Cargo.toml\t--all-targets\t--\t-D\tclippy::disallowed_methods' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tgolden_fixtures\t--test\tbrowser_contract_properties' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tchecker_positive\t--test\tchecker_negative\t--test\tchecker_regressions' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tcompatibility\t--test\tprotocol_v2' \
@@ -559,6 +562,12 @@ require_text "license gate" "node scripts/generate-license-inventory.mjs --check
 require_text "correctness-delay scanner phase" 'phase "correctness-delay scanner"'
 require_text "correctness-delay scanner self-tests" \
     "node tests/correctness_delay_scanner.mjs"
+require_text "compiler-resolved correctness-delay self-test" \
+    "node tests/correctness_delay_clippy.mjs"
+require_text "compiler-resolved correctness-delay lint denial" \
+    "-D clippy::disallowed_methods"
+require_text "compiler-resolved fuzz correctness-delay lint" \
+    "--manifest-path fuzz/Cargo.toml"
 require_text "correctness-delay repository scan" \
     "node scripts/check-correctness-delays.mjs"
 require_text "required phase \"U4/16 upload budget\"" 'phase "iteration 004 reduced deterministic budgets"'
@@ -607,10 +616,11 @@ require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 require_file "correctness-delay scanner" "scripts/check-correctness-delays.mjs"
 require_file "correctness-delay scanner mutation tests" \
     "tests/correctness_delay_scanner.mjs"
+require_file "compiler-resolved correctness-delay mutation tests" \
+    "tests/correctness_delay_clippy.mjs"
+require_file "compiler-resolved correctness-delay policy" "clippy.toml"
 require_file "correctness-delay JavaScript parser" \
     "scripts/correctness-delay-javascript.mjs"
-require_file "correctness-delay Rust parser" \
-    "scripts/correctness-delay-rust.mjs"
 require_file "iteration 004 verification-surface manifest" \
     "scripts/iteration-004-verification-surfaces.mjs"
 require_file "parser-backed Rust syntax validator" \

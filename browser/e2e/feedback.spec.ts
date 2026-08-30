@@ -4,6 +4,7 @@ import axe from "axe-core";
 import { RuntimePage } from "./support/runtime-page.js";
 
 test("feedback targets reflect authoritative work and remain keyboard safe", async ({ page }) => {
+  await page.clock.install();
   const runtime = new RuntimePage(page);
   await runtime.open("feedback");
   await runtime.expectStatus("connected");
@@ -29,7 +30,7 @@ test("feedback targets reflect authoritative work and remain keyboard safe", asy
   await page.locator("#feedback-retrying").evaluate((element) => {
     element.remove();
   });
-  await page.waitForTimeout(250);
+  await page.clock.fastForward(250);
   await expect(page.locator("#feedback-retrying")).toHaveCount(0);
 
   await page.addScriptTag({ content: axe.source });

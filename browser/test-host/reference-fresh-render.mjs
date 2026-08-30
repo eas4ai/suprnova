@@ -149,6 +149,7 @@ asynchronous.configureAsync({
   randomness: { number: () => 0.5 },
   timers: {
     clearTimeout: (handle) => window.clearTimeout(handle),
+    // suprnova-correctness-delay-allow: product-timer -- reference host supplies the runtime's observable reconnect scheduling port
     timeout: (callback, milliseconds) => window.setTimeout(callback, milliseconds),
   },
 });

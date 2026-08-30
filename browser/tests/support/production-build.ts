@@ -123,8 +123,8 @@ async function acquire(lockDirectory: string): Promise<string> {
       if (Date.now() >= deadline) {
         throw Object.assign(new Error("production_build_lock_timeout"), { cause: error });
       }
-      // suprnova-correctness-delay-allow: product-timer -- bounded lock retry cadence is the helper's tested production behavior
       await new Promise<void>((resolve) => {
+        // suprnova-correctness-delay-allow: product-timer -- bounded lock retry cadence is the helper's tested production behavior
         setTimeout(resolve, 25);
       });
     }

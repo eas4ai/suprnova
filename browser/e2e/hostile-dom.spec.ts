@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { browserTaskBarrier } from "./support/event-loop-barrier.js";
+
 for (const scenario of [
   "hostileMalformedUtf8",
   "hostileHugeJson",
@@ -8,8 +10,12 @@ for (const scenario of [
   test(`${scenario} retains accepted DOM and bounded authority`, async ({ page }) => {
     await page.goto(`/scenario/${scenario}`);
     const island = page.locator('[data-suprnova-live-document-key="primary"]');
+    const response = page.waitForResponse(
+      (candidate) => new URL(candidate.url()).pathname === "/live",
+    );
     await page.locator("#hostile-action").click();
-    await page.waitForTimeout(300);
+    await response;
+    await browserTaskBarrier(page);
 
     await expect(island).toHaveAttribute("data-suprnova-live-revision", "7");
     await expect(page.locator("#hostile-original")).toHaveText("Last accepted hostile fixture");
@@ -40,7 +46,7 @@ test("extreme initial depth, count, attributes, and text stop at one visible clo
   const island = page.locator('[data-suprnova-live-document-key="primary"]');
   await expect(page.locator("#hostile-limit-marker")).toBeVisible();
   await page.locator("#hostile-over-limit").click();
-  await page.waitForTimeout(100);
+  await browserTaskBarrier(page);
   await expect(island).toHaveAttribute("data-suprnova-live-status", "connected");
   expect(requests).toBe(0);
 });
@@ -73,7 +79,7 @@ test("third-party mutation, shadow ownership, and duplicate roots stay bounded",
       throw new Error("closed_shadow_fixture_missing");
     closedButton.click();
   });
-  await page.waitForTimeout(100);
+  await browserTaskBarrier(page);
   expect(requests).toBe(0);
 
   const openRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/live");
