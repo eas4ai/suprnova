@@ -307,22 +307,43 @@ test("dynamic insertion uses normal discovery and removal disposes exactly once"
       if (template === null) throw new Error("candidate_missing");
       const candidate = template.content.firstElementChild?.cloneNode(true);
       if (!(candidate instanceof Element)) throw new Error("candidate_invalid");
-      document.querySelector("main")?.append(candidate);
-      for (
-        let attempt = 0;
-        attempt < 20 && candidate.getAttribute(attribute) !== "connected";
-        attempt += 1
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      const connected = candidate.getAttribute(attribute);
-      candidate.remove();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return {
-        connected,
-        disposed: candidate.getAttribute(attribute),
-        survivors: document.querySelectorAll(selector).length,
+      const main = document.querySelector("main");
+      if (main === null) throw new Error("main_missing");
+      const observeStatus = (expected: string) => {
+        let observer: MutationObserver | undefined;
+        const reached = new Promise<void>((resolve) => {
+          if (candidate.getAttribute(attribute) === expected) {
+            resolve();
+            return;
+          }
+          observer = new MutationObserver(() => {
+            if (candidate.getAttribute(attribute) === expected) resolve();
+          });
+          observer.observe(candidate, { attributeFilter: [attribute], attributes: true });
+        });
+        return { disconnect: () => observer?.disconnect(), reached };
       };
+      const connectedStatus = observeStatus("connected");
+      try {
+        main.append(candidate);
+        await connectedStatus.reached;
+        const connected = candidate.getAttribute(attribute);
+        const disposedStatus = observeStatus("disconnected");
+        try {
+          candidate.remove();
+          await disposedStatus.reached;
+          return {
+            connected,
+            disposed: candidate.getAttribute(attribute),
+            survivors: document.querySelectorAll(selector).length,
+          };
+        } finally {
+          disposedStatus.disconnect();
+        }
+      } finally {
+        connectedStatus.disconnect();
+        candidate.remove();
+      }
     },
     { selector: ISLAND_SELECTOR, attribute: STATUS_ATTRIBUTE },
   );
