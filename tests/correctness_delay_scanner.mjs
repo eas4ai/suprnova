@@ -258,6 +258,16 @@ const rejectedJavaScriptMutations = [
     source: `const html = \`${scriptOpen} data-type="application/json">setTimeout(run, 10);${scriptClose}\`;`,
     kind: "delay-primitive-reference",
   },
+  {
+    name: "quoted data value cannot forge a src attribute",
+    source: `const html = \`${scriptOpen} data-note=" src='/scenario.js'">setTimeout(run, 10);${scriptClose}\`;`,
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "quoted data value cannot forge an inert type attribute",
+    source: `const html = \`${scriptOpen} data-note=" type='application/json'">setTimeout(run, 10);${scriptClose}\`;`,
+    kind: "delay-primitive-reference",
+  },
 ];
 
 for (const mutation of rejectedJavaScriptMutations) {
@@ -282,6 +292,22 @@ assert.deepEqual(
   ),
   ["inline-script-assembly"],
   "dynamic inline script assembly fails closed",
+);
+
+assert.deepEqual(
+  violationKinds(
+    'const suffix = selectedTagSuffix(); const html = "<scr" + suffix + ">setTimeout(run, 10);</scr" + "ipt>";',
+  ),
+  ["inline-script-assembly"],
+  "a dynamically completed script tag name fails closed",
+);
+
+assert.deepEqual(
+  violationKinds(
+    "const tag = selectedTag(); const html = `<${tag}>setTimeout(run, 10);</${tag}>`;",
+  ),
+  ["inline-script-assembly"],
+  "an interpolated tag name fails closed",
 );
 
 const acceptedJavaScriptFixtures = [
@@ -312,6 +338,10 @@ const acceptedJavaScriptFixtures = [
   {
     name: "template interpolation without a delay",
     source: "const value = `prefix ${String(observed)} suffix`;",
+  },
+  {
+    name: "ordinary element with a dynamic attribute value",
+    source: 'const html = `<div data-kind="${kind}">ordinary content</div>`;',
   },
   {
     name: "provably inert inline JSON script",

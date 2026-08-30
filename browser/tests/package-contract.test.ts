@@ -28,7 +28,9 @@ const EXPECTED_SCRIPTS = [
   "generate",
   "generate:check",
   "host:iteration-004",
+  "host:static",
   "lint",
+  "pretest:browser",
   "test",
   "test:browser",
   "test:browser:install",
@@ -87,6 +89,10 @@ describe("production browser package contract", () => {
     expect(manifest.scripts["budget:async"]).toBe("node scripts/run-async-budget.mjs");
     expect(manifest.scripts["budget:browser"]).toBe("node scripts/run-browser-budget.mjs");
     expect(manifest.scripts["budget:upload"]).toBe("node scripts/run-upload-budget.mjs");
+    expect(manifest.scripts["pretest:browser"]).toBe("npm run build");
+    expect(manifest.scripts["test:browser"]).toBe("playwright test");
+    expect(manifest.scripts["host:static"]).toBe("npm run build && node test-host/server.mjs");
+    expect(manifest.scripts["host:iteration-004"]?.startsWith("npm run build && ")).toBe(true);
     expect(manifest.scripts["host:iteration-004"]).toContain("--bin suprnova-live-reference-host");
     expect(manifest.scripts["test:host"]).toContain("--test reference_host");
 

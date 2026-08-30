@@ -177,8 +177,7 @@ function reconstructedTextAssembly(ts, sourceFile, node) {
   const right = reconstructedTextAssembly(ts, sourceFile, current.right);
   if (left === null && right === null) return null;
   return {
-    dynamic:
-      left === null || right === null || left.dynamic || right.dynamic,
+    dynamic: left === null || right === null || left.dynamic || right.dynamic,
     start: current.getStart(sourceFile),
     text: `${left?.text ?? dynamicTextMarker}${right?.text ?? dynamicTextMarker}`,
   };
@@ -194,42 +193,141 @@ function isNestedTextAssembly(ts, node) {
   );
 }
 
-function attributeValue(attributes, name) {
-  const expression = new RegExp(
-    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\u0060]+))`,
-    "iu",
-  );
-  const match = expression.exec(attributes);
-  return match === null ? null : (match[1] ?? match[2] ?? match[3] ?? "");
+function scriptAttributes(source) {
+  const attributes = new Map();
+  let cursor = 0;
+  while (cursor < source.length) {
+    while (cursor < source.length && /\s/u.test(source[cursor])) cursor += 1;
+    if (cursor >= source.length || source[cursor] === "/") break;
+
+    const nameStart = cursor;
+    while (cursor < source.length && !/[\s=/>]/u.test(source[cursor])) {
+      cursor += 1;
+    }
+    if (cursor === nameStart) return null;
+    const name = source.slice(nameStart, cursor).toLowerCase();
+
+    while (cursor < source.length && /\s/u.test(source[cursor])) cursor += 1;
+    let value = "";
+    if (source[cursor] === "=") {
+      cursor += 1;
+      while (cursor < source.length && /\s/u.test(source[cursor])) cursor += 1;
+      const quote = source[cursor];
+      if (quote === '"' || quote === "'") {
+        cursor += 1;
+        const valueStart = cursor;
+        while (cursor < source.length && source[cursor] !== quote) cursor += 1;
+        if (cursor >= source.length) return null;
+        value = source.slice(valueStart, cursor);
+        cursor += 1;
+      } else {
+        const valueStart = cursor;
+        while (cursor < source.length && !/[\s>]/u.test(source[cursor])) {
+          cursor += 1;
+        }
+        if (cursor === valueStart) return null;
+        value = source.slice(valueStart, cursor);
+      }
+    }
+    if (!attributes.has(name)) attributes.set(name, value);
+  }
+  return attributes;
+}
+
+function tagEnd(source, start) {
+  let quote = null;
+  for (let cursor = start; cursor < source.length; cursor += 1) {
+    const character = source[cursor];
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === ">") return cursor;
+  }
+  return null;
+}
+
+function parsedScriptTags(source) {
+  const tags = [];
+  const opening = /<script(?=[\s/>])/giu;
+  const closing = /<\/script\s*>/giu;
+  while (true) {
+    const match = opening.exec(source);
+    if (match === null) break;
+    const openingEnd = tagEnd(source, opening.lastIndex);
+    if (openingEnd === null) break;
+    closing.lastIndex = openingEnd + 1;
+    const close = closing.exec(source);
+    if (close === null) break;
+    tags.push({
+      attributes: source.slice(opening.lastIndex, openingEnd),
+      body: source.slice(openingEnd + 1, close.index),
+      bodyOffset: openingEnd + 1,
+      end: closing.lastIndex,
+      start: match.index,
+    });
+    opening.lastIndex = closing.lastIndex;
+  }
+  return tags;
+}
+
+function dynamicTagNameOffsets(source) {
+  const offsets = [];
+  for (let cursor = 0; cursor < source.length; cursor += 1) {
+    if (source[cursor] !== "<") continue;
+    let nameStart = cursor + 1;
+    if (source[nameStart] === "/") nameStart += 1;
+    let nameEnd = nameStart;
+    while (nameEnd < source.length && !/[\s/>]/u.test(source[nameEnd])) {
+      nameEnd += 1;
+    }
+    if (source.slice(nameStart, nameEnd).includes(dynamicTextMarker)) {
+      offsets.push(cursor);
+    }
+  }
+  return offsets;
 }
 
 function executableInlineScripts(ts, sourceFile) {
   const scripts = [];
   const violations = [];
-  const expression = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/giu;
   function visit(node) {
     const assembly = isNestedTextAssembly(ts, node)
       ? null
       : reconstructedTextAssembly(ts, sourceFile, node);
     if (assembly !== null) {
-      const withoutDynamicText = assembly.text.replaceAll(dynamicTextMarker, "");
-      const hasPotentialScript = /<script\b/iu.test(withoutDynamicText);
-      let matchedScript = false;
-      for (const match of assembly.text.matchAll(expression)) {
-        matchedScript = true;
-        const attributes = match[1] ?? "";
-        const body = match[2] ?? "";
-        const bodyOffset = (match.index ?? 0) + match[0].indexOf(body);
-        const beforeBody = assembly.text.slice(0, bodyOffset);
+      for (const offset of dynamicTagNameOffsets(assembly.text)) {
+        const beforeTag = assembly.text.slice(0, offset);
+        violations.push({
+          kind: "inline-script-assembly",
+          line:
+            sourceFile.getLineAndCharacterOfPosition(assembly.start).line +
+            1 +
+            (beforeTag.split("\n").length - 1),
+        });
+      }
+      const tags = parsedScriptTags(assembly.text);
+      for (const tag of tags) {
+        const beforeBody = assembly.text.slice(0, tag.bodyOffset);
         const line =
           sourceFile.getLineAndCharacterOfPosition(assembly.start).line +
           1 +
           (beforeBody.split("\n").length - 1);
-        const dynamic = match[0].includes(dynamicTextMarker);
-        const source = attributeValue(attributes, "src");
+        const attributes = scriptAttributes(tag.attributes);
+        if (attributes === null) {
+          violations.push({ kind: "inline-script-assembly", line });
+        }
+        const dynamic = assembly.text
+          .slice(tag.start, tag.end)
+          .includes(dynamicTextMarker);
+        const source = attributes?.get("src") ?? null;
         if (source !== null && !source.includes(dynamicTextMarker)) continue;
 
-        const type = attributeValue(attributes, "type");
+        const type = attributes?.get("type") ?? null;
         if (
           type !== null &&
           !type.includes(dynamicTextMarker) &&
@@ -240,10 +338,10 @@ function executableInlineScripts(ts, sourceFile) {
         if (dynamic) violations.push({ kind: "inline-script-assembly", line });
         scripts.push({
           line,
-          source: body.replaceAll(dynamicTextMarker, "undefined"),
+          source: tag.body.replaceAll(dynamicTextMarker, "undefined"),
         });
       }
-      if (hasPotentialScript && !matchedScript) {
+      if (/<script(?=[\s/>])/iu.test(assembly.text) && tags.length === 0) {
         violations.push({
           kind: "inline-script-assembly",
           line:

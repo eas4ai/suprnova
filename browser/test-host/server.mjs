@@ -2,7 +2,6 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
-import { buildRuntimeAssets } from "../scripts/build.mjs";
 import {
   continuityBody,
   externalClassicBootSource,
@@ -15,12 +14,12 @@ import {
   transitionBody,
   uploadBody,
 } from "./scenarios.mjs";
+import { afterRuntimeAssetsValidated } from "./runtime-assets.mjs";
 
 const host = "127.0.0.1";
 const port = 4173;
 const browserRoot = new URL("../", import.meta.url);
 const dist = new URL("dist/", browserRoot);
-await buildRuntimeAssets(dist.pathname);
 const liveAttempts = new Map();
 
 function delay(milliseconds) {
@@ -220,7 +219,7 @@ function respond(response, status, body, headers = {}) {
   response.end(body);
 }
 
-const server = createServer(async (request, response) => {
+async function handleRequest(request, response) {
   const target = new URL(request.url ?? "/", `http://${host}:${port}`);
   if (target.pathname === "/health") {
     respond(response, 200, "ok");
@@ -501,8 +500,9 @@ const server = createServer(async (request, response) => {
     return;
   }
   respond(response, 404, "not found");
-});
+}
 
+const server = await afterRuntimeAssetsValidated(dist.pathname, () => createServer(handleRequest));
 server.listen(port, host);
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

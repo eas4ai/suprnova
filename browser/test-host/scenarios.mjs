@@ -155,8 +155,10 @@ function hostileInitialLimits() {
     " ",
   );
   const elements = Array.from({ length: 4_100 }, (_, index) => {
-    const id = index === 4_099 ? ' id="hostile-over-limit"' : "";
-    return `<button${id} type="button" live:click.prevent="save">${index}</button>`;
+    if (index === 4_099) {
+      return `<button id="hostile-over-limit" type="button" live:click.prevent="save">${index}</button>`;
+    }
+    return `<button type="button" live:click.prevent="save">${index}</button>`;
   }).join("");
   const text = "x".repeat(1_048_577);
   return document(
