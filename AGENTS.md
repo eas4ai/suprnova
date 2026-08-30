@@ -25,13 +25,13 @@ user-level counterpart.
 | Path | Role |
 |---|---|
 | `docs/specs/suprnova-live/` | Normative architecture, domain, UX, glossary, and convention contracts |
-| `docs/specs/suprnova-live/iterations/001.md` | Current confirmed scope contract |
+| `docs/specs/suprnova-live/iterations/005.md` | Current confirmed scope contract |
 | `src/` | Rust engine source created by iteration 001 |
 | `browser/` | Strict TypeScript runtime and cross-language conformance package |
 | `scripts/check-specs.mjs` | Structural, link, decision-order, iteration, and optional-archive drift gate |
 | `scripts/gate.sh` | Unattended project gate created by iteration 001 |
 | `reference/` | Ignored, non-normative pinned sources and comparative evidence |
-| `/home/shawn/workspace2/suprnova` | Eventual internal-crate destination; read-only until a confirmed integration iteration |
+| `/home/shawn/workspace2/suprnova` | Internal-crate destination authorized by iteration 005; modify only in the isolated integration worktree |
 | `/home/shawn/workspace2/suprnova-magnetar` | Separate active project; not part of Live scope |
 
 Suprnova Live is being developed here as a future internal Suprnova crate. It is
@@ -43,7 +43,7 @@ together; never maintain two authoritative copies.
 ## Scope and re-anchor rules
 
 - The current iteration contract is
-  `docs/specs/suprnova-live/iterations/001.md`. Implement only its `In` section;
+  `docs/specs/suprnova-live/iterations/005.md`. Implement only its `In` section;
   its `Out` section is named build-order sequencing, not permission to omit
   agreed final functionality.
 - New ideas go through `/next-iteration`: surface and capture them, never
@@ -52,8 +52,8 @@ together; never maintain two authoritative copies.
   document and confirm the change before acting.
 - Add new or collided terms to `glossary.md` as soon as their project-specific
   meaning is confirmed.
-- Preserve unrelated and concurrent work. Do not edit Suprnova or Magnetar
-  unless a confirmed iteration explicitly authorizes it.
+- Preserve unrelated and concurrent work. Iteration 005 authorizes Suprnova
+  changes only in its isolated integration worktree; do not edit Magnetar.
 - Keep exactly one todo item in progress. A task is not done until its code and
   proportionate verification both pass.
 - Clippy findings are reviewed and resolved without blanket `-D warnings`.

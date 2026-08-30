@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-26
+Last revised: 2026-08-30
 
 ## Purpose
 
@@ -115,6 +115,12 @@ application routes and Live components
   tree, normative specifications, and checker move together into
   `suprnova/crates/suprnova-live/`; neither repository may remain a parallel
   maintained authority afterward.
+- Iteration 005 authorizes that atomic move. Authority transfers when the
+  committed standalone history and the complete checked product/specification
+  tree land beneath `suprnova/crates/suprnova-live/`. The standalone repository
+  then remains historical evidence only; uncommitted local files, reference
+  catalogs, ignored dependencies, and optional handoff archives do not silently
+  join the product import.
 - Before that atomic move, the standalone engine exposes internal Live host
   adapter contracts for normalized request facts, verified request context,
   application services, and typed response intent. Conformance and test
@@ -517,6 +523,13 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-30 -- Authorized iteration 005 as the atomic Suprnova integration and
+  complete RenderCache implementation. The engine, browser runtime, generated
+  artifacts, fixtures, tests, benchmarks, normative specifications, checker, and
+  implementation documentation move together under `crates/suprnova-live/`,
+  after which the standalone repository is historical rather than a parallel
+  maintained authority. The move preserves committed history and carries every
+  unresolved iteration-004 qualification as an explicit release blocker.
 - 2026-08-26 -- Removed the arbitrary 16 KiB total-size ceiling from the
   asynchronous ESM/classic artifacts. Deterministic builds still report exact
   Brotli bytes and compare each variant with the separately reviewed Task 6

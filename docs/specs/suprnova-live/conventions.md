@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-29
+Last revised: 2026-08-30
 
 ## Authority and application
 
@@ -31,7 +31,7 @@ iteration must do that explicitly.
 
 ### Completeness and scope
 
-- The active implementation contract is [`iterations/004.md`](iterations/004.md).
+- The active implementation contract is [`iterations/005.md`](iterations/005.md).
   Closed contracts remain historical evidence; preliminary sequencing in an
   older contract does not override the active confirmed boundary.
 - Implement the active iteration contract completely. Do not substitute an
@@ -528,6 +528,13 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-30 -- Advanced the active contract to iteration 005 for the atomic
+  Suprnova workspace cutover and the complete RenderCache foundation assigned by
+  iteration 004. The committed engine, browser, fixtures, tests, specs, checker,
+  and implementation documentation move together; after cutover the integrated
+  subtree is the sole maintained authority. Outstanding iteration-004 release
+  qualification remains visible and cannot be converted into success by the
+  repository move.
 - 2026-08-29 -- Recorded the completed Iteration 004 artifact and protocol
   facts: fixture corpus v4, upload and async protocol v1, feature-registry ABI
   v1, asset-manifest schema v2, runtime contract v1, and optional capabilities
