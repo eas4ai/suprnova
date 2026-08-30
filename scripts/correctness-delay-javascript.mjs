@@ -53,6 +53,13 @@ function selectedName(ts, node) {
   return null;
 }
 
+function propertyNameText(ts, node) {
+  if (node === undefined) return null;
+  if (ts.isComputedPropertyName(node)) return literalText(ts, node.expression);
+  if (ts.isIdentifier(node)) return node.text;
+  return literalText(ts, node);
+}
+
 function moduleReference(ts, node) {
   if (
     (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -91,6 +98,90 @@ function isPropertyNamePosition(ts, node) {
     (ts.isImportSpecifier(parent) && parent.propertyName === node) ||
     (ts.isExportSpecifier(parent) && parent.propertyName === node)
   );
+}
+
+function isDestructuringAssignmentProperty(ts, node) {
+  let current = node;
+  while (current.parent !== undefined) {
+    const parent = current.parent;
+    if (ts.isParenthesizedExpression(parent) && parent.expression === current) {
+      current = parent;
+      continue;
+    }
+    if (
+      (ts.isObjectLiteralExpression(parent) ||
+        ts.isArrayLiteralExpression(parent)) &&
+      current.parent === parent
+    ) {
+      current = parent;
+      continue;
+    }
+    if (ts.isPropertyAssignment(parent) && parent.initializer === current) {
+      current = parent;
+      continue;
+    }
+    return (
+      ts.isBinaryExpression(parent) &&
+      parent.left === current &&
+      parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    );
+  }
+  return false;
+}
+
+function reconstructedLiteral(ts, sourceFile, node) {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return {
+      start: node.getStart(sourceFile) + 1,
+      text: node.text,
+    };
+  }
+  if (!ts.isTemplateExpression(node)) return null;
+  let text = node.head.text;
+  for (const span of node.templateSpans) {
+    const expression = sourceFile.text.slice(
+      span.expression.getStart(sourceFile),
+      span.expression.getEnd(),
+    );
+    text += `undefined${"\n".repeat(expression.split("\n").length - 1)}`;
+    text += span.literal.text;
+  }
+  return { start: node.getStart(sourceFile) + 1, text };
+}
+
+function executableInlineScripts(ts, sourceFile) {
+  const scripts = [];
+  const expression = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/giu;
+  function visit(node) {
+    const literal = reconstructedLiteral(ts, sourceFile, node);
+    if (literal !== null && literal.text.includes("<script")) {
+      for (const match of literal.text.matchAll(expression)) {
+        const attributes = match[1] ?? "";
+        const type = attributes.match(/\btype\s*=\s*["']?([^\s"'>]+)/iu)?.[1];
+        if (
+          type !== undefined &&
+          !new Set(["application/javascript", "module", "text/javascript"]).has(
+            type.toLowerCase(),
+          )
+        ) {
+          continue;
+        }
+        const body = match[2] ?? "";
+        const bodyOffset = (match.index ?? 0) + match[0].indexOf(body);
+        const beforeBody = literal.text.slice(0, bodyOffset);
+        scripts.push({
+          line:
+            sourceFile.getLineAndCharacterOfPosition(literal.start).line +
+            1 +
+            (beforeBody.split("\n").length - 1),
+          source: body,
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return scripts;
 }
 
 function isPromiseResolveCall(ts, expression) {
@@ -154,7 +245,7 @@ function comments(ts, sourceFile) {
     });
 }
 
-export function scanJavaScript(ts, filePath, source) {
+export function scanJavaScript(ts, filePath, source, scanEmbedded = true) {
   const sourceFile = ts.createSourceFile(
     filePath,
     source,
@@ -180,6 +271,7 @@ export function scanJavaScript(ts, filePath, source) {
     };
   }
 
+  const sourceComments = comments(ts, sourceFile);
   const violations = [];
   const seen = new Set();
   const add = (kind, node) => {
@@ -214,10 +306,14 @@ export function scanJavaScript(ts, filePath, source) {
     if (
       ts.isBindingElement(node) &&
       node.propertyName !== undefined &&
-      delayPrimitives.has(
-        literalText(ts, node.propertyName) ??
-          node.propertyName.getText(sourceFile),
-      )
+      delayPrimitives.has(propertyNameText(ts, node.propertyName))
+    ) {
+      add("delay-primitive-reference", node);
+    }
+    if (
+      ts.isPropertyAssignment(node) &&
+      isDestructuringAssignmentProperty(ts, node) &&
+      delayPrimitives.has(propertyNameText(ts, node.name))
     ) {
       add("delay-primitive-reference", node);
     }
@@ -260,5 +356,27 @@ export function scanJavaScript(ts, filePath, source) {
   }
 
   visit(sourceFile);
-  return { comments: comments(ts, sourceFile), violations };
+  if (scanEmbedded) {
+    for (const embedded of executableInlineScripts(ts, sourceFile)) {
+      const scanned = scanJavaScript(ts, filePath, embedded.source, false);
+      sourceComments.push(
+        ...scanned.comments.map((comment) => ({
+          ...comment,
+          line: embedded.line + comment.line - 1,
+        })),
+      );
+      for (const violation of scanned.violations) {
+        const line = embedded.line + violation.line - 1;
+        const key = `${violation.kind}:${String(line)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          violations.push({ ...violation, line });
+        }
+      }
+    }
+  }
+  return {
+    comments: sourceComments.sort((left, right) => left.line - right.line),
+    violations,
+  };
 }

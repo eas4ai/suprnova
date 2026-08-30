@@ -107,6 +107,23 @@ const rejectedJavaScriptMutations = [
     kind: "delay-primitive-reference",
   },
   {
+    name: "computed destructured timer",
+    source:
+      'const { ["setTimeout"]: later } = globalThis; await new Promise((resolve) => later(resolve, 10));',
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "destructuring assignment timer",
+    source:
+      "let later; ({ setTimeout: later } = globalThis); await new Promise((resolve) => later(resolve, 10));",
+    kind: "delay-primitive-reference",
+  },
+  {
+    name: "computed destructuring assignment Playwright wait",
+    source: 'let wait; ({ ["waitForTimeout"]: wait } = page); await wait(10);',
+    kind: "delay-primitive-reference",
+  },
+  {
     name: "computed qualified timer alias",
     source:
       'const later = globalThis["setTimeout"]; await new Promise((resolve) => later(resolve, 10));',
@@ -202,6 +219,15 @@ const rejectedJavaScriptMutations = [
     source: "function waitForTimeout(milliseconds) { observe(milliseconds); }",
     kind: "delay-primitive-reference",
   },
+  {
+    name: "executable inline module timer",
+    source:
+      "const html = `" +
+      '<script type="module">' +
+      "await new Promise((resolve) => setTimeout(resolve, 10));</scr" +
+      "ipt>`;",
+    kind: "delay-primitive-reference",
+  },
 ];
 
 for (const mutation of rejectedJavaScriptMutations) {
@@ -244,6 +270,15 @@ const acceptedJavaScriptFixtures = [
   {
     name: "similar property name",
     source: "await page.waitForTimeoutBudget(10);",
+  },
+  {
+    name: "benign interface and object property keys",
+    source: `
+interface DelayMetadata { setTimeout: string; waitForTimeout: boolean }
+const metadata: DelayMetadata = { setTimeout: "documented", waitForTimeout: false };
+const computed = { ["setTimeout"]: "documented", ["waitForTimeout"]: false };
+observe(metadata, computed);
+`,
   },
   {
     name: "deterministic fake clock",
@@ -350,6 +385,7 @@ for (const required of [
   "browser/e2e/iteration-004-integration.spec.ts",
   "browser/test-host/server.mjs",
   "browser/test-host/iteration-004.mjs",
+  "browser/test-host/stimulus-scenario.mjs",
 ]) {
   assert.ok(
     surfacePaths.includes(required),
