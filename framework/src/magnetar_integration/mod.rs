@@ -21,6 +21,7 @@ pub mod oauth;
 pub mod oauth_transport;
 pub mod passkey;
 pub mod password;
+mod sign_in;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -32,6 +33,7 @@ pub use crate::auth::{LockoutStatus, Session, SessionToken, User, UserId};
 pub use default_engine::{MagnetarConfig, init_magnetar};
 #[cfg(feature = "magnetar-oauth")]
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
+pub use sign_in::SignInOutcome;
 
 pub(crate) fn bind_issued_session(
     issued: &engine::MagnetarIssuedSession,
