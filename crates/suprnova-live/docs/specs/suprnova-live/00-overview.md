@@ -124,26 +124,31 @@ application routes and Live components
   response intent. Those contracts and their conformance adapters do not by
   themselves prove the still-pending Iteration 005 public facade, router,
   middleware, provider, CLI, or RenderCache implementation.
-- `framework/src/live/` is the Suprnova integration and public facade. It adapts
-  the router, request context, middleware, sessions, authorization, SeaORM,
-  generic cache, events, broadcasting, telemetry, and configuration to the
-  internal engine and re-exports the application-facing API.
-- `suprnova-macros/` owns Live procedural macros and generated metadata. Macro
-  output names only public `::suprnova::live` paths so applications never bind
-  to internal crate layout.
-- `suprnova-cli/` owns Live scaffolding, inspection, the cross-language check
-  command, asset installation, and generated-project drift fixtures.
-- `app/` is the end-to-end dogfood application. It must exercise SSR-only pages,
-  Live pages with and without RenderCache, all three deployment tiers where
-  practical, and the official component families.
-- The official component library ships with Suprnova Live but remains separable
+- Iteration 005 assigns `framework/src/live/` as the required Suprnova
+  integration and public-facade location. It must adapt the router, request
+  context, middleware, sessions, authorization, SeaORM, generic cache, events,
+  broadcasting, telemetry, and configuration to the internal engine and
+  re-export the application-facing API. That integration is not complete until
+  its framework tests pass.
+- Iteration 005 assigns production Live procedural macros and generated metadata
+  to `suprnova-macros/`. Macro output must name only public
+  `::suprnova::live` paths so applications never bind to internal crate layout;
+  the imported development macro package does not satisfy production placement.
+- Iteration 005 assigns Live scaffolding, inspection, the cross-language check
+  command, asset installation, and generated-project drift fixtures to
+  `suprnova-cli/`; those surfaces remain incomplete until their CLI and generated-
+  application tests pass.
+- `app/` must become the end-to-end dogfood application. It must exercise SSR-
+  only pages, Live pages with and without RenderCache, all three deployment tiers
+  where practical, and the official component families.
+- The official component library must ship with Suprnova Live but remain separable
   from the CSS-agnostic runtime. Its templates, Tailwind CSS 4 source, semantic
   theme tokens, catalog fixtures, and accessibility tests are versioned with the
   Live contract.
-- The large reference catalog remains in the development repository. Its pinned
-  provenance informs implementation, but references are evidence rather than a
-  normative contract and do not justify splitting specifications from product
-  code.
+- The former standalone checkout retains the large reference catalog as
+  historical evidence. Its pinned provenance informs implementation, but
+  references are not a normative contract and do not justify splitting
+  specifications from product code.
 
 ### Server execution paths
 
@@ -420,9 +425,9 @@ implementation and verification rules.
 
 ### Excluded
 
-- A third-party or framework-independent crate. Suprnova Live is developed here
-  as an internal Suprnova subsystem and shall ultimately live within the
-  Suprnova project boundary.
+- A third-party or framework-independent crate. Suprnova Live lives under
+  `crates/suprnova-live/` as an internal subsystem within the Suprnova project
+  boundary.
 - An SPA architecture, client-side router, JSON page protocol, virtual DOM, or
   general-purpose client component framework.
 - An Inertia adapter or a mixed Live/Inertia rendering protocol. Inertia remains

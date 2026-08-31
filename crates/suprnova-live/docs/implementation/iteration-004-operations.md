@@ -234,12 +234,13 @@ historical provenance rather than a parallel maintained authority.
 Iteration 004's durable test-tool classification remains exact: The Rust
 reference host, Node static host, direct-provider bridge, fault controls, and
 benchmark harnesses are conformance-only test tools, not production administration APIs.
-They are neither the future Suprnova integration nor vendor integration.
+They are neither Suprnova application integration nor vendor integration.
 
-Its historical ownership statement was: The future Suprnova application
-integration will own routes, authentication, session, configuration, provider,
-scanner, storage, and broadcast wiring. Iteration 005 now owns that integration
-and must still prove real router and middleware registration,
+Suprnova application integration owns routes, authentication, session,
+configuration, provider, scanner, storage, and broadcast wiring. Iteration 005
+must implement and prove that ownership through framework tests; importing the
+host-neutral reference machinery does not satisfy it. The integration must prove
+real router and middleware registration,
 trusted request context, authentication, authorization, session/CSRF/tenant
 mapping, configuration, asset roles, application validation, database adapters,
 storage and provider clients, scanner service, finalizer/domain transaction

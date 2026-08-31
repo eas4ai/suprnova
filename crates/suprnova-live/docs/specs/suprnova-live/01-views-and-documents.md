@@ -1,7 +1,7 @@
 # Suprnova Live -- 01 Views and Documents
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-31
 
 ## Scope
 
@@ -153,22 +153,27 @@ UX flow:
 2. Rendering fails -> the appropriate HTTP or Live recovery surface appears and
    the partial output is discarded.
 
-## Iteration 002 implementation profile
+## Historical Iteration 002 implementation profile
 
-Iteration 002 implements the host-neutral Suprnova view contract with Askama as
-its normative checked substrate. It renders typed external templates into
+Iteration 002 implemented the host-neutral Suprnova view contract with Askama as
+its normative checked substrate. It rendered typed external templates into
 deterministic document or island HTML plus typed status/header/content-type,
-asset, mount, and diagnostic metadata. It also emits bounded initial island
+asset, mount, and diagnostic metadata. It also emitted bounded initial island
 boundaries with iteration-001 seed or instanced snapshots and detects duplicate
 document-local identities, invalid nesting, partial-render failure, and unsafe
 trusted-markup use.
 
-The standalone profile accepts normalized route, locale, identity, feature, and
-asset inputs only through Live host adapter contracts. It neither imports
-Suprnova HTTP types nor registers routes in the active framework checkout. A
-conformance adapter may prove canonical document and HEAD/conditional response
-intent, but only the later atomic integration move may claim actual
-`suprnova::view`, router, or `Response` integration.
+At Iteration 002 completion, the standalone profile accepted normalized route,
+locale, identity, feature, and asset inputs only through Live host adapter
+contracts. It neither imported Suprnova HTTP types nor registered framework
+routes. Its conformance adapter proved canonical document and HEAD/conditional
+response intent without claiming actual `suprnova::view`, router, or `Response`
+integration.
+
+Iteration 005 has completed the atomic repository-authority move. Actual
+`suprnova::view`, router, and `Response` adaptation remains Iteration 005 work
+until framework integration tests pass; importing the host-neutral profile does
+not satisfy or prove those adapters.
 
 Document and island metadata use different authority. A document render may
 return bounded typed response intent for its host route, while an island render
@@ -188,6 +193,10 @@ metadata through a render result.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Marked the Iteration 002 view profile as historical after the
+  repository-authority cutover. The product/specification move is complete;
+  actual `suprnova::view`, router, and `Response` adapters remain required
+  Iteration 005 work and are not inferred from colocation.
 - 2026-08-21 -- Required Suprnova-owned `TrustedHtml` for unescaped Live output
   and rejected Askama's untyped raw `safe` filter in checked Live templates.
   Split document response intent from island metadata so a component render

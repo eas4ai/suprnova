@@ -77,6 +77,41 @@ const semanticRequirements = new Map([
     ],
   ],
   [
+    "docs/implementation/benchmarking.md",
+    [
+      {
+        id: "benchmark_snapshot_integrated_crate_root",
+        pattern:
+          /Run a local exploratory measurement from the integrated crate root:[\s\S]{0,150}rtk env CARGO_INCREMENTAL=0 scripts\/run-snapshot-budget\.sh/u,
+      },
+      {
+        id: "benchmark_action_integrated_crate_root",
+        pattern:
+          /Run it from the integrated crate root:[\s\S]{0,150}rtk env CARGO_INCREMENTAL=0 scripts\/run-action-budget\.sh/u,
+      },
+    ],
+  ],
+  [
+    "docs/implementation/browser-assets.md",
+    [
+      {
+        id: "browser_assets_current_host_ownership",
+        pattern:
+          /Iteration 005's Suprnova host adapter owns asset authorization, compression, CDN purge, and framework route registration\.[\s\S]{0,300}not complete until/u,
+      },
+    ],
+  ],
+  [
+    "docs/implementation/host-adapter-contract.md",
+    [
+      {
+        id: "host_adapter_current_ownership",
+        pattern:
+          /Iteration 005's Suprnova adapter must own truthful normalization and enforcement[\s\S]{0,900}not claimed complete until/u,
+      },
+    ],
+  ],
+  [
     "docs/implementation/uploads.md",
     [
       {
@@ -213,12 +248,12 @@ const semanticRequirements = new Map([
       {
         id: "operations_conformance_boundary",
         pattern:
-          /The Rust reference host, Node static host, direct-provider bridge, fault controls, and benchmark harnesses are conformance-only test tools, not production administration APIs\.[\s\S]{0,300}They are neither the future Suprnova integration nor vendor integration\./u,
+          /The Rust reference host, Node static host, direct-provider bridge, fault controls, and benchmark harnesses are conformance-only test tools, not production administration APIs\.[\s\S]{0,300}They are neither Suprnova application integration nor vendor integration\./u,
       },
       {
-        id: "operations_future_suprnova_ownership",
+        id: "operations_current_suprnova_ownership",
         pattern:
-          /The future Suprnova application integration will own routes, authentication, session, configuration, provider, scanner, storage, and broadcast wiring\./u,
+          /Suprnova application integration owns routes, authentication, session, configuration, provider, scanner, storage, and broadcast wiring\.[\s\S]{0,400}Iteration 005 must implement and prove that ownership through framework tests/u,
       },
       {
         id: "operations_async_size_review_not_cap",
@@ -290,10 +325,47 @@ function mutationSelfTest(documents) {
     {
       file: "docs/implementation/iteration-004-operations.md",
       pattern:
-        /They are\s+neither the future Suprnova integration nor vendor integration\./u,
+        /They are\s+neither Suprnova application integration nor vendor integration\./u,
       replacement:
-        "They are both the future Suprnova integration and vendor integration.",
+        "They are both Suprnova application integration and vendor integration.",
       requirement: "operations_conformance_boundary",
+    },
+    {
+      file: "docs/implementation/iteration-004-operations.md",
+      pattern: /Suprnova application integration owns routes/u,
+      replacement:
+        "Historical planning said a future Suprnova integration might own framework wiring.",
+      requirement: "operations_current_suprnova_ownership",
+    },
+    {
+      file: "docs/implementation/browser-assets.md",
+      pattern:
+        /Iteration 005's Suprnova host adapter owns asset authorization/u,
+      replacement:
+        "An eventual Suprnova host adapter may own asset authorization",
+      requirement: "browser_assets_current_host_ownership",
+    },
+    {
+      file: "docs/implementation/host-adapter-contract.md",
+      pattern:
+        /Iteration 005's Suprnova adapter must own truthful normalization and enforcement/u,
+      replacement:
+        "An eventual Suprnova adapter may own truthful normalization and enforcement",
+      requirement: "host_adapter_current_ownership",
+    },
+    {
+      file: "docs/implementation/benchmarking.md",
+      pattern:
+        /Run a local exploratory measurement from the integrated crate root:/u,
+      replacement:
+        "Run a local exploratory measurement from the repository root:",
+      requirement: "benchmark_snapshot_integrated_crate_root",
+    },
+    {
+      file: "docs/implementation/benchmarking.md",
+      pattern: /Run it from the integrated crate root:/u,
+      replacement: "Run it from the repository root:",
+      requirement: "benchmark_action_integrated_crate_root",
     },
     {
       file: "README.md",

@@ -28,12 +28,13 @@ authorization decision.
 
 ## Host adapter contract
 
-The eventual Suprnova adapter owns truthful normalization and enforcement for
-HTTP method/media/cache admission, origin, CSRF, session rotation, current
+Iteration 005's Suprnova adapter must own truthful normalization and enforcement
+for HTTP method/media/cache admission, origin, CSRF, session rotation, current
 principal and tenant, trusted proxy facts, rate limiting, route middleware, the
-route/slot mount catalog, and request-scoped application capabilities. It also
-owns concrete session, authorization, validation, transaction, outbox, clock,
-randomness, ledger, and application-service providers.
+route/slot mount catalog, and request-scoped application capabilities. It must
+also own concrete session, authorization, validation, transaction, outbox,
+clock, randomness, ledger, and application-service providers. That production
+adapter is not claimed complete until its framework integration tests pass.
 
 The adapter passes complete bounded body bytes and a validated context into the
 host-neutral endpoint, then translates `LiveEndpointResponse` into Suprnova's
@@ -41,9 +42,10 @@ real response type. It must not reconstruct a context from a snapshot, reuse one
 across requests or identity changes, skip a declared check, or treat a
 conformance provider as production authentication or authorization.
 
-The types in this repository define and test that adapter contract. No router,
-middleware, request/response, session, auth, tenant, or transaction adapter is
-registered in Suprnova yet.
+The types in the integrated internal crate define and test that adapter
+contract. No router, middleware, request/response, session, auth, tenant, or
+transaction adapter is claimed complete merely because those types now share
+the Suprnova workspace.
 
 ## Endpoint service
 

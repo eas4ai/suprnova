@@ -47,7 +47,10 @@ CSP refusal is a bounded enhancement failure rather than an action failure.
 
 Cross-origin Live endpoints are rejected unless the embedding application
 passes the exact origin at boot. Asset authorization, compression, CDN purge,
-and framework route registration belong to the eventual Suprnova host adapter.
+and framework route registration are application-host responsibilities.
+Iteration 005's Suprnova host adapter owns asset authorization, compression, CDN
+purge, and framework route registration. That production delivery path is not
+complete until real framework asset-route tests pass.
 
 ## Dependency notices
 

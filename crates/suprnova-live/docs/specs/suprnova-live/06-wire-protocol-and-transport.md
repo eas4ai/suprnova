@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-08-26
+Last revised: 2026-08-31
 
 ## Scope
 
@@ -202,16 +202,17 @@ terminal. HTML preflight and morph precede browser snapshot/revision commit;
 no-render validation occupies the same gate. Reconciliation, focus, events,
 registered effects, and feedback follow commit. A post-acceptance morph failure
 requests fresh rendering without replay. Iteration 002 owns the host-neutral
-endpoint/media service contract; the atomic integration move owns its actual
-Suprnova HTTP/middleware adapter, and iteration 003 owns scheduling and real DOM
-execution.
+endpoint/media service contract. The now-completed atomic repository-authority
+move assigned its actual Suprnova HTTP/middleware adapter to Iteration 005, but
+that adapter remains incomplete until framework tests pass. Iteration 003 owns
+scheduling and real DOM execution.
 
-## Iteration 002 implementation profile
+## Historical Iteration 002 implementation profile
 
-Iteration 002 turns the v1 parser and response model into a host-neutral Live
-endpoint service and adds protocol v2 for the server-component operations that
-v1 cannot represent. Protocol v1 remains accepted for its existing model-sync
-and action shapes. Protocol v2 adds typed `params_changed`, `lazy_complete`, and
+Iteration 002 turned the v1 parser and response model into a host-neutral Live
+endpoint service and added protocol v2 for the server-component operations that
+v1 could not represent. Protocol v1 remains accepted for its existing model-sync
+and action shapes. Protocol v2 carries typed `params_changed`, `lazy_complete`, and
 `fresh_render` lifecycle operations plus bounded child-parameter and URL-intent
 response fields; snapshot schema v1 remains independent. A component contract
 declares the minimum protocol/runtime contract it requires, and rolling nodes
@@ -252,6 +253,10 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Marked the Iteration 002 endpoint profile as historical after
+  the repository-authority cutover. The move is complete; actual Suprnova HTTP
+  and middleware adaptation remains required Iteration 005 work and is not
+  proved by the imported host-neutral service.
 - 2026-08-26 -- Added a canonical bounded WebSocket membership-request and
   acknowledgment exchange. Subscribe carries a one-connection control nonce,
   exact subscription, stream, signed-descriptor binding, and positive

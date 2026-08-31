@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-27
+Last revised: 2026-08-31
 
 ## Scope
 
@@ -299,15 +299,18 @@ license checks, Rust format/Clippy/tests/doctests/MSRV, nightly fuzz build,
 strict TypeScript install/format/lint/type/test/build/budget, and a scratch-file
 A8/16 measurement without rewriting the checked baseline.
 
-## Iteration 002 harness placement
+## Historical Iteration 002 harness placement
 
-Iteration 002 adds an internal procedural-macro development crate, generated
+Iteration 002 added an internal procedural-macro development crate, generated
 component/view/state/action metadata, macro UI fixtures, an Askama-compatible
-view checker, and a host-neutral component harness. Final macro placement in
-`suprnova-macros`, public `suprnova::live`/`suprnova::view` paths, CLI wiring,
-and generated-application checks wait for the atomic integration move. No
-generated application code may name the standalone development crate as a
-product dependency.
+view checker, and a host-neutral component harness. At Iteration 002 completion,
+final macro placement in `suprnova-macros`, public
+`suprnova::live`/`suprnova::view` paths, CLI wiring, and generated-application
+checks were assigned to the later atomic integration move. That repository-
+authority move is now complete, while the actual macro placement, public
+facades, CLI wiring, and generated-application checks remain required Iteration
+005 work until their integration suites pass. No generated application code may
+name the internal engine or development macro crate as a product dependency.
 
 The checker validates view existence, Askama source structure, component and
 action identities, model paths and permissions, lifecycle signatures, binding
@@ -483,6 +486,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Marked the Iteration 002 harness placement as historical after
+  the repository-authority cutover. The move is complete; production macro
+  placement, public Live/view facades, CLI wiring, and generated-application
+  checks remain required Iteration 005 work and cannot be inferred from imported
+  development fixtures.
 - 2026-08-27 -- Decision ID: iteration-004-task-10-async-evidence-integrity.
   Release workload evidence now fetches, hashes, and executes the exact built
   `suprnova-live.async.esm.js` artifact. A bounded count-only production port

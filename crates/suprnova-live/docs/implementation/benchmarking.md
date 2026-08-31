@@ -1,8 +1,8 @@
 # Live kernel benchmark reproduction
 
-All checked results are versioned evidence, not marketing claims. The current
-repository results are `local_exploratory`; validated S1 evidence remains the
-qualification boundary for a release or public performance statement.
+All checked results are versioned evidence, not marketing claims. The integrated
+crate's current results are `local_exploratory`; validated S1 evidence remains
+the qualification boundary for a release or public performance statement.
 
 ## Snapshot-processing benchmark
 
@@ -12,7 +12,7 @@ canonicalize, and sign. Its state is exactly 8 KiB, its response-size check uses
 16 KiB of HTML, and component hooks, rendering, domain I/O, and providers are
 outside the timed region.
 
-Run a local exploratory measurement from the repository root:
+Run a local exploratory measurement from the integrated crate root:
 
 ```sh
 rtk env CARGO_INCREMENTAL=0 scripts/run-snapshot-budget.sh
@@ -38,7 +38,7 @@ hydration, prepared binding, registered no-op dispatch, and successor
 classification. The application action body, external provider/domain I/O, and
 Askama rendering are excluded so the benchmark isolates framework overhead.
 
-Run it from the repository root:
+Run it from the integrated crate root:
 
 ```sh
 rtk env CARGO_INCREMENTAL=0 scripts/run-action-budget.sh

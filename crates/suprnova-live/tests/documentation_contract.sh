@@ -169,6 +169,9 @@ require_heading docs/implementation/iteration-004-operations.md "Observability"
 require_heading docs/implementation/iteration-004-operations.md "Benchmarks"
 require_heading docs/implementation/iteration-004-operations.md "Reference-host boundary"
 require_heading docs/implementation/iteration-004-operations.md "Suprnova integration boundary"
+require_text docs/implementation/iteration-004-operations.md \
+    "current Suprnova integration ownership" \
+    'Suprnova application integration owns routes, authentication, session, configuration, provider, scanner, storage, and broadcast wiring.'
 
 require_text docs/implementation/component-authoring.md \
     "final application facade" 'suprnova::live'
@@ -187,12 +190,24 @@ require_text docs/implementation/actions-and-validation.md \
 require_text docs/implementation/host-adapter-contract.md \
     "endpoint-owned response authority" \
     'The endpoint owns status, headers, cache policy, cookies, and media type.'
+require_text docs/implementation/host-adapter-contract.md \
+    "current host-adapter ownership" \
+    "Iteration 005's Suprnova adapter must own truthful normalization and enforcement"
 require_text docs/implementation/browser-runtime.md \
     "standalone runtime disclaimer" 'standalone development machinery'
 require_text docs/implementation/browser-assets.md \
     "immutable asset policy" 'public, max-age=31536000, immutable'
 require_text docs/implementation/browser-assets.md \
     "module preload policy" 'modulepreload'
+require_text docs/implementation/browser-assets.md \
+    "current asset-host ownership" \
+    "Iteration 005's Suprnova host adapter owns asset authorization"
+require_text docs/implementation/benchmarking.md \
+    "snapshot benchmark working directory" \
+    'Run a local exploratory measurement from the integrated crate root:'
+require_text docs/implementation/benchmarking.md \
+    "action benchmark working directory" \
+    'Run it from the integrated crate root:'
 require_text docs/implementation/live-directives.md \
     "closed grammar authority" 'generated from the Rust directive catalog'
 require_text docs/implementation/local-reactivity.md \

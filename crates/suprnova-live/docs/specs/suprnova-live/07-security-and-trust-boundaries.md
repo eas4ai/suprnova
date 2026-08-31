@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-26
+Last revised: 2026-08-31
 
 ## Scope
 
@@ -236,28 +236,31 @@ promotion abuse bounds, and safe classification. They do not implement or
 stand in for TLS/proxy policy, origin/CSRF checks, cookies/sessions, principal
 or tenant resolution, current authorization, domain freshness, HTTP dispatch,
 CSP, DOM morphing, or browser effect execution. Iteration 002 owns the trusted
-server host contract and kernel enforcement; the atomic integration move owns
-actual Suprnova adapters, and iteration 003 owns browser/output integrations.
+server host contract and kernel enforcement. The now-completed atomic
+repository-authority move assigned actual Suprnova adapters to Iteration 005,
+but those adapters remain incomplete until their ordered framework security
+tests pass. Iteration 003 owns browser/output integrations.
 
-## Iteration 002 implementation profile
+## Historical Iteration 002 implementation profile
 
-Iteration 002 defines a non-browser-constructible trusted Live request context
-and requires it before promotion, hydration, model application, action dispatch,
+Iteration 002 defined a non-browser-constructible trusted Live request context
+and required it before promotion, hydration, model application, action dispatch,
 fresh render, or endpoint success. The capability records only normalized,
 bounded facts and opaque host handles needed by the kernel; it never carries
 raw cookies, CSRF tokens, session secrets, forwarded headers, or reusable
 authorization results. Component and action authorization still runs against
 current host authority after verified hydration and before protected work.
 
-Production construction belongs exclusively to the eventual Suprnova host
+Production construction belongs exclusively to the Iteration 005 Suprnova host
 adapter after its origin, CSRF, session, principal, tenant, proxy, rate, and
-middleware checks pass in proven order. Iteration 002 supplies private
+middleware checks pass in proven order. That adapter is required but not
+claimed complete. Iteration 002 supplied private
 conformance/test builders and hostile-adapter suites that prove the kernel
 rejects absent, inconsistent, expired, cross-principal, cross-tenant, and
-cross-route context. These are security contract tests, not claims that the
-active Suprnova checkout is integrated.
+cross-route context. These are historical security contract tests, not proof of
+the pending production adapter.
 
-Iteration 002 removes the public zero-input
+Iteration 002 removed the public zero-input
 `PromotionAttestations::verified()` assertion from production boundaries. The
 host adapter must provide typed dispositions for every configured authenticity
 check (`passed` or policy-declared `not_required`), a current scope fingerprint,
@@ -281,6 +284,11 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Marked the Iteration 002 trusted-host profile as historical
+  after the repository-authority cutover. The move is complete; actual Suprnova
+  origin, CSRF, session, identity, tenant, proxy, rate, and middleware adapters
+  remain required Iteration 005 work until ordered security integration tests
+  pass.
 - 2026-08-26 -- Required one bounded immutable own-data snapshot of each complete
   browser-event dispatch candidate before any validation or side effect. No
   accessor, inherited/symbol/extra field, sparse payload, mutable reread, or
