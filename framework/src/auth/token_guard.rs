@@ -10,13 +10,13 @@
 //!
 //! # Depends on `BearerTokenMiddleware`
 //!
-//! `TokenGuard` reads the authenticated id from the per-request session
-//! scope (`session::auth_user_id`). It does **not** parse the
+//! `TokenGuard` reads only bearer-specific provenance from per-request auth
+//! state. It does **not** parse the
 //! `Authorization` header itself - that is
 //! `crate::magnetar_integration::middleware::BearerTokenMiddleware`'s job:
 //! it validates the `Authorization: Bearer <token>` header against the
-//! Magnetar session store and binds the resolved `user_id` into the request
-//! scope. **Register `BearerTokenMiddleware` on token-guarded routes**,
+//! Magnetar session store and binds the resolved `user_id` as bearer
+//! provenance. **Register `BearerTokenMiddleware` on token-guarded routes**,
 //! or `TokenGuard` will always report a guest. The guard then resolves
 //! the full user via its [`UserProvider`].
 
@@ -53,24 +53,24 @@ impl TokenGuard {
 impl Guard for TokenGuard {
     async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
         // Per-request cache (a prior resolution, or a `set_user`).
-        if let Some(user) = request_state::current_user() {
+        if let Some(user) = request_state::bearer_user() {
             return Ok(Some(user));
         }
 
-        let id = match crate::session::auth_user_id() {
+        let id = match request_state::bearer_user_id() {
             Some(id) => id,
             None => return Ok(None),
         };
 
         let user = self.provider.retrieve_by_id(&id).await?;
         if let Some(user) = &user {
-            request_state::set_current_user(user.clone());
+            request_state::set_bearer_user(user.clone());
         }
         Ok(user)
     }
 
     async fn id(&self) -> Result<Option<String>, FrameworkError> {
-        Ok(crate::session::auth_user_id())
+        Ok(request_state::bearer_user_id())
     }
 
     async fn validate(&self, credentials: &Credentials) -> Result<bool, FrameworkError> {
@@ -82,11 +82,11 @@ impl Guard for TokenGuard {
     }
 
     async fn set_user(&self, user: Arc<dyn Authenticatable>) {
-        request_state::set_current_user(user);
+        request_state::set_bearer_user(user);
     }
 
     async fn has_user(&self) -> bool {
-        request_state::has_current_user()
+        request_state::has_bearer_user()
     }
 }
 
@@ -149,16 +149,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolves_user_from_request_scoped_id() {
+    async fn web_session_identity_is_not_a_token_guard_identity() {
         with_scopes(async {
-            // Stand in for BearerTokenMiddleware binding the id into the
-            // request scope.
             set_auth_user("7");
             let g = guard();
-            assert!(g.check().await.unwrap());
+            assert_eq!(g.id().await.unwrap(), None);
+            assert!(g.user().await.unwrap().is_none());
+            assert!(!g.has_user().await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resolves_and_caches_user_from_bearer_id() {
+        with_scopes(async {
+            request_state::set_bearer_user_id("7");
+
+            let g = guard();
             assert_eq!(g.id().await.unwrap(), Some("7".to_string()));
-            let user = g.user().await.unwrap().expect("user resolved");
+            assert!(!g.has_user().await);
+
+            let user = g.user().await.unwrap().expect("bearer user resolved");
             assert_eq!(user.get_auth_identifier(), "7");
+            assert!(g.has_user().await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn generic_cached_web_user_is_not_a_token_guard_identity() {
+        with_scopes(async {
+            request_state::set_current_user(Arc::new(TestUser { id: "7".into() }));
+
+            let g = guard();
+            assert_eq!(g.id().await.unwrap(), None);
+            assert!(g.user().await.unwrap().is_none());
+            assert!(!g.has_user().await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bearer_identity_wins_when_generic_web_user_differs() {
+        with_scopes(async {
+            let g = guard();
+            g.set_user(Arc::new(TestUser { id: "7".into() })).await;
+            request_state::set_current_user(Arc::new(TestUser { id: "8".into() }));
+
+            assert_eq!(g.id().await.unwrap(), Some("7".to_string()));
+            let user = g.user().await.unwrap().expect("bearer user remains set");
+            assert_eq!(user.get_auth_identifier(), "7");
+            assert!(g.has_user().await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_user_remains_visible_to_the_token_guard() {
+        with_scopes(async {
+            let g = guard();
+            g.set_user(Arc::new(TestUser { id: "7".into() })).await;
+
+            assert_eq!(g.id().await.unwrap(), Some("7".to_string()));
+            let user = g.user().await.unwrap().expect("set bearer user is visible");
+            assert_eq!(user.get_auth_identifier(), "7");
+            assert!(g.has_user().await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn replacing_bearer_id_invalidates_the_cached_bearer_user() {
+        with_scopes(async {
+            let g = guard();
+            g.set_user(Arc::new(TestUser { id: "7".into() })).await;
+
+            request_state::set_bearer_user_id("8");
+
+            assert_eq!(crate::Auth::id(), Some("8".to_string()));
+            assert_eq!(g.id().await.unwrap(), Some("8".to_string()));
+            assert!(!g.has_user().await);
+            assert!(g.user().await.unwrap().is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn replacing_bearer_id_preserves_an_unrelated_cached_web_user() {
+        with_scopes(async {
+            let g = guard();
+            g.set_user(Arc::new(TestUser { id: "7".into() })).await;
+            request_state::set_current_user(Arc::new(TestUser { id: "8".into() }));
+
+            request_state::set_bearer_user_id("9");
+
+            assert_eq!(crate::Auth::id(), Some("8".to_string()));
+            assert_eq!(g.id().await.unwrap(), Some("9".to_string()));
+            assert!(!g.has_user().await);
+            assert!(g.user().await.unwrap().is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn request_state_teardown_clears_bearer_provenance() {
+        let g = guard();
+
+        with_scopes(async {
+            g.set_user(Arc::new(TestUser { id: "7".into() })).await;
+            assert!(g.has_user().await);
+        })
+        .await;
+
+        with_scopes(async {
+            assert_eq!(g.id().await.unwrap(), None);
+            assert!(g.user().await.unwrap().is_none());
+            assert!(!g.has_user().await);
         })
         .await;
     }

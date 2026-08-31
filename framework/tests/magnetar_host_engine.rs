@@ -1260,20 +1260,79 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
         Some(created.user_id.clone())
     );
 
+    #[derive(Clone)]
+    struct BearerTestUser {
+        id: String,
+    }
+
+    impl suprnova::Authenticatable for BearerTestUser {
+        fn get_auth_identifier(&self) -> String {
+            self.id.clone()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+            self
+        }
+    }
+
+    struct BearerTestProvider;
+
+    #[async_trait]
+    impl suprnova::UserProvider for BearerTestProvider {
+        async fn retrieve_by_id(
+            &self,
+            id: &str,
+        ) -> Result<Option<Arc<dyn suprnova::Authenticatable>>, suprnova::FrameworkError> {
+            Ok(Some(Arc::new(BearerTestUser { id: id.to_owned() })))
+        }
+    }
+
     let request = build_bearer_request(&format!("Bearer {facade_token}")).await;
     let slot = suprnova::session::new_session_slot_for_test();
-    let bound_user_id = suprnova::session::session_scope_for_test(slot, async {
-        use suprnova::Middleware;
+    slot.lock()
+        .expect("framework session slot")
+        .as_mut()
+        .expect("framework session")
+        .user_id = Some("web-principal".to_owned());
+    let (auth_id, token_guard_id, token_guard_user_id, session_user_id) =
+        suprnova::session::session_scope_for_test(
+            slot,
+            suprnova::auth::request_state::request_state_scope_for_test(async {
+                use suprnova::{Guard, Middleware};
 
-        let next: suprnova::Next =
-            Arc::new(|_| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
-        let _ = suprnova::magnetar_integration::middleware::BearerTokenMiddleware
-            .handle(request, next)
-            .await;
-        suprnova::Auth::id()
-    })
-    .await;
-    assert_eq!(bound_user_id.as_deref(), Some(created.user_id.as_str()));
+                let next: suprnova::Next =
+                    Arc::new(|_| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
+                let _ = suprnova::magnetar_integration::middleware::BearerTokenMiddleware
+                    .handle(request, next)
+                    .await;
+                let token_guard = suprnova::TokenGuard::new(Arc::new(BearerTestProvider));
+                let auth_id = suprnova::Auth::id();
+                let token_guard_id = token_guard.id().await.expect("token guard id");
+                let token_guard_user_id = token_guard
+                    .user()
+                    .await
+                    .expect("token guard resolves bearer identity")
+                    .expect("valid bearer has a user")
+                    .get_auth_identifier();
+                (
+                    auth_id,
+                    token_guard_id,
+                    token_guard_user_id,
+                    suprnova::session::session()
+                        .expect("framework session remains installed")
+                        .user_id,
+                )
+            }),
+        )
+        .await;
+    assert_eq!(auth_id.as_deref(), Some(created.user_id.as_str()));
+    assert_eq!(token_guard_id.as_deref(), Some(created.user_id.as_str()));
+    assert_eq!(token_guard_user_id, created.user_id);
+    assert_eq!(session_user_id.as_deref(), Some("web-principal"));
 
     let lifecycle = LifecycleEvent::new(
         "committed-session-mutation",

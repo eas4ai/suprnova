@@ -3,10 +3,9 @@
 use async_trait::async_trait;
 
 use crate::Request;
-use crate::auth::request_state::set_current_user_id;
+use crate::auth::request_state::set_bearer_user_id;
 use crate::http::Response;
 use crate::middleware::{Middleware, Next};
-use crate::session::set_auth_user;
 
 /// Authenticate `Authorization: Bearer` credentials through Magnetar.
 pub struct BearerTokenMiddleware;
@@ -22,8 +21,7 @@ impl Middleware for BearerTokenMiddleware {
                 && let Some(engine) = super::optional_password_engine()
                 && let Ok(Some(user_id)) = engine.bearer_user_id(token).await
             {
-                set_current_user_id(&user_id);
-                set_auth_user(&user_id);
+                set_bearer_user_id(&user_id);
             }
         }
         next(request).await
