@@ -80,6 +80,31 @@ impl CeremonyStore for NullStorage {
         Ok(false)
     }
 }
+
+#[tokio::test]
+async fn ceremony_store_atomic_finalize_default_fails_closed() {
+    let error = NullStorage
+        .transition_and_consume(
+            "device-code",
+            "device-authorization",
+            "approved:grant",
+            "issued",
+            "grant",
+            "device-authorization-grant",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable {
+            dependency,
+            message,
+        } if dependency == "ceremony store"
+            && message.contains("atomic transition-and-consume")
+    ));
+}
+
 struct Allow;
 #[async_trait]
 impl FactorGate for Allow {

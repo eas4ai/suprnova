@@ -23,8 +23,9 @@ use magnetar::oauth::device::{
     DeviceCeremonyStatus, DevicePollOutcome,
 };
 use magnetar::sessions::SessionMetadata;
-use magnetar::storage::{CredentialActor, DeviceStore};
+use magnetar::storage::{CeremonyStore, CredentialActor, DeviceStore};
 use magnetar::{Error, Result};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use secrecy::ExposeSecret;
 
 use grants_harness::create_user;
@@ -197,6 +198,92 @@ async fn approve_without_two_factor_stores_an_encrypted_one_time_device_session(
         .await
         .expect("poll returns a real Magnetar session");
     assert_eq!(verified.user_id(), user_id);
+
+    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::ExpiredToken => {}
+        other => panic!("expected ExpiredToken on redemption replay, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn issued_transition_failure_does_not_destroy_device_grant() {
+    let h = grants_harness::harness().await;
+    let user_id = create_user(&h.storage(), "transition-failure@example.test").await;
+    let actor = actor(&h, &user_id, "transition-failure-browser").await;
+    h.factors.set_enrolled(false);
+    let svc = service(&h).await;
+
+    let issued = svc.issue_code().await.unwrap();
+    let outcome = svc
+        .approve(&issued.user_code, &actor, SessionMetadata::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DeviceApprovalOutcome::Approved));
+
+    let approved = h
+        .storage()
+        .peek_device(&issued.user_code)
+        .await
+        .unwrap()
+        .expect("approved ceremony remains until the device polls");
+    let approved_state = approved.state.clone();
+    let grant_selector = approved_state
+        .strip_prefix("approved:")
+        .expect("approved state carries its grant selector")
+        .to_owned();
+
+    h.oauth
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TRIGGER fail_device_issued_transition
+             BEFORE UPDATE OF state ON storage_ceremonies
+             WHEN OLD.kind = 'device-authorization'
+              AND NEW.kind = 'device-authorization'
+              AND OLD.state <> 'issued'
+              AND NEW.state = 'issued'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced device transition failure');
+             END"
+            .to_owned(),
+        ))
+        .await
+        .expect("install scoped transition failure trigger");
+
+    svc.poll(issued.device_code.expose_secret())
+        .await
+        .expect_err("issued transition failure must surface");
+
+    let after_failure = h
+        .storage()
+        .peek_device(&issued.user_code)
+        .await
+        .unwrap()
+        .expect("failed transition preserves the approved device ceremony");
+    assert_eq!(after_failure.state, approved_state);
+    assert!(
+        h.storage()
+            .peek(&grant_selector, "device-authorization-grant")
+            .await
+            .unwrap()
+            .is_some(),
+        "failed transition must preserve the one-time device grant"
+    );
+
+    h.oauth
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_device_issued_transition".to_owned(),
+        ))
+        .await
+        .expect("remove transition failure trigger before retry");
+
+    let grant = match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::Success(grant) => grant,
+        other => panic!("expected Success after retry, got {other:?}"),
+    };
+    assert_eq!(grant.user_id(), user_id);
 
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
         DevicePollOutcome::ExpiredToken => {}
