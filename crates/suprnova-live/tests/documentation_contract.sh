@@ -196,7 +196,8 @@ require_text docs/implementation/browser-assets.md \
 require_text docs/implementation/live-directives.md \
     "closed grammar authority" 'generated from the Rust directive catalog'
 require_text docs/implementation/local-reactivity.md \
-    "Stimulus exclusion" 'not bundled into the core runtime'
+    "Stimulus and bridge exclusion" \
+    "Neither Stimulus nor Suprnova's bridge/continuity implementation is bundled"
 require_text docs/implementation/scheduling-and-feedback.md \
     "one scheduler invariant" 'one bounded scheduler per island'
 require_text docs/implementation/morphing-and-continuity.md \
