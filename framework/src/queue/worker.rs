@@ -1046,22 +1046,14 @@ impl SettlementDeps {
 /// [`Settled::Unsupported`] and fall through to [`fallback_settle`], which
 /// documents the duplicate window that choice accepts.
 ///
-/// # Why batch accounting does not gate the settlement
+/// # Durable batch accounting
 ///
-/// A batch repository error is frequently *permanent*:
-/// [`PendingBatch::dispatch`](crate::queue::batch::PendingBatch::dispatch)
-/// deletes the batch row when a mid-loop push fails, and the envelopes that
-/// already landed then get `Err(batch not found)` forever. Refusing to settle
-/// on that would spin those orphans on visibility expiry with no exit. So the
-/// batch step runs before the settlement - a crash replays it rather than
-/// losing it, and replay is harmless because settlement is idempotent per
-/// `(batch_id, job_id)` - but its error never holds the reservation.
-///
-/// Batch accounting is *not* part of the settlement transaction, and
-/// deliberately so: the repository is separately installable and may address a
-/// different database entirely, which would make the coupling either a lie or
-/// a hard constraint on where batch metadata lives. Its own
-/// `(batch_id, job_id)` uniqueness is what makes the replay safe.
+/// A successful batch member is not removed from the queue until its accounting
+/// writes succeed. The repository is separately installable and may address a
+/// different database, so the writes cannot share the queue settlement's
+/// transaction. Instead, an error leaves the reservation intact for redelivery;
+/// the repository's `(batch_id, job_id)` uniqueness makes replay safe even when
+/// the first write took effect but its response was lost.
 async fn handle_completed(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -1090,22 +1082,35 @@ async fn handle_completed(
         follow_ups.push(next_env);
     }
 
-    // 2. Notify batch repository (best-effort - see the doc comment). This
-    // runs before the settlement so a crash replays it rather than losing it;
-    // replay is harmless because settlement is idempotent per `(batch_id,
-    // job_id)`.
+    // 2. Persist batch accounting before settlement. A rejected or uncertain
+    // write leaves the reservation intact so visibility expiry retries the
+    // idempotent `(batch_id, job_id)` operation.
     if let Some(batch_id) = env.batch_id.as_deref()
         && let Some(repo) = deps.batches.as_ref()
     {
-        let counts = repo.record_successful_job(batch_id, env.id).await;
-        if let Ok(c) = counts
-            && c.pending_jobs == 0
-        {
-            let _ = repo.mark_finished(batch_id).await;
-            if let Ok(Some(b)) = repo.find(batch_id).await {
-                let phase = terminal_batch_phase(&b);
-                fire_batch_callbacks(&b, phase).await;
-                fire_batch_callbacks(&b, BatchPhase::Finally).await;
+        let counts = match repo.record_successful_job(batch_id, env.id).await {
+            Ok(counts) => counts,
+            Err(e) => {
+                settlement_failure(driver, env, "record_successful_job", "success", &e);
+                return;
+            }
+        };
+        if counts.pending_jobs == 0 {
+            if let Err(e) = repo.mark_finished(batch_id).await {
+                settlement_failure(driver, env, "mark_finished", "success", &e);
+                return;
+            }
+            match repo.find(batch_id).await {
+                Ok(Some(b)) => {
+                    let phase = terminal_batch_phase(&b);
+                    fire_batch_callbacks(&b, phase).await;
+                    fire_batch_callbacks(&b, BatchPhase::Finally).await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    settlement_failure(driver, env, "find", "success", &e);
+                    return;
+                }
             }
         }
     }
@@ -1282,10 +1287,6 @@ async fn handle_released(
 /// dead letter. Install
 /// [`NullFailedJobStore`](crate::queue::NullFailedJobStore) to opt out of
 /// retention deliberately; it accepts every record, so it never blocks an ack.
-///
-/// Batch accounting stays best-effort for the reason given on
-/// [`handle_completed`]: a deleted batch row returns a permanent error, and
-/// gating the ack on it would strand the orphaned envelopes forever.
 /// Which callback a batch fires once its last job settles.
 ///
 /// `Then` means "the whole batch succeeded", so it is only correct when
@@ -1552,7 +1553,10 @@ mod tests {
     use crate::queue::failed::{FailedJob, FailedJobStore};
     use async_trait::async_trait;
     use chrono::DateTime;
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use uuid::Uuid;
 
     /// Ordered record of every settlement-visible operation, shared by all
@@ -1585,6 +1589,7 @@ mod tests {
         push_fails: bool,
         ops: Arc<OpLog>,
         pushed: Mutex<Vec<Envelope>>,
+        settle_calls: AtomicUsize,
     }
 
     impl RecordingDriver {
@@ -1597,6 +1602,7 @@ mod tests {
                 push_fails,
                 ops,
                 pushed: Mutex::new(Vec::new()),
+                settle_calls: AtomicUsize::new(0),
             }
         }
 
@@ -1606,6 +1612,10 @@ mod tests {
 
         fn push_count(&self) -> usize {
             self.ops.count("push")
+        }
+
+        fn settle_count(&self) -> usize {
+            self.settle_calls.load(Ordering::Relaxed)
         }
     }
 
@@ -1621,6 +1631,15 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(env);
             Ok(())
+        }
+
+        async fn settle(
+            &self,
+            _token: &ReservationToken,
+            _follow_ups: &[Envelope],
+        ) -> Result<Settled, FrameworkError> {
+            self.settle_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Settled::Unsupported)
         }
 
         async fn pop(
@@ -1716,22 +1735,30 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BatchRepoBehavior {
+        Normal,
+        RecordFails,
+        RecordSuccessAppliesThenFailsOnce,
+        MarkFinishedFails,
+        FindFails,
+        FindReturnsNone,
+    }
+
     /// Real [`MemoryBatchRepository`] behaviour plus shared-log recording and
-    /// a knob that makes the two settlement writes fail - the shape of a
-    /// batch row deleted by `PendingBatch::dispatch`'s rollback, which
-    /// returns `Err(batch not found)` for every envelope that already landed.
+    /// focused failure modes for each durable-accounting step.
     struct RecordingBatchRepo {
         inner: MemoryBatchRepository,
         ops: Arc<OpLog>,
-        record_fails: bool,
+        behavior: Mutex<BatchRepoBehavior>,
     }
 
     impl RecordingBatchRepo {
-        fn new(ops: Arc<OpLog>, record_fails: bool) -> Self {
+        fn new(ops: Arc<OpLog>, behavior: BatchRepoBehavior) -> Self {
             Self {
                 inner: MemoryBatchRepository::new(),
                 ops,
-                record_fails,
+                behavior: Mutex::new(behavior),
             }
         }
     }
@@ -1742,7 +1769,15 @@ mod tests {
             self.inner.store(batch).await
         }
         async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError> {
-            self.inner.find(id).await
+            self.ops.record("batch.find");
+            let behavior = *self.behavior.lock().unwrap_or_else(|e| e.into_inner());
+            match behavior {
+                BatchRepoBehavior::FindFails => {
+                    Err(FrameworkError::internal("batch lookup exploded"))
+                }
+                BatchRepoBehavior::FindReturnsNone => Ok(None),
+                _ => self.inner.find(id).await,
+            }
         }
         async fn increment_total_jobs(
             &self,
@@ -1757,10 +1792,26 @@ mod tests {
             job_id: Uuid,
         ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
             self.ops.record("batch.record_success");
-            if self.record_fails {
-                return Err(FrameworkError::internal(format!("batch not found: {id}")));
+            let behavior = {
+                let mut behavior = self.behavior.lock().unwrap_or_else(|e| e.into_inner());
+                let current = *behavior;
+                if current == BatchRepoBehavior::RecordSuccessAppliesThenFailsOnce {
+                    *behavior = BatchRepoBehavior::Normal;
+                }
+                current
+            };
+            match behavior {
+                BatchRepoBehavior::RecordFails => {
+                    Err(FrameworkError::internal(format!("batch not found: {id}")))
+                }
+                BatchRepoBehavior::RecordSuccessAppliesThenFailsOnce => {
+                    self.inner.record_successful_job(id, job_id).await?;
+                    Err(FrameworkError::internal(
+                        "record_successful_job response was lost",
+                    ))
+                }
+                _ => self.inner.record_successful_job(id, job_id).await,
             }
-            self.inner.record_successful_job(id, job_id).await
         }
         async fn record_failed_job(
             &self,
@@ -1768,7 +1819,9 @@ mod tests {
             job_id: Uuid,
         ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
             self.ops.record("batch.record_failed");
-            if self.record_fails {
+            if *self.behavior.lock().unwrap_or_else(|e| e.into_inner())
+                == BatchRepoBehavior::RecordFails
+            {
                 return Err(FrameworkError::internal(format!("batch not found: {id}")));
             }
             self.inner.record_failed_job(id, job_id).await
@@ -1780,6 +1833,12 @@ mod tests {
             self.inner.is_cancelled(id).await
         }
         async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
+            self.ops.record("batch.mark_finished");
+            if *self.behavior.lock().unwrap_or_else(|e| e.into_inner())
+                == BatchRepoBehavior::MarkFinishedFails
+            {
+                return Err(FrameworkError::internal("mark_finished exploded"));
+            }
             self.inner.mark_finished(id).await
         }
         async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
@@ -2330,7 +2389,10 @@ mod tests {
     async fn completed_decrements_the_batch_before_acking() {
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(false, ops.clone());
-        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), false));
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::Normal,
+        ));
         let batch_id = seed_batch(&repo, 2).await;
         let token = ReservationToken(Uuid::new_v4());
         let mut env = fresh_env("Member", 1);
@@ -2359,15 +2421,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_acks_even_when_the_batch_repository_errors() {
-        // Failure mode, and the reason batch accounting is best-effort:
-        // `PendingBatch::dispatch` deletes the batch row when a mid-loop push
-        // fails, so envelopes that already landed get `batch not found`
-        // forever. Gating the ack on that would spin them on visibility
-        // expiry with no exit.
+    async fn completed_batch_repository_failure_leaves_the_job_redeliverable() {
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(false, ops.clone());
-        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), true));
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::RecordFails,
+        ));
         let token = ReservationToken(Uuid::new_v4());
         let mut env = fresh_env("Orphan", 1);
         env.batch_id = Some(Uuid::new_v4().to_string());
@@ -2386,9 +2446,193 @@ mod tests {
 
         assert_eq!(
             ops.ops(),
-            vec!["batch.record_success", "ack"],
-            "a permanently-failing batch write must not hold the reservation"
+            vec!["batch.record_success"],
+            "settlement must stop at the rejected batch write"
         );
+        assert_eq!(
+            driver.ack_count(),
+            0,
+            "a rejected batch write must leave the reservation redeliverable"
+        );
+        assert_eq!(
+            driver.settle_count(),
+            0,
+            "a rejected batch write must not reach driver settlement"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_recovers_from_an_uncertain_batch_write_response() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::RecordSuccessAppliesThenFailsOnce,
+        ));
+        let batch_id = seed_batch(&repo, 2).await;
+        let mut env = fresh_env("Member", 1);
+        env.batch_id = Some(batch_id.clone());
+
+        handle_completed(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo.clone()),
+            },
+        )
+        .await;
+        let first_delivery_ops = ops.ops();
+        let first_delivery_settle_count = driver.settle_count();
+
+        handle_completed(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            first_delivery_ops,
+            vec!["batch.record_success"],
+            "an uncertain write response must leave the first delivery unsettled"
+        );
+        assert_eq!(
+            ops.ops(),
+            vec!["batch.record_success", "batch.record_success", "ack"],
+            "redelivery retries the idempotent write before settling once"
+        );
+        assert_eq!(
+            first_delivery_settle_count, 0,
+            "the uncertain first delivery must not reach driver settlement"
+        );
+        assert_eq!(
+            driver.settle_count(),
+            1,
+            "only the recovered delivery reaches driver settlement"
+        );
+        assert_eq!(driver.ack_count(), 1, "only the recovered delivery settles");
+        let snap = repo
+            .inner
+            .find(&batch_id)
+            .await
+            .unwrap()
+            .expect("batch exists");
+        assert_eq!(
+            snap.pending_jobs, 1,
+            "replaying the same job id must not decrement the batch twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_mark_finished_failure_leaves_the_job_redeliverable() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::MarkFinishedFails,
+        ));
+        let batch_id = seed_batch(&repo, 1).await;
+        let mut env = fresh_env("LastMember", 1);
+        env.batch_id = Some(batch_id);
+
+        handle_completed(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["batch.record_success", "batch.mark_finished"],
+            "settlement must stop at the rejected terminal write"
+        );
+        assert_eq!(driver.ack_count(), 0);
+        assert_eq!(driver.settle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_batch_find_failure_leaves_the_job_redeliverable() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::FindFails,
+        ));
+        let batch_id = seed_batch(&repo, 1).await;
+        let mut env = fresh_env("LastMember", 1);
+        env.batch_id = Some(batch_id);
+
+        handle_completed(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["batch.record_success", "batch.mark_finished", "batch.find",],
+            "settlement must stop when terminal batch lookup fails"
+        );
+        assert_eq!(driver.ack_count(), 0);
+        assert_eq!(driver.settle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_missing_terminal_batch_still_settles() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::FindReturnsNone,
+        ));
+        let batch_id = seed_batch(&repo, 1).await;
+        let mut env = fresh_env("LastMember", 1);
+        env.batch_id = Some(batch_id);
+
+        handle_completed(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec![
+                "batch.record_success",
+                "batch.mark_finished",
+                "batch.find",
+                "ack",
+            ],
+            "a deliberately removed batch skips callbacks but may settle"
+        );
+        assert_eq!(driver.ack_count(), 1);
+        assert_eq!(driver.settle_count(), 1);
     }
 
     #[tokio::test]
@@ -2488,7 +2732,10 @@ mod tests {
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(false, ops.clone());
         let store = Arc::new(RecordingFailedStore::new(ops.clone(), false));
-        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), true));
+        let repo = Arc::new(RecordingBatchRepo::new(
+            ops.clone(),
+            BatchRepoBehavior::RecordFails,
+        ));
         let token = ReservationToken(Uuid::new_v4());
         let mut env = fresh_env("Doomed", 3);
         env.batch_id = Some(Uuid::new_v4().to_string());
