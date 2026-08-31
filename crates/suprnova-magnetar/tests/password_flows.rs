@@ -427,6 +427,54 @@ async fn login_failures_are_indistinguishable_and_recorded() {
 }
 
 #[tokio::test]
+async fn failed_attempt_storage_failure_returns_service_unavailable() {
+    use sea_orm::{ConnectionTrait as _, EntityTrait as _, PaginatorTrait as _};
+
+    let hash_config = fast_hash_config();
+    let driver = Arc::new(WorkSpyDriver::default());
+    let world = harness_with(driver.clone(), hash_config, LockoutConfig::default()).await;
+    register(&world).await;
+    driver.drain_mints();
+    assert!(
+        world.storage.find_by_email(EMAIL).await.unwrap().is_some(),
+        "the trigger must not interfere with user lookup"
+    );
+
+    world
+        .db
+        .execute_unprepared(
+            "CREATE TRIGGER fail_failed_attempt_insert \
+             BEFORE INSERT ON storage_lockouts \
+             WHEN NEW.reason = '203.0.113.7' \
+             BEGIN \
+                 SELECT RAISE(ABORT, 'injected failed-attempt write failure'); \
+             END",
+        )
+        .await
+        .unwrap();
+
+    let reply = dispatch(&world, login_request(EMAIL, "wrong password")).await;
+
+    assert_configured_dual_work(&driver.drain_verifies(), hash_config);
+    assert_eq!(reply.status, 503);
+    assert_eq!(reply.body, Some(json!({"message": "service unavailable"})));
+    assert!(reply.grant.is_none(), "failed accounting grants no session");
+    assert_eq!(
+        storage_schema::sessions::Entity::find()
+            .count(&world.db)
+            .await
+            .unwrap(),
+        0,
+        "failed accounting persists no session"
+    );
+    assert_eq!(
+        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        0,
+        "the aborted failed-attempt transaction leaves no partial accounting row"
+    );
+}
+
+#[tokio::test]
 async fn successful_login_passes_the_gate_and_upgrades_legacy_bcrypt() {
     let world = harness().await;
     // Seed a legacy bcrypt credential exactly as the framework minted it.
