@@ -50,6 +50,25 @@ fn cache_key_normalizes_scope_order_and_duplicates() {
 }
 
 #[test]
+fn cache_key_record_id_encoding_is_stable() {
+    let key = M2MCacheKey::new(
+        "provider:one",
+        "client:two",
+        vec![
+            "write:reports".to_owned(),
+            "read".to_owned(),
+            "write:reports".to_owned(),
+        ],
+    );
+
+    assert_eq!(
+        key.record_id(),
+        "m2m:v1:3c76b5d317de5dc2bb3e08203e3a4b8c126cc9b2cfd51b95484d94ec6a516d04",
+        "the persisted cache identity encoding must remain stable"
+    );
+}
+
+#[test]
 fn cache_key_differs_by_provider_client_or_scope_set() {
     let base = M2MCacheKey::new("m2m", "client", vec!["read".to_owned()]);
     let other_provider = M2MCacheKey::new("other", "client", vec!["read".to_owned()]);
@@ -214,6 +233,60 @@ async fn client_credentials_scopes_never_share_a_cache_entry() {
         transport.request_count(),
         2,
         "distinct scope sets must never share a cache entry"
+    );
+}
+
+#[tokio::test]
+async fn client_credentials_delimiter_boundaries_never_share_a_cache_entry() {
+    let harness = harness().await;
+    let mut registry = magnetar::oauth::OAuthProviderRegistry::new();
+    registry
+        .register(Arc::new(BrokerMockProvider::new(
+            "a:b",
+            "https://a-b.mock.test/token",
+        )))
+        .expect("provider with a delimiter in its name registers");
+    registry
+        .register(Arc::new(BrokerMockProvider::new(
+            "a",
+            "https://a.mock.test/token",
+        )))
+        .expect("provider without a delimiter in its name registers");
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_json(
+        200,
+        r#"{"access_token":"provider-a-b-token","token_type":"Bearer","expires_in":3600}"#,
+    );
+    transport.push_json(
+        200,
+        r#"{"access_token":"provider-a-token","token_type":"Bearer","expires_in":3600}"#,
+    );
+    let hook = Arc::new(RecordingReuseHook::default());
+    let service = harness.service(transport.clone(), registry, fast_config(false), hook);
+
+    let provider_delimiter = M2MCacheKey::new("a:b", "c", vec!["scope".to_owned()]);
+    let client_delimiter = M2MCacheKey::new("a", "b:c", vec!["scope".to_owned()]);
+    assert_ne!(provider_delimiter.record_id(), client_delimiter.record_id());
+
+    let provider_token = service
+        .client_credentials(provider_delimiter)
+        .await
+        .expect("the provider-delimited identity must receive its own token");
+    let client_token = service
+        .client_credentials(client_delimiter)
+        .await
+        .expect("the client-delimited identity must receive its own token");
+    assert_eq!(provider_token.value.expose_secret(), "provider-a-b-token");
+    assert_eq!(client_token.value.expose_secret(), "provider-a-token");
+    assert_ne!(
+        provider_token.value.expose_secret(),
+        client_token.value.expose_secret(),
+        "different provider/client tuples must receive distinct provider tokens"
+    );
+    assert_eq!(
+        transport.request_count(),
+        2,
+        "different provider/client tuples must produce two provider requests"
     );
 }
 

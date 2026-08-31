@@ -5,6 +5,15 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+
+const RECORD_ID_PREFIX: &str = "m2m:v1:";
+const RECORD_ID_DOMAIN: &[u8] = b"magnetar-m2m-cache-v1\0";
+
+fn append_component(hasher: &mut Sha256, component: &[u8]) {
+    hasher.update((component.len() as u64).to_be_bytes());
+    hasher.update(component);
+}
 
 /// Identifies one cached machine-to-machine token: a `(provider, client,
 /// scope-set)` tuple. Scope order/duplication is irrelevant --
@@ -49,18 +58,20 @@ impl M2MCacheKey {
     }
 
     /// Deterministically derive the broker's opaque `record_id` for this
-    /// key. Uses `U+001F` (unit separator) to join normalized scopes,
-    /// since it cannot appear in an OAuth scope token
-    /// (`scope-token = 1*NQCHAR`, RFC 6749 appendix A.4, which excludes
-    /// control characters).
+    /// key. A versioned domain and length-prefixed components make every
+    /// provider, client, and normalized scope boundary unambiguous.
     #[must_use]
     pub fn record_id(&self) -> String {
-        format!(
-            "m2m:{}:{}:{}",
-            self.provider,
-            self.client_id,
-            self.normalized_scopes().join("\u{1f}")
-        )
+        let scopes = self.normalized_scopes();
+        let mut hasher = Sha256::new();
+        hasher.update(RECORD_ID_DOMAIN);
+        append_component(&mut hasher, self.provider.as_bytes());
+        append_component(&mut hasher, self.client_id.as_bytes());
+        append_component(&mut hasher, &(scopes.len() as u64).to_be_bytes());
+        for scope in scopes {
+            append_component(&mut hasher, scope.as_bytes());
+        }
+        format!("{RECORD_ID_PREFIX}{:x}", hasher.finalize())
     }
 }
 
