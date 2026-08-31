@@ -55,6 +55,7 @@ rtk node scripts/check-specs.mjs
 rtk git diff --check
 
 phase "generated license inventory"
+rtk node tests/license_inventory_graph.mjs
 rtk node scripts/generate-license-inventory.mjs --check
 
 phase "Rust formatting and lint review"

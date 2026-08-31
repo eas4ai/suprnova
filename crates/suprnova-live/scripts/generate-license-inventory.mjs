@@ -5,6 +5,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  cargoDependencyClosure,
+  loadLockedCargoMetadata,
+} from "./license-inventory-cargo.mjs";
+
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const liveRoot = resolve(scriptDirectory, "..");
 const workspaceResult = spawnSync(
@@ -29,6 +34,18 @@ if (
   );
 }
 const inventoryPath = resolve(liveRoot, "THIRD_PARTY_LICENSES.md");
+const liveWorkspaceCargoRoots = [
+  "suprnova-live",
+  "suprnova-live-macro-fixture",
+  "suprnova-live-macros",
+  "suprnova-live-test-support",
+];
+const fuzzCargoRoots = ["suprnova-live-fuzz"];
+const compileFixtureCargoRoots = [
+  "suprnova-live-compile-1",
+  "suprnova-live-compile-10",
+  "suprnova-live-compile-100",
+];
 const internalCargoPackages = new Set([
   "suprnova-live",
   "suprnova-live-fuzz",
@@ -58,58 +75,9 @@ function markdown(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
-function cargoPackagesFrom(directory) {
-  const result = spawnSync(
-    "rtk",
-    ["cargo", "metadata", "--locked", "--format-version", "1"],
-    {
-      cwd: directory,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
-
-  if (result.status !== 0) {
-    process.stderr.write(result.stderr);
-    throw new Error(
-      "cargo metadata failed while generating the license inventory",
-    );
-  }
-
-  const metadata = JSON.parse(result.stdout);
-  const packagesById = new Map(
-    metadata.packages.map((dependency) => [dependency.id, dependency]),
-  );
-  const nodesById = new Map(
-    metadata.resolve.nodes.map((node) => [node.id, node]),
-  );
-  const pending = metadata.workspace_members.filter((id) => {
-    const dependency = packagesById.get(id);
-    return (
-      dependency !== undefined && internalCargoPackages.has(dependency.name)
-    );
-  });
-  if (pending.length === 0) {
-    throw new Error(
-      `cargo metadata in ${directory} contains no Suprnova Live workspace package`,
-    );
-  }
-
-  const reachable = new Set();
-  while (pending.length > 0) {
-    const id = pending.pop();
-    if (reachable.has(id)) continue;
-    reachable.add(id);
-    const node = nodesById.get(id);
-    if (node === undefined) {
-      throw new Error(`cargo metadata resolve graph is missing ${id}`);
-    }
-    pending.push(...node.dependencies);
-  }
-
-  return [...reachable]
-    .map((id) => packagesById.get(id))
-    .filter((dependency) => dependency !== undefined)
+function cargoPackagesFrom(directory, rootPackageNames) {
+  const metadata = loadLockedCargoMetadata(directory);
+  return cargoDependencyClosure(metadata, rootPackageNames)
     .filter((dependency) => !internalCargoPackages.has(dependency.name))
     .map((dependency) => ({
       ecosystem: "Cargo",
@@ -123,9 +91,12 @@ function cargoPackagesFrom(directory) {
 
 function cargoPackages() {
   const packages = [
-    ...cargoPackagesFrom(workspaceRoot),
-    ...cargoPackagesFrom(resolve(liveRoot, "fuzz")),
-    ...cargoPackagesFrom(resolve(liveRoot, "tests/fixtures/compile")),
+    ...cargoPackagesFrom(workspaceRoot, liveWorkspaceCargoRoots),
+    ...cargoPackagesFrom(resolve(liveRoot, "fuzz"), fuzzCargoRoots),
+    ...cargoPackagesFrom(
+      resolve(liveRoot, "tests/fixtures/compile"),
+      compileFixtureCargoRoots,
+    ),
   ];
   const unique = new Map();
   for (const dependency of packages) {
@@ -300,11 +271,18 @@ function renderInventory() {
 
   return `# Third-party licenses
 
-Suprnova Live is licensed under MIT. This generated inventory covers every
-resolved third-party package in the root, fuzz, compile-fixture, and npm
-lockfiles. Regenerate it with
+Suprnova Live is licensed under MIT. For Cargo, this generated inventory covers
+the conservative dependency closure reachable from the four Live package roots
+in the shared Suprnova resolution, plus the separately resolved fuzz and compile
+fixture roots. Unrelated parent-workspace roots and their unreachable
+dependencies are excluded. Regenerate it with
 \`rtk node scripts/generate-license-inventory.mjs\`; the unattended gate uses
 \`--check\` to reject lockfile or license drift.
+
+Cargo feature unification is shared-workspace-wide, so this conservative closure
+can include optional dependency edges enabled elsewhere in the workspace. A
+\`Workspace resolved\` row records reachability in those resolved graphs; it does
+not claim exact \`cargo tree\` use by every Live build.
 
 For npm, usage is derived transitively from the exact root dependency graph.
 Production runtime takes precedence over production build, test-only, and

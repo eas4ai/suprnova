@@ -1,10 +1,17 @@
 # Third-party licenses
 
-Suprnova Live is licensed under MIT. This generated inventory covers every
-resolved third-party package in the root, fuzz, compile-fixture, and npm
-lockfiles. Regenerate it with
+Suprnova Live is licensed under MIT. For Cargo, this generated inventory covers
+the conservative dependency closure reachable from the four Live package roots
+in the shared Suprnova resolution, plus the separately resolved fuzz and compile
+fixture roots. Unrelated parent-workspace roots and their unreachable
+dependencies are excluded. Regenerate it with
 `rtk node scripts/generate-license-inventory.mjs`; the unattended gate uses
 `--check` to reject lockfile or license drift.
+
+Cargo feature unification is shared-workspace-wide, so this conservative closure
+can include optional dependency edges enabled elsewhere in the workspace. A
+`Workspace resolved` row records reachability in those resolved graphs; it does
+not claim exact `cargo tree` use by every Live build.
 
 For npm, usage is derived transitively from the exact root dependency graph.
 Production runtime takes precedence over production build, test-only, and

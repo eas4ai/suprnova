@@ -317,6 +317,7 @@ write_expected_gate_commands() {
         $'node\tscripts/check-implementation-docs.mjs' \
         $'node\tscripts/check-specs.mjs' \
         $'git\tdiff\t--check' \
+        $'node\ttests/license_inventory_graph.mjs' \
         $'node\tscripts/generate-license-inventory.mjs\t--check' \
         $'cargo\tfmt\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--\t--check' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
@@ -574,6 +575,12 @@ require_text "full async release workload budget" "npm run budget:browser -- --r
 require_text "workspace MSRV check" 'cargo +"${workspace_msrv}" check'
 require_text "compile-fixture MSRV check" 'live_root}/tests/fixtures/compile/Cargo.toml'
 require_text "license gate" "node scripts/generate-license-inventory.mjs --check"
+require_text "license inventory graph contract" \
+    "node tests/license_inventory_graph.mjs"
+require_order "license inventory graph contract" \
+    "node tests/license_inventory_graph.mjs" \
+    "generated license inventory check" \
+    "node scripts/generate-license-inventory.mjs --check"
 require_text "correctness-delay scanner phase" 'phase "correctness-delay scanner"'
 require_text "correctness-delay Rust parser build" \
     "--bin correctness-delay-rust-parser"
@@ -636,6 +643,10 @@ require_file "upload media-header fuzz target" "fuzz/fuzz_targets/upload_media_h
 require_file "async envelope fuzz target" "fuzz/fuzz_targets/async_envelope.rs"
 require_file "async sequence fuzz target" "fuzz/fuzz_targets/async_sequence.rs"
 require_file "correctness-delay scanner" "scripts/check-correctness-delays.mjs"
+require_file "license inventory Cargo graph module" \
+    "scripts/license-inventory-cargo.mjs"
+require_file "license inventory Cargo graph contract" \
+    "tests/license_inventory_graph.mjs"
 require_file "correctness-delay scanner mutation tests" \
     "tests/correctness_delay_scanner.mjs"
 require_file "compiler-resolved correctness-delay mutation tests" \
