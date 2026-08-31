@@ -50,6 +50,25 @@ fn cache_key_normalizes_scope_order_and_duplicates() {
 }
 
 #[test]
+fn cache_key_record_id_encoding_is_stable() {
+    let key = M2MCacheKey::new(
+        "provider:one",
+        "client:two",
+        vec![
+            "write:reports".to_owned(),
+            "read".to_owned(),
+            "write:reports".to_owned(),
+        ],
+    );
+
+    assert_eq!(
+        key.record_id(),
+        "m2m:v1:3c76b5d317de5dc2bb3e08203e3a4b8c126cc9b2cfd51b95484d94ec6a516d04",
+        "the persisted cache identity encoding must remain stable"
+    );
+}
+
+#[test]
 fn cache_key_differs_by_provider_client_or_scope_set() {
     let base = M2MCacheKey::new("m2m", "client", vec!["read".to_owned()]);
     let other_provider = M2MCacheKey::new("other", "client", vec!["read".to_owned()]);
