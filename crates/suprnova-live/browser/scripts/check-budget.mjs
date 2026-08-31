@@ -14,10 +14,12 @@ const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v
 const artifactSizeBaselinePath = resolve(browserRoot, "benchmarks/baselines/artifact-size-v1.json");
 const artifactSizeBaselineRepositoryPath = "browser/benchmarks/baselines/artifact-size-v1.json";
 const MAX_INVALID_BASELINE_OBJECTS = 8;
+const MAX_GRAPH_PATHS = 512;
 const MAX_PROVENANCE_COMMITS = 256;
 const MAX_PROVENANCE_PARENTS = 8;
-const MAX_PROVENANCE_PATHS = 128;
 const MAX_REPOSITORY_PATH_BYTES = 1_024;
+const MAX_SOURCE_COMMIT_PATHS = 384;
+const MAX_SOURCE_PATH_OUTPUT_BYTES = 1024 * 1024;
 const MAX_COMMITTED_FILE_BYTES = 1024 * 1024;
 const MAX_COMMITTED_OBJECT_QUERIES = 768;
 const MAX_COMMITTED_OBJECT_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -211,34 +213,69 @@ function repositoryPathCandidates(prefix, recordedPath) {
   return Object.freeze([...new Set(candidates)]);
 }
 
-function graphNodes(output, allowBoundary) {
-  const lines = output.split("\n").filter(Boolean);
-  if (lines.length < 1 || lines.length > MAX_PROVENANCE_COMMITS) {
+function sourceCommitPaths(repositoryRoot, sourceCommits) {
+  const commits = [...new Set(sourceCommits)].sort();
+  if (commits.length < 1) return Object.freeze([]);
+  let output;
+  try {
+    output = execFileSync(
+      "git",
+      [
+        "-C",
+        repositoryRoot,
+        "show",
+        "-m",
+        "--format=",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        ...commits,
+      ],
+      {
+        encoding: null,
+        maxBuffer: MAX_SOURCE_PATH_OUTPUT_BYTES,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+  } catch (error) {
+    throw new Error("artifact_size_baseline_provenance_invalid", { cause: error });
+  }
+  if (!Buffer.isBuffer(output)) {
     throw new Error("artifact_size_baseline_provenance_invalid");
   }
-  const nodes = new Map();
-  for (const line of lines) {
-    const boundary = line.startsWith("-");
-    const fields = (boundary ? line.slice(1) : line).split(" ");
-    if (
-      (!allowBoundary && boundary) ||
-      fields.length < 1 ||
-      fields.length > MAX_PROVENANCE_PARENTS + 1 ||
-      fields.some((commit) => !/^[0-9a-f]{40}$/u.test(commit)) ||
-      nodes.has(fields[0])
-    ) {
+  const paths = new Set();
+  let offset = 0;
+  while (offset < output.length) {
+    const pathEnd = output.indexOf(0, offset);
+    if (pathEnd < 0 || pathEnd === offset) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
-    nodes.set(
-      fields[0],
-      Object.freeze({ boundary, parents: Object.freeze(boundary ? [] : fields.slice(1)) }),
-    );
+    const encoded = output.subarray(offset, pathEnd);
+    const repositoryPath = encoded.toString("utf8");
+    if (!Buffer.from(repositoryPath, "utf8").equals(encoded)) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+    paths.add(boundedRepositoryPath(repositoryPath));
+    if (paths.size > MAX_SOURCE_COMMIT_PATHS) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+    offset = pathEnd + 1;
   }
-  return nodes;
+  if (paths.size < 1) {
+    throw new Error("artifact_size_baseline_provenance_invalid");
+  }
+  return Object.freeze([...paths].sort());
 }
 
-function provenanceGraph(repositoryRoot, repositoryPaths, sourceAnchor) {
-  const pathOutput = git(repositoryRoot, [
+function provenanceGraph(repositoryRoot, repositoryPaths) {
+  if (
+    repositoryPaths.length < 1 ||
+    repositoryPaths.length > MAX_GRAPH_PATHS ||
+    new Set(repositoryPaths).size !== repositoryPaths.length
+  ) {
+    throw new Error("artifact_size_baseline_provenance_invalid");
+  }
+  const output = git(repositoryRoot, [
     "rev-list",
     "--parents",
     "--full-history",
@@ -249,27 +286,24 @@ function provenanceGraph(repositoryRoot, repositoryPaths, sourceAnchor) {
     "--",
     ...repositoryPaths,
   ]);
-  const nodes = graphNodes(pathOutput, false);
-  if (sourceAnchor !== null) {
-    const sourceOutput = git(repositoryRoot, [
-      "rev-list",
-      "--parents",
-      "--ancestry-path",
-      "--boundary",
-      `--max-count=${String(MAX_PROVENANCE_COMMITS + 1)}`,
-      "--topo-order",
-      "HEAD",
-      `^${sourceAnchor}`,
-    ]);
-    for (const [commit, sourceNode] of graphNodes(sourceOutput, true)) {
-      const existing = nodes.get(commit);
-      if (existing === undefined || !sourceNode.boundary) nodes.set(commit, sourceNode);
-    }
-  }
-  if (nodes.size > MAX_PROVENANCE_COMMITS) {
+  const lines = output.split("\n").filter(Boolean);
+  if (lines.length < 1 || lines.length > MAX_PROVENANCE_COMMITS) {
     throw new Error("artifact_size_baseline_provenance_invalid");
   }
-  for (const { parents } of nodes.values()) {
+  const nodes = new Map();
+  for (const line of lines) {
+    const fields = line.split(" ");
+    if (
+      fields.length < 1 ||
+      fields.length > MAX_PROVENANCE_PARENTS + 1 ||
+      fields.some((commit) => !/^[0-9a-f]{40}$/u.test(commit)) ||
+      nodes.has(fields[0])
+    ) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+    nodes.set(fields[0], Object.freeze(fields.slice(1)));
+  }
+  for (const parents of nodes.values()) {
     if (parents.some((parent) => !nodes.has(parent))) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
@@ -284,11 +318,11 @@ function provenanceGraph(repositoryRoot, repositoryPaths, sourceAnchor) {
     }
     visiting.add(commit);
     const result = new Set([commit]);
-    const node = nodes.get(commit);
-    if (node === undefined) {
+    const parents = nodes.get(commit);
+    if (parents === undefined) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
-    for (const parent of node.parents) {
+    for (const parent of parents) {
       for (const ancestor of collectAncestors(parent)) result.add(ancestor);
     }
     visiting.delete(commit);
@@ -307,11 +341,11 @@ function provenanceGraph(repositoryRoot, repositoryPaths, sourceAnchor) {
       return reachable.has(ancestor);
     },
     parents(commit) {
-      const node = nodes.get(commit);
-      if (node === undefined) {
+      const parents = nodes.get(commit);
+      if (parents === undefined) {
         throw new Error("artifact_size_baseline_provenance_invalid");
       }
-      return node.parents;
+      return parents;
     },
     contains(commit) {
       return nodes.has(commit);
@@ -519,15 +553,6 @@ function validateDecisionSource(objects, prefix, entry) {
   }
 }
 
-function retainsHistoryThrough(candidate, expected, entryIndex) {
-  return (
-    candidate.history.length > entryIndex &&
-    expected.history
-      .slice(0, entryIndex + 1)
-      .every((entry, index) => sameEntry(entry, candidate.history[index]))
-  );
-}
-
 export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
   const baseline = validateArtifactSizeBaseline(value);
   const repository = provenanceRepository(repositoryRoot);
@@ -541,14 +566,14 @@ export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
       repositoryPathCandidates(repository.prefix, entry.review.sourceDecisionPath),
     );
   const repositoryPaths = [...new Set([...baselinePaths, ...decisionPaths])].sort();
-  if (repositoryPaths.length < 1 || repositoryPaths.length > MAX_PROVENANCE_PATHS) {
-    throw new Error("artifact_size_baseline_provenance_invalid");
-  }
-  const graph = provenanceGraph(
+  const sourcePaths = sourceCommitPaths(
     repository.topLevel,
-    repositoryPaths,
-    baseline.history[1]?.review.sourceCommit ?? null,
+    baseline.history.slice(1).map((entry) => entry.review.sourceCommit),
   );
+  // Code-only sources stay visible in the simplified path graph without
+  // materializing every unrelated commit between the source and its review.
+  const graphPaths = [...new Set([...repositoryPaths, ...sourcePaths])].sort();
+  const graph = provenanceGraph(repository.topLevel, graphPaths);
   for (const entry of baseline.history.slice(1)) {
     if (!graph.contains(entry.review.sourceCommit)) {
       throw new Error("artifact_size_baseline_provenance_invalid");
@@ -581,17 +606,8 @@ export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
   }
-  for (const [offset, entry] of baseline.history.slice(1).entries()) {
-    const entryIndex = offset + 1;
+  for (const entry of baseline.history.slice(1)) {
     const introduced = introductionForDecision(graph, historical, entry.review.decision);
-    for (const prior of historical) {
-      if (
-        !retainsHistoryThrough(prior.baseline, baseline, entryIndex) &&
-        !graph.isAncestor(prior.commit, introduced.commit)
-      ) {
-        throw new Error("artifact_size_baseline_provenance_invalid");
-      }
-    }
     if (
       introduced.commit === entry.review.sourceCommit ||
       !graph.isAncestor(entry.review.sourceCommit, introduced.commit)

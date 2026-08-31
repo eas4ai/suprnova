@@ -593,6 +593,112 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
+  it("ignores more than 256 unrelated commits after a valid reviewed baseline", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      for (let index = 0; index < 257; index += 1) {
+        runFixtureGit(
+          fixture.repository,
+          "commit",
+          "--allow-empty",
+          "-qm",
+          `unrelated empty commit ${String(index + 1)}`,
+        );
+      }
+      const validate = await provenanceValidator();
+
+      expect(validate(fixture.reviewed, fixture.repository)).toEqual(fixture.reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("accepts a later code-only source from a side branch predating the first source", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-side-source-"));
+    const baselineRelative = "browser/benchmarks/baselines/artifact-size-v1.json";
+    const decisionRelative = "docs/specs/suprnova-live/19-developer-tooling-and-testing.md";
+    try {
+      await mkdir(join(repository, "browser/benchmarks/baselines"), { recursive: true });
+      await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+      );
+      await writeFile(join(repository, decisionRelative), "# Decisions\n");
+      runFixtureGit(repository, "init", "-q");
+      runFixtureGit(repository, "config", "user.email", "fixture@example.test");
+      runFixtureGit(repository, "config", "user.name", "Fixture");
+      runFixtureGit(repository, "add", ".");
+      runFixtureGit(repository, "commit", "-qm", "record anchor baseline");
+
+      const firstDecision = "iteration-005-mainline-source";
+      await writeFile(
+        join(repository, decisionRelative),
+        `# Decisions\n- 2026-08-30 -- Decision ID: ${firstDecision}.\n`,
+      );
+      runFixtureGit(repository, "add", decisionRelative);
+      runFixtureGit(repository, "commit", "-qm", "record first review decision");
+      const mainBranch = runFixtureGit(repository, "branch", "--show-current");
+      runFixtureGit(repository, "branch", "later-side-source");
+
+      await mkdir(join(repository, "src"), { recursive: true });
+      await writeFile(join(repository, "src/main.rs"), "pub fn mainline_reviewed() {}\n");
+      runFixtureGit(repository, "add", "src/main.rs");
+      runFixtureGit(repository, "commit", "-qm", "implement first reviewed source");
+      const firstSource = runFixtureGit(repository, "rev-parse", "HEAD");
+      const firstReviewed = appendReviewedBaseline(
+        TASK6_ONLY_ARTIFACT_BASELINE,
+        firstSource,
+        firstDecision,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(firstReviewed, null, 2)}\n`,
+      );
+      runFixtureGit(repository, "add", baselineRelative);
+      runFixtureGit(repository, "commit", "-qm", "append first reviewed baseline");
+
+      runFixtureGit(repository, "checkout", "-q", "later-side-source");
+      const secondDecision = "iteration-005-side-branch-source";
+      await writeFile(
+        join(repository, decisionRelative),
+        `# Decisions\n- 2026-08-30 -- Decision ID: ${firstDecision}.\n- 2026-08-30 -- Decision ID: ${secondDecision}.\n`,
+      );
+      runFixtureGit(repository, "add", decisionRelative);
+      runFixtureGit(repository, "commit", "-qm", "record side review decision");
+      await mkdir(join(repository, "src"), { recursive: true });
+      await writeFile(join(repository, "src/side.rs"), "pub fn side_reviewed() {}\n");
+      runFixtureGit(repository, "add", "src/side.rs");
+      runFixtureGit(repository, "commit", "-qm", "implement side reviewed source");
+      const secondSource = runFixtureGit(repository, "rev-parse", "HEAD");
+
+      runFixtureGit(repository, "checkout", "-q", mainBranch);
+      runFixtureGit(
+        repository,
+        "merge",
+        "--no-ff",
+        "-qm",
+        "merge side reviewed source",
+        "later-side-source",
+      );
+      const reviewed = appendReviewedBaseline(
+        firstReviewed,
+        secondSource,
+        secondDecision,
+        "2026-08-30T20:01:00-04:00",
+      );
+      await writeFile(join(repository, baselineRelative), `${JSON.stringify(reviewed, null, 2)}\n`);
+      runFixtureGit(repository, "add", baselineRelative);
+      runFixtureGit(repository, "commit", "-qm", "append side reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(validate(reviewed, repository)).toEqual(reviewed);
+    } finally {
+      await rm(repository, { force: true, recursive: true });
+    }
+  });
+
   it("rejects invalid history even when a later commit restores a valid baseline", async () => {
     const fixture = await createLegacyProvenanceFixture();
     try {
