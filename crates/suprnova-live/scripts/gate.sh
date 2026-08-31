@@ -165,6 +165,10 @@ rtk env CARGO_INCREMENTAL=0 cargo test \
     --all-features
 
 phase "correctness-delay scanner"
+rtk env CARGO_INCREMENTAL=0 cargo build \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live-test-support \
+    --bin correctness-delay-rust-parser
 rtk node tests/correctness_delay_scanner.mjs
 rtk node scripts/check-correctness-delays.mjs
 

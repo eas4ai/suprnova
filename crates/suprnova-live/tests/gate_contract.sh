@@ -340,6 +340,7 @@ write_expected_gate_commands() {
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--test\treference_host\t--\t--test-threads=1' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--no-fail-fast' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--doc\t--all-features' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tbuild\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--bin\tcorrectness-delay-rust-parser' \
         $'node\ttests/correctness_delay_scanner.mjs' \
         $'node\tscripts/check-correctness-delays.mjs' \
         $'npm\trun\tformat:check' \
@@ -574,6 +575,8 @@ require_text "workspace MSRV check" 'cargo +"${workspace_msrv}" check'
 require_text "compile-fixture MSRV check" 'live_root}/tests/fixtures/compile/Cargo.toml'
 require_text "license gate" "node scripts/generate-license-inventory.mjs --check"
 require_text "correctness-delay scanner phase" 'phase "correctness-delay scanner"'
+require_text "correctness-delay Rust parser build" \
+    "--bin correctness-delay-rust-parser"
 require_text "correctness-delay scanner self-tests" \
     "node tests/correctness_delay_scanner.mjs"
 require_text "compiler-resolved correctness-delay self-test" \
@@ -584,6 +587,10 @@ require_text "compiler-resolved fuzz correctness-delay lint" \
     'live_root}/fuzz/Cargo.toml'
 require_text "correctness-delay repository scan" \
     "node scripts/check-correctness-delays.mjs"
+require_order "correctness-delay Rust parser build" \
+    "--bin correctness-delay-rust-parser" \
+    "correctness-delay scanner self-tests" \
+    "node tests/correctness_delay_scanner.mjs"
 require_text "required phase \"U4/16 upload budget\"" 'phase "iteration 004 reduced deterministic budgets"'
 require_text "legacy U4/16 budget phase" 'phase "U4/16 upload framework and browser budget"'
 require_text "legacy async continuity budget phase" 'phase "E100/1K and R100 async continuity budgets"'

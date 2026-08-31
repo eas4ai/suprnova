@@ -16,6 +16,71 @@ const defaultRepositoryRoot = path.resolve(scriptDirectory, "..");
 const allowedCategories = new Set(["fake-clock", "product-timer", "watchdog"]);
 const allowPrefix = "suprnova-correctness-delay-allow:";
 
+export function resolveCargoTargetDirectory(repositoryRoot) {
+  const resolvedRepositoryRoot = path.resolve(repositoryRoot);
+  const gitRoot = spawnSync(
+    "git",
+    ["-C", resolvedRepositoryRoot, "rev-parse", "--show-toplevel"],
+    { encoding: "utf8", maxBuffer: 1024 * 1024 },
+  );
+  if (gitRoot.status !== 0 || gitRoot.error !== undefined) {
+    throw new Error(
+      "cannot resolve the parent Git workspace for the Rust parser",
+    );
+  }
+
+  const workspaceRoot = path.resolve(gitRoot.stdout.trim());
+  const relativeRepositoryRoot = path.relative(
+    workspaceRoot,
+    resolvedRepositoryRoot,
+  );
+  if (
+    relativeRepositoryRoot.startsWith(`..${path.sep}`) ||
+    relativeRepositoryRoot === ".." ||
+    path.isAbsolute(relativeRepositoryRoot)
+  ) {
+    throw new Error("the Live root is outside the parent Git workspace");
+  }
+
+  const metadata = spawnSync(
+    "cargo",
+    [
+      "metadata",
+      "--locked",
+      "--format-version",
+      "1",
+      "--no-deps",
+      "--manifest-path",
+      path.join(workspaceRoot, "Cargo.toml"),
+    ],
+    {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
+  if (metadata.status !== 0 || metadata.error !== undefined) {
+    throw new Error("cannot resolve locked Cargo workspace metadata");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(metadata.stdout);
+  } catch {
+    throw new Error("locked Cargo workspace metadata is not valid JSON");
+  }
+  if (
+    typeof parsed.workspace_root !== "string" ||
+    path.resolve(parsed.workspace_root) !== workspaceRoot ||
+    typeof parsed.target_directory !== "string"
+  ) {
+    throw new Error(
+      "locked Cargo metadata does not describe the parent workspace",
+    );
+  }
+  return path.resolve(parsed.target_directory);
+}
+
 function allowPolicy(comments, violations) {
   const failures = [];
   const allows = [];
@@ -73,11 +138,19 @@ export function parseRustCandidates(repositoryRoot, rustCandidates) {
     process.platform === "win32"
       ? "correctness-delay-rust-parser.exe"
       : "correctness-delay-rust-parser";
-  const parserPath = path.join(
-    process.env.CARGO_TARGET_DIR ?? path.join(repositoryRoot, "target"),
-    "debug",
-    executableName,
-  );
+  let targetDirectory;
+  try {
+    targetDirectory = resolveCargoTargetDirectory(repositoryRoot);
+  } catch {
+    return [
+      {
+        filePath: path.resolve(repositoryRoot),
+        kind: "cargo-target-unavailable",
+        line: 1,
+      },
+    ];
+  }
+  const parserPath = path.join(targetDirectory, "debug", executableName);
   if (!fs.existsSync(parserPath)) {
     return [{ filePath: parserPath, kind: "rust-parser-unavailable", line: 1 }];
   }

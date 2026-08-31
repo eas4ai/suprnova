@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   parseRustCandidates,
+  resolveCargoTargetDirectory,
   scanRepository,
   scanSource,
 } from "../scripts/check-correctness-delays.mjs";
@@ -455,6 +456,20 @@ for (const malformed of [
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
+);
+const workspaceRoot = path.resolve(repositoryRoot, "..", "..");
+const expectedTargetDirectory = process.env.CARGO_TARGET_DIR
+  ? path.resolve(workspaceRoot, process.env.CARGO_TARGET_DIR)
+  : path.join(workspaceRoot, "target");
+assert.equal(
+  resolveCargoTargetDirectory(repositoryRoot),
+  expectedTargetDirectory,
+  "the integrated scanner resolves the parent Cargo workspace target directory",
+);
+assert.notEqual(
+  resolveCargoTargetDirectory(repositoryRoot),
+  path.join(repositoryRoot, "target"),
+  "the integrated scanner must not fall back to a nested Live target directory",
 );
 assert.deepEqual(
   parseRustCandidates(repositoryRoot, [
