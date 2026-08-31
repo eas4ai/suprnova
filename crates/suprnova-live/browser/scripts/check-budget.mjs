@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -14,13 +14,12 @@ const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v1.json");
 const artifactSizeBaselinePath = resolve(browserRoot, "benchmarks/baselines/artifact-size-v1.json");
 const artifactSizeBaselineRepositoryPath = "browser/benchmarks/baselines/artifact-size-v1.json";
+const MAX_ARTIFACT_BASELINE_HISTORY = 64;
 const MAX_INVALID_BASELINE_OBJECTS = 8;
 const MAX_GRAPH_PATHS = 512;
 const MAX_PROVENANCE_COMMITS = 256;
 const MAX_PROVENANCE_PARENTS = 8;
 const MAX_REPOSITORY_PATH_BYTES = 1_024;
-const MAX_SOURCE_COMMIT_PATHS = 384;
-const MAX_SOURCE_PATH_OUTPUT_BYTES = 1024 * 1024;
 const MAX_COMMITTED_FILE_BYTES = 1024 * 1024;
 const MAX_COMMITTED_OBJECT_QUERIES = 768;
 const MAX_COMMITTED_OBJECT_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -84,7 +83,7 @@ export function validateArtifactSizeBaseline(value) {
       value.methodology.deterministic !== true ||
       !Array.isArray(value.history) ||
       value.history.length < 1 ||
-      value.history.length > 64
+      value.history.length > MAX_ARTIFACT_BASELINE_HISTORY
     ) {
       throw new Error("artifact_size_baseline_invalid");
     }
@@ -228,60 +227,6 @@ function repositoryPathCandidates(prefix, recordedPath) {
   return Object.freeze([...new Set(candidates)]);
 }
 
-function sourceCommitPaths(repositoryRoot, sourceCommits) {
-  const commits = [...new Set(sourceCommits)].sort();
-  if (commits.length < 1) return Object.freeze([]);
-  let output;
-  try {
-    output = execFileSync(
-      "git",
-      [
-        "-C",
-        repositoryRoot,
-        "show",
-        "-m",
-        "--format=",
-        "--name-only",
-        "--no-renames",
-        "-z",
-        ...commits,
-      ],
-      {
-        encoding: null,
-        maxBuffer: MAX_SOURCE_PATH_OUTPUT_BYTES,
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
-  } catch (error) {
-    throw new Error("artifact_size_baseline_provenance_invalid", { cause: error });
-  }
-  if (!Buffer.isBuffer(output)) {
-    throw new Error("artifact_size_baseline_provenance_invalid");
-  }
-  const paths = new Set();
-  let offset = 0;
-  while (offset < output.length) {
-    const pathEnd = output.indexOf(0, offset);
-    if (pathEnd < 0 || pathEnd === offset) {
-      throw new Error("artifact_size_baseline_provenance_invalid");
-    }
-    const encoded = output.subarray(offset, pathEnd);
-    const repositoryPath = encoded.toString("utf8");
-    if (!Buffer.from(repositoryPath, "utf8").equals(encoded)) {
-      throw new Error("artifact_size_baseline_provenance_invalid");
-    }
-    paths.add(boundedRepositoryPath(repositoryPath));
-    if (paths.size > MAX_SOURCE_COMMIT_PATHS) {
-      throw new Error("artifact_size_baseline_provenance_invalid");
-    }
-    offset = pathEnd + 1;
-  }
-  if (paths.size < 1) {
-    throw new Error("artifact_size_baseline_provenance_invalid");
-  }
-  return Object.freeze([...paths].sort());
-}
-
 function provenanceGraph(repositoryRoot, repositoryPaths, tips) {
   const revisions = [...new Set(tips)].sort();
   if (
@@ -371,6 +316,27 @@ function provenanceGraph(repositoryRoot, repositoryPaths, tips) {
       return nodes.has(commit);
     },
   });
+}
+
+function gitIsAncestor(repositoryRoot, ancestor, descendant) {
+  const result = spawnSync(
+    "git",
+    ["-C", repositoryRoot, "merge-base", "--is-ancestor", ancestor, descendant],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+    },
+  );
+  if (
+    result.error !== undefined ||
+    result.signal !== null ||
+    (result.status !== 0 && result.status !== 1)
+  ) {
+    throw new Error("artifact_size_baseline_provenance_invalid", {
+      ...(result.error === undefined ? {} : { cause: result.error }),
+    });
+  }
+  return result.status === 0;
 }
 
 function committedObjects(repositoryRoot, requestedQueries) {
@@ -586,10 +552,6 @@ export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
       repositoryPathCandidates(repository.prefix, entry.review.sourceDecisionPath),
     );
   const repositoryPaths = [...new Set([...baselinePaths, ...decisionPaths])].sort();
-  const sourcePaths = sourceCommitPaths(
-    repository.topLevel,
-    baseline.history.slice(1).map((entry) => entry.review.sourceCommit),
-  );
   const graph = provenanceGraph(repository.topLevel, repositoryPaths, ["HEAD"]);
   const queries = [
     ...baselinePaths.map((repositoryPath) => `HEAD:${repositoryPath}`),
@@ -624,23 +586,23 @@ export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
       introduced: introductionForDecision(graph, historical, entry.review.decision),
     }),
   );
-  const sourceGraphPaths = [...new Set([...baselinePaths, ...sourcePaths])].sort();
-  const sourceGraph =
-    reviewed.length === 0
-      ? null
-      : provenanceGraph(
-          repository.topLevel,
-          sourceGraphPaths,
-          reviewed.map(({ introduced }) => introduced.commit),
-        );
+  const ancestry = new Map();
   for (const { entry, introduced } of reviewed) {
-    if (
-      sourceGraph === null ||
-      !sourceGraph.contains(entry.review.sourceCommit) ||
-      !sourceGraph.contains(introduced.commit) ||
-      introduced.commit === entry.review.sourceCommit ||
-      !sourceGraph.isAncestor(entry.review.sourceCommit, introduced.commit)
-    ) {
+    const pair = `${entry.review.sourceCommit}:${introduced.commit}`;
+    let accepted = ancestry.get(pair);
+    if (accepted === undefined) {
+      // Git revision walks accept one shared revision/path domain, not independent
+      // source/introduction pairs. Keep those proofs exact and mechanically bound
+      // their processes to the schema's 63 reviewed entries, deduplicating repeats.
+      if (ancestry.size >= MAX_ARTIFACT_BASELINE_HISTORY - 1) {
+        throw new Error("artifact_size_baseline_provenance_invalid");
+      }
+      accepted =
+        introduced.commit !== entry.review.sourceCommit &&
+        gitIsAncestor(repository.topLevel, entry.review.sourceCommit, introduced.commit);
+      ancestry.set(pair, accepted);
+    }
+    if (!accepted) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
     validateDecisionSource(objects, repository.prefix, entry);

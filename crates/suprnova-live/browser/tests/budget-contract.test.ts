@@ -693,6 +693,87 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
+  it("keeps each reviewed source path paired with its own introduction", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-source-pairs-"));
+    const baselineRelative = "browser/benchmarks/baselines/artifact-size-v1.json";
+    const decisionRelative = "docs/specs/suprnova-live/19-developer-tooling-and-testing.md";
+    const sourceA = "src/reviewed-a.rs";
+    const sourceB = "src/reviewed-b.rs";
+    const decisionA = "iteration-005-reviewed-source-a";
+    const decisionB = "iteration-005-reviewed-source-b";
+    try {
+      await mkdir(join(repository, "browser/benchmarks/baselines"), { recursive: true });
+      await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
+      await mkdir(join(repository, "src"), { recursive: true });
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+      );
+      await writeFile(join(repository, decisionRelative), "# Decisions\n");
+      runFixtureGit(repository, "init", "-q");
+      runFixtureGit(repository, "config", "user.email", "fixture@example.test");
+      runFixtureGit(repository, "config", "user.name", "Fixture");
+      runFixtureGit(repository, "add", ".");
+      runFixtureGit(repository, "commit", "-qm", "record anchor baseline");
+
+      await writeFile(
+        join(repository, decisionRelative),
+        `# Decisions\n- 2026-08-30 -- Decision ID: ${decisionA}.\n`,
+      );
+      runFixtureGit(repository, "add", decisionRelative);
+      runFixtureGit(repository, "commit", "-qm", "record decision A");
+      await writeFile(join(repository, sourceA), "reviewed source A\n");
+      runFixtureGit(repository, "add", sourceA);
+      runFixtureGit(repository, "commit", "-qm", "record source A");
+      const sourceCommitA = runFixtureGit(repository, "rev-parse", "HEAD");
+      const reviewedA = appendReviewedBaseline(
+        TASK6_ONLY_ARTIFACT_BASELINE,
+        sourceCommitA,
+        decisionA,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(reviewedA, null, 2)}\n`,
+      );
+      runFixtureGit(repository, "add", baselineRelative);
+      runFixtureGit(repository, "commit", "-qm", "append reviewed baseline A");
+
+      for (let index = 0; index < 257; index += 1) {
+        await writeFile(join(repository, sourceA), `later A revision ${String(index + 1)}\n`);
+        runFixtureGit(repository, "add", sourceA);
+        runFixtureGit(repository, "commit", "-qm", `later A edit ${String(index + 1)}`);
+      }
+      await writeFile(
+        join(repository, decisionRelative),
+        `# Decisions\n- 2026-08-30 -- Decision ID: ${decisionA}.\n- 2026-08-30 -- Decision ID: ${decisionB}.\n`,
+      );
+      runFixtureGit(repository, "add", decisionRelative);
+      runFixtureGit(repository, "commit", "-qm", "record decision B");
+      await writeFile(join(repository, sourceB), "reviewed source B\n");
+      runFixtureGit(repository, "add", sourceB);
+      runFixtureGit(repository, "commit", "-qm", "record source B");
+      const sourceCommitB = runFixtureGit(repository, "rev-parse", "HEAD");
+      const reviewedB = appendReviewedBaseline(
+        reviewedA,
+        sourceCommitB,
+        decisionB,
+        "2026-08-30T21:00:00-04:00",
+      );
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(reviewedB, null, 2)}\n`,
+      );
+      runFixtureGit(repository, "add", baselineRelative);
+      runFixtureGit(repository, "commit", "-qm", "append reviewed baseline B");
+      const validate = await provenanceValidator();
+
+      expect(validate(reviewedB, repository)).toEqual(reviewedB);
+    } finally {
+      await rm(repository, { force: true, recursive: true });
+    }
+  });
+
   it.each([
     ["literal wildcard", "*", "unrelated.txt", 257],
     ["literal bracket expression", "[abc]", "a", 257],
@@ -974,7 +1055,7 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
-  it("bounds Git process calls independently of reviewed decision count", async () => {
+  it("deduplicates Git ancestry processes for identical source-introduction pairs", async () => {
     const fixture = await createLegacyProvenanceFixture();
     try {
       const decisions = Array.from(
