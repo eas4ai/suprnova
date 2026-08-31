@@ -7,11 +7,10 @@
 //! the request boundary (`handle_request`), alongside the Inertia flash
 //! bag and the SSR-disable flag.
 //!
-//! This layer is **guard-agnostic on purpose**. Both the session guard
-//! and the (stateless) token guard resolve through it, so
-//! [`Guard::set_user`](super::Guard::set_user), `once`, and
-//! [`Guard::has_user`](super::Guard::has_user) work for token-only
-//! requests that never install `SessionMiddleware`.
+//! The generic current-user slot supports session guards and the static
+//! [`crate::Auth`] facade. Bearer credentials also carry explicit provenance
+//! in separate fields so a web session or its cached user can never satisfy a
+//! [`TokenGuard`](super::TokenGuard).
 //!
 //! It serves three jobs:
 //!
@@ -21,13 +20,11 @@
 //!    don't re-query the provider - closing a divergence where the old
 //!    `Auth::user()` re-queried on every call). `current_user_id` feeds
 //!    `Auth::id()` so the static facade sees `once`/`set_user`.
-//! 2. **Id-only slot** - the authenticated identifier when only the id is
-//!    known, not a resolved [`Authenticatable`]. Set by
-//!    `BearerTokenMiddleware` after it validates a token, so
-//!    `Auth::check()`/`Auth::id()` work for token-only requests that never
-//!    install `SessionMiddleware` - without forcing a provider lookup on
-//!    every request. A later fully-resolved current user still wins; see
-//!    `current_user_id`.
+//! 2. **Bearer provenance** - the bearer-authenticated id and optional
+//!    resolved user. `BearerTokenMiddleware` sets the id after validating a
+//!    token; `TokenGuard` resolves and caches the full user lazily. Both
+//!    setters mirror into the generic slots so token-only `Auth::id()` and
+//!    `AuthMiddleware` behavior stays unchanged.
 //! 3. **Via-remember flag** - whether the current user was
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active
@@ -35,12 +32,9 @@
 //!
 //! # Deliberate v1 divergence
 //!
-//! A single current-user slot means `Auth::guard("api").user()` and
-//! `Auth::guard("web").user()` within the *same* request resolve to the
-//! same cached user. Laravel caches per-guard. Almost no application
-//! mixes guards within one request, so v1 keeps the single slot;
-//! per-guard caching can be layered on later without changing this
-//! surface.
+//! Session guards still share one generic current-user slot. Laravel caches
+//! per guard. Bearer identity is the exception because allowing a web
+//! principal to satisfy a token guard crosses an authentication boundary.
 
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +54,10 @@ struct AuthRequestState {
     /// resolves and caches the full user lazily, so this slot exists to
     /// carry the id until something actually needs the user.
     current_user_id: Option<String>,
+    /// The user resolved specifically from bearer-token provenance.
+    bearer_user: Option<Arc<dyn Authenticatable>>,
+    /// The identifier validated by bearer-token middleware.
+    bearer_user_id: Option<String>,
     /// Whether the current user came from a remember-me cookie this
     /// request rather than an active session.
     via_remember: bool,
@@ -128,14 +126,79 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
     feature = "database-postgres",
     feature = "database-mysql"
 ))]
-pub(crate) fn set_current_user_id(id: impl Into<String>) {
+pub(crate) fn set_bearer_user_id(id: impl Into<String>) {
     let id = id.into();
     let _ = AUTH_STATE.try_with(|state| {
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .current_user_id = Some(id);
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.bearer_user_id.as_deref() != Some(id.as_str()) {
+            let current_user_is_bearer = match (&guard.current_user, &guard.bearer_user) {
+                (Some(current_user), Some(bearer_user)) => Arc::ptr_eq(current_user, bearer_user),
+                _ => false,
+            };
+            if current_user_is_bearer {
+                guard.current_user = None;
+            }
+            guard.bearer_user = None;
+        }
+        guard.bearer_user_id = Some(id.clone());
+        guard.current_user_id = Some(id);
     });
+}
+
+/// The identifier validated from a bearer token, if any.
+pub(crate) fn bearer_user_id() -> Option<String> {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .bearer_user_id
+                .clone()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Cache a user resolved specifically through bearer authentication.
+///
+/// The generic mirrors preserve token-only [`crate::Auth`] facade behavior
+/// without allowing generic web identity to flow back into `TokenGuard`.
+pub(crate) fn set_bearer_user(user: Arc<dyn Authenticatable>) {
+    let id = user.get_auth_identifier();
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.current_user = Some(user.clone());
+        guard.current_user_id = Some(id.clone());
+        guard.bearer_user = Some(user);
+        guard.bearer_user_id = Some(id);
+    });
+}
+
+/// The user resolved specifically through bearer authentication, if any.
+pub(crate) fn bearer_user() -> Option<Arc<dyn Authenticatable>> {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .bearer_user
+                .clone()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Whether a bearer user has already been resolved for this request.
+pub(crate) fn has_bearer_user() -> bool {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .bearer_user
+                .is_some()
+        })
+        .unwrap_or(false)
 }
 
 /// The current request user's identifier, if one is known.
@@ -163,6 +226,8 @@ pub(crate) fn clear_current_user() {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
         guard.current_user = None;
         guard.current_user_id = None;
+        guard.bearer_user = None;
+        guard.bearer_user_id = None;
     });
 }
 
@@ -247,27 +312,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_current_user_id_round_trips_within_scope() {
+    async fn set_bearer_user_id_mirrors_into_generic_identity() {
         request_state_scope_for_test(async {
             assert_eq!(current_user_id(), None);
+            assert_eq!(bearer_user_id(), None);
 
-            set_current_user_id("usr_only_id");
+            set_bearer_user_id("usr_only_id");
             assert_eq!(current_user_id(), Some("usr_only_id".to_string()));
+            assert_eq!(bearer_user_id(), Some("usr_only_id".to_string()));
         })
         .await;
     }
 
     #[tokio::test]
-    async fn resolved_user_takes_precedence_over_id_only_slot() {
+    async fn set_bearer_user_mirrors_user_and_identifier() {
+        request_state_scope_for_test(async {
+            set_bearer_user(Arc::new(TestUser {
+                id: "bearer-7".into(),
+            }));
+
+            assert_eq!(current_user_id(), Some("bearer-7".to_string()));
+            assert_eq!(bearer_user_id(), Some("bearer-7".to_string()));
+            assert_eq!(
+                bearer_user()
+                    .expect("bearer user is cached")
+                    .get_auth_identifier(),
+                "bearer-7"
+            );
+            assert!(has_bearer_user());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn generic_resolved_user_takes_precedence_in_generic_identity() {
         request_state_scope_for_test(async {
             // The id-only slot is set first, as `BearerTokenMiddleware` would
             // do before any provider lookup.
-            set_current_user_id("id-only-99");
+            set_bearer_user_id("id-only-99");
             assert_eq!(current_user_id(), Some("id-only-99".to_string()));
 
-            // A later `set_current_user` - e.g. `TokenGuard::user()` resolving
-            // and caching the full user - must win, per `current_user_id`'s
-            // documented precedence.
+            // A later generic user resolution, such as a web guard lookup,
+            // still wins in the generic facade view. Bearer-specific readers
+            // continue to use the separate provenance fields.
             set_current_user(Arc::new(TestUser {
                 id: "resolved-7".into(),
             }));
@@ -277,17 +364,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_current_user_clears_the_id_only_slot() {
+    async fn clear_current_user_clears_bearer_provenance() {
         request_state_scope_for_test(async {
-            set_current_user_id("usr_to_clear");
+            set_bearer_user(Arc::new(TestUser {
+                id: "usr_to_clear".into(),
+            }));
             assert_eq!(current_user_id(), Some("usr_to_clear".to_string()));
+            assert_eq!(bearer_user_id(), Some("usr_to_clear".to_string()));
+            assert!(has_bearer_user());
 
             clear_current_user();
 
-            // A request that only ever set the id-only slot (bearer-token
-            // auth with no SessionMiddleware, for example) must not keep
-            // reporting authenticated after logout.
+            // Logout must not leave either the generic mirrors or the
+            // bearer-specific provenance authenticated.
             assert_eq!(current_user_id(), None);
+            assert_eq!(bearer_user_id(), None);
+            assert!(bearer_user().is_none());
+            assert!(!has_bearer_user());
         })
         .await;
     }
@@ -308,11 +401,17 @@ mod tests {
         // setters silently no-op rather than panic.
         assert!(current_user().is_none());
         assert_eq!(current_user_id(), None);
+        assert!(bearer_user().is_none());
+        assert_eq!(bearer_user_id(), None);
         assert!(!has_current_user());
+        assert!(!has_bearer_user());
         assert!(!via_remember());
         set_current_user(Arc::new(TestUser { id: "1".into() }));
+        set_bearer_user(Arc::new(TestUser { id: "2".into() }));
+        set_bearer_user_id("3");
         set_via_remember(true);
         assert!(current_user().is_none());
+        assert!(bearer_user().is_none());
         assert!(!via_remember());
     }
 }
