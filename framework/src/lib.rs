@@ -632,6 +632,7 @@ pub use suprnova_macros::scopes;
 pub use suprnova_macros::service;
 pub use suprnova_macros::workflow;
 pub use suprnova_macros::workflow_step;
+pub use suprnova_macros::{view, view_filter};
 // Derives + traits live in separate namespaces, so the `Factory`
 // derive re-export coexists with the `Factory` trait re-export above.
 // Same pattern as `serde::Serialize` (trait + derive same name).

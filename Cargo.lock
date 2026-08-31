@@ -7407,6 +7407,7 @@ dependencies = [
  "aes-gcm",
  "ammonia",
  "argon2",
+ "askama",
  "async-stream",
  "async-trait",
  "aws-credential-types",

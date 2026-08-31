@@ -34,6 +34,7 @@ mod service;
 mod suprnova_test;
 mod test_macro;
 mod utils;
+mod view;
 mod workflow;
 mod workflow_step;
 
@@ -72,6 +73,18 @@ pub fn derive_live_component(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn live(args: TokenStream, item: TokenStream) -> TokenStream {
     live::expand_live(args, item)
+}
+
+/// Declares a checked external-template view through Suprnova's public facade.
+#[proc_macro_attribute]
+pub fn view(args: TokenStream, item: TokenStream) -> TokenStream {
+    view::expand_view(args, item)
+}
+
+/// Declares a custom checked-template filter without importing Askama directly.
+#[proc_macro_attribute]
+pub fn view_filter(args: TokenStream, item: TokenStream) -> TokenStream {
+    view::expand_view_filter(args, item)
 }
 
 /// Derive macro for `Data` - composite derive that produces `Serialize`

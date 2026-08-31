@@ -5,6 +5,10 @@
     reason = "the generated-code ABI is intentionally hidden from application documentation"
 )]
 
+/// Pinned checked-template runtime used only by generated view code.
+#[doc(hidden)]
+pub use askama;
+
 /// Opaque bridge from generated component metadata into the public registry.
 #[doc(hidden)]
 pub struct ComponentRegistration(suprnova_live::registry::ComponentDescriptor);

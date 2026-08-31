@@ -170,10 +170,13 @@ routes. Its conformance adapter proved canonical document and HEAD/conditional
 response intent without claiming actual `suprnova::view`, router, or `Response`
 integration.
 
-Iteration 005 has completed the atomic repository-authority move. Actual
-`suprnova::view`, router, and `Response` adaptation remains Iteration 005 work
-until framework integration tests pass; importing the host-neutral profile does
-not satisfy or prove those adapters.
+Iteration 005 has completed the atomic repository-authority move and now exposes
+checked authoring through Suprnova-owned `view`, `view_filter`, `ViewTemplate`,
+and `ViewRenderer` APIs. Askama remains behind the hidden generated-code ABI,
+and a fail-closed adapter projects validated document response intent into
+Suprnova's HTTP response type. Real router registration and mounted document
+execution remain Iteration 005 Task 5 work; importing or wrapping the
+host-neutral profile alone does not satisfy or prove those routes.
 
 Document and island metadata use different authority. A document render may
 return bounded typed response intent for its host route, while an island render
@@ -193,6 +196,12 @@ metadata through a render result.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Added the downstream-only checked view boundary: application
+  manifests and source name only `suprnova`; generated Askama code uses the
+  hidden Live ABI; the public renderer, template trait, failures, and document
+  response adapter remain Suprnova-owned. Public cache intent stays private at
+  this adapter until RenderCache proves shared-cache safety. Real route
+  registration remains a separate Iteration 005 obligation.
 - 2026-08-31 -- Marked the Iteration 002 view profile as historical after the
   repository-authority cutover. The product/specification move is complete;
   actual `suprnova::view`, router, and `Response` adapters remain required
