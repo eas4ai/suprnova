@@ -2,7 +2,7 @@
 #
 # Shipped files must not point at development artifacts.
 #
-# `.gitignore` lists the working documents this project keeps locally —
+# `.gitignore` lists the working documents this project keeps locally -
 # audit reports, remediation plans, review notes, per-directory assistant
 # guidance. None of them exist in a user's clone, on docs.rs, or in a
 # scaffolded project. A comment, doc comment, or script message citing
@@ -18,7 +18,7 @@
 # Note this file is checked like any other: naming an ignored document
 # here, even to explain the rule, is the thing the rule forbids.
 #
-# The rule is not "never mention them" — it is that published files must
+# The rule is not "never mention them" - it is that published files must
 # stand alone. Say the rule, don't cite where it is written down.
 #
 # Only literal names are checked. A glob entry like `/GROK-*.md` names no
@@ -52,7 +52,7 @@ if [ "$failures" -gt 0 ]; then
     echo "" >&2
     echo "$failures published file(s) cite a development artifact." >&2
     echo "State the rule or the reason inline instead of citing where it" >&2
-    echo "is written down — the reader has no such file." >&2
+    echo "is written down - the reader has no such file." >&2
     exit 1
 fi
 

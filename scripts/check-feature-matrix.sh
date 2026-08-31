@@ -29,7 +29,7 @@ write_tree() {
         --prefix none > "$TMP_DIR/$name.tree"
 }
 
-# The tree a plain `cargo build` resolves — no --no-default-features.
+# The tree a plain `cargo build` resolves - no --no-default-features.
 #
 # Every other tree here deliberately strips defaults to isolate one
 # feature. The RUSTSEC exception in `.cargo/audit.toml` rests on a claim
@@ -347,7 +347,7 @@ assert_absent "$TMP_DIR/minimal.tree" rsa
 # `localization` is default-on, so what these assertions protect is the
 # opt-OUT: a build without the feature must actually shed the Fluent and
 # ICU4X formatting stack, or the gate is theatre. The assertions name
-# specific crates rather than an `icu_` prefix on purpose — `url -> idna ->
+# specific crates rather than an `icu_` prefix on purpose - `url -> idna ->
 # idna_adapter` already puts `icu_normalizer`/`icu_properties` in every
 # tree that carries reqwest, and that arrival has nothing to do with this
 # feature. The crates asserted absent below reach the graph only through
@@ -379,8 +379,8 @@ assert_present "$TMP_DIR/localization.tree" fixed_decimal
 assert_absent "$TMP_DIR/workspace-all-targets.tree" rkyv
 assert_absent "$TMP_DIR/workspace-all-targets.tree" rkyv_derive
 
-# `.cargo/audit.toml` used to ignore four rustls-webpki advisories —
-# RUSTSEC-2026-0049 / -0098 / -0099 / -0104 — on the claim that the
+# `.cargo/audit.toml` used to ignore four rustls-webpki advisories -
+# RUSTSEC-2026-0049 / -0098 / -0099 / -0104 - on the claim that the
 # vulnerable `rustls-webpki 0.102.x` reached the graph only through
 # `pinecone-sdk`, itself behind the off-by-default `vector-pinecone`
 # feature. All four ignores are gone: the Pinecone driver was rewritten
@@ -388,7 +388,7 @@ assert_absent "$TMP_DIR/workspace-all-targets.tree" rkyv_derive
 # taking `tonic 0.11 -> rustls 0.22 -> rustls-webpki 0.102` with it.
 #
 # These assertions are what stop that from silently regressing. Re-adding
-# the SDK — or any dependency dragging `tonic 0.11` back in — fails here
+# the SDK - or any dependency dragging `tonic 0.11` back in - fails here
 # first, while it is still one revert away.
 assert_absent "$TMP_DIR/all-features.tree" pinecone-sdk
 assert_version_absent "$TMP_DIR/all-features.tree" rustls-webpki v0.102
@@ -409,8 +409,8 @@ assert_version_present "$TMP_DIR/all-features.tree" rustls-webpki v0.103
 # Azure / GCS gating (`filesystem-azure`, `filesystem-gcs`)
 # ---------------------------------------------------------------------------
 #
-# The whole point of splitting these out of `filesystem` is that `rsa` —
-# RUSTSEC-2023-0071, the Marvin timing attack, no fixed release upstream —
+# The whole point of splitting these out of `filesystem` is that `rsa` -
+# RUSTSEC-2023-0071, the Marvin timing attack, no fixed release upstream -
 # becomes avoidable. It was not before: `filesystem` meant opendal, and
 # opendal was configured with `services-azblob` and `services-gcs`
 # unconditionally, so the only way to shed `rsa` was to give up storage.
@@ -418,7 +418,7 @@ assert_version_present "$TMP_DIR/all-features.tree" rustls-webpki v0.103
 # The two service crates reach `rsa` by taking `reqsign-core` with its
 # `jwt` feature (`reqsign-core`'s `rsa` is optional behind exactly that),
 # and `reqsign-azure-storage` also depends on `rsa` directly. Asserting on
-# `rsa` rather than on the reqsign crates is deliberate — a future opendal
+# `rsa` rather than on the reqsign crates is deliberate - a future opendal
 # could reshuffle its signers, and it is `rsa`'s presence that the
 # advisory is about.
 assert_present "$TMP_DIR/filesystem.tree" opendal
@@ -430,11 +430,11 @@ assert_prefix_absent "$TMP_DIR/filesystem.tree" reqsign-google
 # `reqsign-aws-v4` takes `reqsign-core` without `jwt`, so S3 never cost an
 # `rsa`. Gating it would break the most-used cloud backend and remove no
 # dependency. If this assertion ever fails, someone has moved S3 behind a
-# feature — check whether they had a reason better than symmetry.
+# feature - check whether they had a reason better than symmetry.
 assert_present "$TMP_DIR/filesystem.tree" opendal-service-s3
 
 # Opting in re-admits the advisory. That is the trade, made knowingly by
-# an app that actually stores objects there — so assert it happens, or the
+# an app that actually stores objects there - so assert it happens, or the
 # features are gating nothing and the split is theatre.
 assert_present "$TMP_DIR/filesystem-azure.tree" rsa
 assert_present "$TMP_DIR/filesystem-azure.tree" opendal-service-azblob

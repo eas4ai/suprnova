@@ -15,7 +15,7 @@
 #   5. Pushes the commit and tag to `origin`.
 #
 # Under the current git-distribution model nothing is published to
-# crates.io — the tag IS the release. See README.md → "Distribution
+# crates.io - the tag IS the release. See README.md → "Distribution
 # model".
 
 set -euo pipefail
@@ -113,8 +113,8 @@ fi
 # and the Releases page sat on a stale version while the tags were correct.
 #
 # Publishing is skipped automatically unless origin is GitHub. That is what
-# keeps scripts/tests/release-normal-smoke.sh — which runs this script against
-# a disposable bare origin — from ever publishing a fake version.
+# keeps scripts/tests/release-normal-smoke.sh - which runs this script against
+# a disposable bare origin - from ever publishing a fake version.
 
 # Prints the CHANGELOG body for a version, header excluded, leading blanks
 # trimmed. Stops at the next `## <version>` heading.
@@ -175,7 +175,7 @@ if [[ $PUBLISH_GITHUB_RELEASE -eq 1 ]]; then
     exit 1
   fi
   if ! gh auth status >/dev/null 2>&1; then
-    echo "error: gh is installed but not authenticated — run 'gh auth login'" >&2
+    echo "error: gh is installed but not authenticated - run 'gh auth login'" >&2
     exit 1
   fi
 
@@ -207,7 +207,7 @@ fi
 
 RELEASE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
 if [[ -n "$RELEASE_STATUS" ]]; then
-  echo "error: working tree is dirty — commit or stash first" >&2
+  echo "error: working tree is dirty - commit or stash first" >&2
   printf '%s\n' "$RELEASE_STATUS" >&2
   exit 1
 fi
@@ -321,7 +321,7 @@ git push --atomic origin main "v$NEW_VERSION"
 # ---------- 7. Publish the GitHub release ----------------------------------
 #
 # The tag is the release for consumers (`tag = "vX.Y.Z"` resolves the moment
-# the push lands), so a failure here does not break downstream — but it does
+# the push lands), so a failure here does not break downstream - but it does
 # leave the Releases page claiming an older version is Latest. Report it as a
 # failure with the exact retry, rather than exiting 0 on a half-done release.
 
@@ -353,7 +353,7 @@ fi
 if [[ $PUBLISH_GITHUB_RELEASE -eq 1 && $RELEASE_PUBLISHED -eq 0 ]]; then
   echo
   echo "error: commit and tag are pushed, but the GitHub release was NOT created" >&2
-  echo "       downstream consumers are unaffected — the tag is what they resolve" >&2
+  echo "       downstream consumers are unaffected - the tag is what they resolve" >&2
   echo "       retry with:" >&2
   echo "         awk -v want=$NEW_VERSION '\$1==\"##\"{if(f)exit;f=(\$2==want);next} f' CHANGELOG.md \\" >&2
   echo "           | gh release create v$NEW_VERSION --title \"Suprnova v$NEW_VERSION\" \\" >&2

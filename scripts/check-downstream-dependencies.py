@@ -22,7 +22,7 @@ REQSIGN_REQUIRED = {
 # Azure and GCS moved behind `filesystem-azure` / `filesystem-gcs` in
 # 0.9.0, and these two crates are why: they are the only ones that enable
 # `reqsign-core/jwt`, the feature `reqsign-core`'s optional `rsa` sits
-# behind — RUSTSEC-2023-0071, the Marvin timing attack, unfixed upstream.
+# behind - RUSTSEC-2023-0071, the Marvin timing attack, unfixed upstream.
 # Either one reappearing in a default-feature graph means the gating
 # regressed and `rsa` is back. `check-feature-matrix.sh` covers the other
 # direction: that enabling those features does pull them.
@@ -56,7 +56,7 @@ def main() -> None:
     leaked = sorted(set(reqsign) & REQSIGN_FORBIDDEN_BY_DEFAULT)
     if leaked:
         fail(
-            f"{', '.join(leaked)} resolved for a filesystem-only consumer — "
+            f"{', '.join(leaked)} resolved for a filesystem-only consumer - "
             "the Azure/GCS feature gating regressed, and rsa "
             "(RUSTSEC-2023-0071) is back in the default graph"
         )

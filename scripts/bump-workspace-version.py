@@ -196,7 +196,7 @@ RULE_INSTALL_TAG = "install_tag"
 RULE_TAGGED_RELEASE = "tagged_release"
 #: A documented `suprnova --version` output line, ``# suprnova X.Y.Z``.
 #:
-#: The binary itself can never be stale — `--version`, `-v` and `-V` all
+#: The binary itself can never be stale - `--version`, `-v` and `-V` all
 #: resolve through clap's `ArgAction::Version` to `CARGO_PKG_VERSION`,
 #: which is `[workspace.package] version`, which this script owns. A
 #: version copied into prose is the only spelling that can drift, so it is
@@ -205,7 +205,7 @@ RULE_TAGGED_RELEASE = "tagged_release"
 #: Deliberately anchored to a leading ``# `` so it matches an output
 #: comment inside a fenced example and nothing else. Prose of the form
 #: "Suprnova 0.7.2 introduced …" is a historical statement and rewriting
-#: it would falsify the sentence — the same trap `TAG_PINS_FROZEN`
+#: it would falsify the sentence - the same trap `TAG_PINS_FROZEN`
 #: documents for the changelog.
 RULE_CLI_VERSION = "cli_version"
 
@@ -219,7 +219,7 @@ RULE_CLI_VERSION = "cli_version"
 #: dependency syntax, so `manual/installation.md` had its ``tag = "…"``
 #: snippet bumped while the ``cargo install --tag`` line eleven lines above
 #: it froze at v0.7.2, and `manual/cli.md`, `manual/cli-new.md` and
-#: `suprnova-cli/README.md` — which carry *only* the install form — were
+#: `suprnova-cli/README.md` - which carry *only* the install form - were
 #: never discovered at all. The CLI's own README sat three releases stale
 #: telling readers to install v0.6.0. `RULE_INSTALL_TAG` handled that form
 #: correctly the whole time; it was simply only ever applied to the two
@@ -236,7 +236,7 @@ TAG_PIN_PATTERNS: dict[str, str] = {
 #: Every README whose prose pins a version, and which rules must match in it.
 #:
 #: The root README was already covered; the three adapter READMEs were not,
-#: which is how they advertised v0.6.0 while v0.7.2 shipped — the identical
+#: which is how they advertised v0.6.0 while v0.7.2 shipped - the identical
 #: failure this function was written to stop, reintroduced by a file the list
 #: did not name. `assert_all_versioned_readmes_listed` now fails the release
 #: if a README pins a tag without appearing here, so a new adapter crate
@@ -314,7 +314,7 @@ TAG_SCAN_EXCLUDED_PARTS = frozenset(
 #:
 #: `CHANGELOG.md` is a historical record: every tag it names is a past
 #: version, named *because* it is past. Rewriting those pins does not
-#: update the file, it falsifies it. The 0.8.0 release proved it — a
+#: update the file, it falsifies it. The 0.8.0 release proved it - a
 #: sentence reading "if you pinned `v0.7.3`, move to `v0.8.0`" was
 #: rewritten to "if you pinned `v0.8.0`, move to `v0.8.0`", and shipped.
 TAG_PINS_FROZEN = frozenset(
@@ -330,7 +330,7 @@ TAG_SCAN_SUFFIXES = ("*.md", "*.rs")
 
 
 def ignored_by_git(root: Path, candidates: list[Path]) -> set[Path]:
-    """Of `candidates`, the ones git ignores — i.e. the ones not shipped.
+    """Of `candidates`, the ones git ignores - i.e. the ones not shipped.
 
     Discovery is a filesystem sweep, so it also finds local working files
     that happen to quote a tag in prose. One took a release down *after*
@@ -338,7 +338,7 @@ def ignored_by_git(root: Path, candidates: list[Path]) -> set[Path]:
     as a bumped manifest, and `git add` then refused the ignored path,
     aborting between the version bump and the commit.
 
-    `release-bump-smoke.sh` could not have caught that — it builds its
+    `release-bump-smoke.sh` could not have caught that - it builds its
     fixture from `git ls-files --exclude-standard`, so the ignored file
     is exactly what never reaches the fixture. Hence the check belongs
     here, against the real tree.
@@ -372,11 +372,11 @@ def discover_tag_pinned_files(root: Path) -> list[Path]:
 
     Two classes were frozen when this was generalised:
 
-    * ``manual/*.md`` — four chapters telling readers to depend on
+    * ``manual/*.md`` - four chapters telling readers to depend on
       ``tag = "v0.7.2"``, none of them rewritten by any release. They read
       as current because 0.7.2 *was* current; the next release would have
       shipped a manual pinning the previous version.
-    * ``framework/src/broadcasting/fanout/mod.rs`` — a public doc comment
+    * ``framework/src/broadcasting/fanout/mod.rs`` - a public doc comment
       still pinning ``v0.6.0``, two releases stale, telling anyone who
       enabled the feature to depend on a version from two releases back.
 
@@ -413,7 +413,7 @@ def rules_for(root: Path, path: Path, source: str) -> tuple[str, ...]:
     only a dependency snippet gets the dependency rule. Deriving this from
     the content rather than defaulting every discovered file to
     `RULE_DEP_TAG` is what stops an install line freezing beside a snippet
-    that tracks the release — see `TAG_PIN_PATTERNS`.
+    that tracks the release - see `TAG_PIN_PATTERNS`.
 
     Rules named in `VERSIONED_READMES` are kept and take precedence, so a
     listed file whose install line or MSRV sentence gets reworded away
@@ -432,7 +432,7 @@ def assert_all_versioned_readmes_listed(root: Path) -> None:
     """Fail if a file in `VERSIONED_READMES` has stopped pinning a tag.
 
     The inverse of the old check. Discovery now finds files that pin a tag,
-    so the risk is no longer "a file is missing from the list" — it is a
+    so the risk is no longer "a file is missing from the list" - it is a
     listed file whose extra rules (install line, MSRV sentence) were
     reworded away, which would silently stop being enforced.
     """

@@ -5,7 +5,7 @@
 # its expiry. An exception with no expiry is a decision nobody revisits;
 # an expiry nobody checks is the same thing with extra steps.
 #
-# Format, parsed by check-audit.sh — keep it exact:
+# Format, parsed by check-audit.sh - keep it exact:
 #
 #     # OWNER: name <email>
 #     # EXPIRES: YYYY-MM-DD
@@ -52,15 +52,15 @@ ignore = [
     "RUSTSEC-2026-0235",
 
     # ------------------------------------------------------------------
-    # rsa 0.9.10 — Marvin timing attack
+    # rsa 0.9.10 - Marvin timing attack
     # ------------------------------------------------------------------
     # Re-checked 2026-07-30 against advisory-db: `patched = []`. There is
     # still no fixed release. crates.io's newest `rsa` is 0.10.0-rc.18, a
-    # pre-release the advisory does not list as patched either — so
+    # pre-release the advisory does not list as patched either - so
     # "upgrade" is not an available action, not merely an inconvenient one.
     #
     # Reachability: real, and this one IS in the default dependency graph
-    # — but by one path now, not four (`cargo tree -i rsa`, re-checked
+    # - but by one path now, not four (`cargo tree -i rsa`, re-checked
     # 2026-07-31 after the Azure/GCS split):
     #
     #   sqlx-mysql 0.8.6            <- `database-mysql`, a default feature
@@ -88,10 +88,10 @@ ignore = [
     # filesystem,database-postgres` resolves with no `rsa` at all and
     # still has the storage subsystem. A stock default build still has it,
     # because `database-mysql` is a default feature and `sqlx-mysql`
-    # depends on `rsa` non-optionally — so this exception stays open.
+    # depends on `rsa` non-optionally - so this exception stays open.
     #
     # What bounds it is the operation, not the path. The advisory is a
-    # timing side-channel against RSA *decryption* — it recovers the
+    # timing side-channel against RSA *decryption* - it recovers the
     # private key from whoever decrypts. Neither path decrypts:
     #
     #   * sqlx-mysql *encrypts* the password with the server's public key
@@ -101,7 +101,7 @@ ignore = [
     #   * reqsign uses `rsa` behind its optional `jwt` feature to *sign*
     #     Google service-account assertions (`reqsign/core/src/jwt.rs`).
     #
-    # So this is not "vulnerable but bounded" — the vulnerable operation
+    # So this is not "vulnerable but bounded" - the vulnerable operation
     # is never performed here.
     #
     # An earlier version of this comment claimed the exit was to build

@@ -222,7 +222,7 @@ python3 "$TMP_DIR/scripts/bump-workspace-version.py" \
     --root "$TMP_DIR" --verify "$NEW_VERSION"
 
 # Coverage, not just execution. `--verify` asks the bumper whether it is
-# happy, using the same discovery the bump used — so a file class the
+# happy, using the same discovery the bump used - so a file class the
 # discovery does not scan passes both steps while staying stale. That is
 # exactly how `manual/*.md` and a public doc comment in
 # `broadcasting/fanout/mod.rs` sat at older versions through several
@@ -232,7 +232,7 @@ python3 "$TMP_DIR/scripts/bump-workspace-version.py" \
 # version other than the one just released.
 #
 # **Every pin syntax, not just the dependency one.** `cargo install --tag
-# vX.Y.Z` is not a stylistic variant of `tag = "vX.Y.Z"` — it is a second
+# vX.Y.Z` is not a stylistic variant of `tag = "vX.Y.Z"` - it is a second
 # form, and checking only the first repeated the very failure this block
 # was added to catch, one level down. `manual/installation.md` carried both
 # and the release bumped only the dependency snippet; `manual/cli.md`,
@@ -240,7 +240,7 @@ python3 "$TMP_DIR/scripts/bump-workspace-version.py" \
 # form, so discovery never picked them up at all and the CLI's own README
 # sat three releases stale. Scanning for one shape while the rewrite fixes
 # another is how a file passes the bump, passes `--verify`, and ships
-# wrong — so this list and TAG_PIN_PATTERNS must gain a form together.
+# wrong - so this list and TAG_PIN_PATTERNS must gain a form together.
 SEMVER_RE='[0-9]+\.[0-9]+\.[0-9]+'
 # Dots are literal here: an unescaped `v0.6.0` would also match `v0X6Y0`.
 NEW_VERSION_RE="${NEW_VERSION//./\\.}"

@@ -6,7 +6,7 @@
 # `cargo audit` has no notion of an expiring ignore: an entry added
 # "temporarily" stays until somebody re-reads the file, which is to say
 # forever. Every ignore therefore carries an OWNER and an EXPIRES date,
-# and this script fails once one lapses — which turns the ignore list into
+# and this script fails once one lapses - which turns the ignore list into
 # something that has to be renewed on purpose rather than inherited.
 
 set -euo pipefail
@@ -36,7 +36,7 @@ check_exception_policy() {
     local owner="" expires=""
     while IFS= read -r line; do
         # Leading whitespace stripped so an entry is distinguishable from
-        # the commented format example in this file's header — which the
+        # the commented format example in this file's header - which the
         # first version of this parser dutifully tried to validate.
         local trimmed="${line#"${line%%[![:space:]]*}"}"
 
@@ -97,11 +97,11 @@ check_exception_policy() {
 #
 # Asserted against Cargo.lock rather than a `cargo tree` profile because
 # that is what `cargo audit` actually reads, and because these are
-# dev-dependencies — `check-feature-matrix.sh` builds its trees with
+# dev-dependencies - `check-feature-matrix.sh` builds its trees with
 # `--edges normal,build`, where a dev-dependency is invisible by
 # construction.
 #
-# `scc`: RUSTSEC-2026-0205, unsound — `Array::insert` violates exception
+# `scc`: RUSTSEC-2026-0205, unsound - `Array::insert` violates exception
 # safety if the comparison function panics, so a panicking compare can
 # double-free. It reached us only through `serial_test 3.x`, which pinned
 # `scc = "^2"` and so could never resolve to the patched 3.8.4.
