@@ -195,7 +195,7 @@ async function createLegacyProvenanceFixture(): Promise<ProvenanceFixture> {
   );
   await writeFile(
     join(repository, decisionRelative),
-    "Decision ID: iteration-004-task-7-membership-budget-policy\n",
+    "- 2026-08-26 -- Decision ID: iteration-004-task-7-membership-budget-policy.\n",
   );
   runFixtureGit(repository, "init", "-q");
   runFixtureGit(repository, "config", "user.email", "fixture@example.test");
@@ -443,7 +443,7 @@ describe("role-aware production artifact budgets", () => {
       );
       await writeFile(
         join(repository, decisionRelative),
-        "Decision ID: iteration-004-task-7-membership-budget-policy\n",
+        "- 2026-08-26 -- Decision ID: iteration-004-task-7-membership-budget-policy.\n",
       );
       runGit("init", "-q");
       runGit("config", "user.email", "fixture@example.test");
@@ -532,7 +532,10 @@ describe("role-aware production artifact budgets", () => {
       const decision = "iteration-005-integrated-artifact-review";
       const integratedDecisionPath = join(crateRoot, fixture.decisionRelative);
       const decisionSource = await readFile(integratedDecisionPath, "utf8");
-      await writeFile(integratedDecisionPath, `${decisionSource}Decision ID: ${decision}\n`);
+      await writeFile(
+        integratedDecisionPath,
+        `${decisionSource}- 2026-08-30 -- Decision ID: ${decision}.\n`,
+      );
       runFixtureGit(fixture.repository, "add", `crates/suprnova-live/${fixture.decisionRelative}`);
       runFixtureGit(fixture.repository, "commit", "-qm", "record integrated review decision");
       const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
@@ -603,6 +606,183 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
+  it("rejects baseline deletion even when a later commit restores it", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      await rm(join(fixture.repository, fixture.baselineRelative));
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "delete reviewed baseline");
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(fixture.reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "restore reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(() => validate(fixture.reviewed, fixture.repository)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects restored baseline deletion hidden on a merged side branch", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const mainBranch = runFixtureGit(fixture.repository, "branch", "--show-current");
+      runFixtureGit(fixture.repository, "checkout", "-qb", "delete-and-restore");
+      await rm(join(fixture.repository, fixture.baselineRelative));
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "delete reviewed baseline on branch");
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(fixture.reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "restore reviewed baseline on branch");
+      runFixtureGit(fixture.repository, "checkout", "-q", mainBranch);
+      runFixtureGit(
+        fixture.repository,
+        "merge",
+        "--no-ff",
+        "-qm",
+        "merge restored baseline branch",
+        "delete-and-restore",
+      );
+      const validate = await provenanceValidator();
+
+      expect(() => validate(fixture.reviewed, fixture.repository)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    [
+      "marker prefix collision",
+      "- 2026-08-30 -- NotDecision ID: iteration-005-exact-decision-marker.\n",
+    ],
+    [
+      "marker suffix collision",
+      "- 2026-08-30 -- Decision ID: iteration-005-exact-decision-marker-extra.\n",
+    ],
+  ])("rejects a %s", async (_scenario, decisionSource) => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const decision = "iteration-005-exact-decision-marker";
+      await writeFile(join(fixture.repository, fixture.decisionRelative), decisionSource);
+      runFixtureGit(fixture.repository, "add", fixture.decisionRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "record colliding decision marker");
+      const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+      const reviewed = appendReviewedBaseline(
+        fixture.reviewed,
+        sourceCommit,
+        decision,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "append colliding reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(() => validate(reviewed, fixture.repository)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("accepts an exact normative decision marker", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const decision = "iteration-005-exact-decision-marker";
+      await writeFile(
+        join(fixture.repository, fixture.decisionRelative),
+        `- 2026-08-30 -- Decision ID: ${decision}.\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.decisionRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "record exact decision marker");
+      const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+      const reviewed = appendReviewedBaseline(
+        fixture.reviewed,
+        sourceCommit,
+        decision,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "append exact reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(validate(reviewed, fixture.repository)).toEqual(reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("bounds Git process calls independently of reviewed decision count", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const decisions = Array.from(
+        { length: 8 },
+        (_, index) => `iteration-005-bounded-git-process-${String(index + 1)}`,
+      );
+      await writeFile(
+        join(fixture.repository, fixture.decisionRelative),
+        decisions.map((decision) => `- 2026-08-30 -- Decision ID: ${decision}.`).join("\n") + "\n",
+      );
+      runFixtureGit(fixture.repository, "add", fixture.decisionRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "record bounded process decisions");
+      const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+      const reviewed = decisions.reduce<ArtifactSizeBaseline>(
+        (baseline, decision, index) =>
+          appendReviewedBaseline(
+            baseline,
+            sourceCommit,
+            decision,
+            `2026-08-30T20:${String(index + 1).padStart(2, "0")}:00-04:00`,
+          ),
+        fixture.reviewed,
+      );
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "append bounded process reviews");
+      const validate = await provenanceValidator();
+      const tracePath = join(fixture.repository, "git-trace.jsonl");
+      const priorTrace = process.env["GIT_TRACE2_EVENT"];
+      try {
+        process.env["GIT_TRACE2_EVENT"] = tracePath;
+        expect(validate(reviewed, fixture.repository)).toEqual(reviewed);
+      } finally {
+        if (priorTrace === undefined) delete process.env["GIT_TRACE2_EVENT"];
+        else process.env["GIT_TRACE2_EVENT"] = priorTrace;
+      }
+      const gitStarts = (await readFile(tracePath, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { readonly event?: string })
+        .filter(({ event }) => event === "start").length;
+
+      expect(gitStarts).toBeLessThanOrEqual(4);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
   it("rejects ambiguous or unrelated relocation paths as provenance authority", async () => {
     const ambiguousFixture = await createLegacyProvenanceFixture();
     const unrelatedFixture = await createLegacyProvenanceFixture();
@@ -629,7 +809,10 @@ describe("role-aware production artifact budgets", () => {
         "vendor/live/19-developer-tooling-and-testing.md",
       );
       await mkdir(join(unrelatedFixture.repository, "vendor/live"), { recursive: true });
-      await writeFile(unrelatedDecisionPath, `Decision ID: ${unrelatedDecision}\n`);
+      await writeFile(
+        unrelatedDecisionPath,
+        `- 2026-08-30 -- Decision ID: ${unrelatedDecision}.\n`,
+      );
       runFixtureGit(unrelatedFixture.repository, "add", "vendor/live");
       runFixtureGit(unrelatedFixture.repository, "commit", "-qm", "record unrelated decision");
       const unrelatedSourceCommit = runFixtureGit(unrelatedFixture.repository, "rev-parse", "HEAD");
