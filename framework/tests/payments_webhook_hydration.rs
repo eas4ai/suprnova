@@ -1,9 +1,10 @@
 //! Integration tests for webhook → mirror-table hydration.
 //!
-//! Each test:
+//! Each route-level test:
 //!   1. Spins up an in-memory SQLite with the payments migration applied.
-//!   2. Registers a fresh `MockPaymentProvider` under a unique name and keeps
-//!      a direct handle on it so the test can pre-populate provider state.
+//!   2. Registers an isolated provider under a unique name. Most use a fresh
+//!      `MockPaymentProvider`; the signature regression uses a dedicated
+//!      HMAC-verifying provider.
 //!   3. Drives the route via a real TCP server + raw hyper client (same
 //!      pattern as `payments_webhook_idempotency.rs`).
 //!   4. Asserts the relevant mirror rows in `payments_subscriptions`,
@@ -19,6 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use hmac::digest::KeyInit;
+use hmac::{Hmac, Mac};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -26,10 +29,13 @@ use hyper_util::rt::TokioIo;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
+use sha2::Sha256;
 use suprnova::handle_request;
 use suprnova::payments::{
-    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
-    UpdateSubscriptionRequest,
+    Checkout, CreateCustomerRequest, CustomerRef, CustomerStore, MockPaymentProvider, PayloadIds,
+    PaymentError, PaymentProvider, PaymentProviderRegistry, PaymentResult, SessionPayload,
+    StartSessionRequest, SubscribeRequest, Subscription, SubscriptionResult, UpdateCustomerRequest,
+    UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler, constant_time_eq,
     entities::{customer, subscription, subscription_item, transaction, webhook_event},
     webhook_routes,
 };
@@ -45,6 +51,123 @@ impl MigratorTrait for PaymentsTestMigrator {
     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         suprnova::payments::migrations::migrations()
     }
+}
+
+type TestHmacSha256 = Hmac<Sha256>;
+
+const TEST_WEBHOOK_SIGNING_SECRET: &[u8] = b"f05-webhook-signing-secret";
+
+/// Minimal provider that authenticates the regression event with HMAC-SHA256
+/// and then reports the referenced subscription as missing.
+struct SignedMissingSubscriptionProvider;
+
+impl PaymentProvider for SignedMissingSubscriptionProvider {
+    fn name(&self) -> &'static str {
+        "signed-missing-subscription"
+    }
+}
+
+#[async_trait::async_trait]
+impl WebhookHandler for SignedMissingSubscriptionProvider {
+    fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
+        let provided = ctx
+            .headers
+            .get("x-test-webhook-signature")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| PaymentError::WebhookSignature("missing test signature".into()))?;
+        let expected = sign_test_webhook(ctx.body);
+        if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            Ok(())
+        } else {
+            Err(PaymentError::WebhookSignature(
+                "invalid test signature".into(),
+            ))
+        }
+    }
+
+    fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
+        let raw: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|error| PaymentError::Validation(format!("invalid test webhook: {error}")))?;
+        let provider_event_id = raw
+            .get("id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| PaymentError::Validation("missing event id".into()))?;
+
+        Ok(WebhookEvent {
+            provider: self.name().into(),
+            provider_event_id: provider_event_id.into(),
+            provider_event_type: "subscription.created".into(),
+            neutral: Some(suprnova::payments::NeutralEventKind::SubscriptionCreated),
+            raw_payload: raw,
+        })
+    }
+
+    fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds {
+        PayloadIds {
+            subscription_id: event
+                .raw_payload
+                .pointer("/data/object/id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Checkout for SignedMissingSubscriptionProvider {
+    async fn start_session(&self, _req: StartSessionRequest) -> PaymentResult<SessionPayload> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Subscription for SignedMissingSubscriptionProvider {
+    async fn subscribe(&self, _req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn update(&self, _req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn cancel(
+        &self,
+        _provider_subscription_id: &str,
+        _at_period_end: bool,
+    ) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotFound(provider_subscription_id.into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomerStore for SignedMissingSubscriptionProvider {
+    async fn create_customer(&self, _req: CreateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn update_customer(&self, _req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn get_customer(&self, _provider_customer_id: &str) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn delete_customer(&self, _provider_customer_id: &str) -> PaymentResult<()> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+}
+
+fn sign_test_webhook(body: &[u8]) -> String {
+    let mut mac = TestHmacSha256::new_from_slice(TEST_WEBHOOK_SIGNING_SECRET)
+        .expect("HMAC accepts any key length");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 // ── test server helpers ───────────────────────────────────────────────────────
@@ -87,6 +210,24 @@ async fn send_webhook(
     path: &str,
     body: Bytes,
 ) -> (hyper::http::StatusCode, Bytes) {
+    send_webhook_with_signature(addr, path, body, None).await
+}
+
+async fn send_signed_webhook(
+    addr: SocketAddr,
+    path: &str,
+    body: Bytes,
+) -> (hyper::http::StatusCode, Bytes) {
+    let signature = sign_test_webhook(&body);
+    send_webhook_with_signature(addr, path, body, Some(&signature)).await
+}
+
+async fn send_webhook_with_signature(
+    addr: SocketAddr,
+    path: &str,
+    body: Bytes,
+    signature: Option<&str>,
+) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
@@ -97,14 +238,16 @@ async fn send_webhook(
     });
 
     let content_len = body.len().to_string();
-    let req = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method("POST")
         .uri(path)
         .header("Host", "localhost")
         .header("Content-Type", "application/json")
-        .header("Content-Length", content_len)
-        .body(Full::new(body))
-        .unwrap();
+        .header("Content-Length", content_len);
+    if let Some(signature) = signature {
+        request = request.header("X-Test-Webhook-Signature", signature);
+    }
+    let req = request.body(Full::new(body)).unwrap();
 
     let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
         .await
@@ -697,6 +840,69 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
     assert!(
         subs.is_empty(),
         "no subscription row may exist after failed hydration"
+    );
+}
+
+/// Provider failures remain retryable even when their human-readable text
+/// happens to contain language commonly emitted for database collisions.
+#[tokio::test]
+async fn provider_error_text_containing_duplicate_remains_retryable() {
+    let provider_name: &'static str = "mock-hydration-duplicate-error-text";
+    let provider: Arc<dyn PaymentProvider> = Arc::new(SignedMissingSubscriptionProvider);
+    PaymentProviderRegistry::bind(provider_name, provider);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 2).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let missing_subscription_id = "sub_duplicate_provider_failure";
+    let body = Bytes::from(
+        json!({
+            "id": "evt_duplicate_provider_failure",
+            "type": "subscription.created",
+            "data": {
+                "object": {
+                    "id": missing_subscription_id,
+                    "customer": "cus_duplicate_provider_failure"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (status, response_body) = send_signed_webhook(addr, &path, body).await;
+    assert_eq!(
+        status.as_u16(),
+        503,
+        "provider lookup failure must remain retryable, got body: {}",
+        String::from_utf8_lossy(&response_body)
+    );
+    assert_eq!(response_body.as_ref(), b"hydration-failed");
+
+    let audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_duplicate_provider_failure"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(audit.processed_at.is_none(), "must not be marked processed");
+    assert_eq!(
+        audit.process_error.as_deref(),
+        Some("requested resource not found: sub_duplicate_provider_failure"),
+        "process_error must describe the current provider failure"
+    );
+
+    let subscriptions = subscription::Entity::find()
+        .all(&*conn)
+        .await
+        .expect("db ok");
+    assert!(
+        subscriptions.is_empty(),
+        "failed provider prefetch must not write subscription mirror rows"
     );
 }
 
