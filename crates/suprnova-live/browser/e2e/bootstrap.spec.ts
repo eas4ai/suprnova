@@ -2,6 +2,17 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { ISLAND_SELECTOR, RuntimePage, STATUS_ATTRIBUTE } from "./support/runtime-page.js";
 
+async function bootManually(page: Page) {
+  await page.addScriptTag({
+    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
+    type: "module",
+  });
+  await page.waitForFunction(() => {
+    const runtime: unknown = Reflect.get(window, Symbol.for("suprnova.live.runtime.v1"));
+    return (typeof runtime === "object" || typeof runtime === "function") && runtime !== null;
+  });
+}
+
 async function installStoppingFeatureDriver(page: Page, event: 0 | 1 | null) {
   await page.evaluate((stopEvent) => {
     const events: number[] = [];
@@ -46,10 +57,7 @@ test("SSR content is visible before startup and a valid instanced island connect
   await runtime.expectVisibleContent("Server-rendered search results");
   await expect(runtime.island()).not.toHaveAttribute(STATUS_ATTRIBUTE, /.+/u);
 
-  await page.addScriptTag({
-    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
-    type: "module",
-  });
+  await bootManually(page);
   await runtime.expectStatus("connected");
 });
 
@@ -70,10 +78,7 @@ test("core-only boot stays operational when optional feature artifacts are absen
     { selector: ISLAND_SELECTOR },
   );
 
-  await page.addScriptTag({
-    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
-    type: "module",
-  });
+  await bootManually(page);
 
   await runtime.expectStatus("connected");
   await expect(runtime.island()).toHaveAttribute("live:poll.5s", "refresh");
@@ -93,10 +98,7 @@ test("a feature driver cannot resurrect startup after stopping core during event
   const runtime = new RuntimePage(page);
   await runtime.open("manual");
   await installStoppingFeatureDriver(page, 0);
-  await page.addScriptTag({
-    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
-    type: "module",
-  });
+  await bootManually(page);
 
   expect(
     await page.evaluate(() => {
@@ -125,10 +127,7 @@ test("a feature driver cannot continue island startup after stopping core during
   const runtime = new RuntimePage(page);
   await runtime.open("manual");
   await installStoppingFeatureDriver(page, 1);
-  await page.addScriptTag({
-    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
-    type: "module",
-  });
+  await bootManually(page);
 
   expect(
     await page.evaluate(() => {
@@ -155,10 +154,7 @@ test("retained feature island ports stay inert after document disposal", async (
   const runtime = new RuntimePage(page);
   await runtime.open("manual");
   await installStoppingFeatureDriver(page, null);
-  await page.addScriptTag({
-    content: 'import { boot } from "/assets/suprnova-live.esm.js"; boot();',
-    type: "module",
-  });
+  await bootManually(page);
   await runtime.expectStatus("connected");
 
   expect(
