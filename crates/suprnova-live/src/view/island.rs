@@ -21,7 +21,8 @@ const ROOT_ATTRIBUTE: &str = "data-suprnova-live-root";
 /// media-type authority:
 ///
 /// ```compile_fail
-/// use suprnova_live::view::IslandRender;
+/// # use suprnova_live as suprnova;
+/// use suprnova::view::IslandRender;
 /// fn forbidden_transport_access(render: &IslandRender) {
 ///     let _ = (
 ///         &render.status,

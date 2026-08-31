@@ -7493,6 +7493,7 @@ dependencies = [
  "sqlx",
  "strum",
  "subtle",
+ "suprnova-live",
  "suprnova-macros",
  "suprnova-magnetar",
  "suprnova-web-push",

@@ -70,6 +70,8 @@ pub mod http;
 pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
+/// Server-driven interactive components and their application-facing contracts.
+pub mod live;
 #[cfg(feature = "localization")]
 pub mod localization;
 pub(crate) mod lock;
@@ -106,6 +108,8 @@ pub mod testing;
 pub mod timeout;
 pub mod validation;
 pub mod vector;
+/// Checked server-rendered view contracts used by ordinary routes and Live components.
+pub mod view;
 #[cfg(feature = "web-push")]
 pub mod web_push;
 pub mod workflow;

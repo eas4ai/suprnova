@@ -165,7 +165,8 @@ enum TrustedMarkupProvenance {
 /// Ordinary strings have no convenience conversion into this type:
 ///
 /// ```compile_fail
-/// use suprnova_live::view::TrustedHtml;
+/// # use suprnova_live as suprnova;
+/// use suprnova::view::TrustedHtml;
 /// let untrusted = String::from("<strong>untrusted</strong>");
 /// let _: TrustedHtml = untrusted.into();
 /// ```

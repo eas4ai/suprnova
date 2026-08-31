@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+suprnova-live = { path = "../crates/suprnova-live", version = "1.3.7" }
 suprnova-macros = { path = "../suprnova-macros", version = "1.3.7" }
 dotenvy = "0.15"
 inventory = "0.3"

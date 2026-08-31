@@ -110,8 +110,9 @@ mod sealed {
 /// unchecked generic renderer:
 ///
 /// ```compile_fail
+/// # use suprnova_live as suprnova;
 /// use std::fmt;
-/// use suprnova_live::view::{TemplateFailure, ViewTemplate};
+/// use suprnova::view::{TemplateFailure, ViewTemplate};
 /// struct UncheckedRenderer;
 /// impl ViewTemplate for UncheckedRenderer {
 ///     fn render_view(&self, _: &mut dyn fmt::Write) -> Result<(), TemplateFailure> {
