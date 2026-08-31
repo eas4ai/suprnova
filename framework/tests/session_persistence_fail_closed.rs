@@ -20,7 +20,8 @@
 //! test-binary boundaries).
 
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
 use suprnova::{Crypt, EncryptionKey, FrameworkError};
 
@@ -55,6 +56,42 @@ impl SessionStore for FailingStore {
     async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
         Ok(0)
     }
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+/// Store that loads an authenticated session but refuses to delete its old
+/// row after an ID rotation. Writes are observable so the test can prove the
+/// middleware returns before persisting the rotated replacement.
+struct RotationDestroyFailsStore {
+    session: SessionData,
+    destroyed_ids: Mutex<Vec<String>>,
+    writes: AtomicUsize,
+}
+
+#[async_trait]
+impl SessionStore for RotationDestroyFailsStore {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok((id == self.session.id).then(|| self.session.clone()))
+    }
+
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
+        self.destroyed_ids.lock().unwrap().push(id.to_string());
+        Err(FrameworkError::internal(
+            "simulated session rotation cleanup failure",
+        ))
+    }
+
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
     async fn gc(&self) -> Result<u64, FrameworkError> {
         Ok(0)
     }
@@ -215,6 +252,106 @@ async fn clean_session_write_failure_passes_through() {
         ok.status_code(),
         200,
         "clean-session write failure must not change the handler's success status"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotation_destroy_failure_fails_closed_before_write_and_cookie() {
+    use http_body_util::BodyExt;
+    use suprnova::http::cookie::Cookie;
+    use suprnova::middleware::{Middleware, Next};
+
+    ensure_crypt();
+
+    let old_session_id = "a".repeat(40);
+    let mut old_session = SessionData::new(old_session_id.clone(), "b".repeat(40));
+    old_session.user_id = Some("authenticated-user".to_string());
+    old_session.loaded_from_store = true;
+
+    let store = Arc::new(RotationDestroyFailsStore {
+        session: old_session,
+        destroyed_ids: Mutex::new(Vec::new()),
+        writes: AtomicUsize::new(0),
+    });
+    let mut config = test_config();
+    config.cookie_name = "rotation_session".to_string();
+    let old_cookie = Cookie::encrypted(&config.cookie_name, &old_session_id)
+        .expect("encrypt old session cookie");
+    let next: Next = Arc::new(move |_req| {
+        Box::pin(async move {
+            Cookie::queue(Cookie::new("promo", "10OFF"));
+            suprnova::session::regenerate_session_id();
+            Ok(suprnova::HttpResponse::text("ok"))
+        })
+    });
+
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+    let response = middleware
+        .handle(
+            post_request_with_cookie(&config.cookie_name, old_cookie.value()).await,
+            next,
+        )
+        .await;
+
+    let error = match response {
+        Err(error) => error,
+        Ok(_) => panic!("failed old-row cleanup must fail the rotation closed"),
+    };
+    assert_eq!(error.status_code(), 500);
+    assert_eq!(
+        store.destroyed_ids.lock().unwrap().as_slice(),
+        [old_session_id.as_str()],
+        "the old session row must be destroyed exactly once"
+    );
+    assert_eq!(
+        store.writes.load(Ordering::SeqCst),
+        0,
+        "the rotated session must not be written after cleanup fails"
+    );
+
+    let hyper_response = error.into_hyper();
+    let set_cookies: Vec<String> = hyper_response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().expect("valid Set-Cookie header").to_string())
+        .collect();
+    let session_cookie_prefix = format!("{}=", config.cookie_name);
+    let session_cookies: Vec<&String> = set_cookies
+        .iter()
+        .filter(|cookie| cookie.starts_with(&session_cookie_prefix))
+        .collect();
+    assert_eq!(
+        session_cookies.len(),
+        1,
+        "the response must emit exactly one session-cookie instruction: {set_cookies:?}"
+    );
+    assert!(
+        session_cookies[0].contains("Max-Age=0"),
+        "the only session cookie must forget the old browser credential: {set_cookies:?}"
+    );
+    assert!(
+        !session_cookies
+            .iter()
+            .any(|cookie| !cookie.contains("Max-Age=0")),
+        "no live replacement session cookie may be emitted: {set_cookies:?}"
+    );
+    assert!(
+        set_cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("promo=") && cookie.contains("promo=10OFF")),
+        "unrelated pending cookies must survive the fail-closed response: {set_cookies:?}"
+    );
+
+    let body = hyper_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect failure response body")
+        .to_bytes();
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "Internal Server Error: session rotation failed"
     );
 }
 
