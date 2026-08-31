@@ -46,6 +46,11 @@ fn live_packages_share_the_suprnova_workspace_without_a_framework_cycle() {
         "{} must not own a nested Rust toolchain; the Suprnova workspace root is authoritative",
         live_root.display()
     );
+    assert!(
+        !live_root.join("Cargo.lock").exists(),
+        "{} must not retain a nested lockfile; the Suprnova workspace lock is authoritative",
+        live_root.display()
+    );
 
     let packages = metadata["packages"]
         .as_array()
@@ -58,11 +63,11 @@ fn live_packages_share_the_suprnova_workspace_without_a_framework_cycle() {
         .find(|package| package["name"] == "suprnova")
         .expect("the public suprnova package must be present in cargo metadata");
 
-    for name in [
-        "suprnova-live",
-        "suprnova-live-macros",
-        "suprnova-live-macro-fixture",
-        "suprnova-live-test-support",
+    for (name, expected_manifest_root) in [
+        ("suprnova-live", live_root.clone()),
+        ("suprnova-macros", workspace_root.join("suprnova-macros")),
+        ("suprnova-live-macro-fixture", live_root.clone()),
+        ("suprnova-live-test-support", live_root.clone()),
     ] {
         let package = packages
             .iter()
@@ -105,10 +110,10 @@ fn live_packages_share_the_suprnova_workspace_without_a_framework_cycle() {
             )
         });
         assert!(
-            manifest.starts_with(&live_root),
+            manifest.starts_with(&expected_manifest_root),
             "integrated package {name} manifest {} must be beneath {}",
             manifest.display(),
-            live_root.display()
+            expected_manifest_root.display()
         );
     }
 

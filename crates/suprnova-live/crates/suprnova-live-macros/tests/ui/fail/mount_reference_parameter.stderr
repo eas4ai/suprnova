@@ -1,5 +1,0 @@
-error: mount parameters must be immutable owned values
-  --> tests/ui/fail/mount_reference_parameter.rs:12:18
-   |
-12 |     pub fn mount(value: &str) -> Self {
-   |                  ^^^^^

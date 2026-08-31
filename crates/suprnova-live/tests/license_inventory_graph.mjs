@@ -6,22 +6,23 @@ import {
   cargoDependencyClosure,
   loadLockedCargoMetadata,
   resolveGitWorkspaceRoot,
+  thirdPartyCargoDependencyClosure,
 } from "../scripts/license-inventory-cargo.mjs";
 
 const liveRoots = [
   "suprnova-live",
-  "suprnova-live-macros",
+  "suprnova-macros",
   "suprnova-live-macro-fixture",
   "suprnova-live-test-support",
 ];
 
-function cargoPackage(id, name) {
+function cargoPackage(id, name, source = "registry+test") {
   return {
     id,
     name,
     version: "1.0.0",
     license: "MIT",
-    source: "registry+test",
+    source,
   };
 }
 
@@ -32,9 +33,14 @@ function resolveNode(id, dependencies = []) {
 const metadata = {
   packages: [
     cargoPackage("live", "suprnova-live"),
-    cargoPackage("macros", "suprnova-live-macros"),
+    cargoPackage("macros", "suprnova-macros"),
     cargoPackage("fixture", "suprnova-live-macro-fixture"),
     cargoPackage("support", "suprnova-live-test-support"),
+    cargoPackage("framework", "suprnova"),
+    cargoPackage("framework-external", "framework-external"),
+    cargoPackage("first-party-path", "first-party-path", null),
+    cargoPackage("path-external", "path-external"),
+    cargoPackage("vendored-path", "vendored-path", null),
     cargoPackage("shared", "shared"),
     cargoPackage("transitive", "transitive"),
     cargoPackage("cycle-a", "cycle-a"),
@@ -42,13 +48,25 @@ const metadata = {
     cargoPackage("unrelated", "unrelated-workspace-root"),
     cargoPackage("unrelated-dependency", "unrelated-dependency"),
   ],
-  workspace_members: ["live", "macros", "fixture", "support", "unrelated"],
+  workspace_members: [
+    "live",
+    "macros",
+    "fixture",
+    "support",
+    "framework",
+    "unrelated",
+  ],
   resolve: {
     nodes: [
       resolveNode("live", ["shared"]),
-      resolveNode("macros", ["cycle-a"]),
-      resolveNode("fixture"),
+      resolveNode("macros", ["cycle-a", "framework"]),
+      resolveNode("fixture", ["first-party-path", "vendored-path"]),
       resolveNode("support", ["shared"]),
+      resolveNode("framework", ["framework-external"]),
+      resolveNode("framework-external"),
+      resolveNode("first-party-path", ["path-external"]),
+      resolveNode("path-external"),
+      resolveNode("vendored-path"),
       resolveNode("shared", ["transitive"]),
       resolveNode("transitive"),
       resolveNode("cycle-a", ["cycle-b"]),
@@ -66,14 +84,35 @@ assert.deepEqual(
   [
     "cycle-a",
     "cycle-b",
+    "first-party-path",
+    "framework-external",
+    "path-external",
     "shared",
+    "suprnova",
     "suprnova-live",
     "suprnova-live-macro-fixture",
-    "suprnova-live-macros",
     "suprnova-live-test-support",
+    "suprnova-macros",
     "transitive",
+    "vendored-path",
   ],
   "the shared-workspace inventory follows transitive and cyclic Live edges without including unrelated roots",
+);
+
+assert.deepEqual(
+  thirdPartyCargoDependencyClosure(metadata, liveRoots, ["first-party-path"])
+    .map(({ name }) => name)
+    .sort(),
+  [
+    "cycle-a",
+    "cycle-b",
+    "framework-external",
+    "path-external",
+    "shared",
+    "transitive",
+    "vendored-path",
+  ],
+  "third-party inventory excludes explicitly proven first-party IDs while retaining unclassified path dependencies and their external closure",
 );
 
 const missingPackage = structuredClone(metadata);

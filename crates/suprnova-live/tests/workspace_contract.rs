@@ -52,7 +52,6 @@ fn workspace_declares_the_internal_kernel_packages() {
         .expect("the Live crate must be inside the Suprnova workspace");
 
     for package in [
-        "crates/suprnova-live-macros",
         "crates/suprnova-live-macro-fixture",
         "crates/suprnova-live-test-support",
     ] {
@@ -67,6 +66,18 @@ fn workspace_declares_the_internal_kernel_packages() {
         );
         assert!(live_root.join(package).join("Cargo.toml").is_file());
     }
+
+    let production_macros = workspace_root.join("suprnova-macros");
+    assert!(
+        workspace_manifest.contains("\"suprnova-macros\""),
+        "workspace is missing the production Suprnova macro package"
+    );
+    assert!(production_macros.join("Cargo.toml").is_file());
+    assert!(production_macros.join("src/live/mod.rs").is_file());
+    assert!(
+        !live_root.join("crates/suprnova-live-macros").exists(),
+        "the retired duplicate Live macro package must not remain"
+    );
 }
 
 #[test]
@@ -74,7 +85,6 @@ fn helper_packages_are_non_publishable_and_featureless() {
     let root = live_root();
 
     for package in [
-        "crates/suprnova-live-macros",
         "crates/suprnova-live-macro-fixture",
         "crates/suprnova-live-test-support",
     ] {

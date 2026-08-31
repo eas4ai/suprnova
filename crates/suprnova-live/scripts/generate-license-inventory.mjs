@@ -5,9 +5,10 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  cargoDependencyClosure,
+  cargoWorkspaceMemberPackageIds,
   loadLockedCargoMetadata,
   resolveGitWorkspaceRoot,
+  thirdPartyCargoDependencyClosure,
 } from "./license-inventory-cargo.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,7 @@ const inventoryPath = resolve(liveRoot, "THIRD_PARTY_LICENSES.md");
 const liveWorkspaceCargoRoots = [
   "suprnova-live",
   "suprnova-live-macro-fixture",
-  "suprnova-live-macros",
+  "suprnova-macros",
   "suprnova-live-test-support",
 ];
 const fuzzCargoRoots = ["suprnova-live-fuzz"];
@@ -37,16 +38,6 @@ const compileFixtureCargoRoots = [
   "suprnova-live-compile-10",
   "suprnova-live-compile-100",
 ];
-const internalCargoPackages = new Set([
-  "suprnova-live",
-  "suprnova-live-fuzz",
-  "suprnova-live-macro-fixture",
-  "suprnova-live-macros",
-  "suprnova-live-test-support",
-  "suprnova-live-compile-1",
-  "suprnova-live-compile-10",
-  "suprnova-live-compile-100",
-]);
 const npmBuildDependencies = new Set(["esbuild", "terser"]);
 const npmTestDependencies = new Set([
   "@hotwired/stimulus",
@@ -66,10 +57,12 @@ function markdown(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
-function cargoPackagesFrom(directory, rootPackageNames) {
-  const metadata = loadLockedCargoMetadata(directory);
-  return cargoDependencyClosure(metadata, rootPackageNames)
-    .filter((dependency) => !internalCargoPackages.has(dependency.name))
+function cargoPackagesFrom(metadata, rootPackageNames, firstPartyPackageIds) {
+  return thirdPartyCargoDependencyClosure(
+    metadata,
+    rootPackageNames,
+    firstPartyPackageIds,
+  )
     .map((dependency) => ({
       ecosystem: "Cargo",
       name: dependency.name,
@@ -81,14 +74,32 @@ function cargoPackagesFrom(directory, rootPackageNames) {
 }
 
 function cargoPackages() {
-  const packages = [
-    ...cargoPackagesFrom(workspaceRoot, liveWorkspaceCargoRoots),
-    ...cargoPackagesFrom(resolve(liveRoot, "fuzz"), fuzzCargoRoots),
-    ...cargoPackagesFrom(
-      resolve(liveRoot, "tests/fixtures/compile"),
-      compileFixtureCargoRoots,
+  const resolutions = [
+    {
+      metadata: loadLockedCargoMetadata(workspaceRoot),
+      roots: liveWorkspaceCargoRoots,
+    },
+    {
+      metadata: loadLockedCargoMetadata(resolve(liveRoot, "fuzz")),
+      roots: fuzzCargoRoots,
+    },
+    {
+      metadata: loadLockedCargoMetadata(
+        resolve(liveRoot, "tests/fixtures/compile"),
+      ),
+      roots: compileFixtureCargoRoots,
+    },
+  ];
+  const firstPartyPackageIds = [
+    ...new Set(
+      resolutions.flatMap(({ metadata }) =>
+        cargoWorkspaceMemberPackageIds(metadata),
+      ),
     ),
   ];
+  const packages = resolutions.flatMap(({ metadata, roots }) =>
+    cargoPackagesFrom(metadata, roots, firstPartyPackageIds),
+  );
   const unique = new Map();
   for (const dependency of packages) {
     const key = [dependency.name, dependency.version, dependency.source].join(

@@ -30,7 +30,7 @@ fi
 
 live_packages=(
     --package suprnova-live
-    --package suprnova-live-macros
+    --package suprnova-macros
     --package suprnova-live-macro-fixture
     --package suprnova-live-test-support
 )
@@ -110,8 +110,8 @@ rtk env CARGO_INCREMENTAL=0 cargo test \
     --test security_hostile_context
 rtk env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \
-    --package suprnova-live-macros \
-    --test ui
+    --package suprnova-macros \
+    --test live_ui
 
 phase "iteration 004 Rust boundaries"
 rtk env CARGO_INCREMENTAL=0 cargo test \

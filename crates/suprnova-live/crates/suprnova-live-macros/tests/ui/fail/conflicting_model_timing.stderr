@@ -1,5 +1,0 @@
-error: conflicting model timing helpers
- --> tests/ui/fail/conflicting_model_timing.rs:6:19
-  |
-6 |     #[model(blur, change)]
-  |                   ^^^^^^

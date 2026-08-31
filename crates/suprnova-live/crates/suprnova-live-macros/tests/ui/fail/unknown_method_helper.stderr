@@ -1,5 +1,0 @@
-error: cannot find attribute `surprise` in this scope
-  --> tests/ui/fail/unknown_method_helper.rs:11:7
-   |
-11 |     #[surprise]
-   |       ^^^^^^^^

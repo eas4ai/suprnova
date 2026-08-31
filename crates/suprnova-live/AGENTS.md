@@ -86,18 +86,18 @@ the following complete gate before calling the iteration done:
 
 ```bash
 CARGO_INCREMENTAL=0 cargo fmt --manifest-path ../../Cargo.toml \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support -- --check
 CARGO_INCREMENTAL=0 cargo clippy --manifest-path ../../Cargo.toml \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support \
   --all-targets --all-features
 CARGO_INCREMENTAL=0 cargo test --manifest-path ../../Cargo.toml \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support \
   --all-targets --all-features --no-fail-fast
 CARGO_INCREMENTAL=0 cargo test --manifest-path ../../Cargo.toml \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support \
   --doc --all-features
 (cd browser && npm ci)

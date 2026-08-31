@@ -319,19 +319,19 @@ write_expected_gate_commands() {
         $'git\tdiff\t--check' \
         $'node\ttests/license_inventory_graph.mjs' \
         $'node\tscripts/generate-license-inventory.mjs\t--check' \
-        $'cargo\tfmt\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--\t--check' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
+        $'cargo\tfmt\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--\t--check' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
         $'node\ttests/correctness_delay_clippy.mjs' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--\t-D\tclippy::disallowed_methods' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--\t-D\tclippy::disallowed_methods' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<live>/fuzz/Cargo.toml\t--all-targets\t--\t-D\tclippy::disallowed_methods' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tgolden_fixtures\t--test\tbrowser_contract_properties' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tchecker_positive\t--test\tchecker_negative\t--test\tchecker_regressions' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tcompatibility\t--test\tprotocol_v2' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tsecurity_boundaries' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tsecurity_hostile_context' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-macros\t--test\tui' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-macros\t--test\tlive_ui' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\titeration_004_conformance\t--test\titeration_004_adversarial\t--test\titeration_004_exhaustion' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.94.0\tcheck\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.94.0\tcheck\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.94.0\tcheck\t--manifest-path\t<live>/tests/fixtures/compile/Cargo.toml\t--workspace\t--all-targets' \
         $'cargo\t+nightly\tfuzz\tbuild\t--fuzz-dir\t<live>/fuzz' \
         $'npm\tci' \
@@ -339,8 +339,8 @@ write_expected_gate_commands() {
         $'npm\trun\tbuild' \
         $'npm\trun\tbuild:check' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--test\treference_host\t--\t--test-threads=1' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--no-fail-fast' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--doc\t--all-features' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--no-fail-fast' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--doc\t--all-features' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\tbuild\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--bin\tcorrectness-delay-rust-parser' \
         $'node\ttests/correctness_delay_scanner.mjs' \
         $'node\tscripts/check-correctness-delays.mjs' \
@@ -490,7 +490,7 @@ gate_stops_at_clippy_failure() {
     local trace_path=$2
     local output_path=$3
     local normalized_path=$4
-    local expected_last=$'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features'
+    local expected_last=$'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features'
     local status
     local last_command
 
@@ -560,8 +560,8 @@ require_text "crate-root ownership" 'live_root='
 require_text "workspace-root ownership" 'workspace_root='
 require_text "parent workspace manifest" 'workspace_root}/Cargo.toml'
 require_text "explicit Live package scope" '--package suprnova-live'
-require_text "macro compile package" "--package suprnova-live-macros"
-require_text "macro compile UI contract" "--test ui"
+require_text "macro compile package" "--package suprnova-macros"
+require_text "macro compile UI contract" "--test live_ui"
 require_text "checked template fixtures" "--test checker_regressions"
 require_text "protocol v1/v2 parity" "--test protocol_v2"
 require_text "security-boundary tests" "--test security_boundaries"
@@ -696,7 +696,6 @@ fi
 
 for manifest in \
     Cargo.toml \
-    crates/suprnova-live-macros/Cargo.toml \
     crates/suprnova-live-macro-fixture/Cargo.toml \
     crates/suprnova-live-test-support/Cargo.toml
 do
@@ -707,6 +706,18 @@ do
         exit 1
     fi
 done
+
+production_macro_manifest=${workspace_root}/suprnova-macros/Cargo.toml
+production_macro_source=$(<"${production_macro_manifest}")
+if [[ ${production_macro_source} != *"rust-version.workspace = true"* ]]; then
+    printf 'gate contract: %s does not inherit the workspace MSRV\n' \
+        "${production_macro_manifest}" >&2
+    exit 1
+fi
+if [[ -e ${live_root}/crates/suprnova-live-macros ]]; then
+    printf '%s\n' "gate contract: retired duplicate Live macro package remains" >&2
+    exit 1
+fi
 
 workspace_manifest_source=$(<"${workspace_root}/Cargo.toml")
 if [[ ${workspace_manifest_source} != *'rust-version = "1.94.0"'* ]]; then

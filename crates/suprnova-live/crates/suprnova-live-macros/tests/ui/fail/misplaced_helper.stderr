@@ -1,5 +1,0 @@
-error: field helper cannot be placed on a Live impl method
-  --> tests/ui/fail/misplaced_helper.rs:11:5
-   |
-11 |     #[model]
-   |     ^

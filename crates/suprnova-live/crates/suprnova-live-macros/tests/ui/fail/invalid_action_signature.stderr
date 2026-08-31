@@ -1,5 +1,0 @@
-error: Live actions require `&mut self` as their first argument
-  --> tests/ui/fail/invalid_action_signature.rs:12:18
-   |
-12 |     pub async fn save() {}
-   |                  ^^^^

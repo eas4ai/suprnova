@@ -1,6 +1,7 @@
 use suprnova::live::testing::ActionAssertion;
 use suprnova::live::{
-    ActionOutcome, ActionResult, LiveConfig, LiveConfigErrorKind, LiveRegistry, RegistryErrorKind,
+    ActionOutcome, ActionResult, AuthorizedAction, EffectPayloadMetadata, EventPayloadMetadata,
+    LiveConfig, LiveConfigErrorKind, LiveRegistry, RegistryErrorKind,
 };
 use suprnova::view::{TrustedHtml, TrustedMarkupReason};
 use suprnova_live::component::ComponentHooks;
@@ -47,6 +48,20 @@ generated_contract!(
     "catalog.search",
     "live/catalog/search.html"
 );
+
+struct Saved;
+
+impl EventPayloadMetadata for Saved {
+    const NAME: &'static str = "saved";
+    const VERSION: u16 = 1;
+}
+
+struct Focus;
+
+impl EffectPayloadMetadata for Focus {
+    const NAME: &'static str = "focus";
+    const VERSION: u16 = 1;
+}
 generated_contract!(
     DuplicateSearch,
     "catalog.search",
@@ -125,6 +140,11 @@ fn config_is_validated_and_registry_is_immutable_after_build() {
 
 #[test]
 fn action_view_and_testing_contracts_are_available_from_public_facades() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<AuthorizedAction>();
+    assert_eq!(Saved::NAME, "saved");
+    assert_eq!(Focus::NAME, "focus");
+
     let render = ActionResult::render();
     ActionAssertion::new(&render).assert_rendered();
     assert_eq!(render.outcome(), &ActionOutcome::Render);

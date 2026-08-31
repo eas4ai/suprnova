@@ -1,5 +1,0 @@
-error: state_schema_version must be a non-zero u16
- --> tests/ui/fail/invalid_version.rs:4:85
-  |
-4 | #[live(name = "invalid.version", view = "live/example.html", state_schema_version = 0)]
-  |                                                                                     ^

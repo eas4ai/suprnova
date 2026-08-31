@@ -13,7 +13,7 @@ default = []
 
 [dependencies]
 suprnova-live = { path = "../.." }
-suprnova-live-macros = { path = "../suprnova-live-macros" }
+suprnova-macros = { path = "../../../../suprnova-macros" }
 
 [lints.rust]
 missing_docs = "deny"

@@ -18,13 +18,19 @@ pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigError
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
+pub use suprnova_macros::{LiveComponent, live};
 
 /// Closed semantic results and metadata returned by registered Live actions.
 pub mod action {
     pub use suprnova_live::action::{
-        ActionOutcome, ActionResult, FlashIntent, OutcomeError, OutcomeErrorKind, OutcomeMetadata,
-        RouteIntent, UrlIntent,
+        ActionOutcome, ActionResult, AuthorizedAction, FlashIntent, OutcomeError, OutcomeErrorKind,
+        OutcomeMetadata, RouteIntent, UrlIntent,
     };
+}
+
+/// Versioned browser event and effect contracts declared by Live components.
+pub mod metadata {
+    pub use suprnova_live::metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 }
 
 /// Stable redacted failure and browser-recovery contracts.
@@ -41,6 +47,7 @@ pub mod validation {
     };
 }
 
-pub use action::{ActionOutcome, ActionResult};
+pub use action::{ActionOutcome, ActionResult, AuthorizedAction};
 pub use error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCode};
+pub use metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};

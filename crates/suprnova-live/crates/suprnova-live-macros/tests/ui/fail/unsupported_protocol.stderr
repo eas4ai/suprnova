@@ -1,5 +1,0 @@
-error: minimum_protocol_version is not supported by this Live macro release
- --> tests/ui/fail/unsupported_protocol.rs:4:1
-  |
-4 | #[live(
-  | ^

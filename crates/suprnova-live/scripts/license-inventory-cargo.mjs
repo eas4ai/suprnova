@@ -196,3 +196,40 @@ export function cargoDependencyClosure(metadata, rootPackageNames) {
     .map((id) => packagesById.get(id))
     .sort((left, right) => left.id.localeCompare(right.id, "en"));
 }
+
+export function cargoWorkspaceMemberPackageIds(metadata) {
+  if (typeof metadata !== "object" || metadata === null) {
+    throw new Error("cargo metadata is not an object");
+  }
+  const packages = requiredArray(metadata.packages, "packages");
+  const packageIds = new Set(
+    packages.map((dependency) => {
+      if (typeof dependency !== "object" || dependency === null) {
+        throw new Error("cargo metadata contains an invalid package");
+      }
+      return requiredString(dependency.id, "package id");
+    }),
+  );
+  return requiredArray(metadata.workspace_members, "workspace members").map(
+    (id) => {
+      requiredString(id, "workspace member id");
+      if (!packageIds.has(id)) {
+        throw new Error(`workspace package ${id} is absent from Cargo packages`);
+      }
+      return id;
+    },
+  );
+}
+
+export function thirdPartyCargoDependencyClosure(
+  metadata,
+  rootPackageNames,
+  firstPartyPackageIds = [],
+) {
+  const dependencies = cargoDependencyClosure(metadata, rootPackageNames);
+  const firstPartyIds = new Set(cargoWorkspaceMemberPackageIds(metadata));
+  for (const id of requiredArray(firstPartyPackageIds, "first-party package IDs")) {
+    firstPartyIds.add(requiredString(id, "first-party package ID"));
+  }
+  return dependencies.filter(({ id }) => !firstPartyIds.has(id));
+}

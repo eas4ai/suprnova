@@ -1,5 +1,0 @@
-error: Live components cannot be generic
- --> tests/ui/fail/generic_component.rs:5:19
-  |
-5 | pub struct Generic<T> {
-  |                   ^

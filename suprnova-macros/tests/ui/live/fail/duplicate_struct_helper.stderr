@@ -1,0 +1,5 @@
+error: duplicate `name` helper
+ --> tests/ui/live/fail/duplicate_struct_helper.rs:4:24
+  |
+4 | #[live(name = "first", name = "second", view = "live/example.html")]
+  |                        ^^^^

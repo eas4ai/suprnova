@@ -85,8 +85,8 @@ metadata, registered events and effects, URL/binding policy, and the
 semantic metadata but excludes Rust type paths, source paths, addresses, build
 order, and registration order.
 
-Startup code explicitly registers descriptors with
-`ComponentRegistryBuilder` and then builds an immutable `ComponentRegistry`.
+Startup code explicitly registers component contracts with
+`LiveRegistry::builder()` and then builds an immutable `LiveRegistry`.
 Duplicate component, view, or action identities and contract conflicts fail
 deterministically. There is no `inventory` submission, linker section, global
 mutable registry, or browser-selected Rust path. A mount is also matched against
@@ -94,17 +94,20 @@ the immutable route/slot catalog before it can reach component execution.
 
 Generated runtime references are absolute `::suprnova::live` or
 `::suprnova::live::__private` paths. The hidden namespace is generated-code
-plumbing, not an application extension surface.
+plumbing, not an application extension surface. Application-authored event and
+effect contracts use the public `EventPayloadMetadata` and
+`EffectPayloadMetadata` traits; authorized action parameters use the public
+`AuthorizedAction` proof type.
 
 ## Internal standalone machinery
 
 This historical section name identifies machinery built before the cutover; the
 packages themselves now live only in the integrated internal crate authority.
 
-`crates/suprnova-live-macros` is the internal procedural-macro development
-package. `crates/suprnova-live-macro-fixture` impersonates the required
-`suprnova` facade only in compile fixtures so generated final paths remain
-proved while production macro ownership moves.
+`suprnova-macros/src/live` is the sole production implementation of the Live
+procedural macros. `crates/suprnova-live-macro-fixture` impersonates the
+required `suprnova` facade only in engine-level compile fixtures so generated
+final paths remain proved without introducing a framework dependency.
 `crates/suprnova-live-test-support` contains synthetic trusted contexts and the
 browserless harness. These packages are unpublished and are not application
 dependencies.
@@ -113,5 +116,5 @@ The host-neutral document adapter, endpoint types, and test host ports are
 conformance machinery inside the integrated internal crate. This conformance
 machinery does not claim registered Suprnova integration. The real
 `suprnova::live` facade, router registration, middleware adapters,
-session/auth/tenant services, and production macro placement remain required
-work within Iteration 005 until their framework tests pass.
+session/auth/tenant services, and remaining framework integration work stay
+within Iteration 005 until their framework tests pass.

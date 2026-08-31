@@ -1,5 +1,0 @@
-error: registered Live methods must be public
-  --> tests/ui/fail/private_action.rs:12:14
-   |
-12 |     async fn save(&mut self) {}
-   |              ^^^^

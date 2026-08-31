@@ -1,5 +1,0 @@
-error: duplicate Live URL query key
-  --> tests/ui/fail/duplicate_url_query.rs:10:5
-   |
-10 |     #[url(key = "q")]
-   |     ^

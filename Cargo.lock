@@ -7584,18 +7584,7 @@ name = "suprnova-live-macro-fixture"
 version = "1.3.7"
 dependencies = [
  "suprnova-live",
- "suprnova-live-macros",
-]
-
-[[package]]
-name = "suprnova-live-macros"
-version = "1.3.7"
-dependencies = [
- "proc-macro2",
- "quote",
- "suprnova-live-macro-fixture",
- "syn 2.0.117",
- "trybuild",
+ "suprnova-macros",
 ]
 
 [[package]]
@@ -7629,6 +7618,7 @@ dependencies = [
  "serde_json",
  "suprnova",
  "syn 2.0.117",
+ "trybuild",
  "validator",
 ]
 

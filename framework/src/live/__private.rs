@@ -27,6 +27,7 @@ pub mod action {
     pub use suprnova_live::action::ActionError;
     pub use suprnova_live::action::ActionTable;
     pub use suprnova_live::action::AuthorizationRequirement;
+    pub use suprnova_live::action::AuthorizedAction;
     pub use suprnova_live::action::IntoActionResult;
     pub use suprnova_live::action::TransactionPolicy;
 }
@@ -56,7 +57,9 @@ pub mod metadata {
     pub use suprnova_live::metadata::ComponentMetadata;
     pub use suprnova_live::metadata::ContractVersions;
     pub use suprnova_live::metadata::EffectMetadata;
+    pub use suprnova_live::metadata::EffectPayloadMetadata;
     pub use suprnova_live::metadata::EventMetadata;
+    pub use suprnova_live::metadata::EventPayloadMetadata;
     pub use suprnova_live::metadata::FieldMetadata;
     pub use suprnova_live::metadata::LiveComponentContract;
     pub use suprnova_live::metadata::LiveComponentDefinitionMetadata;

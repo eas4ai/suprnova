@@ -8,7 +8,7 @@ extern crate self as suprnova;
 /// Final Live facade shape used only by standalone macro compile tests.
 pub mod live {
     pub use suprnova_live::*;
-    pub use suprnova_live_macros::{LiveComponent, live};
+    pub use suprnova_macros::{LiveComponent, live};
 
     /// Hidden generated-code support surface used only by macro compile tests.
     #[doc(hidden)]

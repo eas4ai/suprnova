@@ -9,7 +9,7 @@ extern crate self as suprnova;
 
 pub mod live {
     pub use suprnova_live::*;
-    pub use suprnova_live_macros::{LiveComponent, live};
+    pub use suprnova_macros::{LiveComponent, live};
 
     #[doc(hidden)]
     pub mod __private {

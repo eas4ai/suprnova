@@ -19,6 +19,7 @@ mod factory;
 mod handler;
 mod inertia;
 mod injectable;
+mod live;
 mod main_macro;
 mod model;
 mod model_attribute;
@@ -35,6 +36,43 @@ mod test_macro;
 mod utils;
 mod workflow;
 mod workflow_step;
+
+/// Derives canonical state and browser-contract metadata for a Live component.
+#[proc_macro_derive(
+    LiveComponent,
+    attributes(
+        live,
+        __suprnova_live,
+        public,
+        model,
+        locked,
+        server_only,
+        session,
+        secret,
+        transient,
+        url,
+        mount,
+        action,
+        computed,
+        validate,
+        hydrate,
+        rendering,
+        rendered,
+        dehydrate,
+        teardown,
+        params_changed,
+        lazy_complete
+    )
+)]
+pub fn derive_live_component(input: TokenStream) -> TokenStream {
+    live::derive_live_component(input)
+}
+
+/// Declares Live component metadata on a struct or registered behavior on its impl.
+#[proc_macro_attribute]
+pub fn live(args: TokenStream, item: TokenStream) -> TokenStream {
+    live::expand_live(args, item)
+}
 
 /// Derive macro for `Data` - composite derive that produces `Serialize`
 /// (skipping `#[data(input_only)]` fields) and `Deserialize` (rejecting

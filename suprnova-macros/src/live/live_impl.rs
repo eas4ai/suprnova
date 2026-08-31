@@ -1,0 +1,594 @@
+use std::collections::BTreeMap;
+
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::quote;
+use syn::ext::IdentExt as _;
+use syn::spanned::Spanned as _;
+use syn::{
+    Attribute, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, Meta, Pat, PathArguments,
+    Receiver, Type, Visibility,
+};
+
+use super::attrs::{
+    ActionAuthorizationArgs, ActionTransactionArgs, ActionValidationArgs, contains_reference,
+    is_field_helper, is_method_helper, parse_action_args, validate_registered_name,
+};
+use super::component::model_codec_tokens;
+use super::expand::enforce_runtime_path_contract;
+
+pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<TokenStream2> {
+    if !args.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "the outer #[live] impl attribute does not accept arguments",
+        ));
+    }
+    if item.trait_.is_some() {
+        return Err(syn::Error::new(
+            item.impl_token.span(),
+            "#[live] requires an inherent impl",
+        ));
+    }
+    if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
+        return Err(syn::Error::new(
+            item.generics.span(),
+            "a Live component impl cannot be generic",
+        ));
+    }
+
+    let mut actions = BTreeMap::<String, RegisteredAction>::new();
+    let mut singleton_helpers = BTreeMap::<String, Span>::new();
+    let mut mount_parameters = Vec::<(String, Type)>::new();
+    let mut supports_params_changed = false;
+    let mut supports_lazy_complete = false;
+    for impl_item in &mut item.items {
+        let ImplItem::Fn(method) = impl_item else {
+            reject_helpers_on_non_method(impl_item)?;
+            continue;
+        };
+        let helper = take_method_helper(method)?;
+        let Some((helper_name, attribute)) = helper else {
+            continue;
+        };
+        validate_common_signature(method)?;
+        match helper_name.as_str() {
+            "action" => {
+                validate_action_signature(method)?;
+                method.attrs.push(syn::parse_quote!(
+                    #[doc = "Live may invoke this action body again after an uncommitted attempt. Nontransactional external effects require application idempotency, compensation, or an established outbox/delivery contract."]
+                ));
+                let args = parse_action_args(&attribute)?;
+                let name = args
+                    .name
+                    .as_ref()
+                    .map_or_else(|| method.sig.ident.unraw().to_string(), syn::LitStr::value);
+                let literal = args
+                    .name
+                    .unwrap_or_else(|| syn::LitStr::new(&name, method.sig.ident.span()));
+                validate_registered_name(&literal)?;
+                let (authorization_parameter, arguments) = extract_action_parameters(method)?;
+                let registered = RegisteredAction {
+                    version: args.version,
+                    method: method.sig.ident.clone(),
+                    arguments,
+                    asynchronous: method.sig.asyncness.is_some(),
+                    authorization: args.authorization,
+                    validation: args.validation,
+                    transaction: args.transaction,
+                    authorization_parameter,
+                };
+                if actions.insert(name, registered).is_some() {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "duplicate registered Live action name",
+                    ));
+                }
+            }
+            "mount" => {
+                ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
+                validate_mount_signature(method)?;
+                mount_parameters = extract_mount_parameters(method)?;
+                ensure_path_helper(&attribute)?;
+            }
+            "computed" => {
+                validate_computed_signature(method)?;
+                ensure_path_helper(&attribute)?;
+            }
+            "validate" => {
+                validate_receiver_method(method, false)?;
+                ensure_path_helper(&attribute)?;
+            }
+            _ => {
+                ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
+                validate_receiver_method(method, true)?;
+                ensure_path_helper(&attribute)?;
+                supports_params_changed |= helper_name == "params_changed";
+                supports_lazy_complete |= helper_name == "lazy_complete";
+            }
+        }
+    }
+
+    let self_ty = &item.self_ty;
+    let action_values = actions
+        .iter()
+        .map(|(name, action)| {
+            let version = action.version;
+            let authorization = match action.authorization {
+                ActionAuthorizationArgs::Public => quote!(Public),
+                ActionAuthorizationArgs::Current => quote!(Current),
+            };
+            let validation = match action.validation {
+                ActionValidationArgs::None => quote!(None),
+                ActionValidationArgs::Whole => quote!(WholeComponent),
+                ActionValidationArgs::Arguments => quote!(ActionArguments),
+                ActionValidationArgs::All => quote!(ComponentAndArguments),
+            };
+            let transaction = match action.transaction {
+                ActionTransactionArgs::None => quote!(None),
+                ActionTransactionArgs::Required => quote!(Required),
+            };
+            let argument_fields = action.arguments.iter().map(|argument| {
+                let name = argument.name.to_string();
+                let codec = model_codec_tokens(&argument.ty);
+                let required = argument.required;
+                quote! {
+                    ::suprnova::live::__private::action::ActionArgumentField::new(
+                        ::suprnova::live::__private::identity::ModelField::parse(#name)
+                            .expect("macro-validated Live action argument identity"),
+                        #codec,
+                        #required,
+                    ).expect("macro-validated Live action argument field")
+                }
+            });
+            quote! {
+                ::suprnova::live::__private::metadata::ActionMetadata::new_with_contract(
+                    ::suprnova::live::__private::identity::ActionName::parse(#name)
+                        .expect("macro-validated Live action identity"),
+                    #version,
+                    ::suprnova::live::__private::action::ActionArgumentSchema::new(
+                        ::std::vec![#(#argument_fields),*],
+                    ).expect("macro-validated Live action argument schema"),
+                    ::suprnova::live::__private::action::AuthorizationRequirement::#authorization,
+                    ::suprnova::live::__private::validation::ValidationSelection::#validation,
+                    ::suprnova::live::__private::action::TransactionPolicy::#transaction,
+                )?
+            }
+        })
+        .collect::<Vec<_>>();
+    let action_entries = actions
+        .values()
+        .enumerate()
+        .map(|(index, action)| {
+            let method = &action.method;
+            let decodes = action.arguments.iter().map(|argument| {
+                let ident = &argument.name;
+                let ty = &argument.ty;
+                let name = ident.to_string();
+                quote! {
+                    let #ident: #ty = arguments.decode::<#ty>(#name)?;
+                }
+            });
+            let mut invocation_arguments = Vec::new();
+            if action.authorization_parameter.is_some() {
+                invocation_arguments.push(quote!(authorization));
+            }
+            invocation_arguments.extend(
+                action
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let name = &argument.name;
+                        quote!(#name)
+                    }),
+            );
+            let invocation = if action.asynchronous {
+                quote!(target.#method(#(#invocation_arguments),*).await)
+            } else {
+                quote!(target.#method(#(#invocation_arguments),*))
+            };
+            quote! {
+                ::suprnova::live::__private::action::ActionEntry::new(
+                    metadata.actions()[#index].clone(),
+                    |target, authorization, arguments| {
+                        ::std::boxed::Box::pin(async move {
+                            let target = target
+                                .as_any_mut()
+                                .downcast_mut::<#self_ty>()
+                                .ok_or_else(
+                                    ::suprnova::live::__private::action::ActionError::dispatcher_contract
+                                )?;
+                            #(#decodes)*
+                            let _ = authorization;
+                            let output = #invocation;
+                            ::suprnova::live::__private::action::IntoActionResult::into_action_result(
+                                output,
+                            )
+                        })
+                    },
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let parameter_values = mount_parameters.iter().map(|(name, ty)| {
+        let codec = model_codec_tokens(ty);
+        quote! {
+            ::suprnova::live::__private::component::composition::ChildParameterField::new(
+                ::suprnova::live::__private::identity::ModelField::parse(#name)
+                    .expect("macro-validated Live mount parameter identity"),
+                #codec,
+                true,
+            )
+        }
+    });
+    let parameter_values = parameter_values.collect::<Vec<_>>();
+    let tokens = quote! {
+        #item
+
+        impl ::suprnova::live::__private::metadata::LiveComponentContract for #self_ty {
+            fn descriptor() -> ::std::result::Result<
+                ::suprnova::live::__private::registry::ComponentDescriptor,
+                ::suprnova::live::__private::metadata::MetadataError,
+            > {
+                let metadata = <Self as
+                    ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
+                >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::registry::ComponentDescriptor::new(metadata)
+                        .with_composition(
+                            parameter_schema,
+                            #supports_params_changed,
+                            #supports_lazy_complete,
+                        )
+                        .with_actions(action_table)
+                        .expect("macro-validated Live action metadata equivalence"),
+                )
+            }
+
+            fn descriptor_with_hooks(
+                hooks: ::suprnova::live::__private::component::ComponentHooks,
+            ) -> ::std::result::Result<
+                ::suprnova::live::__private::registry::ComponentDescriptor,
+                ::suprnova::live::__private::metadata::MetadataError,
+            > {
+                let metadata = <Self as
+                    ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
+                >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
+                        metadata,
+                        hooks,
+                    ).with_composition(
+                        parameter_schema,
+                        #supports_params_changed,
+                        #supports_lazy_complete,
+                    )
+                    .with_actions(action_table)
+                    .expect("macro-validated Live action metadata equivalence"),
+                )
+            }
+        }
+    };
+    enforce_runtime_path_contract(&tokens)?;
+    Ok(tokens)
+}
+
+fn take_method_helper(method: &mut ImplItemFn) -> syn::Result<Option<(String, Attribute)>> {
+    let mut helper = None;
+    let mut retained = Vec::with_capacity(method.attrs.len());
+    for attribute in method.attrs.drain(..) {
+        let Some(name) = attribute
+            .path()
+            .get_ident()
+            .map(|ident| ident.unraw().to_string())
+        else {
+            retained.push(attribute);
+            continue;
+        };
+        if is_field_helper(&name) {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "field helper cannot be placed on a Live impl method",
+            ));
+        }
+        if is_method_helper(&name) {
+            if helper.replace((name, attribute)).is_some() {
+                return Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "a Live method may declare only one method helper",
+                ));
+            }
+        } else {
+            retained.push(attribute);
+        }
+    }
+    method.attrs = retained;
+    Ok(helper)
+}
+
+fn reject_helpers_on_non_method(item: &ImplItem) -> syn::Result<()> {
+    let attributes = match item {
+        ImplItem::Const(item) => &item.attrs,
+        ImplItem::Type(item) => &item.attrs,
+        ImplItem::Macro(item) => &item.attrs,
+        ImplItem::Verbatim(_) | _ => return Ok(()),
+    };
+    if let Some(attribute) = attributes.iter().find(|attribute| {
+        attribute.path().get_ident().is_some_and(|ident| {
+            let name = ident.unraw().to_string();
+            is_method_helper(&name) || is_field_helper(&name)
+        })
+    }) {
+        return Err(syn::Error::new(
+            attribute.span(),
+            "Live helpers can only be placed on their documented item kind",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_common_signature(method: &ImplItemFn) -> syn::Result<()> {
+    let signature = &method.sig;
+    if signature.constness.is_some()
+        || signature.unsafety.is_some()
+        || signature.abi.is_some()
+        || signature.variadic.is_some()
+        || !signature.generics.params.is_empty()
+        || signature.generics.where_clause.is_some()
+    {
+        return Err(syn::Error::new(
+            signature.span(),
+            "Live methods cannot be const, unsafe, extern, variadic, or generic",
+        ));
+    }
+    if !matches!(method.vis, Visibility::Public(_)) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "registered Live methods must be public",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_action_signature(method: &ImplItemFn) -> syn::Result<()> {
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    if !receiver.is_some_and(|value| value.reference.is_some() && value.mutability.is_some()) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "Live actions require `&mut self` as their first argument",
+        ));
+    }
+    Ok(())
+}
+
+struct RegisteredAction {
+    version: u16,
+    method: syn::Ident,
+    arguments: Vec<ActionParameter>,
+    asynchronous: bool,
+    authorization: ActionAuthorizationArgs,
+    validation: ActionValidationArgs,
+    transaction: ActionTransactionArgs,
+    authorization_parameter: Option<syn::Ident>,
+}
+
+struct ActionParameter {
+    name: syn::Ident,
+    ty: Type,
+    required: bool,
+}
+
+fn extract_action_parameters(
+    method: &ImplItemFn,
+) -> syn::Result<(Option<syn::Ident>, Vec<ActionParameter>)> {
+    let mut authorization = None;
+    let mut parameters = Vec::new();
+    for (index, argument) in method.sig.inputs.iter().skip(1).enumerate() {
+        let FnArg::Typed(argument) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be typed named values",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "action arguments must use simple stable names",
+            ));
+        };
+        if is_authorized_action_reference(&argument.ty) {
+            if index != 0 || authorization.is_some() {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "the authorized action context must be the first action parameter",
+                ));
+            }
+            authorization = Some(pattern.ident.clone());
+            continue;
+        }
+        if pattern.by_ref.is_some()
+            || pattern.mutability.is_some()
+            || pattern.subpat.is_some()
+            || contains_reference(&argument.ty)
+        {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be immutable owned values",
+            ));
+        }
+        parameters.push(ActionParameter {
+            name: pattern.ident.clone(),
+            ty: argument.ty.as_ref().clone(),
+            required: option_inner(&argument.ty).is_none(),
+        });
+    }
+    Ok((authorization, parameters))
+}
+
+fn is_authorized_action_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    if reference.mutability.is_some() {
+        return false;
+    }
+    let Type::Path(path) = reference.elem.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "AuthorizedAction")
+}
+
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    match arguments.args.first()? {
+        GenericArgument::Type(inner) if arguments.args.len() == 1 => Some(inner),
+        _ => None,
+    }
+}
+
+fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {
+    if method
+        .sig
+        .inputs
+        .iter()
+        .any(|argument| matches!(argument, FnArg::Receiver(_)))
+    {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "mount must be an associated constructor without a self receiver",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<(String, Type)>> {
+    method
+        .sig
+        .inputs
+        .iter()
+        .map(|argument| {
+            let FnArg::Typed(argument) = argument else {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be typed named arguments",
+                ));
+            };
+            let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    argument.pat.span(),
+                    "mount parameters must use simple stable names",
+                ));
+            };
+            if pattern.by_ref.is_some()
+                || pattern.mutability.is_some()
+                || pattern.subpat.is_some()
+                || contains_reference(&argument.ty)
+            {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be immutable owned values",
+                ));
+            }
+            Ok((
+                pattern.ident.unraw().to_string(),
+                argument.ty.as_ref().clone(),
+            ))
+        })
+        .collect()
+}
+
+fn validate_computed_signature(method: &ImplItemFn) -> syn::Result<()> {
+    if method.sig.asyncness.is_some() {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "computed values must be synchronous",
+        ));
+    }
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    if !receiver.is_some_and(|value| value.reference.is_some() && value.mutability.is_none()) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "computed values require `&self`",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_receiver_method(method: &ImplItemFn, require_mutable: bool) -> syn::Result<()> {
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    let valid = receiver.is_some_and(|value| {
+        value.reference.is_some() && (!require_mutable || value.mutability.is_some())
+    });
+    if !valid {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            if require_mutable {
+                "lifecycle hooks require `&mut self`"
+            } else {
+                "validation methods require `&self` or `&mut self`"
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn receiver(argument: &FnArg) -> Option<&Receiver> {
+    match argument {
+        FnArg::Receiver(receiver) => Some(receiver),
+        FnArg::Typed(_) => None,
+    }
+}
+
+fn ensure_singleton(
+    helpers: &mut BTreeMap<String, Span>,
+    name: &str,
+    span: Span,
+) -> syn::Result<()> {
+    if helpers.insert(name.to_owned(), span).is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("duplicate #[{name}] lifecycle helper"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_path_helper(attribute: &Attribute) -> syn::Result<()> {
+    if matches!(attribute.meta, Meta::Path(_)) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            attribute.span(),
+            "this Live method helper does not accept arguments",
+        ))
+    }
+}

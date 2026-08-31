@@ -422,14 +422,14 @@ After a coherent Live task:
 
 ```bash
 CARGO_INCREMENTAL=0 cargo fmt \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support -- --check
 CARGO_INCREMENTAL=0 cargo clippy \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support \
   --all-targets --all-features
 CARGO_INCREMENTAL=0 cargo test \
-  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live -p suprnova-macros \
   -p suprnova-live-macro-fixture -p suprnova-live-test-support \
   --all-targets --all-features --no-fail-fast
 ```

@@ -1,5 +1,0 @@
-error: model debounce must be between 1 and 60000 milliseconds
- --> tests/ui/fail/invalid_debounce.rs:6:24
-  |
-6 |     #[model(debounce = 0)]
-  |                        ^

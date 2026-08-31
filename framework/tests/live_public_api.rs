@@ -28,6 +28,21 @@ fn html_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn without_script_elements(html: &str) -> String {
+    let mut visible = String::with_capacity(html.len());
+    let mut remainder = html;
+    while let Some(start) = remainder.find("<script") {
+        visible.push_str(&remainder[..start]);
+        let Some(end) = remainder[start..].find("</script>") else {
+            visible.push_str(&remainder[start..]);
+            return visible;
+        };
+        remainder = &remainder[start + end + "</script>".len()..];
+    }
+    visible.push_str(remainder);
+    visible
+}
+
 #[test]
 fn rendered_public_docs_do_not_expose_internal_crate_paths() {
     let root = workspace_root();
@@ -59,9 +74,10 @@ fn rendered_public_docs_do_not_expose_internal_crate_paths() {
             }
             let html = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let visible_html = without_script_elements(&html).replace("__suprnova_live", "");
             for forbidden in ["suprnova_live", "suprnova_live_macros", "askama_parser"] {
                 assert!(
-                    !html.contains(forbidden),
+                    !visible_html.contains(forbidden),
                     "public {module} documentation exposed internal path {forbidden} in {}",
                     path.display()
                 );
