@@ -14,6 +14,35 @@ function requiredString(value, description) {
   return value;
 }
 
+export function resolveGitWorkspaceRoot(directory, spawn = spawnSync) {
+  const result = spawn(
+    "git",
+    ["-C", directory, "rev-parse", "--show-toplevel"],
+    { encoding: "utf8" },
+  );
+
+  if (result.error !== undefined) {
+    const detail =
+      result.error instanceof Error
+        ? result.error.message
+        : String(result.error);
+    throw new Error(`cannot spawn git in ${directory}: ${detail}`, {
+      cause: result.error,
+    });
+  }
+  if (result.status !== 0) {
+    const stderr =
+      typeof result.stderr === "string" ? result.stderr.trim() : "";
+    throw new Error(
+      `git rev-parse failed in ${directory} with status ${String(result.status)}${stderr.length > 0 ? `: ${stderr}` : ""}`,
+    );
+  }
+  if (typeof result.stdout !== "string" || result.stdout.trim().length === 0) {
+    throw new Error(`git rev-parse in ${directory} returned no workspace root`);
+  }
+  return result.stdout.trim();
+}
+
 export function loadLockedCargoMetadata(directory, spawn = spawnSync) {
   const result = spawn(
     "rtk",

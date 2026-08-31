@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   cargoDependencyClosure,
   loadLockedCargoMetadata,
+  resolveGitWorkspaceRoot,
 } from "../scripts/license-inventory-cargo.mjs";
 
 const liveRoots = [
@@ -119,6 +120,46 @@ assert.throws(
     error.cause === spawnFailure &&
     error.message.includes("spawn rtk ENOENT"),
   "Cargo metadata spawn failures preserve their root cause",
+);
+
+const gitSpawnFailure = new Error("spawn git ENOENT");
+assert.throws(
+  () =>
+    resolveGitWorkspaceRoot("/fixture", () => ({
+      error: gitSpawnFailure,
+      status: null,
+      stderr: null,
+      stdout: null,
+    })),
+  (error) =>
+    error instanceof Error &&
+    error.cause === gitSpawnFailure &&
+    error.message.includes("spawn git ENOENT"),
+  "Git workspace spawn failures preserve their root cause",
+);
+
+assert.throws(
+  () =>
+    resolveGitWorkspaceRoot("/fixture", () => ({
+      error: undefined,
+      status: 128,
+      stderr: null,
+      stdout: null,
+    })),
+  /git rev-parse failed in \/fixture with status 128$/u,
+  "Git failures tolerate nullable stderr without masking the status",
+);
+
+assert.throws(
+  () =>
+    resolveGitWorkspaceRoot("/fixture", () => ({
+      error: undefined,
+      status: 0,
+      stderr: null,
+      stdout: null,
+    })),
+  /git rev-parse in \/fixture returned no workspace root/u,
+  "a successful Git process with nullable stdout fails closed",
 );
 
 assert.throws(

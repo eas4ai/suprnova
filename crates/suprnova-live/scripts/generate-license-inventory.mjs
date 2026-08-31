@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,20 +7,12 @@ import { fileURLToPath } from "node:url";
 import {
   cargoDependencyClosure,
   loadLockedCargoMetadata,
+  resolveGitWorkspaceRoot,
 } from "./license-inventory-cargo.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const liveRoot = resolve(scriptDirectory, "..");
-const workspaceResult = spawnSync(
-  "git",
-  ["-C", liveRoot, "rev-parse", "--show-toplevel"],
-  { encoding: "utf8" },
-);
-if (workspaceResult.status !== 0) {
-  process.stderr.write(workspaceResult.stderr);
-  throw new Error(`cannot resolve Suprnova workspace above ${liveRoot}`);
-}
-const workspaceRoot = workspaceResult.stdout.trim();
+const workspaceRoot = resolveGitWorkspaceRoot(liveRoot);
 const liveRelative = relative(workspaceRoot, liveRoot);
 if (
   liveRelative.length === 0 ||
