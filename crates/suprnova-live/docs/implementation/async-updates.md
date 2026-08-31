@@ -2,10 +2,10 @@
 
 Iteration 004 implements typed server events, authorized logical
 subscriptions, polling, multiplexed push transports, continuity recovery, and
-the optional `async@1` browser artifact. This is standalone engine and
-conformance machinery. It does not claim a configured production broadcaster,
-Suprnova route adapter, or a document-wide scheduler shared with uploads and
-Live actions.
+the optional `async@1` browser artifact. This host-neutral engine and
+conformance machinery now lives in the integrated internal crate. It does not
+claim that Iteration 005's production broadcaster, Suprnova route adapter, or a
+document-wide scheduler shared with uploads and Live actions is complete.
 
 Suprnova can serve SSR pages, links, and forms without JavaScript, and a Live
 island's initial HTML is server rendered. `live:poll`, `live:stream`, registered
@@ -48,9 +48,9 @@ per-source sequence ordering, cycle policy, fanout, and contract version. A
 stream may emit only event names and payload schemas present in both the
 component metadata and its signed subscription descriptor.
 
-The current standalone metadata form is shown below. A future `suprnova::live`
-macro may generate this declaration, but that macro is not part of the shipped
-standalone API.
+The current internal metadata form is shown below. Iteration 005 owns any
+`suprnova::live` macro-generated declaration; until that integration is proved,
+this lower-level form is conformance machinery rather than application API.
 
 ```rust
 let event = EventMetadata::from_payload_with_contract::<OrdersUpdated>(

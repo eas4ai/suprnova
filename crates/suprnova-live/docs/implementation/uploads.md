@@ -1,10 +1,10 @@
 # Uploads
 
-Iteration 004 implements the standalone upload engine, upload protocol v1, and
-the optional `uploads@1` browser artifact. This is engine and conformance
-machinery for the future internal `suprnova::live` facade. It does not claim
-that Suprnova routes, sessions, storage, scanners, or application macros are
-already integrated.
+Iteration 004 implements the host-neutral upload engine, upload protocol v1,
+and the optional `uploads@1` browser artifact. This engine and conformance
+machinery now lives in the integrated internal crate. It does not claim that
+Iteration 005's `suprnova::live` facade, routes, sessions, storage, scanners, or
+application macros are complete.
 
 Suprnova itself can render pages and process ordinary forms without JavaScript.
 Live initial content is server-rendered HTML. `live:upload`, Live actions, model
@@ -42,9 +42,10 @@ attributes. A current upload field can be authored as follows:
 <button type="button" live:upload.remove="avatar">Remove upload</button>
 ```
 
-The standalone engine currently expresses policy through checked metadata. The
-future Suprnova integration may wrap this in a macro or attribute, but no such
-application-facing syntax is claimed here. The lower-level shipped form is:
+The internal engine currently expresses policy through checked metadata.
+Iteration 005 may expose this through a macro or attribute, but no such
+application-facing syntax is claimed complete here. The lower-level shipped
+form is:
 
 ```rust
 let avatar = FieldMetadata::new(

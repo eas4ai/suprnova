@@ -52,7 +52,7 @@ request authenticity, nor continued ledger authority.
 
 The host remains responsible for making the supplied facts truthful. A typed
 `Passed` value is not magic authentication; it is a narrow integration boundary
-whose production adapter must be covered by framework tests. The standalone
+whose production adapter must be covered by framework tests. The host-neutral
 hostile-adapter suite proves that missing, expired, inconsistent, cross-route,
 cross-principal, and cross-tenant facts cannot enter kernel execution.
 
@@ -123,20 +123,21 @@ rollback across an uncoupled provider. Provider, clock, randomness, key, parse,
 verification, compatibility, and limit failures are classified and fail before
 uncertain success publication.
 
-## Explicitly deferred integrations
+## Framework integrations still in progress
 
 Iteration 002 implements the host-neutral endpoint, trusted-context validator,
 component/action registry, authorization/validation/transaction ports, and
 conformance services. Actual Suprnova router/middleware/request/response,
 origin/CSRF, cookie/session, principal/tenant, policy, database transaction,
-outbox, and provider adapters require the later atomic integration move and are
-not claimed here.
+outbox, and provider adapters remain Iteration 005 work until their framework
+integration tests pass; colocation does not make them complete.
 
 Iteration 003 implements CSP-compatible runtime delivery metadata, DOM
 morphing, URL execution in the browser, registered effect execution,
-scheduling, feedback, lifecycle, and post-acceptance recovery in the standalone
-browser host. It does not claim that Suprnova's router, response pipeline, asset
-publisher, sessions, or middleware have registered those pieces.
+scheduling, feedback, lifecycle, and post-acceptance recovery in the host-
+neutral browser harness. It does not claim that Suprnova's router, response
+pipeline, asset publisher, sessions, or middleware have registered those
+pieces.
 
 Consequently, using the internal parser or a verified snapshot by itself is
 never sufficient authority to perform an application action.

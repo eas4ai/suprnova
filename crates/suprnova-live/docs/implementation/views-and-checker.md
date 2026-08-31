@@ -24,7 +24,7 @@ root. Mount metadata contains validated component/slot identity and signed data,
 never executable script or handler attributes.
 
 `CanonicalDocumentConformance` proves GET, HEAD, conditional validator, body
-suppression, and representation-length behavior. It is a standalone
+suppression, and representation-length behavior. It is a host-neutral
 conformance adapter, not a registered Suprnova route.
 
 ## Askama checker

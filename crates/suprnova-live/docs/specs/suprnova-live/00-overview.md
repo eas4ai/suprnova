@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-30
+Last revised: 2026-08-31
 
 ## Purpose
 
@@ -107,26 +107,23 @@ application routes and Live components
   snapshot, protocol, rendering, scheduling metadata, RenderCache contracts,
   provider conformance fixtures, the browser-runtime source, and component
   assets. It must not depend on the public `suprnova` framework crate.
-- During dedicated development, this repository owns the implementation,
-  `docs/specs/suprnova-live/` as the normative Live specification root, and
-  `scripts/check-specs.mjs` as their structural drift gate. Development starts
-  here rather than modifying the active Suprnova checkout. When separation
-  materially blocks integration, testing, or coherent changes, the product
-  tree, normative specifications, and checker move together into
-  `suprnova/crates/suprnova-live/`; neither repository may remain a parallel
-  maintained authority afterward.
-- Iteration 005 authorizes that atomic move. Authority transfers when the
-  committed standalone history and the complete checked product/specification
-  tree land beneath `suprnova/crates/suprnova-live/`. The standalone repository
-  then remains historical evidence only; uncommitted local files, reference
-  catalogs, ignored dependencies, and optional handoff archives do not silently
-  join the product import.
-- Before that atomic move, the standalone engine exposes internal Live host
-  adapter contracts for normalized request facts, verified request context,
-  application services, and typed response intent. Conformance and test
-  adapters exercise those contracts without claiming to be Suprnova
-  integration. The standalone workspace has no source or path dependency on
-  the active Suprnova checkout.
+- The integrated `crates/suprnova-live/` tree owns the implementation,
+  `crates/suprnova-live/docs/specs/suprnova-live/` as the normative Live
+  specification root, and `crates/suprnova-live/scripts/check-specs.mjs` as its
+  structural drift gate. Product code, specifications, checker, browser runtime,
+  fixtures, tests, benchmarks, and implementation documents remain colocated;
+  no second maintained authority is permitted.
+- Iteration 005 transferred committed standalone history and the complete
+  checked product/specification tree into this location. The former
+  `/home/shawn/workspace2/suprnova-live` checkout is immutable historical
+  provenance only. Its uncommitted files, reference catalog, ignored
+  dependencies, and optional handoff archive are not integrated product inputs
+  and receive no parallel maintenance.
+- The integrated engine exposes host-neutral adapter contracts for normalized
+  request facts, verified request context, application services, and typed
+  response intent. Those contracts and their conformance adapters do not by
+  themselves prove the still-pending Iteration 005 public facade, router,
+  middleware, provider, CLI, or RenderCache implementation.
 - `framework/src/live/` is the Suprnova integration and public facade. It adapts
   the router, request context, middleware, sessions, authorization, SeaORM,
   generic cache, events, broadcasting, telemetry, and configuration to the
@@ -176,7 +173,7 @@ invalidation afterward. A reconnect becomes current only after trusted replay
 proves continuity or an authoritative refresh establishes a new baseline.
 
 Uploads separate an opaque non-authority handle from a short-lived secret
-transfer grant. The standalone reverse-proxy/file provider streams untrusted
+transfer grant. The daemon-free reverse-proxy/file provider streams untrusted
 bytes into quarantine without a daemon, while provider-neutral direct-storage
 adapters preserve the same revisioned lifecycle, verification, finalization,
 and cleanup contracts. File bytes and transfer grants never enter component
@@ -523,6 +520,14 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Completed the authority cutover after importing the committed
+  standalone history. `crates/suprnova-live/` now keeps product code, normative
+  specifications, checker, browser runtime, fixtures, tests, benchmarks, and
+  implementation documents as one maintained authority. The former standalone
+  checkout is immutable historical provenance only. This authority decision
+  does not claim the Iteration 005 public facade, routers, providers, CLI, or
+  RenderCache implementation complete, and it preserves `U4/16`, `E100/1K`,
+  `R100`, and the historical-baseline resolution as release blockers.
 - 2026-08-30 -- Authorized iteration 005 as the atomic Suprnova integration and
   complete RenderCache implementation. The engine, browser runtime, generated
   artifacts, fixtures, tests, benchmarks, normative specifications, checker, and

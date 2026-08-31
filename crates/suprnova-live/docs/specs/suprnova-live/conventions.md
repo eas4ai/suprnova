@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-30
+Last revised: 2026-08-31
 
 ## Authority and application
 
@@ -12,20 +12,17 @@ standard it imports, and any future repository-local `BEST_PRACTICES.md` remain
 authoritative. A repository-local `BEST_PRACTICES.md` overrides the machine
 copy.
 
-This repository is the dedicated development workspace for the future internal
-Suprnova Live crate, not a specification-only repository or a third-party crate.
-Iteration 001 creates implementation here beside the normative
-`docs/specs/suprnova-live/` directory and `scripts/check-specs.mjs`; it does not
-modify the active Suprnova checkout. Development remains here until the separate
-workspace materially blocks integration, testing, or a coherent change. At that
-trigger, the product tree, normative specifications, and checker move together
-into `suprnova/crates/suprnova-live/` in one controlled integration, and this
-repository ceases to be a maintained authority. The large `reference/` catalog
-and optional `suprnova-live.zip` Fable handoff export are non-normative
-development artifacts and need not move. When the ZIP exists, the checker
-requires its Markdown bytes to match the source set exactly. No Stage 5 edit
-authorizes modification of the active Suprnova workspace; a later integration
-iteration must do that explicitly.
+`crates/suprnova-live/` is the internal Suprnova Live engine subtree, not a
+specification-only repository or a third-party crate. It keeps implementation
+beside the normative `docs/specs/suprnova-live/` set and
+`scripts/check-specs.mjs`; those files, browser sources and artifacts, fixtures,
+tests, benchmarks, and implementation documents are one maintained authority.
+The former `/home/shawn/workspace2/suprnova-live` checkout is immutable
+historical provenance only. Its large `reference/` catalog and optional
+`suprnova-live.zip` Fable handoff export remain non-normative historical
+artifacts and do not become a parallel current contract. Iteration 005
+authorizes coherent changes in an isolated Suprnova integration worktree while
+unrelated Suprnova and Magnetar work remains untouched.
 
 ## Implementation standards
 
@@ -255,41 +252,39 @@ iteration must do that explicitly.
 
 ## Naming and organization
 
-### Development and eventual integration layout
+### Integrated development layout
 
 ```text
-suprnova-live/
-  Cargo.toml
-  docs/specs/suprnova-live/
-  scripts/
-    check-specs.mjs
-    gate.sh
-  src/
-    component/
-    state/
-    snapshot/
-    protocol/
-    render/
-    render_cache/
-    providers/
-    testing/
-  browser/
-    src/
-    tests/
-    package.json
-    package-lock.json
-  components/
-    templates/
-    styles/
-    catalog/
-  fixtures/
-  benches/
-    render_cache_budget.rs
-  reference/                 # development evidence; not integrated
-
 suprnova/
-  crates/suprnova-live/      # eventual destination of the product tree,
-                             # normative specs, and checker together
+  Cargo.toml
+  crates/suprnova-live/      # sole maintained Live authority
+    Cargo.toml
+    docs/specs/suprnova-live/
+    docs/implementation/
+    scripts/
+      check-specs.mjs
+      gate.sh
+    src/
+      component/
+      state/
+      snapshot/
+      protocol/
+      render/
+      render_cache/
+      providers/
+      testing/
+    browser/
+      src/
+      tests/
+      package.json
+      package-lock.json
+    components/
+      templates/
+      styles/
+      catalog/
+    fixtures/
+    benches/
+      render_cache_budget.rs
   framework/src/live/
   suprnova-macros/src/live/
   suprnova-cli/src/commands/live/
@@ -389,82 +384,73 @@ Commands below are run from the named repository root. A check is reported as
 passing only when that exact command ran successfully. Heavy Cargo commands are
 never run concurrently with another build in the Suprnova tree.
 
-### Specification workspace: `/home/shawn/workspace2/suprnova-live`
+### Integrated specification subtree
 
-Per documentation change:
+From the Suprnova workspace root, per documentation change:
 
 ```bash
-node scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-implementation-docs.mjs
 git diff --check
 ```
 
-While the optional Fable handoff ZIP is present in the development workspace,
-regenerate it before the structural check so its Markdown bytes remain exact:
+Before a documentation commit:
 
 ```bash
-(cd docs/specs && zip -X -q -FS -r suprnova-live.zip suprnova-live -i '*.md' -x 'suprnova-live/iterations/next/*')
-node scripts/check-specs.mjs
-```
-
-Before a Stage commit:
-
-```bash
-node scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-implementation-docs.mjs
 git diff --check
 git status --short
 ```
 
-The Same Page Stop hook runs
-`.agents/skills/new-project/scripts/spec-drift-gate.mjs`; it supplements rather
-than replaces the explicit structural check.
+A locally installed Same Page Stop hook may supplement these commands; it never
+replaces the explicit structural check.
 
-### Dedicated Live workspace: `/home/shawn/workspace2/suprnova-live`
+The former standalone Fable ZIP is historical provenance. Do not regenerate or
+use it as current specification authority.
 
-While iterating on Rust:
+### Integrated Live subtree: `crates/suprnova-live/`
+
+From the Suprnova workspace root, while iterating on Rust:
 
 ```bash
-CARGO_INCREMENTAL=0 cargo check --all-targets --all-features
-CARGO_INCREMENTAL=0 cargo test <test-filter>
+CARGO_INCREMENTAL=0 cargo check -p suprnova-live --all-targets --all-features
+CARGO_INCREMENTAL=0 cargo test -p suprnova-live <test-filter>
 ```
 
 After a coherent Live task:
 
 ```bash
-CARGO_INCREMENTAL=0 cargo fmt --all --check
-CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features
-CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast
+CARGO_INCREMENTAL=0 cargo fmt \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support -- --check
+CARGO_INCREMENTAL=0 cargo clippy \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features
+CARGO_INCREMENTAL=0 cargo test \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features --no-fail-fast
 ```
 
-Before any push from the dedicated workspace:
+Before any push from the integrated workspace:
 
 ```bash
-SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 scripts/gate.sh
+SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/gate.sh
 ```
 
 Before a release or when upload/provider/stream/resource-budget behavior changes:
 
 ```bash
-SUPRNOVA_LIVE_RELEASE=1 CARGO_INCREMENTAL=0 scripts/gate.sh
+SUPRNOVA_LIVE_RELEASE=1 CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/gate.sh
 ```
 
-### Suprnova integration workspace: `/home/shawn/workspace2/suprnova`
-
-These commands apply only after the migration trigger moves Live into the
-Suprnova workspace. While iterating on an integrated change:
+When a task changes the public framework integration as well as the engine:
 
 ```bash
-CARGO_INCREMENTAL=0 cargo check -p suprnova-live
-CARGO_INCREMENTAL=0 cargo check -p suprnova
+CARGO_INCREMENTAL=0 cargo check -p suprnova-live -p suprnova
 CARGO_INCREMENTAL=0 cargo test -p suprnova-live <test-filter>
-CARGO_INCREMENTAL=0 cargo test -p suprnova --test <affected-live-file>
-```
-
-After a coherent integrated task:
-
-```bash
-CARGO_INCREMENTAL=0 cargo fmt --all --check
-CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets
-CARGO_INCREMENTAL=0 cargo test -p suprnova-live --no-fail-fast
 CARGO_INCREMENTAL=0 cargo test -p suprnova --test <affected-live-file>
 CARGO_INCREMENTAL=0 cargo test -p suprnova-macros
 CARGO_INCREMENTAL=0 cargo test -p suprnova-cli --test template_drift
@@ -476,38 +462,24 @@ After a public API or generated-template change:
 CARGO_INCREMENTAL=0 cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
 ```
 
-Before any push from the integrated workspace:
-
-```bash
-CARGO_INCREMENTAL=0 scripts/gate.sh
-```
-
-Before a release or when provider/security/MSRV/feature behavior changes:
-
-```bash
-CARGO_INCREMENTAL=0 scripts/gate.sh --full
-```
-
-### Browser runtime: `browser/`
-
-The path becomes `crates/suprnova-live/browser/` only after integration.
+### Browser runtime: `crates/suprnova-live/browser/`
 
 Dependency installation after checkout or lockfile change:
 
 ```bash
-npm ci
+npm --prefix crates/suprnova-live/browser ci
 ```
 
 Per runtime task:
 
 ```bash
-npm run format:check
-npm run lint
-npm run typecheck
-npm test
-npm run test:browser
-npm run build
-npm run budget
+npm --prefix crates/suprnova-live/browser run format:check
+npm --prefix crates/suprnova-live/browser run lint
+npm --prefix crates/suprnova-live/browser run typecheck
+npm --prefix crates/suprnova-live/browser test
+npm --prefix crates/suprnova-live/browser run test:browser
+npm --prefix crates/suprnova-live/browser run build
+npm --prefix crates/suprnova-live/browser run budget
 ```
 
 `build` must reproduce checked artifacts byte-for-byte from the lockfile and
@@ -520,14 +492,23 @@ pass.
 ### Provider and browser matrix checks
 
 Provider conformance, oldest-browser, current-browser, accessibility, CSP, and
-benchmark matrix commands shall be wired into `scripts/gate.sh` or a script it
-invokes before the corresponding implementation can be called complete. Tests
+benchmark matrix commands shall be wired into
+`crates/suprnova-live/scripts/gate.sh` or a script it invokes before the
+corresponding implementation can be called complete. Tests
 requiring Redis, Memcached, PostgreSQL, MySQL/MariaDB, or a real browser remain
 explicit and unattended; credentials are never embedded in commands or
 fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Established the integrated `crates/suprnova-live/` subtree as
+  the sole maintained product, specification, checker, browser, fixture, test,
+  benchmark, and implementation-document authority. The former standalone
+  checkout is immutable historical provenance; its reference catalog and Fable
+  ZIP remain non-normative. Updated commands to run from the Suprnova root with
+  explicit Live package and browser paths. This cutover does not claim the
+  public facade, routes, providers, CLI, or RenderCache complete, and the
+  outstanding Iteration 004 release qualification remains blocking.
 - 2026-08-30 -- Advanced the active contract to iteration 005 for the atomic
   Suprnova workspace cutover and the complete RenderCache foundation assigned by
   iteration 004. The committed engine, browser, fixtures, tests, specs, checker,

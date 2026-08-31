@@ -1,9 +1,9 @@
 # Iteration 004 operations
 
 This guide records the artifacts, controls, evidence, and integration boundaries
-that Iteration 004 actually ships. It is an operator and conformance reference
-for the standalone development workspace, not a production Suprnova deployment
-guide.
+that Iteration 004 shipped before the workspace cutover. The imported commands
+remain an operator and conformance reference inside `crates/suprnova-live/`, not
+a production Suprnova deployment guide.
 
 ## Artifacts
 
@@ -225,26 +225,30 @@ or Suprnova application deployment.
 
 ## Suprnova integration boundary
 
-Development remains in this repository. Iteration 004 does not edit or register
-inside the active Suprnova checkout. The Rust reference host, Node static host,
-direct-provider bridge, fault controls, and benchmark harnesses are
-conformance-only test tools, not production administration APIs. They are
-neither the future Suprnova integration nor vendor integration.
+At Iteration 004 completion, development remained in the standalone checkout
+and did not edit or register inside Suprnova. Iteration 005 has since imported
+that committed history, product code, normative specifications, and checker
+together under `crates/suprnova-live/`; the former checkout is immutable
+historical provenance rather than a parallel maintained authority.
 
-A confirmed atomic integration iteration will move product code, normative
-specifications, and their checker together into Suprnova. The Suprnova
-application layer will own real router and middleware registration, trusted
-request context, authentication, authorization, session/CSRF/tenant mapping,
-configuration, asset roles, application validation, database adapters, storage
-and provider clients, scanner service, finalizer/domain transaction wiring,
-cleanup scheduling, broadcaster/event-source adapters, and operational tracing.
-The engine remains behind `suprnova::live`; applications do not depend on this
-internal development crate directly.
+Iteration 004's durable test-tool classification remains exact: The Rust
+reference host, Node static host, direct-provider bridge, fault controls, and
+benchmark harnesses are conformance-only test tools, not production administration APIs.
+They are neither the future Suprnova integration nor vendor integration.
 
-The future Suprnova application integration will own routes, authentication,
-session, configuration, provider, scanner, storage, and broadcast wiring.
+Its historical ownership statement was: The future Suprnova application
+integration will own routes, authentication, session, configuration, provider,
+scanner, storage, and broadcast wiring. Iteration 005 now owns that integration
+and must still prove real router and middleware registration,
+trusted request context, authentication, authorization, session/CSRF/tenant
+mapping, configuration, asset roles, application validation, database adapters,
+storage and provider clients, scanner service, finalizer/domain transaction
+wiring, cleanup scheduling, broadcaster/event-source adapters, and operational
+tracing. The engine remains behind `suprnova::live`; applications do not depend
+on this internal crate directly.
 
-That later adapter must preserve the shipped protocols and conformance suites.
+That framework adapter must preserve the shipped protocols and conformance
+suites.
 It must not copy the reference host into production, expose its example
 reacquisition or fault routes as framework routes, make Node a semantic server,
 or weaken exact origin, secret, revision, continuity, cleanup, and resource

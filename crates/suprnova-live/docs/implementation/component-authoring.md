@@ -1,9 +1,9 @@
 # Live component authoring and metadata
 
 This document records the Iteration 002 authoring contract. The examples use
-the final application namespace that will exist after the atomic Suprnova
-integration. They are not instructions to depend on the standalone engine or
-its development macro package directly.
+the final application namespace required from Iteration 005's public Suprnova
+integration. They are not instructions to depend on the internal engine or its
+development macro package directly, and they do not claim that facade complete.
 
 ## Application-facing authoring
 
@@ -98,15 +98,20 @@ plumbing, not an application extension surface.
 
 ## Internal standalone machinery
 
+This historical section name identifies machinery built before the cutover; the
+packages themselves now live only in the integrated internal crate authority.
+
 `crates/suprnova-live-macros` is the internal procedural-macro development
-package. `crates/suprnova-live-macro-fixture` impersonates the eventual
-`suprnova` facade only in compile fixtures so generated final paths can be
-proved before the atomic move. `crates/suprnova-live-test-support` contains
-synthetic trusted contexts and the browserless harness. These packages are
-unpublished and are not application dependencies.
+package. `crates/suprnova-live-macro-fixture` impersonates the required
+`suprnova` facade only in compile fixtures so generated final paths remain
+proved while production macro ownership moves.
+`crates/suprnova-live-test-support` contains synthetic trusted contexts and the
+browserless harness. These packages are unpublished and are not application
+dependencies.
 
 The host-neutral document adapter, endpoint types, and test host ports are
-conformance machinery. This standalone workspace does not claim registered
-Suprnova integration. The real `suprnova::live` facade, router registration,
-middleware adapters, session/auth/tenant services, and macro placement are
-owned by the later atomic integration iteration.
+conformance machinery inside the integrated internal crate. This conformance
+machinery does not claim registered Suprnova integration. The real
+`suprnova::live` facade, router registration, middleware adapters,
+session/auth/tenant services, and production macro placement remain required
+work within Iteration 005 until their framework tests pass.

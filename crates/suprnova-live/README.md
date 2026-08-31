@@ -1,7 +1,11 @@
 # Suprnova Live
 
-This repository is the development workspace for the future internal
-`suprnova-live` crate. Iteration 001 established the trusted interaction spine:
+This directory is the sole maintained authority for Suprnova's internal
+`suprnova-live` crate. Its committed standalone development history was imported
+under `crates/suprnova-live/`; the former standalone checkout is immutable
+historical provenance, not a parallel product or specification repository.
+
+Iteration 001 established the trusted interaction spine:
 bounded canonical JSON, purpose-separated signed public-seed and instanced
 snapshots, verified hydration and deterministic dehydration, Tier 0 revision
 authority, bounded seed promotion, strict Live v1 request/response contracts,
@@ -20,10 +24,12 @@ explicit finalization and cleanup, typed events, signed subscriptions,
 multiplexed SSE/WebSocket delivery, polling, continuity recovery, backpressure,
 optional production artifacts, and qualified workload contracts.
 
-It is not a third-party crate and is not yet the application-facing Live API.
-The eventual public facade belongs under `suprnova::live`. Actual Suprnova
-router/HTTP/view/session/CSRF/auth/tenant adapters, final macro placement, and
-asset registration wait for the atomic integration move.
+It is not a third-party crate and is not itself the application-facing Live API.
+Iteration 005 owns the `suprnova::live` and `suprnova::view` facades, actual
+router/HTTP/view/session/CSRF/auth/tenant adapters, final macro placement, asset
+registration, and complete RenderCache implementation. Their presence in the
+same workspace is not claimed here until their implementation and integration
+evidence pass.
 
 ## Workspace
 
@@ -38,12 +44,13 @@ asset registration wait for the atomic integration move.
 - `fuzz/` owns one nightly target per external parser/verifier.
 - `benchmarks/` records the A8/16 budget contract and measured evidence.
 
-The workspace uses Rust 1.91.1 with no default features. Dependencies are exact
-in `Cargo.lock`; browser tooling is exact in `browser/package-lock.json`.
+The crate inherits Rust 1.94.0 and release metadata from the parent Suprnova
+workspace and has no default features. Dependencies are resolved by the parent
+`Cargo.lock`; browser tooling is exact in `browser/package-lock.json`.
 
 ## Verification
 
-Run the unattended gate from the repository root:
+Run the unattended Live gate from this integrated crate root:
 
 ```sh
 rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
@@ -56,6 +63,10 @@ deterministic browser builds, Chromium/Firefox/WebKit Playwright suites,
 release-aware actual-browser evidence, browser byte/performance budgets,
 snapshot and action budgets, and macro expansion scaling. It reviews warnings
 without blanket warning denial.
+
+The ordinary gate is not release qualification. Iteration 004's pinned
+`U4/16`, `E100/1K`, and `R100` workloads and historical-baseline resolution
+remain release blockers until their required evidence is approved.
 
 ## Implementation contracts
 

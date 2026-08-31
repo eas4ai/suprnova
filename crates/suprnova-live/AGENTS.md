@@ -22,6 +22,9 @@ user-level counterpart.
 
 ## Repository layout
 
+Paths in this file are relative to `crates/suprnova-live/` unless explicitly
+rooted at the parent Suprnova workspace.
+
 | Path | Role |
 |---|---|
 | `docs/specs/suprnova-live/` | Normative architecture, domain, UX, glossary, and convention contracts |
@@ -30,15 +33,17 @@ user-level counterpart.
 | `browser/` | Strict TypeScript runtime and cross-language conformance package |
 | `scripts/check-specs.mjs` | Structural, link, decision-order, iteration, and optional-archive drift gate |
 | `scripts/gate.sh` | Unattended project gate created by iteration 001 |
-| `reference/` | Ignored, non-normative pinned sources and comparative evidence |
-| `/home/shawn/workspace2/suprnova` | Internal-crate destination authorized by iteration 005; modify only in the isolated integration worktree |
+| Suprnova workspace root | Maintained framework workspace; use only an isolated integration worktree while iteration 005 is active |
+| `/home/shawn/workspace2/suprnova-live` | Immutable historical development provenance; never a parallel product, specification, or checker authority |
 | `/home/shawn/workspace2/suprnova-magnetar` | Separate active project; not part of Live scope |
 
-Suprnova Live is being developed here as a future internal Suprnova crate. It is
-not a third-party crate. Development remains here until workspace separation is
-a material integration, testing, or coherent-change blocker. A confirmed
-integration iteration then moves product code, normative specs, and the checker
-together; never maintain two authoritative copies.
+Suprnova Live is an internal crate in the Suprnova workspace, not a third-party
+crate. This integrated subtree is the sole maintained product, specification,
+checker, browser-runtime, fixture, test, benchmark, and implementation-document
+authority. The former standalone checkout preserves committed development
+history only and receives no parallel product changes. Colocation does not mean
+the public facade, routes, providers, CLI, or RenderCache implementation are
+complete; iteration 005 owns and must verify those remaining integration tasks.
 
 ## Scope and re-anchor rules
 
@@ -68,26 +73,33 @@ For specification-only changes:
 
 ```bash
 node scripts/check-specs.mjs
+node scripts/check-implementation-docs.mjs
 git diff --check
 ```
 
-The ZIP is an optional Fable handoff artifact. If it is absent, do not create it
-merely to satisfy the checker; if it is present, regenerate it before checking:
+The former standalone checkout's optional Fable ZIP is historical provenance,
+not an integrated release artifact. Do not recreate or use it as maintained
+specification authority.
+
+For Rust or browser changes, run affected targeted checks while iterating and
+the following complete gate before calling the iteration done:
 
 ```bash
-(cd docs/specs && zip -X -q -FS -r suprnova-live.zip suprnova-live -i '*.md' -x 'suprnova-live/iterations/next/*')
-node scripts/check-specs.mjs
-```
-
-After iteration 001 creates the Rust and browser workspaces, run the affected
-targeted checks while iterating and the following complete gate before calling
-the iteration done:
-
-```bash
-CARGO_INCREMENTAL=0 cargo fmt --all --check
-CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features
-CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast
-CARGO_INCREMENTAL=0 cargo test --doc --all-features
+CARGO_INCREMENTAL=0 cargo fmt --manifest-path ../../Cargo.toml \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support -- --check
+CARGO_INCREMENTAL=0 cargo clippy --manifest-path ../../Cargo.toml \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features
+CARGO_INCREMENTAL=0 cargo test --manifest-path ../../Cargo.toml \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features --no-fail-fast
+CARGO_INCREMENTAL=0 cargo test --manifest-path ../../Cargo.toml \
+  -p suprnova-live -p suprnova-live-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --doc --all-features
 (cd browser && npm ci)
 (cd browser && npm run format:check)
 (cd browser && npm run lint)
@@ -95,8 +107,13 @@ CARGO_INCREMENTAL=0 cargo test --doc --all-features
 (cd browser && npm test)
 (cd browser && npm run build)
 (cd browser && npm run budget)
-CARGO_INCREMENTAL=0 scripts/gate.sh
+SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 scripts/gate.sh
 ```
+
+`SUPRNOVA_LIVE_RELEASE=1` remains blocked until the pinned Iteration 004
+`U4/16`, `E100/1K`, and `R100` qualification plus the historical-baseline
+resolution have approved evidence. Never relabel the ordinary gate as that
+qualification.
 
 Never run heavy Cargo builds concurrently with another build in Suprnova,
 Magnetar, or this workspace. Report a check as passing only when that exact

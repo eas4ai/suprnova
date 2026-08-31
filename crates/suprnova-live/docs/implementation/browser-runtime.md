@@ -1,9 +1,13 @@
 # Live browser runtime
 
-Iteration 003 supplies the browser half of Live as standalone development
-machinery. The final application facade remains `suprnova::live`; this host and
-the private `@suprnova/live` package prove the runtime contract but do not claim
-registered Suprnova router or asset-pipeline integration.
+Iteration 003 supplied the browser half of Live as host-neutral development
+machinery. Those sources and the private `@suprnova/live` package now live in
+the integrated `crates/suprnova-live/` authority. The runtime contract and test
+host do not by themselves claim that Iteration 005's Suprnova router or asset-
+pipeline integration is complete.
+
+The historical phrase "standalone development machinery" describes the
+Iteration 003 provenance; it does not assign current repository authority.
 
 Initial island content is ordinary server-rendered HTML. JavaScript is required
 only when a developer opts into Live directives, model synchronization, local

@@ -53,7 +53,8 @@ affinity, CPU, memory, kernel, and environment classification are written to
 ## Macro expansion and compile budget
 
 The fixed compile workspace contains 1-, 10-, and 100-component fixtures that
-all resolve generated runtime paths through the standalone final-facade fixture.
+all resolve generated runtime paths through the integrated development final-
+facade fixture.
 The budget uses pinned nightly expansion for token/byte counts and isolated
 MSRV `cargo check` work for each fixture:
 
