@@ -1,15 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-local_benchmark_result=${repository_root}/benchmarks/local/gate-snapshot-budget-v1.json
-local_action_result=${repository_root}/benchmarks/local/gate-action-budget-v1.json
+live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if ! workspace_root=$(git -C "${live_root}" rev-parse --show-toplevel 2>/dev/null); then
+    printf 'Suprnova Live gate cannot resolve its parent Git workspace: %s\n' \
+        "${live_root}" >&2
+    exit 1
+fi
+case ${live_root} in
+    "${workspace_root}"/*) ;;
+    *)
+        printf 'Suprnova Live crate root is outside its parent workspace: %s\n' \
+            "${live_root}" >&2
+        exit 1
+        ;;
+esac
+
+workspace_manifest=${workspace_root}/Cargo.toml
+if [[ ! -f ${workspace_manifest} ]]; then
+    printf 'Suprnova workspace manifest is missing: %s\n' "${workspace_manifest}" >&2
+    exit 1
+fi
+workspace_msrv=$(awk -F '"' '/^rust-version[[:space:]]*=/ { print $2; exit }' \
+    "${workspace_manifest}")
+if [[ -z ${workspace_msrv} ]]; then
+    printf 'Suprnova workspace MSRV is missing from %s\n' "${workspace_manifest}" >&2
+    exit 1
+fi
+
+live_packages=(
+    --package suprnova-live
+    --package suprnova-live-macros
+    --package suprnova-live-macro-fixture
+    --package suprnova-live-test-support
+)
+local_benchmark_result=${live_root}/benchmarks/local/gate-snapshot-budget-v1.json
+local_action_result=${live_root}/benchmarks/local/gate-action-budget-v1.json
 
 phase() {
     printf '\n[%s]\n' "$1"
 }
 
-cd "${repository_root}"
+cd "${live_root}"
 
 phase "gate contract"
 rtk proxy tests/gate_contract.sh
@@ -26,56 +58,111 @@ phase "generated license inventory"
 rtk node scripts/generate-license-inventory.mjs --check
 
 phase "Rust formatting and lint review"
-rtk cargo fmt --all -- --check
-rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features
+rtk cargo fmt \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
+    -- \
+    --check
+rtk env CARGO_INCREMENTAL=0 cargo clippy \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
+    --all-targets \
+    --all-features
 rtk node tests/correctness_delay_clippy.mjs
 rtk env CARGO_INCREMENTAL=0 cargo clippy \
-    --workspace \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
     --all-targets \
     --all-features \
     -- \
     -D clippy::disallowed_methods
 rtk env CARGO_INCREMENTAL=0 cargo clippy \
-    --manifest-path fuzz/Cargo.toml \
+    --manifest-path "${live_root}/fuzz/Cargo.toml" \
     --all-targets \
     -- \
     -D clippy::disallowed_methods
 
 phase "Rust fixture, checker, protocol, and security boundaries"
 rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
     --test golden_fixtures \
     --test browser_contract_properties
-rtk env CARGO_INCREMENTAL=0 cargo test --test checker_positive --test checker_negative --test checker_regressions
-rtk env CARGO_INCREMENTAL=0 cargo test --test compatibility --test protocol_v2
-rtk env CARGO_INCREMENTAL=0 cargo test --test security_boundaries
-rtk env CARGO_INCREMENTAL=0 cargo test --test security_hostile_context
-rtk env CARGO_INCREMENTAL=0 cargo test -p suprnova-live-macros --test ui
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
+    --test checker_positive \
+    --test checker_negative \
+    --test checker_regressions
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
+    --test compatibility \
+    --test protocol_v2
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
+    --test security_boundaries
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
+    --test security_hostile_context
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live-macros \
+    --test ui
 
 phase "iteration 004 Rust boundaries"
 rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
     --test iteration_004_conformance \
     --test iteration_004_adversarial \
     --test iteration_004_exhaustion
 
-phase "iteration 004 reference host"
-rtk env CARGO_INCREMENTAL=0 cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1
-
-phase "Rust all-target and documentation tests"
-rtk env CARGO_INCREMENTAL=0 cargo test --workspace --all-targets --all-features --no-fail-fast
-rtk env CARGO_INCREMENTAL=0 cargo test --workspace --doc --all-features
-
 phase "Rust MSRV"
-rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 check --workspace --all-targets --all-features
-rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 check --manifest-path tests/fixtures/compile/Cargo.toml --workspace --all-targets
+rtk env CARGO_INCREMENTAL=0 cargo +"${workspace_msrv}" check \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
+    --all-targets \
+    --all-features
+rtk env CARGO_INCREMENTAL=0 cargo +"${workspace_msrv}" check \
+    --manifest-path "${live_root}/tests/fixtures/compile/Cargo.toml" \
+    --workspace \
+    --all-targets
 
 phase "nightly fuzz build"
-rtk cargo +nightly fuzz build
+rtk cargo +nightly fuzz build --fuzz-dir "${live_root}/fuzz"
 
 phase "browser dependency and conformance gates"
 (
     cd browser
     rtk npm ci
+    rtk npm run generate:check
+    rtk npm run build
+    rtk npm run build:check
 )
+
+phase "iteration 004 reference host"
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live-test-support \
+    --test reference_host \
+    -- \
+    --test-threads=1
+
+phase "Rust all-target and documentation tests"
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
+    --all-targets \
+    --all-features \
+    --no-fail-fast
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    "${live_packages[@]}" \
+    --doc \
+    --all-features
 
 phase "correctness-delay scanner"
 rtk node tests/correctness_delay_scanner.mjs
@@ -83,7 +170,6 @@ rtk node scripts/check-correctness-delays.mjs
 
 (
     cd browser
-    rtk npm run generate:check
     rtk npm run format:check
     rtk npm run lint
     rtk npm run typecheck
@@ -104,8 +190,6 @@ rtk node scripts/check-correctness-delays.mjs
         tests/budget-contract.test.ts
     phase "browser broad unit suite"
     rtk npm run test:unit
-    rtk npm run build
-    rtk npm run build:check
     phase "iteration 004 browser matrix"
     rtk npm run test:browser -- \
         e2e/iteration-004-integration.spec.ts \

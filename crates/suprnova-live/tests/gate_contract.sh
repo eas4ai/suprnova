@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-gate_path=${repository_root}/scripts/gate.sh
-upload_runner_path=${repository_root}/scripts/run-upload-budget.sh
-async_runner_path=${repository_root}/scripts/run-async-budget.sh
+live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+workspace_root=$(git -C "${live_root}" rev-parse --show-toplevel)
+gate_path=${live_root}/scripts/gate.sh
+upload_runner_path=${live_root}/scripts/run-upload-budget.sh
+async_runner_path=${live_root}/scripts/run-async-budget.sh
 
 if [[ ! -f ${gate_path} ]]; then
     printf '%s\n' "gate contract: scripts/gate.sh is missing" >&2
@@ -16,7 +17,7 @@ gate_source=$(<"${gate_path}")
 require_file() {
     local description=$1
     local relative_path=$2
-    if [[ ! -f ${repository_root}/${relative_path} ]]; then
+    if [[ ! -f ${live_root}/${relative_path} ]]; then
         printf 'gate contract: missing %s (%s)\n' "${description}" "${relative_path}" >&2
         exit 1
     fi
@@ -26,6 +27,13 @@ require_text() {
     local description=$1
     local needle=$2
     if [[ ${gate_source} != *"${needle}"* ]]; then
+        local normalized=${gate_source//$'\n'/ }
+        while [[ ${normalized} == *"  "* ]]; do
+            normalized=${normalized//  / }
+        done
+        if [[ ${normalized} == *"${needle}"* ]]; then
+            return
+        fi
         printf 'gate contract: missing %s (%s)\n' "${description}" "${needle}" >&2
         exit 1
     fi
@@ -288,7 +296,8 @@ normalize_gate_trace() {
             continue
         fi
         for ((index = start; index < ${#fields[@]}; index += 1)); do
-            field=${fields[index]//${repository_root}/<repo>}
+            field=${fields[index]//${live_root}/<live>}
+            field=${field//${workspace_root}/<workspace>}
             if (( index > start )); then
                 printf '\t' >>"${normalized_path}"
             fi
@@ -309,36 +318,36 @@ write_expected_gate_commands() {
         $'node\tscripts/check-specs.mjs' \
         $'git\tdiff\t--check' \
         $'node\tscripts/generate-license-inventory.mjs\t--check' \
-        $'cargo\tfmt\t--all\t--\t--check' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--workspace\t--all-targets\t--all-features' \
+        $'cargo\tfmt\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--\t--check' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
         $'node\ttests/correctness_delay_clippy.mjs' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--workspace\t--all-targets\t--all-features\t--\t-D\tclippy::disallowed_methods' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\tfuzz/Cargo.toml\t--all-targets\t--\t-D\tclippy::disallowed_methods' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tgolden_fixtures\t--test\tbrowser_contract_properties' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tchecker_positive\t--test\tchecker_negative\t--test\tchecker_regressions' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tcompatibility\t--test\tprotocol_v2' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tsecurity_boundaries' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\tsecurity_hostile_context' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t-p\tsuprnova-live-macros\t--test\tui' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--test\titeration_004_conformance\t--test\titeration_004_adversarial\t--test\titeration_004_exhaustion' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t-p\tsuprnova-live-test-support\t--test\treference_host\t--\t--test-threads=1' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--workspace\t--all-targets\t--all-features\t--no-fail-fast' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--workspace\t--doc\t--all-features' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.91.1\tcheck\t--workspace\t--all-targets\t--all-features' \
-        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.91.1\tcheck\t--manifest-path\ttests/fixtures/compile/Cargo.toml\t--workspace\t--all-targets' \
-        $'cargo\t+nightly\tfuzz\tbuild' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--\t-D\tclippy::disallowed_methods' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<live>/fuzz/Cargo.toml\t--all-targets\t--\t-D\tclippy::disallowed_methods' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tgolden_fixtures\t--test\tbrowser_contract_properties' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tchecker_positive\t--test\tchecker_negative\t--test\tchecker_regressions' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tcompatibility\t--test\tprotocol_v2' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tsecurity_boundaries' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\tsecurity_hostile_context' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-macros\t--test\tui' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--test\titeration_004_conformance\t--test\titeration_004_adversarial\t--test\titeration_004_exhaustion' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.94.0\tcheck\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\t+1.94.0\tcheck\t--manifest-path\t<live>/tests/fixtures/compile/Cargo.toml\t--workspace\t--all-targets' \
+        $'cargo\t+nightly\tfuzz\tbuild\t--fuzz-dir\t<live>/fuzz' \
         $'npm\tci' \
+        $'npm\trun\tgenerate:check' \
+        $'npm\trun\tbuild' \
+        $'npm\trun\tbuild:check' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--test\treference_host\t--\t--test-threads=1' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--no-fail-fast' \
+        $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--doc\t--all-features' \
         $'node\ttests/correctness_delay_scanner.mjs' \
         $'node\tscripts/check-correctness-delays.mjs' \
-        $'npm\trun\tgenerate:check' \
         $'npm\trun\tformat:check' \
         $'npm\trun\tlint' \
         $'npm\trun\ttypecheck' \
         $'npm\trun\ttest:unit\t--\ttests/golden-fixtures.test.ts\ttests/upload-protocol.test.ts\ttests/upload-manager.test.ts\ttests/async-envelope.test.ts\ttests/async-feature.test.ts\ttests/async-dispatch.test.ts\ttests/bounded-resources.test.ts' \
         $'npm\trun\ttest:unit\t--\ttests/feature-host.test.ts\ttests/document-lifecycle.test.ts\ttests/optional-artifacts.test.ts\ttests/build-contract.test.ts\ttests/budget-contract.test.ts' \
         $'npm\trun\ttest:unit' \
-        $'npm\trun\tbuild' \
-        $'npm\trun\tbuild:check' \
         $'npm\trun\ttest:browser\t--\te2e/iteration-004-integration.spec.ts\te2e/iteration-004-adversarial.spec.ts\te2e/iteration-004-lifecycle.spec.ts\te2e/iteration-004-accessibility.spec.ts\t--project=chromium\t--project=firefox\t--project=webkit' \
         $'npm\trun\ttest:browser\t--\te2e/csp.spec.ts\t--project=chromium' \
         $'npm\trun\ttest:browser\t--\te2e/async-lifecycle.spec.ts\te2e/iteration-004-lifecycle.spec.ts\t--project=chrome-bfcache' \
@@ -359,8 +368,8 @@ write_expected_gate_commands() {
     fi
 
     printf '%s\n' \
-        $'env\tCARGO_INCREMENTAL=0\tSUPRNOVA_LIVE_BENCH_RESULT=<repo>/benchmarks/local/gate-snapshot-budget-v1.json\tscripts/run-snapshot-budget.sh' \
-        $'env\tCARGO_INCREMENTAL=0\tSUPRNOVA_LIVE_BENCH_RESULT=<repo>/benchmarks/local/gate-action-budget-v1.json\tscripts/run-action-budget.sh' \
+        $'env\tCARGO_INCREMENTAL=0\tSUPRNOVA_LIVE_BENCH_RESULT=<live>/benchmarks/local/gate-snapshot-budget-v1.json\tscripts/run-snapshot-budget.sh' \
+        $'env\tCARGO_INCREMENTAL=0\tSUPRNOVA_LIVE_BENCH_RESULT=<live>/benchmarks/local/gate-action-budget-v1.json\tscripts/run-action-budget.sh' \
         $'env\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\tscripts/run-upload-budget.sh' \
         $'env\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\tscripts/run-async-budget.sh' \
         >>"${expected_path}"
@@ -403,11 +412,11 @@ write_expected_gate_phases() {
         "Rust formatting and lint review" \
         "Rust fixture, checker, protocol, and security boundaries" \
         "iteration 004 Rust boundaries" \
-        "iteration 004 reference host" \
-        "Rust all-target and documentation tests" \
         "Rust MSRV" \
         "nightly fuzz build" \
         "browser dependency and conformance gates" \
+        "iteration 004 reference host" \
+        "Rust all-target and documentation tests" \
         "correctness-delay scanner" \
         "iteration 004 browser unit boundaries" \
         "browser broad unit suite" \
@@ -479,7 +488,7 @@ gate_stops_at_clippy_failure() {
     local trace_path=$2
     local output_path=$3
     local normalized_path=$4
-    local expected_last=$'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--workspace\t--all-targets\t--all-features'
+    local expected_last=$'env\tCARGO_INCREMENTAL=0\tcargo\tclippy\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-live-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features'
     local status
     local last_command
 
@@ -545,19 +554,24 @@ require_text "structural specification check" "node scripts/check-specs.mjs"
 require_text "Rust fixture parity" "--test golden_fixtures"
 require_text "Rust browser contract properties" "--test browser_contract_properties"
 require_text "TypeScript fixture parity" "npm run test:unit"
-require_text "macro compile UI contract" "cargo test -p suprnova-live-macros --test ui"
-require_text "checked template fixtures" "cargo test --test checker_positive --test checker_negative --test checker_regressions"
-require_text "protocol v1/v2 parity" "cargo test --test compatibility --test protocol_v2"
-require_text "security-boundary tests" "cargo test --test security_boundaries"
-require_text "hostile-context tests" "cargo test --test security_hostile_context"
-require_text "nightly fuzz build" "cargo +nightly fuzz build"
+require_text "crate-root ownership" 'live_root='
+require_text "workspace-root ownership" 'workspace_root='
+require_text "parent workspace manifest" 'workspace_root}/Cargo.toml'
+require_text "explicit Live package scope" '--package suprnova-live'
+require_text "macro compile package" "--package suprnova-live-macros"
+require_text "macro compile UI contract" "--test ui"
+require_text "checked template fixtures" "--test checker_regressions"
+require_text "protocol v1/v2 parity" "--test protocol_v2"
+require_text "security-boundary tests" "--test security_boundaries"
+require_text "hostile-context tests" "--test security_hostile_context"
+require_text "nightly fuzz build" 'cargo +nightly fuzz build --fuzz-dir "${live_root}/fuzz"'
 require_text "Rust snapshot budget" "scripts/run-snapshot-budget.sh"
 require_text "Rust action budget" "scripts/run-action-budget.sh"
 require_text "macro expansion budget" "node scripts/check-expansion-budget.mjs"
 require_text "browser byte budget" "npm run budget"
 require_text "full async release workload budget" "npm run budget:browser -- --release --dedicated"
-require_text "MSRV check" "cargo +1.91.1 check"
-require_text "compile-fixture MSRV check" "--manifest-path tests/fixtures/compile/Cargo.toml"
+require_text "workspace MSRV check" 'cargo +"${workspace_msrv}" check'
+require_text "compile-fixture MSRV check" 'live_root}/tests/fixtures/compile/Cargo.toml'
 require_text "license gate" "node scripts/generate-license-inventory.mjs --check"
 require_text "correctness-delay scanner phase" 'phase "correctness-delay scanner"'
 require_text "correctness-delay scanner self-tests" \
@@ -567,7 +581,7 @@ require_text "compiler-resolved correctness-delay self-test" \
 require_text "compiler-resolved correctness-delay lint denial" \
     "-D clippy::disallowed_methods"
 require_text "compiler-resolved fuzz correctness-delay lint" \
-    "--manifest-path fuzz/Cargo.toml"
+    'live_root}/fuzz/Cargo.toml'
 require_text "correctness-delay repository scan" \
     "node scripts/check-correctness-delays.mjs"
 require_text "required phase \"U4/16 upload budget\"" 'phase "iteration 004 reduced deterministic budgets"'
@@ -579,7 +593,8 @@ require_text "iteration 004 adversarial test" "--test iteration_004_adversarial"
 require_text "iteration 004 exhaustion test" "--test iteration_004_exhaustion"
 require_text "iteration 004 reference-host phase" 'phase "iteration 004 reference host"'
 require_text "thin Rust reference-host integration" \
-    "cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1"
+    "--test reference_host"
+require_text "serialized reference-host integration" "--test-threads=1"
 require_text "iteration 004 browser matrix phase" 'phase "iteration 004 browser matrix"'
 require_text "real BFCache browser lifecycle phase" 'phase "real BFCache browser lifecycle"'
 require_text "iteration 004 browser unit phase" 'phase "iteration 004 browser unit boundaries"'
@@ -626,6 +641,75 @@ require_file "iteration 004 verification-surface manifest" \
 require_file "parser-backed Rust syntax validator" \
     "crates/suprnova-live-test-support/src/bin/correctness-delay-rust-parser.rs"
 
+for budget_runner in \
+    scripts/run-snapshot-budget.sh \
+    scripts/run-action-budget.sh \
+    scripts/run-upload-budget.sh \
+    scripts/run-async-budget.sh
+do
+    runner_source=$(<"${live_root}/${budget_runner}")
+    for required_runner_text in \
+        'live_root=' \
+        'workspace_root=' \
+        '--manifest-path "${workspace_manifest}"' \
+        '--package suprnova-live'
+    do
+        if [[ ${runner_source} != *"${required_runner_text}"* ]]; then
+            printf 'gate contract: %s is missing relocation contract (%s)\n' \
+                "${budget_runner}" "${required_runner_text}" >&2
+            exit 1
+        fi
+    done
+    if [[ ${runner_source} == *"repository_root="* ]]; then
+        printf 'gate contract: %s retains the standalone-root contract\n' \
+            "${budget_runner}" >&2
+        exit 1
+    fi
+done
+
+if [[ ${gate_source} == *"--workspace --all-targets --all-features"* ]]; then
+    printf '%s\n' "gate contract: Live gate must not sweep the parent workspace" >&2
+    exit 1
+fi
+if [[ ${gate_source} == *"+1.91.1"* ]]; then
+    printf '%s\n' "gate contract: standalone MSRV survived integration" >&2
+    exit 1
+fi
+
+for manifest in \
+    Cargo.toml \
+    crates/suprnova-live-macros/Cargo.toml \
+    crates/suprnova-live-macro-fixture/Cargo.toml \
+    crates/suprnova-live-test-support/Cargo.toml
+do
+    manifest_source=$(<"${live_root}/${manifest}")
+    if [[ ${manifest_source} != *"rust-version.workspace = true"* ]]; then
+        printf 'gate contract: %s does not inherit the workspace MSRV\n' \
+            "${manifest}" >&2
+        exit 1
+    fi
+done
+
+workspace_manifest_source=$(<"${workspace_root}/Cargo.toml")
+if [[ ${workspace_manifest_source} != *'rust-version = "1.94.0"'* ]]; then
+    printf '%s\n' "gate contract: Suprnova workspace MSRV is not 1.94.0" >&2
+    exit 1
+fi
+for fixture_manifest in \
+    tests/fixtures/compile/1-component/Cargo.toml \
+    tests/fixtures/compile/10-component/Cargo.toml \
+    tests/fixtures/compile/100-component/Cargo.toml
+do
+    fixture_source=$(<"${live_root}/${fixture_manifest}")
+    if [[ ${fixture_source} != *'rust-version = "1.94.0"'* ]]; then
+        printf 'gate contract: %s does not use the Suprnova workspace MSRV\n' \
+            "${fixture_manifest}" >&2
+        exit 1
+    fi
+done
+
+rtk node "${live_root}/scripts/generate-license-inventory.mjs" --check
+
 if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
     exit 1
@@ -665,6 +749,8 @@ fi
 
 require_order "browser lockfile install" "npm ci" \
     "deterministic browser build" "npm run build:check"
+require_order "deterministic browser build" "npm run build:check" \
+    "reference host" 'phase "iteration 004 reference host"'
 require_order "gate contract" 'phase "gate contract"' \
     "correctness-delay scanner" 'phase "correctness-delay scanner"'
 require_order "browser lockfile install" "npm ci" \
@@ -718,12 +804,36 @@ release_output=${probe_root}/release.output
 run_gate_probe "${gate_path}" 0 "${ordinary_trace}" "${ordinary_output}"
 run_gate_probe "${gate_path}" 1 "${release_trace}" "${release_output}"
 
+alternate_cwd_trace=${probe_root}/alternate-cwd.trace
+alternate_cwd_output=${probe_root}/alternate-cwd.output
+(
+    cd "${probe_root}"
+    run_gate_probe \
+        "${gate_path}" 0 "${alternate_cwd_trace}" "${alternate_cwd_output}"
+)
+
+outside_repository=${probe_root}/outside-repository
+mkdir -p "${outside_repository}/scripts"
+cp "${gate_path}" "${outside_repository}/scripts/gate.sh"
+git -C "${outside_repository}" init --quiet
+if PATH="${probe_root}:${PATH}" \
+    SUPRNOVA_LIVE_GATE_TRACE="${probe_root}/outside.trace" \
+    SUPRNOVA_LIVE_RELEASE=0 \
+    bash "${outside_repository}/scripts/gate.sh" \
+        >"${probe_root}/outside.output" 2>&1; then
+    printf '%s\n' "gate contract: a standalone crate root was accepted" >&2
+    exit 1
+fi
+
 require_budget_trace_contract "ordinary gate" 0 "${ordinary_trace}"
 require_budget_trace_contract "release gate" 1 "${release_trace}"
 require_gate_execution_trace \
     "ordinary gate" 0 "${ordinary_trace}" "${ordinary_output}" "ordinary"
 require_gate_execution_trace \
     "release gate" 1 "${release_trace}" "${release_output}" "release"
+require_gate_execution_trace \
+    "alternate-current-directory gate" 0 \
+    "${alternate_cwd_trace}" "${alternate_cwd_output}" "alternate-cwd"
 
 if ! gate_stops_at_clippy_failure \
     "${gate_path}" \
@@ -734,7 +844,7 @@ if ! gate_stops_at_clippy_failure \
     exit 1
 fi
 
-strict_mutant=$(mktemp "${repository_root}/scripts/.gate-contract-strict-mutant.XXXXXX")
+strict_mutant=$(mktemp "${live_root}/scripts/.gate-contract-strict-mutant.XXXXXX")
 mutant_runners+=("${strict_mutant}")
 write_replacement_mutant \
     "${gate_path}" "${strict_mutant}" \
@@ -749,12 +859,12 @@ if gate_stops_at_clippy_failure \
 fi
 
 conditional_mutant=$(mktemp \
-    "${repository_root}/scripts/.gate-contract-conditional-mutant.XXXXXX")
+    "${live_root}/scripts/.gate-contract-conditional-mutant.XXXXXX")
 mutant_runners+=("${conditional_mutant}")
 write_replacement_mutant \
     "${gate_path}" "${conditional_mutant}" \
-    "rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features" \
-    $'if false; then\n    rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features\nfi'
+    $'rtk env CARGO_INCREMENTAL=0 cargo clippy \\\n    --manifest-path "${workspace_manifest}" \\\n    "${live_packages[@]}" \\\n    --all-targets \\\n    --all-features' \
+    $'if false; then\n    rtk env CARGO_INCREMENTAL=0 cargo clippy \\\n        --manifest-path "${workspace_manifest}" \\\n        "${live_packages[@]}" \\\n        --all-targets \\\n        --all-features\nfi'
 run_gate_probe \
     "${conditional_mutant}" 0 \
     "${probe_root}/conditional-mutant.trace" \
@@ -769,7 +879,7 @@ if gate_execution_trace_is_valid \
 fi
 
 bfcache_mutant=$(mktemp \
-    "${repository_root}/scripts/.gate-contract-bfcache-mutant.XXXXXX")
+    "${live_root}/scripts/.gate-contract-bfcache-mutant.XXXXXX")
 mutant_runners+=("${bfcache_mutant}")
 write_replacement_mutant \
     "${gate_path}" "${bfcache_mutant}" \
@@ -803,8 +913,8 @@ alternate_path_release_trace=${probe_root}/alternate-path-release.trace
 printf '%s\n' \
     $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t./scripts/run-upload-budget.sh' \
     $'profile=\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=reduced\t../suprnova-live/scripts/run-async-budget.sh' \
-    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${repository_root}/scripts/run-upload-budget.sh" \
-    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${repository_root}/scripts/run-async-budget.sh" \
+    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${live_root}/scripts/run-upload-budget.sh" \
+    "profile="$'\tenv\tSUPRNOVA_LIVE_BUDGET_PROFILE=qualified\t'"${live_root}/scripts/run-async-budget.sh" \
     >"${alternate_path_release_trace}"
 if ! budget_trace_is_valid 1 "${alternate_path_release_trace}"; then
     printf '%s\n' "gate contract: harmless alternate runner paths were not normalized" >&2
@@ -826,9 +936,9 @@ if ! qualified_runner_fails_closed \
     exit 1
 fi
 
-upload_mutant=$(mktemp "${repository_root}/scripts/.gate-contract-upload-mutant.XXXXXX")
+upload_mutant=$(mktemp "${live_root}/scripts/.gate-contract-upload-mutant.XXXXXX")
 mutant_runners+=("${upload_mutant}")
-async_mutant=$(mktemp "${repository_root}/scripts/.gate-contract-async-mutant.XXXXXX")
+async_mutant=$(mktemp "${live_root}/scripts/.gate-contract-async-mutant.XXXXXX")
 mutant_runners+=("${async_mutant}")
 write_exit_bypass_mutant "${upload_runner_path}" "${upload_mutant}"
 write_exit_bypass_mutant "${async_runner_path}" "${async_mutant}"

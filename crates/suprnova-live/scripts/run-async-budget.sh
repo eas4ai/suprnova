@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+workspace_root=$(git -C "${live_root}" rev-parse --show-toplevel)
+case ${live_root} in
+    "${workspace_root}"/*) ;;
+    *)
+        printf 'async budget: Live root is outside the Suprnova workspace (%s)\n' \
+            "${live_root}" >&2
+        exit 70
+        ;;
+esac
+workspace_manifest=${workspace_root}/Cargo.toml
 profile=${SUPRNOVA_LIVE_BUDGET_PROFILE:-reduced}
-browser_result=${SUPRNOVA_LIVE_ASYNC_BUDGET_RESULT:-"${repository_root}/browser/benchmarks/local/async-budget-v1.json"}
-server_result=${SUPRNOVA_LIVE_ASYNC_SERVER_RESULT:-"${repository_root}/benchmarks/local/async-server-v1.json"}
-baseline=${SUPRNOVA_LIVE_ASYNC_BUDGET_BASELINE:-"${repository_root}/browser/benchmarks/baselines/async-budget-v1.json"}
+browser_result=${SUPRNOVA_LIVE_ASYNC_BUDGET_RESULT:-"${live_root}/browser/benchmarks/local/async-budget-v1.json"}
+server_result=${SUPRNOVA_LIVE_ASYNC_SERVER_RESULT:-"${live_root}/benchmarks/local/async-server-v1.json"}
+baseline=${SUPRNOVA_LIVE_ASYNC_BUDGET_BASELINE:-"${live_root}/browser/benchmarks/baselines/async-budget-v1.json"}
 
 if [[ ${profile} != reduced && ${profile} != qualified ]]; then
     printf '%s\n' "async budget profile must be reduced or qualified" >&2
@@ -17,7 +27,7 @@ if [[ ${profile} == qualified && ${SUPRNOVA_LIVE_B1_DEDICATED:-0} != 1 ]]; then
     exit 1
 fi
 
-cd "${repository_root}/browser"
+cd "${live_root}/browser"
 rtk env \
     SUPRNOVA_LIVE_B1_DEDICATED="${SUPRNOVA_LIVE_B1_DEDICATED:-0}" \
     npm run budget:async -- \
@@ -26,5 +36,8 @@ rtk env \
     --server-output "${server_result}" \
     --output "${browser_result}"
 
-cd "${repository_root}"
-rtk env CARGO_INCREMENTAL=0 cargo test --test async_budget_contract
+cd "${live_root}"
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --manifest-path "${workspace_manifest}" \
+    --package suprnova-live \
+    --test async_budget_contract

@@ -2,11 +2,32 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use suprnova_live::{ENGINE_VERSION, SUPPORTED_PROTOCOL_VERSIONS, SUPPORTED_SNAPSHOT_VERSIONS};
 
-fn repository_root() -> PathBuf {
+fn live_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn workspace_root() -> PathBuf {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--locked", "--format-version", "1", "--no-deps"])
+        .current_dir(live_root())
+        .output()
+        .expect("cargo metadata must start");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata must be valid JSON");
+    PathBuf::from(
+        metadata["workspace_root"]
+            .as_str()
+            .expect("cargo metadata must expose workspace_root"),
+    )
 }
 
 fn read_manifest(path: &Path) -> String {
@@ -23,25 +44,34 @@ fn exposes_the_kernel_version_contract() {
 
 #[test]
 fn workspace_declares_the_internal_kernel_packages() {
-    let root = repository_root();
-    let workspace_manifest = read_manifest(&root.join("Cargo.toml"));
+    let live_root = live_root();
+    let workspace_root = workspace_root();
+    let workspace_manifest = read_manifest(&workspace_root.join("Cargo.toml"));
+    let live_prefix = live_root
+        .strip_prefix(&workspace_root)
+        .expect("the Live crate must be inside the Suprnova workspace");
 
     for package in [
         "crates/suprnova-live-macros",
         "crates/suprnova-live-macro-fixture",
         "crates/suprnova-live-test-support",
     ] {
+        let workspace_member = live_prefix.join(package);
+        let workspace_member = workspace_member
+            .to_str()
+            .expect("workspace member paths must be UTF-8")
+            .replace('\\', "/");
         assert!(
-            workspace_manifest.contains(package),
-            "workspace is missing {package}"
+            workspace_manifest.contains(&workspace_member),
+            "workspace is missing {workspace_member}"
         );
-        assert!(root.join(package).join("Cargo.toml").is_file());
+        assert!(live_root.join(package).join("Cargo.toml").is_file());
     }
 }
 
 #[test]
 fn helper_packages_are_non_publishable_and_featureless() {
-    let root = repository_root();
+    let root = live_root();
 
     for package in [
         "crates/suprnova-live-macros",

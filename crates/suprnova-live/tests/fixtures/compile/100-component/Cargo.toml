@@ -2,7 +2,7 @@
 name = "suprnova-live-compile-100"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.94.0"
 license = "MIT"
 publish = false
 

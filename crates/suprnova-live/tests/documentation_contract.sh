@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+workspace_root=$(git -C "${live_root}" rev-parse --show-toplevel)
+case ${live_root} in
+    "${workspace_root}"/*) ;;
+    *)
+        printf 'documentation contract: Live root is outside the Suprnova workspace (%s)\n' \
+            "${live_root}" >&2
+        exit 1
+        ;;
+esac
 
 require_file() {
     local relative_path=$1
-    if [[ ! -f ${repository_root}/${relative_path} ]]; then
+    if [[ ! -f ${live_root}/${relative_path} ]]; then
         printf 'documentation contract: missing %s\n' "${relative_path}" >&2
         exit 1
     fi
@@ -15,7 +24,7 @@ require_heading() {
     local relative_path=$1
     local heading=$2
     local contents
-    contents=$(<"${repository_root}/${relative_path}")
+    contents=$(<"${live_root}/${relative_path}")
     if [[ ${contents} != *$'\n## '"${heading}"$'\n'* ]]; then
         printf 'documentation contract: %s is missing heading "## %s"\n' \
             "${relative_path}" "${heading}" >&2
@@ -28,7 +37,7 @@ require_text() {
     local description=$2
     local needle=$3
     local contents
-    contents=$(<"${repository_root}/${relative_path}")
+    contents=$(<"${live_root}/${relative_path}")
     contents=${contents//$'\n'/ }
     if [[ ${contents} != *"${needle}"* ]]; then
         printf 'documentation contract: %s is missing %s (%s)\n' \
@@ -208,6 +217,6 @@ require_text THIRD_PARTY_LICENSES.md \
 # The shared data-driven semantic contract also runs in this shell gate. Its
 # in-memory mutation cases prove that one critical inversion in each Iteration
 # 004 guide and one broken README link are detected.
-rtk node "${repository_root}/scripts/check-implementation-docs.mjs" --semantic-only
+rtk node "${live_root}/scripts/check-implementation-docs.mjs" --semantic-only
 
 printf '%s\n' "documentation contract ok"

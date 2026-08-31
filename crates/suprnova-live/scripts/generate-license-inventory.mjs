@@ -2,12 +2,33 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const repositoryRoot = resolve(scriptDirectory, "..");
-const inventoryPath = resolve(repositoryRoot, "THIRD_PARTY_LICENSES.md");
+const liveRoot = resolve(scriptDirectory, "..");
+const workspaceResult = spawnSync(
+  "git",
+  ["-C", liveRoot, "rev-parse", "--show-toplevel"],
+  { encoding: "utf8" },
+);
+if (workspaceResult.status !== 0) {
+  process.stderr.write(workspaceResult.stderr);
+  throw new Error(`cannot resolve Suprnova workspace above ${liveRoot}`);
+}
+const workspaceRoot = workspaceResult.stdout.trim();
+const liveRelative = relative(workspaceRoot, liveRoot);
+if (
+  liveRelative.length === 0 ||
+  liveRelative === ".." ||
+  liveRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+  isAbsolute(liveRelative)
+) {
+  throw new Error(
+    `Suprnova Live root is outside its parent workspace: ${liveRoot}`,
+  );
+}
+const inventoryPath = resolve(liveRoot, "THIRD_PARTY_LICENSES.md");
 const internalCargoPackages = new Set([
   "suprnova-live",
   "suprnova-live-fuzz",
@@ -44,6 +65,7 @@ function cargoPackagesFrom(directory) {
     {
       cwd: directory,
       encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
     },
   );
 
@@ -55,7 +77,39 @@ function cargoPackagesFrom(directory) {
   }
 
   const metadata = JSON.parse(result.stdout);
-  return metadata.packages
+  const packagesById = new Map(
+    metadata.packages.map((dependency) => [dependency.id, dependency]),
+  );
+  const nodesById = new Map(
+    metadata.resolve.nodes.map((node) => [node.id, node]),
+  );
+  const pending = metadata.workspace_members.filter((id) => {
+    const dependency = packagesById.get(id);
+    return (
+      dependency !== undefined && internalCargoPackages.has(dependency.name)
+    );
+  });
+  if (pending.length === 0) {
+    throw new Error(
+      `cargo metadata in ${directory} contains no Suprnova Live workspace package`,
+    );
+  }
+
+  const reachable = new Set();
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (reachable.has(id)) continue;
+    reachable.add(id);
+    const node = nodesById.get(id);
+    if (node === undefined) {
+      throw new Error(`cargo metadata resolve graph is missing ${id}`);
+    }
+    pending.push(...node.dependencies);
+  }
+
+  return [...reachable]
+    .map((id) => packagesById.get(id))
+    .filter((dependency) => dependency !== undefined)
     .filter((dependency) => !internalCargoPackages.has(dependency.name))
     .map((dependency) => ({
       ecosystem: "Cargo",
@@ -69,9 +123,9 @@ function cargoPackagesFrom(directory) {
 
 function cargoPackages() {
   const packages = [
-    ...cargoPackagesFrom(repositoryRoot),
-    ...cargoPackagesFrom(resolve(repositoryRoot, "fuzz")),
-    ...cargoPackagesFrom(resolve(repositoryRoot, "tests/fixtures/compile")),
+    ...cargoPackagesFrom(workspaceRoot),
+    ...cargoPackagesFrom(resolve(liveRoot, "fuzz")),
+    ...cargoPackagesFrom(resolve(liveRoot, "tests/fixtures/compile")),
   ];
   const unique = new Map();
   for (const dependency of packages) {
@@ -180,7 +234,7 @@ function npmUsageByPath(lock) {
 }
 
 function npmPackages() {
-  const lockPath = resolve(repositoryRoot, "browser/package-lock.json");
+  const lockPath = resolve(liveRoot, "browser/package-lock.json");
   const lock = JSON.parse(readFileSync(lockPath, "utf8"));
   const usages = npmUsageByPath(lock);
 
