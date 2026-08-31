@@ -503,10 +503,17 @@ impl PasswordPlugin {
         let (principal, rehash) = match self.provider.authenticate_with_outcome(attempt).await {
             Ok(success) => success,
             Err(error) if is_invalid_credentials(&error) => {
-                let _ = self
+                if let Err(error) = self
                     .lockout
                     .record_failed_attempt(&identity, ip.as_deref())
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        error = %error,
+                        "lockout failed-attempt accounting unavailable; failing closed"
+                    );
+                    return Ok(unavailable());
+                }
                 return Ok(invalid_credentials_response());
             }
             Err(error) => return Err(error.into()),
