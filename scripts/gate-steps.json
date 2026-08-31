@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "retention": {
+    "max_runs": 50,
+    "max_age_days": 30
+  },
+  "documentation_allowlist": [
+    "manual/**",
+    ".manual-translations.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "registered_files": [
+    {
+      "path": "README.md",
+      "checks": ["utf8", "doc-references", "prose-dashes"]
+    },
+    {
+      "path": "CHANGELOG.md",
+      "checks": ["utf8", "doc-references", "prose-dashes"]
+    },
+    {
+      "path": "LICENSE",
+      "checks": ["utf8", "doc-references", "prose-dashes"]
+    }
+  ],
+  "steps": [
+    {
+      "id": "fmt",
+      "name": "cargo fmt --all --check",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "fmt", "--all", "--check"],
+      "timeout_seconds": 120,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "doc-references",
+      "name": "published document references",
+      "tiers": ["default", "full", "docs"],
+      "argv": ["scripts/check-doc-references.sh"],
+      "timeout_seconds": 120,
+      "category": "docs",
+      "capabilities": ["bash", "git"]
+    },
+    {
+      "id": "prose-dashes",
+      "name": "published prose dash policy",
+      "tiers": ["default", "full", "docs"],
+      "argv": ["scripts/check-prose-dashes.sh"],
+      "timeout_seconds": 120,
+      "category": "docs",
+      "capabilities": ["bash", "git"]
+    },
+    {
+      "id": "workspace-clippy",
+      "name": "workspace clippy",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "clippy", "--workspace", "--all-targets"],
+      "timeout_seconds": 1200,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "json-rustdoc",
+      "name": "JSON rustdoc links",
+      "tiers": ["default", "full"],
+      "argv": ["env", "RUSTC_BOOTSTRAP=1", "cargo", "rustdoc", "-p", "suprnova", "--lib", "--", "-Z", "unstable-options", "--output-format", "json"],
+      "timeout_seconds": 900,
+      "category": "code",
+      "capabilities": ["cargo", "env"]
+    },
+    {
+      "id": "workspace-tests",
+      "name": "workspace tests",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "test", "--workspace", "--no-fail-fast"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "magnetar-all-feature-tests",
+      "name": "Magnetar all-feature tests",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "test", "-p", "suprnova-magnetar", "--all-features", "--tests", "--no-fail-fast"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "postgres-tests",
+      "name": "Postgres regressions",
+      "tiers": ["default", "full"],
+      "argv": ["scripts/check-postgres.sh"],
+      "timeout_seconds": 600,
+      "category": "environment",
+      "capabilities": ["bash", "cargo", "docker"]
+    },
+    {
+      "id": "scaffold-tests",
+      "name": "scaffold compile tests",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "test", "-p", "suprnova-cli", "--test", "scaffold_snapshot", "--", "--ignored"],
+      "timeout_seconds": 1200,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "translation-lock",
+      "name": "manual translation lock",
+      "tiers": ["docs", "full"],
+      "argv": ["scripts/check-manual-translations.sh"],
+      "timeout_seconds": 300,
+      "category": "docs",
+      "capabilities": ["bash", "git", "python3"]
+    },
+    {
+      "id": "manual-structure",
+      "name": "manual mirror structure",
+      "tiers": ["docs", "full"],
+      "argv": ["python3", "scripts/check-manual-structure.py"],
+      "timeout_seconds": 120,
+      "category": "docs",
+      "capabilities": ["git", "python3"]
+    },
+    {
+      "id": "all-feature-clippy",
+      "name": "all-feature clippy",
+      "tiers": ["full"],
+      "argv": ["cargo", "clippy", "-p", "suprnova", "--all-targets", "--features", "otel,broadcasting-fanout,vector-pinecone,filesystem-azure,filesystem-gcs"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "mysql-relations",
+      "name": "MySQL relation regressions",
+      "tiers": ["full"],
+      "argv": ["scripts/check-mysql.sh"],
+      "timeout_seconds": 600,
+      "category": "environment",
+      "capabilities": ["bash", "cargo", "docker"]
+    },
+    {
+      "id": "magnetar-live-databases",
+      "name": "Magnetar live Postgres and MySQL",
+      "tiers": ["full"],
+      "argv": ["scripts/check-magnetar-live.sh"],
+      "timeout_seconds": 1200,
+      "category": "environment",
+      "capabilities": ["bash", "cargo", "docker"]
+    },
+    {
+      "id": "msrv",
+      "name": "Rust 1.94.0 MSRV",
+      "tiers": ["full"],
+      "argv": ["scripts/check-msrv.sh"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["bash", "cargo", "git", "python3", "rustup"]
+    },
+    {
+      "id": "feature-matrix",
+      "name": "framework feature matrix",
+      "tiers": ["full"],
+      "argv": ["scripts/check-feature-matrix.sh"],
+      "timeout_seconds": 2700,
+      "category": "code",
+      "capabilities": ["bash", "cargo", "git"]
+    },
+    {
+      "id": "feature-pinecone-tests",
+      "name": "Pinecone feature tests",
+      "tiers": ["full"],
+      "argv": ["cargo", "test", "-p", "suprnova", "--features", "vector-pinecone", "--no-fail-fast"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "feature-fanout-tests",
+      "name": "broadcast fanout feature tests",
+      "tiers": ["full"],
+      "argv": ["cargo", "test", "-p", "suprnova", "--features", "broadcasting-fanout", "--no-fail-fast"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo"]
+    },
+    {
+      "id": "audit",
+      "name": "dependency audit",
+      "tiers": ["full"],
+      "argv": ["scripts/check-audit.sh"],
+      "timeout_seconds": 600,
+      "category": "code",
+      "capabilities": ["bash", "cargo-audit"]
+    },
+    {
+      "id": "downstream-security",
+      "name": "downstream dependency security",
+      "tiers": ["full"],
+      "argv": ["scripts/check-downstream-dependencies.sh"],
+      "timeout_seconds": 1200,
+      "category": "code",
+      "capabilities": ["bash", "cargo", "python3"]
+    },
+    {
+      "id": "release-smoke",
+      "name": "normal release smoke",
+      "tiers": ["full"],
+      "argv": ["scripts/tests/release-normal-smoke.sh"],
+      "timeout_seconds": 1200,
+      "category": "code",
+      "capabilities": ["bash", "cargo", "git", "python3"]
+    }
+  ]
+}

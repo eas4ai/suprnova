@@ -103,12 +103,14 @@ async fn sqlite_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1() {
 }
 
 #[cfg(all(test, feature = "seaorm-postgres"))]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1() {
     verify_parity(SeaOrm11Fixture::Postgres).await;
 }
 
 #[cfg(all(test, feature = "seaorm-mysql"))]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1() {
     verify_parity(SeaOrm11Fixture::MySql).await;

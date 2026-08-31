@@ -245,7 +245,7 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 12] = [
+const LIVE_TEST_INVOCATIONS: [&str; 14] = [
     "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
     "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
     "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
@@ -258,9 +258,11 @@ const LIVE_TEST_INVOCATIONS: [&str; 12] = [
     "run_live_test test token_broker_concurrency two_pod_convergence_postgres",
     "run_live_test test token_broker_concurrency two_pod_convergence_mysql",
     "run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
+    "run_live_test lib _ migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
+    "run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 12] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 14] = [
     "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
@@ -273,9 +275,11 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 12] = [
     "cargo test --test token_broker_concurrency --all-features two_pod_convergence_postgres -- --ignored --exact",
     "cargo test --test token_broker_concurrency --all-features two_pod_convergence_mysql -- --ignored --exact",
     "cargo test --lib --all-features migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier -- --ignored --exact",
+    "cargo test --lib --all-features migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
+    "cargo test --lib --all-features migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 12] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 14] = [
     (
         "tests/default_schema_backends.rs",
         "postgres_default_schema_is_replay_safe",
@@ -318,6 +322,14 @@ const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 12] = [
         "src/migration/mysql_swap_tests.rs",
         "plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
     ),
+    (
+        "src/migration/seaorm_upgrade_tests.rs",
+        "postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
+    ),
+    (
+        "src/migration/seaorm_upgrade_tests.rs",
+        "mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
+    ),
 ];
 
 fn parse_live_test_invocations(script: &str) -> Vec<String> {
@@ -343,7 +355,8 @@ fn assert_exact_live_test_invocations(script: &str) {
     assert_eq!(
         invocations.len(),
         LIVE_TEST_INVOCATIONS.len(),
-        "live tests must be exactly 12"
+        "live tests must be exactly {}",
+        LIVE_TEST_INVOCATIONS.len()
     );
     for (index, expected) in LIVE_TEST_INVOCATIONS.iter().enumerate() {
         assert_eq!(
@@ -450,7 +463,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected twelve"
+        "source-discovered live database test inventory must remain the expected fourteen"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
