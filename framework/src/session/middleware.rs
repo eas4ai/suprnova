@@ -1003,11 +1003,10 @@ impl Middleware for SessionMiddleware {
             //
             // The inequality check is load-bearing: a normal navigation
             // keeps the same id, and destroying-then-writing would race
-            // with concurrent reads on the same row. Destroy is
-            // best-effort cleanup of OLD state - failures are
-            // `warn!`-logged and never fail the request, because a 500
-            // here wouldn't undo the regeneration in memory and would
-            // block legitimate logouts. GC reaps the stale row at TTL.
+            // with concurrent reads on the same row. Destroy is a
+            // security boundary: if it fails, the old authenticated row
+            // remains replayable. Fail closed, expire the browser's old
+            // credential, and return before writing or issuing the new id.
             if let Some(ref old_id) = original_session_id
                 && old_id != &session.id
             {
@@ -1020,12 +1019,16 @@ impl Middleware for SessionMiddleware {
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::error!(
                             error = %e,
-                            old_session_id = %old_id,
-                            new_session_id = %session.id,
-                            "session id rotated; failed to destroy old store row (gc will reap at TTL)"
+                            "session id rotation cleanup failed; failing closed with 500"
                         );
+                        pending_cookies.push(self.create_forget_session_cookie());
+                        let failure = Err(crate::http::HttpResponse::text(
+                            "Internal Server Error: session rotation failed",
+                        )
+                        .status(500));
+                        return attach_pending_cookies(failure, pending_cookies);
                     }
                 }
             }
