@@ -923,6 +923,58 @@ pub mod sql_stores {
             Ok(deleted.rows_affected == 1)
         }
 
+        async fn replace_for_rotation(
+            &self,
+            id: &str,
+            selector: &str,
+            now: DateTime<Utc>,
+            replacement: RememberRow,
+        ) -> Result<bool> {
+            let auth_epoch =
+                i64::try_from(replacement.auth_epoch).map_err(|_| Error::InvalidInput {
+                    field: "auth_epoch".to_owned(),
+                    message: "exceeds the database integer range".to_owned(),
+                })?;
+            let transaction = self.0.begin().await.map_err(db_error)?;
+            let result = async {
+                let deleted = remembers::Entity::delete_many()
+                    .filter(remembers::Column::Id.eq(id.to_owned()))
+                    .filter(remembers::Column::Selector.eq(selector.to_owned()))
+                    .filter(remembers::Column::ExpiresAt.gt(now))
+                    .exec(&transaction)
+                    .await
+                    .map_err(db_error)?;
+                if deleted.rows_affected != 1 {
+                    return Ok(false);
+                }
+                remembers::ActiveModel {
+                    id: Set(replacement.id),
+                    selector: Set(replacement.selector),
+                    user_id: Set(replacement.user_id),
+                    auth_epoch: Set(auth_epoch),
+                    verifier_hash: Set(replacement.verifier_hash),
+                    expires_at: Set(replacement.expires_at),
+                }
+                .insert(&transaction)
+                .await
+                .map_err(db_error)?;
+                Ok(true)
+            }
+            .await;
+
+            match result {
+                Ok(true) => transaction.commit().await.map_err(db_error).map(|()| true),
+                Ok(false) => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Ok(false)
+                }
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    Err(error)
+                }
+            }
+        }
+
         async fn revoke_all_remember(&self, user_id: &str) -> Result<u64> {
             let deleted = remembers::Entity::delete_many()
                 .filter(remembers::Column::UserId.eq(user_id.to_owned()))

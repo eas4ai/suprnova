@@ -16,8 +16,8 @@ use magnetar::default_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
 use magnetar::migration::{MigrationEngine, MigrationRunner, ShapeConfirmation, SourceShape};
 #[cfg(feature = "seaorm-sqlite")]
 use magnetar::sessions::{
-    OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, RememberStore, SessionMetadata,
-    SessionQueries, StoredSession,
+    OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, RememberRow, RememberStore,
+    SessionMetadata, SessionQueries, StoredSession,
 };
 use magnetar::storage::{NewUser, SeaOrmStorage, UserStore};
 use sea_orm::Database;
@@ -209,6 +209,127 @@ async fn negative_legacy_remember_epoch_is_neutral_not_found() {
             identifier
         } if resource == "remember token" && identifier == "expired or revoked"
     ));
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn sqlite_remember_replacement_rolls_back_and_has_one_winner() {
+    let database = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory SQLite");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("create default auth tables");
+    let store = SqlRememberStore(database.clone());
+    let now = Utc::now();
+    let original = RememberRow {
+        id: "original-id".to_owned(),
+        selector: "original-selector".to_owned(),
+        user_id: "rotation-user".to_owned(),
+        auth_epoch: 9,
+        verifier_hash: "sha256:original".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let first_replacement = RememberRow {
+        id: "first-replacement-id".to_owned(),
+        selector: "first-replacement-selector".to_owned(),
+        verifier_hash: "sha256:first".to_owned(),
+        ..original.clone()
+    };
+    let second_replacement = RememberRow {
+        id: "second-replacement-id".to_owned(),
+        selector: "second-replacement-selector".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..original.clone()
+    };
+    store
+        .insert_remember(original.clone())
+        .await
+        .expect("seed original remember row");
+
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TRIGGER fail_auth_remember_replacement
+             BEFORE INSERT ON auth_remember_tokens
+             WHEN NEW.user_id = 'rotation-user'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected auth remember replacement failure');
+             END"
+            .to_owned(),
+        ))
+        .await
+        .expect("install scoped replacement failure trigger");
+
+    let error = store
+        .replace_for_rotation(
+            &original.id,
+            &original.selector,
+            now,
+            first_replacement.clone(),
+        )
+        .await
+        .expect_err("replacement insertion failure must surface");
+    assert!(matches!(error, magnetar::Error::Internal { .. }));
+    assert_eq!(
+        store
+            .find_for_rotation(&original.selector, now)
+            .await
+            .expect("inspect original after failed replacement"),
+        Some(original.clone()),
+    );
+
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_auth_remember_replacement".to_owned(),
+        ))
+        .await
+        .expect("remove replacement failure trigger before retry");
+
+    assert!(
+        store
+            .replace_for_rotation(
+                &original.id,
+                &original.selector,
+                now,
+                first_replacement.clone(),
+            )
+            .await
+            .expect("retry replacement succeeds")
+    );
+    assert!(
+        !store
+            .replace_for_rotation(
+                &original.id,
+                &original.selector,
+                now,
+                second_replacement.clone(),
+            )
+            .await
+            .expect("second replacement attempt loses the comparison")
+    );
+    assert!(
+        store
+            .find_for_rotation(&original.selector, now)
+            .await
+            .expect("original selector lookup succeeds")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .find_for_rotation(&first_replacement.selector, now)
+            .await
+            .expect("winner selector lookup succeeds"),
+        Some(first_replacement),
+    );
+    assert!(
+        store
+            .find_for_rotation(&second_replacement.selector, now)
+            .await
+            .expect("loser selector lookup succeeds")
+            .is_none()
+    );
 }
 
 #[cfg(feature = "seaorm-postgres")]

@@ -32,6 +32,7 @@ use magnetar::sessions::{
 use magnetar::storage::{NewUser, UserStore};
 use magnetar::{Error, Result};
 use parking_lot::Mutex;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use secrecy::{ExposeSecret, SecretString};
 
 use factor::{credential_actor, factor_world, totp_code_now};
@@ -232,6 +233,146 @@ async fn trusted_remember_proof_enters_factor_gate_and_mints_real_opaque_session
         )
         .await
         .expect("the rotated replacement remains the sole live credential");
+}
+
+#[tokio::test]
+async fn replacement_insert_failure_preserves_original_credential_for_retry() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-rotation-failure@example.test").await;
+    let store = Arc::new(storage_schema::sql_stores::SqlRememberStore(
+        world.db.clone(),
+    ));
+    let hook = Arc::new(RecordingRememberAnomalyHook::default());
+    let remember = Arc::new(
+        RememberService::new(store.clone(), Duration::days(30))
+            .expect("compose remember service")
+            .with_anomaly_hook(hook.clone()),
+    );
+    let token_service: Arc<dyn RememberTokenService> = remember;
+    let (gate, service) = service_with_token_service(&world, token_service);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original remember credential")
+        .expose_once();
+    let original_plaintext = original.expose_secret().to_owned();
+    let (original_selector, _) = credential_parts(&original);
+    let original_row = store
+        .find_for_rotation(&original_selector, now)
+        .await
+        .expect("read original remember row")
+        .expect("original remember row exists");
+    let sessions_before = world
+        .sessions
+        .list_for_user(&user.user_id)
+        .await
+        .expect("list sessions before failed rotation")
+        .len();
+
+    world
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "CREATE TRIGGER fail_remember_replacement
+                 BEFORE INSERT ON storage_remembers
+                 WHEN NEW.user_id = '{}'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected remember replacement failure');
+                 END",
+                user.user_id
+            ),
+        ))
+        .await
+        .expect("install scoped replacement failure trigger");
+
+    let error = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext.clone())),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect_err("replacement insertion failure must surface");
+    assert!(matches!(error, Error::Internal { .. }));
+    assert_eq!(
+        store
+            .find_for_rotation(&original_selector, now)
+            .await
+            .expect("inspect original row after failed rotation"),
+        Some(original_row),
+        "failed replacement insertion must preserve the exact original row",
+    );
+    assert!(gate.methods().is_empty());
+    assert!(hook.events().is_empty());
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .expect("list sessions after failed rotation")
+            .len(),
+        sessions_before,
+    );
+
+    world
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_remember_replacement".to_owned(),
+        ))
+        .await
+        .expect("remove replacement failure trigger before retry");
+
+    let replacement = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext.clone())),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect("retry with the preserved original credential succeeds")
+        .replacement
+        .expose_once();
+
+    let replay_error = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext)),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect_err("the successfully rotated original must not replay");
+    assert!(matches!(
+        replay_error,
+        Error::NotFound {
+            resource,
+            identifier,
+        } if resource == "remember token" && identifier == "expired or revoked"
+    ));
+
+    service
+        .sign_in(
+            RememberCredential::from_host(replacement),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect("the returned replacement remains usable");
+    assert_eq!(
+        gate.methods(),
+        vec![SignInMethod::Remembered, SignInMethod::Remembered]
+    );
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .expect("list sessions after successful rotations")
+            .len(),
+        sessions_before + 2,
+    );
 }
 
 #[tokio::test]

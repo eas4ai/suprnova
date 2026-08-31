@@ -69,6 +69,24 @@ pub trait RememberStore: Send + Sync {
         selector: &str,
         now: DateTime<Utc>,
     ) -> Result<bool>;
+    /// Replace one exact, still-valid row with its prepared rotation successor.
+    ///
+    /// Stores that cannot make the conditional removal and replacement insert
+    /// one atomic operation fail closed so an accepted credential is never
+    /// consumed without a durable successor.
+    async fn replace_for_rotation(
+        &self,
+        id: &str,
+        selector: &str,
+        now: DateTime<Utc>,
+        replacement: RememberRow,
+    ) -> Result<bool> {
+        let _ = (id, selector, now, replacement);
+        Err(crate::Error::DependencyUnavailable {
+            dependency: "remember store".to_owned(),
+            message: "atomic remember credential rotation is unavailable".to_owned(),
+        })
+    }
     /// Revoke all rows for a user.
     async fn revoke_all_remember(&self, user_id: &str) -> Result<u64>;
     /// Prune expired rows and return the number removed.
@@ -193,6 +211,31 @@ impl<S: RememberStore + ?Sized> RememberService<S> {
         self
     }
 
+    fn prepare_at_epoch(
+        user_id: &str,
+        auth_epoch: u64,
+        now: DateTime<Utc>,
+        lifetime: Duration,
+    ) -> Result<(RememberRow, RememberCredential)> {
+        validate_lifetime(lifetime)?;
+        if user_id.is_empty() {
+            return Err(invalid("user_id", "must not be empty"));
+        }
+        let selector = random_hex::<16>();
+        let verifier = random_hex::<32>();
+        let credential =
+            RememberCredential::from_host(SecretString::from(format!("{selector}.{verifier}")));
+        let row = RememberRow {
+            id: random_hex::<16>(),
+            selector,
+            user_id: user_id.to_owned(),
+            auth_epoch,
+            verifier_hash: sha256_verifier(&verifier),
+            expires_at: now + lifetime,
+        };
+        Ok((row, credential))
+    }
+
     /// Issue with an already-loaded user epoch and explicit lifetime.
     pub async fn issue_at_epoch(
         &self,
@@ -201,26 +244,9 @@ impl<S: RememberStore + ?Sized> RememberService<S> {
         now: DateTime<Utc>,
         lifetime: Duration,
     ) -> Result<RememberCredential> {
-        validate_lifetime(lifetime)?;
-        if user_id.is_empty() {
-            return Err(invalid("user_id", "must not be empty"));
-        }
-        let selector = random_hex::<16>();
-        let verifier = random_hex::<32>();
-        let verifier_hash = sha256_verifier(&verifier);
-        self.store
-            .insert_remember(RememberRow {
-                id: random_hex::<16>(),
-                selector: selector.clone(),
-                user_id: user_id.to_owned(),
-                auth_epoch,
-                verifier_hash,
-                expires_at: now + lifetime,
-            })
-            .await?;
-        Ok(RememberCredential::from_host(SecretString::from(format!(
-            "{selector}.{verifier}"
-        ))))
+        let (row, credential) = Self::prepare_at_epoch(user_id, auth_epoch, now, lifetime)?;
+        self.store.insert_remember(row).await?;
+        Ok(credential)
     }
 
     /// Atomically rotate one presented credential and issue its replacement
@@ -252,9 +278,11 @@ impl<S: RememberStore + ?Sized> RememberService<S> {
                 .await;
             return Err(invalid("credential", "invalid verifier"));
         }
+        let (replacement_row, replacement) =
+            Self::prepare_at_epoch(&row.user_id, row.auth_epoch, now, replacement_lifetime)?;
         if !self
             .store
-            .consume_for_rotation(&row.id, &row.selector, now)
+            .replace_for_rotation(&row.id, &row.selector, now, replacement_row)
             .await?
         {
             self.anomaly_hook
@@ -265,9 +293,6 @@ impl<S: RememberStore + ?Sized> RememberService<S> {
                 .await;
             return Err(expired("remember token"));
         }
-        let replacement = self
-            .issue_at_epoch(&row.user_id, row.auth_epoch, now, replacement_lifetime)
-            .await?;
         Ok((row.user_id, row.auth_epoch, replacement))
     }
 
