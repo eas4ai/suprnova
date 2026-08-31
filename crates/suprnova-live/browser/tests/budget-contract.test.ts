@@ -222,6 +222,58 @@ async function createLegacyProvenanceFixture(): Promise<ProvenanceFixture> {
   return Object.freeze({ baselineRelative, decisionRelative, repository, reviewed });
 }
 
+async function createCodeSourceProvenanceFixture(options: {
+  readonly decision: string;
+  readonly noiseCommits?: number;
+  readonly noiseRelative?: string;
+  readonly sourceRelative: string;
+}): Promise<ProvenanceFixture> {
+  const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-code-source-"));
+  const baselineRelative = "browser/benchmarks/baselines/artifact-size-v1.json";
+  const decisionRelative = "docs/specs/suprnova-live/19-developer-tooling-and-testing.md";
+  await mkdir(join(repository, "browser/benchmarks/baselines"), { recursive: true });
+  await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
+  await writeFile(
+    join(repository, baselineRelative),
+    `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+  );
+  await writeFile(join(repository, decisionRelative), "# Decisions\n");
+  runFixtureGit(repository, "init", "-q");
+  runFixtureGit(repository, "config", "user.email", "fixture@example.test");
+  runFixtureGit(repository, "config", "user.name", "Fixture");
+  runFixtureGit(repository, "add", ".");
+  runFixtureGit(repository, "commit", "-qm", "record anchor baseline");
+  await writeFile(
+    join(repository, decisionRelative),
+    `# Decisions\n- 2026-08-30 -- Decision ID: ${options.decision}.\n`,
+  );
+  runFixtureGit(repository, "add", decisionRelative);
+  runFixtureGit(repository, "commit", "-qm", "record artifact source decision");
+  await mkdir(join(repository, options.sourceRelative, ".."), { recursive: true });
+  await writeFile(join(repository, options.sourceRelative), "reviewed source\n");
+  runFixtureGit(repository, "--literal-pathspecs", "add", "--", options.sourceRelative);
+  runFixtureGit(repository, "commit", "-qm", "record code-only artifact source");
+  const sourceCommit = runFixtureGit(repository, "rev-parse", "HEAD");
+  if (options.noiseRelative !== undefined) {
+    await mkdir(join(repository, options.noiseRelative, ".."), { recursive: true });
+    for (let index = 0; index < (options.noiseCommits ?? 0); index += 1) {
+      await writeFile(join(repository, options.noiseRelative), `noise ${String(index + 1)}\n`);
+      runFixtureGit(repository, "add", options.noiseRelative);
+      runFixtureGit(repository, "commit", "-qm", `record noise ${String(index + 1)}`);
+    }
+  }
+  const reviewed = appendReviewedBaseline(
+    TASK6_ONLY_ARTIFACT_BASELINE,
+    sourceCommit,
+    options.decision,
+    "2026-08-30T20:00:00-04:00",
+  );
+  await writeFile(join(repository, baselineRelative), `${JSON.stringify(reviewed, null, 2)}\n`);
+  runFixtureGit(repository, "add", baselineRelative);
+  runFixtureGit(repository, "commit", "-qm", "append reviewed artifact baseline");
+  return Object.freeze({ baselineRelative, decisionRelative, repository, reviewed });
+}
+
 async function importFixtureAsSubtree(fixture: ProvenanceFixture): Promise<string> {
   const legacyTip = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
   runFixtureGit(fixture.repository, "checkout", "--orphan", "integrated");
@@ -612,6 +664,57 @@ describe("role-aware production artifact budgets", () => {
       await rm(fixture.repository, { force: true, recursive: true });
     }
   });
+
+  it("ignores more than 256 later edits to the reviewed source file", async () => {
+    const sourceRelative = "src/reviewed.rs";
+    const fixture = await createCodeSourceProvenanceFixture({
+      decision: "iteration-005-later-source-edits",
+      sourceRelative,
+    });
+    try {
+      for (let index = 0; index < 257; index += 1) {
+        await writeFile(
+          join(fixture.repository, sourceRelative),
+          `reviewed source revision ${String(index + 1)}\n`,
+        );
+        runFixtureGit(fixture.repository, "add", sourceRelative);
+        runFixtureGit(
+          fixture.repository,
+          "commit",
+          "-qm",
+          `later source edit ${String(index + 1)}`,
+        );
+      }
+      const validate = await provenanceValidator();
+
+      expect(validate(fixture.reviewed, fixture.repository)).toEqual(fixture.reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    ["literal wildcard", "*", "unrelated.txt", 257],
+    ["literal bracket expression", "[abc]", "a", 257],
+    ["literal exclude magic", ":(exclude)", undefined, 0],
+  ])(
+    "treats a %s source filename as data, not a pathspec",
+    async (_scenario, sourceRelative, noiseRelative, noiseCommits) => {
+      const fixture = await createCodeSourceProvenanceFixture({
+        decision: `iteration-005-hostile-source-${String(noiseCommits)}-${String(sourceRelative.length)}`,
+        noiseCommits,
+        ...(noiseRelative === undefined ? {} : { noiseRelative }),
+        sourceRelative,
+      });
+      try {
+        const validate = await provenanceValidator();
+
+        expect(validate(fixture.reviewed, fixture.repository)).toEqual(fixture.reviewed);
+      } finally {
+        await rm(fixture.repository, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("accepts a later code-only source from a side branch predating the first source", async () => {
     const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-side-source-"));
