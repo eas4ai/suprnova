@@ -17,8 +17,9 @@
 //!    serialized by taking a `FOR UPDATE` lock on the audit row before
 //!    re-checking `processed_at` - the second arrival blocks until the
 //!    first commits, then sees `processed_at` set and short-circuits
-//!    instead of double-applying. Mirror-table `UNIQUE` violations from a
-//!    racing apply are treated as benign already-applied (200, not 503).
+//!    instead of double-applying. Any mirror-write failure remains retryable;
+//!    only a re-read of a committed `processed_at` is acknowledged as a
+//!    concurrent duplicate.
 //! 3. **5xx on failure.** Hydration errors return 503 so the provider
 //!    retries with backoff. The audit row's `process_error` is updated
 //!    outside the rolled-back transaction so operators can see the
@@ -38,6 +39,7 @@ use crate::payments::{
 };
 use crate::routing::Router;
 use chrono::Utc;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
     QuerySelect, Set, TransactionTrait,
@@ -48,14 +50,13 @@ fn err_response(status: u16, body: &str) -> Response {
     Ok(HttpResponse::text(body).status(status))
 }
 
-/// A `UNIQUE` violation surfaces differently per backend (SQLite says
-/// `UNIQUE constraint failed`, Postgres says `duplicate key value violates
-/// unique constraint`, MySQL says `Duplicate entry`). This catches all
-/// three by substring - the alternative is per-driver SQLSTATE matching,
-/// which SeaORM abstracts away.
-fn is_unique_violation(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("unique") || m.contains("duplicate")
+/// Return whether SeaORM classified a database failure as a unique-constraint
+/// violation, independent of backend-specific human-readable text.
+fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
+    matches!(
+        error.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    )
 }
 
 async fn handle_webhook_inner(
@@ -125,9 +126,10 @@ async fn handle_webhook_inner(
         return err_response(200, "duplicate");
     }
 
-    // 6. Ensure audit row exists. INSERT race on (provider, event_id) UNIQUE
-    //    is treated as a concurrent duplicate - return 200 so the racing
-    //    caller can retry against the now-existing row if it later fails.
+    // 6. Ensure audit row exists. An INSERT race on (provider, event_id)
+    //    continues into serialized hydration so this response reflects the
+    //    competing attempt's committed outcome. Only this receipt insertion
+    //    treats a structured UNIQUE violation as an expected race.
     if existing.is_none() {
         let neutral_str = event.neutral.and_then(|k| {
             serde_json::to_value(k)
@@ -146,12 +148,15 @@ async fn handle_webhook_inner(
             ..Default::default()
         };
         if let Err(e) = record.insert(db).await {
-            let msg = format!("{e}");
-            if is_unique_violation(&msg) {
-                return err_response(200, "duplicate-race");
+            if !is_unique_violation(&e) {
+                tracing::error!(error = %e, "failed to persist webhook event");
+                return err_response(500, "persist");
             }
-            tracing::error!(error = %e, "failed to persist webhook event");
-            return err_response(500, "persist");
+            tracing::debug!(
+                provider = %provider_name,
+                event_id = %event.provider_event_id,
+                "webhook receipt insertion raced; continuing to serialized hydration"
+            );
         }
     } else {
         // Retry: clear stale process_error from a previous failed attempt so
@@ -161,7 +166,14 @@ async fn handle_webhook_inner(
             am.process_error = Set(None);
             if let Err(e) = am.update(db).await {
                 tracing::error!(error = %e, "failed to clear stale process_error before retry");
-                // Continue - the retry can still succeed and overwrite this.
+                let error = format!("clear stale process_error before retry: {e}");
+                if let Err(mark_error) = mark_failed(db, &event, &error).await {
+                    tracing::error!(
+                        error = %mark_error,
+                        "failed to record webhook retry preparation failure"
+                    );
+                }
+                return err_response(503, "hydration-failed");
             }
         }
     }
@@ -191,25 +203,18 @@ async fn handle_webhook_inner(
             err_response(200, "duplicate")
         }
         Err(e) => {
-            // A mirror-table `UNIQUE` violation means a racing apply already
-            // landed the row this attempt was about to write. The state the
-            // provider asked for exists; surfacing 503 would just provoke a
-            // pointless retry. Treat it as already-applied: 200.
-            if is_unique_violation(&format!("{e}")) {
-                tracing::debug!(
-                    provider = %provider_name,
-                    event_id = %event.provider_event_id,
-                    "mirror upsert hit a unique violation from a concurrent apply; treating as already-applied"
-                );
-                return err_response(200, "duplicate-applied");
-            }
             tracing::error!(
                 provider = %provider_name,
                 event_id = %event.provider_event_id,
                 error = %e,
                 "webhook hydration failed"
             );
-            let _ = mark_failed(db, &event, &format!("{e}")).await;
+            if let Err(mark_error) = mark_failed(db, &event, &format!("{e}")).await {
+                tracing::error!(
+                    error = %mark_error,
+                    "failed to record webhook hydration failure"
+                );
+            }
             err_response(503, "hydration-failed")
         }
     }
@@ -716,19 +721,39 @@ async fn mark_failed(
     event: &WebhookEvent,
     err_str: &str,
 ) -> Result<(), PaymentError> {
-    let model = webhook_event::Entity::find()
+    let updated = webhook_event::Entity::update_many()
+        .col_expr(
+            webhook_event::Column::ProcessError,
+            Expr::value(Some(err_str.to_owned())),
+        )
+        .filter(webhook_event::Column::Provider.eq(&event.provider))
+        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+        .filter(webhook_event::Column::ProcessedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    if updated.rows_affected == 1 {
+        return Ok(());
+    }
+
+    // A competing attempt may have committed after this attempt released its
+    // transaction lock. Treat that state as authoritative and never attach a
+    // stale failure to a processed receipt.
+    let row = webhook_event::Entity::find()
         .filter(webhook_event::Column::Provider.eq(&event.provider))
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
         .one(db)
         .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?
-        .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
-    let mut am: webhook_event::ActiveModel = model.into();
-    am.process_error = Set(Some(err_str.into()));
-    am.update(db)
-        .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    Ok(())
+    match row {
+        Some(model) if model.processed_at.is_some() => Ok(()),
+        Some(_) => Err(PaymentError::Internal(
+            "webhook failure was not recorded on the unprocessed audit row".into(),
+        )),
+        None => Err(PaymentError::Internal(
+            "webhook event vanished after insert".into(),
+        )),
+    }
 }
 
 /// Mount the webhook ingress route onto an Axum-compatible Router.
@@ -822,18 +847,155 @@ mod tests {
         )
     }
 
-    /// `is_unique_violation` recognises the per-backend phrasings so a benign
-    /// concurrent-apply collision is mapped to 200 rather than a spurious 503.
-    #[test]
-    fn unique_violation_matcher_covers_each_backend_phrasing() {
-        assert!(is_unique_violation("UNIQUE constraint failed: t.col"));
-        assert!(is_unique_violation(
-            "duplicate key value violates unique constraint \"uniq_x\""
-        ));
-        assert!(is_unique_violation(
-            "Duplicate entry 'a-b' for key 'uniq_x'"
-        ));
-        assert!(!is_unique_violation("connection refused"));
+    /// Duplicate classification uses SeaORM's structured SQL error rather
+    /// than human-readable text that unrelated provider failures can contain.
+    #[tokio::test]
+    async fn unique_violation_classification_is_structured() {
+        let misleading =
+            sea_orm::DbErr::Custom("duplicate key value from an unrelated provider failure".into());
+        assert!(!is_unique_violation(&misleading));
+
+        let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+            .await
+            .expect("TestDatabase::fresh");
+        let conn = db.conn();
+        let record = webhook_event::ActiveModel {
+            provider: Set("mock".into()),
+            provider_event_id: Set("evt_structured_unique".into()),
+            provider_event_type: Set("payment.succeeded".into()),
+            neutral_event_kind: Set(Some("payment_succeeded".into())),
+            payload: Set(serde_json::json!({})),
+            received_at: Set(Utc::now().to_rfc3339()),
+            processed_at: Set(None),
+            process_error: Set(None),
+            ..Default::default()
+        };
+        record.clone().insert(conn).await.expect("first insert");
+        let duplicate = record
+            .insert(conn)
+            .await
+            .expect_err("second insert must violate the receipt uniqueness constraint");
+
+        assert!(is_unique_violation(&duplicate));
+    }
+
+    /// A failed contender must not attach its stale error after another
+    /// contender has already committed the event as processed.
+    #[tokio::test]
+    async fn mark_failed_preserves_concurrently_processed_audit_state() {
+        let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+            .await
+            .expect("TestDatabase::fresh");
+        let conn = db.conn();
+        let processed_at = Utc::now().to_rfc3339();
+        let event = WebhookEvent {
+            provider: "mock".into(),
+            provider_event_id: "evt_processed_before_failure_record".into(),
+            provider_event_type: "payment.succeeded".into(),
+            neutral: Some(NeutralEventKind::PaymentSucceeded),
+            raw_payload: serde_json::json!({}),
+        };
+        webhook_event::ActiveModel {
+            provider: Set(event.provider.clone()),
+            provider_event_id: Set(event.provider_event_id.clone()),
+            provider_event_type: Set(event.provider_event_type.clone()),
+            neutral_event_kind: Set(Some("payment_succeeded".into())),
+            payload: Set(event.raw_payload.clone()),
+            received_at: Set(processed_at.clone()),
+            processed_at: Set(Some(processed_at.clone())),
+            process_error: Set(None),
+            ..Default::default()
+        }
+        .insert(conn)
+        .await
+        .expect("seed processed audit row");
+
+        mark_failed(conn, &event, "stale failure from losing contender")
+            .await
+            .expect("processed audit row is a successful no-op");
+
+        let audit = webhook_event::Entity::find()
+            .filter(webhook_event::Column::Provider.eq(&event.provider))
+            .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+            .one(conn)
+            .await
+            .expect("db ok")
+            .expect("audit row");
+        assert_eq!(audit.processed_at.as_deref(), Some(processed_at.as_str()));
+        assert!(
+            audit.process_error.is_none(),
+            "a losing contender must not overwrite the committed audit state"
+        );
+    }
+
+    /// A structured UNIQUE failure from the receipt insert must continue into
+    /// hydration and return its retryable result instead of acknowledging the
+    /// event immediately. The extra index deterministically forces that exact
+    /// receipt-insert branch without relying on scheduler timing.
+    #[tokio::test]
+    async fn receipt_insert_unique_collision_continues_into_retryable_hydration() {
+        let provider_name: &'static str = "mock-webhook-receipt-unique-collision";
+        let _mock = register_mock(provider_name);
+
+        let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+            .await
+            .expect("TestDatabase::fresh");
+        let conn = db.conn();
+        conn.execute_unprepared(
+            "CREATE UNIQUE INDEX f05_receipt_event_type_unique \
+             ON payments_webhook_events (provider_event_type)",
+        )
+        .await
+        .expect("create deterministic receipt collision index");
+        webhook_event::ActiveModel {
+            provider: Set("mock".into()),
+            provider_event_id: Set("evt_receipt_collision_seed".into()),
+            provider_event_type: Set("payment.succeeded".into()),
+            neutral_event_kind: Set(Some("payment_succeeded".into())),
+            payload: Set(serde_json::json!({})),
+            received_at: Set(Utc::now().to_rfc3339()),
+            processed_at: Set(None),
+            process_error: Set(None),
+            ..Default::default()
+        }
+        .insert(conn)
+        .await
+        .expect("seed conflicting receipt value");
+
+        let event_id = "evt_receipt_collision_target";
+        let transaction_id = "txn_receipt_collision_target";
+        let response = handle_webhook_inner(
+            conn,
+            provider_name,
+            None,
+            http::HeaderMap::new(),
+            payment_succeeded_body(event_id, transaction_id),
+        )
+        .await;
+
+        assert_eq!(
+            status_of(&response),
+            503,
+            "receipt collision must report hydration failure, not an early duplicate acknowledgement"
+        );
+        let target_audit = webhook_event::Entity::find()
+            .filter(webhook_event::Column::ProviderEventId.eq(event_id))
+            .one(conn)
+            .await
+            .expect("db ok");
+        assert!(
+            target_audit.is_none(),
+            "forced receipt insert must not land"
+        );
+        let mirror = transaction::Entity::find()
+            .filter(transaction::Column::ProviderTransactionId.eq(transaction_id))
+            .one(conn)
+            .await
+            .expect("db ok");
+        assert!(
+            mirror.is_none(),
+            "hydration failure must roll back the mirror write"
+        );
     }
 
     /// Two concurrent RETRY deliveries of the same unprocessed event must
