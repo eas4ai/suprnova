@@ -180,6 +180,7 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
+pub use magnetar_integration::SignInOutcome;
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",

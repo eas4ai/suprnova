@@ -3,7 +3,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use super::{Session, User};
+use super::{Session, SignInOutcome, User};
 use crate::error::FrameworkError;
 use crate::session::{session, session_mut};
 
@@ -196,6 +196,25 @@ impl PasskeyAuth {
         email: &str,
         response: PublicKeyCredential,
     ) -> Result<(User, Session), FrameworkError> {
+        self.finish_authentication_outcome(email, response)
+            .await?
+            .into_legacy_tuple("second-factor authentication is required")
+    }
+
+    /// Complete a passkey ceremony and preserve any factor continuation.
+    ///
+    /// A [`SignInOutcome::FactorRequired`] result does not bind the framework
+    /// session. Its selector can be completed through the retained host engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ceremony or credential is invalid, user
+    /// lookup fails, or session issuance fails.
+    pub async fn finish_authentication_outcome(
+        &self,
+        email: &str,
+        response: PublicKeyCredential,
+    ) -> Result<SignInOutcome, FrameworkError> {
         let engine = super::passkey_engine()?;
         let selector = take_selector(
             SESSION_KEY_AUTH,
@@ -212,11 +231,8 @@ impl PasskeyAuth {
             .map_err(map_error)?;
         let issued = match decision {
             super::engine::HostSignInDecision::SessionAllowed(issued) => issued,
-            super::engine::HostSignInDecision::FactorRequired { .. } => {
-                return Err(FrameworkError::Domain {
-                    message: "second-factor authentication is required".to_owned(),
-                    status_code: 401,
-                });
+            super::engine::HostSignInDecision::FactorRequired { challenge_selector } => {
+                return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
         super::bind_issued_session(&issued, false);
@@ -224,7 +240,10 @@ impl PasskeyAuth {
             .passkey_user_by_id(issued.session.user_id.as_str())
             .await
             .map_err(map_error)?;
-        Ok((user, issued.session))
+        Ok(SignInOutcome::Authenticated {
+            user,
+            session: issued.session,
+        })
     }
 }
 
