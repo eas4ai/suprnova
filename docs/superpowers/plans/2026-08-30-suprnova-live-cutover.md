@@ -4,7 +4,7 @@
 
 **Goal:** Move the committed Suprnova Live product and specification history into the Suprnova workspace as one buildable internal crate tree with one authoritative checker and gate path.
 
-**Architecture:** Import the standalone branch as a history-preserving subtree under `crates/suprnova-live/`, then make that tree a normal member of the Suprnova workspace without introducing an engine-to-framework dependency. Keep the nested Live scripts rooted at their own crate directory, expose them to Suprnova through one root gate wrapper, and leave the standalone checkout as immutable historical evidence after the cutover.
+**Architecture:** Import the standalone branch as a history-preserving subtree under `crates/suprnova-live/`, then make that tree a normal member of the Suprnova workspace without introducing an engine-to-framework dependency. Keep the nested Live scripts rooted at their own crate directory, expose them to Suprnova through one wrapper in the existing ignored local `scripts/` tooling repository, and leave the standalone checkout as immutable historical evidence after the cutover. The public Suprnova branch does not publish that private release tooling.
 
 **Tech Stack:** Git subtree, Cargo workspace resolver 3, Rust 2024, Node.js ESM, strict TypeScript, npm lockfile, existing Suprnova and Live shell gates.
 
@@ -18,8 +18,9 @@
 - `crates/suprnova-live/Cargo.toml` - internal engine package manifest after removal of the nested workspace declaration.
 - `crates/suprnova-live/crates/*/Cargo.toml` - retained macro-development, facade-fixture, and test-support packages aligned to workspace package policy.
 - `crates/suprnova-live/scripts/gate.sh` - Live-owned gate that remains runnable from any current directory and targets only integrated Live packages unless a test deliberately invokes the parent framework.
-- `scripts/check-suprnova-live.sh` - Suprnova-owned unattended adapter that invokes the integrated Live gate with the correct profile and no duplicate implementation.
-- `scripts/gate.sh` - existing Suprnova gate with one Live phase using the adapter.
+- `/home/shawn/workspace2/suprnova/scripts/check-suprnova-live.sh` - local Suprnova-owned unattended adapter that invokes the integrated Live gate with the correct profile and no duplicate implementation.
+- `/home/shawn/workspace2/suprnova/scripts/gate-steps.json` - existing ignored local gate registry with one ordinary Live step using the adapter.
+- `/home/shawn/workspace2/suprnova/scripts/gate-assets.json` and local smoke contracts - integrity and installation ownership for the private gate addition.
 - `crates/suprnova-live/AGENTS.md` - integrated local rules and active Iteration 005 path.
 - `crates/suprnova-live/docs/specs/suprnova-live/conventions.md` - authoritative integrated paths and verification commands.
 
@@ -285,33 +286,43 @@ rtk git commit -m "build: relocate suprnova live verification"
 
 **Files:**
 
-- Create: `scripts/check-suprnova-live.sh`
-- Modify: `scripts/gate.sh`
-- Test: `scripts/check-suprnova-live.sh`
+- Create locally: `/home/shawn/workspace2/suprnova/scripts/check-suprnova-live.sh`
+- Modify locally: `/home/shawn/workspace2/suprnova/scripts/gate-steps.json`
+- Modify locally as required by the existing tooling contract: `/home/shawn/workspace2/suprnova/scripts/gate-assets.json`
+- Test locally: `/home/shawn/workspace2/suprnova/scripts/tests/release-normal-smoke.sh`
 
-- [ ] **Step 1: Run GitNexus impact on the root gate phase owner**
+The entire `/home/shawn/workspace2/suprnova/scripts/` directory is an existing
+gitignored nested Git repository. Task 4 commits there locally and never pushes
+or adds its files to the public Suprnova worktree.
 
-Use GitNexus impact analysis on the shell function or file-level target that owns root gate phases. If the result is HIGH or CRITICAL, stop and report the blast radius before editing.
+- [ ] **Step 1: Preserve the pre-existing local-tooling boundary**
+
+Verify the nested tooling repository status separately from the public
+Suprnova worktree. Checkpoint the developer-approved completed release-tooling
+changes in their own local commit before adding Live, excluding caches and
+other generated workstation residue. Run GitNexus impact where the local index
+can resolve a symbol; shell registry entries with no indexed symbol require
+literal contract review rather than a false low-risk claim.
 
 - [ ] **Step 2: Write the failing wrapper contract**
 
-Before creating the file, run:
-
-Before implementation, run:
+Add a failing local smoke assertion and run it before creating the adapter.
+The assertion must require exactly one registered ordinary Live step, the
+adapter asset in the local integrity registry, and release-install preservation.
 
 ```bash
-rtk proxy scripts/check-suprnova-live.sh
+rtk proxy scripts/tests/release-normal-smoke.sh
 ```
 
-Expected: FAIL because the wrapper does not yet exist.
+Expected: FAIL because the wrapper and registered step do not yet exist.
 
-Create `scripts/check-suprnova-live.sh`:
+Create the local `scripts/check-suprnova-live.sh` adapter:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+repository_root=$(git rev-parse --show-toplevel)
 live_gate=${repository_root}/crates/suprnova-live/scripts/gate.sh
 
 if [[ ! -x "${live_gate}" ]]; then
@@ -323,36 +334,49 @@ export SUPRNOVA_LIVE_RELEASE=${SUPRNOVA_LIVE_RELEASE:-0}
 exec "${live_gate}"
 ```
 
-- [ ] **Step 3: Add the root gate phase**
+- [ ] **Step 3: Register the ordinary local gate step**
 
-Insert one named `Suprnova Live` phase in the root gate after formatting/prose checks and before release stamping. Invoke only `scripts/check-suprnova-live.sh`; do not duplicate Live commands in the root gate.
+Add one `suprnova-live` step to the local `gate-steps.json` registry for the
+`default` and `full` tiers. Invoke only `scripts/check-suprnova-live.sh`; do not
+duplicate Live commands in the registry or runner. Register the adapter in the
+existing gate asset/integrity mechanism and update the local installation and
+smoke contracts so a release-tool reinstall cannot silently remove it.
 
-Use the root gate's existing phase helper and add exactly:
+The registry command is exactly:
 
-```bash
-phase "Suprnova Live"
-rtk proxy scripts/check-suprnova-live.sh
+```json
+{"argv": ["scripts/check-suprnova-live.sh"]}
 ```
 
-- [ ] **Step 4: Verify wrapper and root gate contract**
+- [ ] **Step 4: Verify the adapter against the integration worktree**
+
+Expose the local tooling repository to the integration worktree only through
+an ignored temporary link or equivalent reversible local setup, then run the
+wrapper with the integration worktree as the current Git root. Do not copy the
+private tooling into public version control.
 
 Run:
 
 ```bash
 rtk proxy scripts/check-suprnova-live.sh
-rtk proxy bash -n scripts/gate.sh
+rtk proxy scripts/tests/release-normal-smoke.sh
+rtk proxy bash -n scripts/check-suprnova-live.sh
 rtk git diff --check
 ```
 
-Expected: the ordinary integrated Live gate passes, and the root gate remains valid unattended shell. Qualification-only failures remain confined to explicit release mode.
+Expected: the ordinary integrated Live gate passes from the integration
+worktree, local gate installation/smoke contracts pass, and qualification-only
+failures remain confined to explicit release mode.
 
-- [ ] **Step 5: Commit the root gate adapter**
+- [ ] **Step 5: Commit the local gate adapter without pushing**
 
-Run GitNexus change detection, review the root gate impact, then commit:
+Run change detection and review within the nested local tooling repository,
+then create a local-only commit. Do not push and do not stage the ignored
+`scripts/` path in the public Suprnova worktree.
 
 ```bash
-rtk git add scripts/check-suprnova-live.sh scripts/gate.sh
-rtk git commit -m "build: gate integrated suprnova live"
+rtk git -C /home/shawn/workspace2/suprnova/scripts add check-suprnova-live.sh gate-steps.json gate-assets.json tests
+rtk git -C /home/shawn/workspace2/suprnova/scripts commit -m "build: gate integrated suprnova live"
 ```
 
 ## Task 5: Update authority and path contracts
