@@ -42,6 +42,8 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test token_broker_concurrency two_pod_convergence_postgres
     run_live_test test token_broker_concurrency two_pod_convergence_mysql
     run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier
+    run_live_test lib _ migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1
+    run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1
 
     exit 0
 fi

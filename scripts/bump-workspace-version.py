@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""Atomically bump workspace version metadata, internal path requirements,
+and the version references README.md carries in prose."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+    r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+@dataclass(frozen=True)
+class PathRequirement:
+    manifest: Path
+    key: str
+    dependency_path: Path
+    version: str
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("version", help="new semantic version")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.cwd(),
+        help="workspace root (default: current directory)",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--verify",
+        action="store_true",
+        help="verify the workspace is already consistently versioned",
+    )
+    mode.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the version argument without reading or editing manifests",
+    )
+    return parser.parse_args()
+
+
+def validate_version(version: str) -> None:
+    match = SEMVER.fullmatch(version)
+    if match is None:
+        raise ValueError(f"'{version}' is not a valid semantic version")
+    prerelease = match.group("prerelease")
+    if prerelease is not None and any(
+        len(identifier) > 1
+        and identifier.startswith("0")
+        and identifier.isdigit()
+        for identifier in prerelease.split(".")
+    ):
+        raise ValueError(
+            f"'{version}' is not a valid semantic version: numeric "
+            "prerelease identifiers must not contain leading zeroes"
+        )
+
+
+def load_toml(path: Path) -> dict[str, object]:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def cargo_metadata(root: Path) -> dict[str, object]:
+    result = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            str(root / "Cargo.toml"),
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def workspace_manifests(root: Path) -> list[Path]:
+    metadata = cargo_metadata(root)
+    return sorted(
+        Path(package["manifest_path"]).resolve()
+        for package in metadata["packages"]
+    )
+
+
+def dependency_tables(document: dict[str, object]) -> list[dict[str, object]]:
+    tables: list[dict[str, object]] = []
+    for name in DEPENDENCY_TABLES:
+        table = document.get(name)
+        if isinstance(table, dict):
+            tables.append(table)
+
+    targets = document.get("target")
+    if isinstance(targets, dict):
+        for target in targets.values():
+            if not isinstance(target, dict):
+                continue
+            for name in DEPENDENCY_TABLES:
+                table = target.get(name)
+                if isinstance(table, dict):
+                    tables.append(table)
+    return tables
+
+
+def internal_path_requirements(root: Path) -> list[PathRequirement]:
+    manifests = workspace_manifests(root)
+    workspace_dirs = {manifest.parent.resolve() for manifest in manifests}
+    requirements: list[PathRequirement] = []
+
+    for manifest in manifests:
+        document = load_toml(manifest)
+        for table in dependency_tables(document):
+            for key, dependency in table.items():
+                if not isinstance(dependency, dict):
+                    continue
+                path = dependency.get("path")
+                version = dependency.get("version")
+                if not isinstance(path, str) or not isinstance(version, str):
+                    continue
+                dependency_path = (manifest.parent / path).resolve()
+                if dependency_path not in workspace_dirs:
+                    continue
+                requirements.append(
+                    PathRequirement(manifest, key, dependency_path, version)
+                )
+
+    return requirements
+
+
+def replace_workspace_version(source: str, version: str) -> str:
+    lines = source.splitlines(keepends=True)
+    in_workspace_package = False
+    replacements = 0
+
+    for index, line in enumerate(lines):
+        section = re.match(r"^\s*\[([^]]+)]\s*(?:#.*)?$", line)
+        if section:
+            in_workspace_package = section.group(1) == "workspace.package"
+            continue
+        if not in_workspace_package:
+            continue
+        updated, count = re.subn(
+            r'^(\s*version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\g<2>",
+            line,
+            count=1,
+        )
+        if count:
+            lines[index] = updated
+            replacements += count
+
+    if replacements != 1:
+        raise ValueError(
+            "expected exactly one workspace.package.version in Cargo.toml"
+        )
+    return "".join(lines)
+
+
+#: Embeddable semver fragment, for building larger patterns. Distinct from the
+#: anchored, compiled ``SEMVER`` above, which validates a version on its own.
+SEMVER_FRAGMENT = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?"
+
+#: The dependency-tag pin, ``tag = "vX.Y.Z"``. Every README that tells a
+#: consumer how to depend on this repo carries one, because the git tag *is*
+#: the release.
+RULE_DEP_TAG = "dep_tag"
+#: The ``cargo install --tag vX.Y.Z`` line, wherever it appears.
+RULE_INSTALL_TAG = "install_tag"
+#: The canonical current-release sentence, beginning with ``Current `main```,
+#: whose "tagged vX.Y.Z release has/retains" suffix distinguishes a release
+#: from main.
+RULE_TAGGED_RELEASE = "tagged_release"
+#: A documented `suprnova --version` output line, ``# suprnova X.Y.Z``.
+#:
+#: The binary itself can never be stale — `--version`, `-v` and `-V` all
+#: resolve through clap's `ArgAction::Version` to `CARGO_PKG_VERSION`,
+#: which is `[workspace.package] version`, which this script owns. A
+#: version copied into prose is the only spelling that can drift, so it is
+#: the one that needs rewriting.
+#:
+#: Deliberately anchored to a leading ``# `` so it matches an output
+#: comment inside a fenced example and nothing else. Prose of the form
+#: "Suprnova 0.7.2 introduced …" is a historical statement and rewriting
+#: it would falsify the sentence — the same trap `TAG_PINS_FROZEN`
+#: documents for the changelog.
+RULE_CLI_VERSION = "cli_version"
+
+#: How each version-pin rule recognises its syntax.
+#:
+#: One definition per rule, shared by discovery (`discover_tag_pinned_files`)
+#: and rewriting (`replace_readme_versions`), so the sweep cannot look for
+#: one shape while the rewrite fixes another.
+#:
+#: That split is exactly what went wrong. Discovery matched only the
+#: dependency syntax, so `manual/installation.md` had its ``tag = "…"``
+#: snippet bumped while the ``cargo install --tag`` line eleven lines above
+#: it froze at v0.7.2, and `manual/cli.md`, `manual/cli-new.md` and
+#: `suprnova-cli/README.md` — which carry *only* the install form — were
+#: never discovered at all. The CLI's own README sat three releases stale
+#: telling readers to install v0.6.0. `RULE_INSTALL_TAG` handled that form
+#: correctly the whole time; it was simply only ever applied to the two
+#: hand-listed READMEs. Generalising *which files* are scanned without
+#: generalising *which forms* are recognised is the same defect one level
+#: down.
+TAG_PIN_PATTERNS: dict[str, str] = {
+    RULE_INSTALL_TAG: rf"(--tag v){SEMVER_FRAGMENT}",
+    RULE_DEP_TAG: rf'(tag = "v){SEMVER_FRAGMENT}(")',
+    RULE_CLI_VERSION: rf"(^# suprnova ){SEMVER_FRAGMENT}$",
+    RULE_TAGGED_RELEASE: rf"^(Current `main` [^\r\n]*?\btagged v){SEMVER_FRAGMENT}( release (?:has|retains))\b",
+}
+
+#: Every README whose prose pins a version, and which rules must match in it.
+#:
+#: The root README was already covered; the three adapter READMEs were not,
+#: which is how they advertised v0.6.0 while v0.7.2 shipped — the identical
+#: failure this function was written to stop, reintroduced by a file the list
+#: did not name. `assert_all_versioned_readmes_listed` now fails the release
+#: if a README pins a tag without appearing here, so a new adapter crate
+#: cannot repeat it a third time.
+VERSIONED_READMES: dict[str, tuple[str, ...]] = {
+    "README.md": (RULE_INSTALL_TAG, RULE_DEP_TAG, RULE_TAGGED_RELEASE),
+    "framework/README.md": (RULE_INSTALL_TAG, RULE_DEP_TAG),
+    "crates/suprnova-payments-stripe/README.md": (RULE_DEP_TAG,),
+    "crates/suprnova-payments-paddle/README.md": (RULE_DEP_TAG,),
+    "crates/suprnova-web-push/README.md": (RULE_DEP_TAG,),
+}
+
+
+def replace_readme_versions(
+    source: str, version: str, rules: tuple[str, ...], label: str = "README.md"
+) -> str:
+    """Rewrite the version references a README carries in prose.
+
+    Manifests are bumped atomically on every release; these were not, which is
+    how a README advertised v0.6.0 while v0.7.0 shipped. Each rule named for
+    the file must match at least once, so a reworded README fails the release
+    loudly instead of silently going stale again.
+    """
+    rewrites = {
+        RULE_INSTALL_TAG: (TAG_PIN_PATTERNS[RULE_INSTALL_TAG], rf"\g<1>{version}"),
+        RULE_DEP_TAG: (TAG_PIN_PATTERNS[RULE_DEP_TAG], rf"\g<1>{version}\g<5>"),
+        RULE_CLI_VERSION: (TAG_PIN_PATTERNS[RULE_CLI_VERSION], rf"\g<1>{version}"),
+        RULE_TAGGED_RELEASE: (
+            TAG_PIN_PATTERNS[RULE_TAGGED_RELEASE],
+            rf"\g<1>{version}\g<5>",
+        ),
+    }
+    for rule in rules:
+        pattern, replacement = rewrites[rule]
+        # MULTILINE so RULE_CLI_VERSION's `^`/`$` bind to a line rather than
+        # the whole file. A no-op for the rules that carry no anchors.
+        source, count = re.subn(pattern, replacement, source, flags=re.MULTILINE)
+        if rule == RULE_TAGGED_RELEASE and count != 1:
+            raise ValueError(
+                f"{label} expected exactly one semantic-version match for "
+                f"{rule} ({pattern!r}); found {count}"
+            )
+        if count == 0:
+            raise ValueError(
+                f"{label} matches nothing for {rule} ({pattern!r}); update "
+                "VERSIONED_READMES alongside the README wording"
+            )
+    return source
+
+
+#: Directories whose version pins are not ours to rewrite.
+#:
+#: `templates/` interpolates `{framework_tag}` at scaffold time and is
+#: guarded separately by `template_drift`; `reference/` is gitignored
+#: third-party source; `docs/` holds superpowers planning documents that
+#: quote historical versions on purpose and would be falsified by a
+#: rewrite.
+TAG_SCAN_EXCLUDED_PARTS = frozenset(
+    {
+        "target",
+        "node_modules",
+        "reference",
+        "templates",
+        ".git",
+        ".superpowers",
+        "docs",
+    }
+)
+
+#: Files that pin a tag which must NOT track the release.
+#:
+#: `cargo_meta.rs` embeds a scaffold-shaped `Cargo.toml` as a fixture for
+#: TOML-parsing tests. The version in it is irrelevant to the assertions,
+#: and rewriting it every release would be pure churn in a test file.
+#:
+#: `CHANGELOG.md` is a historical record: every tag it names is a past
+#: version, named *because* it is past. Rewriting those pins does not
+#: update the file, it falsifies it. The 0.8.0 release proved it — a
+#: sentence reading "if you pinned `v0.7.3`, move to `v0.8.0`" was
+#: rewritten to "if you pinned `v0.8.0`, move to `v0.8.0`", and shipped.
+TAG_PINS_FROZEN = frozenset(
+    {
+        "suprnova-cli/src/commands/cargo_meta.rs",
+        "CHANGELOG.md",
+    }
+)
+
+#: File suffixes worth scanning. A tag pin only matters where somebody
+#: reads it and copies it: prose and doc comments.
+TAG_SCAN_SUFFIXES = ("*.md", "*.rs")
+
+
+def ignored_by_git(root: Path, candidates: list[Path]) -> set[Path]:
+    """Of `candidates`, the ones git ignores — i.e. the ones not shipped.
+
+    Discovery is a filesystem sweep, so it also finds local working files
+    that happen to quote a tag in prose. One took a release down *after*
+    the gate had passed: the sweep rewrote the ignored file, reported it
+    as a bumped manifest, and `git add` then refused the ignored path,
+    aborting between the version bump and the commit.
+
+    `release-bump-smoke.sh` could not have caught that — it builds its
+    fixture from `git ls-files --exclude-standard`, so the ignored file
+    is exactly what never reaches the fixture. Hence the check belongs
+    here, against the real tree.
+
+    A tree that is not a git repository filters nothing: that is the
+    smoke-test fixture, where every file present is one that shipped.
+    """
+    if not candidates:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+        input="\0".join(str(path) for path in candidates),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # 0 = some ignored, 1 = none ignored, anything else = not a repo or a
+    # genuine git failure. Both of the latter mean "filter nothing".
+    if result.returncode not in (0, 1):
+        return set()
+    return {Path(line) for line in result.stdout.split("\0") if line}
+
+
+def discover_tag_pinned_files(root: Path) -> list[Path]:
+    """Every shipped file whose text pins ``tag = "vX.Y.Z"``.
+
+    Discovery rather than a hand-maintained list, because a hand-maintained
+    list is exactly what failed twice already. `VERSIONED_READMES` named
+    five files and the release rewrote those five; everything else froze at
+    whatever version it was written against.
+
+    Two classes were frozen when this was generalised:
+
+    * ``manual/*.md`` — four chapters telling readers to depend on
+      ``tag = "v0.7.2"``, none of them rewritten by any release. They read
+      as current because 0.7.2 *was* current; the next release would have
+      shipped a manual pinning the previous version.
+    * ``framework/src/broadcasting/fanout/mod.rs`` — a public doc comment
+      still pinning ``v0.6.0``, two releases stale, telling anyone who
+      enabled the feature to depend on a version from two releases back.
+
+    Both are the failure `assert_all_versioned_readmes_listed` was written
+    to stop, in file classes it never scanned. So the sweep now covers
+    prose and doc comments, and the named list is reduced to "these files
+    need *extra* rules beyond the dependency tag".
+    """
+    # The flag goes here rather than inline as `(?m)` in one alternative:
+    # Python rejects a global flag that is not at the start of the whole
+    # expression, which a joined alternation would put it in the middle of.
+    pinned = re.compile("|".join(TAG_PIN_PATTERNS.values()), re.MULTILINE)
+    found: list[Path] = []
+    for suffix in TAG_SCAN_SUFFIXES:
+        for path in root.rglob(suffix):
+            relative_parts = path.relative_to(root).parts
+            if any(part in TAG_SCAN_EXCLUDED_PARTS for part in relative_parts):
+                continue
+            if path.relative_to(root).as_posix() in TAG_PINS_FROZEN:
+                continue
+            if pinned.search(path.read_text(encoding="utf-8")):
+                found.append(path)
+    found = sorted(set(found))
+    ignored = ignored_by_git(root, found)
+    return [path for path in found if path not in ignored]
+
+
+def rules_for(root: Path, path: Path, source: str) -> tuple[str, ...]:
+    """Which rewrite rules apply to a discovered file.
+
+    Each tag-pin rule applies to a file when that file actually contains
+    the syntax the rule rewrites, so a chapter carrying only a
+    ``cargo install --tag`` line gets the install rule and one carrying
+    only a dependency snippet gets the dependency rule. Deriving this from
+    the content rather than defaulting every discovered file to
+    `RULE_DEP_TAG` is what stops an install line freezing beside a snippet
+    that tracks the release — see `TAG_PIN_PATTERNS`.
+
+    Rules named in `VERSIONED_READMES` are kept and take precedence, so a
+    listed file whose install line or MSRV sentence gets reworded away
+    still fails the release loudly via `replace_readme_versions` instead of
+    silently dropping to whatever the content happens to show. Derivation
+    only ever *adds* to that contract.
+    """
+    rules = list(VERSIONED_READMES.get(path.relative_to(root).as_posix(), ()))
+    for rule, pattern in TAG_PIN_PATTERNS.items():
+        if rule not in rules and re.search(pattern, source, re.MULTILINE):
+            rules.append(rule)
+    return tuple(rules)
+
+
+def assert_all_versioned_readmes_listed(root: Path) -> None:
+    """Fail if a file in `VERSIONED_READMES` has stopped pinning a tag.
+
+    The inverse of the old check. Discovery now finds files that pin a tag,
+    so the risk is no longer "a file is missing from the list" — it is a
+    listed file whose extra rules (install line, MSRV sentence) were
+    reworded away, which would silently stop being enforced.
+    """
+    missing = [
+        relative
+        for relative in VERSIONED_READMES
+        if not (root / relative).exists()
+    ]
+    if missing:
+        raise ValueError(
+            "VERSIONED_READMES names files that do not exist: " + ", ".join(missing)
+        )
+
+
+def inline_dependency(line: str, key: str) -> dict[str, object] | None:
+    if not re.match(rf'^\s*{re.escape(key)}\s*=\s*\{{', line):
+        return None
+    try:
+        parsed = tomllib.loads(f"[dependencies]\n{line}")
+    except tomllib.TOMLDecodeError:
+        return None
+    dependency = parsed.get("dependencies", {}).get(key)
+    return dependency if isinstance(dependency, dict) else None
+
+
+def replace_path_requirement(
+    source: str,
+    requirement: PathRequirement,
+    version: str,
+) -> str:
+    lines = source.splitlines(keepends=True)
+    replacements = 0
+
+    for index, line in enumerate(lines):
+        dependency = inline_dependency(line, requirement.key)
+        if dependency is None:
+            continue
+        path = dependency.get("path")
+        current_version = dependency.get("version")
+        if not isinstance(path, str) or current_version != requirement.version:
+            continue
+        resolved = (requirement.manifest.parent / path).resolve()
+        if resolved != requirement.dependency_path:
+            continue
+        updated, count = re.subn(
+            r'(\bversion\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\g<2>",
+            line,
+            count=1,
+        )
+        if count:
+            lines[index] = updated
+            replacements += count
+            break
+
+    if replacements != 1:
+        relative = requirement.manifest.name
+        raise ValueError(
+            f"could not safely rewrite {requirement.key} in {relative}; "
+            "internal versioned path dependencies must use an inline table"
+        )
+    return "".join(lines)
+
+
+def verify(root: Path, version: str) -> list[PathRequirement]:
+    root_document = load_toml(root / "Cargo.toml")
+    workspace = root_document.get("workspace")
+    package = workspace.get("package") if isinstance(workspace, dict) else None
+    actual = package.get("version") if isinstance(package, dict) else None
+    if actual != version:
+        raise ValueError(
+            f"workspace.package.version is {actual!r}, expected {version!r}"
+        )
+
+    metadata = cargo_metadata(root)
+    mismatched_packages = [
+        f"{item['name']}={item['version']}"
+        for item in metadata["packages"]
+        if item["version"] != version
+    ]
+    if mismatched_packages:
+        raise ValueError(
+            "workspace packages did not inherit the release version: "
+            + ", ".join(mismatched_packages)
+        )
+
+    requirements = internal_path_requirements(root)
+    mismatched_requirements = [
+        f"{requirement.manifest.relative_to(root)}:{requirement.key}="
+        f"{requirement.version}"
+        for requirement in requirements
+        if requirement.version != version
+    ]
+    if mismatched_requirements:
+        raise ValueError(
+            "internal path requirements do not match the workspace version: "
+            + ", ".join(mismatched_requirements)
+        )
+
+    # The rewrite is idempotent at the target version, so "applying it
+    # changes nothing" is exactly "this file already carries this version".
+    assert_all_versioned_readmes_listed(root)
+    stale = []
+    for path in discover_tag_pinned_files(root):
+        relative = path.relative_to(root).as_posix()
+        source = path.read_text(encoding="utf-8")
+        if (
+            replace_readme_versions(
+                source, version, rules_for(root, path, source), relative
+            )
+            != source
+        ):
+            stale.append(relative)
+    if stale:
+        raise ValueError(
+            "these files pin a version that is not the workspace version: "
+            + ", ".join(stale)
+        )
+    return requirements
+
+
+def write_all_atomically(updated: dict[Path, str]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path, source in updated.items():
+            descriptor, temp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+            )
+            temp_path = Path(temp_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(source)
+            os.chmod(temp_path, stat.S_IMODE(path.stat().st_mode))
+            staged.append((path, temp_path))
+        for path, temp_path in staged:
+            os.replace(temp_path, path)
+    finally:
+        for _, temp_path in staged:
+            temp_path.unlink(missing_ok=True)
+
+
+def bump(root: Path, version: str) -> list[Path]:
+    requirements = internal_path_requirements(root)
+    if not requirements:
+        raise ValueError("workspace has no versioned internal path dependencies")
+
+    assert_all_versioned_readmes_listed(root)
+    tag_pinned = discover_tag_pinned_files(root)
+    paths = {
+        root / "Cargo.toml",
+        *tag_pinned,
+        *(item.manifest for item in requirements),
+    }
+    originals = {path: path.read_text(encoding="utf-8") for path in paths}
+    updated = dict(originals)
+    updated[root / "Cargo.toml"] = replace_workspace_version(
+        updated[root / "Cargo.toml"], version
+    )
+    for path in tag_pinned:
+        updated[path] = replace_readme_versions(
+            updated[path],
+            version,
+            rules_for(root, path, updated[path]),
+            path.relative_to(root).as_posix(),
+        )
+    for requirement in requirements:
+        updated[requirement.manifest] = replace_path_requirement(
+            updated[requirement.manifest], requirement, version
+        )
+
+    try:
+        write_all_atomically(updated)
+        verify(root, version)
+    except Exception:
+        write_all_atomically(originals)
+        raise
+    return sorted(path for path in paths if updated[path] != originals[path])
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        validate_version(args.version)
+        if args.validate_only:
+            return 0
+
+        root = args.root.resolve()
+        if args.verify:
+            requirements = verify(root, args.version)
+            print(f"workspace.package.version={args.version}")
+            for requirement in requirements:
+                print(
+                    f"{requirement.manifest.relative_to(root)}:"
+                    f"{requirement.key}={requirement.version}"
+                )
+            print(f"internal path requirements={len(requirements)}")
+            return 0
+
+        for path in bump(root, args.version):
+            print(path.relative_to(root))
+        return 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
