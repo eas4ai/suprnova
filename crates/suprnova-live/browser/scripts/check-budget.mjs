@@ -344,6 +344,15 @@ function validateDecisionSource(repositoryRoot, prefix, entry) {
   }
 }
 
+function retainsHistoryThrough(candidate, expected, entryIndex) {
+  return (
+    candidate.history.length > entryIndex &&
+    expected.history
+      .slice(0, entryIndex + 1)
+      .every((entry, index) => sameEntry(entry, candidate.history[index]))
+  );
+}
+
 export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
   const baseline = validateArtifactSizeBaseline(value);
   const repository = provenanceRepository(repositoryRoot);
@@ -367,12 +376,21 @@ export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
       throw new Error("artifact_size_baseline_provenance_invalid");
     }
   }
-  for (const entry of baseline.history.slice(1)) {
+  for (const [offset, entry] of baseline.history.slice(1).entries()) {
+    const entryIndex = offset + 1;
     const introduced = introductionForDecision(
       repository.topLevel,
       historical,
       entry.review.decision,
     );
+    for (const prior of historical) {
+      if (
+        !retainsHistoryThrough(prior.baseline, baseline, entryIndex) &&
+        !isAncestor(repository.topLevel, prior.commit, introduced.commit)
+      ) {
+        throw new Error("artifact_size_baseline_provenance_invalid");
+      }
+    }
     if (
       introduced.commit === entry.review.sourceCommit ||
       !isAncestor(repository.topLevel, entry.review.sourceCommit, introduced.commit)

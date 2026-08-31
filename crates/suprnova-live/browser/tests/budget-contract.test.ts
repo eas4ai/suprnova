@@ -578,6 +578,31 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
+  it("rejects valid reviewed-history truncation even when a later commit restores it", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "truncate valid reviewed history");
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(fixture.reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "restore valid reviewed history");
+      const validate = await provenanceValidator();
+
+      expect(() => validate(fixture.reviewed, fixture.repository)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
   it("rejects ambiguous or unrelated relocation paths as provenance authority", async () => {
     const ambiguousFixture = await createLegacyProvenanceFixture();
     const unrelatedFixture = await createLegacyProvenanceFixture();
