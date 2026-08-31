@@ -62,10 +62,11 @@ rtk node scripts/check-expansion-budget.mjs
 ```
 
 The checked local evidence records 1,762/15,622/154,222 expanded tokens,
-10,174/92,884/919,984 expanded bytes, and 5,372/5,400/5,562 milliseconds of
-isolated check work for 1/10/100 components. The gate rejects fixture drift,
-baseline regression, and unexplained superlinear growth. Local compile timing
-is exploratory and is never presented as release-grade toolchain performance.
+10,174/92,884/919,984 expanded bytes, and 6,239/6,262/6,500 milliseconds of
+isolated Rust/Cargo 1.94.0 check work for 1/10/100 components. The gate rejects
+fixture drift, baseline regression, and unexplained superlinear growth. Local
+compile timing is exploratory and is never presented as release-grade toolchain
+performance.
 
 ## Browser runtime benchmark
 

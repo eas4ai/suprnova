@@ -7,33 +7,33 @@
       "component_count": 1,
       "expanded_tokens": 1762,
       "expanded_bytes": 10174,
-      "cargo_check_milliseconds": 5372,
-      "fixture_sha256": "38e891dae23974f49c1962a0bc7b9a22a8d963e6d8a5384d5bb725b65bae039c"
+      "cargo_check_milliseconds": 6239,
+      "fixture_sha256": "4d4ade37b29af0a8ef44cf0d3a034d45fc8735864ce1de49e5e589c98cec9112"
     },
     {
       "component_count": 10,
       "expanded_tokens": 15622,
       "expanded_bytes": 92884,
-      "cargo_check_milliseconds": 5400,
-      "fixture_sha256": "32a8c8f61e67465a69f29d141ab8ccf35f01d3b026d3396f1a7981e1204dc66d"
+      "cargo_check_milliseconds": 6262,
+      "fixture_sha256": "b04c83290a10f3735b9a9cd5da2be94223c884af384d9e82ad30d67fb48d45a4"
     },
     {
       "component_count": 100,
       "expanded_tokens": 154222,
       "expanded_bytes": 919984,
-      "cargo_check_milliseconds": 5562,
-      "fixture_sha256": "115fb8ff6eb794bdff98586f5b2fd0a9d8e1edbc0209d5b1a7a8d2afd79f098d"
+      "cargo_check_milliseconds": 6500,
+      "fixture_sha256": "cf6d2bc998e809e5cdd4a784b2cd8a0b8256672507b97aaba90e0bd16bc42e44"
     }
   ],
-  "measured_at_unix_ms": 1787374150401,
+  "measured_at_unix_ms": 1788150027810,
   "environment": {
     "classification": "local_exploratory",
     "operating_system": "linux",
     "architecture": "x64",
-    "kernel": "7.0.0-29-generic",
-    "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)",
+    "kernel": "7.0.0-30-generic",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
     "nightly_rustc": "rustc 1.100.0-nightly (e71c0f1e3 2026-08-18)",
-    "cargo": "cargo 1.91.1 (ea2d97820 2025-10-10)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
     "release_qualified": false
   }
 }
