@@ -559,6 +559,40 @@ describe("role-aware production artifact budgets", () => {
     }
   });
 
+  it("accepts a code-only source commit between the decision and baseline append", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const decision = "iteration-005-code-only-artifact-source";
+      const decisionPath = join(fixture.repository, fixture.decisionRelative);
+      const decisionSource = await readFile(decisionPath, "utf8");
+      await writeFile(decisionPath, `${decisionSource}- 2026-08-30 -- Decision ID: ${decision}.\n`);
+      runFixtureGit(fixture.repository, "add", fixture.decisionRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "record artifact review decision");
+      await mkdir(join(fixture.repository, "src"), { recursive: true });
+      await writeFile(join(fixture.repository, "src/feature.rs"), "pub fn reviewed_feature() {}\n");
+      runFixtureGit(fixture.repository, "add", "src/feature.rs");
+      runFixtureGit(fixture.repository, "commit", "-qm", "implement reviewed feature");
+      const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+      const reviewed = appendReviewedBaseline(
+        fixture.reviewed,
+        sourceCommit,
+        decision,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "append reviewed artifact baseline");
+      const validate = await provenanceValidator();
+
+      expect(validate(reviewed, fixture.repository)).toEqual(reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
   it("rejects invalid history even when a later commit restores a valid baseline", async () => {
     const fixture = await createLegacyProvenanceFixture();
     try {
