@@ -129,6 +129,132 @@ const TASK6_ONLY_ARTIFACT_BASELINE = Object.freeze({
   history: Object.freeze([TASK6_ARTIFACT_BASELINE]),
 });
 
+type ProvenanceFixture = Readonly<{
+  repository: string;
+  baselineRelative: string;
+  decisionRelative: string;
+  reviewed: ArtifactSizeBaseline;
+}>;
+
+type ProvenanceValidator = (value: unknown, repositoryRoot: string) => ArtifactSizeBaseline;
+
+function runFixtureGit(repository: string, ...arguments_: string[]): string {
+  const result = spawnSync("git", arguments_, { cwd: repository, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`${result.stdout}${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+function appendReviewedBaseline(
+  baseline: ArtifactSizeBaseline,
+  sourceCommit: string,
+  decision: string,
+  recordedAt: string,
+): ArtifactSizeBaseline {
+  return {
+    ...baseline,
+    history: [
+      ...baseline.history,
+      {
+        review: {
+          decision,
+          rationale:
+            "Relocation-safe provenance must bind this reviewed artifact growth to its prior specification decision.",
+          recordedAt,
+          sourceCommit,
+          sourceDecision: decision,
+          sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
+        },
+        roles: {
+          "async-classic": {
+            artifact: "suprnova-live.async.classic.js",
+            brotliBytes: 16_470,
+            sha256: "a".repeat(64),
+          },
+          "async-esm": {
+            artifact: "suprnova-live.async.esm.js",
+            brotliBytes: 18_730,
+            sha256: "b".repeat(64),
+          },
+        },
+      },
+    ],
+  };
+}
+
+async function createLegacyProvenanceFixture(): Promise<ProvenanceFixture> {
+  const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-relocation-"));
+  const baselineRelative = "browser/benchmarks/baselines/artifact-size-v1.json";
+  const decisionRelative = "docs/specs/suprnova-live/19-developer-tooling-and-testing.md";
+  await mkdir(join(repository, "browser/benchmarks/baselines"), { recursive: true });
+  await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
+  await writeFile(
+    join(repository, baselineRelative),
+    `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+  );
+  await writeFile(
+    join(repository, decisionRelative),
+    "Decision ID: iteration-004-task-7-membership-budget-policy\n",
+  );
+  runFixtureGit(repository, "init", "-q");
+  runFixtureGit(repository, "config", "user.email", "fixture@example.test");
+  runFixtureGit(repository, "config", "user.name", "Fixture");
+  runFixtureGit(repository, "add", ".");
+  runFixtureGit(repository, "commit", "-qm", "record prior review decision");
+  const sourceCommit = runFixtureGit(repository, "rev-parse", "HEAD");
+  const reviewed: ArtifactSizeBaseline = {
+    ...ARTIFACT_BASELINE,
+    history: [
+      TASK6_ARTIFACT_BASELINE,
+      {
+        ...REVIEWED_ARTIFACT_BASELINE,
+        review: {
+          ...REVIEWED_ARTIFACT_BASELINE.review,
+          sourceCommit,
+        },
+      },
+    ],
+  };
+  await writeFile(join(repository, baselineRelative), `${JSON.stringify(reviewed, null, 2)}\n`);
+  runFixtureGit(repository, "add", baselineRelative);
+  runFixtureGit(repository, "commit", "-qm", "append reviewed baseline");
+  return Object.freeze({ baselineRelative, decisionRelative, repository, reviewed });
+}
+
+async function importFixtureAsSubtree(fixture: ProvenanceFixture): Promise<string> {
+  const legacyTip = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+  runFixtureGit(fixture.repository, "checkout", "--orphan", "integrated");
+  await rm(join(fixture.repository, "browser"), { force: true, recursive: true });
+  await rm(join(fixture.repository, "docs"), { force: true, recursive: true });
+  await writeFile(join(fixture.repository, "README.md"), "integrated host\n");
+  runFixtureGit(fixture.repository, "add", "-A");
+  runFixtureGit(fixture.repository, "commit", "-qm", "create integration host");
+  const mainline = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+  runFixtureGit(fixture.repository, "read-tree", "--prefix=crates/suprnova-live/", "-u", legacyTip);
+  const importedTree = runFixtureGit(fixture.repository, "write-tree");
+  const mergeCommit = runFixtureGit(
+    fixture.repository,
+    "commit-tree",
+    importedTree,
+    "-p",
+    mainline,
+    "-p",
+    legacyTip,
+    "-m",
+    "import live subtree",
+  );
+  runFixtureGit(fixture.repository, "reset", "--hard", mergeCommit);
+  return join(fixture.repository, "crates/suprnova-live");
+}
+
+async function provenanceValidator(): Promise<ProvenanceValidator> {
+  const loaded = (await import("../scripts/check-budget.mjs")) as {
+    readonly validateArtifactSizeBaselineProvenance: ProvenanceValidator;
+  };
+  return loaded.validateArtifactSizeBaselineProvenance;
+}
+
 async function evaluator(): Promise<
   Readonly<{
     evaluate: (
@@ -370,6 +496,140 @@ describe("role-aware production artifact budgets", () => {
       ).toThrow("artifact_size_baseline_provenance_invalid");
     } finally {
       await rm(repository, { force: true, recursive: true });
+    }
+  });
+
+  it("preserves provenance in the legacy standalone repository layout", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const validate = await provenanceValidator();
+
+      expect(validate(fixture.reviewed, fixture.repository)).toEqual(fixture.reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("preserves reachable legacy provenance after a prefixed subtree import", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const crateRoot = await importFixtureAsSubtree(fixture);
+      const checkedBaseline = JSON.parse(
+        await readFile(join(crateRoot, fixture.baselineRelative), "utf8"),
+      ) as ArtifactSizeBaseline;
+      const validate = await provenanceValidator();
+
+      expect(validate(checkedBaseline, crateRoot)).toEqual(fixture.reviewed);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("resolves crate-relative decision paths for future integrated reviews", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      const crateRoot = await importFixtureAsSubtree(fixture);
+      const decision = "iteration-005-integrated-artifact-review";
+      const integratedDecisionPath = join(crateRoot, fixture.decisionRelative);
+      const decisionSource = await readFile(integratedDecisionPath, "utf8");
+      await writeFile(integratedDecisionPath, `${decisionSource}Decision ID: ${decision}\n`);
+      runFixtureGit(fixture.repository, "add", `crates/suprnova-live/${fixture.decisionRelative}`);
+      runFixtureGit(fixture.repository, "commit", "-qm", "record integrated review decision");
+      const sourceCommit = runFixtureGit(fixture.repository, "rev-parse", "HEAD");
+      const integratedBaseline = appendReviewedBaseline(
+        fixture.reviewed,
+        sourceCommit,
+        decision,
+        "2026-08-30T20:00:00-04:00",
+      );
+      await writeFile(
+        join(crateRoot, fixture.baselineRelative),
+        `${JSON.stringify(integratedBaseline, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", `crates/suprnova-live/${fixture.baselineRelative}`);
+      runFixtureGit(fixture.repository, "commit", "-qm", "append integrated reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(validate(integratedBaseline, crateRoot)).toEqual(integratedBaseline);
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects invalid history even when a later commit restores a valid baseline", async () => {
+    const fixture = await createLegacyProvenanceFixture();
+    try {
+      await writeFile(join(fixture.repository, fixture.baselineRelative), "{}\n");
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "tamper with baseline history");
+      await writeFile(
+        join(fixture.repository, fixture.baselineRelative),
+        `${JSON.stringify(fixture.reviewed, null, 2)}\n`,
+      );
+      runFixtureGit(fixture.repository, "add", fixture.baselineRelative);
+      runFixtureGit(fixture.repository, "commit", "-qm", "restore reviewed baseline");
+      const validate = await provenanceValidator();
+
+      expect(() => validate(fixture.reviewed, fixture.repository)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(fixture.repository, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects ambiguous or unrelated relocation paths as provenance authority", async () => {
+    const ambiguousFixture = await createLegacyProvenanceFixture();
+    const unrelatedFixture = await createLegacyProvenanceFixture();
+    try {
+      const validate = await provenanceValidator();
+      const ambiguousCrateRoot = await importFixtureAsSubtree(ambiguousFixture);
+      await mkdir(join(ambiguousFixture.repository, "browser/benchmarks/baselines"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(ambiguousFixture.repository, ambiguousFixture.baselineRelative),
+        `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
+      );
+      runFixtureGit(ambiguousFixture.repository, "add", ambiguousFixture.baselineRelative);
+      runFixtureGit(ambiguousFixture.repository, "commit", "-qm", "add ambiguous legacy path");
+      expect(() => validate(ambiguousFixture.reviewed, ambiguousCrateRoot)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+
+      const unrelatedCrateRoot = await importFixtureAsSubtree(unrelatedFixture);
+      const unrelatedDecision = "iteration-005-unrelated-artifact-review";
+      const unrelatedDecisionPath = join(
+        unrelatedFixture.repository,
+        "vendor/live/19-developer-tooling-and-testing.md",
+      );
+      await mkdir(join(unrelatedFixture.repository, "vendor/live"), { recursive: true });
+      await writeFile(unrelatedDecisionPath, `Decision ID: ${unrelatedDecision}\n`);
+      runFixtureGit(unrelatedFixture.repository, "add", "vendor/live");
+      runFixtureGit(unrelatedFixture.repository, "commit", "-qm", "record unrelated decision");
+      const unrelatedSourceCommit = runFixtureGit(unrelatedFixture.repository, "rev-parse", "HEAD");
+      const unrelatedBaseline = appendReviewedBaseline(
+        unrelatedFixture.reviewed,
+        unrelatedSourceCommit,
+        unrelatedDecision,
+        "2026-08-30T20:01:00-04:00",
+      );
+      await writeFile(
+        join(unrelatedCrateRoot, unrelatedFixture.baselineRelative),
+        `${JSON.stringify(unrelatedBaseline, null, 2)}\n`,
+      );
+      runFixtureGit(
+        unrelatedFixture.repository,
+        "add",
+        `crates/suprnova-live/${unrelatedFixture.baselineRelative}`,
+      );
+      runFixtureGit(unrelatedFixture.repository, "commit", "-qm", "append unrelated review");
+      expect(() => validate(unrelatedBaseline, unrelatedCrateRoot)).toThrow(
+        "artifact_size_baseline_provenance_invalid",
+      );
+    } finally {
+      await rm(ambiguousFixture.repository, { force: true, recursive: true });
+      await rm(unrelatedFixture.repository, { force: true, recursive: true });
     }
   });
 
