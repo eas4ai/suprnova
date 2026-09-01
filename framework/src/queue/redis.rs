@@ -16,11 +16,11 @@
 //! pending entries list and is re-delivered. Idempotency belongs at the
 //! job level - see `framework/src/idempotency/mod.rs`.
 //!
-//! Similarly, `nack` performs two non-atomic Redis commands (XADD +
-//! XACK). If XACK fails after XADD succeeds, the original message stays
-//! in the PEL and is re-delivered via XAUTOCLAIM, while the
-//! freshly-published copy carries `attempts + 1`. Job handlers MUST be
-//! idempotent.
+//! Similarly, `nack` performs two non-atomic Redis commands (XADD + XACK).
+//! Once XADD is confirmed, same-process retries retain that phase and retry
+//! only XACK. A process crash or an ambiguous producer error can still leave
+//! both the original PEL entry and a freshly-published copy, so job handlers
+//! MUST be idempotent.
 //!
 //! ## Attempt accounting across redeliveries
 //!
@@ -89,13 +89,14 @@
 //!
 //! ## nack semantics
 //!
-//! Redis Streams has no native nack-with-delay. `nack` is implemented as an
-//! atomic two-step:
+//! Redis Streams has no native nack-with-delay. `nack` is implemented as a
+//! retryable two-step:
 //! 1. Re-publish the envelope (with `attempts` incremented and `available_at`
 //!    advanced by `requeue_delay`). A zero delay re-publishes directly to the
 //!    stream via `XADD`; a non-zero delay goes to the `<stream>:delayed` ZSET
 //!    and is promoted by the next `pop`.
-//! 2. Acknowledge the original message via `XACK` so it leaves the PEL.
+//! 2. Record that publication locally, then acknowledge the original message
+//!    via `XACK` so a failed acknowledgement can resume without republishing.
 //!
 //! ## AutoCommit::Disabled
 //!
@@ -132,8 +133,9 @@ use sea_streamer_redis::{
     RedisProducer, RedisStreamer,
 };
 use std::collections::HashMap;
+use std::future::Future;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -179,6 +181,277 @@ struct PendingEntry {
     envelope: Envelope,
     message: sea_streamer::SharedMessage,
     lease_deadline: Instant,
+    lifecycle: tokio::sync::Mutex<LifecycleState>,
+}
+
+impl PendingEntry {
+    fn new(
+        envelope: Envelope,
+        message: sea_streamer::SharedMessage,
+        lease_deadline: Instant,
+    ) -> Self {
+        Self {
+            envelope,
+            message,
+            lease_deadline,
+            lifecycle: tokio::sync::Mutex::new(LifecycleState::Reserved),
+        }
+    }
+}
+
+enum LifecycleState {
+    Reserved,
+    PublishPending(PreparedRequeue),
+    PublishedAwaitingAck {
+        kind: RequeueKind,
+        requested_delay: Duration,
+    },
+    Settled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequeueKind {
+    Nack,
+    Release,
+}
+
+impl RequeueKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Nack => "nack",
+            Self::Release => "release",
+        }
+    }
+
+    fn consumes_attempt(self) -> bool {
+        matches!(self, Self::Nack)
+    }
+}
+
+#[derive(Clone)]
+struct PreparedRequeue {
+    kind: RequeueKind,
+    requested_delay: Duration,
+    payload: Arc<str>,
+    target: RequeueTarget,
+}
+
+impl PreparedRequeue {
+    fn new<Encode>(
+        original: &Envelope,
+        requested_delay: Duration,
+        kind: RequeueKind,
+        requested_at: chrono::DateTime<Utc>,
+        encode: Encode,
+    ) -> Result<Self, FrameworkError>
+    where
+        Encode: FnOnce(&Envelope) -> Result<String, FrameworkError>,
+    {
+        let mut envelope = original.clone();
+        if kind.consumes_attempt() {
+            envelope.attempts += 1;
+        }
+        envelope.available_at = requested_at
+            + chrono::Duration::from_std(requested_delay).unwrap_or(chrono::Duration::zero());
+        let target = if requested_delay.is_zero() {
+            RequeueTarget::Immediate
+        } else {
+            RequeueTarget::Delayed {
+                score: envelope.available_at.timestamp(),
+            }
+        };
+        let payload = Arc::<str>::from(encode(&envelope)?);
+        Ok(Self {
+            kind,
+            requested_delay,
+            payload,
+            target,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RequeueTarget {
+    Immediate,
+    Delayed { score: i64 },
+}
+
+type PendingMap = Mutex<HashMap<Uuid, Arc<PendingEntry>>>;
+
+fn pending_entry(
+    pending: &PendingMap,
+    token: &ReservationToken,
+) -> Result<Option<Arc<PendingEntry>>, FrameworkError> {
+    Ok(lock::lock(pending, "redis queue pending map")?
+        .get(&token.0)
+        .cloned())
+}
+
+fn pending_entry_is_current(
+    pending: &PendingMap,
+    token: &ReservationToken,
+    entry: &Arc<PendingEntry>,
+) -> Result<bool, FrameworkError> {
+    Ok(lock::lock(pending, "redis queue pending map")?
+        .get(&token.0)
+        .is_some_and(|current| Arc::ptr_eq(current, entry)))
+}
+
+fn forget_pending_entry(
+    pending: &PendingMap,
+    token: &ReservationToken,
+    entry: &Arc<PendingEntry>,
+) -> Result<(), FrameworkError> {
+    let mut entries = lock::lock(pending, "redis queue pending map")?;
+    if entries
+        .get(&token.0)
+        .is_some_and(|current| Arc::ptr_eq(current, entry))
+    {
+        entries.remove(&token.0);
+    }
+    Ok(())
+}
+
+async fn ack_pending_with<Acknowledge>(
+    pending: &PendingMap,
+    token: &ReservationToken,
+    acknowledge: Acknowledge,
+) -> Result<(), FrameworkError>
+where
+    Acknowledge: FnOnce(&sea_streamer::SharedMessage) -> Result<(), FrameworkError> + Send,
+{
+    let Some(entry) = pending_entry(pending, token)? else {
+        return Ok(());
+    };
+    let mut lifecycle = entry.lifecycle.lock().await;
+    if !pending_entry_is_current(pending, token, &entry)? {
+        return Ok(());
+    }
+    match &*lifecycle {
+        LifecycleState::Reserved | LifecycleState::PublishedAwaitingAck { .. } => {}
+        LifecycleState::PublishPending(prepared) => {
+            return Err(FrameworkError::internal(format!(
+                "redis {} requeue has not been published; retry {} before acknowledging",
+                prepared.kind.label(),
+                prepared.kind.label()
+            )));
+        }
+        LifecycleState::Settled => return forget_pending_entry(pending, token, &entry),
+    }
+
+    acknowledge(&entry.message)?;
+    *lifecycle = LifecycleState::Settled;
+    forget_pending_entry(pending, token, &entry)
+}
+
+fn ensure_requeue_intent(
+    stored_kind: RequeueKind,
+    stored_delay: Duration,
+    requested_kind: RequeueKind,
+    requested_delay: Duration,
+) -> Result<(), FrameworkError> {
+    if stored_kind == requested_kind && stored_delay == requested_delay {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(format!(
+        "redis reservation is already being settled by {} with delay {:?}; retry that operation \
+         instead of {} with delay {:?}",
+        stored_kind.label(),
+        stored_delay,
+        requested_kind.label(),
+        requested_delay
+    )))
+}
+
+struct RequeueRequest {
+    delay: Duration,
+    kind: RequeueKind,
+    requested_at: chrono::DateTime<Utc>,
+}
+
+async fn requeue_pending_with<Encode, Publish, PublishFuture, Acknowledge>(
+    pending: &PendingMap,
+    token: &ReservationToken,
+    request: RequeueRequest,
+    encode: Encode,
+    publish: Publish,
+    acknowledge: Acknowledge,
+) -> Result<(), FrameworkError>
+where
+    Encode: FnOnce(&Envelope) -> Result<String, FrameworkError> + Send,
+    Publish: FnOnce(PreparedRequeue) -> PublishFuture + Send,
+    PublishFuture: Future<Output = Result<(), FrameworkError>> + Send,
+    Acknowledge:
+        FnOnce(&sea_streamer::SharedMessage, RequeueKind) -> Result<(), FrameworkError> + Send,
+{
+    let RequeueRequest {
+        delay: requested_delay,
+        kind: requested_kind,
+        requested_at,
+    } = request;
+    let Some(entry) = pending_entry(pending, token)? else {
+        return Ok(());
+    };
+    let mut lifecycle = entry.lifecycle.lock().await;
+    if !pending_entry_is_current(pending, token, &entry)? {
+        return Ok(());
+    }
+
+    let publication = match &*lifecycle {
+        LifecycleState::Reserved => {
+            let prepared = PreparedRequeue::new(
+                &entry.envelope,
+                requested_delay,
+                requested_kind,
+                requested_at,
+                encode,
+            )?;
+            *lifecycle = LifecycleState::PublishPending(prepared.clone());
+            Some(prepared)
+        }
+        LifecycleState::PublishPending(prepared) => {
+            ensure_requeue_intent(
+                prepared.kind,
+                prepared.requested_delay,
+                requested_kind,
+                requested_delay,
+            )?;
+            Some(prepared.clone())
+        }
+        LifecycleState::PublishedAwaitingAck {
+            kind,
+            requested_delay: stored_delay,
+        } => {
+            ensure_requeue_intent(*kind, *stored_delay, requested_kind, requested_delay)?;
+            None
+        }
+        LifecycleState::Settled => {
+            drop(lifecycle);
+            return forget_pending_entry(pending, token, &entry);
+        }
+    };
+
+    if let Some(prepared) = publication {
+        let kind = prepared.kind;
+        let delay = prepared.requested_delay;
+        publish(prepared).await?;
+        *lifecycle = LifecycleState::PublishedAwaitingAck {
+            kind,
+            requested_delay: delay,
+        };
+    }
+
+    let kind = match *lifecycle {
+        LifecycleState::PublishedAwaitingAck { kind, .. } => kind,
+        LifecycleState::Reserved | LifecycleState::PublishPending(_) | LifecycleState::Settled => {
+            return Err(FrameworkError::internal(
+                "redis requeue reached an invalid lifecycle phase",
+            ));
+        }
+    };
+    acknowledge(&entry.message, kind)?;
+    *lifecycle = LifecycleState::Settled;
+    forget_pending_entry(pending, token, &entry)
 }
 
 struct PendingMetadata {
@@ -281,9 +554,10 @@ pub struct RedisQueueDriver {
     /// connection plus an Arc-shared task) and is what the `redis` crate
     /// recommends for high-throughput async use.
     conn: ConnectionManager,
-    /// Map from `ReservationToken` UUID to its envelope, acknowledgement
-    /// handle, and authoritative Redis lease deadline.
-    pending: Mutex<HashMap<Uuid, PendingEntry>>,
+    /// Map from `ReservationToken` UUID to a retained, per-token lifecycle.
+    /// Entries remain addressable through every failed operation and are
+    /// removed only after acknowledgement succeeds.
+    pending: PendingMap,
 }
 
 impl RedisQueueDriver {
@@ -417,6 +691,33 @@ impl RedisQueueDriver {
             .map_err(|e| FrameworkError::internal(format!("redis ZADD delayed: {e}")))?;
         Ok(())
     }
+
+    async fn publish_requeue(&self, prepared: PreparedRequeue) -> Result<(), FrameworkError> {
+        let op = prepared.kind.label();
+        match prepared.target {
+            RequeueTarget::Immediate => {
+                let send_fut = self
+                    .producer
+                    .send_to(&self.stream_key, prepared.payload.as_ref())
+                    .map_err(|e| {
+                        FrameworkError::internal(format!("redis {op} re-publish error: {e}"))
+                    })?;
+                send_fut.await.map_err(|e| {
+                    FrameworkError::internal(format!("redis {op} re-publish receipt error: {e}"))
+                })?;
+            }
+            RequeueTarget::Delayed { score } => {
+                let mut conn = self.conn.clone();
+                let _added: i64 = conn
+                    .zadd(&self.delayed_key, prepared.payload.as_ref(), score)
+                    .await
+                    .map_err(|e| {
+                        FrameworkError::internal(format!("redis {op} ZADD delayed error: {e}"))
+                    })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -522,11 +823,11 @@ impl QueueDriver for RedisQueueDriver {
             let mut g = lock::lock(&self.pending, "redis queue pending map")?;
             g.insert(
                 token.0,
-                PendingEntry {
-                    envelope: envelope.clone(),
-                    message: shared,
-                    lease_deadline: pending_lease.deadline,
-                },
+                Arc::new(PendingEntry::new(
+                    envelope.clone(),
+                    shared,
+                    pending_lease.deadline,
+                )),
             );
         }
 
@@ -541,50 +842,36 @@ impl QueueDriver for RedisQueueDriver {
     /// next consumer interaction. A crash between `ack().await?` and the
     /// next flush re-delivers the message.
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        let entry = {
-            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
-            g.remove(&token.0)
-        };
-
-        if let Some(entry) = entry {
+        ack_pending_with(&self.pending, token, |message| {
             self.consumer
-                .ack(&entry.message)
-                .map_err(|e| FrameworkError::internal(format!("redis ack error: {e}")))?;
-
-            // Flush the ack to Redis immediately so it doesn't linger.
-            // `commit` requires `&mut self` which we don't have here because
-            // the trait requires `&self`. With `AutoCommit::Disabled` the ack
-            // is queued internally and will be committed when the consumer's
-            // internal flush fires or when the next `next()` call triggers it.
-            // This is acceptable: the message is out of the consumer's in-flight
-            // set from our perspective the moment `ack` is called.
-        }
-        // Token not found → already acked or never seen → idempotent no-op.
-
-        Ok(())
+                .ack(message)
+                .map_err(|e| FrameworkError::internal(format!("redis ack error: {e}")))
+        })
+        .await
     }
 
     /// Return a message to the queue with incremented `attempts` and an
     /// optional delay before it becomes visible again.
     ///
     /// Implementation:
-    /// 1. Retrieve and remove the envelope and acknowledgement handle from the pending map.
-    /// 2. Bump `envelope.attempts += 1`.
-    /// 3. Set `envelope.available_at = now + requeue_delay`.
-    /// 4. Re-publish the modified envelope. A zero `requeue_delay` re-publishes
+    /// 1. Lock the retained reservation lifecycle for this token.
+    /// 2. Prepare the successor once, bumping attempts for `nack` only and
+    ///    freezing its payload and availability timestamp across retries.
+    /// 3. Re-publish the modified envelope. A zero `requeue_delay` re-publishes
     ///    to the stream via `XADD`; a non-zero delay lands the envelope in
     ///    `<stream>:delayed` and the next `pop` promotes it once due.
-    /// 5. Acknowledge the original message via `XACK` (removes it from the PEL).
+    /// 4. Record confirmed publication, then acknowledge the original message
+    ///    via `XACK` and remove the local entry only after that succeeds.
     ///
-    /// At-least-once: the re-publish and ack are non-atomic. A crash between
-    /// re-publish success and ack success causes one extra delivery with the
-    /// pre-nack attempts counter.
+    /// At-least-once: the re-publish and ack are non-atomic. Same-process ack
+    /// retries do not republish, but a crash or ambiguous publish error can
+    /// still cause an extra delivery.
     async fn nack(
         &self,
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        self.requeue(token, requeue_delay, true, "nack").await
+        self.requeue(token, requeue_delay, RequeueKind::Nack).await
     }
 
     /// Put the message back after `delay` without consuming an attempt.
@@ -599,7 +886,7 @@ impl QueueDriver for RedisQueueDriver {
         _env: &Envelope,
         delay: Duration,
     ) -> Result<(), FrameworkError> {
-        self.requeue(token, delay, false, "release").await
+        self.requeue(token, delay, RequeueKind::Release).await
     }
 
     fn queue_filter_capability(&self) -> QueueFilterCapability {
@@ -879,64 +1166,42 @@ impl QueueDriver for RedisQueueDriver {
 }
 
 impl RedisQueueDriver {
-    /// Shared body of [`QueueDriver::nack`] and [`QueueDriver::release`],
-    /// which differ only in whether the requeue consumes an attempt.
+    /// Shared retryable body of [`QueueDriver::nack`] and
+    /// [`QueueDriver::release`], which differ only in whether preparation
+    /// consumes an attempt.
     async fn requeue(
         &self,
         token: &ReservationToken,
         requeue_delay: Duration,
-        consume_attempt: bool,
-        op: &'static str,
+        kind: RequeueKind,
     ) -> Result<(), FrameworkError> {
-        let entry = {
-            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
-            g.remove(&token.0)
-        };
-
-        let PendingEntry {
-            mut envelope,
-            message,
-            lease_deadline: _,
-        } = match entry {
-            Some(entry) => entry,
-            // Already acked / unknown token - silently succeed.
-            None => return Ok(()),
-        };
-
-        if consume_attempt {
-            envelope.attempts += 1;
-        }
-
-        // Advance availability by the requested delay.
-        let available_at = Utc::now()
-            + chrono::Duration::from_std(requeue_delay).unwrap_or(chrono::Duration::zero());
-        envelope.available_at = available_at;
-
-        if requeue_delay.is_zero() {
-            // Immediate retry - straight to the stream.
-            let json = envelope.to_json().map_err(|e| {
-                FrameworkError::internal(format!("envelope encode error ({op}): {e}"))
-            })?;
-            let send_fut = self
-                .producer
-                .send_to(&self.stream_key, json.as_str())
-                .map_err(|e| {
-                    FrameworkError::internal(format!("redis {op} re-publish error: {e}"))
-                })?;
-            send_fut.await.map_err(|e| {
-                FrameworkError::internal(format!("redis {op} re-publish receipt error: {e}"))
-            })?;
-        } else {
-            // Deferred retry - park on the delayed ZSET; pop will promote.
-            self.zadd_delayed(&envelope).await?;
-        }
-
-        // Ack the original message so it leaves the PEL.
-        self.consumer
-            .ack(&message)
-            .map_err(|e| FrameworkError::internal(format!("redis {op} ack error: {e}")))?;
-
-        Ok(())
+        requeue_pending_with(
+            &self.pending,
+            token,
+            RequeueRequest {
+                delay: requeue_delay,
+                kind,
+                requested_at: Utc::now(),
+            },
+            |envelope| {
+                envelope.to_json().map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "envelope encode error ({}): {e}",
+                        kind.label()
+                    ))
+                })
+            },
+            |prepared| self.publish_requeue(prepared),
+            |message, stored_kind| {
+                self.consumer.ack(message).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "redis {} ack error: {e}",
+                        stored_kind.label()
+                    ))
+                })
+            },
+        )
+        .await
     }
 
     /// `XLEN <stream>` - total entries currently held by the stream
@@ -1112,6 +1377,309 @@ fn is_missing_stream_or_group(e: &redis::RedisError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn lifecycle_envelope() -> Envelope {
+        Envelope {
+            schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
+            id: Uuid::new_v4(),
+            job_name: "redis-lifecycle-probe".into(),
+            queue: None,
+            payload: serde_json::json!({}),
+            dispatched_at: Utc::now(),
+            available_at: Utc::now(),
+            attempts: 0,
+            max_tries: 3,
+            backoff: crate::queue::BackoffSchedule::default(),
+            timeout_secs: None,
+            fail_on_timeout: false,
+            idempotency_key: None,
+            unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
+            batch_id: None,
+            chain_remaining: Vec::new(),
+        }
+    }
+
+    fn lifecycle_message() -> sea_streamer::SharedMessage {
+        let bytes = b"{}".to_vec();
+        let length = bytes.len();
+        sea_streamer::SharedMessage::new(
+            sea_streamer::MessageHeader::new(
+                StreamKey::new("redis-lifecycle-test").expect("valid stream key"),
+                sea_streamer::ShardId::new(0),
+                1,
+                sea_streamer::Timestamp::UNIX_EPOCH,
+            ),
+            bytes,
+            0,
+            length,
+        )
+    }
+
+    fn pending_fixture() -> (Mutex<HashMap<Uuid, Arc<PendingEntry>>>, ReservationToken) {
+        let envelope = lifecycle_envelope();
+        let token = ReservationToken(envelope.id);
+        let entry = Arc::new(PendingEntry::new(
+            envelope,
+            lifecycle_message(),
+            Instant::now() + Duration::from_secs(30),
+        ));
+        (Mutex::new(HashMap::from([(token.0, entry)])), token)
+    }
+
+    #[tokio::test]
+    async fn failed_ack_keeps_pending_entry_for_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (pending, token) = pending_fixture();
+        let attempts = AtomicUsize::new(0);
+
+        let first = ack_pending_with(&pending, &token, |_| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(FrameworkError::internal("injected ack failure"))
+        })
+        .await;
+        assert!(first.is_err());
+        assert!(
+            lock::lock(&pending, "test pending map")
+                .expect("pending map")
+                .contains_key(&token.0)
+        );
+
+        ack_pending_with(&pending, &token, |_| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .expect("retry should finish the retained acknowledgement");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            !lock::lock(&pending, "test pending map")
+                .expect("pending map")
+                .contains_key(&token.0)
+        );
+
+        ack_pending_with(&pending, &token, |_| -> Result<(), FrameworkError> {
+            panic!("completed tokens must remain idempotent no-ops")
+        })
+        .await
+        .expect("a completed token should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn requeue_retry_preserves_entry_after_encode_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (pending, token) = pending_fixture();
+        let publish_attempts = AtomicUsize::new(0);
+        let ack_attempts = AtomicUsize::new(0);
+
+        let first = requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay: Duration::from_secs(5),
+                kind: RequeueKind::Nack,
+                requested_at: Utc::now(),
+            },
+            |_| Err(FrameworkError::internal("injected encode failure")),
+            |_| {
+                publish_attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+            |_, _| {
+                ack_attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(first.is_err());
+        assert_eq!(publish_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(ack_attempts.load(Ordering::SeqCst), 0);
+        assert!(
+            lock::lock(&pending, "test pending map")
+                .expect("pending map")
+                .contains_key(&token.0)
+        );
+
+        requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay: Duration::from_secs(5),
+                kind: RequeueKind::Nack,
+                requested_at: Utc::now(),
+            },
+            |envelope| {
+                envelope
+                    .to_json()
+                    .map_err(|e| FrameworkError::internal(format!("test encode: {e}")))
+            },
+            |_| {
+                publish_attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+            |_, _| {
+                ack_attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect("retry should encode, publish, and acknowledge");
+        assert_eq!(publish_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(ack_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn requeue_retry_reuses_prepared_publication_after_publish_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (pending, token) = pending_fixture();
+        let encoded = AtomicUsize::new(0);
+        let publish_attempts = AtomicUsize::new(0);
+        let ack_attempts = AtomicUsize::new(0);
+        let payloads = Mutex::new(Vec::<String>::new());
+        let requested_at = Utc::now();
+        let delay = Duration::from_secs(7);
+
+        let first = requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay,
+                kind: RequeueKind::Nack,
+                requested_at,
+            },
+            |envelope| {
+                encoded.fetch_add(1, Ordering::SeqCst);
+                envelope
+                    .to_json()
+                    .map_err(|e| FrameworkError::internal(format!("test encode: {e}")))
+            },
+            |prepared| {
+                publish_attempts.fetch_add(1, Ordering::SeqCst);
+                payloads
+                    .lock()
+                    .expect("payload log")
+                    .push(prepared.payload.to_string());
+                std::future::ready(Err(FrameworkError::internal("injected publish failure")))
+            },
+            |_, _| {
+                ack_attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(first.is_err());
+
+        requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay,
+                kind: RequeueKind::Nack,
+                requested_at: requested_at + chrono::Duration::seconds(30),
+            },
+            |_| Err(FrameworkError::internal("prepared payload was re-encoded")),
+            |prepared| {
+                publish_attempts.fetch_add(1, Ordering::SeqCst);
+                payloads
+                    .lock()
+                    .expect("payload log")
+                    .push(prepared.payload.to_string());
+                std::future::ready(Ok(()))
+            },
+            |_, _| {
+                ack_attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect("retry should reuse the prepared publication");
+
+        let payloads = payloads.lock().expect("payload log");
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], payloads[1]);
+        let retried = Envelope::from_json(&payloads[0]).expect("prepared envelope");
+        assert_eq!(retried.attempts, 1);
+        assert_eq!(
+            retried.available_at,
+            requested_at + chrono::Duration::seconds(7)
+        );
+        assert_eq!(encoded.load(Ordering::SeqCst), 1);
+        assert_eq!(publish_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(ack_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn requeue_retry_skips_publish_after_ack_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (pending, token) = pending_fixture();
+        let encoded = AtomicUsize::new(0);
+        let published = AtomicUsize::new(0);
+        let acknowledged = AtomicUsize::new(0);
+
+        let first = requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay: Duration::ZERO,
+                kind: RequeueKind::Release,
+                requested_at: Utc::now(),
+            },
+            |envelope| {
+                encoded.fetch_add(1, Ordering::SeqCst);
+                envelope
+                    .to_json()
+                    .map_err(|e| FrameworkError::internal(format!("test encode: {e}")))
+            },
+            |_| {
+                published.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+            |_, _| {
+                acknowledged.fetch_add(1, Ordering::SeqCst);
+                Err(FrameworkError::internal("injected final ack failure"))
+            },
+        )
+        .await;
+        assert!(first.is_err());
+
+        requeue_pending_with(
+            &pending,
+            &token,
+            RequeueRequest {
+                delay: Duration::ZERO,
+                kind: RequeueKind::Release,
+                requested_at: Utc::now(),
+            },
+            |_| Err(FrameworkError::internal("published payload was re-encoded")),
+            |_| {
+                published.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err(FrameworkError::internal(
+                    "published payload was sent twice",
+                )))
+            },
+            |_, _| {
+                acknowledged.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect("retry should only acknowledge the original delivery");
+
+        assert_eq!(encoded.load(Ordering::SeqCst), 1);
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        assert_eq!(acknowledged.load(Ordering::SeqCst), 2);
+        assert!(
+            !lock::lock(&pending, "test pending map")
+                .expect("pending map")
+                .contains_key(&token.0)
+        );
+    }
 
     fn pending_reply(owner: &str, idle_ms: i64, deliveries: i64) -> redis::Value {
         redis::Value::Array(vec![redis::Value::Array(vec![
