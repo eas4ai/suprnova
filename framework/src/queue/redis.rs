@@ -3977,14 +3977,6 @@ mod tests {
             .query_async(&mut conn)
             .await
             .expect("old stream entry");
-        let _: () = redis::cmd("XGROUP")
-            .arg("CREATE")
-            .arg(&stream)
-            .arg(group)
-            .arg("0")
-            .query_async(&mut conn)
-            .await
-            .expect("old consumer group");
         let _: redis::Value = redis::cmd("XREADGROUP")
             .arg("GROUP")
             .arg(group)
