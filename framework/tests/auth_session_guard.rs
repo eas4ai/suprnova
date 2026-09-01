@@ -21,10 +21,10 @@ use tokio::sync::Mutex;
 use suprnova::SessionMiddleware;
 use suprnova::auth::events::{Attempting, Authenticated, Failed, Login, Logout};
 use suprnova::auth::request_state;
-use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
+use suprnova::events::testing::{assert_dispatched, assert_not_dispatched, dispatched};
 use suprnova::{
     Auth, AuthConfig, AuthManager, Authenticatable, Credentials, EventFacade, FrameworkError,
-    SessionGuard, StatefulGuard, UserProvider,
+    Guard, SessionGuard, StatefulGuard, UserProvider,
 };
 
 /// Shared runtime - SQLx pools die with their creating runtime, so every
@@ -351,6 +351,43 @@ fn attempt_with_valid_credentials_stamps_password_confirmation() {
     });
 }
 
+#[test]
+fn named_attempt_does_not_stamp_default_password_confirmation() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let admin = SessionGuard::named("admin", Arc::new(FakeProvider));
+            admin
+                .attempt(&Credentials::password("a@b.com", "secret"), false)
+                .await
+                .unwrap()
+                .expect("named credentials must authenticate their own guard");
+            assert!(
+                suprnova::session::session()
+                    .and_then(|session| session.password_confirmed_at())
+                    .is_none(),
+                "a named guard must not authorize the default guard's confirmation gate"
+            );
+
+            guard()
+                .attempt(&Credentials::password("a@b.com", "secret"), false)
+                .await
+                .unwrap()
+                .expect("default credentials must authenticate");
+            assert!(
+                suprnova::session::session()
+                    .and_then(|session| session.password_confirmed_at())
+                    .is_some(),
+                "the configured default guard must retain the legacy confirmation stamp"
+            );
+        })
+        .await;
+    });
+}
+
 /// The stamp is earned by proving a password, not by being logged in. A
 /// failed attempt must leave the window closed - otherwise a wrong-password
 /// request would hand out the reauth window that gates passkey enrollment.
@@ -471,6 +508,41 @@ fn login_then_logout_dispatches_login_and_logout_with_user_id() {
 
         assert_dispatched::<Login>(|e| e.user_id == "7");
         assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+    });
+}
+
+#[test]
+fn named_guard_logout_preserves_other_guard() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let web = SessionGuard::named("web", Arc::new(FakeProvider));
+            let admin = SessionGuard::named("admin", Arc::new(FakeProvider));
+
+            web.login(the_user(), false).await.unwrap();
+            admin
+                .login(
+                    Arc::new(TestUser { id: "9".into() }) as Arc<dyn Authenticatable>,
+                    false,
+                )
+                .await
+                .unwrap();
+
+            admin.logout().await.unwrap();
+
+            assert!(admin.guest().await.unwrap());
+            assert_eq!(web.id().await.unwrap().as_deref(), Some("7"));
+            assert_eq!(Auth::id().as_deref(), Some("7"));
+        })
+        .await;
+
+        let logout_events = dispatched::<Logout>(|_| true);
+        assert_eq!(logout_events.len(), 1, "logout must dispatch exactly once");
+        assert_eq!(logout_events[0].guard, "admin");
+        assert_eq!(logout_events[0].user_id.as_deref(), Some("9"));
     });
 }
 
@@ -634,6 +706,32 @@ fn facade_logout_and_invalidate_rotates_session_id() {
         .await;
 
         assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+    });
+}
+
+#[test]
+fn logout_and_invalidate_clears_named_guard_request_cache() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let admin = SessionGuard::named("admin", Arc::new(FakeProvider));
+
+            Auth::login(the_user(), false).await.unwrap();
+            admin.login(the_user(), false).await.unwrap();
+            assert_eq!(admin.id().await.unwrap().as_deref(), Some("7"));
+
+            Auth::logout_and_invalidate().await.unwrap();
+
+            assert_eq!(
+                admin.id().await.unwrap(),
+                None,
+                "full session invalidation must clear named request caches"
+            );
+        })
+        .await;
     });
 }
 

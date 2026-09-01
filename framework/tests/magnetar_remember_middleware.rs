@@ -301,4 +301,71 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
         None,
         "an installed engine must validate the Magnetar binding, never trust bare user_id",
     );
+
+    // Named provider-backed session guards do not own Magnetar bindings and
+    // must survive merely because an engine is installed. Named identities
+    // that do carry a binding remain fail-closed, including malformed values.
+    let named_session_id = "b".repeat(40);
+    let mut named_session = SessionData::new(named_session_id.clone(), "named-csrf".to_owned());
+    named_session.data.insert(
+        "_auth_guards".to_owned(),
+        serde_json::json!({
+            "provider": { "id": "provider-user" },
+            "revoked": {
+                "id": "revoked-user",
+                "magnetar_web_binding": {
+                    "session_id": "missing-session",
+                    "token_digest": vec![0_u8; 32],
+                },
+            },
+            "malformed": {
+                "id": "malformed-user",
+                "magnetar_web_binding": "not-a-binding",
+            },
+        }),
+    );
+    store.seed(named_session).await;
+    let named_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &named_session_id)
+        .expect("encrypt named-guard data-session cookie");
+    let observed_named = Arc::new(Mutex::new(None::<SessionData>));
+    let observed_in_handler = observed_named.clone();
+    let named_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = suprnova::session::session();
+            Ok(suprnova::HttpResponse::text("named checked"))
+        })
+    });
+    assert!(
+        middleware
+            .handle(
+                request_with_cookies(&[(&config.cookie_name, &named_cookie)]).await,
+                named_next,
+            )
+            .await
+            .is_ok(),
+        "named binding validation request must reach the handler",
+    );
+    let observed_named = observed_named
+        .lock()
+        .await
+        .clone()
+        .expect("handler sees named-guard data session");
+    let guards = observed_named
+        .data
+        .get("_auth_guards")
+        .and_then(serde_json::Value::as_object)
+        .expect("guard container remains for the provider-backed identity");
+    assert!(
+        guards.contains_key("provider"),
+        "binding-less provider-backed named guards must survive",
+    );
+    assert!(
+        !guards.contains_key("revoked"),
+        "an explicitly bound named guard must fail closed when its binding is revoked",
+    );
+    assert!(
+        !guards.contains_key("malformed"),
+        "a present but malformed named binding must fail closed",
+    );
 }

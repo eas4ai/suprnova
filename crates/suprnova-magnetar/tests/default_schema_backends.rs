@@ -332,6 +332,59 @@ async fn sqlite_remember_replacement_rolls_back_and_has_one_winner() {
     );
 }
 
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn sqlite_remember_selector_revocation_preserves_other_rows() {
+    let database = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory SQLite");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("create default auth tables");
+    let store = SqlRememberStore(database);
+    let now = Utc::now();
+    let first = RememberRow {
+        id: "selector-revoke-first-id".to_owned(),
+        selector: "selector-revoke-first".to_owned(),
+        user_id: "selector-revoke-user".to_owned(),
+        auth_epoch: 1,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let second = RememberRow {
+        id: "selector-revoke-second-id".to_owned(),
+        selector: "selector-revoke-second".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..first.clone()
+    };
+    store.insert_remember(first.clone()).await.unwrap();
+    store.insert_remember(second.clone()).await.unwrap();
+
+    assert!(
+        store
+            .revoke_remember_selector(&first.selector)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .revoke_remember_selector(&first.selector)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.find_for_rotation(&first.selector, now).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .find_for_rotation(&second.selector, now)
+            .await
+            .unwrap(),
+        Some(second)
+    );
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]

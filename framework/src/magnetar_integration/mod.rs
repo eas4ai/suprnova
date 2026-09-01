@@ -39,10 +39,14 @@ pub(crate) fn bind_issued_session(
     issued: &engine::MagnetarIssuedSession,
     password_confirmed: bool,
 ) {
+    let default_guard = crate::auth::Auth::default_guard_name();
+    let user_id = issued.session.user_id.to_string();
     crate::session::session_mut(|session| {
         session.rotate_id(crate::session::generate_session_id());
         session.csrf_token = crate::session::generate_csrf_token();
-        session.user_id = Some(issued.session.user_id.to_string());
+        session.user_id = Some(user_id.clone());
+        session.set_auth_guard_id(&default_guard, user_id.clone());
+        session.set_auth_guard_magnetar_binding(&default_guard, issued.web_binding.clone());
         session.set_magnetar_web_binding(issued.web_binding.clone());
         if password_confirmed {
             session.password_confirmed();

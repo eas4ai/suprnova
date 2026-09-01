@@ -765,6 +765,16 @@ where
         self.remember.revoke_all_for_user(user_id).await
     }
 
+    /// Revoke exactly one remember credential by its non-secret selector.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the remember service's exact-revocation error, including its
+    /// fail-closed unsupported-capability result.
+    pub async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
+        self.remember.revoke_selector(selector).await
+    }
+
     /// Register through the host's real Magnetar password provider.
     pub async fn register_password(&self, input: RegisterInput) -> Result<RegistrationOutcome> {
         self.password.register(input).await
@@ -941,6 +951,20 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession>;
     /// Revoke every remember credential for one user.
     async fn revoke_remember(&self, user_id: &str) -> Result<u64>;
+    /// Revoke exactly one remember credential by its non-secret selector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DependencyUnavailable`] by default so an older engine
+    /// implementation cannot silently broaden a guard-scoped logout into
+    /// revoking every remember credential for the user.
+    async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
+        let _ = selector;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "exact remember credential revocation is unavailable".to_owned(),
+        })
+    }
     /// Load a host-mapped users user by its opaque application id.
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
     /// Revoke one opaque session by its stable row identifier.
@@ -1085,6 +1109,10 @@ where
 
     async fn revoke_remember(&self, user_id: &str) -> Result<u64> {
         MagnetarHostEngine::revoke_remember(self, user_id).await
+    }
+
+    async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
+        MagnetarHostEngine::revoke_remember_selector(self, selector).await
     }
 
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {

@@ -4,9 +4,9 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 
 use crate::container::App;
+use crate::session::middleware::{clear_guard_auth_user, set_guard_auth_user};
 use crate::session::{
-    auth_user_id, clear_auth_user, generate_csrf_token, regenerate_session_id, session_mut,
-    set_auth_user,
+    auth_user_id, clear_auth_user, generate_csrf_token, regenerate_session_id, session, session_mut,
 };
 
 use super::authenticatable::Authenticatable;
@@ -93,6 +93,13 @@ impl Auth {
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
+        Self::login_guard_id(&Self::default_guard_name(), user_id)
+    }
+
+    pub(crate) fn login_guard_id(
+        guard_name: &str,
+        user_id: impl Into<String>,
+    ) -> Result<(), crate::error::FrameworkError> {
         if !crate::session::middleware::session_scope_installed() {
             return Err(crate::error::FrameworkError::internal(
                 "Auth::login_id called outside a request scope: no SessionMiddleware is \
@@ -105,7 +112,7 @@ impl Auth {
         regenerate_session_id();
 
         // Set the authenticated user
-        set_auth_user(user_id);
+        set_guard_auth_user(guard_name, user_id);
 
         // Regenerate CSRF token for extra security
         session_mut(|session| {
@@ -141,13 +148,21 @@ impl Auth {
         user_id: impl Into<String>,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
+        Self::login_guard_remember(&Self::default_guard_name(), user_id, ttl_minutes).await
+    }
+
+    pub(crate) async fn login_guard_remember(
+        guard_name: &str,
+        user_id: impl Into<String>,
+        ttl_minutes: i64,
+    ) -> Result<(), crate::error::FrameworkError> {
         let user_id = user_id.into();
         // Regular session login (regen session id + CSRF, set user). This
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
-        Self::login_id(user_id.clone())?;
+        Self::login_guard_id(guard_name, user_id.clone())?;
         // Issue the row + queue the cookie.
-        Self::issue_remember_cookie(&user_id, ttl_minutes).await
+        Self::issue_remember_cookie_for_guard(guard_name, &user_id, ttl_minutes).await
     }
 
     /// Issue the remember-me row + queue the remember-me cookie for the
@@ -171,6 +186,15 @@ impl Auth {
         user_id: &str,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
+        Self::issue_remember_cookie_for_guard(&Self::default_guard_name(), user_id, ttl_minutes)
+            .await
+    }
+
+    pub(crate) async fn issue_remember_cookie_for_guard(
+        guard_name: &str,
+        user_id: &str,
+        ttl_minutes: i64,
+    ) -> Result<(), crate::error::FrameworkError> {
         // Pre-flight: refuse to insert the DB row when no pending-cookies
         // scope is installed. Otherwise `push_pending_cookie` below would
         // silently drop the cookie and the row would be orphaned - the
@@ -183,6 +207,12 @@ impl Auth {
                  SessionMiddleware is active (or the test forgot \
                  pending_cookies_scope_for_test). Refusing to insert a remember-me \
                  row that would orphan when the cookie cannot reach the response.",
+            ));
+        }
+        if !crate::session::middleware::session_scope_installed() {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::issue_remember_cookie called outside a request scope: no active \
+                 session is available to retain the remember selector.",
             ));
         }
 
@@ -201,6 +231,9 @@ impl Auth {
             } else {
                 super::remember::issue(user_id, ttl_minutes).await?
             };
+        let selector = crate::session::middleware::remember_selector(&plaintext)?;
+        let carrier = crate::session::middleware::encode_remember_carrier(guard_name, &plaintext)?;
+
         // Build + queue the cookie. The cookie's `Max-Age` matches the
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
         // stops sending the cookie the moment the row expires - the
@@ -209,7 +242,7 @@ impl Auth {
         let max_age =
             std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));
         let cookie =
-            crate::session::middleware::create_remember_cookie(&config, &plaintext, max_age)?;
+            crate::session::middleware::create_remember_cookie(&config, &carrier, max_age)?;
         let queued = crate::session::middleware::push_pending_cookie(cookie);
         // The pre-flight above guarantees `queued == true`; the assert is
         // a belt-and-suspenders against future refactors removing the
@@ -218,6 +251,10 @@ impl Auth {
             queued,
             "pending-cookies scope was installed at pre-flight but lost by push time"
         );
+        request_state::set_active_remember_carrier(guard_name, &selector);
+        session_mut(|session| {
+            session.set_auth_guard_remember_selector(guard_name, selector);
+        });
 
         Ok(())
     }
@@ -304,6 +341,27 @@ impl Auth {
         }
     }
 
+    pub(crate) async fn revoke_remember_selector(
+        guard_name: &str,
+        selector: &str,
+    ) -> Result<bool, crate::error::FrameworkError> {
+        if request_state::take_active_remember_carrier(guard_name, selector) {
+            Self::queue_remember_clear_cookie();
+        }
+        if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
+            engine
+                .revoke_remember_selector(selector)
+                .await
+                .map_err(|error| {
+                    crate::error::FrameworkError::internal(format!(
+                        "revoke Magnetar remember credential by selector: {error}"
+                    ))
+                })
+        } else {
+            super::remember::revoke_by_selector(selector).await
+        }
+    }
+
     /// Queue the "forget remember-me" cookie on the outgoing response.
     /// Internal helper - callers want `revoke_remember_tokens` or
     /// `revoke_remember_tokens_for_user`, which queue the clear cookie
@@ -381,6 +439,41 @@ impl Auth {
         Ok(())
     }
 
+    pub(crate) async fn clear_guard_authentication(
+        guard_name: &str,
+    ) -> Result<(), crate::error::FrameworkError> {
+        if guard_name == Self::default_guard_name() {
+            return Self::clear_authentication().await;
+        }
+
+        let mut selectors = session()
+            .and_then(|session| session.auth_guard_remember_selector(guard_name))
+            .into_iter()
+            .chain(request_state::active_remember_selector_for_guard(
+                guard_name,
+            ))
+            .collect::<Vec<_>>();
+        selectors.sort_unstable();
+        selectors.dedup();
+        clear_guard_auth_user(guard_name);
+        session_mut(|session| {
+            session.csrf_token = generate_csrf_token();
+            session.dirty = true;
+        });
+        let mut first_revoke_error = None;
+        for selector in selectors {
+            if let Err(error) = Self::revoke_remember_selector(guard_name, &selector).await
+                && first_revoke_error.is_none()
+            {
+                first_revoke_error = Some(error);
+            }
+        }
+        if let Some(error) = first_revoke_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Log out the current user.
     ///
     /// Clears the session user and the request-scoped current user, revokes
@@ -408,13 +501,30 @@ impl Auth {
     ///
     /// Use this for complete session destruction (e.g. "log out everywhere").
     /// Flushes the whole session (not just the auth user), revokes every
-    /// remember-me token for the user, clears the request-scoped current user,
-    /// and dispatches a [`Logout`](crate::auth::events::Logout) event.
+    /// remember-me token for the default user plus each retained named-guard
+    /// selector, clears every request-scoped guard identity, and dispatches a
+    /// [`Logout`](crate::auth::events::Logout) event.
     pub async fn logout_and_invalidate() -> Result<(), crate::error::FrameworkError> {
         // Capture the id before flushing so the event is attributed
         // AND so the revoke below can target the right user after the
         // session is gone. `Auth::id()` returns `None` once we flush.
         let user_id = Self::id();
+        let default_guard = Self::default_guard_name();
+        let mut named_remember_selectors = session()
+            .map(|session| {
+                session
+                    .auth_guard_names()
+                    .into_iter()
+                    .filter(|guard_name| guard_name != &default_guard)
+                    .filter_map(|guard_name| {
+                        session
+                            .auth_guard_remember_selector(&guard_name)
+                            .map(|selector| (guard_name, selector))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        named_remember_selectors.sort_unstable();
 
         // STEP 1: Destroy session + request_state FIRST. Even if the
         // revoke errors below, the session is already gone - every
@@ -434,21 +544,36 @@ impl Auth {
             session.flush();
             session.csrf_token = generate_csrf_token();
         });
-        request_state::clear_current_user();
+        request_state::clear_all_authentication();
 
-        // STEP 2: Revoke remember-me using the captured id. Same
-        // cookie-first ordering as `clear_authentication`: even if
-        // the DB DELETE fails, the response carries the clear cookie
-        // and the browser drops the remember-me cookie on its way out.
+        // STEP 2: Revoke each captured named selector and every credential for
+        // the default user. Teardown is already complete; attempt every revoke
+        // deterministically even if one fails, then return the first error.
+        // Cookie-first ordering still ensures the browser drops its carrier.
+        let mut first_revoke_error = None;
+        for (guard_name, selector) in named_remember_selectors {
+            if let Err(error) = Self::revoke_remember_selector(&guard_name, &selector).await
+                && first_revoke_error.is_none()
+            {
+                first_revoke_error = Some(error);
+            }
+        }
         if let Some(ref id) = user_id {
-            Self::revoke_remember_tokens_for_user(id).await?;
+            if let Err(error) = Self::revoke_remember_tokens_for_user(id).await
+                && first_revoke_error.is_none()
+            {
+                first_revoke_error = Some(error);
+            }
         } else {
             // No prior auth - queue the clear cookie defensively.
             Self::queue_remember_clear_cookie();
         }
+        if let Some(error) = first_revoke_error {
+            return Err(error);
+        }
 
         EventFacade::dispatch(events::Logout {
-            guard: Self::default_guard_name(),
+            guard: default_guard,
             user_id,
         })
         .await?;
@@ -810,11 +935,10 @@ impl Auth {
     ///
     /// After this call, [`id`](Self::id) / [`check`](Self::check) /
     /// [`user`](Self::user) reflect `user` for the remainder of the request.
-    /// The request-scoped current user is shared by every guard, so the facade
-    /// writes it directly - no [`AuthManager`] needed (the same manager-free
-    /// fast path as `id`/`check`/`guest`).
+    /// The facade writes the configured default guard's request cache and its
+    /// generic compatibility mirror. Named sibling guards are unchanged.
     pub fn set_user(user: Arc<dyn Authenticatable>) {
-        request_state::set_current_user(user);
+        request_state::set_guard_user(&Self::default_guard_name(), user);
     }
 
     /// Whether a user has already been resolved for this request, without

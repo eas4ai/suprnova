@@ -49,8 +49,8 @@
 //!
 //! - **Issuance**: random selector + random verifier → bcrypt-hash
 //!   the verifier → INSERT row → encrypt `"{selector}.{verifier}"`
-//!   under `Crypt` → place the encrypted blob in the `remember_me`
-//!   cookie.
+//!   inside a versioned, guard-named carrier under `Crypt` → place the
+//!   encrypted blob in the `remember_me` cookie.
 //!
 //! - **Verification**: decrypt cookie → split into
 //!   `(selector, verifier)` → `SELECT row WHERE selector = ? AND
@@ -70,11 +70,12 @@
 //!
 //! # Cookie format
 //!
-//! The on-wire cookie value is `Crypt::encrypt_string("{selector}.{verifier}")`.
-//! A successful decrypt yields the composite plaintext; the framework
-//! never stores or returns either half on its own. Tokens whose
-//! plaintext lacks the `.` separator are silently rejected (no DB hit,
-//! no bcrypt cost).
+//! New on-wire cookies encrypt a private, versioned carrier containing the
+//! complete guard name and `"{selector}.{verifier}"`. During the compatibility
+//! window, an unwrapped decrypted composite is accepted as a default-guard
+//! carrier. The framework never persists the verifier or plaintext carrier.
+//! Tokens whose credential lacks the `.` separator are silently rejected (no
+//! DB hit, no bcrypt cost).
 //!
 //! # Why bcrypt, not "store the verifier plaintext"
 //!
@@ -266,6 +267,19 @@ pub async fn revoke_all_for_user(user_id: &str) -> Result<u64, FrameworkError> {
         .await
         .map_err(|e| FrameworkError::database(format!("revoke remember tokens: {e}")))?;
     Ok(result.rows_affected)
+}
+
+/// Revoke exactly one remember token by its non-secret selector.
+pub(crate) async fn revoke_by_selector(selector: &str) -> Result<bool, FrameworkError> {
+    let conn = DB::connection()?;
+    let result = entity::Entity::delete_many()
+        .filter(entity::Column::Selector.eq(selector))
+        .exec(conn.inner())
+        .await
+        .map_err(|error| {
+            FrameworkError::database(format!("revoke remember token by selector: {error}"))
+        })?;
+    Ok(result.rows_affected == 1)
 }
 
 /// Delete a single remember-token row by id. Useful for "log out this

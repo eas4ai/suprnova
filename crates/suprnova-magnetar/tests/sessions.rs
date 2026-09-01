@@ -165,6 +165,14 @@ impl RememberStore for MemoryRemember {
         rows.retain(|row| row.user_id != user_id);
         Ok((before - rows.len()) as u64)
     }
+
+    async fn revoke_remember_selector(&self, selector: &str) -> magnetar::Result<bool> {
+        let mut rows = self.0.lock();
+        let before = rows.len();
+        rows.retain(|row| row.selector != selector);
+        Ok(rows.len() != before)
+    }
+
     async fn prune_expired_remember(&self, now: chrono::DateTime<Utc>) -> magnetar::Result<u64> {
         let mut rows = self.0.lock();
         let before = rows.len();
@@ -298,6 +306,76 @@ async fn legacy_remember_store_fails_closed_without_consuming_original() {
             && message == "atomic remember credential rotation is unavailable"
     ));
     assert_eq!(store.0.0.lock().as_slice(), &[original]);
+}
+
+#[tokio::test]
+async fn remember_service_revokes_only_the_exact_selector() {
+    let store = Arc::new(MemoryRemember::default());
+    let service = RememberService::new(store.clone(), Duration::days(30)).unwrap();
+    let now = Utc::now();
+
+    let _first = service
+        .issue_at_epoch("same-user", 4, now, Duration::days(30))
+        .await
+        .unwrap();
+    let second = service
+        .issue_at_epoch("same-user", 4, now, Duration::days(30))
+        .await
+        .unwrap();
+    let selectors = store
+        .0
+        .lock()
+        .iter()
+        .map(|row| row.selector.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(selectors.len(), 2);
+
+    assert!(service.revoke_selector(&selectors[0]).await.unwrap());
+    assert!(!service.revoke_selector(&selectors[0]).await.unwrap());
+    assert_eq!(
+        store
+            .0
+            .lock()
+            .iter()
+            .map(|row| row.selector.as_str())
+            .collect::<Vec<_>>(),
+        vec![selectors[1].as_str()]
+    );
+
+    let second = magnetar::sessions::RememberCredential::from_host(second.expose_once());
+    let (user_id, _, _) = service
+        .rotate_at_epoch(&second, now, Duration::days(30))
+        .await
+        .expect("the other selector must remain usable");
+    assert_eq!(user_id, "same-user");
+}
+
+#[tokio::test]
+async fn legacy_remember_store_fails_closed_for_selector_revocation() {
+    let store = LegacyRememberStore::default();
+    let row = RememberRow {
+        id: "legacy-selector-id".to_owned(),
+        selector: "legacy-selector-only".to_owned(),
+        user_id: "legacy-selector-user".to_owned(),
+        auth_epoch: 3,
+        verifier_hash: "sha256:legacy-selector".to_owned(),
+        expires_at: Utc::now() + Duration::hours(1),
+    };
+    store.insert_remember(row.clone()).await.unwrap();
+
+    let error = store
+        .revoke_remember_selector(&row.selector)
+        .await
+        .expect_err("an old-method-only store must fail closed");
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable {
+            dependency,
+            message,
+        } if dependency == "remember store"
+            && message == "exact remember credential revocation is unavailable"
+    ));
+    assert_eq!(store.0.0.lock().as_slice(), &[row]);
 }
 
 #[tokio::test]

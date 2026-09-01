@@ -478,6 +478,52 @@ impl SessionMiddleware {
     }
 }
 
+const REMEMBER_GUARD_CARRIER_PREFIX: &str = "suprnova.remember.v1:";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RememberGuardCarrier {
+    guard: String,
+    credential: String,
+}
+
+pub(crate) fn remember_selector(credential: &str) -> Result<String, FrameworkError> {
+    let (selector, verifier) = credential.split_once('.').ok_or_else(|| {
+        FrameworkError::internal("issued remember credential has no selector separator")
+    })?;
+    if selector.is_empty() || verifier.is_empty() {
+        return Err(FrameworkError::internal(
+            "issued remember credential has an empty selector or verifier",
+        ));
+    }
+    Ok(selector.to_owned())
+}
+
+pub(crate) fn encode_remember_carrier(
+    guard: &str,
+    credential: &str,
+) -> Result<String, FrameworkError> {
+    let encoded = serde_json::to_string(&RememberGuardCarrier {
+        guard: guard.to_owned(),
+        credential: credential.to_owned(),
+    })
+    .map_err(|error| FrameworkError::internal(format!("encode remember carrier: {error}")))?;
+    Ok(format!("{REMEMBER_GUARD_CARRIER_PREFIX}{encoded}"))
+}
+
+fn decode_remember_carrier(plaintext: &str) -> Option<(String, String)> {
+    let Some(encoded) = plaintext.strip_prefix(REMEMBER_GUARD_CARRIER_PREFIX) else {
+        return Some((
+            crate::auth::Auth::default_guard_name(),
+            plaintext.to_owned(),
+        ));
+    };
+    let carrier = serde_json::from_str::<RememberGuardCarrier>(encoded).ok()?;
+    if carrier.guard.is_empty() || carrier.credential.is_empty() {
+        return None;
+    }
+    Some((carrier.guard, carrier.credential))
+}
+
 /// Build an outbound remember-me cookie carrying the encrypted plaintext.
 ///
 /// Framework-internal helper. `Auth::login_remember` and the
@@ -717,9 +763,12 @@ impl Middleware for SessionMiddleware {
 
         let magnetar_engine = crate::magnetar_integration::optional_password_engine();
 
-        // An installed engine makes its digest-only binding authoritative.
-        // Bare framework user ids are never enough to hydrate authentication.
+        // An installed engine makes the default guard's digest-only binding
+        // authoritative, as well as any named guard record that explicitly
+        // carries such a binding. Binding-less named records remain valid for
+        // provider-backed SessionGuard implementations.
         if let Some(engine) = magnetar_engine.as_ref() {
+            let default_guard_name = crate::auth::Auth::default_guard_name();
             let binding = session.magnetar_web_binding();
             let valid_user_id = match (session.user_id.as_deref(), binding.as_ref()) {
                 (Some(expected_user_id), Some(binding)) => {
@@ -745,27 +794,73 @@ impl Middleware for SessionMiddleware {
             };
             if session.user_id.is_some() && valid_user_id.is_none() {
                 session.user_id = None;
+                session.remove_auth_guard(&default_guard_name);
                 session.clear_magnetar_web_binding();
                 session.dirty = true;
-                crate::auth::request_state::clear_current_user();
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
+            } else if let Some(valid_user_id) = valid_user_id {
+                session.set_auth_guard_id(&default_guard_name, valid_user_id);
             } else if session.user_id.is_none() && session.magnetar_web_binding().is_some() {
                 session.clear_magnetar_web_binding();
+            }
+
+            for guard_name in session.auth_guard_names() {
+                if guard_name == default_guard_name {
+                    continue;
+                }
+                if !session.has_auth_guard_magnetar_binding(&guard_name) {
+                    continue;
+                }
+                let expected_user_id = session.auth_guard_id(&guard_name);
+                let binding = session.auth_guard_magnetar_binding(&guard_name);
+                let valid = match (expected_user_id.as_deref(), binding.as_ref()) {
+                    (Some(expected_user_id), Some(binding)) => {
+                        match engine.resolve_web_binding(binding).await {
+                            Ok(verified) => verified.user_id() == expected_user_id,
+                            Err(
+                                magnetar::Error::InvalidInput { .. }
+                                | magnetar::Error::NotFound { .. }
+                                | magnetar::Error::Conflict { .. },
+                            ) => false,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    guard = %guard_name,
+                                    "Magnetar named web-session validation failed closed"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    session.remove_auth_guard(&guard_name);
+                    crate::auth::request_state::clear_guard_user(&guard_name);
+                }
             }
         }
 
         // Remember-me hydration uses Magnetar whenever its engine is installed.
         // The legacy auth::remember table is consulted only with no engine.
-        if session.user_id.is_none()
-            && let Some(raw_cookie) = request.cookie(
-                &self
-                    .config
-                    .cookie_prefix
-                    .apply(super::super::auth::remember::COOKIE_NAME),
-            )
-        {
-            match Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
-            {
-                Ok(plaintext) => {
+        if let Some(raw_cookie) = request.cookie(
+            &self
+                .config
+                .cookie_prefix
+                .apply(super::super::auth::remember::COOKIE_NAME),
+        ) {
+            let decoded =
+                Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
+                    .ok()
+                    .and_then(|plaintext| decode_remember_carrier(&plaintext));
+            if let Some((guard_name, credential)) = decoded {
+                let is_default = guard_name == crate::auth::Auth::default_guard_name();
+                if let Ok(selector) = remember_selector(&credential) {
+                    crate::auth::request_state::set_active_remember_carrier(&guard_name, &selector);
+                }
+                let already_authenticated = session.auth_guard_id(&guard_name).is_some()
+                    || (is_default && session.user_id.is_some());
+                if !already_authenticated {
                     if let Some(engine) = magnetar_engine.as_ref() {
                         let metadata = magnetar::sessions::SessionMetadata {
                             user_agent: request
@@ -786,7 +881,7 @@ impl Middleware for SessionMiddleware {
                         match engine
                             .remember_sign_in(
                                 magnetar::sessions::RememberCredential::from_host(
-                                    SecretString::from(plaintext),
+                                    SecretString::from(credential),
                                 ),
                                 metadata,
                                 replacement_lifetime,
@@ -794,29 +889,50 @@ impl Middleware for SessionMiddleware {
                             .await
                         {
                             Ok(outcome) => {
+                                let user_id = outcome.session.session.user_id.to_string();
+                                let binding = outcome.session.web_binding.clone();
+                                let replacement = outcome.replacement.expose_once();
+                                let replacement = replacement.expose_secret();
+                                let selector = remember_selector(replacement)?;
+                                let carrier = encode_remember_carrier(&guard_name, replacement)?;
+                                let cookie = create_remember_cookie(
+                                    &self.config,
+                                    &carrier,
+                                    self.config.remember_lifetime,
+                                )?;
+
                                 session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
-                                session.user_id = Some(outcome.session.session.user_id.to_string());
+                                session.set_auth_guard_id(&guard_name, user_id.clone());
+                                crate::auth::request_state::set_active_remember_carrier(
+                                    &guard_name,
+                                    &selector,
+                                );
+                                session.set_auth_guard_remember_selector(&guard_name, selector);
                                 session
-                                    .set_magnetar_web_binding(outcome.session.web_binding.clone());
-                                crate::auth::request_state::set_via_remember(true);
-                                let replacement = outcome.replacement.expose_once();
-                                if let Ok(cookie) = create_remember_cookie(
-                                    &self.config,
-                                    replacement.expose_secret(),
-                                    self.config.remember_lifetime,
-                                ) {
-                                    pending.lock().unwrap().push(cookie);
+                                    .set_auth_guard_magnetar_binding(&guard_name, binding.clone());
+                                if is_default {
+                                    session.user_id = Some(user_id.clone());
+                                    session.set_magnetar_web_binding(binding);
                                 }
+                                crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
+                                crate::auth::request_state::set_guard_via_remember(
+                                    &guard_name,
+                                    true,
+                                );
+                                pending.lock().unwrap().push(cookie);
                             }
                             Err(
                                 magnetar::Error::InvalidInput { .. }
                                 | magnetar::Error::NotFound { .. }
                                 | magnetar::Error::Conflict { .. },
-                            ) => pending
-                                .lock()
-                                .unwrap()
-                                .push(create_forget_remember_cookie(&self.config)),
+                            ) => {
+                                crate::auth::request_state::clear_active_remember_carrier();
+                                pending
+                                    .lock()
+                                    .unwrap()
+                                    .push(create_forget_remember_cookie(&self.config));
+                            }
                             Err(error) => tracing::warn!(
                                 %error,
                                 "Magnetar remember sign-in failed; continuing anonymously"
@@ -826,26 +942,44 @@ impl Middleware for SessionMiddleware {
                         let ttl_minutes =
                             i64::try_from(self.config.remember_lifetime.as_secs() / 60)
                                 .unwrap_or(i64::MAX);
-                        match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes)
+                        match crate::auth::remember::verify_and_rotate(&credential, ttl_minutes)
                             .await
                         {
-                            Ok(Some((user_id, new_plaintext))) => {
-                                session.rotate_id(generate_session_id());
-                                session.user_id = Some(user_id);
-                                session.csrf_token = generate_csrf_token();
-                                crate::auth::request_state::set_via_remember(true);
-                                if let Ok(cookie) = create_remember_cookie(
+                            Ok(Some((user_id, new_credential))) => {
+                                let selector = remember_selector(&new_credential)?;
+                                let carrier =
+                                    encode_remember_carrier(&guard_name, &new_credential)?;
+                                let cookie = create_remember_cookie(
                                     &self.config,
-                                    &new_plaintext,
+                                    &carrier,
                                     self.config.remember_lifetime,
-                                ) {
-                                    pending.lock().unwrap().push(cookie);
+                                )?;
+
+                                session.rotate_id(generate_session_id());
+                                session.csrf_token = generate_csrf_token();
+                                session.set_auth_guard_id(&guard_name, user_id.clone());
+                                crate::auth::request_state::set_active_remember_carrier(
+                                    &guard_name,
+                                    &selector,
+                                );
+                                session.set_auth_guard_remember_selector(&guard_name, selector);
+                                if is_default {
+                                    session.user_id = Some(user_id.clone());
                                 }
+                                crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
+                                crate::auth::request_state::set_guard_via_remember(
+                                    &guard_name,
+                                    true,
+                                );
+                                pending.lock().unwrap().push(cookie);
                             }
-                            Ok(None) => pending
-                                .lock()
-                                .unwrap()
-                                .push(create_forget_remember_cookie(&self.config)),
+                            Ok(None) => {
+                                crate::auth::request_state::clear_active_remember_carrier();
+                                pending
+                                    .lock()
+                                    .unwrap()
+                                    .push(create_forget_remember_cookie(&self.config));
+                            }
                             Err(error) => tracing::warn!(
                                 %error,
                                 "legacy remember-me verification failed; continuing without it"
@@ -853,10 +987,12 @@ impl Middleware for SessionMiddleware {
                         }
                     }
                 }
-                Err(_) => pending
+            } else {
+                crate::auth::request_state::clear_active_remember_carrier();
+                pending
                     .lock()
                     .unwrap()
-                    .push(create_forget_remember_cookie(&self.config)),
+                    .push(create_forget_remember_cookie(&self.config));
             }
         }
 
@@ -1156,21 +1292,55 @@ pub fn auth_user_id() -> Option<String> {
     crate::auth::request_state::current_user_id().or_else(|| session().and_then(|s| s.user_id))
 }
 
+/// Return one session guard's request or persisted identifier.
+pub(crate) fn guard_auth_user_id(guard_name: &str) -> Option<String> {
+    crate::auth::request_state::guard_user_id(guard_name).or_else(|| {
+        session().and_then(|session| {
+            session.auth_guard_id(guard_name).or_else(|| {
+                (guard_name == crate::auth::Auth::default_guard_name())
+                    .then_some(session.user_id)
+                    .flatten()
+            })
+        })
+    })
+}
+
+/// Persist one session guard's identifier and mirror the default guard.
+pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) {
+    let user_id = user_id.into();
+    let is_default = guard_name == crate::auth::Auth::default_guard_name();
+    session_mut(|session| {
+        session.set_auth_guard_id(guard_name, user_id.clone());
+        if is_default {
+            session.user_id = Some(user_id.clone());
+            session.dirty = true;
+        }
+    });
+    crate::auth::request_state::set_guard_user_id(guard_name, user_id);
+}
+
 /// Helper to set the authenticated user
 pub fn set_auth_user(user_id: impl Into<String>) {
-    let user_id = user_id.into();
+    set_guard_auth_user(&crate::auth::Auth::default_guard_name(), user_id);
+}
+
+/// Clear one session guard without touching sibling guards.
+pub(crate) fn clear_guard_auth_user(guard_name: &str) {
+    let is_default = guard_name == crate::auth::Auth::default_guard_name();
     session_mut(|session| {
-        session.user_id = Some(user_id);
-        session.dirty = true;
+        session.remove_auth_guard(guard_name);
+        if is_default {
+            session.user_id = None;
+            session.clear_magnetar_web_binding();
+            session.dirty = true;
+        }
     });
+    crate::auth::request_state::clear_guard_user(guard_name);
 }
 
 /// Helper to clear the authenticated user (logout)
 pub fn clear_auth_user() {
-    session_mut(|session| {
-        session.user_id = None;
-        session.dirty = true;
-    });
+    clear_guard_auth_user(&crate::auth::Auth::default_guard_name());
 }
 
 /// Reserved key under `SessionData::data` for the "password verified

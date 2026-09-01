@@ -975,6 +975,15 @@ pub mod sql_stores {
             }
         }
 
+        async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
+            let deleted = remembers::Entity::delete_many()
+                .filter(remembers::Column::Selector.eq(selector.to_owned()))
+                .exec(&self.0)
+                .await
+                .map_err(db_error)?;
+            Ok(deleted.rows_affected == 1)
+        }
+
         async fn revoke_all_remember(&self, user_id: &str) -> Result<u64> {
             let deleted = remembers::Entity::delete_many()
                 .filter(remembers::Column::UserId.eq(user_id.to_owned()))
