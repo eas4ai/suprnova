@@ -115,7 +115,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
-use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
+use crate::queue::driver::{QueueDriver, QueueFilterCapability, Reservation, ReservationToken};
 use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
@@ -134,7 +134,7 @@ use sea_streamer_redis::{
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// How many delayed entries one promotion pass may move.
@@ -146,6 +146,14 @@ use uuid::Uuid;
 /// blocks *every* Redis client, not just this queue, for as long as the
 /// script takes to `XADD` the lot.
 const PROMOTE_DUE_BATCH: usize = 128;
+
+/// One Redis consumer probe per aggregate poll keeps an empty connection from
+/// delaying later failover connections for a worker-sized visibility lease.
+const POP_PROBE_BUDGET: Duration = Duration::from_millis(100);
+
+fn pop_probe_budget(_requested_visibility: Duration) -> Duration {
+    POP_PROBE_BUDGET
+}
 
 /// Lua script that atomically promotes due delayed entries.
 ///
@@ -167,9 +175,82 @@ end
 return #entries
 "#;
 
-/// Value stored in the pending map: the original envelope plus the
-/// `SharedMessage` needed to call `RedisConsumer::ack`.
-type PendingEntry = (Envelope, sea_streamer::SharedMessage);
+struct PendingEntry {
+    envelope: Envelope,
+    message: sea_streamer::SharedMessage,
+    lease_deadline: Instant,
+}
+
+struct PendingMetadata {
+    owner: String,
+    idle: Duration,
+    deliveries: u32,
+}
+
+struct PendingLease {
+    deliveries: u32,
+    deadline: Instant,
+}
+
+fn parse_pending_metadata(value: &redis::Value) -> Option<PendingMetadata> {
+    let rows = match value {
+        redis::Value::Array(rows) => rows,
+        _ => return None,
+    };
+    let cells = match rows.first()? {
+        redis::Value::Array(cells) => cells,
+        _ => return None,
+    };
+    let _entry_id = redis::from_redis_value_ref::<String>(cells.first()?).ok()?;
+    let owner = redis::from_redis_value_ref::<String>(cells.get(1)?).ok()?;
+    let idle_ms = redis::from_redis_value_ref::<u64>(cells.get(2)?).ok()?;
+    let deliveries = redis::from_redis_value_ref::<u32>(cells.get(3)?).ok()?;
+    if deliveries == 0 {
+        return None;
+    }
+    Some(PendingMetadata {
+        owner,
+        idle: Duration::from_millis(idle_ms),
+        deliveries,
+    })
+}
+
+fn current_pending_lease(
+    metadata: &PendingMetadata,
+    consumer_id: &str,
+    query_started: Instant,
+    configured_timeout: Duration,
+    now: Instant,
+) -> Option<PendingLease> {
+    if metadata.owner != consumer_id {
+        return None;
+    }
+    let remaining = configured_timeout.saturating_sub(metadata.idle);
+    let deadline = query_started
+        .checked_add(remaining)
+        .unwrap_or(query_started);
+    (deadline > now).then_some(PendingLease {
+        deliveries: metadata.deliveries,
+        deadline,
+    })
+}
+
+fn verified_pending_lease(
+    response: Option<&redis::Value>,
+    consumer_id: &str,
+    query_started: Instant,
+    configured_timeout: Duration,
+    now: Instant,
+) -> Option<PendingLease> {
+    let metadata = parse_pending_metadata(response?)?;
+    current_pending_lease(
+        &metadata,
+        consumer_id,
+        query_started,
+        configured_timeout,
+        now,
+    )
+}
 
 /// Redis-backed queue driver.
 ///
@@ -187,6 +268,12 @@ pub struct RedisQueueDriver {
     /// methods (`reserved_size`, `pending_size`) can scope XPENDING queries
     /// to the same group the consumer reads from.
     group_name: String,
+    /// Consumer identity used to fence a message that another consumer
+    /// reclaims between `next()` and the authoritative XPENDING lookup.
+    consumer_id: String,
+    /// Connection-scoped XAUTOCLAIM idle threshold. Redis cannot vary this
+    /// lease per `pop` call, so reservation aliases must use this value.
+    visibility_timeout: Duration,
     /// Direct Redis connection used for ZADD on `push`/`nack` and EVAL on
     /// `pop`. Sea-streamer's `RedisProducer` is intentionally bypassed for
     /// these operations because it speaks only XADD; the
@@ -194,8 +281,8 @@ pub struct RedisQueueDriver {
     /// connection plus an Arc-shared task) and is what the `redis` crate
     /// recommends for high-throughput async use.
     conn: ConnectionManager,
-    /// Map from `ReservationToken` UUID → `(Envelope, SharedMessage)`.
-    /// The `SharedMessage` is required by `RedisConsumer::ack`.
+    /// Map from `ReservationToken` UUID to its envelope, acknowledgement
+    /// handle, and authoritative Redis lease deadline.
     pending: Mutex<HashMap<Uuid, PendingEntry>>,
 }
 
@@ -289,6 +376,8 @@ impl RedisQueueDriver {
             stream_key,
             delayed_key,
             group_name: group.to_string(),
+            consumer_id: consumer_id.to_string(),
+            visibility_timeout,
             conn,
             pending: Mutex::new(HashMap::new()),
         })
@@ -359,14 +448,13 @@ impl QueueDriver for RedisQueueDriver {
         Ok(())
     }
 
-    /// Poll for the next message. Returns `None` if no message arrives within
-    /// `visibility_timeout`. Internally polls in short (100 ms) probe windows
-    /// so the caller's deadline is respected without holding the consumer
-    /// locked across the full wait.
+    /// Poll for the next message. Returns `None` after one bounded 100 ms
+    /// probe when no message is ready, allowing an aggregate driver to move
+    /// promptly to its next connection.
     ///
-    /// Note: `visibility_timeout` controls how long *this call* waits for a
-    /// message. The XAUTOCLAIM idle window (how long an unacked message stays
-    /// in the PEL before reclaim) is set at construction time and is unrelated.
+    /// `visibility_timeout` is the requested lease from the generic trait. The
+    /// connection-scoped XAUTOCLAIM timeout remains authoritative for Redis;
+    /// neither value extends this call's fixed probe budget.
     async fn pop(
         &self,
         visibility_timeout: Duration,
@@ -376,30 +464,18 @@ impl QueueDriver for RedisQueueDriver {
         // same envelope.
         self.promote_due().await?;
 
-        // Poll in short probe windows so we return promptly when the queue is
-        // empty AND honour the caller's deadline when a message is slow to arrive
-        // (e.g. right after a push on a fresh stream/consumer-group).
-        let probe = Duration::from_millis(100);
-        let deadline = tokio::time::Instant::now() + visibility_timeout;
-
-        let msg = loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Ok(None);
-            }
-            let wait = remaining.min(probe);
-            match tokio::time::timeout(wait, self.consumer.next()).await {
-                // This probe timed out - loop and check deadline.
-                Err(_elapsed) => continue,
-                // Consumer returned an error.
+        let msg =
+            match tokio::time::timeout(pop_probe_budget(visibility_timeout), self.consumer.next())
+                .await
+            {
+                Err(_elapsed) => return Ok(None),
                 Ok(Err(e)) => {
                     return Err(FrameworkError::internal(format!(
                         "redis consumer next error: {e}"
                     )));
                 }
-                Ok(Ok(msg)) => break msg,
-            }
-        };
+                Ok(Ok(msg)) => msg,
+            };
 
         // Parse the envelope from the message payload.
         // Bind the Payload to a local so its borrow lives long enough.
@@ -431,10 +507,10 @@ impl QueueDriver for RedisQueueDriver {
         // `attempts + 1` from the value the worker was handed, which is
         // now the adjusted one.
         let (id_ts, id_seq) = msg.message_id();
-        let redeliveries = self
-            .redelivery_count(&format!("{id_ts}-{id_seq}"))
-            .await
-            .saturating_sub(1);
+        let Some(pending_lease) = self.pending_lease(&format!("{id_ts}-{id_seq}")).await else {
+            return Ok(None);
+        };
+        let redeliveries = pending_lease.deliveries.saturating_sub(1);
         envelope.attempts = envelope.attempts.saturating_add(redeliveries);
 
         let token = ReservationToken(envelope.id);
@@ -444,7 +520,14 @@ impl QueueDriver for RedisQueueDriver {
         let shared = sea_streamer::Message::to_owned(&msg);
         {
             let mut g = lock::lock(&self.pending, "redis queue pending map")?;
-            g.insert(token.0, (envelope.clone(), shared));
+            g.insert(
+                token.0,
+                PendingEntry {
+                    envelope: envelope.clone(),
+                    message: shared,
+                    lease_deadline: pending_lease.deadline,
+                },
+            );
         }
 
         Ok(Some(Reservation { envelope, token }))
@@ -463,9 +546,9 @@ impl QueueDriver for RedisQueueDriver {
             g.remove(&token.0)
         };
 
-        if let Some((_envelope, shared_msg)) = entry {
+        if let Some(entry) = entry {
             self.consumer
-                .ack(&shared_msg)
+                .ack(&entry.message)
                 .map_err(|e| FrameworkError::internal(format!("redis ack error: {e}")))?;
 
             // Flush the ack to Redis immediately so it doesn't linger.
@@ -485,7 +568,7 @@ impl QueueDriver for RedisQueueDriver {
     /// optional delay before it becomes visible again.
     ///
     /// Implementation:
-    /// 1. Retrieve and remove the `(Envelope, SharedMessage)` from the pending map.
+    /// 1. Retrieve and remove the envelope and acknowledgement handle from the pending map.
     /// 2. Bump `envelope.attempts += 1`.
     /// 3. Set `envelope.available_at = now + requeue_delay`.
     /// 4. Re-publish the modified envelope. A zero `requeue_delay` re-publishes
@@ -517,6 +600,21 @@ impl QueueDriver for RedisQueueDriver {
         delay: Duration,
     ) -> Result<(), FrameworkError> {
         self.requeue(token, delay, false, "release").await
+    }
+
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        QueueFilterCapability::Unsupported
+    }
+
+    fn reservation_deadline(
+        &self,
+        token: &ReservationToken,
+        _fallback_deadline: Instant,
+    ) -> Instant {
+        lock::lock(&self.pending, "redis queue pending map")
+            .ok()
+            .and_then(|pending| pending.get(&token.0).map(|entry| entry.lease_deadline))
+            .unwrap_or_else(Instant::now)
     }
 
     /// Total envelopes the driver currently holds across the live stream
@@ -739,7 +837,7 @@ impl QueueDriver for RedisQueueDriver {
         let filter = queue_filter(queue);
         let g = lock::lock(&self.pending, "redis queue pending map")?;
         Ok(g.values()
-            .map(|(env, _msg)| env)
+            .map(|entry| &entry.envelope)
             .filter(|env| queue_matches(env.queue.as_deref(), &filter))
             .map(InspectedJob::from_envelope)
             .collect())
@@ -795,8 +893,12 @@ impl RedisQueueDriver {
             g.remove(&token.0)
         };
 
-        let (mut envelope, shared_msg) = match entry {
-            Some(e) => e,
+        let PendingEntry {
+            mut envelope,
+            message,
+            lease_deadline: _,
+        } = match entry {
+            Some(entry) => entry,
             // Already acked / unknown token - silently succeed.
             None => return Ok(()),
         };
@@ -831,7 +933,7 @@ impl RedisQueueDriver {
 
         // Ack the original message so it leaves the PEL.
         self.consumer
-            .ack(&shared_msg)
+            .ack(&message)
             .map_err(|e| FrameworkError::internal(format!("redis {op} ack error: {e}")))?;
 
         Ok(())
@@ -870,11 +972,14 @@ impl RedisQueueDriver {
         Ok(n.max(0) as u64)
     }
 
-    /// How many times Redis has delivered one stream entry.
+    /// Read the authoritative owner, idle time, and delivery count for one
+    /// stream entry, then derive its remaining connection-scoped lease.
     ///
     /// `XPENDING <key> <group> IDLE 0 <id> <id> 1` returns one row per
     /// entry in the form `[id, consumer, idle-ms, delivery-count]`. The
-    /// count is 1 on a first delivery and rises with every XAUTOCLAIM.
+    /// count is 1 on a first delivery and rises with every XAUTOCLAIM. The
+    /// deadline is anchored at the instant immediately before this query, not
+    /// response time, so a slow lookup cannot extend the reservation.
     ///
     /// # Cost
     ///
@@ -885,16 +990,17 @@ impl RedisQueueDriver {
     /// buys the only signal that distinguishes a job whose worker died
     /// from a job being delivered for the first time.
     ///
-    /// Returns 1 - "treat as a first delivery" - for anything unexpected:
-    /// a missing group, an entry already acked, a reply shape this does
-    /// not recognise. Guessing high here would burn attempts off healthy
-    /// jobs and dead-letter work that never failed, which is worse than
-    /// the bug this exists to fix.
-    async fn redelivery_count(&self, entry_id: &str) -> u32 {
+    /// A command failure, missing/malformed row, changed owner, or elapsed
+    /// deadline returns `None`; the caller must not run work it cannot prove
+    /// this consumer still owns. In particular, a failed lookup cannot restart
+    /// the configured timeout because sea-streamer may have buffered this PEL
+    /// entry long before the current `pop` received it.
+    async fn pending_lease(&self, entry_id: &str) -> Option<PendingLease> {
+        let query_started = Instant::now();
         // The XPENDING lookup is a pure read, so a dropped connection no
         // longer silently under-counts deliveries - the under-count is what
         // leaves a poison job un-dead-letterable.
-        let resp: redis::Value =
+        let resp: Option<redis::Value> =
             match crate::redis_retry::retry_read("queue XPENDING entry", || {
                 let mut conn = self.conn.clone();
                 let stream = self.stream_key.name().to_string();
@@ -915,33 +1021,24 @@ impl RedisQueueDriver {
             })
             .await
             {
-                Ok(v) => v,
+                Ok(v) => Some(v),
                 Err(e) => {
                     tracing::debug!(
                         error = %e,
                         entry_id,
-                        "XPENDING lookup failed; treating this as a first delivery"
+                        "XPENDING lookup failed; declining the unverified reservation"
                     );
-                    return 1;
+                    None
                 }
             };
 
-        // [[id, consumer, idle-ms, delivery-count]]
-        let rows = match resp {
-            redis::Value::Array(rows) | redis::Value::Set(rows) => rows,
-            _ => return 1,
-        };
-        let Some(first) = rows.into_iter().next() else {
-            return 1;
-        };
-        let cells = match first {
-            redis::Value::Array(cells) | redis::Value::Set(cells) => cells,
-            _ => return 1,
-        };
-        match cells.get(3) {
-            Some(redis::Value::Int(n)) => u32::try_from(*n).unwrap_or(1).max(1),
-            _ => 1,
-        }
+        verified_pending_lease(
+            resp.as_ref(),
+            &self.consumer_id,
+            query_started,
+            self.visibility_timeout,
+            Instant::now(),
+        )
     }
 
     /// `XPENDING <stream> <group>` summary - first element is the total
@@ -1010,4 +1107,113 @@ fn is_missing_stream_or_group(e: &redis::RedisError) -> bool {
     ) && e
         .detail()
         .is_some_and(|d| d.to_ascii_lowercase().contains("no such key"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending_reply(owner: &str, idle_ms: i64, deliveries: i64) -> redis::Value {
+        redis::Value::Array(vec![redis::Value::Array(vec![
+            redis::Value::BulkString(b"1-0".to_vec()),
+            redis::Value::BulkString(owner.as_bytes().to_vec()),
+            redis::Value::Int(idle_ms),
+            redis::Value::Int(deliveries),
+        ])])
+    }
+
+    #[test]
+    fn pop_probe_budget_is_fixed_and_independent_of_the_requested_lease() {
+        assert_eq!(pop_probe_budget(Duration::ZERO), Duration::from_millis(100));
+        assert_eq!(
+            pop_probe_budget(Duration::from_secs(60)),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn pending_metadata_anchors_the_remaining_lease_at_query_start() {
+        let response = pending_reply("worker-a", 250, 3);
+        let metadata = parse_pending_metadata(&response).expect("valid XPENDING row");
+        assert_eq!(metadata.owner, "worker-a");
+        assert_eq!(metadata.idle, Duration::from_millis(250));
+        assert_eq!(metadata.deliveries, 3);
+
+        let query_started = std::time::Instant::now();
+        let decision = verified_pending_lease(
+            Some(&response),
+            "worker-a",
+            query_started,
+            Duration::from_secs(5),
+            query_started + Duration::from_millis(100),
+        )
+        .expect("the same consumer still has a live lease");
+        assert_eq!(
+            decision.deadline,
+            query_started + Duration::from_millis(4_750)
+        );
+        assert_eq!(decision.deliveries, 3);
+
+        assert!(
+            verified_pending_lease(
+                None,
+                "worker-a",
+                query_started,
+                Duration::from_secs(5),
+                query_started + Duration::from_millis(100),
+            )
+            .is_none(),
+            "a command error cannot fabricate authoritative ownership metadata"
+        );
+    }
+
+    #[test]
+    fn pending_metadata_rejects_missing_malformed_foreign_and_elapsed_entries() {
+        assert!(parse_pending_metadata(&redis::Value::Array(vec![])).is_none());
+        assert!(
+            parse_pending_metadata(&redis::Value::Array(vec![redis::Value::Array(vec![
+                redis::Value::BulkString(b"1-0".to_vec()),
+                redis::Value::BulkString(b"worker-a".to_vec()),
+                redis::Value::Int(10),
+            ])]))
+            .is_none()
+        );
+
+        let query_started = std::time::Instant::now();
+        let foreign = parse_pending_metadata(&pending_reply("worker-b", 10, 1))
+            .expect("well-shaped foreign row");
+        assert!(
+            current_pending_lease(
+                &foreign,
+                "worker-a",
+                query_started,
+                Duration::from_secs(5),
+                query_started,
+            )
+            .is_none()
+        );
+
+        let elapsed = parse_pending_metadata(&pending_reply("worker-a", 4_000, 1))
+            .expect("well-shaped elapsed row");
+        assert!(
+            current_pending_lease(
+                &elapsed,
+                "worker-a",
+                query_started,
+                Duration::from_secs(5),
+                query_started + Duration::from_secs(2),
+            )
+            .is_none()
+        );
+        assert!(
+            verified_pending_lease(
+                None,
+                "worker-a",
+                query_started,
+                Duration::from_secs(5),
+                query_started + Duration::from_secs(5),
+            )
+            .is_none()
+        );
+    }
 }

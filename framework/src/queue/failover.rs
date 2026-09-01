@@ -1,38 +1,62 @@
 //! Failover queue connection - an ordered list of driver connections where a
-//! push that one connection refuses falls through to the next.
+//! push that one connection refuses falls through to the next and workers
+//! drain every connection that accepted work.
 //!
 //! Mirrors Laravel 13's `Illuminate\Queue\FailoverQueue`, including the
 //! per-job `bulk` loop that PR #60950 added so a batch does not lose each
 //! job's own delay on the way through.
 
 use crate::error::FrameworkError;
-use crate::queue::driver::{QueueDriver, Reservation, ReservationToken, Settled};
+use crate::queue::driver::{
+    QueueDriver, QueueFilterCapability, Reservation, ReservationToken, Settled,
+};
 use crate::queue::envelope::Envelope;
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+use uuid::Uuid;
+
+struct Connection {
+    label: String,
+    driver: Arc<dyn QueueDriver>,
+    gate: Arc<RwLock<()>>,
+}
+
+#[derive(Clone)]
+struct ReservationOrigin {
+    connection: Arc<Connection>,
+    inner_token: ReservationToken,
+    lease_deadline: Instant,
+}
 
 /// Wraps an ordered list of queue connections: a push that the first
 /// connection refuses is retried on the next, and so on down the list.
 ///
-/// # Writes fall through, reads do not
+/// # Reads and reservation ownership
 ///
-/// Only [`push`](QueueDriver::push) and [`bulk_push`](QueueDriver::bulk_push)
-/// walk the list. Everything else - `pop`, `pop_from`, `ack`, `nack`,
-/// `release`, `settle`, `clear`, all four counters and all three listings -
-/// delegates to the first connection only. This is not laziness: reservation
-/// tokens are meaningful only to the driver that issued them, so routing
-/// lifecycle calls anywhere else would corrupt state. The counters and
-/// listings follow the same rule so that what an operator inspects is the
-/// same backend the worker is draining, rather than a sum across connections
-/// that matches no single worker's view.
+/// [`pop`](QueueDriver::pop) and [`pop_from`](QueueDriver::pop_from) rotate
+/// their starting connection, then scan the full list sequentially. Rotation
+/// prevents a recovered, continuously busy primary from starving work that
+/// landed on a fallback. Polling stays sequential so one call cannot reserve
+/// several jobs and return only one of them.
 ///
-/// The operational consequence is the one Laravel's own docs carry: a worker
-/// pointed at the failover connection drains the **primary** only. Jobs that
-/// failed over to a fallback need a worker running against that fallback
-/// connection directly, or they sit there.
+/// Each returned reservation receives a fresh aggregate token. The driver
+/// retains a short-lived mapping from that token to the issuing connection's
+/// real token, then routes `ack`, `nack`, `release`, and `settle` back to that
+/// exact connection. This indirection is required because inner tokens are
+/// not globally unique: two backends may legitimately issue the same UUID.
+/// Expired or unknown aggregate tokens are treated as stale and never sent to
+/// an arbitrary connection.
+///
+/// Counters and listings aggregate every configured connection in configured
+/// order, and `clear` attempts every connection. The observable backlog thus
+/// matches the work this aggregate driver can consume.
 ///
 /// # What `bulk_push` guarantees
 ///
@@ -89,13 +113,16 @@ pub struct FailoverQueueDriver {
     /// label reported on `QueueFailedOver`; [`QueueDriver::name`] cannot
     /// stand in for it because it names the driver *type* (two `redis`
     /// connections would be indistinguishable).
-    drivers: Vec<(String, Arc<dyn QueueDriver>)>,
-    /// The same `Arc` as the first entry of `drivers`, held separately so
-    /// every read-side delegation is a field access instead of an index into
-    /// a `Vec` whose non-emptiness is only a constructor invariant. Cheap:
-    /// an `Arc` clone taken once, at construction.
-    primary: Arc<dyn QueueDriver>,
-    /// Indices into `drivers` currently believed to be failing.
+    connections: Vec<Arc<Connection>>,
+    /// Starting index for the next read. Incrementing once per aggregate poll
+    /// distributes first choice across all connections without reserving from
+    /// them concurrently.
+    next_read: AtomicUsize,
+    /// Aggregate reservation token to issuing driver and inner token.
+    /// Entries expire with the visibility lease so a late worker cannot act
+    /// on a token that a backend may already have reused after redelivery.
+    reservations: Mutex<HashMap<ReservationToken, ReservationOrigin>>,
+    /// Indices into `connections` currently believed to be failing.
     ///
     /// Written twice per push attempt, and the two writes do different jobs.
     /// An index is inserted the instant that connection refuses, as one
@@ -125,16 +152,210 @@ impl FailoverQueueDriver {
     /// `Queue::set_driver` and then fail every push at runtime; rejecting it
     /// here turns a silent outage into a boot error.
     pub fn new(drivers: Vec<(String, Arc<dyn QueueDriver>)>) -> Result<Self, FrameworkError> {
-        let primary = drivers.first().map(|(_, d)| Arc::clone(d)).ok_or_else(|| {
-            FrameworkError::internal(
+        if drivers.is_empty() {
+            return Err(FrameworkError::internal(
                 "FailoverQueueDriver requires at least one connection; \
                  an empty list has nothing to push to",
-            )
-        })?;
+            ));
+        }
+        let mut connections: Vec<Arc<Connection>> = Vec::with_capacity(drivers.len());
+        for (label, driver) in drivers {
+            let gate = connections
+                .iter()
+                .find(|connection| Arc::ptr_eq(&connection.driver, &driver))
+                .map(|connection| Arc::clone(&connection.gate))
+                .unwrap_or_else(|| Arc::new(RwLock::new(())));
+            connections.push(Arc::new(Connection {
+                label,
+                driver,
+                gate,
+            }));
+        }
+
         Ok(Self {
-            drivers,
-            primary,
+            connections,
+            next_read: AtomicUsize::new(0),
+            reservations: Mutex::new(HashMap::new()),
             failing: Mutex::new(HashSet::new()),
+        })
+    }
+
+    fn remember_reservation(
+        &self,
+        connection: Arc<Connection>,
+        reservation: Reservation,
+        lease_deadline: Instant,
+    ) -> Reservation {
+        let now = Instant::now();
+        let mut reservations = self
+            .reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reservations.retain(|_, origin| origin.lease_deadline > now);
+
+        let aggregate_token = loop {
+            let candidate = ReservationToken(Uuid::new_v4());
+            if !reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        reservations.insert(
+            aggregate_token.clone(),
+            ReservationOrigin {
+                connection,
+                inner_token: reservation.token,
+                lease_deadline,
+            },
+        );
+        Reservation {
+            envelope: reservation.envelope,
+            token: aggregate_token,
+        }
+    }
+
+    fn reservation_origin(&self, token: &ReservationToken) -> Option<ReservationOrigin> {
+        let now = Instant::now();
+        let mut reservations = self
+            .reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reservations.retain(|_, origin| origin.lease_deadline > now);
+        reservations.get(token).cloned()
+    }
+
+    async fn guarded_reservation_origin(
+        &self,
+        token: &ReservationToken,
+    ) -> Option<(ReservationOrigin, tokio::sync::OwnedRwLockReadGuard<()>)> {
+        let initial = self.reservation_origin(token)?;
+        let connection = Arc::clone(&initial.connection);
+        let gate = Arc::clone(&connection.gate).read_owned().await;
+        let current = self.reservation_origin(token)?;
+        if !Arc::ptr_eq(&connection, &current.connection) {
+            return None;
+        }
+        Some((current, gate))
+    }
+
+    fn forget_reservation(&self, token: &ReservationToken) {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(token);
+    }
+
+    fn forget_connection_reservations(&self, connection: &Connection) {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, origin| !Arc::ptr_eq(&origin.connection.driver, &connection.driver));
+    }
+
+    fn prune_expired_reservations(&self) {
+        let now = Instant::now();
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, origin| origin.lease_deadline > now);
+    }
+
+    async fn pop_rotating(
+        &self,
+        visibility_timeout: Duration,
+        queues: Option<&[String]>,
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        if let Some(queues) = queues.filter(|queues| !queues.is_empty()) {
+            let unsupported: Vec<&str> = self
+                .connections
+                .iter()
+                .filter(|connection| {
+                    connection.driver.queue_filter_capability()
+                        == QueueFilterCapability::Unsupported
+                })
+                .map(|connection| connection.label.as_str())
+                .collect();
+            if !unsupported.is_empty() {
+                return Err(FrameworkError::internal(format!(
+                    "failover queue cannot filter --queue={} because these connections do not support queue filtering: {}",
+                    queues.join(","),
+                    unsupported.join(", ")
+                )));
+            }
+        }
+
+        self.prune_expired_reservations();
+        let start = self.next_read.fetch_add(1, Ordering::Relaxed) % self.connections.len();
+        let mut failures = Vec::new();
+
+        for offset in 0..self.connections.len() {
+            let index = (start + offset) % self.connections.len();
+            let connection = Arc::clone(&self.connections[index]);
+            let _gate = connection.gate.read().await;
+            let pop_started = Instant::now();
+            let fallback_deadline = pop_started
+                .checked_add(visibility_timeout)
+                .unwrap_or(pop_started);
+            let popped = match queues {
+                Some(queues) => connection.driver.pop_from(visibility_timeout, queues).await,
+                None => connection.driver.pop(visibility_timeout).await,
+            };
+            match popped {
+                Ok(Some(reservation)) => {
+                    let lease_deadline = connection
+                        .driver
+                        .reservation_deadline(&reservation.token, fallback_deadline);
+                    return Ok(Some(self.remember_reservation(
+                        Arc::clone(&connection),
+                        reservation,
+                        lease_deadline,
+                    )));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        connection = %connection.label,
+                        error = %error,
+                        "queue connection pop failed"
+                    );
+                    failures.push((index, format!("connection `{}`: {error}", connection.label)));
+                    if queues.is_some_and(|queues| !queues.is_empty())
+                        && connection.driver.queue_filter_capability()
+                            == QueueFilterCapability::Unknown
+                    {
+                        failures.sort_unstable_by_key(|(connection_index, _)| *connection_index);
+                        return Err(FrameworkError::internal(format!(
+                            "failover queue could not confirm queue filtering: {}",
+                            failures
+                                .into_iter()
+                                .map(|(_, failure)| failure)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )));
+                    }
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(None)
+        } else {
+            failures.sort_unstable_by_key(|(connection_index, _)| *connection_index);
+            Err(FrameworkError::internal(format!(
+                "failover queue pop failed: {}",
+                failures
+                    .into_iter()
+                    .map(|(_, failure)| failure)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )))
+        }
+    }
+
+    fn add_count(total: u64, additional: u64, operation: &str) -> Result<u64, FrameworkError> {
+        total.checked_add(additional).ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "failover queue `{operation}` count exceeds the u64 range"
+            ))
         })
     }
 
@@ -172,11 +393,11 @@ impl FailoverQueueDriver {
         let mut failed = HashSet::new();
         let mut last_err = None;
 
-        for (idx, (label, driver)) in self.drivers.iter().enumerate() {
+        for (idx, connection) in self.connections.iter().enumerate() {
             // Cloned per attempt because a refused push consumes the
             // envelope it was handed; the cost is a JSON payload clone
             // against a backend write, which is not where the time goes.
-            match driver.push(env.clone()).await {
+            match connection.driver.push(env.clone()).await {
                 Ok(()) => {
                     self.record_failing(failed);
                     return Ok(());
@@ -186,10 +407,10 @@ impl FailoverQueueDriver {
                     // `remaining_connections` rather than "falling over to the
                     // next connection", because on the last entry there is no
                     // next one and the push is about to fail outright.
-                    let remaining = self.drivers.len() - idx - 1;
+                    let remaining = self.connections.len() - idx - 1;
                     if transitioned {
                         tracing::warn!(
-                            connection = %label,
+                            connection = %connection.label,
                             job = %env.job_name,
                             error = %e,
                             remaining_connections = remaining,
@@ -200,7 +421,7 @@ impl FailoverQueueDriver {
                         // still trying to find a home for this job.
                         let _ = crate::events::EventFacade::dispatch(
                             crate::queue::events::QueueFailedOver {
-                                connection: label.clone(),
+                                connection: connection.label.clone(),
                                 job_name: env.job_name.clone(),
                                 exception: e.to_string(),
                             },
@@ -211,7 +432,7 @@ impl FailoverQueueDriver {
                         // edge-triggered as the event and a long outage does
                         // not bury everything else at WARN.
                         tracing::debug!(
-                            connection = %label,
+                            connection = %connection.label,
                             job = %env.job_name,
                             error = %e,
                             remaining_connections = remaining,
@@ -252,22 +473,13 @@ impl QueueDriver for FailoverQueueDriver {
         Ok(())
     }
 
-    // ---- read and lifecycle path: primary connection only ----------------
-    //
-    // Every method below delegates to `self.primary` and never consults a
-    // fallback. For `pop` / `pop_from` / `ack` / `nack` / `release` /
-    // `settle` that is a correctness requirement (a reservation token only
-    // means something to the driver that issued it). For `clear`, the four
-    // counters and the three inspection listings it is a consistency
-    // requirement: an operator reading `pending_jobs` sees exactly what the
-    // worker on this connection will drain, not a union across backends that
-    // no worker actually consumes.
+    // ---- read and lifecycle path: every connection, origin-routed --------
 
     async fn pop(
         &self,
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError> {
-        self.primary.pop(visibility_timeout).await
+        self.pop_rotating(visibility_timeout, None).await
     }
 
     async fn pop_from(
@@ -275,11 +487,47 @@ impl QueueDriver for FailoverQueueDriver {
         visibility_timeout: Duration,
         queues: &[String],
     ) -> Result<Option<Reservation>, FrameworkError> {
-        self.primary.pop_from(visibility_timeout, queues).await
+        self.pop_rotating(visibility_timeout, Some(queues)).await
+    }
+
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        let mut saw_unknown = false;
+        for connection in &self.connections {
+            match connection.driver.queue_filter_capability() {
+                QueueFilterCapability::Supported => {}
+                QueueFilterCapability::Unsupported => {
+                    return QueueFilterCapability::Unsupported;
+                }
+                QueueFilterCapability::Unknown => saw_unknown = true,
+            }
+        }
+        if saw_unknown {
+            QueueFilterCapability::Unknown
+        } else {
+            QueueFilterCapability::Supported
+        }
+    }
+
+    fn reservation_deadline(
+        &self,
+        token: &ReservationToken,
+        _fallback_deadline: Instant,
+    ) -> Instant {
+        self.reservation_origin(token)
+            .map(|origin| origin.lease_deadline)
+            .unwrap_or_else(Instant::now)
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        self.primary.ack(token).await
+        let Some((origin, gate)) = self.guarded_reservation_origin(token).await else {
+            return Ok(());
+        };
+        let result = origin.connection.driver.ack(&origin.inner_token).await;
+        if result.is_ok() {
+            self.forget_reservation(token);
+        }
+        drop(gate);
+        result
     }
 
     async fn nack(
@@ -287,7 +535,19 @@ impl QueueDriver for FailoverQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        self.primary.nack(token, requeue_delay).await
+        let Some((origin, gate)) = self.guarded_reservation_origin(token).await else {
+            return Ok(());
+        };
+        let result = origin
+            .connection
+            .driver
+            .nack(&origin.inner_token, requeue_delay)
+            .await;
+        if result.is_ok() {
+            self.forget_reservation(token);
+        }
+        drop(gate);
+        result
     }
 
     async fn release(
@@ -296,7 +556,19 @@ impl QueueDriver for FailoverQueueDriver {
         env: &Envelope,
         delay: Duration,
     ) -> Result<(), FrameworkError> {
-        self.primary.release(token, env, delay).await
+        let Some((origin, gate)) = self.guarded_reservation_origin(token).await else {
+            return Ok(());
+        };
+        let result = origin
+            .connection
+            .driver
+            .release(&origin.inner_token, env, delay)
+            .await;
+        if result.is_ok() {
+            self.forget_reservation(token);
+        }
+        drop(gate);
+        result
     }
 
     async fn settle(
@@ -304,42 +576,127 @@ impl QueueDriver for FailoverQueueDriver {
         token: &ReservationToken,
         follow_ups: &[Envelope],
     ) -> Result<Settled, FrameworkError> {
-        self.primary.settle(token, follow_ups).await
+        let Some((origin, gate)) = self.guarded_reservation_origin(token).await else {
+            return Ok(Settled::Stale);
+        };
+        let result = match origin
+            .connection
+            .driver
+            .settle(&origin.inner_token, follow_ups)
+            .await
+        {
+            Ok(Settled::Unsupported) => Ok(Settled::Unsupported),
+            Ok(outcome) => {
+                self.forget_reservation(token);
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
+        drop(gate);
+        result
     }
 
     async fn size(&self) -> Result<u64, FrameworkError> {
-        self.primary.size().await
+        let mut total = 0;
+        for connection in &self.connections {
+            total = Self::add_count(total, connection.driver.size().await?, "size")?;
+        }
+        Ok(total)
     }
 
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        self.primary.pending_size().await
+        let mut total = 0;
+        for connection in &self.connections {
+            total = Self::add_count(
+                total,
+                connection.driver.pending_size().await?,
+                "pending_size",
+            )?;
+        }
+        Ok(total)
     }
 
     async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        self.primary.delayed_size().await
+        let mut total = 0;
+        for connection in &self.connections {
+            total = Self::add_count(
+                total,
+                connection.driver.delayed_size().await?,
+                "delayed_size",
+            )?;
+        }
+        Ok(total)
     }
 
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        self.primary.reserved_size().await
+        let mut total = 0;
+        for connection in &self.connections {
+            total = Self::add_count(
+                total,
+                connection.driver.reserved_size().await?,
+                "reserved_size",
+            )?;
+        }
+        Ok(total)
     }
 
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.primary.pending_jobs(queue).await
+        let mut jobs = Vec::new();
+        for connection in &self.connections {
+            jobs.extend(connection.driver.pending_jobs(queue).await?);
+        }
+        Ok(jobs)
     }
 
     async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.primary.delayed_jobs(queue).await
+        let mut jobs = Vec::new();
+        for connection in &self.connections {
+            jobs.extend(connection.driver.delayed_jobs(queue).await?);
+        }
+        Ok(jobs)
     }
 
     async fn reserved_jobs(
         &self,
         queue: Option<&str>,
     ) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.primary.reserved_jobs(queue).await
+        let mut jobs = Vec::new();
+        for connection in &self.connections {
+            jobs.extend(connection.driver.reserved_jobs(queue).await?);
+        }
+        Ok(jobs)
     }
 
     async fn clear(&self) -> Result<u64, FrameworkError> {
-        self.primary.clear().await
+        let mut total: u64 = 0;
+        let mut failures = Vec::new();
+        for connection in &self.connections {
+            let _gate = connection.gate.write().await;
+            match connection.driver.clear().await {
+                Ok(cleared) => {
+                    self.forget_connection_reservations(connection);
+                    if let Some(next_total) = total.checked_add(cleared) {
+                        total = next_total;
+                    } else {
+                        failures.push(format!(
+                            "connection `{}`: clear count overflowed the u64 range",
+                            connection.label
+                        ));
+                    }
+                }
+                Err(error) => {
+                    failures.push(format!("connection `{}`: {error}", connection.label));
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(total)
+        } else {
+            Err(FrameworkError::internal(format!(
+                "failover queue clear failed: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -369,11 +726,9 @@ mod tests {
     // `MemoryQueueDriver::new` builds a `DelayQueue`, which needs a reactor.
     #[tokio::test]
     async fn new_holds_the_first_connection_as_the_primary() {
+        let first = Arc::new(MemoryQueueDriver::new()) as Arc<dyn QueueDriver>;
         let driver = FailoverQueueDriver::new(vec![
-            (
-                "one".to_string(),
-                Arc::new(MemoryQueueDriver::new()) as Arc<dyn QueueDriver>,
-            ),
+            ("one".to_string(), Arc::clone(&first)),
             (
                 "two".to_string(),
                 Arc::new(MemoryQueueDriver::new()) as Arc<dyn QueueDriver>,
@@ -381,9 +736,24 @@ mod tests {
         ])
         .expect("two connections");
         assert!(
-            Arc::ptr_eq(&driver.primary, &driver.drivers[0].1),
-            "the cached primary must be the first configured connection"
+            Arc::ptr_eq(&first, &driver.connections[0].driver),
+            "the first configured connection must remain the write primary"
         );
         assert_eq!(driver.name(), "failover");
+    }
+
+    #[tokio::test]
+    async fn duplicate_driver_slots_share_one_operation_gate() {
+        let shared = Arc::new(MemoryQueueDriver::new()) as Arc<dyn QueueDriver>;
+        let driver = FailoverQueueDriver::new(vec![
+            ("one".to_string(), Arc::clone(&shared)),
+            ("two".to_string(), shared),
+        ])
+        .expect("duplicate connection slots remain supported");
+
+        assert!(
+            Arc::ptr_eq(&driver.connections[0].gate, &driver.connections[1].gate),
+            "duplicate slots for one driver must share the pop/clear gate"
+        );
     }
 }

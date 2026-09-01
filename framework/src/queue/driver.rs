@@ -5,7 +5,7 @@ use crate::queue::envelope::Envelope;
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use chrono::Utc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Opaque token identifying one reservation of a popped envelope.
@@ -47,6 +47,24 @@ pub struct Reservation {
     pub token: ReservationToken,
 }
 
+/// Whether a driver can honor a non-empty queue-name filter in
+/// [`QueueDriver::pop_from`].
+///
+/// The default is [`Unknown`](Self::Unknown), not `Unsupported`, so adding
+/// this capability to the trait remains behavior-compatible with third-party
+/// drivers that already override `pop_from`. Decorators may reject known
+/// [`Unsupported`](Self::Unsupported) connections before polling, but must
+/// let an `Unknown` driver answer for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueFilterCapability {
+    /// The driver implements non-empty queue filters.
+    Supported,
+    /// The driver is known not to implement non-empty queue filters.
+    Unsupported,
+    /// The driver predates capability reporting or cannot declare statically.
+    Unknown,
+}
+
 /// Backend contract every queue driver (sync, memory, database, redis,
 /// SQS, beanstalk, …) implements. The worker speaks to drivers
 /// exclusively through this trait.
@@ -62,6 +80,38 @@ pub trait QueueDriver: Send + Sync {
         &self,
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError>;
+
+    /// Report whether [`pop_from`](Self::pop_from) supports non-empty filters.
+    ///
+    /// The executable default is [`QueueFilterCapability::Unknown`] for
+    /// backward compatibility with external drivers that already override
+    /// `pop_from` but cannot be updated in lockstep with the framework.
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        QueueFilterCapability::Unknown
+    }
+
+    /// Return the authoritative deadline for a reservation issued by this
+    /// driver.
+    ///
+    /// `fallback_deadline` is captured by the caller immediately before
+    /// entering [`pop`](Self::pop) or [`pop_from`](Self::pop_from). The
+    /// executable default returns it unchanged, preserving compatibility for
+    /// drivers whose lease is the requested visibility duration.
+    ///
+    /// Decorators must ask the issuing driver for this value after a successful
+    /// pop and must retain that absolute deadline with any public reservation
+    /// alias. Drivers whose lease is connection-scoped rather than supplied by
+    /// each pop call must override this method and return their actual deadline.
+    /// An unknown or expired token should return [`Instant::now`] so a decorator
+    /// fails stale rather than extending ownership.
+    fn reservation_deadline(
+        &self,
+        token: &ReservationToken,
+        fallback_deadline: Instant,
+    ) -> Instant {
+        let _ = token;
+        fallback_deadline
+    }
 
     /// Pop the next envelope belonging to one of `queues`.
     ///

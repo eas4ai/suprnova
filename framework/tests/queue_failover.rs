@@ -1,19 +1,18 @@
 //! Failover queue parity (#60950): pushes fall through an ordered driver
-//! list, `QueueFailedOver` fires edge-triggered, reads never fail over.
+//! list, `QueueFailedOver` fires edge-triggered, and reads drain every driver.
 //!
-//! The asymmetry is the whole point and every test here is written to pin
-//! one half of it. Writes fall through; everything a reservation token
-//! could reach - `pop`, `ack`, `nack`, `release`, `settle`, the counters
-//! and the listings - stays on the primary, because a token issued by one
-//! backend means nothing to another.
+//! Writes fall through in configured order. Read-side state is aggregated,
+//! pops rotate fairly, and aggregate-issued reservation aliases route lifecycle
+//! calls back to the exact driver and inner token that issued the reservation.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
-use suprnova::queue::driver::Settled;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use suprnova::queue::driver::{QueueFilterCapability, Settled};
 use suprnova::queue::events::QueueFailedOver;
 use suprnova::queue::inspect::InspectedJob;
 use suprnova::queue::{
@@ -25,9 +24,9 @@ use uuid::Uuid;
 
 /// A driver whose `push` fails while `broken` is true, or once its accept
 /// budget runs out; every other method delegates to a real inner
-/// [`MemoryQueueDriver`], so the decorator's read-side delegation is observed
-/// against a driver that actually answers counters and listings rather than
-/// the trait's `Err` defaults.
+/// [`MemoryQueueDriver`], so the decorator's aggregate read and lifecycle
+/// behavior is observed against a driver that actually answers counters and
+/// listings rather than the trait's `Err` defaults.
 struct FlakyDriver {
     inner: MemoryQueueDriver,
     broken: AtomicBool,
@@ -114,6 +113,9 @@ impl QueueDriver for FlakyDriver {
     ) -> Result<Option<Reservation>, FrameworkError> {
         self.inner.pop_from(vt, queues).await
     }
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        QueueFilterCapability::Supported
+    }
     async fn ack(&self, t: &ReservationToken) -> Result<(), FrameworkError> {
         self.inner.ack(t).await
     }
@@ -157,6 +159,295 @@ impl QueueDriver for FlakyDriver {
     }
     fn name(&self) -> &'static str {
         "flaky"
+    }
+}
+
+fn colliding_inner_token() -> ReservationToken {
+    ReservationToken(Uuid::from_u128(0xfeed_face_cafe_beef))
+}
+
+struct DefaultDeadlineDriver;
+
+#[async_trait]
+impl QueueDriver for DefaultDeadlineDriver {
+    async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("default-deadline test driver"))
+    }
+
+    async fn pop(
+        &self,
+        _visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn nack(
+        &self,
+        _token: &ReservationToken,
+        _requeue_delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "default-deadline"
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClearOutcome {
+    Success(u64),
+    Failure(&'static str),
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum LifecycleOperation {
+    Ack,
+    Nack,
+    Release,
+    Settle,
+}
+
+#[derive(Clone, Copy)]
+enum DeadlineOutcome {
+    Fallback,
+    Immediate,
+    After(Duration),
+}
+
+/// One deterministic backend script covers collision, lease, barrier,
+/// aggregate-error, clear, and lifecycle-routing contracts without a family
+/// of nearly identical one-off drivers.
+struct ScriptedDriver {
+    next: tokio::sync::Mutex<VecDeque<Envelope>>,
+    pop_error: Option<&'static str>,
+    clear_outcome: ClearOutcome,
+    deadlines: Mutex<VecDeque<DeadlineOutcome>>,
+    block_pop: bool,
+    block_clear: bool,
+    block_ack: bool,
+    pop_entered: tokio::sync::Notify,
+    release_pop: tokio::sync::Notify,
+    clear_entered: tokio::sync::Notify,
+    release_clear: tokio::sync::Notify,
+    ack_entered: tokio::sync::Notify,
+    release_ack: tokio::sync::Notify,
+    active_envelope: tokio::sync::Mutex<Option<Uuid>>,
+    acknowledged_envelopes: Mutex<Vec<Uuid>>,
+    clear_calls: AtomicUsize,
+    acknowledgements: AtomicUsize,
+    lifecycle_failures: Mutex<HashSet<LifecycleOperation>>,
+    lifecycle_attempts: Mutex<Vec<LifecycleOperation>>,
+}
+
+impl ScriptedDriver {
+    fn new(envelopes: impl IntoIterator<Item = Envelope>) -> Self {
+        Self::operation(envelopes, None, ClearOutcome::Success(0))
+    }
+
+    fn operation(
+        envelopes: impl IntoIterator<Item = Envelope>,
+        pop_error: Option<&'static str>,
+        clear_outcome: ClearOutcome,
+    ) -> Self {
+        Self {
+            next: tokio::sync::Mutex::new(envelopes.into_iter().collect()),
+            pop_error,
+            clear_outcome,
+            deadlines: Mutex::new(VecDeque::new()),
+            block_pop: false,
+            block_clear: false,
+            block_ack: false,
+            pop_entered: tokio::sync::Notify::new(),
+            release_pop: tokio::sync::Notify::new(),
+            clear_entered: tokio::sync::Notify::new(),
+            release_clear: tokio::sync::Notify::new(),
+            ack_entered: tokio::sync::Notify::new(),
+            release_ack: tokio::sync::Notify::new(),
+            active_envelope: tokio::sync::Mutex::new(None),
+            acknowledged_envelopes: Mutex::new(Vec::new()),
+            clear_calls: AtomicUsize::new(0),
+            acknowledgements: AtomicUsize::new(0),
+            lifecycle_failures: Mutex::new(HashSet::new()),
+            lifecycle_attempts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_deadlines(mut self, deadlines: impl IntoIterator<Item = DeadlineOutcome>) -> Self {
+        self.deadlines = Mutex::new(deadlines.into_iter().collect());
+        self
+    }
+
+    fn blocking_pop(mut self) -> Self {
+        self.block_pop = true;
+        self
+    }
+
+    fn blocking_clear_and_ack(mut self) -> Self {
+        self.block_clear = true;
+        self.block_ack = true;
+        self
+    }
+
+    fn failing_once(mut self, operations: impl IntoIterator<Item = LifecycleOperation>) -> Self {
+        self.lifecycle_failures = Mutex::new(operations.into_iter().collect());
+        self
+    }
+
+    fn record_lifecycle(&self, operation: LifecycleOperation) -> Result<(), FrameworkError> {
+        self.lifecycle_attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(operation);
+        if self
+            .lifecycle_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&operation)
+        {
+            Err(FrameworkError::internal("scripted lifecycle failure"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn lifecycle_attempts(&self, operation: LifecycleOperation) -> usize {
+        self.lifecycle_attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|attempt| **attempt == operation)
+            .count()
+    }
+
+    fn acknowledgements(&self) -> usize {
+        self.acknowledgements.load(Ordering::SeqCst)
+    }
+
+    async fn enqueue(&self, envelope: Envelope) {
+        self.next.lock().await.push_back(envelope);
+    }
+
+    fn acknowledged_envelopes(&self) -> Vec<Uuid> {
+        self.acknowledged_envelopes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl QueueDriver for ScriptedDriver {
+    async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("scripted driver refuses pushes"))
+    }
+
+    async fn pop(
+        &self,
+        _visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        if let Some(error) = self.pop_error {
+            return Err(FrameworkError::internal(error));
+        }
+        if self.block_pop {
+            self.pop_entered.notify_one();
+            self.release_pop.notified().await;
+        }
+        let envelope = self.next.lock().await.pop_front();
+        if let Some(envelope) = &envelope {
+            self.active_envelope.lock().await.replace(envelope.id);
+        }
+        Ok(envelope.map(|envelope| Reservation {
+            token: colliding_inner_token(),
+            envelope,
+        }))
+    }
+
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        QueueFilterCapability::Unsupported
+    }
+
+    fn reservation_deadline(
+        &self,
+        _token: &ReservationToken,
+        fallback_deadline: Instant,
+    ) -> Instant {
+        match self
+            .deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+            .unwrap_or(DeadlineOutcome::Fallback)
+        {
+            DeadlineOutcome::Fallback => fallback_deadline,
+            DeadlineOutcome::Immediate => Instant::now(),
+            DeadlineOutcome::After(duration) => Instant::now() + duration,
+        }
+    }
+
+    async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+        self.record_lifecycle(LifecycleOperation::Ack)?;
+        if self.block_ack {
+            self.ack_entered.notify_one();
+            self.release_ack.notified().await;
+        }
+        if let Some(envelope_id) = self.active_envelope.lock().await.take() {
+            self.acknowledged_envelopes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(envelope_id);
+        }
+        self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn nack(
+        &self,
+        _token: &ReservationToken,
+        _requeue_delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.record_lifecycle(LifecycleOperation::Nack)
+    }
+
+    async fn release(
+        &self,
+        _token: &ReservationToken,
+        _env: &Envelope,
+        _delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.record_lifecycle(LifecycleOperation::Release)
+    }
+
+    async fn settle(
+        &self,
+        _token: &ReservationToken,
+        _follow_ups: &[Envelope],
+    ) -> Result<Settled, FrameworkError> {
+        self.record_lifecycle(LifecycleOperation::Settle)?;
+        Ok(Settled::Atomically)
+    }
+
+    async fn clear(&self) -> Result<u64, FrameworkError> {
+        self.clear_entered.notify_one();
+        if self.block_clear {
+            self.release_clear.notified().await;
+        }
+        self.clear_calls.fetch_add(1, Ordering::SeqCst);
+        match self.clear_outcome {
+            ClearOutcome::Success(count) => {
+                self.active_envelope.lock().await.take();
+                Ok(count)
+            }
+            ClearOutcome::Failure(error) => Err(FrameworkError::internal(error)),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "scripted"
     }
 }
 
@@ -222,6 +513,497 @@ fn env_at(available_at: chrono::DateTime<Utc>) -> Envelope {
     }
 }
 
+fn tagged_env(tag: &str) -> Envelope {
+    let mut envelope = env_at(Utc::now());
+    envelope.payload = serde_json::json!({ "tag": tag });
+    envelope
+}
+
+#[test]
+fn default_reservation_deadline_uses_the_pre_pop_fallback() {
+    let driver = DefaultDeadlineDriver;
+    let fallback_deadline = Instant::now() + Duration::from_secs(30);
+
+    assert_eq!(
+        driver.reservation_deadline(&colliding_inner_token(), fallback_deadline),
+        fallback_deadline,
+        "backward-compatible drivers must inherit the conservative pre-pop deadline"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn delayed_pop_uses_the_issuers_longer_authoritative_deadline() {
+    let issuer = Arc::new(
+        ScriptedDriver::new([tagged_env("delayed-deadline")])
+            .blocking_pop()
+            .with_deadlines([DeadlineOutcome::After(Duration::from_secs(30))]),
+    );
+    let failover = Arc::new(
+        FailoverQueueDriver::new(vec![(
+            "issuer".into(),
+            issuer.clone() as Arc<dyn QueueDriver>,
+        )])
+        .expect("one driver"),
+    );
+    let aggregate = failover.clone();
+    let pop = tokio::spawn(async move {
+        aggregate
+            .pop(Duration::ZERO)
+            .await
+            .expect("aggregate pop")
+            .expect("reservation")
+    });
+
+    issuer.pop_entered.notified().await;
+    issuer.release_pop.notify_one();
+    let reservation = pop.await.expect("pop task");
+    failover
+        .ack(&reservation.token)
+        .await
+        .expect("aggregate ack");
+    assert_eq!(
+        issuer.acknowledgements.load(Ordering::SeqCst),
+        1,
+        "the aggregate must retain the alias for the issuer's longer lease"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn reused_inner_token_cannot_be_reached_through_an_expired_outer_alias() {
+    let issuer = Arc::new(
+        ScriptedDriver::new([tagged_env("first"), tagged_env("second")]).with_deadlines([
+            DeadlineOutcome::Immediate,
+            DeadlineOutcome::After(Duration::from_secs(30)),
+        ]),
+    );
+    let failover = FailoverQueueDriver::new(vec![(
+        "issuer".into(),
+        issuer.clone() as Arc<dyn QueueDriver>,
+    )])
+    .expect("one driver");
+
+    let first = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("first aggregate pop")
+        .expect("first reservation");
+    let second = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("second aggregate pop")
+        .expect("second reservation");
+    assert_ne!(
+        first.token, second.token,
+        "outer aliases must remain unique"
+    );
+
+    failover
+        .ack(&first.token)
+        .await
+        .expect("expired alias ack is a no-op");
+    assert_eq!(
+        issuer.acknowledgements.load(Ordering::SeqCst),
+        0,
+        "the expired alias must not act on the reused inner token"
+    );
+    failover.ack(&second.token).await.expect("live alias ack");
+    assert_eq!(issuer.acknowledgements.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn clear_waits_for_pop_alias_publication_then_invalidates_the_alias() {
+    let issuer = Arc::new(
+        ScriptedDriver::operation([tagged_env("barrier")], None, ClearOutcome::Success(1))
+            .blocking_pop(),
+    );
+    let failover = Arc::new(
+        FailoverQueueDriver::new(vec![(
+            "issuer".into(),
+            issuer.clone() as Arc<dyn QueueDriver>,
+        )])
+        .expect("one driver"),
+    );
+
+    let aggregate = failover.clone();
+    let pop = tokio::spawn(async move {
+        aggregate
+            .pop(Duration::from_secs(30))
+            .await
+            .expect("aggregate pop")
+            .expect("reservation")
+    });
+    issuer.pop_entered.notified().await;
+
+    let clear_started = Arc::new(tokio::sync::Notify::new());
+    let aggregate = failover.clone();
+    let started = clear_started.clone();
+    let clear = tokio::spawn(async move {
+        started.notify_one();
+        aggregate.clear().await
+    });
+    clear_started.notified().await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), issuer.clear_entered.notified())
+            .await
+            .is_err(),
+        "clear must not enter the backend while pop has not published its alias"
+    );
+
+    issuer.release_pop.notify_one();
+    let reservation = pop.await.expect("pop task");
+    assert_eq!(
+        clear.await.expect("clear task").expect("aggregate clear"),
+        1
+    );
+    failover
+        .ack(&reservation.token)
+        .await
+        .expect("cleared alias ack is idempotent");
+    assert_eq!(
+        issuer.acknowledgements.load(Ordering::SeqCst),
+        0,
+        "successful clear must invalidate the alias published by pop"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn cleared_alias_cannot_ack_a_reused_inner_token_after_waiting_on_the_gate() {
+    let old_envelope = tagged_env("old");
+    let new_envelope = tagged_env("new");
+    let new_id = new_envelope.id;
+    let issuer = Arc::new(
+        ScriptedDriver::operation([old_envelope], None, ClearOutcome::Success(1))
+            .blocking_clear_and_ack(),
+    );
+    let failover = Arc::new(
+        FailoverQueueDriver::new(vec![(
+            "issuer".into(),
+            issuer.clone() as Arc<dyn QueueDriver>,
+        )])
+        .expect("one driver"),
+    );
+    let old = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("old aggregate pop")
+        .expect("old reservation");
+
+    let aggregate = failover.clone();
+    let clear = tokio::spawn(async move { aggregate.clear().await });
+    issuer.clear_entered.notified().await;
+
+    let ack_started = Arc::new(tokio::sync::Notify::new());
+    let aggregate = failover.clone();
+    let started = ack_started.clone();
+    let old_token = old.token.clone();
+    let old_ack = tokio::spawn(async move {
+        started.notify_one();
+        aggregate.ack(&old_token).await
+    });
+    ack_started.notified().await;
+    let _entered_backend_before_clear =
+        tokio::time::timeout(Duration::from_secs(1), issuer.ack_entered.notified()).await;
+
+    issuer.release_clear.notify_one();
+    assert_eq!(
+        clear.await.expect("clear task").expect("aggregate clear"),
+        1
+    );
+    issuer.enqueue(new_envelope).await;
+    let new = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("post-clear aggregate pop")
+        .expect("new reservation reusing the fixed inner token");
+    assert_eq!(new.envelope.id, new_id);
+    assert_ne!(old.token, new.token, "aggregate aliases remain distinct");
+
+    issuer.release_ack.notify_one();
+    old_ack
+        .await
+        .expect("old ack task")
+        .expect("stale aggregate ack is idempotent");
+    assert!(
+        issuer.acknowledged_envelopes().is_empty(),
+        "the old aggregate alias must not acknowledge the new reservation"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn empty_pop_reports_every_failed_connection_in_configured_order() {
+    let first = Arc::new(ScriptedDriver::operation(
+        None,
+        Some("first pop failed"),
+        ClearOutcome::Success(0),
+    ));
+    let second = Arc::new(ScriptedDriver::operation(
+        None,
+        Some("second pop failed"),
+        ClearOutcome::Success(0),
+    ));
+    let third = Arc::new(ScriptedDriver::operation(
+        None,
+        Some("third pop failed"),
+        ClearOutcome::Success(0),
+    ));
+    let failover = FailoverQueueDriver::new(vec![
+        ("first".into(), first as Arc<dyn QueueDriver>),
+        ("second".into(), second as Arc<dyn QueueDriver>),
+        ("third".into(), third as Arc<dyn QueueDriver>),
+    ])
+    .expect("three drivers");
+
+    let message = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect_err("all failed pops must be aggregated")
+        .to_string();
+    let first_at = message.find("first").expect("first label");
+    let second_at = message.find("second").expect("second label");
+    let third_at = message.find("third").expect("third label");
+    assert!(
+        first_at < second_at && second_at < third_at,
+        "pop failures must retain configured order: {message}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn clear_reports_all_failures_and_invalidates_only_successful_connections() {
+    let first = Arc::new(ScriptedDriver::operation(
+        Some(tagged_env("first")),
+        None,
+        ClearOutcome::Failure("first clear failed"),
+    ));
+    let middle = Arc::new(ScriptedDriver::operation(
+        Some(tagged_env("middle")),
+        None,
+        ClearOutcome::Success(1),
+    ));
+    let last = Arc::new(ScriptedDriver::operation(
+        Some(tagged_env("last")),
+        None,
+        ClearOutcome::Failure("last clear failed"),
+    ));
+    let failover = FailoverQueueDriver::new(vec![
+        ("first".into(), first.clone() as Arc<dyn QueueDriver>),
+        ("middle".into(), middle.clone() as Arc<dyn QueueDriver>),
+        ("last".into(), last.clone() as Arc<dyn QueueDriver>),
+    ])
+    .expect("three drivers");
+
+    let mut aliases = Vec::new();
+    for _ in 0..3 {
+        let reservation = failover
+            .pop(Duration::from_secs(30))
+            .await
+            .expect("aggregate pop")
+            .expect("reservation");
+        aliases.push((
+            reservation.envelope.payload["tag"]
+                .as_str()
+                .expect("tag")
+                .to_owned(),
+            reservation.token,
+        ));
+    }
+
+    let message = failover
+        .clear()
+        .await
+        .expect_err("two failed clears must be reported")
+        .to_string();
+    let first_at = message.find("first").expect("first failed label");
+    let last_at = message.find("last").expect("last failed label");
+    assert!(
+        first_at < last_at,
+        "clear failures must retain order: {message}"
+    );
+    assert_eq!(middle.clear_calls.load(Ordering::SeqCst), 1);
+
+    for (_, alias) in &aliases {
+        failover.ack(alias).await.expect("post-clear ack");
+    }
+    assert_eq!(first.acknowledgements.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        middle.acknowledgements.load(Ordering::SeqCst),
+        0,
+        "successful clear must invalidate only the middle alias"
+    );
+    assert_eq!(last.acknowledgements.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn clear_count_overflow_is_labeled_and_does_not_skip_later_connections() {
+    let first = Arc::new(ScriptedDriver::operation(
+        None,
+        None,
+        ClearOutcome::Success(u64::MAX),
+    ));
+    let second = Arc::new(ScriptedDriver::operation(
+        None,
+        None,
+        ClearOutcome::Success(1),
+    ));
+    let third = Arc::new(ScriptedDriver::operation(
+        None,
+        None,
+        ClearOutcome::Success(0),
+    ));
+    let failover = FailoverQueueDriver::new(vec![
+        ("first".into(), first as Arc<dyn QueueDriver>),
+        ("second".into(), second.clone() as Arc<dyn QueueDriver>),
+        ("third".into(), third.clone() as Arc<dyn QueueDriver>),
+    ])
+    .expect("three drivers");
+
+    let message = failover
+        .clear()
+        .await
+        .expect_err("the aggregate count must not wrap")
+        .to_string();
+    assert!(
+        message.contains("second") && message.contains("overflow"),
+        "the overflow must identify the connection whose count crossed the limit: {message}"
+    );
+    assert_eq!(second.clear_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        third.clear_calls.load(Ordering::SeqCst),
+        1,
+        "count overflow must not skip later clear attempts"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn failed_lifecycle_calls_retain_their_aliases_for_retry() {
+    let issuer = Arc::new(
+        ScriptedDriver::operation(
+            [
+                tagged_env("ack"),
+                tagged_env("nack"),
+                tagged_env("release"),
+                tagged_env("settle"),
+            ],
+            None,
+            ClearOutcome::Success(0),
+        )
+        .failing_once([
+            LifecycleOperation::Ack,
+            LifecycleOperation::Nack,
+            LifecycleOperation::Release,
+            LifecycleOperation::Settle,
+        ]),
+    );
+    let failover = FailoverQueueDriver::new(vec![(
+        "issuer".into(),
+        issuer.clone() as Arc<dyn QueueDriver>,
+    )])
+    .expect("one driver");
+
+    let ack = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("ack pop")
+        .expect("ack reservation");
+    failover.ack(&ack.token).await.expect_err("first ack fails");
+    failover.ack(&ack.token).await.expect("retried ack");
+
+    let nack = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("nack pop")
+        .expect("nack reservation");
+    failover
+        .nack(&nack.token, Duration::ZERO)
+        .await
+        .expect_err("first nack fails");
+    failover
+        .nack(&nack.token, Duration::ZERO)
+        .await
+        .expect("retried nack");
+
+    let release = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("release pop")
+        .expect("release reservation");
+    failover
+        .release(&release.token, &release.envelope, Duration::ZERO)
+        .await
+        .expect_err("first release fails");
+    failover
+        .release(&release.token, &release.envelope, Duration::ZERO)
+        .await
+        .expect("retried release");
+
+    let settle = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("settle pop")
+        .expect("settle reservation");
+    failover
+        .settle(&settle.token, &[])
+        .await
+        .expect_err("first settle fails");
+    assert_eq!(
+        failover
+            .settle(&settle.token, &[])
+            .await
+            .expect("retried settle"),
+        Settled::Atomically
+    );
+
+    for operation in [
+        LifecycleOperation::Ack,
+        LifecycleOperation::Nack,
+        LifecycleOperation::Release,
+        LifecycleOperation::Settle,
+    ] {
+        assert_eq!(
+            issuer.lifecycle_attempts(operation),
+            2,
+            "the failed call must leave its aggregate alias routable"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn unknown_ack_nack_and_release_aliases_are_idempotent_no_ops() {
+    let issuer = Arc::new(ScriptedDriver::operation(
+        std::iter::empty(),
+        None,
+        ClearOutcome::Success(0),
+    ));
+    let failover = FailoverQueueDriver::new(vec![(
+        "issuer".into(),
+        issuer.clone() as Arc<dyn QueueDriver>,
+    )])
+    .expect("one driver");
+    let unknown = ReservationToken(Uuid::from_u128(0xbaad_f00d_baad_f00d));
+
+    failover.ack(&unknown).await.expect("unknown ack");
+    failover
+        .nack(&unknown, Duration::ZERO)
+        .await
+        .expect("unknown nack");
+    failover
+        .release(&unknown, &tagged_env("unknown"), Duration::ZERO)
+        .await
+        .expect("unknown release");
+
+    assert_eq!(issuer.lifecycle_attempts(LifecycleOperation::Ack), 0);
+    assert_eq!(issuer.lifecycle_attempts(LifecycleOperation::Nack), 0);
+    assert_eq!(issuer.lifecycle_attempts(LifecycleOperation::Release), 0);
+}
+
 #[tokio::test]
 #[serial]
 async fn push_falls_through_to_the_next_driver() {
@@ -237,6 +1019,111 @@ async fn push_falls_through_to_the_next_driver() {
             .expect("pop")
             .is_some(),
         "the job must land on the fallback driver"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn failed_over_job_is_drained_and_settled_by_the_failover_driver() {
+    let (_primary, fallback, failover) = build(true);
+    Queue::set_driver(failover.clone());
+    Queue::push(FailoverJob)
+        .await
+        .expect("push must succeed via fallback");
+    assert_eq!(
+        fallback.pending_size().await.expect("fallback pending"),
+        1,
+        "the failed-over job must be pending on the fallback"
+    );
+
+    let queues = ["default".to_owned()];
+    let reservation = failover
+        .pop_from(Duration::from_secs(1), &queues)
+        .await
+        .expect("aggregate filtered pop")
+        .expect("the aggregate must drain the fallback");
+    assert_eq!(
+        failover
+            .settle(&reservation.token, &[])
+            .await
+            .expect("aggregate settle"),
+        Settled::Unsupported,
+        "settle must report the fallback driver's answer"
+    );
+
+    failover
+        .ack(&reservation.token)
+        .await
+        .expect("aggregate ack");
+    assert_eq!(
+        fallback.pending_size().await.expect("pending after ack"),
+        0,
+        "ack must not put the fallback reservation back into pending"
+    );
+    assert_eq!(
+        fallback.reserved_size().await.expect("reserved after ack"),
+        0,
+        "ack must remove the fallback reservation"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn filtered_pop_rejects_unsupported_connection_before_draining_capable_fallback() {
+    let unsupported = Arc::new(ScriptedDriver::new([tagged_env("unsupported")]));
+    let capable = Arc::new(MemoryQueueDriver::new());
+    capable
+        .push(tagged_env("capable"))
+        .await
+        .expect("capable push");
+    let failover = FailoverQueueDriver::new(vec![
+        ("unsupported".into(), unsupported as Arc<dyn QueueDriver>),
+        ("capable".into(), capable.clone() as Arc<dyn QueueDriver>),
+    ])
+    .expect("two drivers");
+
+    let queues = ["default".to_owned()];
+    let error = failover
+        .pop_from(Duration::from_secs(30), &queues)
+        .await
+        .expect_err("filter support must be preflighted for every connection");
+    assert!(
+        error.to_string().contains("unsupported"),
+        "the error must identify the incapable connection: {error}"
+    );
+    assert_eq!(
+        capable.pending_size().await.expect("capable pending"),
+        1,
+        "preflight failure must happen before a capable fallback is drained"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn unknown_filter_error_stops_before_polling_a_later_supported_connection() {
+    let capable = Arc::new(MemoryQueueDriver::new());
+    capable
+        .push(tagged_env("capable"))
+        .await
+        .expect("capable push");
+    let failover = FailoverQueueDriver::new(vec![
+        (
+            "unknown".into(),
+            Arc::new(DefaultDeadlineDriver) as Arc<dyn QueueDriver>,
+        ),
+        ("capable".into(), capable.clone() as Arc<dyn QueueDriver>),
+    ])
+    .expect("two drivers");
+
+    let error = failover
+        .pop_from(Duration::from_secs(30), &["default".to_owned()])
+        .await
+        .expect_err("an unknown driver's filter error must stop this poll");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(
+        capable.pending_size().await.expect("capable pending"),
+        1,
+        "later connections must not be drained after an unknown filter implementation errors"
     );
 }
 
@@ -366,63 +1253,50 @@ async fn every_failing_connection_reports_itself_once() {
 
 #[tokio::test]
 #[serial]
-async fn reads_never_fail_over() {
-    // Jobs pushed while the primary is broken land on the fallback; every
-    // read goes to the PRIMARY only, so it sees nothing. That asymmetry is
-    // the contract - a reservation token is meaningful only to the driver
-    // that issued it.
-    let (_p, fallback, failover) = build(true);
-    Queue::set_driver(failover.clone());
-    Queue::push(FailoverJob).await.expect("push");
+async fn aggregate_counters_listings_and_clear_span_every_driver_in_configured_order() {
+    let (primary, fallback, failover) = build(true);
+    failover
+        .push(tagged_env("fallback"))
+        .await
+        .expect("fallback push");
+    primary.broken.store(false, Ordering::SeqCst);
+    failover
+        .push(tagged_env("primary"))
+        .await
+        .expect("primary push");
 
-    assert_eq!(
-        fallback.size().await.expect("fallback size"),
-        1,
-        "precondition: the job really is on the fallback"
-    );
-    assert!(
-        failover
-            .pop(Duration::from_secs(1))
-            .await
-            .expect("pop")
-            .is_none(),
-        "pop must delegate to the primary only, never the fallback"
-    );
-    assert!(
-        failover
-            .pop_from(Duration::from_secs(1), &["default".to_string()])
-            .await
-            .expect("pop_from")
-            .is_none(),
-        "pop_from must delegate to the primary only"
-    );
+    assert_eq!(primary.pending_size().await.expect("primary pending"), 1);
+    assert_eq!(fallback.pending_size().await.expect("fallback pending"), 1);
     assert_eq!(
         failover.size().await.expect("size"),
-        0,
-        "size = primary only"
+        2,
+        "size must include both configured drivers"
     );
     assert_eq!(
         failover.pending_size().await.expect("pending_size"),
-        0,
-        "pending_size = primary only"
+        2,
+        "pending_size must include both configured drivers"
     );
     assert_eq!(
         failover.delayed_size().await.expect("delayed_size"),
         0,
-        "delayed_size = primary only"
+        "neither driver contains a delayed job"
     );
     assert_eq!(
         failover.reserved_size().await.expect("reserved_size"),
         0,
-        "reserved_size = primary only"
+        "neither driver contains a reservation"
     );
-    assert!(
-        failover
-            .pending_jobs(None)
-            .await
-            .expect("pending_jobs")
-            .is_empty(),
-        "pending_jobs = primary only"
+
+    let pending = failover.pending_jobs(None).await.expect("pending_jobs");
+    let tags: Vec<Option<&str>> = pending
+        .iter()
+        .map(|job| job.payload["tag"].as_str())
+        .collect();
+    assert_eq!(
+        tags,
+        vec![Some("primary"), Some("fallback")],
+        "listings must concatenate drivers in configured order"
     );
     assert!(
         failover
@@ -430,7 +1304,7 @@ async fn reads_never_fail_over() {
             .await
             .expect("delayed_jobs")
             .is_empty(),
-        "delayed_jobs = primary only"
+        "the aggregate delayed listing must be empty"
     );
     assert!(
         failover
@@ -438,25 +1312,35 @@ async fn reads_never_fail_over() {
             .await
             .expect("reserved_jobs")
             .is_empty(),
-        "reserved_jobs = primary only"
+        "the aggregate reserved listing must be empty"
     );
     assert_eq!(
         failover.clear().await.expect("clear"),
+        2,
+        "clear must report the sum removed from every driver"
+    );
+    assert_eq!(
+        primary.size().await.expect("primary size after clear"),
         0,
-        "clear = primary only; the fallback's backlog survives"
+        "clear must empty the primary"
     );
     assert_eq!(
         fallback.size().await.expect("fallback size after clear"),
-        1,
-        "clear must not reach into a connection whose lifecycle we do not own"
+        0,
+        "clear must empty the fallback"
+    );
+    assert_eq!(
+        failover.size().await.expect("aggregate size after clear"),
+        0,
+        "the aggregate must be empty after clear"
     );
 }
 
 #[tokio::test]
 #[serial]
 async fn lifecycle_calls_reach_the_primary_that_issued_the_token() {
-    // The primary is healthy here, so the reservation exists on it; ack via
-    // the decorator must settle that reservation and nothing else.
+    // The primary is healthy here, so the reservation exists on it; the
+    // aggregate-issued alias must route ack back to that exact reservation.
     let (primary, _f, failover) = build(false);
     Queue::set_driver(failover.clone());
     Queue::push(FailoverJob).await.expect("push");
@@ -481,14 +1365,97 @@ async fn lifecycle_calls_reach_the_primary_that_issued_the_token() {
 
 #[tokio::test]
 #[serial]
+async fn fallback_nack_routes_to_the_driver_that_issued_the_token() {
+    let (_primary, fallback, failover) = build(true);
+    failover
+        .push(tagged_env("fallback-nack"))
+        .await
+        .expect("fallback push");
+    let reservation = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("aggregate pop")
+        .expect("fallback reservation");
+    let id = reservation.envelope.id;
+    let attempts = reservation.envelope.attempts;
+
+    failover
+        .nack(&reservation.token, Duration::ZERO)
+        .await
+        .expect("aggregate nack");
+    assert_eq!(fallback.pending_size().await.expect("pending"), 1);
+    assert_eq!(fallback.reserved_size().await.expect("reserved"), 0);
+
+    let retried = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("aggregate retry pop")
+        .expect("retried fallback reservation");
+    assert_eq!(retried.envelope.id, id);
+    assert_eq!(
+        retried.envelope.attempts,
+        attempts + 1,
+        "nack must burn one attempt on the issuing fallback"
+    );
+    failover.ack(&retried.token).await.expect("cleanup ack");
+}
+
+#[tokio::test]
+#[serial]
+async fn fallback_release_routes_to_the_driver_that_issued_the_token() {
+    let (_primary, fallback, failover) = build(true);
+    failover
+        .push(tagged_env("fallback-release"))
+        .await
+        .expect("fallback push");
+    let reservation = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("aggregate pop")
+        .expect("fallback reservation");
+    let id = reservation.envelope.id;
+    let attempts = reservation.envelope.attempts;
+
+    failover
+        .release(&reservation.token, &reservation.envelope, Duration::ZERO)
+        .await
+        .expect("aggregate release");
+    assert_eq!(fallback.pending_size().await.expect("pending"), 1);
+    assert_eq!(fallback.reserved_size().await.expect("reserved"), 0);
+
+    let released = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("aggregate release pop")
+        .expect("released fallback reservation");
+    assert_eq!(released.envelope.id, id);
+    assert_eq!(
+        released.envelope.attempts, attempts,
+        "release must preserve attempts on the issuing fallback"
+    );
+    failover.ack(&released.token).await.expect("cleanup ack");
+}
+
+#[tokio::test]
+#[serial]
 async fn settle_reports_the_primary_answer() {
-    let (_p, _f, failover) = build(false);
+    let (primary, _fallback, failover) = build(false);
+    failover
+        .push(tagged_env("primary-settle"))
+        .await
+        .expect("primary push");
+    let reservation = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("aggregate pop")
+        .expect("primary reservation");
+    assert_eq!(primary.reserved_size().await.expect("reserved"), 1);
+
     // `FlakyDriver::settle` answers `Stale`, which neither the trait default
     // nor the fallback memory driver ever produces. Asserting on it is what
-    // makes this test fail if the decorator stops forwarding and lets the
-    // trait's own `Unsupported` default answer instead.
+    // proves the aggregate routes its public alias back to the primary.
     let settled = failover
-        .settle(&ReservationToken(Uuid::new_v4()), &[])
+        .settle(&reservation.token, &[])
         .await
         .expect("settle");
     assert_eq!(
@@ -496,6 +1463,172 @@ async fn settle_reports_the_primary_answer() {
         Settled::Stale,
         "settle must report the primary's answer, not the decorator's default"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn unknown_alias_settle_is_stale_never_unsupported() {
+    let first = Arc::new(MemoryQueueDriver::new());
+    let second = Arc::new(MemoryQueueDriver::new());
+    let failover = FailoverQueueDriver::new(vec![
+        ("first".into(), first as Arc<dyn QueueDriver>),
+        ("second".into(), second as Arc<dyn QueueDriver>),
+    ])
+    .expect("two drivers");
+
+    assert_eq!(
+        failover
+            .settle(
+                &ReservationToken(Uuid::from_u128(0xdead_beef_dead_beef)),
+                &[],
+            )
+            .await
+            .expect("unknown settle"),
+        Settled::Stale,
+        "an unknown aggregate alias must not inherit a backend's Unsupported answer"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn expired_alias_is_stale_and_cannot_reach_its_former_issuer() {
+    let issuer = Arc::new(ScriptedDriver::new([tagged_env("expired")]));
+    let failover = FailoverQueueDriver::new(vec![(
+        "issuer".into(),
+        issuer.clone() as Arc<dyn QueueDriver>,
+    )])
+    .expect("one driver");
+    let reservation = failover
+        .pop(Duration::ZERO)
+        .await
+        .expect("aggregate pop")
+        .expect("reservation");
+
+    assert_eq!(
+        failover
+            .settle(&reservation.token, &[])
+            .await
+            .expect("expired settle"),
+        Settled::Stale,
+        "an alias at its lease deadline must not expose the issuer's Unsupported answer"
+    );
+    failover
+        .ack(&reservation.token)
+        .await
+        .expect("expired ack is idempotent");
+    assert_eq!(
+        issuer.acknowledgements(),
+        0,
+        "an expired alias must never reach a possibly reused inner token"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn recovered_busy_primary_cannot_starve_the_fallback() {
+    let (primary, _fallback, failover) = build(true);
+    failover
+        .push(tagged_env("fallback"))
+        .await
+        .expect("fallback push");
+    primary.broken.store(false, Ordering::SeqCst);
+    failover
+        .push(tagged_env("primary-one"))
+        .await
+        .expect("first primary push");
+    failover
+        .push(tagged_env("primary-two"))
+        .await
+        .expect("second primary push");
+
+    let first = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("first aggregate pop")
+        .expect("first reservation");
+    let second = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("second aggregate pop")
+        .expect("second reservation");
+    let popped_tags = [
+        first.envelope.payload["tag"].as_str(),
+        second.envelope.payload["tag"].as_str(),
+    ];
+    assert!(
+        popped_tags.contains(&Some("fallback")),
+        "two fair pops must visit the fallback while the primary remains busy; got {popped_tags:?}"
+    );
+    assert_eq!(
+        primary.pending_size().await.expect("primary pending"),
+        1,
+        "the primary must still be busy when the fallback is selected"
+    );
+
+    failover.ack(&first.token).await.expect("first cleanup ack");
+    failover
+        .ack(&second.token)
+        .await
+        .expect("second cleanup ack");
+}
+
+#[tokio::test]
+#[serial]
+async fn colliding_inner_tokens_receive_distinct_aliases_and_route_to_their_issuers() {
+    let first = Arc::new(ScriptedDriver::new([tagged_env("first")]));
+    let second = Arc::new(ScriptedDriver::new([tagged_env("second")]));
+    let failover = FailoverQueueDriver::new(vec![
+        ("first".into(), first.clone() as Arc<dyn QueueDriver>),
+        ("second".into(), second.clone() as Arc<dyn QueueDriver>),
+    ])
+    .expect("two drivers");
+
+    let first_reservation = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("first aggregate pop")
+        .expect("first reservation");
+    let second_reservation = failover
+        .pop(Duration::from_secs(30))
+        .await
+        .expect("second aggregate pop")
+        .expect("second reservation");
+    let first_issuer = first_reservation.envelope.payload["tag"]
+        .as_str()
+        .expect("first issuer tag");
+    let second_issuer = second_reservation.envelope.payload["tag"]
+        .as_str()
+        .expect("second issuer tag");
+    assert_ne!(
+        first_issuer, second_issuer,
+        "the two pops must come from different issuers"
+    );
+    assert_ne!(
+        first_reservation.token, second_reservation.token,
+        "equal backend tokens must receive distinct public aliases"
+    );
+
+    failover
+        .ack(&first_reservation.token)
+        .await
+        .expect("first alias ack");
+    let counts_after_first = (first.acknowledgements(), second.acknowledgements());
+    let expected_after_first = if first_issuer == "first" {
+        (1, 0)
+    } else {
+        (0, 1)
+    };
+    assert_eq!(
+        counts_after_first, expected_after_first,
+        "the first alias must reach only its issuer"
+    );
+
+    failover
+        .ack(&second_reservation.token)
+        .await
+        .expect("second alias ack");
+    assert_eq!(first.acknowledgements(), 1);
+    assert_eq!(second.acknowledgements(), 1);
 }
 
 #[tokio::test]

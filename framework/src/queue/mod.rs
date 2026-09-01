@@ -31,7 +31,7 @@ pub use batch::{
 pub use chain::{ChainLink, PendingChain};
 pub use database::DatabaseQueueDriver;
 pub use debounce::{DebounceOptions, Debounced};
-pub use driver::{QueueDriver, Reservation, ReservationToken, Settled};
+pub use driver::{QueueDriver, QueueFilterCapability, Reservation, ReservationToken, Settled};
 pub use envelope::{CURRENT_SCHEMA_VERSION, Envelope, EnvelopeError};
 pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
 pub use failed::{
