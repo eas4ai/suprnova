@@ -15,14 +15,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use magnetar::broker::{BrokerConfig, BrokerError, RefreshRequest, TokenBroker};
-use magnetar::crypto::{CryptoPurpose, Encryptor};
+use magnetar::broker::{
+    BrokerConfig, BrokerError, RefreshRequest, TokenBroker, TokenBrokerService,
+};
+use magnetar::crypto::{AeadEncryptor, CryptoPurpose, Encryptor};
 use magnetar::oauth::{InvalidGrantMeaning, OAuthProviderRegistry};
 use magnetar::storage::CommitProviderToken;
+use magnetar::storage::provider_tokens::{exchange_claim_id, is_exchange_claim_id};
+use magnetar::{Error, Result};
 use secrecy::ExposeSecret;
 
 use broker_harness::{
-    BrokerMockProvider, DelayedScriptedHttpTransport, RecordingReuseHook, fast_config, harness,
+    BrokerMockProvider, DelayedScriptedHttpTransport, LegacyDelegatingProviderTokenStore,
+    RecordingReuseHook, fast_config, harness,
 };
 
 fn registry_with(provider: BrokerMockProvider) -> OAuthProviderRegistry {
@@ -31,6 +36,37 @@ fn registry_with(provider: BrokerMockProvider) -> OAuthProviderRegistry {
         .register(Arc::new(provider))
         .expect("mock provider registers");
     registry
+}
+
+fn exchange_commit(now: chrono::DateTime<Utc>) -> CommitProviderToken {
+    CommitProviderToken {
+        access_ciphertext: vec![1],
+        refresh_ciphertext: Some(vec![2]),
+        raw_payload_ciphertext: vec![3],
+        token_type: "Bearer".to_owned(),
+        scopes: "read".to_owned(),
+        access_expires_at: Some(now + ChronoDuration::hours(1)),
+        new_generation: 1,
+    }
+}
+
+struct RejectRefreshEncryption {
+    inner: Arc<AeadEncryptor>,
+}
+
+impl Encryptor for RejectRefreshEncryption {
+    fn encrypt(&self, purpose: CryptoPurpose, plaintext: &[u8]) -> Result<Vec<u8>> {
+        if purpose == CryptoPurpose::RefreshToken {
+            return Err(Error::Internal {
+                message: "scripted refresh-token encryption failure".to_owned(),
+            });
+        }
+        self.inner.encrypt(purpose, plaintext)
+    }
+
+    fn decrypt(&self, purpose: CryptoPurpose, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.inner.decrypt(purpose, ciphertext)
+    }
 }
 
 // --- lease happy path / freshness-driven refresh -----------------------
@@ -161,31 +197,403 @@ async fn non_rotating_response_retains_refresh_token_and_generation() {
 // --- generation CAS: stale winner discards ------------------------------
 
 #[tokio::test]
-async fn stale_completion_cannot_overwrite_a_reclaimed_lease() {
+async fn rotated_success_then_local_failure_never_replays_predecessor_after_claim_expiry() {
     let harness = harness().await;
-    let record_id = "linked:reclaim-race";
-    harness
-        .seed(
-            record_id,
+    let record_id = "linked:rotated-local-failure";
+    harness.seed_expired(record_id, "mock").await;
+
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_json(
+        200,
+        r#"{"access_token":"access-v1","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-v1"}"#,
+    );
+    transport.push_json(
+        200,
+        r#"{"access_token":"replayed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"replayed-refresh"}"#,
+    );
+    let config = BrokerConfig {
+        single_flight: false,
+        provider_call_timeout: Duration::from_millis(20),
+        lease_grace: Duration::from_millis(10),
+        poll_interval: Duration::from_millis(2),
+        ..BrokerConfig::default()
+    };
+    let service = TokenBrokerService::new(
+        harness.store.clone(),
+        Arc::new(RejectRefreshEncryption {
+            inner: harness.encryptor.clone(),
+        }),
+        transport.clone(),
+        Arc::new(registry_with(BrokerMockProvider::new(
             "mock",
-            Some("old-access"),
-            Some("original-refresh"),
-            Some(Utc::now() - ChronoDuration::hours(1)),
+            "https://mock.test/token",
+        ))),
+        config,
+    );
+
+    let first = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(
+        matches!(first, Err(BrokerError::Storage(_))),
+        "the scripted local encryption failure must surface after the provider succeeds, got {first:?}"
+    );
+    assert_eq!(transport.request_count(), 1);
+
+    tokio::time::sleep(Duration::from_millis(45)).await;
+    let second = tokio::time::timeout(
+        Duration::from_millis(100),
+        service.refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        }),
+    )
+    .await
+    .expect("an uncertain completed exchange must resolve without waiting on a new provider call");
+    assert_eq!(
+        transport.request_count(),
+        1,
+        "the predecessor refresh token must never be replayed after an uncertain rotated exchange"
+    );
+    assert!(matches!(
+        second,
+        Err(BrokerError::Revoked {
+            reused: false,
+            ref record_id,
+        }) if record_id == "linked:rotated-local-failure"
+    ));
+}
+
+#[tokio::test]
+async fn abandoned_exchange_started_claim_requires_reauthorization_without_second_request() {
+    let harness = harness().await;
+    let record_id = "linked:abandoned-exchange";
+    harness.seed_expired(record_id, "mock").await;
+
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_json_after(
+        Duration::from_secs(5),
+        200,
+        r#"{"access_token":"abandoned-access","token_type":"Bearer","expires_in":3600,"refresh_token":"abandoned-refresh"}"#,
+    );
+    transport.push_json(
+        200,
+        r#"{"access_token":"replayed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"replayed-refresh"}"#,
+    );
+    let config = BrokerConfig {
+        single_flight: false,
+        provider_call_timeout: Duration::from_millis(20),
+        lease_grace: Duration::from_millis(10),
+        poll_interval: Duration::from_millis(2),
+        ..BrokerConfig::default()
+    };
+    let service = Arc::new(harness.service(
+        transport.clone(),
+        registry_with(BrokerMockProvider::new("mock", "https://mock.test/token")),
+        config,
+        Arc::new(RecordingReuseHook::default()),
+    ));
+
+    let leader_service = service.clone();
+    let leader_record_id = record_id.to_owned();
+    let leader = tokio::spawn(async move {
+        leader_service
+            .refresh(RefreshRequest {
+                record_id: leader_record_id,
+                presented_generation: 0,
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), transport.wait_for_request_count(1))
+        .await
+        .expect("the leader must begin its provider exchange");
+    let in_flight = harness.store.read(record_id).await.unwrap().unwrap();
+    assert!(
+        in_flight
+            .claim_id
+            .as_deref()
+            .is_some_and(is_exchange_claim_id),
+        "the durable exchange marker must be committed before the transport observes the request"
+    );
+    leader.abort();
+    let _ = leader.await;
+
+    tokio::time::sleep(Duration::from_millis(45)).await;
+    let second = tokio::time::timeout(
+        Duration::from_millis(100),
+        service.refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        }),
+    )
+    .await
+    .expect("an abandoned exchange must fail closed without waiting on another provider call");
+    assert_eq!(
+        transport.request_count(),
+        1,
+        "an abandoned exchange-started claim must never send a second provider request"
+    );
+    assert!(matches!(
+        second,
+        Err(BrokerError::Revoked {
+            reused: false,
+            ref record_id,
+        }) if record_id == "linked:abandoned-exchange"
+    ));
+}
+
+#[tokio::test]
+async fn exchange_claim_transition_is_strict_and_never_reclaimable() {
+    let harness = harness().await;
+    let record_id = "linked:exchange-transition";
+    harness.seed_expired(record_id, "mock").await;
+    let store = harness.store.as_ref();
+    let now = Utc::now();
+    let deadline = now + ChronoDuration::seconds(30);
+    assert!(
+        store
+            .claim(record_id, 0, "ordinary-owner", deadline, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_exchange_started(record_id, "wrong-owner", 0, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_exchange_started(record_id, "ordinary-owner", 1, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_exchange_started(record_id, "ordinary-owner", 0, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_exchange_started(record_id, "ordinary-owner", 0, now)
+            .await
+            .unwrap(),
+        "the ordinary-to-exchange transition must be one-shot"
+    );
+
+    let marked = store.read(record_id).await.unwrap().unwrap();
+    let expected_exchange_id = exchange_claim_id("ordinary-owner");
+    assert_eq!(
+        marked.claim_id.as_deref(),
+        Some(expected_exchange_id.as_str())
+    );
+    assert_eq!(marked.claim_deadline, Some(deadline));
+    assert!(
+        !store
+            .heartbeat(
+                record_id,
+                &expected_exchange_id,
+                deadline + ChronoDuration::seconds(30),
+            )
+            .await
+            .unwrap(),
+        "heartbeat must not extend an exchange fence"
+    );
+    assert!(
+        !store
+            .mark_revoked_by_claim(record_id, &expected_exchange_id, true)
+            .await
+            .unwrap(),
+        "legacy revocation must not bypass the exchange generation check"
+    );
+    assert!(
+        !store
+            .revoke_family_if_unrevoked(record_id, deadline)
+            .await
+            .unwrap(),
+        "stale-presenter revocation must not consume an exchange fence"
+    );
+    assert!(
+        !store
+            .claim(record_id, 0, "late-reclaimer", deadline, deadline)
+            .await
+            .unwrap(),
+        "an expired exchange-started claim must remain quarantined"
+    );
+
+    let expired_id = "linked:expired-pre-exchange";
+    harness.seed_expired(expired_id, "mock").await;
+    assert!(
+        store
+            .claim(
+                expired_id,
+                0,
+                "expired-owner",
+                now - ChronoDuration::milliseconds(1),
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_exchange_started(expired_id, "expired-owner", 0, now)
+            .await
+            .unwrap(),
+        "an expired ordinary owner must not begin an exchange"
+    );
+    assert!(
+        store
+            .claim(
+                expired_id,
+                0,
+                "replacement-owner",
+                now + ChronoDuration::seconds(30),
+                now,
+            )
+            .await
+            .unwrap(),
+        "an expired pre-exchange claim must remain reclaimable"
+    );
+
+    let revoked_id = "linked:revoked-pre-exchange";
+    harness.seed_expired(revoked_id, "mock").await;
+    assert!(
+        store
+            .claim(
+                revoked_id,
+                0,
+                "revoked-owner",
+                now + ChronoDuration::seconds(30),
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_revoked_by_claim(revoked_id, "revoked-owner", false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_exchange_started(revoked_id, "revoked-owner", 0, now)
+            .await
+            .unwrap(),
+        "a revoked family must not begin an exchange"
+    );
+}
+
+#[tokio::test]
+async fn exchange_completion_requires_exact_owner_generation_and_live_family() {
+    let harness = harness().await;
+    let record_id = "linked:exchange-completion";
+    harness.seed_expired(record_id, "mock").await;
+    let store = harness.store.as_ref();
+    let now = Utc::now();
+    let exchange_id = harness
+        .start_exchange(
+            record_id,
+            0,
+            "completion-owner",
+            now + ChronoDuration::seconds(30),
+            now,
         )
         .await;
+    assert!(
+        !store
+            .commit_exchange(
+                record_id,
+                &exchange_claim_id("wrong-owner"),
+                0,
+                exchange_commit(now),
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .commit_exchange(record_id, &exchange_id, 1, exchange_commit(now))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .commit_exchange(record_id, &exchange_id, 0, exchange_commit(now))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .commit_exchange(record_id, &exchange_id, 0, exchange_commit(now))
+            .await
+            .unwrap(),
+        "an exchange completion must be one-shot"
+    );
+
+    let committed = store.read(record_id).await.unwrap().unwrap();
+    assert_eq!(committed.generation, 1);
+    assert!(committed.claim_id.is_none());
+    assert!(committed.revoked_at.is_none());
+}
+
+#[tokio::test]
+async fn exchange_revocation_requires_exact_owner_and_generation() {
+    let harness = harness().await;
+    let store = harness.store.as_ref();
+    let now = Utc::now();
+
+    let revoked_id = "linked:exchange-revocation";
+    harness.seed_expired(revoked_id, "mock").await;
+    let revoke_exchange_id = harness
+        .start_exchange(
+            revoked_id,
+            0,
+            "revoke-owner",
+            now + ChronoDuration::seconds(30),
+            now,
+        )
+        .await;
+    assert!(
+        !store
+            .mark_revoked_by_exchange(revoked_id, &exchange_claim_id("wrong-owner"), 0, true,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_revoked_by_exchange(revoked_id, &revoke_exchange_id, 1, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_revoked_by_exchange(revoked_id, &revoke_exchange_id, 0, true)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn expired_exchange_is_not_reclaimed_while_original_completion_can_commit() {
+    let harness = harness().await;
+    let record_id = "linked:reclaim-race";
+    harness.seed_expired(record_id, "mock").await;
 
     let registry = registry_with(BrokerMockProvider::new("mock", "https://mock.test/token"));
     let transport = Arc::new(DelayedScriptedHttpTransport::default());
     // The first caller through the door becomes leader and is scripted
-    // slow; the second reclaims the lease once it expires and is fast.
+    // past its lease deadline. Its durable exchange marker must prevent a
+    // second predecessor request even while its completion remains valid.
     transport.push_json_after(
         Duration::from_millis(150),
         200,
         r#"{"access_token":"slow-leader-token","token_type":"Bearer","expires_in":3600,"refresh_token":"slow-leader-refresh"}"#,
-    );
-    transport.push_json(
-        200,
-        r#"{"access_token":"fast-reclaimer-token","token_type":"Bearer","expires_in":3600,"refresh_token":"fast-reclaimer-refresh"}"#,
     );
     let hook = Arc::new(RecordingReuseHook::default());
     let config = BrokerConfig {
@@ -207,39 +615,38 @@ async fn stale_completion_cannot_overwrite_a_reclaimed_lease() {
             })
             .await
     });
-    // Give the leader a deterministic head start so it claims first.
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    let reclaimer_service = service.clone();
-    let reclaimer_record_id = record_id.to_owned();
-    let reclaimer = tokio::spawn(async move {
-        reclaimer_service
+    tokio::time::timeout(Duration::from_secs(1), transport.wait_for_request_count(1))
+        .await
+        .expect("the original leader must begin its provider exchange");
+    let follower_service = service.clone();
+    let follower_record_id = record_id.to_owned();
+    let follower = tokio::spawn(async move {
+        follower_service
             .refresh(RefreshRequest {
-                record_id: reclaimer_record_id,
+                record_id: follower_record_id,
                 presented_generation: 0,
             })
             .await
     });
 
     let leader_result = leader.await.unwrap();
-    let reclaimer_result = reclaimer.await.unwrap();
+    let follower_result = follower.await.unwrap();
 
-    let reclaimer_token = reclaimer_result.expect("the reclaimer must win and commit");
+    let leader_token = leader_result.expect("the fenced leader may complete after its deadline");
+    assert_eq!(leader_token.value.expose_secret(), "slow-leader-token");
+    assert!(matches!(
+        follower_result,
+        Err(BrokerError::Revoked {
+            reused: false,
+            ref record_id,
+        }) if record_id == "linked:reclaim-race"
+    ));
     assert_eq!(
-        reclaimer_token.value.expose_secret(),
-        "fast-reclaimer-token"
+        transport.request_count(),
+        1,
+        "an expired exchange marker must prevent predecessor replay"
     );
-
-    match leader_result {
-        Err(BrokerError::Terminal { message, .. }) => {
-            assert!(
-                message.contains("reclaimed"),
-                "unexpected terminal message: {message}"
-            );
-        }
-        other => {
-            panic!("expected the stale leader's late completion to be discarded, got {other:?}")
-        }
-    }
+    assert_eq!(hook.count(), 0);
 
     let row = harness.store.read(record_id).await.unwrap().unwrap();
     assert_eq!(row.generation, 1);
@@ -249,8 +656,8 @@ async fn stale_completion_cannot_overwrite_a_reclaimed_lease() {
         .unwrap();
     assert_eq!(
         String::from_utf8(final_access).unwrap(),
-        "fast-reclaimer-token",
-        "the reclaimer's committed token must be the one actually stored"
+        "slow-leader-token",
+        "the original fenced leader's token must be the one actually stored"
     );
 }
 
@@ -364,6 +771,54 @@ async fn live_external_claim_before_its_deadline_is_not_reclaimable() {
         "a live claim well before its own deadline must never be reclaimed early, got {result:?}"
     );
     assert_eq!(transport.request_count(), 0);
+}
+
+#[tokio::test]
+async fn legacy_custom_store_defaults_fail_closed_before_provider_io() {
+    let harness = harness().await;
+    let record_id = "linked:legacy-custom-store";
+    harness.seed_expired(record_id, "mock").await;
+
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_json(
+        200,
+        r#"{"access_token":"must-not-send","token_type":"Bearer","expires_in":3600,"refresh_token":"must-not-rotate"}"#,
+    );
+    let service = TokenBrokerService::new(
+        Arc::new(LegacyDelegatingProviderTokenStore::new(
+            harness.store.clone(),
+        )),
+        harness.encryptor.clone(),
+        transport.clone(),
+        Arc::new(registry_with(BrokerMockProvider::new(
+            "mock",
+            "https://mock.test/token",
+        ))),
+        fast_config(false),
+    );
+
+    let result = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(BrokerError::Storage(Error::Internal { .. }))
+    ));
+    assert_eq!(
+        transport.request_count(),
+        0,
+        "a custom store without exchange fencing support must fail before provider I/O"
+    );
+    let row = harness.store.read(record_id).await.unwrap().unwrap();
+    assert!(
+        row.claim_id
+            .as_deref()
+            .is_some_and(|claim_id| !is_exchange_claim_id(claim_id)),
+        "a failed custom-store fence must leave the pre-exchange claim ordinary"
+    );
 }
 
 // --- GenerationProvenance: Observed adopts, Asserted revokes as reuse --
@@ -652,6 +1107,106 @@ async fn invalid_grant_ordinary_dossier_revokes_without_firing_the_hook() {
     assert_eq!(row.revoked_reused, Some(false));
 }
 
+#[tokio::test]
+async fn provider_declared_non_invalid_grant_remains_quarantined() {
+    let harness = harness().await;
+    let record_id = "linked:provider-rejection";
+    harness.seed_expired(record_id, "mock").await;
+
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_status(
+        400,
+        r#"{"error":"invalid_scope","error_description":"scope rejected"}"#,
+    );
+    transport.push_json(
+        200,
+        r#"{"access_token":"retry-access","token_type":"Bearer","expires_in":3600,"refresh_token":"retry-refresh"}"#,
+    );
+    let service = harness.service(
+        transport.clone(),
+        registry_with(BrokerMockProvider::new("mock", "https://mock.test/token")),
+        fast_config(false),
+        Arc::new(RecordingReuseHook::default()),
+    );
+
+    let first = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(matches!(first, Err(BrokerError::Terminal { .. })));
+    let quarantined = harness.store.read(record_id).await.unwrap().unwrap();
+    assert!(
+        quarantined
+            .claim_id
+            .as_deref()
+            .is_some_and(is_exchange_claim_id)
+    );
+
+    tokio::time::sleep(Duration::from_millis(45)).await;
+    let retry = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(matches!(
+        retry,
+        Err(BrokerError::Revoked { reused: false, .. })
+    ));
+    assert_eq!(
+        transport.request_count(),
+        1,
+        "a post-send provider error cannot prove the predecessor remained usable"
+    );
+}
+
+#[tokio::test]
+async fn malformed_provider_response_remains_quarantined() {
+    let harness = harness().await;
+    let record_id = "linked:malformed-response";
+    harness.seed_expired(record_id, "mock").await;
+
+    let transport = Arc::new(DelayedScriptedHttpTransport::default());
+    transport.push_status(200, r#"{"access_token":42,"token_type":"Bearer"}"#);
+    transport.push_json(
+        200,
+        r#"{"access_token":"must-not-replay","token_type":"Bearer","expires_in":3600,"refresh_token":"must-not-rotate"}"#,
+    );
+    let service = harness.service(
+        transport.clone(),
+        registry_with(BrokerMockProvider::new("mock", "https://mock.test/token")),
+        fast_config(false),
+        Arc::new(RecordingReuseHook::default()),
+    );
+
+    let first = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(matches!(first, Err(BrokerError::Terminal { .. })));
+
+    tokio::time::sleep(Duration::from_millis(45)).await;
+    let retry = service
+        .refresh(RefreshRequest {
+            record_id: record_id.to_owned(),
+            presented_generation: 0,
+        })
+        .await;
+    assert!(matches!(
+        retry,
+        Err(BrokerError::Revoked { reused: false, .. })
+    ));
+    assert_eq!(
+        transport.request_count(),
+        1,
+        "a malformed post-send response must never make the predecessor reclaimable"
+    );
+}
+
 // --- upstream error handling: Retry-After -------------------------------
 
 #[tokio::test]
@@ -690,8 +1245,8 @@ async fn retry_after_propagates_from_upstream_5xx() {
     // reclaim.
     let row = harness.store.read(record_id).await.unwrap().unwrap();
     assert!(
-        row.claim_id.is_some(),
-        "a retriable failure must not clear the claim early"
+        row.claim_id.as_deref().is_some_and(is_exchange_claim_id),
+        "a retriable post-send failure must retain the exchange quarantine"
     );
 }
 
