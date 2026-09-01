@@ -39,10 +39,10 @@ loading is idempotent. If options are supplied without a compatible adapter,
 Live reports one bounded Stimulus-unavailable diagnostic and continues ordinary
 Live behavior.
 
-Neither Stimulus nor Suprnova's bridge/continuity implementation is bundled
-into the core runtime. `@hotwired/stimulus` remains a test-only compatibility
-dependency here, and the application owns its chosen version and controllers;
-the adapter imports no Stimulus package.
+Stimulus is not bundled into the core runtime, and neither is Suprnova's
+bridge/continuity implementation. `@hotwired/stimulus` remains a test-only
+compatibility dependency here, and the application owns its chosen version and
+controllers; the adapter imports no Stimulus package.
 
 The bridge starts and stops that application, loads/unloads only supplied
 definitions, captures controller-root continuity before a morph, validates the
