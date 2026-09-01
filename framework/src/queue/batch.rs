@@ -970,6 +970,10 @@ pub struct PendingBatch {
     /// `add` time because `add` returns `Self` and cannot fail; surfaced by
     /// [`PendingBatch::dispatch`] before anything is stored.
     debounce_rejected: Vec<String>,
+    /// Envelope-construction failures collected by [`PendingBatch::add`]. The
+    /// fluent builder remains infallible, while dispatch rejects the entire
+    /// batch before repository or driver mutation.
+    build_errors: Vec<String>,
 }
 
 impl Default for PendingBatch {
@@ -986,6 +990,7 @@ impl PendingBatch {
             options: BatchOptions::default(),
             envelopes: Vec::new(),
             debounce_rejected: Vec::new(),
+            build_errors: Vec::new(),
         }
     }
 
@@ -1009,7 +1014,11 @@ impl PendingBatch {
         let now = Utc::now();
         let mut env = match crate::queue::build_envelope::<J>(&job, now) {
             Ok(e) => e,
-            Err(_) => return self,
+            Err(error) => {
+                self.build_errors
+                    .push(format!("job `{}`: {error}", J::job_name()));
+                return self;
+            }
         };
         env.batch_id = None; // overwritten on dispatch with the batch id
         self.envelopes.push(env);
@@ -1092,6 +1101,12 @@ impl PendingBatch {
                  superseded job is dropped without settling, which would leave the \
                  batch's pending count above zero and its callbacks unfired",
                 self.debounce_rejected.join(", ")
+            )));
+        }
+        if !self.build_errors.is_empty() {
+            return Err(FrameworkError::internal(format!(
+                "cannot dispatch batch because job envelope construction failed: {}",
+                self.build_errors.join("; ")
             )));
         }
         ensure_default_repository();
