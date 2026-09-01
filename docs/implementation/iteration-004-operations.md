@@ -197,7 +197,10 @@ authority, grants, ledger transitions, provider/quarantine I/O, validation,
 scanning, finalization, compensation, cleanup, signed subscriptions, exact
 WebSocket-origin validation, SSE/WebSocket membership, continuity, backpressure,
 and fresh-render semantics. It validates and serves exact production browser
-artifacts from the asset manifest.
+artifacts from the asset manifest. A WebSocket policy close for an oversized or
+invalid control frame sends a 1008 close frame and then completes the closing
+handshake, waiting at most one second for the peer's close reply before the
+socket is dropped.
 
 The Node host owns only static scenario HTML, CSS, JavaScript drivers, and browser
 test orchestration. It may reverse proxy those static scenarios through the Rust

@@ -1205,12 +1205,7 @@ async fn websocket_session(
                     } else {
                         "control_capacity_exceeded"
                     };
-                    let _ = socket
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1008,
-                            reason: Cow::Borrowed(reason),
-                        })))
-                        .await;
+                    complete_policy_close(&mut socket, reason).await;
                     break;
                 }
                 accepted += 1;
@@ -1222,18 +1217,37 @@ async fn websocket_session(
                         }
                     }
                     Err(code) => {
-                        let _ = socket
-                            .send(Message::Close(Some(CloseFrame {
-                                code: 1008,
-                                reason: Cow::Borrowed(code),
-                            })))
-                            .await;
+                        complete_policy_close(&mut socket, code).await;
                         break;
                     }
                 }
             }
         }
     }
+}
+
+/// Sends a policy close frame and waits for the peer's close reply so the
+/// closing handshake completes before the socket is dropped. Dropping the
+/// socket right after the close frame makes browsers observe an abrupt end of
+/// stream during the handshake, and engines then differ on whether they report
+/// the received close code or an error first.
+async fn complete_policy_close(socket: &mut WebSocket, reason: &'static str) {
+    /// Bound on waiting for a peer that never answers the closing handshake.
+    const POLICY_CLOSE_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(1);
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: 1008,
+            reason: Cow::Borrowed(reason),
+        })))
+        .await;
+    let _ = tokio::time::timeout(POLICY_CLOSE_HANDSHAKE_DEADLINE, async {
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 fn websocket_transport_protocol(value: &str) -> Option<(String, String)> {
