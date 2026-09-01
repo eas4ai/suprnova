@@ -1310,6 +1310,10 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     Ok(())
 }
 
+fn redis_consumer_id(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| format!("suprnova-{}", Uuid::new_v4()))
+}
+
 /// Build one queue driver by connection name, reading that driver's own env.
 ///
 /// Split out of [`bootstrap_from_env`] because a failover connection needs to
@@ -1336,8 +1340,7 @@ async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>
             let stream =
                 std::env::var("QUEUE_REDIS_STREAM").unwrap_or_else(|_| "suprnova-queue".into());
             let group = std::env::var("QUEUE_REDIS_GROUP").unwrap_or_else(|_| "default".into());
-            let consumer =
-                std::env::var("QUEUE_REDIS_CONSUMER").unwrap_or_else(|_| "consumer-1".into());
+            let consumer = redis_consumer_id(std::env::var("QUEUE_REDIS_CONSUMER").ok());
             let visibility = std::time::Duration::from_secs(
                 std::env::var("QUEUE_VISIBILITY_TIMEOUT_SECS")
                     .ok()
@@ -1661,4 +1664,30 @@ pub(crate) fn build_envelope<J: Job>(
         batch_id: None,
         chain_remaining: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redis_consumer_id;
+
+    #[test]
+    fn redis_consumer_id_preserves_an_explicit_override() {
+        let configured = "operator-chosen-consumer".to_string();
+
+        assert_eq!(redis_consumer_id(Some(configured.clone())), configured);
+    }
+
+    #[test]
+    fn default_redis_consumer_ids_are_distinct_and_opaque() {
+        let first = redis_consumer_id(None);
+        let second = redis_consumer_id(None);
+
+        assert_ne!(first, second);
+        for consumer in [first, second] {
+            let id = consumer
+                .strip_prefix("suprnova-")
+                .expect("generated consumer id should use the framework prefix");
+            uuid::Uuid::parse_str(id).expect("generated consumer id should contain only a UUID");
+        }
+    }
 }
