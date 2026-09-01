@@ -51,3 +51,11 @@ rustc-ice-*.txt
 /tests/fixtures/compile/target/
 /tests/fixtures/compile/*/target/
 /.worktrees/
+
+# Agent workspace artifacts (development process, never published)
+/.agents/
+/.claude/
+/.codex/
+/.remember/
+/CLAUDE.md
+/skills-lock.json
