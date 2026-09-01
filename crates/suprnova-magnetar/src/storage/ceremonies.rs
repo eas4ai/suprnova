@@ -77,6 +77,28 @@ pub trait CeremonyStore: Send + Sync {
             message: "atomic transition-and-consume is unavailable".to_owned(),
         })
     }
+
+    /// Atomically transition one live ceremony and consume one exact live record.
+    ///
+    /// `consume_id` binds the transaction to the record observed by a prior read,
+    /// preventing a replacement under the same selector from being consumed. The
+    /// default fails closed so existing external implementors remain compatible.
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_and_consume_exact(
+        &self,
+        _transition_selector: &str,
+        _transition_kind: &str,
+        _expected: &str,
+        _next: &str,
+        _consume_selector: &str,
+        _consume_kind: &str,
+        _consume_id: &str,
+    ) -> Result<Option<CeremonyRecord>> {
+        Err(Error::DependencyUnavailable {
+            dependency: "ceremony store".to_owned(),
+            message: "atomic exact transition-and-consume is unavailable".to_owned(),
+        })
+    }
 }
 
 fn record<S>(model: &<S::Ceremony as EntityBinding>::Model) -> CeremonyRecord
@@ -91,6 +113,111 @@ where
         state: S::Ceremony::read_state(model),
         expires_at: S::Ceremony::read_expires_at(model),
         payload: S::Ceremony::read_payload(model),
+    }
+}
+
+impl<S> SeaOrmStorage<S>
+where
+    S: AuthSchema,
+    S::Ceremony: CeremonyFields,
+    <S::Ceremony as EntityBinding>::Entity: EntityTrait<
+            Model = <S::Ceremony as EntityBinding>::Model,
+            ActiveModel = <S::Ceremony as EntityBinding>::ActiveModel,
+        >,
+    <S::Ceremony as EntityBinding>::Column: ColumnTrait,
+{
+    // The arguments describe both records participating in one atomic boundary.
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_and_consume_matching(
+        &self,
+        transition_selector: &str,
+        transition_kind: &str,
+        expected: &str,
+        next: &str,
+        consume_selector: &str,
+        consume_kind: &str,
+        consume_id: Option<&str>,
+    ) -> Result<Option<CeremonyRecord>> {
+        let transition_selector = transition_selector.to_owned();
+        let transition_kind = transition_kind.to_owned();
+        let expected = expected.to_owned();
+        let next = next.to_owned();
+        let consume_selector = consume_selector.to_owned();
+        let consume_kind = consume_kind.to_owned();
+        let consume_id = consume_id.map(str::to_owned);
+        let transaction = self.database().begin().await.map_err(db_error)?;
+
+        let result = async {
+            let now = Utc::now();
+            let mut grant_query = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::find()
+                .filter(S::Ceremony::selector_column().eq(consume_selector.clone()))
+                .filter(S::Ceremony::kind_column().eq(consume_kind.clone()))
+                .filter(S::Ceremony::used_at_column().is_null())
+                .filter(S::Ceremony::expires_at_column().gt(now));
+            if let Some(consume_id) = consume_id.as_ref() {
+                grant_query =
+                    grant_query.filter(S::Ceremony::ceremony_id_column().eq(consume_id.clone()));
+            }
+            let grant_row = grant_query.one(&transaction).await.map_err(db_error)?;
+            let Some(grant_row) = grant_row else {
+                return Ok(None);
+            };
+            let grant_id = S::Ceremony::read_ceremony_id(&grant_row);
+            if consume_id
+                .as_deref()
+                .is_some_and(|consume_id| consume_id != grant_id.as_str())
+            {
+                return Ok(None);
+            }
+            let grant_record = record::<S>(&grant_row);
+
+            let transitioned =
+                <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::update_many()
+                    .col_expr(S::Ceremony::state_column(), Expr::value(next))
+                    .filter(S::Ceremony::selector_column().eq(transition_selector))
+                    .filter(S::Ceremony::kind_column().eq(transition_kind))
+                    .filter(S::Ceremony::state_column().eq(expected))
+                    .filter(S::Ceremony::used_at_column().is_null())
+                    .filter(S::Ceremony::expires_at_column().gt(now))
+                    .exec(&transaction)
+                    .await
+                    .map_err(db_error)?;
+            if transitioned.rows_affected != 1 {
+                return Ok(None);
+            }
+
+            let deleted = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::delete_many()
+                .filter(S::Ceremony::ceremony_id_column().eq(grant_id))
+                .filter(S::Ceremony::selector_column().eq(consume_selector))
+                .filter(S::Ceremony::kind_column().eq(consume_kind))
+                .filter(S::Ceremony::used_at_column().is_null())
+                .filter(S::Ceremony::expires_at_column().gt(now))
+                .exec(&transaction)
+                .await
+                .map_err(db_error)?;
+            if deleted.rows_affected != 1 {
+                return Ok(None);
+            }
+
+            Ok(Some(grant_record))
+        }
+        .await;
+
+        match result {
+            Ok(Some(grant_record)) => transaction
+                .commit()
+                .await
+                .map_err(db_error)
+                .map(|()| Some(grant_record)),
+            Ok(None) => {
+                transaction.rollback().await.map_err(db_error)?;
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -255,76 +382,51 @@ where
             });
         }
 
-        let transition_selector = transition_selector.to_owned();
-        let transition_kind = transition_kind.to_owned();
-        let expected = expected.to_owned();
-        let next = next.to_owned();
-        let consume_selector = consume_selector.to_owned();
-        let consume_kind = consume_kind.to_owned();
-        let transaction = self.database().begin().await.map_err(db_error)?;
+        self.transition_and_consume_matching(
+            transition_selector,
+            transition_kind,
+            expected,
+            next,
+            consume_selector,
+            consume_kind,
+            None,
+        )
+        .await
+    }
 
-        let result = async {
-            let now = Utc::now();
-            let grant_row = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::find()
-                .filter(S::Ceremony::selector_column().eq(consume_selector.clone()))
-                .filter(S::Ceremony::kind_column().eq(consume_kind.clone()))
-                .filter(S::Ceremony::used_at_column().is_null())
-                .filter(S::Ceremony::expires_at_column().gt(now))
-                .one(&transaction)
-                .await
-                .map_err(db_error)?;
-            let Some(grant_row) = grant_row else {
-                return Ok(None);
-            };
-            let grant_id = S::Ceremony::read_ceremony_id(&grant_row);
-            let grant_record = record::<S>(&grant_row);
-
-            let transitioned =
-                <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::update_many()
-                    .col_expr(S::Ceremony::state_column(), Expr::value(next))
-                    .filter(S::Ceremony::selector_column().eq(transition_selector))
-                    .filter(S::Ceremony::kind_column().eq(transition_kind))
-                    .filter(S::Ceremony::state_column().eq(expected))
-                    .filter(S::Ceremony::used_at_column().is_null())
-                    .filter(S::Ceremony::expires_at_column().gt(now))
-                    .exec(&transaction)
-                    .await
-                    .map_err(db_error)?;
-            if transitioned.rows_affected != 1 {
-                return Ok(None);
-            }
-
-            let deleted = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::delete_many()
-                .filter(S::Ceremony::ceremony_id_column().eq(grant_id))
-                .filter(S::Ceremony::selector_column().eq(consume_selector))
-                .filter(S::Ceremony::kind_column().eq(consume_kind))
-                .filter(S::Ceremony::used_at_column().is_null())
-                .filter(S::Ceremony::expires_at_column().gt(now))
-                .exec(&transaction)
-                .await
-                .map_err(db_error)?;
-            if deleted.rows_affected != 1 {
-                return Ok(None);
-            }
-
-            Ok(Some(grant_record))
+    async fn transition_and_consume_exact(
+        &self,
+        transition_selector: &str,
+        transition_kind: &str,
+        expected: &str,
+        next: &str,
+        consume_selector: &str,
+        consume_kind: &str,
+        consume_id: &str,
+    ) -> Result<Option<CeremonyRecord>> {
+        if transition_selector.is_empty()
+            || transition_kind.is_empty()
+            || expected.is_empty()
+            || next.is_empty()
+            || consume_selector.is_empty()
+            || consume_kind.is_empty()
+            || consume_id.is_empty()
+        {
+            return Err(Error::InvalidInput {
+                field: "ceremony state".to_owned(),
+                message: "selectors, kinds, states, and consume id must be non-empty".to_owned(),
+            });
         }
-        .await;
 
-        match result {
-            Ok(Some(grant_record)) => transaction
-                .commit()
-                .await
-                .map_err(db_error)
-                .map(|()| Some(grant_record)),
-            Ok(None) => {
-                transaction.rollback().await.map_err(db_error)?;
-                Ok(None)
-            }
-            Err(error) => {
-                let _ = transaction.rollback().await;
-                Err(error)
-            }
-        }
+        self.transition_and_consume_matching(
+            transition_selector,
+            transition_kind,
+            expected,
+            next,
+            consume_selector,
+            consume_kind,
+            Some(consume_id),
+        )
+        .await
     }
 }

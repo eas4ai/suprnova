@@ -313,6 +313,159 @@ async fn delete_failure_rolls_back_transition_and_preserves_grant() {
 }
 
 #[tokio::test]
+async fn exact_transition_and_consume_rejects_replaced_consume_record() {
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db);
+    let expires_at = Utc::now() + ChronoDuration::minutes(5);
+    store
+        .create(NewCeremony {
+            selector: "replacement-device".into(),
+            kind: "device-authorization".into(),
+            state: "approved:replacement-grant".into(),
+            payload: b"device".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    store
+        .create(NewCeremony {
+            selector: "replacement-grant".into(),
+            kind: "device-authorization-grant".into(),
+            state: "available".into(),
+            payload: b"grant-a".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let grant_a = store
+        .peek("replacement-grant", "device-authorization-grant")
+        .await
+        .unwrap()
+        .expect("grant A is available for preflight");
+    assert_eq!(
+        store
+            .consume("replacement-grant", "device-authorization-grant")
+            .await
+            .unwrap()
+            .expect("grant A can be consumed before replacement")
+            .id,
+        grant_a.id
+    );
+    let grant_b = store
+        .create(NewCeremony {
+            selector: "replacement-grant".into(),
+            kind: "device-authorization-grant".into(),
+            state: "available".into(),
+            payload: b"grant-b".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    assert_ne!(grant_b.id, grant_a.id);
+
+    assert!(
+        store
+            .transition_and_consume_exact(
+                "replacement-device",
+                "device-authorization",
+                "approved:replacement-grant",
+                "issued",
+                "replacement-grant",
+                "device-authorization-grant",
+                &grant_a.id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .peek("replacement-device", "device-authorization")
+            .await
+            .unwrap()
+            .expect("stale grant ID must not advance the device ceremony")
+            .state,
+        "approved:replacement-grant"
+    );
+    let preserved = store
+        .peek("replacement-grant", "device-authorization-grant")
+        .await
+        .unwrap()
+        .expect("stale grant ID must not consume replacement grant B");
+    assert_eq!(preserved.id, grant_b.id);
+    assert_eq!(preserved.payload, b"grant-b");
+}
+
+#[tokio::test]
+async fn exact_transition_and_consume_selects_expected_duplicate_record() {
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db);
+    let expires_at = Utc::now() + ChronoDuration::minutes(5);
+    store
+        .create(NewCeremony {
+            selector: "duplicate-device".into(),
+            kind: "device-authorization".into(),
+            state: "approved:duplicate-grant".into(),
+            payload: b"device".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let grant_a = store
+        .create(NewCeremony {
+            selector: "duplicate-grant".into(),
+            kind: "device-authorization-grant".into(),
+            state: "available".into(),
+            payload: b"grant-a".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let grant_b = store
+        .create(NewCeremony {
+            selector: "duplicate-grant".into(),
+            kind: "device-authorization-grant".into(),
+            state: "available".into(),
+            payload: b"grant-b".to_vec(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+
+    let consumed = store
+        .transition_and_consume_exact(
+            "duplicate-device",
+            "device-authorization",
+            "approved:duplicate-grant",
+            "issued",
+            "duplicate-grant",
+            "device-authorization-grant",
+            &grant_b.id,
+        )
+        .await
+        .unwrap()
+        .expect("the exact operation must select grant B by ID");
+    assert_eq!(consumed.id, grant_b.id);
+    assert_eq!(consumed.payload, b"grant-b");
+    assert_eq!(
+        store
+            .peek("duplicate-device", "device-authorization")
+            .await
+            .unwrap()
+            .expect("the matching transition must win")
+            .state,
+        "issued"
+    );
+    let preserved = store
+        .peek("duplicate-grant", "device-authorization-grant")
+        .await
+        .unwrap()
+        .expect("the unselected duplicate grant A must remain live");
+    assert_eq!(preserved.id, grant_a.id);
+    assert_eq!(preserved.payload, b"grant-a");
+}
+
+#[tokio::test]
 async fn transition_and_consume_lost_comparison_is_non_destructive_and_single_winner() {
     let db = database().await;
     let store = SeaOrmStorage::<StorageSchema>::new(db);

@@ -521,19 +521,27 @@ impl DeviceAuthorizationService {
                 let grant_selector = &state[APPROVED_PREFIX.len()..];
                 let Some(grant_record) = self
                     .ceremonies
-                    .transition_and_consume(
+                    .peek(grant_selector, DEVICE_GRANT_KIND)
+                    .await?
+                else {
+                    return Ok(DevicePollOutcome::ExpiredToken);
+                };
+                let grant = self.decrypt_grant(&grant_record.payload)?;
+                let Some(_) = self
+                    .ceremonies
+                    .transition_and_consume_exact(
                         &poll_payload.user_code,
                         DEVICE_CEREMONY_KIND,
                         state,
                         ISSUED,
                         grant_selector,
                         DEVICE_GRANT_KIND,
+                        &grant_record.id,
                     )
                     .await?
                 else {
                     return Ok(DevicePollOutcome::ExpiredToken);
                 };
-                let grant = self.decrypt_grant(&grant_record.payload)?;
                 Ok(DevicePollOutcome::Success(Box::new(grant)))
             }
             _ => Ok(DevicePollOutcome::ExpiredToken),

@@ -14,21 +14,151 @@ mod oauth_harness;
 mod storage_schema;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration as StdDuration;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use magnetar::abuse::AbusePolicy;
+use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::oauth::device::{
     DeviceApprovalOutcome, DeviceAuthorizationConfig, DeviceAuthorizationService,
     DeviceCeremonyStatus, DevicePollOutcome,
 };
 use magnetar::sessions::SessionMetadata;
-use magnetar::storage::{CeremonyStore, CredentialActor, DeviceStore};
+use magnetar::storage::{
+    CeremonyRecord, CeremonyStore, CredentialActor, DeviceStore, NewCeremony, SeaOrmStorage,
+};
 use magnetar::{Error, Result};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use secrecy::ExposeSecret;
 
 use grants_harness::create_user;
+
+const TRANSIENT_GRANT_DECODE_ERROR: &str = "forced transient session grant decode failure";
+
+struct FailOnceGrantDecryptor {
+    inner: Arc<dyn Encryptor>,
+    fail_next_grant_decrypt: AtomicBool,
+}
+
+impl Encryptor for FailOnceGrantDecryptor {
+    fn encrypt(&self, purpose: CryptoPurpose, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.inner.encrypt(purpose, plaintext)
+    }
+
+    fn decrypt(&self, purpose: CryptoPurpose, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        if purpose == CryptoPurpose::SessionGrant
+            && self.fail_next_grant_decrypt.swap(false, Ordering::SeqCst)
+        {
+            return Err(Error::Internal {
+                message: TRANSIENT_GRANT_DECODE_ERROR.to_owned(),
+            });
+        }
+        self.inner.decrypt(purpose, ciphertext)
+    }
+}
+
+struct ReplaceGrantAfterPeek {
+    inner: Arc<SeaOrmStorage<storage_schema::StorageSchema>>,
+    replace_next_grant: AtomicBool,
+}
+
+#[async_trait]
+impl CeremonyStore for ReplaceGrantAfterPeek {
+    async fn create(&self, input: NewCeremony) -> Result<CeremonyRecord> {
+        self.inner.create(input).await
+    }
+
+    async fn consume(&self, selector: &str, kind: &str) -> Result<Option<CeremonyRecord>> {
+        self.inner.consume(selector, kind).await
+    }
+
+    async fn peek(&self, selector: &str, kind: &str) -> Result<Option<CeremonyRecord>> {
+        let record = self.inner.peek(selector, kind).await?;
+        if kind == "device-authorization-grant"
+            && let Some(observed) = record.as_ref()
+            && self.replace_next_grant.swap(false, Ordering::SeqCst)
+        {
+            let consumed =
+                self.inner
+                    .consume(selector, kind)
+                    .await?
+                    .ok_or_else(|| Error::Internal {
+                        message: "replacement seam lost the observed grant".to_owned(),
+                    })?;
+            if consumed.id != observed.id {
+                return Err(Error::Internal {
+                    message: "replacement seam consumed a different grant".to_owned(),
+                });
+            }
+            self.inner
+                .create(NewCeremony {
+                    selector: observed.selector.clone(),
+                    kind: observed.kind.clone(),
+                    state: observed.state.clone(),
+                    payload: observed.payload.clone(),
+                    expires_at: observed.expires_at,
+                })
+                .await?;
+        }
+        Ok(record)
+    }
+
+    async fn transition(
+        &self,
+        selector: &str,
+        kind: &str,
+        expected: &str,
+        next: &str,
+    ) -> Result<bool> {
+        self.inner.transition(selector, kind, expected, next).await
+    }
+
+    async fn transition_and_consume(
+        &self,
+        transition_selector: &str,
+        transition_kind: &str,
+        expected: &str,
+        next: &str,
+        consume_selector: &str,
+        consume_kind: &str,
+    ) -> Result<Option<CeremonyRecord>> {
+        self.inner
+            .transition_and_consume(
+                transition_selector,
+                transition_kind,
+                expected,
+                next,
+                consume_selector,
+                consume_kind,
+            )
+            .await
+    }
+
+    async fn transition_and_consume_exact(
+        &self,
+        transition_selector: &str,
+        transition_kind: &str,
+        expected: &str,
+        next: &str,
+        consume_selector: &str,
+        consume_kind: &str,
+        consume_id: &str,
+    ) -> Result<Option<CeremonyRecord>> {
+        self.inner
+            .transition_and_consume_exact(
+                transition_selector,
+                transition_kind,
+                expected,
+                next,
+                consume_selector,
+                consume_kind,
+                consume_id,
+            )
+            .await
+    }
+}
 
 async fn actor(
     h: &grants_harness::GrantsHarness,
@@ -289,6 +419,111 @@ async fn issued_transition_failure_does_not_destroy_device_grant() {
         DevicePollOutcome::ExpiredToken => {}
         other => panic!("expected ExpiredToken on redemption replay, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn transient_grant_decode_failure_keeps_approved_device_grant_retryable() {
+    let h = grants_harness::harness().await;
+    let user_id = create_user(&h.storage(), "grant-decode-retry@example.test").await;
+    let actor = actor(&h, &user_id, "grant-decode-retry-browser").await;
+    h.factors.set_enrolled(false);
+    let encryptor = Arc::new(FailOnceGrantDecryptor {
+        inner: h.oauth.encryptor.clone(),
+        fail_next_grant_decrypt: AtomicBool::new(true),
+    });
+    let svc = DeviceAuthorizationService::new(
+        h.storage(),
+        h.storage(),
+        h.storage(),
+        h.gate.clone(),
+        h.sessions.clone(),
+        h.oauth.limiter.clone(),
+        encryptor,
+        DeviceAuthorizationConfig::default(),
+    );
+
+    let issued = svc.issue_code().await.unwrap();
+    let outcome = svc
+        .approve(&issued.user_code, &actor, SessionMetadata::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DeviceApprovalOutcome::Approved));
+
+    let error = svc
+        .poll(issued.device_code.expose_secret())
+        .await
+        .expect_err("the first session grant decode must surface its local failure");
+    assert!(
+        matches!(error, Error::Internal { message } if message == TRANSIENT_GRANT_DECODE_ERROR),
+        "the forced local decode error must be preserved"
+    );
+
+    let grant = match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::Success(grant) => grant,
+        other => panic!("expected Success after the transient decode failure, got {other:?}"),
+    };
+    assert_eq!(grant.user_id(), user_id);
+}
+
+#[tokio::test]
+async fn poll_rejects_stale_preflight_when_grant_is_replaced_before_atomic_redemption() {
+    let h = grants_harness::harness().await;
+    let user_id = create_user(&h.storage(), "grant-replacement@example.test").await;
+    let actor = actor(&h, &user_id, "grant-replacement-browser").await;
+    h.factors.set_enrolled(false);
+    let ceremonies = Arc::new(ReplaceGrantAfterPeek {
+        inner: h.storage(),
+        replace_next_grant: AtomicBool::new(true),
+    });
+    let svc = DeviceAuthorizationService::new(
+        ceremonies,
+        h.storage(),
+        h.storage(),
+        h.gate.clone(),
+        h.sessions.clone(),
+        h.oauth.limiter.clone(),
+        h.oauth.encryptor.clone(),
+        DeviceAuthorizationConfig::default(),
+    );
+
+    let issued = svc.issue_code().await.unwrap();
+    let outcome = svc
+        .approve(&issued.user_code, &actor, SessionMetadata::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DeviceApprovalOutcome::Approved));
+
+    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::ExpiredToken => {}
+        DevicePollOutcome::Success(_) => {
+            panic!("a stale preflight must not redeem its replacement, got Success")
+        }
+        other => panic!("a stale preflight must not redeem its replacement, got {other:?}"),
+    }
+    let approved = h
+        .storage()
+        .peek_device(&issued.user_code)
+        .await
+        .unwrap()
+        .expect("replacement mismatch must preserve the approved ceremony");
+    let grant_selector = approved
+        .state
+        .strip_prefix("approved:")
+        .expect("approved state retains its grant selector");
+    assert!(
+        h.storage()
+            .peek(grant_selector, "device-authorization-grant")
+            .await
+            .unwrap()
+            .is_some(),
+        "replacement mismatch must preserve grant B"
+    );
+
+    let grant = match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::Success(grant) => grant,
+        other => panic!("preserved replacement grant must remain retryable, got {other:?}"),
+    };
+    assert_eq!(grant.user_id(), user_id);
 }
 
 #[tokio::test]
