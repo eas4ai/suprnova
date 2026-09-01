@@ -283,7 +283,7 @@ Run Task 3 tests, the external fixture's `cargo check`, relevant engine view tes
 - Create: `framework/tests/live_boot.rs`
 - Create: `framework/tests/live_trusted_context.rs`
 
-- [ ] **Step 1: Write failing boot and hostile-context tests**
+- [x] **Step 1: Write failing boot and hostile-context tests**
 
 Prove deterministic boot, immutable registration after boot, key/config validation, route/slot catalog ownership, bounded context lifetime, body-cap ownership, session/principal/tenant fingerprints, current CSRF/origin/auth/authorization/rate dispositions, proxy normalization, capability-scope binding, missing-provider failures, cancellation, and safe redacted diagnostics. Add branch-specific tests showing that middleware omission, wrong order, exception/bypass branches, short-circuit responses, and stale request reuse cannot mint acceptable proof for action, upload, SSE-control, or WebSocket-handshake admission.
 
@@ -295,27 +295,27 @@ rtk cargo test -p suprnova --test live_boot --test live_trusted_context
 
 Expected: failure because no runtime graph or context adapter exists.
 
-- [ ] **Step 2: Make application startup fallible and order it before route construction**
+- [x] **Step 2: Make application startup fallible and order it before route construction**
 
 Add an error-returning route/startup path while retaining the existing infallible `Application::routes` compatibility wrapper. Refactor server startup so service registration and boot complete first, then `LiveRuntime` is validated/bound, then the fallible route closure installs routes, then `Server` begins listening. Give programmatic `Server::new`/`Server::from_config` users the same prepared-runtime path; no test-only lifecycle may make Live work when the public server cannot. Runtime or route-construction errors return from the fallible boundary and are rendered once by the existing top-level boot error policy rather than panicking or partially listening.
 
-- [ ] **Step 3: Build one immutable runtime graph**
+- [x] **Step 3: Build one immutable runtime graph**
 
 Construct and validate `LiveRuntime` during the new ordered startup from `LiveConfig`, `LiveRegistry`, clock/random/key ring, ledger, execution kernel, and configured host ports. Register the runtime in Suprnova's container with an explicit override seam for tests. Reject invalid or colliding configuration before route construction or traffic.
 
-- [ ] **Step 4: Mint non-forgeable security evidence at its owning middleware**
+- [x] **Step 4: Mint non-forgeable security evidence at its owning middleware**
 
 Add a crate-private request-carried `LiveSecurityAttestation` whose constructors and mutation methods are visible only to framework middleware. Session, CSRF/origin, authentication, and both rate-limit middleware families mint their own bounded proof only after the exact successful branch and bind it to request identity, route policy, and current scope. A configured `LiveTenantResolver` plus route middleware resolves the tenant and mints tenant proof; absence is explicit when the mount contract permits it. Applications can read ordinary framework state but cannot construct, clone across requests, or mark these proofs passed. WebSocket proof is finalized before upgrade.
 
-- [ ] **Step 5: Normalize current framework facts once per request**
+- [x] **Step 5: Normalize current framework facts once per request**
 
 Create `LiveRequestContextCandidate` only after ordinary Suprnova middleware has produced current facts. Derive purpose-separated fingerprints without retaining raw credentials. Bind action/upload/subscription capabilities to the exact scope and run the engine validator before endpoint work. Never infer a passed security check from mere header presence.
 
-- [ ] **Step 6: Implement host-owned application ports**
+- [x] **Step 6: Implement host-owned application ports**
 
 Adapt Suprnova authorization, transaction, validation, event/outbox/broadcast, telemetry, cancellation, and response-intent facilities to the engine traits. Every file under `live/ports` contains only `pub(crate)` concrete adapters implementing engine-owned traits: it introduces no parallel public port trait, outcome enum, retry policy, revision transition, or state table. Add topology/source assertions for that rule. State per-tier accepted-outcome behavior explicitly; action bodies remain safe to invoke again before commit and external side effects are not exactly-once.
 
-- [ ] **Step 7: Verify and review**
+- [x] **Step 7: Verify and review**
 
 Run Task 4 tests plus engine trusted-context/security/execution tests and focused framework session/auth/CSRF/origin tests. Run independent spec and quality reviews, apply findings, and commit.
 

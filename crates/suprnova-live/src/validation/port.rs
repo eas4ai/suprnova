@@ -5,8 +5,10 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::action::ActionTarget;
+use crate::action::PreparedActionArguments;
 use crate::canonical::CanonicalValue;
-use crate::identity::ActionName;
+use crate::identity::{ActionName, ComponentName};
 use crate::state::ModelPath;
 
 use super::ValidationIssue;
@@ -30,34 +32,60 @@ pub enum ValidationSelection {
 }
 
 /// Immutable bounded values passed to the host's validation implementation.
-#[derive(Clone)]
 pub struct ValidationRequest<'a> {
+    component: &'a ComponentName,
     selection: ValidationSelection,
     state: &'a CanonicalValue,
     arguments: &'a CanonicalValue,
     action: Option<&'a ActionName>,
+    prepared_arguments: Option<&'a PreparedActionArguments>,
+    target: Option<&'a mut dyn ActionTarget>,
 }
 
 impl<'a> ValidationRequest<'a> {
     /// Creates a request from already bounded component state and typed arguments.
     #[must_use]
     pub fn new(
+        component: &'a ComponentName,
         selection: ValidationSelection,
         state: &'a CanonicalValue,
         arguments: &'a CanonicalValue,
     ) -> Self {
         Self {
+            component,
             selection,
             state,
             arguments,
             action: None,
+            prepared_arguments: None,
+            target: None,
         }
+    }
+
+    /// Returns the exact registered component identity that owns the contract.
+    #[must_use]
+    pub const fn component(&self) -> &ComponentName {
+        self.component
     }
 
     /// Associates this validation run with one registered action.
     #[must_use]
     pub fn with_action(mut self, action: &'a ActionName) -> Self {
         self.action = Some(action);
+        self
+    }
+
+    /// Binds the schema-checked argument object used by generated typed hooks.
+    #[must_use]
+    pub fn with_prepared_arguments(mut self, arguments: &'a PreparedActionArguments) -> Self {
+        self.prepared_arguments = Some(arguments);
+        self
+    }
+
+    /// Binds validation to the exact request-owned hydrated component.
+    #[must_use]
+    pub fn with_target(mut self, target: &'a mut dyn ActionTarget) -> Self {
+        self.target = Some(target);
         self
     }
 
@@ -79,10 +107,26 @@ impl<'a> ValidationRequest<'a> {
         self.arguments
     }
 
+    /// Decodes one already schema-checked action argument for a generated hook.
+    pub fn decode_argument<T: serde::de::DeserializeOwned + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<T, ValidationPortError> {
+        self.prepared_arguments
+            .ok_or_else(ValidationPortError::unavailable)?
+            .decode(name)
+            .map_err(|_| ValidationPortError::unavailable())
+    }
+
     /// Returns the registered action identity when present.
     #[must_use]
     pub const fn action(&self) -> Option<&ActionName> {
         self.action
+    }
+
+    /// Returns the exact request-owned target for generated typed validation.
+    pub fn target_mut(&mut self) -> Option<&mut dyn ActionTarget> {
+        self.target.as_deref_mut()
     }
 }
 

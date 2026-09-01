@@ -1,10 +1,13 @@
 //! Immutable application component registration.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
 use super::__private::ComponentRegistration;
+use suprnova_live::identity::ComponentName;
+use suprnova_live::validation::ValidationPort;
 
 mod sealed {
     pub trait Sealed {}
@@ -32,16 +35,27 @@ where
     T: suprnova_live::metadata::LiveComponentContract,
 {
     fn __live_registration() -> Result<ComponentRegistration, RegistryError> {
-        <T as suprnova_live::metadata::LiveComponentContract>::descriptor()
-            .map(ComponentRegistration::new)
-            .map_err(|_| RegistryError::new(RegistryErrorKind::InvalidComponent))
+        let descriptor = <T as suprnova_live::metadata::LiveComponentContract>::descriptor()
+            .map_err(|_| RegistryError::new(RegistryErrorKind::InvalidComponent))?;
+        let mut registration = ComponentRegistration::new(descriptor);
+        if let Some(validation) =
+            <T as suprnova_live::metadata::LiveComponentContract>::validation_port()
+        {
+            registration = registration.with_validation(validation);
+        }
+        Ok(registration)
     }
 }
 
 /// Immutable process-local component registry built before the server accepts traffic.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LiveRegistry {
-    inner: Arc<suprnova_live::registry::ComponentRegistry>,
+    inner: Arc<LiveRegistryGraph>,
+}
+
+struct LiveRegistryGraph {
+    engine: suprnova_live::registry::ComponentRegistry,
+    validation: BTreeMap<ComponentName, Arc<dyn ValidationPort>>,
 }
 
 impl LiveRegistry {
@@ -54,20 +68,46 @@ impl LiveRegistry {
     /// Returns the number of explicitly registered component contracts.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.inner.engine.len()
     }
 
     /// Returns whether no component contract was registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.inner.engine.is_empty()
+    }
+
+    pub(crate) fn engine(&self) -> &suprnova_live::registry::ComponentRegistry {
+        &self.inner.engine
+    }
+
+    pub(crate) fn validation(&self, component: &ComponentName) -> Option<&Arc<dyn ValidationPort>> {
+        self.inner.validation.get(component)
+    }
+
+    pub(crate) fn from_engine(inner: suprnova_live::registry::ComponentRegistry) -> Self {
+        Self {
+            inner: Arc::new(LiveRegistryGraph {
+                engine: inner,
+                validation: BTreeMap::new(),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for LiveRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveRegistry")
+            .field("components", &self.len())
+            .finish_non_exhaustive()
     }
 }
 
 /// Startup-only builder consumed into an immutable [`LiveRegistry`].
-#[derive(Debug, Default)]
 pub struct LiveRegistryBuilder {
     inner: suprnova_live::registry::ComponentRegistryBuilder,
+    validation: BTreeMap<ComponentName, Arc<dyn ValidationPort>>,
 }
 
 impl LiveRegistryBuilder {
@@ -76,33 +116,56 @@ impl LiveRegistryBuilder {
     pub const fn new() -> Self {
         Self {
             inner: suprnova_live::registry::ComponentRegistryBuilder::new(),
+            validation: BTreeMap::new(),
         }
     }
 
     /// Registers one macro-produced component contract.
-    pub fn register<C: ComponentContract>(mut self) -> Result<Self, RegistryError> {
+    pub fn register<C: ComponentContract>(self) -> Result<Self, RegistryError> {
         let registration = C::__live_registration()?;
-        self.inner = self
-            .inner
-            .register(registration.into_engine())
-            .map_err(|error| {
-                let kind = match error.kind() {
-                    suprnova_live::registry::RegistryErrorKind::DuplicateComponent => {
-                        RegistryErrorKind::DuplicateComponent
-                    }
-                    suprnova_live::registry::RegistryErrorKind::DuplicateView => {
-                        RegistryErrorKind::DuplicateView
-                    }
-                    suprnova_live::registry::RegistryErrorKind::CapacityExceeded => {
-                        RegistryErrorKind::CapacityExceeded
-                    }
-                    suprnova_live::registry::RegistryErrorKind::NotRegistered
-                    | suprnova_live::registry::RegistryErrorKind::ContractMismatch => {
-                        RegistryErrorKind::InvalidComponent
-                    }
-                };
-                RegistryError::new(kind)
-            })?;
+        self.register_registration(registration)
+    }
+
+    pub(crate) fn register_registration(
+        mut self,
+        registration: ComponentRegistration,
+    ) -> Result<Self, RegistryError> {
+        let (descriptor, validation) = registration.into_parts();
+        let component = descriptor.metadata().identity().clone();
+        let requires_validation = descriptor.metadata().actions().iter().any(|action| {
+            !matches!(
+                action.validation(),
+                suprnova_live::validation::ValidationSelection::None
+            )
+        });
+        if requires_validation && validation.is_none() {
+            return Err(RegistryError::new(RegistryErrorKind::InvalidComponent));
+        }
+        self.inner = self.inner.register(descriptor).map_err(|error| {
+            let kind = match error.kind() {
+                suprnova_live::registry::RegistryErrorKind::DuplicateComponent => {
+                    RegistryErrorKind::DuplicateComponent
+                }
+                suprnova_live::registry::RegistryErrorKind::DuplicateView => {
+                    RegistryErrorKind::DuplicateView
+                }
+                suprnova_live::registry::RegistryErrorKind::CapacityExceeded => {
+                    RegistryErrorKind::CapacityExceeded
+                }
+                suprnova_live::registry::RegistryErrorKind::NotRegistered
+                | suprnova_live::registry::RegistryErrorKind::ContractMismatch => {
+                    RegistryErrorKind::InvalidComponent
+                }
+            };
+            RegistryError::new(kind)
+        })?;
+        if let Some(validation) = validation {
+            let previous = self.validation.insert(component, validation);
+            debug_assert!(
+                previous.is_none(),
+                "engine registration rejects duplicate names"
+            );
+        }
         Ok(self)
     }
 
@@ -110,8 +173,23 @@ impl LiveRegistryBuilder {
     #[must_use]
     pub fn build(self) -> LiveRegistry {
         LiveRegistry {
-            inner: Arc::new(self.inner.build()),
+            inner: Arc::new(LiveRegistryGraph {
+                engine: self.inner.build(),
+                validation: self.validation,
+            }),
         }
+    }
+}
+
+impl Default for LiveRegistryBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for LiveRegistryBuilder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<LiveRegistryBuilder:redacted>")
     }
 }
 

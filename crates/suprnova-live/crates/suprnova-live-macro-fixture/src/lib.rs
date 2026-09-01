@@ -14,6 +14,34 @@ pub mod live {
     #[doc(hidden)]
     pub mod __private {
         pub use suprnova_live::*;
+
+        /// Generated validation conversion used only by this standalone fixture.
+        pub mod validation {
+            pub use suprnova_live::validation::*;
+
+            /// Converts fixture validation hooks into engine issues.
+            pub trait IntoValidationIssues {
+                /// Performs the conversion.
+                fn into_validation_issues(
+                    self,
+                ) -> Result<Vec<ValidationIssue>, ValidationPortError>;
+            }
+
+            impl IntoValidationIssues for () {
+                fn into_validation_issues(
+                    self,
+                ) -> Result<Vec<ValidationIssue>, ValidationPortError> {
+                    Ok(Vec::new())
+                }
+            }
+
+            /// Converts one generated fixture hook result.
+            pub fn into_validation_issues<T: IntoValidationIssues>(
+                output: T,
+            ) -> Result<Vec<ValidationIssue>, ValidationPortError> {
+                output.into_validation_issues()
+            }
+        }
     }
 }
 

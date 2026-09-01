@@ -88,6 +88,8 @@ pub struct Server {
     /// `hyper_util::rt::TokioTimer` so the deadline actually arms - see
     /// [`ServerConfig::header_read_timeout`] for the SEC-07 background.
     header_read_timeout: std::time::Duration,
+    /// Whether fallible framework preparation completed before construction.
+    prepared: bool,
 }
 
 impl Server {
@@ -109,6 +111,7 @@ impl Server {
             header_read_timeout: std::time::Duration::from_secs(
                 crate::config::providers::DEFAULT_HEADER_READ_TIMEOUT_SECS,
             ),
+            prepared: false,
         }
     }
 
@@ -140,6 +143,40 @@ impl Server {
     /// emitted on every previous-key hit so the operator can schedule
     /// a re-encrypt pass and then remove the env var.
     pub fn from_config(router: impl Into<Router>) -> Result<Self, crate::FrameworkError> {
+        let config = Self::prepare_config()?;
+        let router = router.into();
+        let runtime = crate::live::LiveRuntime::bind()?;
+        Self::prepare_live_router(&router, &runtime)?;
+        Ok(Self::from_prepared_config(router, config))
+    }
+
+    /// Prepare framework services before constructing a fallible route catalog.
+    ///
+    /// Live route registration may validate component and slot ownership, so
+    /// the immutable Live runtime is container-bound before `routes` runs.
+    /// Route-construction failures are returned without binding a listener.
+    pub fn try_from_config_with_routes<F>(routes: F) -> Result<Self, crate::FrameworkError>
+    where
+        F: FnOnce() -> Result<Router, crate::FrameworkError>,
+    {
+        let config = Self::prepare_config()?;
+        let runtime = crate::live::LiveRuntime::bind()?;
+        let router = routes()?;
+        Self::prepare_live_router(&router, &runtime)?;
+        Ok(Self::from_prepared_config(router, config))
+    }
+
+    fn prepare_live_router(
+        router: &Router,
+        runtime: &crate::live::LiveRuntime,
+    ) -> Result<(), crate::FrameworkError> {
+        for entry in router.take_live_mount_entries()? {
+            runtime.register_mount(entry)?;
+        }
+        runtime.finalize_mount_catalog()
+    }
+
+    fn prepare_config() -> Result<ServerConfig, crate::FrameworkError> {
         // Initialize the App container
         App::init();
 
@@ -248,15 +285,20 @@ impl Server {
         // at extract time, not at boot.
         crate::http::body::set_global_max_request_body_bytes(config.max_body_size);
 
-        Ok(Self {
-            router: Arc::new(router.into()),
+        Ok(config)
+    }
+
+    fn from_prepared_config(router: Router, config: ServerConfig) -> Self {
+        Self {
+            router: Arc::new(router),
             // Pull global middleware registered via global_middleware! in bootstrap.rs
             middleware: MiddlewareRegistry::from_global(),
             host: config.host,
             port: config.port,
             max_connections: config.max_connections,
             header_read_timeout: config.header_read_timeout,
-        })
+            prepared: true,
+        }
     }
 
     /// Add global middleware (runs on every request)
@@ -360,7 +402,14 @@ impl Server {
     /// `.with_upgrades()` so WebSocket connections succeed in the same
     /// listener loop. Returns when the shutdown signal arrives and all
     /// in-flight HTTP + WS tasks have drained.
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.prepared {
+            let _ = Self::prepare_config()?;
+            let runtime = crate::live::LiveRuntime::bind()?;
+            Self::prepare_live_router(&self.router, &runtime)?;
+            self.prepared = true;
+        }
+
         // Initialize the global tracing subscriber (and OTel pipelines
         // when the `otel` feature is enabled + an endpoint is set).
         // The guard owns the SDK providers and flushes them on Ctrl-C
@@ -687,7 +736,8 @@ pub async fn handle_request_with_peer(
     if hyper_tungstenite::is_upgrade_request(&req)
         && let Some(ws_match) = router.match_ws(&path)
     {
-        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip).await;
+        let live_metadata = router.live_route_metadata(&hyper::Method::GET, ws_match.pattern());
+        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
     }
 
     // Built-in health check endpoints under /_suprnova/health.
@@ -903,11 +953,30 @@ async fn handle_request_inner(
 
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
-            let request = stamp_peer(
+            let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
+            let live_metadata = router.live_route_metadata(&effective_method, &pattern);
+            if let Some(metadata) = live_metadata {
+                let runtime = match crate::live::LiveRuntime::bind() {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        return HttpResponse::text("Live request preparation failed")
+                            .status(500)
+                            .into_hyper();
+                    }
+                };
+                if runtime
+                    .prepare_request(&mut request, metadata.operation())
+                    .is_err()
+                {
+                    return HttpResponse::text("Live request preparation failed")
+                        .status(500)
+                        .into_hyper();
+                }
+            }
 
             // Resolve the request id ONCE for this request. The same id is
             // handed to the middleware (which scopes it) and to
@@ -920,8 +989,9 @@ async fn handle_request_inner(
             // request with `new()` + push + extend + extend).
             let global_mw = middleware_registry.global_middleware();
             let route_middleware = router.get_route_middleware(&effective_method, &pattern);
-            let mut chain =
-                MiddlewareChain::with_capacity(1 + global_mw.len() + route_middleware.len());
+            let mut chain = MiddlewareChain::with_capacity(
+                1 + global_mw.len() + route_middleware.len() + usize::from(live_metadata.is_some()),
+            );
 
             // 0. RequestId is always outermost so the `request` span it
             //    enters - and every event emitted downstream within it -
@@ -946,6 +1016,12 @@ async fn handle_request_inner(
             //    (c) HEAD requests that fall back to GET still pick up
             //        the GET middleware list (auth, CSRF, rate-limit).
             chain.extend(route_middleware);
+
+            // Live completion is always innermost, after every configured
+            // owner middleware, so omission and ordering remain observable.
+            if let Some(metadata) = live_metadata {
+                chain.push(into_boxed(metadata.completion()));
+            }
 
             // 3. Execute chain with handler, catching panics in middleware
             //    or handler so the client receives a proper 500 instead
@@ -1124,6 +1200,7 @@ async fn handle_ws_upgrade(
     ws_match: crate::routing::WsMatch,
     middleware_registry: Arc<MiddlewareRegistry>,
     peer_ip: Option<std::net::IpAddr>,
+    live_metadata: Option<crate::live::context::LiveRouteMetadata>,
 ) -> hyper::Response<ServerBody> {
     use crate::middleware::MiddlewareChain;
     use crate::routing::BoxedHandler;
@@ -1214,6 +1291,30 @@ async fn handle_ws_upgrade(
     if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
         initial_request = initial_request.with_trusted_proxies(cfg.trusted_proxies);
     }
+    if let Some(metadata) = live_metadata {
+        let runtime = match crate::live::LiveRuntime::bind() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return HttpResponse::text("Live request preparation failed")
+                    .status(500)
+                    .into_hyper();
+            }
+        };
+        if runtime
+            .prepare_request(&mut initial_request, metadata.operation())
+            .is_err()
+        {
+            return HttpResponse::text("Live request preparation failed")
+                .status(500)
+                .into_hyper();
+        }
+        initial_request
+            .record_live_security_check(crate::live::attestation::SecurityCheck::Origin, None);
+        initial_request.record_live_security_not_required(
+            crate::live::attestation::SecurityCheck::Csrf,
+            suprnova_live::host::PolicyReason::StatelessCsrfPolicy,
+        );
+    }
 
     // Resolve the request id once for the whole upgrade. It is echoed on
     // the 101 handshake response, threaded into the connection span and
@@ -1281,11 +1382,16 @@ async fn handle_ws_upgrade(
         }));
 
         let mut chain = MiddlewareChain::with_capacity(
-            1 + middleware_registry.global_middleware().len() + middleware_list.len(),
+            1 + middleware_registry.global_middleware().len()
+                + middleware_list.len()
+                + usize::from(live_metadata.is_some()),
         );
         chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
         chain.extend(middleware_registry.global_middleware().iter().cloned());
         chain.extend(middleware_list);
+        if let Some(metadata) = live_metadata {
+            chain.push(into_boxed(metadata.completion()));
+        }
 
         // The auth request-state scope must wrap the chain, exactly as it
         // wraps `handle_request_inner` on the HTTP path.

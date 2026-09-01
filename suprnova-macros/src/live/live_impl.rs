@@ -11,7 +11,8 @@ use syn::{
 
 use super::attrs::{
     ActionAuthorizationArgs, ActionTransactionArgs, ActionValidationArgs, contains_reference,
-    is_field_helper, is_method_helper, parse_action_args, validate_registered_name,
+    is_field_helper, is_method_helper, parse_action_args, parse_validation_hook_args,
+    validate_registered_name,
 };
 use super::component::model_codec_tokens;
 use super::expand::enforce_runtime_path_contract;
@@ -41,6 +42,8 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
     let mut mount_parameters = Vec::<(String, Type)>::new();
     let mut supports_params_changed = false;
     let mut supports_lazy_complete = false;
+    let mut component_validation_hooks = Vec::new();
+    let mut action_validation_hooks = BTreeMap::new();
     for impl_item in &mut item.items {
         let ImplItem::Fn(method) = impl_item else {
             reject_helpers_on_non_method(impl_item)?;
@@ -96,7 +99,32 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
             "validate" => {
                 validate_receiver_method(method, false)?;
-                ensure_path_helper(&attribute)?;
+                let hook = parse_validation_hook_args(&attribute)?;
+                if let Some(action) = hook.action {
+                    let action_name = action.value();
+                    let arguments = extract_validation_parameters(method)?;
+                    let hook = RegisteredValidationHook {
+                        method: method.sig.ident.clone(),
+                        arguments,
+                        asynchronous: method.sig.asyncness.is_some(),
+                        span: attribute.span(),
+                    };
+                    if action_validation_hooks.insert(action_name, hook).is_some() {
+                        return Err(syn::Error::new(
+                            action.span(),
+                            "an action may declare only one typed validation hook",
+                        ));
+                    }
+                } else {
+                    if method.sig.inputs.len() != 1 {
+                        return Err(syn::Error::new(
+                            method.sig.ident.span(),
+                            "component validation methods accept only `&self` or `&mut self`",
+                        ));
+                    }
+                    component_validation_hooks
+                        .push((method.sig.ident.clone(), method.sig.asyncness.is_some()));
+                }
             }
             _ => {
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
@@ -107,6 +135,12 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         }
     }
+
+    validate_validation_hooks(
+        &actions,
+        &component_validation_hooks,
+        &action_validation_hooks,
+    )?;
 
     let self_ty = &item.self_ty;
     let action_values = actions
@@ -221,6 +255,153 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         }
     });
     let parameter_values = parameter_values.collect::<Vec<_>>();
+    let validation_port = if component_validation_hooks.is_empty()
+        && action_validation_hooks.is_empty()
+    {
+        quote! {}
+    } else {
+        let component_validation_calls =
+            component_validation_hooks.iter().map(|(method, asynchronous)| {
+            let invocation = if *asynchronous {
+                quote!(target.#method().await)
+            } else {
+                quote!(target.#method())
+            };
+            quote! {
+                {
+                    let target = request
+                        .target_mut()
+                        .and_then(|target| target.as_any_mut().downcast_mut::<#self_ty>())
+                        .ok_or_else(
+                            ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                        )?;
+                    issues.extend(
+                        ::suprnova::live::__private::validation::into_validation_issues(
+                            #invocation,
+                        )?,
+                    );
+                }
+            }
+        });
+        let has_component_validation = !component_validation_hooks.is_empty();
+        let action_validation_arms = action_validation_hooks.iter().map(|(name, hook)| {
+            let name = syn::LitStr::new(name, hook.span);
+            let method = &hook.method;
+            let decodes = hook.arguments.iter().map(|argument| {
+                let ident = &argument.name;
+                let ty = &argument.ty;
+                let name = ident.unraw().to_string();
+                quote! {
+                    let #ident: #ty = request.decode_argument::<#ty>(#name)?;
+                }
+            });
+            let arguments = hook.arguments.iter().map(|argument| &argument.name);
+            let invocation = if hook.asynchronous {
+                quote!(target.#method(#(#arguments),*).await)
+            } else {
+                quote!(target.#method(#(#arguments),*))
+            };
+            quote! {
+                #name => {
+                    #(#decodes)*
+                    let target = request
+                        .target_mut()
+                        .and_then(|target| target.as_any_mut().downcast_mut::<#self_ty>())
+                        .ok_or_else(
+                            ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                        )?;
+                    issues.extend(
+                        ::suprnova::live::__private::validation::into_validation_issues(
+                            #invocation,
+                        )?,
+                    );
+                }
+            }
+        });
+        quote! {
+            fn validation_port() -> ::std::option::Option<
+                ::std::sync::Arc<
+                    dyn ::suprnova::live::__private::validation::ValidationPort,
+                >,
+            > {
+                struct GeneratedValidation;
+
+                impl ::suprnova::live::__private::validation::ValidationPort
+                    for GeneratedValidation
+                {
+                    fn validate<'a>(
+                        &'a self,
+                        mut request: ::suprnova::live::__private::validation::ValidationRequest<'a>,
+                    ) -> ::suprnova::live::__private::validation::ValidationFuture<
+                        'a,
+                        ::std::result::Result<
+                            ::std::vec::Vec<
+                                ::suprnova::live::__private::validation::ValidationIssue,
+                            >,
+                            ::suprnova::live::__private::validation::ValidationPortError,
+                        >,
+                    > {
+                        ::std::boxed::Box::pin(async move {
+                            let selection = request.selection().clone();
+                            let mut issues = ::std::vec::Vec::new();
+                            let validate_component = ::std::matches!(
+                                selection,
+                                ::suprnova::live::__private::validation::ValidationSelection::Selected(_)
+                                    | ::suprnova::live::__private::validation::ValidationSelection::WholeComponent
+                                    | ::suprnova::live::__private::validation::ValidationSelection::ComponentAndArguments
+                            );
+                            if validate_component {
+                                if !#has_component_validation {
+                                    return ::std::result::Result::Err(
+                                        ::suprnova::live::__private::validation::ValidationPortError::unavailable(),
+                                    );
+                                }
+                                #(#component_validation_calls)*
+                                if let ::suprnova::live::__private::validation::ValidationSelection::Selected(selected) = &selection {
+                                    issues.retain(|issue| {
+                                        selected.iter().any(|selected| {
+                                            let candidate = issue.path().as_str();
+                                            let selected = selected.as_str();
+                                            candidate == selected
+                                                || candidate.strip_prefix(selected).is_some_and(
+                                                    |suffix| suffix.starts_with('.'),
+                                                )
+                                        })
+                                    });
+                                }
+                            }
+
+                            let validate_arguments = ::std::matches!(
+                                selection,
+                                ::suprnova::live::__private::validation::ValidationSelection::ActionArguments
+                                    | ::suprnova::live::__private::validation::ValidationSelection::ComponentAndArguments
+                            );
+                            if validate_arguments {
+                                let action = request
+                                    .action()
+                                    .ok_or_else(
+                                        ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                                    )?
+                                    .as_str()
+                                    .to_owned();
+                                match action.as_str() {
+                                    #(#action_validation_arms)*
+                                    _ => {
+                                        return ::std::result::Result::Err(
+                                            ::suprnova::live::__private::validation::ValidationPortError::unavailable(),
+                                        );
+                                    }
+                                }
+                            }
+                            ::std::result::Result::Ok(issues)
+                        })
+                    }
+                }
+
+                ::std::option::Option::Some(::std::sync::Arc::new(GeneratedValidation))
+            }
+        }
+    };
     let tokens = quote! {
         #item
 
@@ -284,6 +465,8 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     .expect("macro-validated Live action metadata equivalence"),
                 )
             }
+
+            #validation_port
         }
     };
     enforce_runtime_path_contract(&tokens)?;
@@ -395,6 +578,69 @@ struct ActionParameter {
     required: bool,
 }
 
+struct RegisteredValidationHook {
+    method: syn::Ident,
+    arguments: Vec<ActionParameter>,
+    asynchronous: bool,
+    span: Span,
+}
+
+fn validate_validation_hooks(
+    actions: &BTreeMap<String, RegisteredAction>,
+    component_hooks: &[(syn::Ident, bool)],
+    action_hooks: &BTreeMap<String, RegisteredValidationHook>,
+) -> syn::Result<()> {
+    for (name, hook) in action_hooks {
+        let action = actions.get(name).ok_or_else(|| {
+            syn::Error::new(
+                hook.span,
+                "typed validation hook names an unknown registered action",
+            )
+        })?;
+        let same_contract = action.arguments.len() == hook.arguments.len()
+            && action
+                .arguments
+                .iter()
+                .zip(&hook.arguments)
+                .all(|(action, hook)| {
+                    let action_ty = &action.ty;
+                    let hook_ty = &hook.ty;
+                    action.name == hook.name
+                        && quote!(#action_ty).to_string() == quote!(#hook_ty).to_string()
+                });
+        if !same_contract {
+            return Err(syn::Error::new(
+                hook.span,
+                "typed validation hook arguments must exactly match the registered action",
+            ));
+        }
+    }
+
+    for (name, action) in actions {
+        let component_required = matches!(
+            action.validation,
+            ActionValidationArgs::Whole | ActionValidationArgs::All
+        );
+        if component_required && component_hooks.is_empty() {
+            return Err(syn::Error::new(
+                action.method.span(),
+                "component validation selection requires a bare #[validate] hook",
+            ));
+        }
+        let arguments_required = matches!(
+            action.validation,
+            ActionValidationArgs::Arguments | ActionValidationArgs::All
+        );
+        if arguments_required && !action_hooks.contains_key(name) {
+            return Err(syn::Error::new(
+                action.method.span(),
+                "argument validation selection requires #[validate(action = \"...\")]",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn extract_action_parameters(
     method: &ImplItemFn,
 ) -> syn::Result<(Option<syn::Ident>, Vec<ActionParameter>)> {
@@ -440,6 +686,17 @@ fn extract_action_parameters(
         });
     }
     Ok((authorization, parameters))
+}
+
+fn extract_validation_parameters(method: &ImplItemFn) -> syn::Result<Vec<ActionParameter>> {
+    let (authorization, parameters) = extract_action_parameters(method)?;
+    if authorization.is_some() {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "validation hooks cannot receive authorization capabilities",
+        ));
+    }
+    Ok(parameters)
 }
 
 fn is_authorized_action_reference(ty: &Type) -> bool {

@@ -236,10 +236,13 @@ promotion abuse bounds, and safe classification. They do not implement or
 stand in for TLS/proxy policy, origin/CSRF checks, cookies/sessions, principal
 or tenant resolution, current authorization, domain freshness, HTTP dispatch,
 CSP, DOM morphing, or browser effect execution. Iteration 002 owns the trusted
-server host contract and kernel enforcement. The now-completed atomic
-repository-authority move assigned actual Suprnova adapters to Iteration 005,
-but those adapters remain incomplete until their ordered framework security
-tests pass. Iteration 003 owns browser/output integrations.
+server host contract and kernel enforcement. Iteration 005 Task 4 now supplies
+the ordered Suprnova adapter: production HTTP and WebSocket paths prepare Live
+requests before owner middleware, each configured check ends as `passed` or a
+policy-declared `not_required`, and the engine validator alone mints the trusted
+request context. Endpoint-specific action, upload, and subscription invocation
+continues in the following route tasks. Iteration 003 owns browser/output
+integrations.
 
 ## Historical Iteration 002 implementation profile
 
@@ -253,12 +256,15 @@ current host authority after verified hydration and before protected work.
 
 Production construction belongs exclusively to the Iteration 005 Suprnova host
 adapter after its origin, CSRF, session, principal, tenant, proxy, rate, and
-middleware checks pass in proven order. That adapter is required but not
-claimed complete. Iteration 002 supplied private
-conformance/test builders and hostile-adapter suites that prove the kernel
-rejects absent, inconsistent, expired, cross-principal, cross-tenant, and
-cross-route context. These are historical security contract tests, not proof of
-the pending production adapter.
+middleware checks pass in proven order. Task 4 completed that construction
+boundary and proved action, upload, SSE-control, and WebSocket-handshake
+candidates against the production engine validator. The operation matrix covers
+every omitted check, wrong order, exception/header-bypass attempt, middleware
+short circuit, stale reuse/expiry, and explicit policy absence. Real loopback
+HTTP and WebSocket tests prove preparation occurs before middleware and that
+rejected origins never reach a handler carrying complete evidence. Iteration
+002's private conformance builders remain historical kernel evidence rather
+than a production construction path.
 
 Iteration 002 removed the public zero-input
 `PromotionAttestations::verified()` assertion from production boundaries. The
@@ -284,6 +290,12 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Completed the Iteration 005 Task 4 production trust adapter.
+  The public server paths bind one immutable Live server runtime before traffic,
+  route metadata prepares requests before owner middleware, each middleware
+  mints only its own successful evidence, permitted absence carries an exact
+  typed policy reason, and the engine validator rejects omissions, wrong order,
+  stale reuse, or mismatched scope before protected work.
 - 2026-08-31 -- Marked the Iteration 002 trusted-host profile as historical
   after the repository-authority cutover. The move is complete; actual Suprnova
   origin, CSRF, session, identity, tenant, proxy, rate, and middleware adapters

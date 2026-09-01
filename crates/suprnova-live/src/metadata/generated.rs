@@ -20,4 +20,9 @@ pub trait LiveComponentContract {
 
     /// Builds the same canonical descriptor with generated runtime hooks attached.
     fn descriptor_with_hooks(hooks: ComponentHooks) -> Result<ComponentDescriptor, MetadataError>;
+
+    /// Returns the generated component-specific validation callback when declared.
+    fn validation_port() -> Option<std::sync::Arc<dyn crate::validation::ValidationPort>> {
+        None
+    }
 }

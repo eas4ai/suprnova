@@ -3,6 +3,9 @@ use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_fo
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
 use crate::error::FrameworkError;
+use crate::live::attestation::{
+    LiveOperation, LiveRequestIdentity, LiveSecurityAttestation, SecurityCheck,
+};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -72,6 +75,14 @@ pub struct Request {
     /// carried on the request itself, which crosses the spawn boundary
     /// intact. See [`Request::auth_user_id`].
     auth_user_id: Option<String>,
+    /// Server-minted identity unique to this in-memory request lifetime.
+    live_request_identity: LiveRequestIdentity,
+    /// Framework-owned evidence accumulated by trusted middleware stages.
+    live_security_attestation: LiveSecurityAttestation,
+    /// Current application tenant resolved by `LiveTenantMiddleware`.
+    live_tenant: Option<String>,
+    /// Advisory cancellation tied to this request value's lifetime.
+    live_cancellation: Option<crate::live::ports::cancellation::LiveRequestCancellation>,
 }
 
 impl Request {
@@ -88,6 +99,10 @@ impl Request {
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         }
     }
 
@@ -169,7 +184,145 @@ impl Request {
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         }
+    }
+
+    /// Build a test request with explicit untrusted HTTP headers.
+    ///
+    /// Header insertion never creates framework security evidence; tests use
+    /// this constructor to prove that protocol-shaped attacker input remains
+    /// ordinary data until its owning middleware validates it.
+    #[cfg(feature = "testing")]
+    pub fn for_test_with_headers<'header>(
+        method: &str,
+        uri: &str,
+        headers: impl IntoIterator<Item = (&'header str, &'header str)>,
+    ) -> Self {
+        let mut request = Self::for_test(method, uri);
+        for (name, value) in headers {
+            let name = hyper::header::HeaderName::from_bytes(name.as_bytes())
+                .expect("valid test header name");
+            let value =
+                hyper::header::HeaderValue::from_str(value).expect("valid test header value");
+            request.parts.headers.append(name, value);
+        }
+        request
+    }
+
+    pub(crate) const fn live_request_identity(&self) -> LiveRequestIdentity {
+        self.live_request_identity
+    }
+
+    pub(crate) const fn live_security_attestation(&self) -> &LiveSecurityAttestation {
+        &self.live_security_attestation
+    }
+
+    pub(crate) fn prepare_live_operation(&mut self, operation: LiveOperation) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let now = u64::try_from(now).unwrap_or(u64::MAX - 30_000);
+        self.prepare_live_operation_until(
+            operation,
+            suprnova_live::identity::UnixMillis::new(now.saturating_add(30_000)),
+        )
+    }
+
+    pub(crate) fn prepare_live_operation_until(
+        &mut self,
+        operation: LiveOperation,
+        expires_at: suprnova_live::identity::UnixMillis,
+    ) -> bool {
+        self.prepare_live_operation_until_with_cancellation(
+            operation,
+            expires_at,
+            crate::live::ports::cancellation::SuprnovaCancellationPort.attach(),
+        )
+    }
+
+    pub(crate) fn prepare_live_operation_until_with_cancellation(
+        &mut self,
+        operation: LiveOperation,
+        expires_at: suprnova_live::identity::UnixMillis,
+        cancellation: crate::live::ports::cancellation::LiveRequestCancellation,
+    ) -> bool {
+        let Some(route_pattern) = self.route_pattern.as_deref() else {
+            return false;
+        };
+        let prepared = self.live_security_attestation.prepare(
+            self.live_request_identity,
+            route_pattern,
+            operation,
+            expires_at,
+        );
+        if !prepared {
+            return false;
+        }
+        self.live_cancellation = Some(cancellation);
+
+        if self.peer_is_trusted_proxy() {
+            let normalized_ip = self.ip().map(|ip| ip.to_string());
+            self.record_live_security_check(
+                SecurityCheck::Proxy,
+                normalized_ip.as_deref().map(str::as_bytes),
+            )
+        } else {
+            self.live_security_attestation.record_not_required(
+                self.live_request_identity,
+                SecurityCheck::Proxy,
+                suprnova_live::host::PolicyReason::DirectPeer,
+            )
+        }
+    }
+
+    pub(crate) fn live_operation(&self) -> Option<LiveOperation> {
+        self.live_security_attestation
+            .operation(self.live_request_identity)
+    }
+
+    pub(crate) fn live_cancellation(&self) -> Option<suprnova_live::resource::CancellationFlag> {
+        self.live_cancellation.as_ref().map(|guard| guard.flag())
+    }
+
+    pub(crate) fn record_live_security_check(
+        &mut self,
+        check: SecurityCheck,
+        fact: Option<&[u8]>,
+    ) -> bool {
+        self.live_security_attestation
+            .record_passed(self.live_request_identity, check, fact)
+    }
+
+    pub(crate) fn record_live_security_not_required(
+        &mut self,
+        check: SecurityCheck,
+        reason: suprnova_live::host::PolicyReason,
+    ) -> bool {
+        self.live_security_attestation.record_not_required(
+            self.live_request_identity,
+            check,
+            reason,
+        )
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn remove_live_security_check_for_test(&mut self, check: SecurityCheck) {
+        self.live_security_attestation.remove_for_test(check);
+    }
+
+    pub(crate) fn set_live_tenant(&mut self, tenant: String) {
+        self.live_tenant = Some(tenant);
+    }
+
+    /// Returns the tenant resolved by Live tenant middleware for this request.
+    #[must_use]
+    pub fn live_tenant(&self) -> Option<&str> {
+        self.live_tenant.as_deref()
     }
 
     /// The authenticated user id carried on this request, if any.
@@ -1478,6 +1631,10 @@ mod url_helper_tests {
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -1509,6 +1666,10 @@ mod url_helper_tests {
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         };
 
         let (_, bytes) = req
@@ -1555,6 +1716,10 @@ mod url_helper_tests {
             peer_addr: Some(peer),
             trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -1593,6 +1758,10 @@ mod url_helper_tests {
             peer_addr: Some(peer),
             trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
             auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

@@ -88,6 +88,9 @@ impl Search {
     #[validate]
     pub fn validate_search(&self) {}
 
+    #[validate(action = "save")]
+    pub fn validate_save(&self, _title: String) {}
+
     #[hydrate]
     pub fn hydrate(&mut self) {}
 

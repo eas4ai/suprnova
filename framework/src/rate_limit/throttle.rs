@@ -110,7 +110,7 @@ impl ThrottleRequestsMiddleware {
 
 #[async_trait]
 impl Middleware for ThrottleRequestsMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
         let limits = match resolve_limits(&self.mode, &request) {
             ResolvedLimits::Ok(limits) => limits,
             ResolvedLimits::ShortCircuit(resp) => return Ok(resp),
@@ -159,6 +159,8 @@ impl Middleware for ThrottleRequestsMiddleware {
             }
         }
 
+        request
+            .record_live_security_check(crate::live::attestation::SecurityCheck::RateLimit, None);
         let response = next(request).await;
 
         // Apply after-callback gated hits, and inject X-RateLimit

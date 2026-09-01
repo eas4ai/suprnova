@@ -4,8 +4,14 @@
 //! to synchronize typed state and invoke registered Rust actions through the
 //! shipped browser runtime.
 
+pub(crate) mod attestation;
 mod config;
+pub(crate) mod context;
+mod events;
+pub(crate) mod ports;
 mod registry;
+mod runtime;
+mod tenant;
 
 /// Focused assertion helpers for application component tests.
 pub mod testing;
@@ -18,7 +24,9 @@ pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigError
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
+pub use runtime::LiveRuntime;
 pub use suprnova_macros::{LiveComponent, live};
+pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};
 
 /// Closed semantic results and metadata returned by registered Live actions.
 pub mod action {
@@ -49,5 +57,6 @@ pub mod validation {
 
 pub use action::{ActionOutcome, ActionResult, AuthorizedAction};
 pub use error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCode};
+pub use events::{AcceptedOutcomeKind, LiveOutcomeAccepted};
 pub use metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};

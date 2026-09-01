@@ -537,7 +537,7 @@ impl Default for CsrfMiddleware {
 
 #[async_trait]
 impl Middleware for CsrfMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
         let method = request.method().as_str();
 
         // Reading verbs (GET/HEAD/OPTIONS) are never token-checked.
@@ -568,8 +568,21 @@ impl Middleware for CsrfMiddleware {
         //   here is a 403, and token validation is skipped entirely.
         match self.check_origin(&request) {
             OriginCheck::Pass => {
-                let response = next(request).await;
-                return self.maybe_attach_xsrf_cookie(response);
+                let live_operation = request.live_operation();
+                if live_operation.is_some() {
+                    request.record_live_security_check(
+                        crate::live::attestation::SecurityCheck::Origin,
+                        None,
+                    );
+                }
+                if !live_operation.is_some_and(|operation| operation.requires_csrf()) {
+                    request.record_live_security_not_required(
+                        crate::live::attestation::SecurityCheck::Csrf,
+                        suprnova_live::host::PolicyReason::StatelessCsrfPolicy,
+                    );
+                    let response = next(request).await;
+                    return self.maybe_attach_xsrf_cookie(response);
+                }
             }
             OriginCheck::Fail if matches!(self.origin_policy, OriginPolicy::OriginOnly) => {
                 return reject_origin_mismatch();
@@ -595,6 +608,10 @@ impl Middleware for CsrfMiddleware {
             .or_else(|| request.header("X-XSRF-TOKEN"))
         {
             if constant_time_compare(token, &expected_token) {
+                request.record_live_security_check(
+                    crate::live::attestation::SecurityCheck::Csrf,
+                    None,
+                );
                 let response = next(request).await;
                 return self.maybe_attach_xsrf_cookie(response);
             }
@@ -621,7 +638,7 @@ impl Middleware for CsrfMiddleware {
         // Buffer the body. CSRF_BODY_BUFFER_CAP caps this at 64 KiB -
         // forms with `_token` are well under that, and a malicious large
         // form won't pin memory on CSRF validation alone.
-        let request = match request.buffer_body(CSRF_BODY_BUFFER_CAP).await {
+        let mut request = match request.buffer_body(CSRF_BODY_BUFFER_CAP).await {
             Ok(r) => r,
             Err(_) => return reject_with_419(),
         };
@@ -644,6 +661,10 @@ impl Middleware for CsrfMiddleware {
 
         match token_field {
             Some(token) if constant_time_compare(&token, &expected_token) => {
+                request.record_live_security_check(
+                    crate::live::attestation::SecurityCheck::Csrf,
+                    None,
+                );
                 let response = next(request).await;
                 self.maybe_attach_xsrf_cookie(response)
             }

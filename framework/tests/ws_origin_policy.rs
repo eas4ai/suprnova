@@ -13,13 +13,18 @@
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use suprnova::FrameworkError;
 use suprnova::http::Request;
+use suprnova::live::testing::{
+    LiveSecurityCheck, LiveSecurityDisposition, LiveSecurityPolicyReason, LiveSecurityReport,
+    LiveTestOperation, LiveTestRoutePolicy, inspect_request_attestation,
+    register_live_route_for_test,
+};
 use suprnova::middleware::MiddlewareRegistry;
 use suprnova::routing::Router;
 use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
+use suprnova::{App, Crypt, EncryptionKey, FrameworkError};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -50,6 +55,21 @@ struct ErroringHandler;
 impl WebSocketHandler for ErroringHandler {
     async fn handle(&self, _socket: WsSocket, _req: Request) -> Result<(), FrameworkError> {
         Err(FrameworkError::internal("simulated handler failure"))
+    }
+}
+
+struct LiveEvidenceHandler {
+    captured: Arc<Mutex<Option<LiveSecurityReport>>>,
+    ready: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl WebSocketHandler for LiveEvidenceHandler {
+    async fn handle(&self, _socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+        *self.captured.lock().expect("Live evidence capture lock") =
+            Some(inspect_request_attestation(&req));
+        self.ready.notify_one();
+        Ok(())
     }
 }
 
@@ -101,6 +121,41 @@ fn ws_config(policy: OriginPolicy) -> WsConfig {
         origin_policy: policy,
         ..Default::default()
     }
+}
+
+fn ensure_live_runtime_key() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        App::init();
+        Crypt::init(EncryptionKey::generate());
+    });
+}
+
+fn live_ws_router(
+    captured: Arc<Mutex<Option<LiveSecurityReport>>>,
+    ready: Arc<tokio::sync::Notify>,
+) -> Router {
+    let mut router = Router::new().ws_with_config(
+        "/ws/live",
+        LiveEvidenceHandler { captured, ready },
+        ws_config(OriginPolicy::SameOrigin),
+    );
+    register_live_route_for_test(
+        &mut router,
+        hyper::Method::GET,
+        "/ws/live",
+        LiveTestOperation::WebSocketHandshake,
+        LiveTestRoutePolicy {
+            trusted_internal_origin: false,
+            stateless_session: true,
+            anonymous_principal: true,
+            tenantless: true,
+            upstream_rate_limit: true,
+            no_additional_middleware: true,
+        },
+    )
+    .expect("register production Live WebSocket route metadata");
+    router
 }
 
 /// Build a tungstenite client request with a custom `Origin` header.
@@ -179,6 +234,72 @@ async fn same_origin_default_allows_matching_origin() {
     let reply = ws.next().await.unwrap().unwrap();
     assert_eq!(reply.to_text().unwrap(), "echo: ping");
     ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn live_websocket_origin_admission_mints_evidence_only_after_acceptance() {
+    ensure_live_runtime_key();
+
+    let accepted = Arc::new(Mutex::new(None));
+    let accepted_ready = Arc::new(tokio::sync::Notify::new());
+    let port = spawn_server(live_ws_router(
+        Arc::clone(&accepted),
+        Arc::clone(&accepted_ready),
+    ))
+    .await;
+    let url = format!("ws://127.0.0.1:{port}/ws/live");
+    let origin = format!("http://127.0.0.1:{port}");
+    let (mut socket, response) =
+        tokio_tungstenite::connect_async(ws_request_with_origin(&url, &origin))
+            .await
+            .expect("approved same-origin Live upgrade");
+    assert_eq!(response.status(), 101);
+    tokio::time::timeout(Duration::from_secs(1), accepted_ready.notified())
+        .await
+        .expect("Live WebSocket handler observed admitted request");
+    let report = accepted
+        .lock()
+        .expect("accepted evidence lock")
+        .take()
+        .expect("accepted Live WebSocket evidence");
+    assert!(report.is_complete());
+    assert_eq!(
+        report.disposition(LiveSecurityCheck::Origin),
+        Some(LiveSecurityDisposition::Passed)
+    );
+    assert_eq!(
+        report.disposition(LiveSecurityCheck::Csrf),
+        Some(LiveSecurityDisposition::NotRequired)
+    );
+    assert_eq!(
+        report.policy_reason(LiveSecurityCheck::Csrf),
+        Some(LiveSecurityPolicyReason::StatelessCsrfPolicy)
+    );
+    let _ = socket.close(None).await;
+
+    for rejected_origin in [None, Some("null"), Some("https://evil.example.com")] {
+        let rejected = Arc::new(Mutex::new(None));
+        let port = spawn_server(live_ws_router(
+            Arc::clone(&rejected),
+            Arc::new(tokio::sync::Notify::new()),
+        ))
+        .await;
+        let url = format!("ws://127.0.0.1:{port}/ws/live");
+        let result = match rejected_origin {
+            Some(origin) => {
+                tokio_tungstenite::connect_async(ws_request_with_origin(&url, origin)).await
+            }
+            None => tokio_tungstenite::connect_async(&url).await,
+        };
+        assert!(
+            result.is_err(),
+            "missing, null, and unapproved origins must fail before upgrade"
+        );
+        assert!(
+            rejected.lock().expect("rejected evidence lock").is_none(),
+            "a rejected origin must not reach a request carrying complete evidence"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

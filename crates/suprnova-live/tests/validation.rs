@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use suprnova_live::canonical::CanonicalValue;
-use suprnova_live::identity::ActionName;
+use suprnova_live::identity::{ActionName, ComponentName};
 use suprnova_live::state::ModelPath;
 use suprnova_live::validation::{
     BagPolicy, ErrorBag, ValidationEngine, ValidationEngineErrorKind, ValidationFuture,
@@ -22,6 +22,7 @@ impl ValidationPort for RecordingPort {
         request: ValidationRequest<'a>,
     ) -> ValidationFuture<'a, Result<Vec<ValidationIssue>, ValidationPortError>> {
         Box::pin(async move {
+            assert_eq!(request.component().as_str(), "tests.validation");
             self.trace
                 .lock()
                 .expect("validation trace lock")
@@ -59,7 +60,10 @@ fn request(selection: ValidationSelection) -> ValidationRequest<'static> {
     let action = Box::leak(Box::new(
         ActionName::parse("save").expect("registered action"),
     ));
-    ValidationRequest::new(selection, state, arguments).with_action(action)
+    let component = Box::leak(Box::new(
+        ComponentName::parse("tests.validation").expect("registered component"),
+    ));
+    ValidationRequest::new(component, selection, state, arguments).with_action(action)
 }
 
 #[tokio::test]

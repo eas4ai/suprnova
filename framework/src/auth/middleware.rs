@@ -90,12 +90,23 @@ impl Default for AuthMiddleware {
 
 #[async_trait]
 impl Middleware for AuthMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
         let authenticated = match &self.guard {
             Some(name) => Auth::guard(name)?.check().await?,
             None => Auth::check(),
         };
         if authenticated {
+            // Authentication proof belongs to this middleware's successful
+            // branch. Merely carrying a session value or Authorization header
+            // never mints principal evidence.
+            if let Some(principal_id) =
+                crate::auth::request_state::current_user_id().or_else(Auth::id)
+            {
+                request.record_live_security_check(
+                    crate::live::attestation::SecurityCheck::Principal,
+                    Some(principal_id.as_bytes()),
+                );
+            }
             // User is authenticated, proceed
             return next(request).await;
         }

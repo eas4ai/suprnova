@@ -615,7 +615,14 @@ where
 
         let key = (self.key_fn)(&request);
         match self.limiter.try_acquire(&key, &self.config).await {
-            Ok(true) => next(request).await,
+            Ok(true) => {
+                let mut request = request;
+                request.record_live_security_check(
+                    crate::live::attestation::SecurityCheck::RateLimit,
+                    None,
+                );
+                next(request).await
+            }
             Ok(false) => {
                 // Compute how long the caller must wait before trying again.
                 let secs = self

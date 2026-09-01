@@ -66,6 +66,10 @@ pub(crate) struct ActionArgs {
     pub(crate) transaction: ActionTransactionArgs,
 }
 
+pub(crate) struct ValidationHookArgs {
+    pub(crate) action: Option<LitStr>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ActionAuthorizationArgs {
     Public,
@@ -237,6 +241,12 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
                 }
                 None
             }
+            "validate" if matches!(attribute.meta, syn::Meta::List(_)) => {
+                // `validator::Validate` owns field-level list-form rules. Bare
+                // `#[validate]` remains the Live method helper and is rejected
+                // on state below.
+                None
+            }
             name if is_method_helper(name) => {
                 return Err(syn::Error::new(
                     attribute.span(),
@@ -355,6 +365,34 @@ pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs
         validation: validation.unwrap_or(ActionValidationArgs::None),
         transaction: transaction.unwrap_or(ActionTransactionArgs::None),
     })
+}
+
+pub(crate) fn parse_validation_hook_args(attribute: &Attribute) -> syn::Result<ValidationHookArgs> {
+    let mut action = None;
+    match &attribute.meta {
+        syn::Meta::Path(_) => {}
+        syn::Meta::List(_) => attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("action") {
+                return assign_once(
+                    &mut action,
+                    meta.value()?.parse()?,
+                    meta.path.span(),
+                    "action",
+                );
+            }
+            Err(meta.error("unknown validation helper"))
+        })?,
+        syn::Meta::NameValue(_) => {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "expected #[validate] or #[validate(action = \"...\")]",
+            ));
+        }
+    }
+    if let Some(action) = &action {
+        validate_registered_name(action)?;
+    }
+    Ok(ValidationHookArgs { action })
 }
 
 pub(crate) fn validate_registered_name(value: &LitStr) -> syn::Result<()> {

@@ -611,7 +611,7 @@ impl crate::supervisor::Supervisor for SessionGcSupervisor {
 
 #[async_trait]
 impl Middleware for SessionMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
         // Defensive: refuse to run at all when `Crypt` isn't installed.
         // `Server::from_config` guarantees a key is in place before
         // middleware boots (failing closed in production, generating a
@@ -858,6 +858,18 @@ impl Middleware for SessionMiddleware {
                     .unwrap()
                     .push(create_forget_remember_cookie(&self.config)),
             }
+        }
+
+        // Live accepts session identity only from this successful session
+        // resolution branch. A store outage deliberately leaves the proof
+        // absent even though ordinary non-Live requests retain the existing
+        // graceful-degradation behavior.
+        if !session_read_failed {
+            let session_id = session.id.as_bytes().to_vec();
+            request.record_live_security_check(
+                crate::live::attestation::SecurityCheck::Session,
+                Some(&session_id),
+            );
         }
 
         // Capture the current URL before `next()` consumes the

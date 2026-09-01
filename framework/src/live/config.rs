@@ -5,12 +5,15 @@ use std::fmt;
 
 const HARD_MAX_CONTROL_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_CONTROL_BYTES: usize = 1024 * 1024;
+const HARD_MAX_CONTEXT_LIFETIME_MS: u64 = 300_000;
+const DEFAULT_CONTEXT_LIFETIME_MS: u64 = 30_000;
 
 /// Validated byte limits applied to one Live control request and response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveConfig {
     max_request_bytes: usize,
     max_response_bytes: usize,
+    max_context_lifetime_ms: u64,
 }
 
 impl LiveConfig {
@@ -26,6 +29,7 @@ impl LiveConfig {
         Self {
             max_request_bytes: DEFAULT_CONTROL_BYTES,
             max_response_bytes: DEFAULT_CONTROL_BYTES,
+            max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
         }
     }
 
@@ -40,6 +44,12 @@ impl LiveConfig {
     pub const fn max_response_bytes(self) -> usize {
         self.max_response_bytes
     }
+
+    /// Returns the maximum validity window for one trusted request context.
+    #[must_use]
+    pub const fn max_context_lifetime_ms(self) -> u64 {
+        self.max_context_lifetime_ms
+    }
 }
 
 impl Default for LiveConfig {
@@ -53,6 +63,7 @@ impl Default for LiveConfig {
 pub struct LiveConfigBuilder {
     max_request_bytes: usize,
     max_response_bytes: usize,
+    max_context_lifetime_ms: u64,
 }
 
 impl LiveConfigBuilder {
@@ -62,6 +73,7 @@ impl LiveConfigBuilder {
         Self {
             max_request_bytes: DEFAULT_CONTROL_BYTES,
             max_response_bytes: DEFAULT_CONTROL_BYTES,
+            max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
         }
     }
 
@@ -79,6 +91,13 @@ impl LiveConfigBuilder {
         self
     }
 
+    /// Sets the maximum validity window for one trusted request context.
+    #[must_use]
+    pub const fn max_context_lifetime_ms(mut self, max: u64) -> Self {
+        self.max_context_lifetime_ms = max;
+        self
+    }
+
     /// Validates the configured limits and creates immutable Live configuration.
     pub fn build(self) -> Result<LiveConfig, LiveConfigError> {
         let valid = (1..=HARD_MAX_CONTROL_BYTES).contains(&self.max_request_bytes)
@@ -87,9 +106,15 @@ impl LiveConfigBuilder {
         if !valid {
             return Err(LiveConfigError::new(LiveConfigErrorKind::InvalidByteLimits));
         }
+        if !(1..=HARD_MAX_CONTEXT_LIFETIME_MS).contains(&self.max_context_lifetime_ms) {
+            return Err(LiveConfigError::new(
+                LiveConfigErrorKind::InvalidContextLifetime,
+            ));
+        }
         Ok(LiveConfig {
             max_request_bytes: self.max_request_bytes,
             max_response_bytes: self.max_response_bytes,
+            max_context_lifetime_ms: self.max_context_lifetime_ms,
         })
     }
 }
@@ -106,6 +131,8 @@ impl Default for LiveConfigBuilder {
 pub enum LiveConfigErrorKind {
     /// A request or response ceiling was zero, above the hard ceiling, or inconsistent.
     InvalidByteLimits,
+    /// The trusted request-context lifetime was zero or exceeded the engine ceiling.
+    InvalidContextLifetime,
 }
 
 impl LiveConfigErrorKind {
@@ -114,6 +141,7 @@ impl LiveConfigErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidByteLimits => "invalid_live_byte_limits",
+            Self::InvalidContextLifetime => "invalid_live_context_lifetime",
         }
     }
 }

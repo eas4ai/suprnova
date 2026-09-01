@@ -1,7 +1,7 @@
 # Suprnova Live -- 04 Actions and Validation
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-31
 
 ## Scope
 
@@ -172,9 +172,31 @@ effects.
 The standalone kernel receives a trusted Live request context and host service
 capabilities; it cannot manufacture authentication, tenant, transaction, queue,
 event, or session authority. Conformance adapters prove call order, rollback,
-denial, idempotency, redaction, and response construction. Actual Suprnova
-validation, authorization, database transaction, session/flash, queue, and
-event adapters are reserved for the atomic integration move.
+denial, idempotency, redaction, and response construction.
+
+Iteration 005 Task 4 now provides the immutable Suprnova host graph for current
+authorization, database transactions, component-keyed typed validation,
+accepted-outcome event reporting, bounded execution telemetry, request-lifetime
+cancellation, and HTTP response-intent projection. Component descriptors and
+their generated `#[validate]` callbacks are sealed in one registry graph. The
+engine's validation request carries both the exact component identity and the
+request-owned hydrated, model-bound target, so rules run against current typed
+Rust state rather than a second deserialized shadow model. Ordinary Suprnova
+`validator::ValidationErrors` become stable Live field paths and message
+identifiers; positional list indices collapse to the stable collection path
+rather than entering signed/model identity. Bare `#[validate]` hooks own whole
+component and selected-path validation, with selected results restricted to the
+declared paths. `#[validate(action = "name")]` hooks own argument validation for
+that exact registered action and receive its schema-decoded Rust arguments.
+`all` runs both in that order. Macro expansion rejects missing hooks, unknown
+action hooks, and hook signatures that do not exactly match their action;
+startup registration also fails closed for a non-generated descriptor that
+selects validation without a callback.
+The event reporter uses Suprnova's existing event dispatcher; durable external
+work still belongs to the action's transaction-owned outbox or equivalent
+delivery contract. Real endpoint construction and invocation consume these
+adapters in the following route integration task rather than introducing a
+second execution pipeline.
 
 The Tier 0 accepted-action order is fixed: claim the base revision; hydrate and
 apply permitted models; authorize and validate; begin an explicitly requested
@@ -201,6 +223,16 @@ facility rather than relying on a fallible reporting hook.
 
 ## Decisions and revisions
 
+- 2026-08-31 -- Integrated the Task 4 Suprnova action host graph. Validation
+  requests now bind the exact component identity and request-owned typed target,
+  then dispatch only through the generated selection-aware `#[validate]`
+  callbacks sealed with that component's descriptor. Bare hooks own
+  component/selected paths; action-named hooks receive exact schema-decoded
+  arguments; `all` runs both. Missing or mismatched generated hooks fail during
+  macro expansion and non-generated omissions fail at startup. Accepted
+  outcomes enter Suprnova's existing event system only after acceptance; this
+  reporting does not create exactly-once external side effects or replace a
+  durable transaction-owned outbox.
 - 2026-08-21 -- Locked Tier 0 transaction/render/ledger ordering so rendered
   output is complete before the host commits, the host commits before the
   ledger accepts, and failures after durable commit recover by fresh rendering

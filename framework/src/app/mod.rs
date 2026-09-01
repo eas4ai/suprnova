@@ -32,7 +32,7 @@
 //! ```
 
 use crate::schedule::tz_display::DisplayExpressions;
-use crate::{Router, Schedule, Server};
+use crate::{FrameworkError, Router, Schedule, Server};
 use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
 use std::env;
@@ -194,7 +194,7 @@ where
     config_fn: Option<Box<dyn FnOnce()>>,
     bootstrap_fn: Option<BootstrapFn>,
     http_bootstrap_fn: Option<BootstrapFn>,
-    routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
+    routes_fn: Option<Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>>,
     schedule_fn: Option<ScheduleFn>,
     booted_fns: Vec<BootedFn>,
     _migrator: std::marker::PhantomData<M>,
@@ -644,6 +644,19 @@ where
     where
         F: FnOnce() -> Router + Send + 'static,
     {
+        self.routes_fn = Some(Box::new(|| Ok(f())));
+        self
+    }
+
+    /// Register a fallible route-construction function.
+    ///
+    /// Services and the immutable Live runtime are prepared before this
+    /// function runs. A registration error therefore aborts startup before a
+    /// listener is bound.
+    pub fn try_routes<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce() -> Result<Router, FrameworkError> + Send + 'static,
+    {
         self.routes_fn = Some(Box::new(f));
         self
     }
@@ -894,27 +907,27 @@ where
     async fn run_server_internal(
         bootstrap_fn: Option<BootstrapFn>,
         http_bootstrap_fn: Option<BootstrapFn>,
-        routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
+        routes_fn: Option<Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>>,
         booted_fns: Vec<BootedFn>,
     ) {
         // Run the process-wide hook, then the HTTP-only one.
         Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
 
-        // Get router
-        let router = if let Some(routes_fn) = routes_fn {
-            routes_fn()
-        } else {
-            Router::new()
-        };
-
-        // Create server with configuration from environment.
+        // Prepare framework services and the immutable Live runtime before
+        // invoking fallible route construction.
         //
         // `from_config` returns Err when APP_KEY is required (any
         // non-development environment) but unset or malformed. The
         // error type carries the user-facing remediation (it points at
         // `suprnova key:generate`); we surface it on stderr without a
         // panic stack-trace wrapper so production boot logs stay clean.
-        let server = match Server::from_config(router) {
+        let server = match Server::try_from_config_with_routes(|| {
+            if let Some(routes_fn) = routes_fn {
+                routes_fn()
+            } else {
+                Ok(Router::new())
+            }
+        }) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("suprnova: failed to start server: {e}");

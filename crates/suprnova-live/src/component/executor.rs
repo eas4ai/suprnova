@@ -759,11 +759,14 @@ impl ComponentExecutor {
         let mut validation = ErrorBag::default();
         record_execution_phase(trace, ExecutionPhase::Validate);
         let request = ValidationRequest::new(
+            descriptor.metadata().identity(),
             metadata.validation().clone(),
             hydration.state(),
             arguments.canonical(),
         )
-        .with_action(action);
+        .with_action(action)
+        .with_prepared_arguments(arguments)
+        .with_target(instance);
         let status = validation_engine
             .validate(validation_port, request, &mut validation, bag_policy)
             .await

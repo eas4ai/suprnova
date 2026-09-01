@@ -204,6 +204,15 @@ request scheduling, effects, and morphing. Stimulus complements it for custom
 controllers but does not define the Live protocol.
 _Avoid_: SPA runtime, Stimulus, Turbo, client renderer
 
+**Live server runtime**:
+The immutable Rust runtime graph assembled and container-bound during Suprnova
+startup before Live routes accept traffic. It owns validated configuration, the
+sealed component-and-validation registry, clock, randomness, snapshot key ring,
+instance ledger, execution kernel, host adapters, and finalized mount catalog.
+It is process infrastructure, not a persistent component instance or the Live
+browser runtime.
+_Avoid_: Live browser runtime, service locator, server-resident component object, mutable route registry
+
 **Runtime feature artifact**:
 A deterministic ESM or classic-script production file for a declared optional
 Live capability, selected by trusted rendered roles through the typed asset
@@ -815,6 +824,10 @@ methodology's own history:
   parity; resolved: Suprnova and initial SSR content work without JavaScript,
   while Live interactions require the Live browser runtime and receive no
   synthesized alternate transport.
+- **Live runtime** -- collided between the JavaScript enhancement runtime and
+  the Rust startup graph; resolved: use **Live browser runtime** for the shipped
+  JavaScript and **Live server runtime** for the immutable Rust graph. The
+  unqualified phrase is avoided where either meaning is possible.
 - **Stateful component** -- collided with a persistent server-resident object;
   resolved: Live presents a stateful programming model through signed snapshots
   while request execution remains stateless by default.

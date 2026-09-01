@@ -43,7 +43,7 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_enco
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// Process-global registry mapping route names to path patterns.
 ///
@@ -504,6 +504,10 @@ pub struct Router {
     /// security-shaped invariant - the codex review tracked it as
     /// "route_middleware keyed by path leaks across methods".
     route_middleware: HashMap<(Method, String), Vec<BoxedMiddleware>>,
+    /// Framework-owned metadata for routes that enter a Live trust boundary.
+    live_routes: HashMap<(Method, String), crate::live::context::LiveRouteMetadata>,
+    /// Startup declarations consumed into the immutable Live mount catalog.
+    live_mounts: Mutex<Option<Vec<suprnova_live::host::MountCatalogEntry>>>,
     /// Fallback handler for when no routes match (overrides default 404)
     fallback_handler: Option<Arc<BoxedHandler>>,
     /// Middleware for the fallback route
@@ -524,6 +528,8 @@ impl Router {
             options_routes: MatchitRouter::new(),
             ws_routes: MatchitRouter::new(),
             route_middleware: HashMap::new(),
+            live_routes: HashMap::new(),
+            live_mounts: Mutex::new(Some(Vec::new())),
             fallback_handler: None,
             fallback_middleware: Vec::new(),
         }
@@ -542,6 +548,61 @@ impl Router {
             .get(&(method.clone(), pattern.to_string()))
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn register_live_route_metadata(
+        &mut self,
+        method: Method,
+        pattern: &str,
+        metadata: crate::live::context::LiveRouteMetadata,
+    ) -> Result<(), FrameworkError> {
+        let key = (method, pattern.to_string());
+        if self.live_routes.insert(key, metadata).is_some() {
+            return Err(FrameworkError::internal(
+                "Live route metadata collided during route construction",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn live_route_metadata(
+        &self,
+        method: &Method,
+        pattern: &str,
+    ) -> Option<crate::live::context::LiveRouteMetadata> {
+        self.live_routes
+            .get(&(method.clone(), pattern.to_string()))
+            .copied()
+    }
+
+    pub(crate) fn register_live_mount_entry(
+        &mut self,
+        entry: suprnova_live::host::MountCatalogEntry,
+    ) -> Result<(), FrameworkError> {
+        let declarations = self
+            .live_mounts
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .ok_or_else(|| {
+                FrameworkError::internal(
+                    "Live mount declarations are closed after server preparation",
+                )
+            })?;
+        declarations.push(entry);
+        Ok(())
+    }
+
+    pub(crate) fn take_live_mount_entries(
+        &self,
+    ) -> Result<Vec<suprnova_live::host::MountCatalogEntry>, FrameworkError> {
+        self.live_mounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                FrameworkError::internal("Live mount declarations were consumed more than once")
+            })
     }
 
     /// Register middleware for a `(method, path)` pair (internal use).
