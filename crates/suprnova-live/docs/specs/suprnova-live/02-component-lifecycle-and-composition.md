@@ -1,7 +1,7 @@
 # Suprnova Live -- 02 Component Lifecycle and Composition
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -78,15 +78,20 @@ Acceptance criteria:
   position is not identity.
 - A key collision within an ownership scope is detected and diagnosed.
 - Parameter change behavior distinguishes remount, update, and no-op.
-- A child-parameter update envelope is bound to the issuing parent instance,
-  accepted parent revision, child key, child component contract, parameter
-  schema, and parameter value hash.
+- An exact-delivery child-parameter update uses envelope schema v2, bound to the
+  issuing parent scope and instance, accepted parent revision, child key, child
+  component contract, exact child instance, parameter schema, and parameter
+  value hash. Historical schema-v1 decoding remains valid for its original
+  contract and is never reinterpreted as v2.
 - After the parent morph, a changed hash queues one `params_changed` operation
   through the child's ordinary scheduler and revision-bearing protocol path.
 - Browser-supplied raw parameters cannot substitute for the signed envelope.
-- The server verifies that the issuing parent revision remains an eligible
-  source and rejects a replayed envelope superseded by a later accepted parent
-  revision; the child records/order-checks the applied parent revision.
+- Before component or action work, the server requires the exact child tuple in
+  the signed parent snapshot's composition lineage and independently reads the
+  ledger's current accepted parent revision. A browser snapshot revision is not
+  ledger authority. Missing, expired, consumed, superseded, or unavailable
+  authority fails closed; the child records/order-checks the applied parent
+  revision.
 - Keys never contain secrets and are not treated as authorization evidence.
 
 UX flow:
@@ -104,6 +109,11 @@ silently absorb, duplicate, or destroy a child's state and request queue.
 Acceptance criteria:
 - The nearest declared island boundary owns an interaction.
 - Parent and child snapshots, revisions, and browser queues remain distinct.
+- Snapshot schema v1 may carry the bounded signed
+  `x_suprnova_live_composition_v1` extension. A child records its optional owner
+  lineage; a parent records stable-key-unique immediate-child entries binding
+  its exact instance and accepted revision to each child key, component
+  contract, exact instance, and bounded depth.
 - Parent morphs preserve a surviving keyed child boundary without rerendering
   the child as ordinary markup while updating permitted boundary metadata.
 - Parent-child communication uses declared parameters or events.
@@ -188,6 +198,13 @@ remain iteration 003 behavior.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Added signed bounded composition lineage to instanced snapshot
+  schema v1 and a distinct exact-child-bound child-parameter envelope v2.
+  Server eligibility now requires both the signed parent lineage tuple and the
+  ledger's current accepted parent revision; a browser snapshot, historical v1
+  envelope, superseded revision, or foreign child cannot supply that authority.
+  Framework child delivery, response emission, browser scheduling, and
+  `params_changed` execution remain the next implementation slice.
 - 2026-08-21 -- Locked the development macro surface to
   `#[derive(LiveComponent)]` plus struct/field helpers and one `#[live]` impl
   containing action/lifecycle helpers. Event and effect payload types register

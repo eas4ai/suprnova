@@ -89,11 +89,22 @@ parameter-schema drift remounts rather than mutating incompatible authority.
 
 A surviving child's changed typed parameters become a separately signed
 parent-issued capability only after the parent successor revision is accepted.
-The envelope binds the parent scope/instance/revision, child key and contract,
-parameter schema/digest, canonical value hash, key, and expiry. Only verified
-child authority reaches `params_changed`. `lazy_complete` and `params_changed`
-are registered lifecycle operations, not arbitrary method dispatch or streamed
-HTML.
+Historical envelope v1 binds the parent scope/instance/revision, child key and
+contract, parameter schema/digest, canonical value hash, key, and expiry. The
+separate v2 envelope adds the exact child instance and uses its own signing
+purpose; v1 is never reinterpreted as v2.
+
+V2 verification returns typed `VerifiedChildParametersV2`, which is still not
+delivery eligibility. `authorize_child_parameters_v2` first matches its parent
+scope/instance/revision to a verified parent snapshot, then requires the exact
+child key/contract/instance tuple in the signed composition extension, and
+finally requires the ledger's current accepted revision to equal the issuing
+revision. Only `EligibleChildParametersV2` represents that server-side result.
+Missing/expired/consumed authority, a later accepted revision, foreign lineage,
+or a provider error fails closed before component work. `lazy_complete` and
+`params_changed` remain registered lifecycle operations, not arbitrary method
+dispatch or streamed HTML; framework delivery and dispatch are not implemented
+by this foundation slice.
 
 Parent morph and child parameter application are intentionally non-atomic. The
 child enters a bounded pending state; a child failure refreshes or remounts that

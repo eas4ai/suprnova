@@ -543,6 +543,19 @@ pub trait LiveInstanceLedger: Send + Sync {
     /// Atomically claims a monotonic successor or returns a classified rejection.
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError>;
 
+    /// Reads the current accepted revision for one exact scoped instance.
+    ///
+    /// A pending successor is not accepted authority, so implementations return
+    /// its base revision. Missing, expired, and terminally consumed instances
+    /// return `None`; provider failures remain errors. This authorization read
+    /// must be linearized by the same synchronization authority as claim and
+    /// commit and must not reconstruct authority from browser-carried state.
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError>;
+
     /// Commits fixed outcome metadata for exactly the matching pending token.
     ///
     /// A provider accepts at most one committed outcome for an instance base

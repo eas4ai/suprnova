@@ -167,6 +167,7 @@ pub(crate) struct AcceptedParentFixture {
     pub(crate) scope: ScopeFingerprint,
     pub(crate) instance: InstanceId,
     pub(crate) revision: Revision,
+    pub(crate) ledger: MemoryInstanceLedger,
 }
 
 pub(crate) async fn accepted_parent() -> AcceptedParentFixture {
@@ -217,6 +218,7 @@ pub(crate) async fn accepted_parent() -> AcceptedParentFixture {
         scope,
         instance,
         revision,
+        ledger,
     }
 }
 

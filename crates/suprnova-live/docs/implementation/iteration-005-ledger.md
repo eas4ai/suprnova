@@ -4,6 +4,40 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-01 -- Accepted-revision, signed lineage, and exact-child foundation
+
+The host-neutral engine now exposes a provider-neutral
+`LiveInstanceLedger::current_accepted_revision` authorization read. The memory
+provider performs it under the same mutex as claim and commit: Ready returns the
+current revision, Pending returns its accepted base rather than its unaccepted
+successor, and missing, pruned/expired, or terminal Consumed authority returns
+`None`. Clock or provider synchronization failure remains `LedgerError`.
+Diagnostic inspection and browser snapshots are not correctness fallbacks.
+
+Snapshot schema v1 remains stable and recognizes the optional canonical signed
+`x_suprnova_live_composition_v1` extension. It carries optional owner lineage
+and bounded immediate-child entries binding parent instance/revision, stable
+key, child component contract, exact child instance, and depth. Exact-shape,
+identity, duplicate, mixed-authority, 256-child, depth-64, and 64-KiB bounds are
+enforced before trusted use. Public seeds reject it; unknown well-formed
+namespaced extensions retain the existing v1 compatibility rule.
+
+Child-parameter schema v2 has a separate signing purpose and adds exact child
+instance binding without changing v1 decoding. Server authorization returns an
+`EligibleChildParametersV2` only when verified v2 data matches the signed parent
+snapshot lineage and the ledger still reports the exact issuing parent
+revision. Superseded revisions, foreign scope/parent/key/component/child,
+missing authority, and provider errors fail closed. This checkpoint deliberately
+does not implement framework HTTP child delivery, parent response emission,
+browser scheduling, or `params_changed` execution.
+
+Strict TDD evidence includes compile-time REDs for the new ledger read,
+composition extension, and v2 envelope APIs; a behavioral RED showing a replay
+was still accepted after a later parent revision; and focused GREEN suites for
+ledger transitions, signed composition tamper/bounds/compatibility, exact-child
+bindings, lineage eligibility, supersession, missing authority, and causal
+provider failure.
+
 ## 2026-08-31 -- Atomic workspace cutover
 
 The committed standalone history, engine, browser runtime, specifications,

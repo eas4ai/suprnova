@@ -24,7 +24,7 @@ use suprnova_live::execution::{
 use suprnova_live::host::TrustedLiveRequestContext;
 use suprnova_live::identity::{
     ActionName, BuildId, ComponentName, InstanceId, IslandSlot, ModelField, Revision,
-    RouteIdentity, UnixMillis, ViewName,
+    RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
@@ -269,6 +269,16 @@ impl LiveInstanceLedger for ControlledLedger {
 
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
         self.inner.claim(request).await
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        self.inner
+            .current_accepted_revision(scope, instance_id)
+            .await
     }
 
     async fn commit(

@@ -59,8 +59,8 @@ use suprnova_live::host::{
     ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    ActionName, BrowserOperationName, BuildId, ComponentName, ContentDigest, IslandSlot, KeyId,
-    ModelField, RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
+    ActionName, BrowserOperationName, BuildId, ComponentName, ContentDigest, InstanceId,
+    IslandSlot, KeyId, ModelField, Revision, RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
@@ -263,6 +263,16 @@ impl LiveInstanceLedger for RollbackableFreshRenderLedger {
 
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
         self.inner.claim(request).await
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        self.inner
+            .current_accepted_revision(scope, instance_id)
+            .await
     }
 
     async fn commit(

@@ -32,7 +32,7 @@ omits correlation, media, and transport details while binding current scope,
 instance/base revision, component contract, idempotency identity, signed
 authority, requested operations, proposals, and semantic extensions.
 
-## Child parameter envelope
+## Child parameter envelopes
 
 The `child-params-v1` envelope uses a purpose-derived HMAC key distinct from
 seed and instance snapshots. Its canonical signed body contains:
@@ -55,6 +55,21 @@ Parent rendering may prepare an update, but the envelope is publishable only
 after the matching parent successor revision is accepted. A v2 response child
 delivery binds the target child instance and parameter hash to that signed
 envelope. Superseded-parent replay and cross-child delivery fail closed.
+
+The exact-child foundation adds `child-params-v2` as a separate canonical body
+schema and HKDF purpose. It preserves every v1 binding and adds
+`child_instance`; `PreparedChildParametersV2`, `ExpectedChildParametersV2`, and
+`VerifiedChildParametersV2` are distinct types, and neither verifier decodes the
+other version as its own contract. Before server delivery, verified v2 data must
+match the signed parent snapshot's exact composition child entry and
+`LiveInstanceLedger::current_accepted_revision` must still equal the issuing
+parent revision. The resulting `EligibleChildParametersV2` is server-only.
+Missing or unavailable ledger authority and a valid but superseded browser
+snapshot fail closed.
+
+This checkpoint exposes engine contracts only. It does not yet emit
+`child_deliveries`, add a framework child endpoint, schedule browser work, or
+invoke `params_changed`; those remain the next coherent slice.
 
 ## Response ordering
 

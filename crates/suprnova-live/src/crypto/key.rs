@@ -16,6 +16,7 @@ const HKDF_SALT_V1: &[u8] = b"suprnova-live/snapshot-hkdf/v1";
 const SEED_INFO_V1: &[u8] = b"suprnova-live/seed-signature/v1";
 const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
 const CHILD_PARAMETERS_INFO_V1: &[u8] = b"suprnova-live/child-params-signature/v1";
+const CHILD_PARAMETERS_INFO_V2: &[u8] = b"suprnova-live/child-params-signature/v2";
 const UPLOAD_GRANT_INFO_V1: &[u8] = b"suprnova-live/upload-grant/v1";
 const ASYNC_SUBSCRIPTION_INFO_V1: &[u8] = b"suprnova-live/async-subscription/v1";
 
@@ -28,6 +29,8 @@ pub enum SnapshotPurpose {
     InstanceV1,
     /// Parent-to-child parameter capability schema version 1.
     ChildParametersV1,
+    /// Exact-child-bound parent-to-child parameter capability schema version 2.
+    ChildParametersV2,
     /// Temporary upload transfer-grant schema version 1.
     UploadGrantV1,
     /// Authorized asynchronous subscription descriptor schema version 1.
@@ -40,6 +43,7 @@ impl SnapshotPurpose {
             Self::SeedV1 => SEED_INFO_V1,
             Self::InstanceV1 => INSTANCE_INFO_V1,
             Self::ChildParametersV1 => CHILD_PARAMETERS_INFO_V1,
+            Self::ChildParametersV2 => CHILD_PARAMETERS_INFO_V2,
             Self::UploadGrantV1 => UPLOAD_GRANT_INFO_V1,
             Self::AsyncSubscriptionV1 => ASYNC_SUBSCRIPTION_INFO_V1,
         }

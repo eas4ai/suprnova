@@ -1,12 +1,15 @@
 //! Versioned seed and instanced snapshot bodies and trusted expectations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 
 use serde::Serialize;
 
 use super::state::{SnapshotSchemaSet, StateExposure};
-use super::{SnapshotError, SnapshotErrorKind, SnapshotLimits};
+use super::{
+    COMPOSITION_LINEAGE_EXTENSION_V1, CompositionLineageV1, SnapshotError, SnapshotErrorKind,
+    SnapshotLimits,
+};
 use crate::canonical::{CanonicalValue, to_canonical_bytes};
 use crate::identity::{
     BuildId, ComponentName, ContentDigest, DurationMillis, Generation, InstanceId, IslandSlot,
@@ -282,7 +285,14 @@ impl SeedBodyV1 {
             .memo()
             .validate(&fields.memo, StateExposure::PublicSeed)?;
         validate_canonical_fields([&fields.mount, &fields.state, &fields.memo], limits)?;
-        validate_extensions(&fields.extensions, limits)?;
+        if fields
+            .extensions
+            .contains_key(COMPOSITION_LINEAGE_EXTENSION_V1)
+        {
+            return Err(SnapshotError::new(SnapshotErrorKind::InvalidExtension));
+        }
+        validate_extension_names(&fields.extensions, limits)?;
+        validate_extension_values(&fields.extensions, limits, false)?;
 
         Ok(Self {
             form: SnapshotForm::Seed,
@@ -411,6 +421,25 @@ pub struct InstanceFieldsV1 {
     pub extensions: BTreeMap<String, CanonicalValue>,
 }
 
+impl InstanceFieldsV1 {
+    /// Installs one typed composition-lineage extension without replacing raw input.
+    pub fn set_composition_lineage(
+        &mut self,
+        lineage: CompositionLineageV1,
+    ) -> Result<(), SnapshotError> {
+        match self
+            .extensions
+            .entry(COMPOSITION_LINEAGE_EXTENSION_V1.to_owned())
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(lineage.to_canonical());
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(SnapshotError::new(SnapshotErrorKind::InvalidExtension)),
+        }
+    }
+}
+
 impl fmt::Debug for InstanceFieldsV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<InstanceFieldsV1:redacted>")
@@ -435,6 +464,8 @@ pub struct InstanceBodyV1 {
     state: CanonicalValue,
     memo: CanonicalValue,
     extensions: BTreeMap<String, CanonicalValue>,
+    #[serde(skip)]
+    composition_lineage: Option<CompositionLineageV1>,
 }
 
 impl InstanceBodyV1 {
@@ -462,7 +493,15 @@ impl InstanceBodyV1 {
             .memo()
             .validate(&fields.memo, StateExposure::Instanced)?;
         validate_canonical_fields([&fields.state, &fields.memo], limits)?;
-        validate_extensions(&fields.extensions, limits)?;
+        validate_extension_names(&fields.extensions, limits)?;
+        let composition_lineage = super::composition::composition_lineage_from_extensions(
+            &fields.extensions,
+            limits,
+            &fields.instance_id,
+            fields.revision,
+            fields.component.contract_digest(),
+        )?;
+        validate_extension_values(&fields.extensions, limits, true)?;
 
         Ok(Self {
             form: SnapshotForm::Instance,
@@ -480,6 +519,7 @@ impl InstanceBodyV1 {
             state: fields.state,
             memo: fields.memo,
             extensions: fields.extensions,
+            composition_lineage,
         })
     }
 
@@ -499,6 +539,12 @@ impl InstanceBodyV1 {
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
+    }
+
+    /// Returns verified independently owned island composition lineage, when present.
+    #[must_use]
+    pub const fn composition_lineage(&self) -> Option<&CompositionLineageV1> {
+        self.composition_lineage.as_ref()
     }
 
     pub(crate) const fn key_id(&self) -> &KeyId {
@@ -653,14 +699,14 @@ fn validate_canonical_fields<'value>(
     Ok(())
 }
 
-fn validate_extensions(
+fn validate_extension_names(
     extensions: &BTreeMap<String, CanonicalValue>,
     limits: &SnapshotLimits,
 ) -> Result<(), SnapshotError> {
     if extensions.len() > limits.max_extensions() {
         return Err(SnapshotError::new(SnapshotErrorKind::InvalidExtension));
     }
-    for (name, value) in extensions {
+    for name in extensions.keys() {
         let valid = name.starts_with("x_")
             && name.len() <= 64
             && name
@@ -669,7 +715,110 @@ fn validate_extensions(
         if !valid {
             return Err(SnapshotError::new(SnapshotErrorKind::InvalidExtension));
         }
+    }
+    Ok(())
+}
+
+fn validate_extension_values(
+    extensions: &BTreeMap<String, CanonicalValue>,
+    limits: &SnapshotLimits,
+    skip_composition_lineage: bool,
+) -> Result<(), SnapshotError> {
+    for (name, value) in extensions {
+        if skip_composition_lineage && name == COMPOSITION_LINEAGE_EXTENSION_V1 {
+            continue;
+        }
+        #[cfg(test)]
+        if name == COMPOSITION_LINEAGE_EXTENSION_V1 {
+            super::composition::record_composition_canonicalization("generic");
+        }
         validate_canonical_fields([value], limits)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::composition::ChildKey;
+    use crate::identity::{ComponentName, RouteIdentity};
+    use crate::limits::InputLimits;
+    use crate::snapshot::composition::{
+        CompositionChildLineageV1, CompositionLineageV1, take_composition_canonicalization_paths,
+    };
+    use crate::snapshot::state::StateSchema;
+
+    fn bytes<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {
+        std::array::from_fn(|index| start.wrapping_add(index as u8))
+    }
+
+    #[test]
+    fn recognized_composition_extension_is_canonicalized_once_on_its_own_path() {
+        let parent_instance = InstanceId::from_bytes(&bytes::<16>(0x20)).expect("parent instance");
+        let child_instance = InstanceId::from_bytes(&bytes::<16>(0x40)).expect("child instance");
+        let contract_digest =
+            ContentDigest::from_bytes(&bytes::<32>(0x60)).expect("contract digest");
+        let lineage = CompositionLineageV1::new(
+            None,
+            vec![
+                CompositionChildLineageV1::new(
+                    parent_instance.clone(),
+                    Revision::new(3),
+                    ChildKey::parse("only-once").expect("child key"),
+                    contract_digest.clone(),
+                    child_instance,
+                    1,
+                )
+                .expect("child lineage"),
+            ],
+        )
+        .expect("composition lineage");
+        let empty_schema = StateSchema::new(1, Vec::new()).expect("empty schema");
+        let schemas =
+            SnapshotSchemaSet::new(empty_schema.clone(), empty_schema.clone(), empty_schema)
+                .expect("snapshot schemas");
+        let limits = SnapshotLimits::new(
+            InputLimits::new(256 * 1024, 8, 4_096, 512).expect("input limits"),
+            50,
+            10_000,
+            20_000,
+            8,
+            8,
+        )
+        .expect("snapshot limits");
+        let mut fields = InstanceFieldsV1 {
+            component: ComponentContract::new(
+                ComponentName::parse("catalog.parent").expect("component name"),
+                contract_digest,
+                1,
+                1,
+                1,
+            )
+            .expect("component contract"),
+            build_id: BuildId::parse("build-once").expect("build id"),
+            route: RouteIdentity::from_bytes(&bytes::<32>(0x80)).expect("route"),
+            slot: IslandSlot::parse("parent").expect("slot"),
+            key_id: KeyId::parse("snapshot-once").expect("key id"),
+            scope: ScopeFingerprint::from_bytes(&bytes::<32>(0xa0)).expect("scope"),
+            instance_id: parent_instance,
+            revision: Revision::new(3),
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(2_000),
+            state: CanonicalValue::Object(BTreeMap::new()),
+            memo: CanonicalValue::Object(BTreeMap::new()),
+            extensions: BTreeMap::new(),
+        };
+        fields
+            .set_composition_lineage(lineage)
+            .expect("lineage installs");
+        take_composition_canonicalization_paths();
+
+        InstanceBodyV1::new(fields, &schemas, &limits).expect("instance body validates");
+
+        assert_eq!(
+            take_composition_canonicalization_paths(),
+            vec!["recognized"],
+            "the recognized 64-KiB-capped path must run without generic reserialization"
+        );
+    }
 }

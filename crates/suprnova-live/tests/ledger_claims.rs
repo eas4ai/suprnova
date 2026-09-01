@@ -14,6 +14,125 @@ use suprnova_live::ledger::{
 };
 
 #[tokio::test]
+async fn accepted_revision_changes_only_when_a_pending_claim_commits() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock, 2);
+    let scope = scope(0x0f);
+    let instance = instance(0x1f);
+    promote_default(&ledger, scope.clone(), instance.clone()).await;
+
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&scope, &instance)
+            .await
+            .expect("accepted-revision read succeeds"),
+        Some(Revision::new(0))
+    );
+
+    let grant = match ledger
+        .claim(ClaimRequest::new(
+            scope.clone(),
+            instance.clone(),
+            Revision::new(0),
+            idempotency(0x5f),
+            digest(0x6f),
+        ))
+        .await
+        .expect("claim succeeds")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected granted claim, got {other:?}"),
+    };
+
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&scope, &instance)
+            .await
+            .expect("pending accepted-revision read succeeds"),
+        Some(Revision::new(0)),
+        "a claimed successor is not accepted authority"
+    );
+
+    ledger
+        .commit(
+            &grant.into_token(),
+            AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x7f)),
+        )
+        .await
+        .expect("matching claim commits");
+
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&scope, &instance)
+            .await
+            .expect("committed accepted-revision read succeeds"),
+        Some(Revision::new(1))
+    );
+}
+
+#[tokio::test]
+async fn accepted_revision_read_is_exact_and_terminal_or_expired_authority_is_absent() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock.clone(), 2);
+    let parent_scope = scope(0x31);
+    let parent_instance = instance(0x41);
+    promote_default(&ledger, parent_scope.clone(), parent_instance.clone()).await;
+
+    assert!(
+        ledger
+            .inspect(&parent_scope, &parent_instance)
+            .expect("trusted diagnostic inspection succeeds")
+            .is_some()
+    );
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&scope(0x32), &parent_instance)
+            .await
+            .expect("exact-scope authority read succeeds"),
+        None,
+        "diagnostic presence under another scope is never an authorization fallback"
+    );
+
+    let grant = match ledger
+        .claim(ClaimRequest::new(
+            parent_scope.clone(),
+            parent_instance.clone(),
+            Revision::new(0),
+            idempotency(0x51),
+            digest(0x61),
+        ))
+        .await
+        .expect("claim succeeds")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected grant, got {other:?}"),
+    };
+    ledger
+        .abandon(&grant.into_token())
+        .await
+        .expect("claim terminally consumes authority");
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&parent_scope, &parent_instance)
+            .await
+            .expect("terminal authority read succeeds"),
+        None
+    );
+
+    let expiring_scope = scope(0x33);
+    let expiring_instance = instance(0x43);
+    promote_default(&ledger, expiring_scope.clone(), expiring_instance.clone()).await;
+    clock.set(5_000);
+    assert_eq!(
+        ledger
+            .current_accepted_revision(&expiring_scope, &expiring_instance)
+            .await
+            .expect("expired authority prunes safely"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn claim_advances_monotonically_and_exact_duplicates_observe_one_outcome() {
     let clock = Arc::new(ManualClock::new(1_000));
     let ledger = ledger(clock, 2);

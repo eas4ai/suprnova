@@ -11,7 +11,7 @@ use component_support::{
     schema_set, snapshot_limits, trusted_context,
 };
 use suprnova_live::canonical::CanonicalValue;
-use suprnova_live::identity::{BuildId, InstanceId, Revision, UnixMillis};
+use suprnova_live::identity::{BuildId, InstanceId, Revision, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
     LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord, PromotionOutcome,
@@ -193,6 +193,16 @@ impl LiveInstanceLedger for BlockingLedger {
 
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
         self.inner.claim(request).await
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        self.inner
+            .current_accepted_revision(scope, instance_id)
+            .await
     }
 
     async fn commit(

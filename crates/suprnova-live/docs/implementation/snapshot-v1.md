@@ -60,6 +60,20 @@ Verification also binds the current trusted scope and returns
 `VerifiedInstanceV1`; missing ledger authority cannot be reconstructed from the
 browser-carried body.
 
+The optional recognized extension `x_suprnova_live_composition_v1` records
+independently owned island lineage. Its canonical object has exactly `owner`
+(`null` or one binding) and `children` (an array). Every binding has exactly
+`parent_instance`, decimal-string `parent_revision`, `child_key`,
+`child_component_contract`, `child_instance`, and decimal-string `depth`.
+Parents may record at most 256 immediate children; depth is 1 through 64; the
+extension alone may occupy at most 64 KiB canonical bytes. Empty lineage,
+duplicate child keys or instances, mixed parent authority, invalid identity,
+depth ambiguity, and a descendant beyond depth 64 fail before signing or trusted
+use. A child owner must name the enclosing child instance and component
+contract; every parent child entry must name the enclosing parent instance and
+revision. Public seeds reject the registered instance-only extension. Unknown
+well-formed namespaced extensions retain snapshot-v1 compatibility behavior.
+
 `LiveInstanceLedger` stores bounded concurrency and idempotency metadata, never
 a component object. The complete Tier 0 memory provider proves:
 
@@ -79,6 +93,14 @@ cannot return stale authority.
 Tier 0 claims the successor before uncoupled work. Abandonment or claim expiry
 consumes authority and requires a fresh render; it is never repaired by rolling
 the ledger revision backward.
+
+`LiveInstanceLedger::current_accepted_revision` is the correctness read for one
+exact scope and instance under the provider's claim/commit synchronization.
+Ready returns the current revision. Pending returns the base revision because
+its successor is claimed but not accepted. Missing, pruned/expired, and
+terminally Consumed records return `None`; clock, synchronization, and provider
+failure return `LedgerError`. Diagnostic `inspect` remains test/operations
+metadata and is never a fallback for authorization.
 
 ## State schemas and codecs
 

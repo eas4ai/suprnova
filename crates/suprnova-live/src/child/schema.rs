@@ -17,6 +17,9 @@ const HARD_MAX_LIFETIME_MS: u64 = 300_000;
 /// Canonical child-parameter body schema version.
 pub const CHILD_PARAMETERS_SCHEMA_V1: u16 = 1;
 
+/// Canonical exact-child-bound parameter body schema version.
+pub const CHILD_PARAMETERS_SCHEMA_V2: u16 = 2;
+
 /// Closed reason a child-parameter capability was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChildParameterErrorKind {
@@ -217,6 +220,66 @@ impl fmt::Debug for ChildParametersV1 {
     }
 }
 
+/// Canonical signed parent-to-exact-child parameter body.
+#[derive(Clone, Serialize)]
+pub struct ChildParametersV2 {
+    pub(crate) form: &'static str,
+    pub(crate) schema_version: u16,
+    pub(crate) parent_scope: ScopeFingerprint,
+    pub(crate) parent_instance: InstanceId,
+    pub(crate) parent_revision: Revision,
+    pub(crate) child_key: String,
+    pub(crate) child_contract: ContentDigest,
+    pub(crate) child_instance: InstanceId,
+    pub(crate) parameter_schema_version: u16,
+    pub(crate) parameter_schema_digest: ContentDigest,
+    pub(crate) parameters: CanonicalValue,
+    pub(crate) value_digest: ContentDigest,
+    pub(crate) issued_at: UnixMillis,
+    pub(crate) expires_at: UnixMillis,
+    pub(crate) key_id: KeyId,
+}
+
+impl ChildParametersV2 {
+    /// Returns the issuing accepted parent revision.
+    #[must_use]
+    pub const fn parent_revision(&self) -> Revision {
+        self.parent_revision
+    }
+
+    /// Returns the stable child key.
+    #[must_use]
+    pub fn child_key(&self) -> &str {
+        &self.child_key
+    }
+
+    /// Returns the exact child instance bound by this capability.
+    #[must_use]
+    pub const fn child_instance(&self) -> &InstanceId {
+        &self.child_instance
+    }
+
+    /// Returns the typed canonical parameter object.
+    #[must_use]
+    pub const fn parameters(&self) -> &CanonicalValue {
+        &self.parameters
+    }
+}
+
+impl fmt::Debug for ChildParametersV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChildParametersV2")
+            .field("parent_scope", &self.parent_scope)
+            .field("parent_instance", &self.parent_instance)
+            .field("parent_revision", &self.parent_revision)
+            .field("child_key", &self.child_key)
+            .field("child_instance", &self.child_instance)
+            .field("parameters", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Server-rendered child update awaiting its matching accepted parent outcome.
 #[derive(Clone)]
 pub struct PreparedChildParametersV1 {
@@ -273,6 +336,64 @@ impl fmt::Debug for PreparedChildParametersV1 {
     }
 }
 
+/// Server-rendered exact-child update awaiting its accepted parent outcome.
+#[derive(Clone)]
+pub struct PreparedChildParametersV2 {
+    pub(crate) body: ChildParametersV2,
+}
+
+impl PreparedChildParametersV2 {
+    /// Prepares a bounded exact-child update without publishing it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every authority and validity binding is explicit at this security boundary"
+    )]
+    pub fn new(
+        parent_scope: ScopeFingerprint,
+        parent_instance: InstanceId,
+        parent_revision: Revision,
+        child_instance: InstanceId,
+        pending: PendingChildParameters,
+        issued_at: UnixMillis,
+        expires_at: UnixMillis,
+        key_id: KeyId,
+        limits: &ChildParameterLimits,
+    ) -> Result<Self, ChildParameterError> {
+        validate_window(issued_at, expires_at, limits)?;
+        to_canonical_bytes(pending.parameters(), limits.input()).map_err(map_canonical)?;
+        let parameter_schema_digest =
+            ContentDigest::from_bytes(pending.parameter_schema().as_bytes())
+                .map_err(|_| ChildParameterError::new(ChildParameterErrorKind::InvalidEnvelope))?;
+        let value_digest = ContentDigest::from_bytes(pending.parameter_value().as_bytes())
+            .map_err(|_| ChildParameterError::new(ChildParameterErrorKind::InvalidEnvelope))?;
+        Ok(Self {
+            body: ChildParametersV2 {
+                form: CHILD_PARAMETERS_FORM,
+                schema_version: CHILD_PARAMETERS_SCHEMA_V2,
+                parent_scope,
+                parent_instance,
+                parent_revision,
+                child_key: pending.child().key().as_str().to_owned(),
+                child_contract: pending.child().component_contract().clone(),
+                child_instance,
+                parameter_schema_version: pending.parameter_schema_version(),
+                parameter_schema_digest,
+                parameters: pending.parameters().clone(),
+                value_digest,
+                issued_at,
+                expires_at,
+                key_id,
+            },
+        })
+    }
+}
+
+impl fmt::Debug for PreparedChildParametersV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<PreparedChildParametersV2:redacted>")
+    }
+}
+
 /// Trusted current expectations used to reject cross-parent or superseded replay.
 #[derive(Clone, Debug)]
 pub struct ExpectedChildParametersV1 {
@@ -302,6 +423,51 @@ impl ExpectedChildParametersV1 {
             parent_revision,
             child_key,
             child_contract,
+            parameter_schema,
+            last_applied_parent_revision: None,
+        }
+    }
+
+    /// Records the last parent revision already applied by this child scheduler.
+    #[must_use]
+    pub fn after_applied_parent_revision(mut self, revision: Revision) -> Self {
+        self.last_applied_parent_revision = Some(revision);
+        self
+    }
+}
+
+/// Trusted exact-child expectations used to reject substitution and replay.
+#[derive(Clone, Debug)]
+pub struct ExpectedChildParametersV2 {
+    pub(crate) parent_scope: ScopeFingerprint,
+    pub(crate) parent_instance: InstanceId,
+    pub(crate) parent_revision: Revision,
+    pub(crate) child_key: ChildKey,
+    pub(crate) child_contract: ContentDigest,
+    pub(crate) child_instance: InstanceId,
+    pub(crate) parameter_schema: ChildParameterSchema,
+    pub(crate) last_applied_parent_revision: Option<Revision>,
+}
+
+impl ExpectedChildParametersV2 {
+    /// Binds verification to one parent and one exact child instance.
+    #[must_use]
+    pub const fn new(
+        parent_scope: ScopeFingerprint,
+        parent_instance: InstanceId,
+        parent_revision: Revision,
+        child_key: ChildKey,
+        child_contract: ContentDigest,
+        child_instance: InstanceId,
+        parameter_schema: ChildParameterSchema,
+    ) -> Self {
+        Self {
+            parent_scope,
+            parent_instance,
+            parent_revision,
+            child_key,
+            child_contract,
+            child_instance,
             parameter_schema,
             last_applied_parent_revision: None,
         }

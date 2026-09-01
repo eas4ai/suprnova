@@ -177,6 +177,28 @@ object and may use memory, the application database, or a conforming key/value
 cache by deployment tier.
 _Avoid_: component session, sticky server object, generation ledger, domain transaction log
 
+**Current accepted revision**:
+The provider-neutral authorization metadata read for one exact scoped Live
+instance, linearized with ledger claim and acceptance. A pending claim exposes
+only its already accepted base revision; missing, expired, or consumed authority
+exposes none. It is not reconstructed from a browser snapshot or diagnostic
+inspection.
+_Avoid_: browser revision, pending successor, inspected revision, cached snapshot authority
+
+**Composition lineage**:
+The optional bounded signed snapshot-schema-v1 extension that records an
+independently owned island's immediate owner and children. Each entry binds the
+accepted parent instance/revision, stable child key, child component contract,
+exact child instance, and depth; it is ownership metadata, not component state.
+_Avoid_: DOM ancestry, client composition, child parameters, global component tree
+
+**Eligible child parameters**:
+A server-only typed capability produced after a verified child-parameter-v2
+envelope matches signed parent composition lineage and the ledger still reports
+that exact accepted parent revision. Verification of the envelope or browser
+snapshot alone does not create eligibility.
+_Avoid_: raw child parameters, verified v1 envelope, browser delivery, snapshot revision
+
 **Accepted Live outcome**:
 The one committed protocol outcome permitted for an island base revision. A
 rolled-back Rust method may run again, and external side effects require their

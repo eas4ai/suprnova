@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-31
+Last revised: 2026-09-01
 
 ## Authority and application
 
@@ -127,6 +127,16 @@ unrelated Suprnova and Magnetar work remains untouched.
 - Snapshot keys are derived per purpose and version with HKDF-SHA-256 and sign
   with HMAC-SHA-256. Verification uses explicit key IDs, bounded rotation
   windows, and constant-time comparison.
+- Known snapshot extensions use exact registered canonical schemas and hard
+  independent byte/cardinality/depth bounds; unknown well-formed namespaced
+  extensions follow the owning snapshot version's compatibility rule. Public
+  seeds never inherit instance-only extension authority.
+- Child-parameter envelope versions have separate schema discriminators, typed
+  verified values, and cryptographic purposes. A verifier never reinterprets an
+  older envelope as a newer exact-binding contract.
+- Authorization reads use provider contracts designed for correctness and
+  linearized with their mutations. Broad diagnostic inspection and
+  browser-carried snapshots never substitute for those reads.
 - Protocol, snapshot, directive, view metadata, and cache-entry fixtures are
   consumed by both Rust and TypeScript tests. A handwritten duplicate schema is
   not a second source of truth.
@@ -501,6 +511,11 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Registered the exact bounded composition-lineage extension,
+  child-parameter-v2 purpose/schema separation, and linearizable ledger
+  authorization-read rules. Preserved snapshot-v1 unknown-extension
+  compatibility and historical child-parameter-v1 conformance without granting
+  either stronger authority by reinterpretation.
 - 2026-08-31 -- Established the integrated `crates/suprnova-live/` subtree as
   the sole maintained product, specification, checker, browser, fixture, test,
   benchmark, and implementation-document authority. The former standalone

@@ -14,7 +14,7 @@ use super::{
     LiveInstanceLedger, MountInstanceRecord, PromotionOutcome, PromotionRecord, RefreshReason,
 };
 use crate::clock::Clock;
-use crate::identity::UnixMillis;
+use crate::identity::{InstanceId, Revision, ScopeFingerprint, UnixMillis};
 
 /// Complete zero-daemon instance revision authority for one application process.
 #[derive(Clone)]
@@ -287,6 +287,32 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             },
             successor_revision,
         )))
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        let now = self.now()?;
+        let key = InstanceKey {
+            scope: scope.clone(),
+            instance_id: instance_id.clone(),
+        };
+        let mut state = self.lock()?;
+        if state.prune_instance(&key, now) {
+            return Ok(None);
+        }
+        state.prune_expired(now);
+        let Some(record) = state.instances.get_mut(&key) else {
+            return Ok(None);
+        };
+        expire_pending(record, now);
+        match &record.phase {
+            InstancePhase::Ready => Ok(Some(record.current_revision)),
+            InstancePhase::Pending(pending) => Ok(Some(pending.base_revision)),
+            InstancePhase::Consumed { .. } => Ok(None),
+        }
     }
 
     async fn commit(

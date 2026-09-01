@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-08-31
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -60,6 +60,9 @@ Acceptance criteria:
 - Duplicate keys, ambiguous operations, and invalid ordering are rejected.
 - Batching is allowed only where operations share a compatible island,
   snapshot, security context, and deterministic execution order.
+- Child-parameter schema v1 and v2 are distinct signed capability schemas.
+  Exact-child delivery requires v2; a v1 body is not silently upgraded or
+  accepted by the v2 verifier.
 
 UX flow:
 1. Runtime schedules compatible work -> it creates one bounded request envelope
@@ -253,6 +256,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Added the host-neutral child-parameter envelope-v2 foundation
+  with a separate signing purpose and an exact child-instance binding. Server
+  eligibility requires verified v2 data, the matching signed parent snapshot
+  composition lineage, and the ledger's current accepted parent revision.
+  This decision does not yet claim framework HTTP delivery, parent response
+  emission, browser scheduling, or `params_changed` dispatch complete.
 - 2026-08-31 -- Marked the Iteration 002 endpoint profile as historical after
   the repository-authority cutover. The move is complete; actual Suprnova HTTP
   and middleware adaptation remains required Iteration 005 work and is not

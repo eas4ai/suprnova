@@ -1,7 +1,7 @@
 # Suprnova Live -- 05 Snapshots and Hydration
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -32,6 +32,14 @@ Acceptance criteria:
   serializer's incidental defaults.
 - Unknown required versions are rejected; optional extensions are ignored only
   under an explicit compatibility rule.
+- Unknown well-formed namespaced extensions remain compatible, while a known
+  extension name is validated by its exact registered schema. Instanced
+  snapshot schema v1 optionally recognizes
+  `x_suprnova_live_composition_v1`; public seeds reject it.
+- Composition lineage is canonical, inside the signed body, and independently
+  bounded to 256 immediate children, depth 64, and 64 KiB. It rejects empty or
+  ambiguous records, invalid identities, duplicate keys or child instances,
+  mixed parent authority, and descendants beyond the depth bound before use.
 - Component, route, slot, instance where present, and identity binding cannot be
   substituted without invalidating the applicable form.
 - Instanced revision and issuance metadata support stale, replay, and expiration
@@ -160,6 +168,13 @@ Acceptance criteria:
   produce its own conflict outcome.
 - Missing or expired instance-ledger state never reconstructs authority from a
   browser snapshot; it requires fresh rendering.
+- The provider-neutral current-accepted-revision read is exact to
+  `(scope, instance)` and linearizes with claim and commit. `Ready` returns its
+  current revision; `Pending` returns only its accepted base because the
+  successor is not accepted; missing, pruned/expired, or terminal `Consumed`
+  returns no authority; clock, lock, and provider failures remain errors.
+- Authorization paths use that exact read, never broad diagnostic inspection or
+  a client snapshot, to establish current parent revision authority.
 
 UX flow:
 1. Runtime sends the current revision -> the ledger atomically claims or rejects
@@ -272,6 +287,11 @@ browser-supplied raw parameter map.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Preserved snapshot schema v1 while registering one optional
+  bounded signed composition extension. Added an exact, provider-neutral,
+  linearizable accepted-revision ledger read with explicit pending, missing,
+  expired, consumed, and provider-error semantics; diagnostic inspection and
+  client snapshots remain non-authoritative.
 - 2026-08-21 -- Added distinct server `mount_instance` authority for
   identity-bound initial renders and a purpose-separated `child-params-v1`
   verified envelope. Kept snapshot schema v1 stable while component metadata
