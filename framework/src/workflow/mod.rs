@@ -1065,22 +1065,7 @@ mod tests {
             .build();
         let conn = DbConnection::connect(&config).await.expect("pg connect");
 
-        // The migrator's `create_index` calls are not `if_not_exists`,
-        // so re-running against the same database fails on duplicate
-        // index names. Drop the tables first so this test is idempotent
-        // against a long-lived Postgres instance.
-        conn.inner()
-            .execute_unprepared("DROP TABLE IF EXISTS workflow_steps")
-            .await
-            .ok();
-        conn.inner()
-            .execute_unprepared("DROP TABLE IF EXISTS workflows")
-            .await
-            .ok();
-
-        TestMigrator::up(conn.inner(), None)
-            .await
-            .expect("migrate workflows tables");
+        recreate_postgres_workflow_tables(&conn).await;
 
         TestContainer::singleton(conn.clone());
 
@@ -1095,7 +1080,7 @@ mod tests {
             .execute_unprepared(&format!(
                 "UPDATE workflows
                  SET status='running',
-                     attempts=1,
+                     attempts=2,
                      worker_id='dead-worker',
                      locked_until=NOW() - INTERVAL '1 hour',
                      started_at=NOW() - INTERVAL '1 hour'
@@ -1113,13 +1098,101 @@ mod tests {
 
         assert_eq!(claimed.id, handle.id());
         assert_eq!(
-            claimed.attempts, 2,
-            "reclaimed row must have its attempt counter incremented"
+            claimed.attempts, 3,
+            "the final legal reclaim must increment attempts to max_attempts"
         );
 
         let record = store::get_workflow_record(handle.id()).await.unwrap();
         assert_eq!(record.status, WorkflowStatus::Running.as_str());
         assert_eq!(record.worker_id.as_deref(), Some("recovery-worker"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres at DATABASE_URL"]
+    async fn test_expired_running_workflow_at_attempt_budget_is_failed_not_reclaimed() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use sea_orm::ConnectionTrait;
+
+        let Some(pg_url) = postgres_url_or_skip("expired_running_at_attempt_budget") else {
+            return;
+        };
+
+        let _guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url(&pg_url)
+            .max_connections(2)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await.expect("pg connect");
+
+        recreate_postgres_workflow_tables(&conn).await;
+        TestContainer::singleton(conn.clone());
+
+        let exhausted = store::insert_workflow("exhausted", "{}", 3)
+            .await
+            .expect("insert exhausted workflow");
+        conn.inner()
+            .execute_unprepared(&format!(
+                "UPDATE workflows
+                 SET status='running',
+                     attempts=3,
+                     worker_id='dead-worker',
+                     locked_until=NOW() - INTERVAL '1 hour',
+                     started_at=NOW() - INTERVAL '1 hour'
+                 WHERE id={}",
+                exhausted.id()
+            ))
+            .await
+            .expect("simulate exhausted crashed worker");
+
+        let ready = store::insert_workflow("ready", "{}", 3)
+            .await
+            .expect("insert ready workflow");
+        let cfg = WorkflowConfig::from_env();
+        let claimed = store::claim_next_workflow("recovery-worker", &cfg)
+            .await
+            .expect("claim_next_workflow")
+            .expect("ready workflow should still be claimed");
+
+        assert_eq!(claimed.id, ready.id());
+        assert_eq!(claimed.attempts, 1);
+
+        let terminal = store::get_workflow_record(exhausted.id())
+            .await
+            .expect("load terminal workflow");
+        assert_eq!(terminal.status, WorkflowStatus::Failed.as_str());
+        assert_eq!(
+            terminal.attempts, 3,
+            "cleanup must not spend another attempt"
+        );
+        assert!(terminal.worker_id.is_none());
+        assert!(terminal.locked_until.is_none());
+        assert!(terminal.completed_at.is_some());
+        assert!(
+            terminal
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("attempt budget exhausted"))
+        );
+
+        let completed_at = terminal.completed_at;
+        let error = terminal.error;
+        assert!(
+            store::claim_next_workflow("another-worker", &cfg)
+                .await
+                .expect("second claim")
+                .is_none(),
+            "terminal cleanup must be idempotent"
+        );
+        let unchanged = store::get_workflow_record(exhausted.id())
+            .await
+            .expect("reload terminal workflow");
+        assert_eq!(unchanged.attempts, 3);
+        assert_eq!(unchanged.completed_at, completed_at);
+        assert_eq!(unchanged.error, error);
     }
 
     // A cancelled worker must drain in-flight workflows before returning.
@@ -1375,6 +1448,29 @@ mod tests {
                 None
             }
         }
+    }
+
+    async fn recreate_postgres_workflow_tables(conn: &crate::database::DbConnection) {
+        use sea_orm::ConnectionTrait;
+
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflow_steps")
+            .await
+            .expect("drop workflow_steps test table");
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflows")
+            .await
+            .expect("drop workflows test table");
+
+        let manager = SchemaManager::new(conn.inner());
+        CreateWorkflowsTable
+            .up(&manager)
+            .await
+            .expect("create workflows test table");
+        CreateWorkflowStepsTable
+            .up(&manager)
+            .await
+            .expect("create workflow_steps test table");
     }
 
     async fn setup_db() -> TestDatabase {

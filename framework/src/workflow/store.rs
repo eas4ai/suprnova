@@ -11,6 +11,8 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseBackend, EntityTrait, Query
 use sea_orm::{ConnectionTrait, Statement};
 use std::time::Duration;
 
+const ATTEMPT_BUDGET_EXHAUSTED_ERROR: &str = "Workflow attempt budget exhausted before claim";
+
 /// Insert a new workflow row (pending)
 pub async fn insert_workflow(
     name: &str,
@@ -146,10 +148,66 @@ pub async fn claim_next_workflow(
     //      net was added). Reclaiming these is what turns `locked_until` from
     //      a hint into actual crash recovery; without it, a single crashed
     //      worker strands its in-flight row forever.
-    // FOR UPDATE SKIP LOCKED keeps concurrent workers from racing on the
-    // same row; the outer UPDATE increments attempts so a reclaimed crash
-    // counts toward max_attempts the same way a returned error would.
+    // An eligible row whose budget is already exhausted cannot be left in
+    // pending/running forever, but it must not be claimed again either. The
+    // first two CTEs terminalize at most one such row per poll. The cleanup
+    // and claim predicates are disjoint (`>=` versus `<`), so both updates
+    // can safely execute in this one statement. Bounded cleanup avoids a
+    // large abandoned backlog turning one worker poll into an unbounded
+    // write.
+    //
+    // FOR UPDATE SKIP LOCKED keeps concurrent workers from racing on either
+    // candidate. The outer UPDATE increments attempts, so a reclaimed crash
+    // below budget counts the same way as a returned error. Applying the
+    // budget predicate before that increment preserves the final legal
+    // attempt (`max_attempts - 1` becomes `max_attempts`).
     let sql = r#"
+        WITH exhausted_candidate AS (
+            SELECT id
+            FROM workflows
+            WHERE attempts >= max_attempts
+              AND (
+                  (status = 'pending'
+                   AND (next_run_at IS NULL OR next_run_at <= NOW())
+                   AND (locked_until IS NULL OR locked_until <= NOW()))
+                  OR
+                  (status = 'running'
+                   AND locked_until IS NOT NULL
+                   AND locked_until <= NOW())
+              )
+            ORDER BY id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        ),
+        terminalized AS (
+            UPDATE workflows
+            SET status = 'failed',
+                error = $3,
+                completed_at = COALESCE(completed_at, NOW()),
+                locked_until = NULL,
+                worker_id = NULL,
+                updated_at = NOW()
+            WHERE id = (SELECT id FROM exhausted_candidate)
+              AND attempts >= max_attempts
+            RETURNING id
+        ),
+        claimable_candidate AS (
+            SELECT id
+            FROM workflows
+            WHERE attempts < max_attempts
+              AND (
+                  (status = 'pending'
+                   AND (next_run_at IS NULL OR next_run_at <= NOW())
+                   AND (locked_until IS NULL OR locked_until <= NOW()))
+                  OR
+                  (status = 'running'
+                   AND locked_until IS NOT NULL
+                   AND locked_until <= NOW())
+              )
+            ORDER BY id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
         UPDATE workflows
         SET status = 'running',
             attempts = attempts + 1,
@@ -158,20 +216,7 @@ pub async fn claim_next_workflow(
             started_at = COALESCE(started_at, NOW()),
             updated_at = NOW()
         WHERE id = (
-            SELECT id
-            FROM workflows
-            WHERE (
-                (status = 'pending'
-                 AND (next_run_at IS NULL OR next_run_at <= NOW())
-                 AND (locked_until IS NULL OR locked_until <= NOW()))
-                OR
-                (status = 'running'
-                 AND locked_until IS NOT NULL
-                 AND locked_until <= NOW())
-            )
-            ORDER BY id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
+            SELECT id FROM claimable_candidate
         )
         RETURNING id, name, input, attempts, max_attempts, worker_id
     "#;
@@ -179,7 +224,11 @@ pub async fn claim_next_workflow(
     let stmt = Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         sql,
-        vec![lock_until.into(), worker_id.into()],
+        vec![
+            lock_until.into(),
+            worker_id.into(),
+            ATTEMPT_BUDGET_EXHAUSTED_ERROR.into(),
+        ],
     );
 
     let row = db

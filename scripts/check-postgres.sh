@@ -126,35 +126,42 @@ echo
 echo "==> cargo test -p suprnova --test pagination -- --ignored live_postgres"
 cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_postgres
 
-# The workflow lease-reclaim test is an in-source unit test, and it is
-# gated TWICE: `#[ignore]` keeps it out of the normal run, and even when
-# un-ignored it returns early unless `DATABASE_URL` names a Postgres. Both
-# gates were always closed, so it reported green without executing a line.
-# It covers "a worker died holding the lock, another must reclaim it",
-# which is not a guarantee worth leaving unproven.
+# The workflow lease-reclaim tests are in-source unit tests, and they are
+# gated TWICE: `#[ignore]` keeps them out of the normal run, and even when
+# un-ignored they return early unless `DATABASE_URL` names a Postgres. Both
+# gates were always closed, so they reported green without executing a line.
+# They cover both sides of crash recovery: reclaim work that remains below
+# its attempt budget, and terminalize exhausted work without running it.
 #
-# Run it with the disposable database and both gates opened, then assert it
-# actually ran: a silent skip here would restore exactly the hole this step
-# exists to close.
-echo
-echo "==> cargo test -p suprnova --lib workflow::tests::test_claim_reclaims_expired_running_row"
-workflow_out="$(DATABASE_URL="$PG_TEST_URL" cargo test -p suprnova --lib \
-    workflow::tests::test_claim_reclaims_expired_running_row \
-    -- --ignored --test-threads=1 --nocapture 2>&1)"
-echo "$workflow_out"
+# Run each one with the disposable database and both gates opened, then
+# assert it actually ran: a silent skip here would restore exactly the hole
+# this step exists to close.
+WORKFLOW_TESTS=(
+    test_claim_reclaims_expired_running_row
+    test_expired_running_workflow_at_attempt_budget_is_failed_not_reclaimed
+)
 
-if grep -q "skipping:" <<<"$workflow_out"; then
-    echo >&2
-    echo "check-postgres: the workflow reclaim test SKIPPED itself despite a" >&2
-    echo "    Postgres DATABASE_URL being set. That is the silent-pass bug" >&2
-    echo "    this step exists to prevent - fix the gate, not this check." >&2
-    exit 1
-fi
-if ! grep -qE "^test .*test_claim_reclaims_expired_running_row \.\.\. ok" <<<"$workflow_out"; then
-    echo >&2
-    echo "check-postgres: the workflow reclaim test did not report ok." >&2
-    exit 1
-fi
+for workflow_test in "${WORKFLOW_TESTS[@]}"; do
+    echo
+    echo "==> cargo test -p suprnova --lib workflow::tests::${workflow_test}"
+    workflow_out="$(DATABASE_URL="$PG_TEST_URL" cargo test -p suprnova --lib \
+        "workflow::tests::${workflow_test}" \
+        -- --ignored --test-threads=1 --nocapture 2>&1)"
+    echo "$workflow_out"
+
+    if grep -q "skipping:" <<<"$workflow_out"; then
+        echo >&2
+        echo "check-postgres: ${workflow_test} SKIPPED itself despite a" >&2
+        echo "    Postgres DATABASE_URL being set. That is the silent-pass bug" >&2
+        echo "    this step exists to prevent - fix the gate, not this check." >&2
+        exit 1
+    fi
+    if ! grep -qE "^test .*${workflow_test} \.\.\. ok" <<<"$workflow_out"; then
+        echo >&2
+        echo "check-postgres: ${workflow_test} did not report ok." >&2
+        exit 1
+    fi
+done
 
 echo
 echo "check-postgres: OK"
