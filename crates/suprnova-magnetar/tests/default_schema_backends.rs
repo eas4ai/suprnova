@@ -7,28 +7,247 @@
     )
 ))]
 
-#[cfg(feature = "seaorm-sqlite")]
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use magnetar::default_migration::DefaultMigrationBindings;
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use magnetar::default_schema::DefaultAuthSchema;
+use magnetar::default_schema::sql_stores::SqlRememberStore;
 #[cfg(feature = "seaorm-sqlite")]
-use magnetar::default_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
-use magnetar::migration::{MigrationEngine, MigrationRunner, ShapeConfirmation, SourceShape};
+use magnetar::default_schema::sql_stores::SqlSessionStore;
+#[cfg(feature = "seaorm-postgres")]
+use magnetar::migration::ShapeConfirmation;
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
+use magnetar::migration::{MigrationEngine, MigrationRunner, SourceShape};
 #[cfg(feature = "seaorm-sqlite")]
 use magnetar::sessions::{
-    OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, RememberRow, RememberStore,
-    SessionMetadata, SessionQueries, StoredSession,
+    OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionMetadata, SessionQueries,
+    StoredSession,
 };
+use magnetar::sessions::{RememberRow, RememberStore};
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use magnetar::storage::{NewUser, SeaOrmStorage, UserStore};
-use sea_orm::Database;
 #[cfg(feature = "seaorm-sqlite")]
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set,
-    Statement,
-};
+use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
+#[cfg(any(feature = "seaorm-sqlite", feature = "seaorm-postgres"))]
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 #[cfg(feature = "seaorm-sqlite")]
 use sha2::{Digest, Sha256};
 
+async fn verify_remember_owner_selector_contract(database: &DatabaseConnection) {
+    let store = SqlRememberStore(database.clone());
+    let now = Utc::now()
+        .with_nanosecond(0)
+        .expect("whole-second contract timestamp");
+    let suffix = rand::random::<u64>();
+
+    let first = RememberRow {
+        id: format!("selector-revoke-first-id-{suffix}"),
+        selector: format!("selector-revoke-first-{suffix}"),
+        user_id: format!("selector-revoke-user-{suffix}"),
+        auth_epoch: 1,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let second = RememberRow {
+        id: format!("selector-revoke-second-id-{suffix}"),
+        selector: format!("selector-revoke-second-{suffix}"),
+        verifier_hash: "sha256:second".to_owned(),
+        ..first.clone()
+    };
+    store
+        .insert_remember(first.clone())
+        .await
+        .expect("seed first selector-revocation row");
+    store
+        .insert_remember(second.clone())
+        .await
+        .expect("seed second selector-revocation row");
+
+    assert!(
+        store
+            .revoke_remember_selector(&first.user_id, &first.selector)
+            .await
+            .expect("revoke the matching owner and selector")
+    );
+    assert!(
+        !store
+            .revoke_remember_selector(&first.user_id, &first.selector)
+            .await
+            .expect("repeating an exact revocation is a no-op")
+    );
+    assert_eq!(
+        store
+            .find_for_rotation(&first.selector, now)
+            .await
+            .expect("inspect the revoked selector"),
+        None
+    );
+    assert_eq!(
+        store
+            .find_for_rotation(&second.selector, now)
+            .await
+            .expect("inspect the sibling selector"),
+        Some(second)
+    );
+
+    let ambiguous_revoke_first = RememberRow {
+        id: format!("ambiguous-selector-first-id-{suffix}"),
+        selector: format!("ambiguous-selector-{suffix}"),
+        user_id: format!("ambiguous-selector-owner-{suffix}"),
+        auth_epoch: 1,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let ambiguous_revoke_second = RememberRow {
+        id: format!("ambiguous-selector-second-id-{suffix}"),
+        verifier_hash: "sha256:second".to_owned(),
+        ..ambiguous_revoke_first.clone()
+    };
+    store
+        .insert_remember(ambiguous_revoke_first.clone())
+        .await
+        .expect("seed first ambiguous revocation row");
+    store
+        .insert_remember(ambiguous_revoke_second.clone())
+        .await
+        .expect("seed second ambiguous revocation row");
+
+    assert!(
+        !store
+            .revoke_remember_selector(
+                &format!("different-owner-{suffix}"),
+                &ambiguous_revoke_first.selector,
+            )
+            .await
+            .expect("owner mismatch must fail closed")
+    );
+    let error = store
+        .revoke_remember_selector(
+            &ambiguous_revoke_first.user_id,
+            &ambiguous_revoke_first.selector,
+        )
+        .await
+        .expect_err("ambiguous exact revocation must return an error");
+    assert!(matches!(
+        error,
+        magnetar::Error::Conflict { resource, message }
+            if resource == "remember credential"
+                && message == "owner and selector matched multiple rows"
+    ));
+    let remaining = magnetar::default_schema::remembers::Entity::find()
+        .filter(
+            magnetar::default_schema::remembers::Column::Selector
+                .eq(&ambiguous_revoke_first.selector),
+        )
+        .all(database)
+        .await
+        .expect("query ambiguous selector rows after rejected revocation");
+    assert_eq!(
+        remaining.len(),
+        2,
+        "ambiguous selector revocation must roll back without mutating rows"
+    );
+
+    let ambiguous_rotation_first = RememberRow {
+        id: format!("ambiguous-rotation-first-id-{suffix}"),
+        selector: format!("ambiguous-rotation-selector-{suffix}"),
+        user_id: format!("ambiguous-rotation-first-owner-{suffix}"),
+        auth_epoch: 1,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let ambiguous_rotation_second = RememberRow {
+        id: format!("ambiguous-rotation-second-id-{suffix}"),
+        user_id: format!("ambiguous-rotation-second-owner-{suffix}"),
+        verifier_hash: "sha256:second".to_owned(),
+        ..ambiguous_rotation_first.clone()
+    };
+    store
+        .insert_remember(ambiguous_rotation_first.clone())
+        .await
+        .expect("seed first ambiguous rotation row");
+    store
+        .insert_remember(ambiguous_rotation_second.clone())
+        .await
+        .expect("seed second ambiguous rotation row");
+
+    let error = store
+        .find_for_rotation(&ambiguous_rotation_first.selector, now)
+        .await
+        .expect_err("an ambiguous live selector must fail before verifier comparison");
+    assert!(matches!(
+        error,
+        magnetar::Error::Conflict { resource, message }
+            if resource == "remember credential"
+                && message == "selector matched multiple active rows"
+    ));
+
+    let remaining = magnetar::default_schema::remembers::Entity::find()
+        .filter(
+            magnetar::default_schema::remembers::Column::Selector
+                .eq(&ambiguous_rotation_first.selector),
+        )
+        .all(database)
+        .await
+        .expect("query ambiguous selector rows after rejected rotation lookup");
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().any(|row| {
+        row.id == ambiguous_rotation_first.id
+            && row.user_id == ambiguous_rotation_first.user_id
+            && row.verifier_hash == ambiguous_rotation_first.verifier_hash
+    }));
+    assert!(remaining.iter().any(|row| {
+        row.id == ambiguous_rotation_second.id
+            && row.user_id == ambiguous_rotation_second.user_id
+            && row.verifier_hash == ambiguous_rotation_second.verifier_hash
+    }));
+
+    let mixed_case = RememberRow {
+        id: format!("mixed-case-id-{suffix}"),
+        selector: format!("Selector-Mixed-{suffix}"),
+        user_id: format!("Owner-Mixed-{suffix}"),
+        auth_epoch: 1,
+        verifier_hash: "sha256:mixed-case".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let lower_selector = mixed_case.selector.to_ascii_lowercase();
+    let lower_owner = mixed_case.user_id.to_ascii_lowercase();
+    store
+        .insert_remember(mixed_case.clone())
+        .await
+        .expect("seed mixed-case remember row");
+
+    assert_eq!(
+        store
+            .find_for_rotation(&lower_selector, now)
+            .await
+            .expect("case-mismatched selector lookup must be neutral"),
+        None
+    );
+    assert!(
+        !store
+            .revoke_remember_selector(&mixed_case.user_id, &lower_selector)
+            .await
+            .expect("case-mismatched selector revocation must be neutral")
+    );
+    assert!(
+        !store
+            .revoke_remember_selector(&lower_owner, &mixed_case.selector)
+            .await
+            .expect("case-mismatched owner revocation must be neutral")
+    );
+    assert_eq!(
+        store
+            .find_for_rotation(&mixed_case.selector, now)
+            .await
+            .expect("exact mixed-case selector remains available"),
+        Some(mixed_case)
+    );
+}
+
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 async fn verify(url: &str) {
     let database = Database::connect(url).await.expect("connect live backend");
     magnetar::default_schema::migrate(&database)
@@ -45,6 +264,7 @@ async fn verify(url: &str) {
         runner.detect_shape().await.expect("detect default schema"),
         SourceShape::Magnetar
     );
+    verify_remember_owner_selector_contract(&database).await;
     let store = SeaOrmStorage::<DefaultAuthSchema>::new(database);
     let email = format!("default-schema-{}@example.test", rand::random::<u64>());
     let created = store
@@ -337,110 +557,37 @@ async fn sqlite_remember_replacement_rolls_back_and_has_one_winner() {
 
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
-async fn sqlite_remember_selector_revocation_preserves_other_rows() {
+async fn sqlite_remember_owner_selector_contract() {
     let database = Database::connect("sqlite::memory:")
         .await
         .expect("connect in-memory SQLite");
     magnetar::default_schema::migrate(&database)
         .await
         .expect("create default auth tables");
-    let store = SqlRememberStore(database);
-    let now = Utc::now();
-    let first = RememberRow {
-        id: "selector-revoke-first-id".to_owned(),
-        selector: "selector-revoke-first".to_owned(),
-        user_id: "selector-revoke-user".to_owned(),
-        auth_epoch: 1,
-        verifier_hash: "sha256:first".to_owned(),
-        expires_at: now + Duration::days(1),
-    };
-    let second = RememberRow {
-        id: "selector-revoke-second-id".to_owned(),
-        selector: "selector-revoke-second".to_owned(),
-        verifier_hash: "sha256:second".to_owned(),
-        ..first.clone()
-    };
-    store.insert_remember(first.clone()).await.unwrap();
-    store.insert_remember(second.clone()).await.unwrap();
-
-    assert!(
-        store
-            .revoke_remember_selector(&first.user_id, &first.selector)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .revoke_remember_selector(&first.user_id, &first.selector)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        store.find_for_rotation(&first.selector, now).await.unwrap(),
-        None
-    );
-    assert_eq!(
-        store
-            .find_for_rotation(&second.selector, now)
-            .await
-            .unwrap(),
-        Some(second)
-    );
+    verify_remember_owner_selector_contract(&database).await;
 }
 
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
-async fn sqlite_remember_selector_revocation_does_not_mutate_ambiguous_rows() {
+async fn sqlite_nocase_remember_owner_selector_contract() {
     let database = Database::connect("sqlite::memory:")
         .await
         .expect("connect in-memory SQLite");
-    magnetar::default_schema::migrate(&database)
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE auth_remember_tokens (\
+                id TEXT PRIMARY KEY NOT NULL, \
+                selector TEXT COLLATE NOCASE NOT NULL, \
+                user_id TEXT COLLATE NOCASE NOT NULL, \
+                auth_epoch BIGINT NOT NULL, \
+                verifier_hash TEXT NOT NULL, \
+                expires_at TEXT NOT NULL\
+            )",
+        ))
         .await
-        .expect("create default auth tables");
-    let store = SqlRememberStore(database.clone());
-    let now = Utc::now();
-    let first = RememberRow {
-        id: "ambiguous-selector-first-id".to_owned(),
-        selector: "ambiguous-selector".to_owned(),
-        user_id: "ambiguous-selector-owner".to_owned(),
-        auth_epoch: 1,
-        verifier_hash: "sha256:first".to_owned(),
-        expires_at: now + Duration::days(1),
-    };
-    let second = RememberRow {
-        id: "ambiguous-selector-second-id".to_owned(),
-        verifier_hash: "sha256:second".to_owned(),
-        ..first.clone()
-    };
-    store.insert_remember(first.clone()).await.unwrap();
-    store.insert_remember(second.clone()).await.unwrap();
-
-    assert!(
-        !store
-            .revoke_remember_selector("different-owner", &first.selector)
-            .await
-            .expect("owner mismatch must fail closed")
-    );
-    let error = store
-        .revoke_remember_selector(&first.user_id, &first.selector)
-        .await
-        .expect_err("ambiguous exact revocation must return an error");
-    assert!(matches!(
-        error,
-        magnetar::Error::Conflict { resource, message }
-            if resource == "remember credential"
-                && message == "owner and selector matched multiple rows"
-    ));
-    let remaining = magnetar::default_schema::remembers::Entity::find()
-        .filter(magnetar::default_schema::remembers::Column::Selector.eq(&first.selector))
-        .all(&database)
-        .await
-        .expect("query ambiguous selector rows after rejected revocation");
-    assert_eq!(
-        remaining.len(),
-        2,
-        "ambiguous selector revocation must roll back without mutating rows"
-    );
+        .expect("create case-insensitive remember table");
+    verify_remember_owner_selector_contract(&database).await;
 }
 
 #[cfg(feature = "seaorm-postgres")]

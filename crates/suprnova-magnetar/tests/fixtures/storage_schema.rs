@@ -891,7 +891,15 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            rows.first()
+            let mut rows = rows.into_iter().filter(|row| row.selector == selector);
+            let row = rows.next();
+            if rows.next().is_some() {
+                return Err(Error::Conflict {
+                    resource: "remember credential".to_owned(),
+                    message: "selector matched multiple active rows".to_owned(),
+                });
+            }
+            row.as_ref()
                 .map(|row| {
                     Ok(RememberRow {
                         id: row.id.clone(),
@@ -977,18 +985,39 @@ pub mod sql_stores {
 
         async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
             let transaction = self.0.begin().await.map_err(db_error)?;
-            let result = remembers::Entity::delete_many()
-                .filter(remembers::Column::UserId.eq(user_id.to_owned()))
-                .filter(remembers::Column::Selector.eq(selector.to_owned()))
-                .exec(&transaction)
-                .await
-                .map_err(db_error);
+            let result = async {
+                let rows = remembers::Entity::find()
+                    .filter(remembers::Column::UserId.eq(user_id.to_owned()))
+                    .filter(remembers::Column::Selector.eq(selector.to_owned()))
+                    .all(&transaction)
+                    .await
+                    .map_err(db_error)?;
+                let mut rows = rows
+                    .into_iter()
+                    .filter(|row| row.user_id == user_id && row.selector == selector);
+                let Some(row) = rows.next() else {
+                    return Ok(0);
+                };
+                if rows.next().is_some() {
+                    return Err(Error::Conflict {
+                        resource: "remember credential".to_owned(),
+                        message: "owner and selector matched multiple rows".to_owned(),
+                    });
+                }
+                remembers::Entity::delete_many()
+                    .filter(remembers::Column::Id.eq(row.id))
+                    .exec(&transaction)
+                    .await
+                    .map(|deleted| deleted.rows_affected)
+                    .map_err(db_error)
+            }
+            .await;
             match result {
-                Ok(deleted) if deleted.rows_affected == 1 => {
+                Ok(1) => {
                     transaction.commit().await.map_err(db_error)?;
                     Ok(true)
                 }
-                Ok(deleted) if deleted.rows_affected == 0 => {
+                Ok(0) => {
                     transaction.rollback().await.map_err(db_error)?;
                     Ok(false)
                 }
