@@ -139,6 +139,7 @@ cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_post
 WORKFLOW_TESTS=(
     test_claim_reclaims_expired_running_row
     test_expired_running_workflow_at_attempt_budget_is_failed_not_reclaimed
+    test_postgres_reclaim_rejects_stale_step_completion
 )
 
 for workflow_test in "${WORKFLOW_TESTS[@]}"; do

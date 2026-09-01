@@ -3,11 +3,15 @@
 use crate::database::DB;
 use crate::error::FrameworkError;
 use crate::workflow::config::WorkflowConfig;
+use crate::workflow::context::WorkflowContext;
 use crate::workflow::entities::{workflow_steps, workflows};
 use crate::workflow::types::{ClaimedWorkflow, StepStatus, WorkflowHandle, WorkflowStatus};
 use chrono::{Duration as ChronoDuration, Utc};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseBackend, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseBackend, DatabaseTransaction, EntityTrait, QueryFilter,
+    QuerySelect, Set, TransactionTrait,
+};
 use sea_orm::{ConnectionTrait, Statement};
 use std::time::Duration;
 
@@ -270,26 +274,60 @@ pub async fn claim_next_workflow(
     }
 }
 
-/// Refresh workflow lock lease
+/// Refresh a workflow lock lease.
 ///
-/// Fenced by `worker_id` + `attempts` (the values returned by the claim
-/// that produced the [`ClaimedWorkflow`] this refresh belongs to): the
-/// `UPDATE` only touches the row when both still match what's currently
-/// persisted. If a heartbeat or per-step refresh loses that race - because
-/// `claim_next_workflow` already reclaimed the row for another worker,
-/// bumping `attempts` and overwriting `worker_id` - the predicate matches
-/// zero rows. That is treated as "lease lost", not an error: the new owner
-/// is authoritative now, so we log at `warn` and return `Ok(())` rather
-/// than fail or retry a write that would otherwise stomp the winner's
-/// lease.
+/// The update is fenced by `worker_id` and `attempts`. For compatibility,
+/// losing ownership remains a successful no-op for direct callers; workflow
+/// execution uses a strict crate-private variant that reports lease loss.
 pub async fn refresh_lock(
     id: i64,
     lock_timeout: Duration,
     worker_id: &str,
     attempts: i32,
 ) -> Result<(), FrameworkError> {
-    let db = DB::connection()?;
+    if !refresh_lock_if_owned(id, lock_timeout, worker_id, attempts).await? {
+        tracing::warn!(
+            workflow_id = id,
+            worker_id,
+            attempts,
+            "workflow lock refresh rejected because another claim owns the row"
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn refresh_lock_owned(
+    id: i64,
+    lock_timeout: Duration,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<(), FrameworkError> {
+    if refresh_lock_if_owned(id, lock_timeout, worker_id, attempts).await? {
+        Ok(())
+    } else {
+        Err(workflow_lease_lost(id, worker_id, attempts))
+    }
+}
+
+pub(crate) async fn refresh_lock_if_owned(
+    id: i64,
+    lock_timeout: Duration,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<bool, FrameworkError> {
     let now = Utc::now().naive_utc();
+    refresh_lock_if_owned_at(id, lock_timeout, worker_id, attempts, now).await
+}
+
+pub(crate) async fn refresh_lock_if_owned_at(
+    id: i64,
+    lock_timeout: Duration,
+    worker_id: &str,
+    attempts: i32,
+    now: chrono::NaiveDateTime,
+) -> Result<bool, FrameworkError> {
+    let db = DB::connection()?;
     let lock_until =
         now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
 
@@ -300,23 +338,93 @@ pub async fn refresh_lock(
         )
         .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
         .filter(workflows::Column::Id.eq(id))
+        .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
         .filter(workflows::Column::WorkerId.eq(worker_id))
         .filter(workflows::Column::Attempts.eq(attempts))
         .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
 
-    if result.rows_affected == 0 {
-        tracing::warn!(
-            workflow_id = id,
-            worker_id,
-            attempts,
-            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \
-             - another worker has reclaimed this row; dropping this refresh"
-        );
+    if result.rows_affected > 0 {
+        return Ok(true);
     }
 
-    Ok(())
+    // MySQL reports changed rows rather than matched rows by default. With
+    // second-precision timestamp columns, two refreshes in the same second
+    // can therefore report zero even though this token still owns the row.
+    // Read the ownership tuple back before declaring the lease lost.
+    workflows::Entity::find_by_id(id)
+        .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
+        .filter(workflows::Column::WorkerId.eq(worker_id))
+        .filter(workflows::Column::Attempts.eq(attempts))
+        .one(db.inner())
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| FrameworkError::database(error.to_string()))
+}
+
+fn workflow_lease_lost(id: i64, worker_id: &str, attempts: i32) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "Workflow lease lost for workflow {id} (worker_id={worker_id}, attempts={attempts})"
+    ))
+}
+
+async fn lock_workflow_for_step(
+    transaction: &DatabaseTransaction,
+    workflow_id: i64,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<(), FrameworkError> {
+    let owns_workflow = if transaction.get_database_backend() == DatabaseBackend::Sqlite {
+        workflows::Entity::update_many()
+            .col_expr(
+                workflows::Column::UpdatedAt,
+                Expr::value(Utc::now().naive_utc()),
+            )
+            .filter(workflows::Column::Id.eq(workflow_id))
+            .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
+            .filter(workflows::Column::WorkerId.eq(worker_id))
+            .filter(workflows::Column::Attempts.eq(attempts))
+            .exec(transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+            .rows_affected
+            == 1
+    } else {
+        workflows::Entity::find_by_id(workflow_id)
+            .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
+            .filter(workflows::Column::WorkerId.eq(worker_id))
+            .filter(workflows::Column::Attempts.eq(attempts))
+            .lock_exclusive()
+            .one(transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+            .is_some()
+    };
+
+    if owns_workflow {
+        Ok(())
+    } else {
+        Err(workflow_lease_lost(workflow_id, worker_id, attempts))
+    }
+}
+
+async fn finish_step_write(
+    transaction: DatabaseTransaction,
+    result: Result<(), FrameworkError>,
+) -> Result<(), FrameworkError> {
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string())),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(FrameworkError::database(format!(
+                "workflow step mutation failed: {error}; rollback failed: {rollback_error}"
+            ))),
+        },
+    }
 }
 
 /// Mark workflow as succeeded
@@ -516,12 +624,35 @@ pub async fn load_step_by_index(
         .map_err(|e| FrameworkError::database(e.to_string()))
 }
 
-/// Insert a running step
+/// Insert a running step for the active workflow context.
+///
+/// The active context must belong to `workflow_id`; its claim token fences the
+/// write against a concurrent reclaim.
 pub async fn insert_step_running(
     workflow_id: i64,
     step_index: i32,
     step_name: &str,
     input: &str,
+) -> Result<(), FrameworkError> {
+    let (worker_id, workflow_attempts) = WorkflowContext::current_claim_for(workflow_id)?;
+    insert_step_running_owned(
+        workflow_id,
+        step_index,
+        step_name,
+        input,
+        &worker_id,
+        workflow_attempts,
+    )
+    .await
+}
+
+pub(crate) async fn insert_step_running_owned(
+    workflow_id: i64,
+    step_index: i32,
+    step_name: &str,
+    input: &str,
+    worker_id: &str,
+    workflow_attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
@@ -542,22 +673,46 @@ pub async fn insert_step_running(
         ..Default::default()
     };
 
-    model
-        .insert(db.inner())
+    let transaction = db
+        .inner()
+        .begin()
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        .map_err(|error| FrameworkError::database(error.to_string()))?;
+    let result = async {
+        lock_workflow_for_step(&transaction, workflow_id, worker_id, workflow_attempts).await?;
+        model
+            .insert(&transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        Ok(())
+    }
+    .await;
 
-    Ok(())
+    finish_step_write(transaction, result).await
 }
 
-/// Update a step to running and increment attempts
+/// Update a step to running for the active workflow context.
+///
+/// The active context must belong to the step's workflow; its claim token
+/// fences the write against a concurrent reclaim.
 pub async fn update_step_running(
     step: workflow_steps::Model,
     input: &str,
 ) -> Result<(), FrameworkError> {
+    let (worker_id, workflow_attempts) = WorkflowContext::current_claim_for(step.workflow_id)?;
+    update_step_running_owned(step, input, &worker_id, workflow_attempts).await
+}
+
+pub(crate) async fn update_step_running_owned(
+    step: workflow_steps::Model,
+    input: &str,
+    worker_id: &str,
+    workflow_attempts: i32,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 
+    let workflow_id = step.workflow_id;
     let attempts = step.attempts + 1;
     let mut active: workflow_steps::ActiveModel = step.into();
     active.status = Set(StepStatus::Running.as_str().to_string());
@@ -566,61 +721,135 @@ pub async fn update_step_running(
     active.updated_at = Set(now);
     active.started_at = Set(Some(now));
 
-    active
-        .update(db.inner())
+    let transaction = db
+        .inner()
+        .begin()
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        .map_err(|error| FrameworkError::database(error.to_string()))?;
+    let result = async {
+        lock_workflow_for_step(&transaction, workflow_id, worker_id, workflow_attempts).await?;
+        active
+            .update(&transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        Ok(())
+    }
+    .await;
 
-    Ok(())
+    finish_step_write(transaction, result).await
 }
 
-/// Mark step succeeded
+/// Mark a step succeeded for the active workflow context.
+///
+/// The active context's claim token fences the write against a concurrent
+/// reclaim of the step's parent workflow.
 pub async fn mark_step_succeeded(step_id: i64, output: &str) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
-
-    let mut active: workflow_steps::ActiveModel = workflow_steps::Entity::find_by_id(step_id)
+    let workflow_id = workflow_steps::Entity::find_by_id(step_id)
         .one(db.inner())
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
+        .map_err(|error| FrameworkError::database(error.to_string()))?
         .ok_or_else(|| FrameworkError::internal("Step not found"))?
-        .into();
-
-    active.status = Set(StepStatus::Succeeded.as_str().to_string());
-    active.output = Set(Some(output.to_string()));
-    active.error = Set(None);
-    active.updated_at = Set(now);
-    active.completed_at = Set(Some(now));
-
-    active
-        .update(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-
-    Ok(())
+        .workflow_id;
+    let (worker_id, workflow_attempts) = WorkflowContext::current_claim_for(workflow_id)?;
+    mark_step_succeeded_owned(workflow_id, step_id, output, &worker_id, workflow_attempts).await
 }
 
-/// Mark step failed
-pub async fn mark_step_failed(step_id: i64, error: &str) -> Result<(), FrameworkError> {
+pub(crate) async fn mark_step_succeeded_owned(
+    workflow_id: i64,
+    step_id: i64,
+    output: &str,
+    worker_id: &str,
+    workflow_attempts: i32,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 
-    let mut active: workflow_steps::ActiveModel = workflow_steps::Entity::find_by_id(step_id)
+    let transaction = db
+        .inner()
+        .begin()
+        .await
+        .map_err(|error| FrameworkError::database(error.to_string()))?;
+    let result = async {
+        lock_workflow_for_step(&transaction, workflow_id, worker_id, workflow_attempts).await?;
+        let mut active: workflow_steps::ActiveModel = workflow_steps::Entity::find_by_id(step_id)
+            .filter(workflow_steps::Column::WorkflowId.eq(workflow_id))
+            .one(&transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+            .ok_or_else(|| FrameworkError::internal("Step not found"))?
+            .into();
+
+        active.status = Set(StepStatus::Succeeded.as_str().to_string());
+        active.output = Set(Some(output.to_string()));
+        active.error = Set(None);
+        active.updated_at = Set(now);
+        active.completed_at = Set(Some(now));
+
+        active
+            .update(&transaction)
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        Ok(())
+    }
+    .await;
+
+    finish_step_write(transaction, result).await
+}
+
+/// Mark a step failed for the active workflow context.
+///
+/// The active context's claim token fences the write against a concurrent
+/// reclaim of the step's parent workflow.
+pub async fn mark_step_failed(step_id: i64, error: &str) -> Result<(), FrameworkError> {
+    let db = DB::connection()?;
+    let workflow_id = workflow_steps::Entity::find_by_id(step_id)
         .one(db.inner())
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
+        .map_err(|database_error| FrameworkError::database(database_error.to_string()))?
         .ok_or_else(|| FrameworkError::internal("Step not found"))?
-        .into();
+        .workflow_id;
+    let (worker_id, workflow_attempts) = WorkflowContext::current_claim_for(workflow_id)?;
+    mark_step_failed_owned(workflow_id, step_id, error, &worker_id, workflow_attempts).await
+}
 
-    active.status = Set(StepStatus::Failed.as_str().to_string());
-    active.error = Set(Some(error.to_string()));
-    active.updated_at = Set(now);
-    active.completed_at = Set(Some(now));
+pub(crate) async fn mark_step_failed_owned(
+    workflow_id: i64,
+    step_id: i64,
+    error: &str,
+    worker_id: &str,
+    workflow_attempts: i32,
+) -> Result<(), FrameworkError> {
+    let db = DB::connection()?;
+    let now = Utc::now().naive_utc();
 
-    active
-        .update(db.inner())
+    let transaction = db
+        .inner()
+        .begin()
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        .map_err(|database_error| FrameworkError::database(database_error.to_string()))?;
+    let result = async {
+        lock_workflow_for_step(&transaction, workflow_id, worker_id, workflow_attempts).await?;
+        let mut active: workflow_steps::ActiveModel = workflow_steps::Entity::find_by_id(step_id)
+            .filter(workflow_steps::Column::WorkflowId.eq(workflow_id))
+            .one(&transaction)
+            .await
+            .map_err(|database_error| FrameworkError::database(database_error.to_string()))?
+            .ok_or_else(|| FrameworkError::internal("Step not found"))?
+            .into();
 
-    Ok(())
+        active.status = Set(StepStatus::Failed.as_str().to_string());
+        active.error = Set(Some(error.to_string()));
+        active.updated_at = Set(now);
+        active.completed_at = Set(Some(now));
+
+        active
+            .update(&transaction)
+            .await
+            .map_err(|database_error| FrameworkError::database(database_error.to_string()))?;
+        Ok(())
+    }
+    .await;
+
+    finish_step_write(transaction, result).await
 }

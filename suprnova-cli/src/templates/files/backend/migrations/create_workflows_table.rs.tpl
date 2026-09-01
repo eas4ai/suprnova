@@ -25,23 +25,23 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Workflows::Error).text().null())
                     .col(ColumnDef::new(Workflows::Attempts).integer().not_null())
                     .col(ColumnDef::new(Workflows::MaxAttempts).integer().not_null())
-                    .col(ColumnDef::new(Workflows::NextRunAt).timestamp().null())
-                    .col(ColumnDef::new(Workflows::LockedUntil).timestamp().null())
+                    .col(ColumnDef::new(Workflows::NextRunAt).date_time().null())
+                    .col(ColumnDef::new(Workflows::LockedUntil).date_time().null())
                     .col(ColumnDef::new(Workflows::WorkerId).string().null())
                     .col(
                         ColumnDef::new(Workflows::CreatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(Workflows::UpdatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(Workflows::StartedAt).timestamp().null())
-                    .col(ColumnDef::new(Workflows::CompletedAt).timestamp().null())
+                    .col(ColumnDef::new(Workflows::StartedAt).date_time().null())
+                    .col(ColumnDef::new(Workflows::CompletedAt).date_time().null())
                     .to_owned(),
             )
             .await?;

@@ -81,6 +81,10 @@ pub fn create_workflow_steps_migration() -> &'static str {
     include_str!("files/backend/migrations/create_workflow_steps_table.rs.tpl")
 }
 
+pub fn normalize_workflow_datetimes_migration() -> &'static str {
+    include_str!("files/backend/migrations/normalize_workflow_datetime_columns.rs.tpl")
+}
+
 // Middleware templates
 
 pub fn middleware_mod() -> &'static str {

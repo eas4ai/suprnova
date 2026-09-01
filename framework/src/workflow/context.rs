@@ -71,6 +71,21 @@ impl WorkflowContext {
         CONTEXT.try_with(|_| ()).is_ok()
     }
 
+    pub(crate) fn current_claim_for(workflow_id: i64) -> Result<(String, i32), FrameworkError> {
+        let context = Self::current().ok_or_else(|| {
+            FrameworkError::internal("Workflow step mutation requires an active workflow context")
+        })?;
+
+        if context.inner.workflow_id != workflow_id {
+            return Err(FrameworkError::internal(format!(
+                "Workflow context mismatch: active workflow is {}, requested workflow is {workflow_id}",
+                context.inner.workflow_id
+            )));
+        }
+
+        Ok((context.inner.worker_id.clone(), context.inner.attempts))
+    }
+
     /// Run a workflow step with pre-serialized input JSON
     pub async fn run_step_with_input<F, Fut, T>(
         &self,
@@ -114,7 +129,7 @@ impl WorkflowContext {
                         e
                     ))
                 })?;
-                store::refresh_lock(
+                store::refresh_lock_owned(
                     workflow_id,
                     self.inner.lock_timeout,
                     &self.inner.worker_id,
@@ -124,7 +139,13 @@ impl WorkflowContext {
                 return Ok(value);
             }
 
-            store::update_step_running(existing, &input_json).await?;
+            store::update_step_running_owned(
+                existing,
+                &input_json,
+                &self.inner.worker_id,
+                self.inner.attempts,
+            )
+            .await?;
         } else {
             if let Some(other) = store::load_step_by_index(workflow_id, step_index).await?
                 && other.step_name != step_name
@@ -135,10 +156,18 @@ impl WorkflowContext {
                     step_index, step_name, other.step_name
                 )));
             }
-            store::insert_step_running(workflow_id, step_index, step_name, &input_json).await?;
+            store::insert_step_running_owned(
+                workflow_id,
+                step_index,
+                step_name,
+                &input_json,
+                &self.inner.worker_id,
+                self.inner.attempts,
+            )
+            .await?;
         }
 
-        store::refresh_lock(
+        store::refresh_lock_owned(
             workflow_id,
             self.inner.lock_timeout,
             &self.inner.worker_id,
@@ -154,9 +183,16 @@ impl WorkflowContext {
                     FrameworkError::internal(format!("Workflow step output serialize error: {}", e))
                 })?;
                 if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
-                    store::mark_step_succeeded(step.id, &output_json).await?;
+                    store::mark_step_succeeded_owned(
+                        workflow_id,
+                        step.id,
+                        &output_json,
+                        &self.inner.worker_id,
+                        self.inner.attempts,
+                    )
+                    .await?;
                 }
-                store::refresh_lock(
+                store::refresh_lock_owned(
                     workflow_id,
                     self.inner.lock_timeout,
                     &self.inner.worker_id,
@@ -167,9 +203,16 @@ impl WorkflowContext {
             }
             Err(err) => {
                 if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
-                    store::mark_step_failed(step.id, &err.to_string()).await?;
+                    store::mark_step_failed_owned(
+                        workflow_id,
+                        step.id,
+                        &err.to_string(),
+                        &self.inner.worker_id,
+                        self.inner.attempts,
+                    )
+                    .await?;
                 }
-                store::refresh_lock(
+                store::refresh_lock_owned(
                     workflow_id,
                     self.inner.lock_timeout,
                     &self.inner.worker_id,

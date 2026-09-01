@@ -49,20 +49,20 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(WorkflowSteps::Attempts).integer().not_null())
                     .col(
                         ColumnDef::new(WorkflowSteps::CreatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(WorkflowSteps::UpdatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(WorkflowSteps::StartedAt).timestamp().null())
+                    .col(ColumnDef::new(WorkflowSteps::StartedAt).date_time().null())
                     .col(
                         ColumnDef::new(WorkflowSteps::CompletedAt)
-                            .timestamp()
+                            .date_time()
                             .null(),
                     )
                     .to_owned(),

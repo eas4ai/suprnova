@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the framework's MySQL-only attribute-write regression against a
-# disposable, loopback-only MariaDB instance.
+# Run the framework's MySQL-only regressions against a disposable,
+# loopback-only MariaDB instance.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -57,6 +57,22 @@ export MYSQL_TEST_URL="mysql://root:${MYSQL_PASSWORD}@127.0.0.1:${HOST_PORT}/sup
 echo
 echo "==> cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored"
 cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-threads=1
+
+echo
+echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"
+workflow_out="$(cargo test -p suprnova --lib \
+    workflow::tests::test_mysql_ \
+    -- --ignored --test-threads=1 --nocapture 2>&1)"
+echo "$workflow_out"
+
+if [[ "$workflow_out" == *"skipping:"* ]]; then
+    echo "check-mysql: workflow regression test skipped despite MYSQL_TEST_URL" >&2
+    exit 1
+fi
+if [[ "$workflow_out" != *"2 passed; 0 failed"* ]]; then
+    echo "check-mysql: workflow regression tests did not execute exactly twice" >&2
+    exit 1
+fi
 
 echo
 echo "check-mysql: OK"

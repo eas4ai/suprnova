@@ -159,14 +159,24 @@ fn spawn_lease_heartbeat(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(err) =
-                store::refresh_lock(workflow_id, lock_timeout, &worker_id, attempts).await
+            match store::refresh_lock_if_owned(workflow_id, lock_timeout, &worker_id, attempts)
+                .await
             {
-                tracing::warn!(
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        workflow_id,
+                        worker_id,
+                        attempts,
+                        "workflow lease heartbeat stopped after ownership was lost"
+                    );
+                    break;
+                }
+                Err(err) => tracing::warn!(
                     workflow_id,
                     error = %err,
-                    "workflow lease heartbeat failed; another worker may reclaim this row"
-                );
+                    "workflow lease heartbeat failed; retrying on the next tick"
+                ),
             }
         }
     });
@@ -756,6 +766,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reclaimed_workflow_rejects_stale_step_completion() {
+        let _db = setup_db().await;
+        let handle = store::insert_workflow("stale-step-completion", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let claimed_a = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
+            .await
+            .expect("worker A claims workflow");
+        let ctx_a = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed_a.worker_id,
+            claimed_a.attempts,
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let stale = tokio::spawn(async move {
+            ctx_a
+                .run_step_with_input("race-step", "{}".to_string(), move || async move {
+                    started_tx.send(()).expect("signal stale step start");
+                    release_rx.await.expect("release stale step");
+                    Ok::<_, FrameworkError>("stale".to_string())
+                })
+                .await
+        });
+        started_rx.await.expect("stale step entered its body");
+
+        let claimed_b = store::mark_running(handle.id(), "worker-b", Duration::from_secs(30))
+            .await
+            .expect("worker B reclaims workflow");
+        let ctx_b = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed_b.worker_id,
+            claimed_b.attempts,
+        );
+        let winner = ctx_b
+            .run_step_with_input("race-step", "{}".to_string(), || async {
+                Ok::<_, FrameworkError>("winner".to_string())
+            })
+            .await
+            .expect("current owner completes the step");
+        assert_eq!(winner, "winner");
+
+        release_tx.send(()).expect("release worker A");
+        let stale_error = stale
+            .await
+            .expect("worker A task joins")
+            .expect_err("the reclaimed worker must not complete the step");
+        assert!(
+            stale_error.to_string().contains("lease lost"),
+            "stale completion must report lease loss, got: {stale_error}"
+        );
+
+        let step = store::load_step(handle.id(), 0, "race-step")
+            .await
+            .expect("load race step")
+            .expect("race step exists");
+        assert_eq!(step.status, StepStatus::Succeeded.as_str());
+        assert_eq!(step.output.as_deref(), Some("\"winner\""));
+        assert!(step.error.is_none());
+        assert_eq!(step.attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn test_reclaimed_workflow_rejects_stale_step_admission() {
+        let _db = setup_db().await;
+        let handle = store::insert_workflow("stale-step-admission", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let claimed_a = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
+            .await
+            .expect("worker A claims workflow");
+        let ctx_a = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed_a.worker_id,
+            claimed_a.attempts,
+        );
+
+        store::mark_running(handle.id(), "worker-b", Duration::from_secs(30))
+            .await
+            .expect("worker B reclaims workflow");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_step = calls.clone();
+        let stale_error = ctx_a
+            .run_step_with_input("never-run", "{}".to_string(), move || async move {
+                calls_in_step.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, FrameworkError>("stale".to_string())
+            })
+            .await
+            .expect_err("a stale context must be rejected before its step body runs");
+
+        assert!(
+            stale_error.to_string().contains("lease lost"),
+            "stale admission must report lease loss, got: {stale_error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            store::load_step_by_index(handle.id(), 0)
+                .await
+                .expect("load stale step index")
+                .is_none(),
+            "a stale context must not create a step record"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retry_flow() {
         let _db = setup_db().await;
         ALWAYS_CALLS.store(0, Ordering::SeqCst);
@@ -1195,6 +1316,339 @@ mod tests {
         assert_eq!(unchanged.error, error);
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres at DATABASE_URL"]
+    async fn test_postgres_reclaim_rejects_stale_step_completion() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use sea_orm::ConnectionTrait;
+
+        let Some(pg_url) = postgres_url_or_skip("postgres_reclaim_rejects_stale_step") else {
+            return;
+        };
+
+        let _guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url(&pg_url)
+            .max_connections(4)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await.expect("pg connect");
+        recreate_postgres_workflow_tables(&conn).await;
+        TestContainer::singleton(conn.clone());
+
+        let handle = store::insert_workflow("postgres-step-fence", "{}", 3)
+            .await
+            .expect("insert workflow");
+        let claim_config = WorkflowConfig::from_env();
+        let claimed_a = store::claim_next_workflow("worker-a", &claim_config)
+            .await
+            .expect("worker A claim")
+            .expect("pending workflow is claimable");
+        let ctx_a = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed_a.worker_id,
+            claimed_a.attempts,
+        );
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let stale = tokio::spawn(async move {
+            ctx_a
+                .run_step_with_input("race-step", "{}".to_string(), move || async move {
+                    started_tx.send(()).expect("signal stale step start");
+                    release_rx.await.expect("release stale step");
+                    Ok::<_, FrameworkError>("stale".to_string())
+                })
+                .await
+        });
+        started_rx.await.expect("stale step entered its body");
+
+        conn.inner()
+            .execute_unprepared(&format!(
+                "UPDATE workflows SET locked_until=NOW() - INTERVAL '1 hour' WHERE id={}",
+                handle.id()
+            ))
+            .await
+            .expect("expire worker A lease");
+        let claimed_b = store::claim_next_workflow("worker-b", &claim_config)
+            .await
+            .expect("worker B claim")
+            .expect("expired workflow is reclaimable");
+        assert_eq!(claimed_b.id, handle.id());
+        assert_eq!(claimed_b.attempts, 2);
+
+        let ctx_b = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed_b.worker_id,
+            claimed_b.attempts,
+        );
+        let winner = ctx_b
+            .run_step_with_input("race-step", "{}".to_string(), || async {
+                Ok::<_, FrameworkError>("winner".to_string())
+            })
+            .await
+            .expect("current owner completes step");
+        assert_eq!(winner, "winner");
+
+        release_tx.send(()).expect("release worker A");
+        let stale_error = stale
+            .await
+            .expect("worker A task joins")
+            .expect_err("reclaimed worker must not complete step");
+        assert!(stale_error.to_string().contains("lease lost"));
+
+        let step = store::load_step(handle.id(), 0, "race-step")
+            .await
+            .expect("load race step")
+            .expect("race step exists");
+        assert_eq!(step.status, StepStatus::Succeeded.as_str());
+        assert_eq!(step.output.as_deref(), Some("\"winner\""));
+        assert_eq!(step.attempts, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MySQL or MariaDB at MYSQL_TEST_URL"]
+    async fn test_mysql_same_second_refresh_confirms_current_owner() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use chrono::Timelike;
+
+        let Some(mysql_url) = mysql_url_or_skip("mysql_same_second_refresh") else {
+            return;
+        };
+
+        let _guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url(&mysql_url)
+            .max_connections(2)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await.expect("mysql connect");
+        recreate_mysql_workflow_tables(&conn).await;
+        TestContainer::singleton(conn.clone());
+
+        let handle = store::insert_workflow("mysql-refresh-fallback", "{}", 3)
+            .await
+            .expect("insert workflow");
+        let claimed = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
+            .await
+            .expect("claim workflow");
+        let now = chrono::Utc::now()
+            .naive_utc()
+            .with_nanosecond(0)
+            .expect("zero nanoseconds is valid");
+
+        assert!(
+            store::refresh_lock_if_owned_at(
+                handle.id(),
+                Duration::ZERO,
+                "worker-a",
+                claimed.attempts,
+                now,
+            )
+            .await
+            .expect("initial fixed-time refresh")
+        );
+
+        assert!(
+            store::refresh_lock_if_owned_at(
+                handle.id(),
+                Duration::ZERO,
+                "worker-a",
+                claimed.attempts,
+                now,
+            )
+            .await
+            .expect("same-second refresh must read ownership back")
+        );
+        assert!(
+            !store::refresh_lock_if_owned_at(
+                handle.id(),
+                Duration::ZERO,
+                "stale-worker",
+                claimed.attempts,
+                now,
+            )
+            .await
+            .expect("stale refresh query")
+        );
+
+        let context = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed.worker_id,
+            claimed.attempts,
+        );
+        let value = context
+            .run_step_with_input("mysql-step", "{}".to_string(), || async {
+                Ok::<_, FrameworkError>(42_i32)
+            })
+            .await
+            .expect("execute step against fresh MySQL schema");
+        assert_eq!(value, 42);
+        let step = store::load_step(handle.id(), 0, "mysql-step")
+            .await
+            .expect("load MySQL step")
+            .expect("MySQL step exists");
+        assert_eq!(step.status, StepStatus::Succeeded.as_str());
+        assert_eq!(step.output.as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MySQL or MariaDB at MYSQL_TEST_URL"]
+    async fn test_mysql_legacy_timestamp_migration_preserves_values() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let Some(mysql_url) = mysql_url_or_skip("mysql_legacy_timestamp_migration") else {
+            return;
+        };
+
+        let _guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url(&mysql_url)
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await.expect("mysql connect");
+        conn.inner()
+            .execute_unprepared("SET time_zone = '-04:00'")
+            .await
+            .expect("set non-UTC test session");
+        recreate_legacy_mysql_workflow_tables(&conn).await;
+
+        conn.inner()
+            .execute_unprepared(
+                "INSERT INTO workflows (
+                       id, name, status, input, attempts, max_attempts,
+                       next_run_at, locked_until, worker_id, created_at,
+                       updated_at, started_at, completed_at
+                   ) VALUES (
+                       1, 'legacy-workflow', 'running', '{}', 1, 3,
+                       '2026-09-01 12:34:56', '2026-09-01 12:34:56',
+                       'legacy-worker', '2026-09-01 12:34:56',
+                       '2026-09-01 12:34:56', '2026-09-01 12:34:56',
+                       '2026-09-01 12:34:56'
+                   )",
+            )
+            .await
+            .expect("seed legacy workflow");
+        conn.inner()
+            .execute_unprepared(
+                "INSERT INTO workflow_steps (
+                       id, workflow_id, step_index, step_name, status, input,
+                       attempts, created_at, updated_at, started_at, completed_at
+                   ) VALUES (
+                       1, 1, 0, 'legacy-step', 'succeeded', '{}', 1,
+                       '2026-09-01 12:34:56', '2026-09-01 12:34:56',
+                       '2026-09-01 12:34:56', '2026-09-01 12:34:56'
+                   )",
+            )
+            .await
+            .expect("seed legacy workflow step");
+
+        let manager = SchemaManager::new(conn.inner());
+        migrations::NormalizeWorkflowDateTimesForMysql
+            .up(&manager)
+            .await
+            .expect("normalize legacy MySQL workflow date columns");
+
+        let type_row = conn
+            .inner()
+            .query_one_raw(Statement::from_string(
+                DbBackend::MySql,
+                "SELECT COUNT(*) AS compatible_count
+                   FROM information_schema.columns
+                   WHERE table_schema = DATABASE()
+                     AND data_type = 'datetime'
+                     AND (
+                       (
+                         column_name IN ('created_at', 'updated_at')
+                         AND is_nullable = 'NO'
+                         AND LOWER(column_default) IN (
+                           'current_timestamp', 'current_timestamp()'
+                         )
+                       )
+                       OR
+                       (
+                         column_name IN (
+                           'next_run_at', 'locked_until', 'started_at', 'completed_at'
+                         )
+                         AND is_nullable = 'YES'
+                         AND (
+                           column_default IS NULL OR UPPER(column_default) = 'NULL'
+                         )
+                       )
+                     )
+                     AND (
+                       (table_name = 'workflows' AND column_name IN (
+                         'next_run_at', 'locked_until', 'created_at',
+                         'updated_at', 'started_at', 'completed_at'
+                       ))
+                       OR
+                       (table_name = 'workflow_steps' AND column_name IN (
+                         'created_at', 'updated_at', 'started_at', 'completed_at'
+                       ))
+                     )"
+                .to_string(),
+            ))
+            .await
+            .expect("query normalized MySQL column metadata")
+            .expect("compatible column count row");
+        let compatible_count: i64 = type_row
+            .try_get("", "compatible_count")
+            .expect("decode compatible column count");
+        assert_eq!(compatible_count, 10);
+
+        let values_row = conn
+            .inner()
+            .query_one_raw(Statement::from_string(
+                DbBackend::MySql,
+                "SELECT CONCAT_WS('|',
+                       DATE_FORMAT(w.next_run_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(w.locked_until, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(w.created_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(w.updated_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(w.started_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(w.completed_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(s.updated_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(s.started_at, '%Y-%m-%d %H:%i:%s'),
+                       DATE_FORMAT(s.completed_at, '%Y-%m-%d %H:%i:%s')
+                   ) AS values_after
+                   FROM workflows AS w
+                   JOIN workflow_steps AS s ON s.workflow_id = w.id
+                   WHERE w.id = 1 AND s.id = 1"
+                    .to_string(),
+            ))
+            .await
+            .expect("query migrated workflow and step values")
+            .expect("migrated workflow and step row");
+        let values_after: String = values_row
+            .try_get("", "values_after")
+            .expect("decode migrated workflow and step values");
+        assert_eq!(values_after, vec!["2026-09-01 12:34:56"; 10].join("|"));
+
+        TestContainer::singleton(conn.clone());
+        store::get_workflow_record(1)
+            .await
+            .expect("decode migrated workflow entity");
+        store::load_step(1, 0, "legacy-step")
+            .await
+            .expect("decode migrated workflow step entity")
+            .expect("migrated workflow step exists");
+    }
+
     // A cancelled worker must drain in-flight workflows before returning.
     // Spawns a worker that has no rows to claim (so it idles in the
     // poll/sleep path), cancels the token, and asserts run_with_cancel
@@ -1420,6 +1874,7 @@ mod tests {
         use sea_orm_migration::MigrationName;
         let wf = migrations::CreateWorkflowsTable;
         let st = migrations::CreateWorkflowStepsTable;
+        let normalize = migrations::NormalizeWorkflowDateTimesForMysql;
         assert!(
             wf.name().contains("workflows"),
             "workflows migration name must reference the table: {}",
@@ -1430,8 +1885,17 @@ mod tests {
             "workflow_steps migration name must reference the table: {}",
             st.name()
         );
+        assert!(
+            normalize
+                .name()
+                .contains("normalize_workflow_datetime_columns"),
+            "normalizer migration name must describe its compatibility change: {}",
+            normalize.name()
+        );
         // Names must be distinct so the migrator doesn't dedupe them.
         assert_ne!(wf.name(), st.name());
+        assert_ne!(wf.name(), normalize.name());
+        assert_ne!(st.name(), normalize.name());
     }
 
     fn postgres_url_or_skip(test_name: &str) -> Option<String> {
@@ -1445,6 +1909,20 @@ mod tests {
             }
             Err(_) => {
                 eprintln!("[{test_name}] skipping: DATABASE_URL not set");
+                None
+            }
+        }
+    }
+
+    fn mysql_url_or_skip(test_name: &str) -> Option<String> {
+        match std::env::var("MYSQL_TEST_URL") {
+            Ok(url) if url.starts_with("mysql://") => Some(url),
+            Ok(_) => {
+                eprintln!("[{test_name}] skipping: MYSQL_TEST_URL is not a MySQL URL");
+                None
+            }
+            Err(_) => {
+                eprintln!("[{test_name}] skipping: MYSQL_TEST_URL not set");
                 None
             }
         }
@@ -1471,6 +1949,57 @@ mod tests {
             .up(&manager)
             .await
             .expect("create workflow_steps test table");
+    }
+
+    async fn recreate_mysql_workflow_tables(conn: &crate::database::DbConnection) {
+        use sea_orm::ConnectionTrait;
+
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflow_steps")
+            .await
+            .expect("drop workflow_steps test table");
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflows")
+            .await
+            .expect("drop workflows test table");
+
+        let manager = SchemaManager::new(conn.inner());
+        migrations::CreateWorkflowsTable
+            .up(&manager)
+            .await
+            .expect("create production workflows table");
+        migrations::CreateWorkflowStepsTable
+            .up(&manager)
+            .await
+            .expect("create production workflow_steps table");
+    }
+
+    async fn recreate_legacy_mysql_workflow_tables(conn: &crate::database::DbConnection) {
+        use sea_orm::ConnectionTrait;
+
+        recreate_mysql_workflow_tables(conn).await;
+        conn.inner()
+            .execute_unprepared(
+                "ALTER TABLE workflows
+                       MODIFY COLUMN next_run_at TIMESTAMP NULL DEFAULT NULL,
+                       MODIFY COLUMN locked_until TIMESTAMP NULL DEFAULT NULL,
+                       MODIFY COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       MODIFY COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       MODIFY COLUMN started_at TIMESTAMP NULL DEFAULT NULL,
+                       MODIFY COLUMN completed_at TIMESTAMP NULL DEFAULT NULL",
+            )
+            .await
+            .expect("convert workflows table to legacy TIMESTAMP columns");
+        conn.inner()
+            .execute_unprepared(
+                "ALTER TABLE workflow_steps
+                       MODIFY COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       MODIFY COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       MODIFY COLUMN started_at TIMESTAMP NULL DEFAULT NULL,
+                       MODIFY COLUMN completed_at TIMESTAMP NULL DEFAULT NULL",
+            )
+            .await
+            .expect("convert workflow_steps table to legacy TIMESTAMP columns");
     }
 
     async fn setup_db() -> TestDatabase {
@@ -1524,23 +2053,23 @@ mod tests {
                         .col(ColumnDef::new(Workflows::Error).text().null())
                         .col(ColumnDef::new(Workflows::Attempts).integer().not_null())
                         .col(ColumnDef::new(Workflows::MaxAttempts).integer().not_null())
-                        .col(ColumnDef::new(Workflows::NextRunAt).timestamp().null())
-                        .col(ColumnDef::new(Workflows::LockedUntil).timestamp().null())
+                        .col(ColumnDef::new(Workflows::NextRunAt).date_time().null())
+                        .col(ColumnDef::new(Workflows::LockedUntil).date_time().null())
                         .col(ColumnDef::new(Workflows::WorkerId).string().null())
                         .col(
                             ColumnDef::new(Workflows::CreatedAt)
-                                .timestamp()
+                                .date_time()
                                 .not_null()
                                 .default(Expr::current_timestamp()),
                         )
                         .col(
                             ColumnDef::new(Workflows::UpdatedAt)
-                                .timestamp()
+                                .date_time()
                                 .not_null()
                                 .default(Expr::current_timestamp()),
                         )
-                        .col(ColumnDef::new(Workflows::StartedAt).timestamp().null())
-                        .col(ColumnDef::new(Workflows::CompletedAt).timestamp().null())
+                        .col(ColumnDef::new(Workflows::StartedAt).date_time().null())
+                        .col(ColumnDef::new(Workflows::CompletedAt).date_time().null())
                         .to_owned(),
                 )
                 .await?;
@@ -1624,20 +2153,20 @@ mod tests {
                         .col(ColumnDef::new(WorkflowSteps::Attempts).integer().not_null())
                         .col(
                             ColumnDef::new(WorkflowSteps::CreatedAt)
-                                .timestamp()
+                                .date_time()
                                 .not_null()
                                 .default(Expr::current_timestamp()),
                         )
                         .col(
                             ColumnDef::new(WorkflowSteps::UpdatedAt)
-                                .timestamp()
+                                .date_time()
                                 .not_null()
                                 .default(Expr::current_timestamp()),
                         )
-                        .col(ColumnDef::new(WorkflowSteps::StartedAt).timestamp().null())
+                        .col(ColumnDef::new(WorkflowSteps::StartedAt).date_time().null())
                         .col(
                             ColumnDef::new(WorkflowSteps::CompletedAt)
-                                .timestamp()
+                                .date_time()
                                 .null(),
                         )
                         .to_owned(),
