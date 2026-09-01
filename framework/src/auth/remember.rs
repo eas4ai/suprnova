@@ -210,17 +210,23 @@ pub async fn verify_and_rotate(
 
     // O(1) indexed lookup: the UNIQUE constraint on `selector` means
     // this returns 0 or 1 rows.
-    let row = entity::Entity::find()
+    let rows = entity::Entity::find()
         .filter(entity::Column::Selector.eq(selector))
         .filter(entity::Column::ExpiresAt.gt(now))
-        .one(conn.inner())
+        .all(conn.inner())
         .await
         .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
 
-    let row = match row {
+    let mut rows = rows.into_iter().filter(|row| row.selector == selector);
+    let row = match rows.next() {
         Some(r) => r,
         None => return Ok(None),
     };
+    if rows.next().is_some() {
+        return Err(FrameworkError::database(
+            "remember selector matched multiple exact rows",
+        ));
+    }
 
     // Exactly one `bcrypt::verify` per request - constant-time
     // comparison, no scanning. Audit HIGH `hashing` #1: the async
@@ -278,22 +284,46 @@ pub(crate) async fn revoke_by_selector(
     let transaction = conn.inner().begin().await.map_err(|error| {
         FrameworkError::database(format!("begin remember selector revocation: {error}"))
     })?;
-    let result = entity::Entity::delete_many()
-        .filter(entity::Column::UserId.eq(user_id))
-        .filter(entity::Column::Selector.eq(selector))
-        .exec(&transaction)
-        .await
-        .map_err(|error| {
-            FrameworkError::database(format!("revoke remember token by selector: {error}"))
-        });
+    let result = async {
+        let rows = entity::Entity::find()
+            .filter(entity::Column::UserId.eq(user_id))
+            .filter(entity::Column::Selector.eq(selector))
+            .all(&transaction)
+            .await
+            .map_err(|error| {
+                FrameworkError::database(format!(
+                    "find remember token for selector revocation: {error}"
+                ))
+            })?;
+        let mut rows = rows
+            .into_iter()
+            .filter(|row| row.user_id == user_id && row.selector == selector);
+        let Some(row) = rows.next() else {
+            return Ok(0);
+        };
+        if rows.next().is_some() {
+            return Err(FrameworkError::database(
+                "remember selector matched multiple exact rows",
+            ));
+        }
+        entity::Entity::delete_many()
+            .filter(entity::Column::Id.eq(row.id))
+            .exec(&transaction)
+            .await
+            .map(|deleted| deleted.rows_affected)
+            .map_err(|error| {
+                FrameworkError::database(format!("revoke remember token by selector: {error}"))
+            })
+    }
+    .await;
     match result {
-        Ok(deleted) if deleted.rows_affected == 1 => {
+        Ok(1) => {
             transaction.commit().await.map_err(|error| {
                 FrameworkError::database(format!("commit remember selector revocation: {error}"))
             })?;
             Ok(true)
         }
-        Ok(deleted) if deleted.rows_affected == 0 => {
+        Ok(0) => {
             transaction.rollback().await.map_err(|error| {
                 FrameworkError::database(format!("rollback remember selector revocation: {error}"))
             })?;

@@ -16,6 +16,8 @@ use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
 use super::store::{SessionData, SessionStore};
 
+pub(crate) type PendingRememberRevocation = (String, String, String);
+
 // Per-request session slot. `tokio::task_local!` (not `thread_local!`)
 // so the binding survives `.await` points that resume on a different
 // worker thread - the same fix applied to `InertiaContext` in Tier 0.
@@ -44,6 +46,52 @@ tokio::task_local! {
     /// middleware layer that already owns the response. A task-local
     /// slot is the same shape we use for the session itself.
     pub(crate) static PENDING_COOKIES: Arc<Mutex<Vec<Cookie>>>;
+    /// Exact remember credentials invalidated by synchronous identity
+    /// transitions. `SessionMiddleware` drains these after the handler and
+    /// before persisting the replacement session.
+    pub(crate) static PENDING_REMEMBER_REVOCATIONS: Arc<Mutex<Vec<PendingRememberRevocation>>>;
+}
+
+/// Queue one exact remember credential for end-of-request revocation.
+#[must_use = "a synchronous identity transition must not silently drop exact remember cleanup"]
+pub(crate) fn push_pending_remember_revocation(
+    guard_name: &str,
+    user_id: String,
+    selector: String,
+) -> bool {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| {
+            slot.lock()
+                .unwrap()
+                .push((guard_name.to_owned(), user_id, selector));
+        })
+        .is_ok()
+}
+
+/// Remove every exact remember credential queued in the active request.
+pub(crate) fn take_pending_remember_revocations() -> Option<Vec<PendingRememberRevocation>> {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| std::mem::take(&mut *slot.lock().unwrap()))
+        .ok()
+}
+
+/// Restore revocations that could not yet be completed so middleware can retry.
+#[must_use = "failed remember cleanup must remain queued for the middleware fail-closed gate"]
+pub(crate) fn restore_pending_remember_revocations(
+    mut revocations: Vec<PendingRememberRevocation>,
+) -> bool {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| {
+            let mut queued = slot.lock().unwrap();
+            revocations.append(&mut queued);
+            *queued = revocations;
+        })
+        .is_ok()
+}
+
+/// Whether synchronous identity transitions can queue exact remember cleanup.
+pub(crate) fn pending_remember_revocations_scope_installed() -> bool {
+    PENDING_REMEMBER_REVOCATIONS.try_with(|_| ()).is_ok()
 }
 
 /// Push a cookie into the per-request pending-cookies slot.
@@ -83,11 +131,20 @@ pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
 /// Silently does nothing outside a request scope - the same posture
 /// `inertia::flash::push` takes outside a flash scope.
 pub(crate) fn queue_cookie(cookie: Cookie) {
-    let _ = PENDING_COOKIES.try_with(|slot| {
-        let mut guard = slot.lock().unwrap();
-        guard.retain(|c| c.name() != cookie.name());
-        guard.push(cookie);
-    });
+    let _ = replace_pending_cookie(cookie);
+}
+
+/// Replace any queued cookie with the same name and report whether the
+/// request-scoped pending-cookie jar was available.
+#[must_use = "callers replacing a fail-closed cookie must verify the replacement reached the response jar"]
+pub(crate) fn replace_pending_cookie(cookie: Cookie) -> bool {
+    PENDING_COOKIES
+        .try_with(|slot| {
+            let mut guard = slot.lock().unwrap();
+            guard.retain(|c| c.name() != cookie.name());
+            guard.push(cookie);
+        })
+        .is_ok()
 }
 
 /// Look up a cookie queued under `name`, whether by `queue_cookie` or
@@ -479,11 +536,18 @@ impl SessionMiddleware {
 }
 
 const REMEMBER_GUARD_CARRIER_PREFIX: &str = "suprnova.remember.v1:";
+const REMEMBER_GUARD_CARRIER_VERSION_PREFIX: &str = "suprnova.remember.v";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RememberGuardCarrier {
     guard: String,
     credential: String,
+}
+
+enum DecodedRememberCarrier {
+    Supported(String, String),
+    UnknownVersion,
+    Malformed,
 }
 
 pub(crate) fn remember_selector(credential: &str) -> Result<String, FrameworkError> {
@@ -510,18 +574,24 @@ pub(crate) fn encode_remember_carrier(
     Ok(format!("{REMEMBER_GUARD_CARRIER_PREFIX}{encoded}"))
 }
 
-fn decode_remember_carrier(plaintext: &str) -> Option<(String, String)> {
+fn decode_remember_carrier(plaintext: &str) -> DecodedRememberCarrier {
     let Some(encoded) = plaintext.strip_prefix(REMEMBER_GUARD_CARRIER_PREFIX) else {
-        return Some((
-            crate::auth::Auth::default_guard_name(),
-            plaintext.to_owned(),
-        ));
+        return if plaintext.starts_with(REMEMBER_GUARD_CARRIER_VERSION_PREFIX) {
+            DecodedRememberCarrier::UnknownVersion
+        } else {
+            DecodedRememberCarrier::Supported(
+                crate::auth::Auth::default_guard_name(),
+                plaintext.to_owned(),
+            )
+        };
     };
-    let carrier = serde_json::from_str::<RememberGuardCarrier>(encoded).ok()?;
+    let Ok(carrier) = serde_json::from_str::<RememberGuardCarrier>(encoded) else {
+        return DecodedRememberCarrier::Malformed;
+    };
     if carrier.guard.is_empty() || carrier.credential.is_empty() {
-        return None;
+        return DecodedRememberCarrier::Malformed;
     }
-    Some((carrier.guard, carrier.credential))
+    DecodedRememberCarrier::Supported(carrier.guard, carrier.credential)
 }
 
 /// Build an outbound remember-me cookie carrying the encrypted plaintext.
@@ -760,6 +830,8 @@ impl Middleware for SessionMiddleware {
         // and `Auth::revoke_remember_tokens`) and drained below right
         // next to where the session cookie is attached.
         let pending: Arc<Mutex<Vec<Cookie>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending_remember_revocations: Arc<Mutex<Vec<PendingRememberRevocation>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         let magnetar_engine = crate::magnetar_integration::optional_password_engine();
 
@@ -801,7 +873,12 @@ impl Middleware for SessionMiddleware {
             } else if let Some(valid_user_id) = valid_user_id {
                 session.set_auth_guard_id(&default_guard_name, valid_user_id);
             } else if session.user_id.is_none() && session.magnetar_web_binding().is_some() {
+                session.remove_auth_guard(&default_guard_name);
                 session.clear_magnetar_web_binding();
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
+            } else if session.auth_guard_id(&default_guard_name).is_some() {
+                session.remove_auth_guard(&default_guard_name);
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
             }
 
             for guard_name in session.auth_guard_names() {
@@ -849,10 +926,27 @@ impl Middleware for SessionMiddleware {
                 .cookie_prefix
                 .apply(super::super::auth::remember::COOKIE_NAME),
         ) {
-            let decoded =
-                Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
-                    .ok()
-                    .and_then(|plaintext| decode_remember_carrier(&plaintext));
+            let decoded = match Cookie::read_encrypted_for(
+                super::super::auth::remember::COOKIE_NAME,
+                &raw_cookie,
+            ) {
+                Ok(plaintext) => decode_remember_carrier(&plaintext),
+                Err(_) => DecodedRememberCarrier::Malformed,
+            };
+            let decoded = match decoded {
+                DecodedRememberCarrier::Supported(guard_name, credential) => {
+                    Some((guard_name, credential))
+                }
+                DecodedRememberCarrier::UnknownVersion => None,
+                DecodedRememberCarrier::Malformed => {
+                    crate::auth::request_state::clear_active_remember_carrier();
+                    pending
+                        .lock()
+                        .unwrap()
+                        .push(create_forget_remember_cookie(&self.config));
+                    None
+                }
+            };
             if let Some((guard_name, credential)) = decoded {
                 let is_default = guard_name == crate::auth::Auth::default_guard_name();
                 if let Ok(selector) = remember_selector(&credential) {
@@ -987,12 +1081,6 @@ impl Middleware for SessionMiddleware {
                         }
                     }
                 }
-            } else {
-                crate::auth::request_state::clear_active_remember_carrier();
-                pending
-                    .lock()
-                    .unwrap()
-                    .push(create_forget_remember_cookie(&self.config));
             }
         }
 
@@ -1029,10 +1117,34 @@ impl Middleware for SessionMiddleware {
                 self.config.clone(),
                 SESSION_CONTEXT.scope(
                     slot.clone(),
-                    PENDING_COOKIES.scope(pending.clone(), next(request)),
+                    PENDING_COOKIES.scope(
+                        pending.clone(),
+                        PENDING_REMEMBER_REVOCATIONS
+                            .scope(pending_remember_revocations.clone(), next(request)),
+                    ),
                 ),
             )
             .await;
+
+        let pending_revocations =
+            std::mem::take(&mut *pending_remember_revocations.lock().unwrap());
+        for (guard_name, user_id, selector) in pending_revocations {
+            if let Err(error) =
+                crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector).await
+            {
+                tracing::error!(
+                    %error,
+                    guard = %guard_name,
+                    "deferred remember credential revocation failed; discarding identity transition"
+                );
+                let pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
+                let failure = Err(crate::http::HttpResponse::text(
+                    "Internal Server Error: identity transition cleanup failed",
+                )
+                .status(500));
+                return attach_pending_cookies(failure, pending_cookies);
+            }
+        }
 
         // Take the potentially-modified session back out of the slot.
         let mut session = slot.lock().unwrap().take();

@@ -100,11 +100,29 @@ impl Auth {
         guard_name: &str,
         user_id: impl Into<String>,
     ) -> Result<(), crate::error::FrameworkError> {
-        if !crate::session::middleware::session_scope_installed() {
+        Self::ensure_session_scope()?;
+
+        let active_remember = request_state::active_remember_selector_for_guard(guard_name);
+        if active_remember.is_some()
+            && (!crate::session::middleware::pending_cookies_scope_installed()
+                || !crate::session::middleware::pending_remember_revocations_scope_installed())
+        {
             return Err(crate::error::FrameworkError::internal(
-                "Auth::login_id called outside a request scope: no SessionMiddleware is \
-                 active (or the test forgot session_scope_for_test). The session write \
-                 would have been dropped silently.",
+                "Auth::login_id cannot replace an active remember credential outside \
+                 SessionMiddleware: response-cookie and deferred-revocation scopes are required.",
+            ));
+        }
+
+        let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
+        if let Some((previous_user_id, selector)) = remember_to_revoke
+            && !crate::session::middleware::push_pending_remember_revocation(
+                guard_name,
+                previous_user_id,
+                selector,
+            )
+        {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::login_id could not retain exact remember cleanup for the request",
             ));
         }
 
@@ -118,6 +136,7 @@ impl Auth {
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
+        request_state::set_guard_via_remember(guard_name, false);
 
         Ok(())
     }
@@ -156,7 +175,13 @@ impl Auth {
         user_id: impl Into<String>,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
+        Self::ensure_remember_issue_scopes()?;
+        Self::flush_pending_remember_revocations().await?;
         let user_id = user_id.into();
+        let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
+        if let Some((previous_user_id, selector)) = remember_to_revoke {
+            Self::revoke_remember_selector(guard_name, &previous_user_id, &selector).await?;
+        }
         // Regular session login (regen session id + CSRF, set user). This
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
@@ -186,8 +211,14 @@ impl Auth {
         user_id: &str,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
-        Self::issue_remember_cookie_for_guard(&Self::default_guard_name(), user_id, ttl_minutes)
-            .await
+        Self::ensure_remember_issue_scopes()?;
+        Self::flush_pending_remember_revocations().await?;
+        let guard_name = Self::default_guard_name();
+        let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(&guard_name);
+        if let Some((previous_user_id, selector)) = remember_to_revoke {
+            Self::revoke_remember_selector(&guard_name, &previous_user_id, &selector).await?;
+        }
+        Self::issue_remember_cookie_for_guard(&guard_name, user_id, ttl_minutes).await
     }
 
     pub(crate) async fn issue_remember_cookie_for_guard(
@@ -201,20 +232,7 @@ impl Auth {
         // client receives no durable login state but the database holds
         // a live token. Single task = task-local cannot vanish mid-fn,
         // so no TOCTOU between this check and the push.
-        if !crate::session::middleware::pending_cookies_scope_installed() {
-            return Err(crate::error::FrameworkError::internal(
-                "Auth::issue_remember_cookie called outside a request scope: no \
-                 SessionMiddleware is active (or the test forgot \
-                 pending_cookies_scope_for_test). Refusing to insert a remember-me \
-                 row that would orphan when the cookie cannot reach the response.",
-            ));
-        }
-        if !crate::session::middleware::session_scope_installed() {
-            return Err(crate::error::FrameworkError::internal(
-                "Auth::issue_remember_cookie called outside a request scope: no active \
-                 session is available to retain the remember selector.",
-            ));
-        }
+        Self::ensure_remember_issue_scopes()?;
 
         let plaintext =
             if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
@@ -243,7 +261,10 @@ impl Auth {
             std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));
         let cookie =
             crate::session::middleware::create_remember_cookie(&config, &carrier, max_age)?;
-        let queued = crate::session::middleware::push_pending_cookie(cookie);
+        // The browser has one remember-cookie slot. Replace any earlier
+        // directive for that slot (including middleware's malformed-carrier
+        // clear) so duplicate-header ordering cannot decide the final state.
+        let queued = crate::session::middleware::replace_pending_cookie(cookie);
         // The pre-flight above guarantees `queued == true`; the assert is
         // a belt-and-suspenders against future refactors removing the
         // pre-flight without removing the row write.
@@ -257,6 +278,80 @@ impl Auth {
         });
 
         Ok(())
+    }
+
+    fn ensure_session_scope() -> Result<(), crate::error::FrameworkError> {
+        if crate::session::middleware::session_scope_installed() {
+            return Ok(());
+        }
+        Err(crate::error::FrameworkError::internal(
+            "Auth::login_id called outside a request scope: no SessionMiddleware is \
+             active (or the test forgot session_scope_for_test). The session write \
+             would have been dropped silently.",
+        ))
+    }
+
+    fn ensure_remember_issue_scopes() -> Result<(), crate::error::FrameworkError> {
+        if !crate::session::middleware::pending_cookies_scope_installed() {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::issue_remember_cookie called outside a request scope: no \
+                 SessionMiddleware is active (or the test forgot \
+                 pending_cookies_scope_for_test). Refusing to insert a remember-me \
+                 row that would orphan when the cookie cannot reach the response.",
+            ));
+        }
+        if !crate::session::middleware::session_scope_installed() {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::issue_remember_cookie called outside a request scope: no active \
+                 session is available to retain the remember selector.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn flush_pending_remember_revocations()
+    -> Result<(), crate::error::FrameworkError> {
+        let Some(revocations) = crate::session::middleware::take_pending_remember_revocations()
+        else {
+            return Ok(());
+        };
+        let mut revocations = revocations.into_iter();
+        while let Some((guard_name, user_id, selector)) = revocations.next() {
+            if let Err(error) =
+                Self::revoke_remember_selector(&guard_name, &user_id, &selector).await
+            {
+                let mut retry = vec![(guard_name, user_id, selector)];
+                retry.extend(revocations);
+                if !crate::session::middleware::restore_pending_remember_revocations(retry) {
+                    return Err(crate::error::FrameworkError::internal(format!(
+                        "remember cleanup failed and could not be retained for middleware retry: {error}"
+                    )));
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_guard_remember_identity_replacement(
+        guard_name: &str,
+    ) -> Option<(String, String)> {
+        let active_selector = request_state::active_remember_selector_for_guard(guard_name);
+        let retained_selector =
+            session().and_then(|session| session.auth_guard_remember_selector(guard_name));
+        let verified_owner_selector = active_selector
+            .as_ref()
+            .filter(|active| retained_selector.as_ref() == Some(active))
+            .and_then(|selector| {
+                crate::session::middleware::persisted_guard_auth_user_id(guard_name)
+                    .map(|owner| (owner, selector.clone()))
+            });
+        if active_selector.is_some() {
+            request_state::clear_active_remember_carrier_for_guard(guard_name);
+            Self::queue_remember_clear_cookie();
+        }
+
+        verified_owner_selector
     }
 
     /// Revoke every remember-me token for the currently-authenticated
@@ -371,12 +466,12 @@ impl Auth {
     fn queue_remember_clear_cookie() {
         let config = crate::session::middleware::current_session_config();
         let clear = crate::session::middleware::create_forget_remember_cookie(&config);
-        // A clear cookie is a defensive add - when there is no scope to push
-        // into (no SessionMiddleware) there is no orphan state to worry about,
-        // and the browser simply keeps whatever stale cookie it held. Dropping
-        // the result here is intentional, unlike the issue path which gates a
-        // DB row write on the push succeeding.
-        let _ = crate::session::middleware::push_pending_cookie(clear);
+        // A clear cookie is a defensive replacement - matching on the fully
+        // built name also replaces an already queued prefixed carrier. When
+        // there is no scope (no SessionMiddleware), there is no queued response
+        // state to replace. Dropping the result here is intentional, unlike the
+        // issue path which gates a DB row write on the replacement succeeding.
+        let _ = crate::session::middleware::replace_pending_cookie(clear);
     }
 
     /// Tear down all authentication state for the current request: revoke the
@@ -1296,6 +1391,9 @@ mod tests {
                 crate::session::session_scope_for_test(
                     session_slot,
                     crate::session::pending_cookies_scope_for_test(pending_slot.clone(), async {
+                        assert!(crate::session::middleware::push_pending_cookie(
+                            crate::http::Cookie::new("__Host-remember_me", "stale-carrier")
+                        ));
                         Auth::queue_remember_clear_cookie();
                     }),
                 ),
@@ -1304,18 +1402,24 @@ mod tests {
 
         let pending = pending_slot.lock().unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name(), "__Host-remember_me");
+        assert_eq!(pending[0].value(), "");
         assert!(
             pending[0]
                 .to_header_value()
                 .starts_with("__Host-remember_me="),
             "remember clear must use the active middleware prefix"
         );
+        assert!(
+            pending[0].to_header_value().contains("Max-Age=0"),
+            "the sole prefixed cookie must be the forget directive"
+        );
     }
 
-    // `login_remember` is the public entry. It calls `login_id` first, so
-    // the no-session-scope case errors out before the row write - the same
-    // fail-loud guarantee. The pending-cookies path is exercised in
-    // `tests/remember_me.rs` against a live DB.
+    // `login_remember` is the public entry. It preflights the response-cookie
+    // and session scopes before changing either session or database state.
+    // The scoped success path is exercised in `tests/remember_me.rs` against
+    // a live database.
     #[tokio::test]
     async fn login_remember_errors_outside_session_scope() {
         let err = Auth::login_remember("alice-42", 60)
@@ -1323,8 +1427,8 @@ mod tests {
             .expect_err("login_remember outside a session scope must error");
         let msg = err.to_string();
         assert!(
-            msg.contains("login_id") && msg.contains("session"),
-            "error must point at the underlying login_id cause; got: {msg}"
+            msg.contains("issue_remember_cookie") && msg.contains("SessionMiddleware"),
+            "error must identify the missing request scopes; got: {msg}"
         );
     }
 

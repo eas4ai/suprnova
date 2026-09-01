@@ -240,12 +240,19 @@ impl StatefulGuard for SessionGuard {
         remember: bool,
     ) -> Result<(), FrameworkError> {
         let user_id = user.get_auth_identifier();
+        Auth::flush_pending_remember_revocations().await?;
+        let remember_to_revoke = Auth::prepare_guard_remember_identity_replacement(&self.name);
+
+        if let Some((previous_user_id, selector)) = remember_to_revoke {
+            Auth::revoke_remember_selector(&self.name, &previous_user_id, &selector).await?;
+        }
 
         // Delegate session persistence (+ remember-me row/cookie) to the
         // proven facade helpers: both regenerate the session id and CSRF
         // token to defeat session fixation.
         if remember {
-            Auth::login_guard_remember(&self.name, user_id.clone(), self.remember_ttl_minutes)
+            Auth::login_guard_id(&self.name, user_id.clone())?;
+            Auth::issue_remember_cookie_for_guard(&self.name, &user_id, self.remember_ttl_minutes)
                 .await?;
         } else {
             Auth::login_guard_id(&self.name, user_id.clone())?;

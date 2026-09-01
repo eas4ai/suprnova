@@ -40,6 +40,15 @@ pub(crate) fn bind_issued_session(
     password_confirmed: bool,
 ) {
     let default_guard = crate::auth::Auth::default_guard_name();
+    let verified_remember =
+        crate::auth::Auth::prepare_guard_remember_identity_replacement(&default_guard);
+    // Binding is deliberately synchronous: the fresh Magnetar session has
+    // already been issued, so awaiting A's selector revocation here would make
+    // a revoke failure strand durable B state behind a failed framework bind.
+    // The preparation step still replaces A's queued carrier with a forget
+    // directive and clears its request provenance, making the browser path fail
+    // closed; the now-unreachable row expires through normal retention.
+    let _ = verified_remember;
     let user_id = issued.session.user_id.to_string();
     crate::session::session_mut(|session| {
         session.rotate_id(crate::session::generate_session_id());
