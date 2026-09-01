@@ -35,7 +35,9 @@ use tokio::runtime::Runtime;
 
 use suprnova::http::text;
 use suprnova::magnetar_integration::middleware::BearerTokenMiddleware;
-use suprnova::{Auth, AuthMiddleware, MiddlewareRegistry, Router, handle_request};
+use suprnova::{
+    Auth, AuthMiddleware, BasicAuthMiddleware, MiddlewareRegistry, Router, handle_request,
+};
 
 /// One tokio runtime shared across every test in this file.
 static RT: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("tokio runtime"));
@@ -209,6 +211,62 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
             body, expected_user_id,
             "Auth::id() inside the handler must equal the token's user id"
         );
+    });
+}
+
+#[test]
+fn valid_bearer_does_not_satisfy_stateful_basic() {
+    LazyLock::force(&SETUP);
+
+    RT.block_on(async {
+        Auth::password()
+            .register("bearer-before-basic@example.com", "BearerBasic1!")
+            .await
+            .unwrap();
+
+        let (_user, magnetar_session) = Auth::password()
+            .authenticate(
+                "bearer-before-basic@example.com",
+                "BearerBasic1!",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let token_str = magnetar_session
+            .token
+            .as_ref()
+            .expect("freshly authenticated session must carry plaintext token")
+            .expose_secret()
+            .to_string();
+
+        let protected_body = "stateful-basic-protected-handler";
+        let router: Router = Router::new()
+            .get(
+                "/protected",
+                move |_req| async move { text(protected_body) },
+            )
+            .into();
+        let registry = MiddlewareRegistry::new()
+            .append(BearerTokenMiddleware)
+            .append(BasicAuthMiddleware::new().realm("Stateful Basic Test"));
+        let addr = spawn_server(router, registry, 1).await;
+
+        let (status, headers, body) = request(
+            addr,
+            "GET",
+            "/protected",
+            &[("Authorization", &format!("Bearer {token_str}"))],
+        )
+        .await;
+
+        assert_eq!(status, 401);
+        assert_eq!(
+            headers.get("www-authenticate").map(String::as_str),
+            Some("Basic realm=\"Stateful Basic Test\"")
+        );
+        assert_ne!(body, protected_body);
     });
 }
 

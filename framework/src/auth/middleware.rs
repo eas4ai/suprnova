@@ -364,12 +364,20 @@ impl Default for BasicAuthMiddleware {
 impl Middleware for BasicAuthMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         // Stateful basic short-circuits on an already-authenticated session,
-        // matching Laravel's `basic()` (which returns early when `check()`
-        // passes). Stateless `once` always re-reads the header.
+        // matching Laravel's `basic()`. Stateless `once` always re-reads the
+        // header.
         if !self.stateless {
             let already = match &self.guard {
-                Some(name) => Auth::guard(name)?.check().await?,
-                None => Auth::check(),
+                Some(name) => {
+                    // Do not trust a stale session slot for an absent or
+                    // stateless guard.
+                    Auth::stateful_guard(name)?;
+                    crate::session::middleware::persisted_guard_auth_user_id(name).is_some()
+                }
+                None => crate::session::middleware::persisted_guard_auth_user_id(
+                    &Auth::default_guard_name(),
+                )
+                .is_some(),
             };
             if already {
                 return next(request).await;
