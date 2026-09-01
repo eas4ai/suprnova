@@ -64,8 +64,17 @@ rtk node scripts/check-expansion-budget.mjs
 The checked local evidence records 1,762/15,622/154,222 expanded tokens,
 10,174/92,884/919,984 expanded bytes, and 5,372/5,400/5,562 milliseconds of
 isolated check work for 1/10/100 components. The gate rejects fixture drift,
-baseline regression, and unexplained superlinear growth. Local compile timing
-is exploratory and is never presented as release-grade toolchain performance.
+expansion size more than 10% above the checked baseline, and token or byte
+growth above twelve times between consecutive fixtures. Isolated check time is
+bounded only within one run: each larger fixture must finish within twice the
+1-component fixture's check time. Dependency compilation dominates that check,
+so a per-component compile regression that matters shows up as that ratio, and
+the same-run ratio cancels machine speed, `CARGO_BUILD_JOBS`, and concurrent
+load, none of which a checked millisecond baseline can. The recorded
+milliseconds and job setting are exploratory context, are never compared
+against the checked baseline, and are never presented as release-grade
+toolchain performance. `tests/expansion_budget_rules.mjs` holds the rule
+contract.
 
 ## Browser runtime benchmark
 

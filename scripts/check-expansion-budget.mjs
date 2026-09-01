@@ -14,6 +14,13 @@ import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
+import {
+  assertBaseline,
+  assertCheckTimeBounded,
+  assertLinearExpansion,
+  cargoBuildJobs,
+} from "./expansion-budget-rules.mjs";
+
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
 const baselinePath = resolve(
@@ -25,7 +32,6 @@ const localResultPath = resolve(
   "benchmarks/local/expansion-budget-v1.json",
 );
 const fixtureCounts = [1, 10, 100];
-const maxGrowth = 12;
 const tokenPattern = /[A-Za-z_][A-Za-z0-9_]*|::|->|=>|[^\s]/gu;
 
 function runRtk(arguments_, options = {}) {
@@ -111,56 +117,9 @@ function measureFixture(componentCount) {
   };
 }
 
-function assertLinear(fixtures) {
-  for (const metric of [
-    "expanded_tokens",
-    "expanded_bytes",
-    "cargo_check_milliseconds",
-  ]) {
-    for (let index = 1; index < fixtures.length; index += 1) {
-      const ratio = fixtures[index][metric] / fixtures[index - 1][metric];
-      if (ratio > maxGrowth) {
-        throw new Error(
-          `${metric} grew ${ratio.toFixed(2)}x from ${fixtures[index - 1].component_count} to ${fixtures[index].component_count} components`,
-        );
-      }
-    }
-  }
-}
-
-function assertBaseline(observed, baseline) {
-  if (baseline.schema_version !== 1 || baseline.workload !== "component-expansion") {
-    throw new Error("checked expansion baseline has an unsupported schema");
-  }
-  for (const fixture of observed.fixtures) {
-    const expected = baseline.fixtures.find(
-      (candidate) => candidate.component_count === fixture.component_count,
-    );
-    if (!expected || expected.fixture_sha256 !== fixture.fixture_sha256) {
-      throw new Error(
-        `${fixture.component_count}-component fixture drifted; regenerate and review the baseline`,
-      );
-    }
-    for (const metric of ["expanded_tokens", "expanded_bytes"]) {
-      if (fixture[metric] > expected[metric] * 1.1) {
-        throw new Error(
-          `${fixture.component_count}-component ${metric} regressed by more than 10%`,
-        );
-      }
-    }
-    if (
-      fixture.cargo_check_milliseconds >
-      expected.cargo_check_milliseconds * 2.5 + 2_000
-    ) {
-      throw new Error(
-        `${fixture.component_count}-component isolated cargo check regressed materially`,
-      );
-    }
-  }
-}
-
 const fixtures = fixtureCounts.map(measureFixture);
-assertLinear(fixtures);
+assertLinearExpansion(fixtures);
+assertCheckTimeBounded(fixtures);
 const observed = {
   schema_version: 1,
   workload: "component-expansion",
@@ -169,6 +128,7 @@ const observed = {
   measured_at_unix_ms: Date.now(),
   environment: {
     classification: "local_exploratory",
+    cargo_build_jobs: cargoBuildJobs(process.env),
     operating_system: platform(),
     architecture: arch(),
     kernel: release(),
@@ -202,5 +162,5 @@ for (const fixture of fixtures) {
   );
 }
 process.stdout.write(
-  `[expansion-budget] ${writeBaseline ? "baseline recorded" : "baseline and linear-growth checks passed"}\n`,
+  `[expansion-budget] ${writeBaseline ? "baseline recorded" : "baseline, linear-growth, and same-run check-time bounds passed"}\n`,
 );

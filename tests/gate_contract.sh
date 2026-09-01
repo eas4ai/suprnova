@@ -373,6 +373,7 @@ write_expected_gate_commands() {
     fi
 
     printf '%s\n' \
+        $'node\ttests/expansion_budget_rules.mjs' \
         $'node\tscripts/check-expansion-budget.mjs' \
         $'git\tdiff\t--check' \
         >>"${expected_path}"
@@ -553,6 +554,7 @@ require_text "hostile-context tests" "cargo test --test security_hostile_context
 require_text "nightly fuzz build" "cargo +nightly fuzz build"
 require_text "Rust snapshot budget" "scripts/run-snapshot-budget.sh"
 require_text "Rust action budget" "scripts/run-action-budget.sh"
+require_text "expansion budget rule contract" "node tests/expansion_budget_rules.mjs"
 require_text "macro expansion budget" "node scripts/check-expansion-budget.mjs"
 require_text "browser byte budget" "npm run budget"
 require_text "full async release workload budget" "npm run budget:browser -- --release --dedicated"

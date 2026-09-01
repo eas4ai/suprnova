@@ -165,6 +165,7 @@ if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then
 fi
 
 phase "macro expansion and isolated compile budget"
+rtk node tests/expansion_budget_rules.mjs
 rtk node scripts/check-expansion-budget.mjs
 
 phase "final worktree diff check"
