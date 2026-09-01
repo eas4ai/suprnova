@@ -234,6 +234,47 @@ async fn growing_a_batch_raises_both_total_and_pending() {
 }
 
 #[tokio::test]
+async fn a_completed_nonempty_batch_cannot_be_grown() {
+    for (label, repo) in backends().await {
+        let b = fresh("completed", 1);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+        let settled = repo
+            .record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(settled.pending_jobs, 0, "{label}: batch completed");
+
+        let error = repo
+            .increment_total_jobs(&id, 1)
+            .await
+            .expect_err("a completed non-empty batch must stay sealed");
+        assert!(error.to_string().contains("completed batch"), "{label}");
+
+        let snapshot = repo.find(&id).await.unwrap().unwrap();
+        assert_eq!(snapshot.total_jobs, 1, "{label}");
+        assert_eq!(snapshot.pending_jobs, 0, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_batch_can_receive_its_first_jobs() {
+    for (label, repo) in backends().await {
+        let b = fresh("empty", 0);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        let grown = repo.increment_total_jobs(&id, 2).await.unwrap();
+        assert_eq!(grown.pending_jobs, 2, "{label}");
+        assert_eq!(
+            repo.find(&id).await.unwrap().unwrap().total_jobs,
+            2,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn settling_against_an_unknown_batch_is_an_error() {
     for (label, repo) in backends().await {
         let missing = Uuid::new_v4().to_string();

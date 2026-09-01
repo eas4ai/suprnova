@@ -121,6 +121,9 @@ pub trait BatchRepository: Send + Sync {
     async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError>;
     /// Atomically add `delta` jobs to the batch's `total_jobs` and
     /// `pending_jobs` counters, returning the post-update snapshot.
+    /// A non-empty batch whose pending count has reached zero is sealed and
+    /// rejects positive growth so a terminal callback decision cannot become
+    /// stale after settlement commits.
     async fn increment_total_jobs(
         &self,
         id: &str,
@@ -234,6 +237,11 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
+        if delta > 0 && entry.batch.total_jobs > 0 && entry.batch.pending_jobs == 0 {
+            return Err(FrameworkError::internal(format!(
+                "cannot add jobs to completed batch: {id}"
+            )));
+        }
         entry.batch.total_jobs += delta;
         entry.batch.pending_jobs += delta;
         Ok(UpdatedBatchJobCounts {
@@ -440,6 +448,69 @@ impl DatabaseBatchRepository {
         self.db.get_database_backend()
     }
 
+    /// Begin a transaction that can serialize mutations through the parent
+    /// batch row on every supported backend.
+    async fn begin_serialized_transaction(
+        &self,
+    ) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
+        use sea_orm::{
+            IsolationLevel, SqliteTransactionMode, TransactionOptions, TransactionTrait,
+        };
+        let options = match self.backend() {
+            sea_orm::DatabaseBackend::Sqlite => TransactionOptions {
+                sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+                ..Default::default()
+            },
+            sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => {
+                TransactionOptions {
+                    isolation_level: Some(IsolationLevel::ReadCommitted),
+                    ..Default::default()
+                }
+            }
+            backend => return Err(crate::database::unsupported_database_backend(backend)),
+        };
+        self.db
+            .begin_with_options(options)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))
+    }
+
+    /// Lock the parent batch before changing or counting its settlements.
+    ///
+    /// PostgreSQL and MySQL provide row locks. SQLite has no `FOR UPDATE`, so
+    /// [`Self::begin_serialized_transaction`] acquires its writer lock before
+    /// this existence read instead.
+    async fn lock_batch<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Option<i64>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let lock_clause = match self.backend() {
+            sea_orm::DatabaseBackend::Sqlite => "",
+            sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => " FOR UPDATE",
+            backend => return Err(crate::database::unsupported_database_backend(backend)),
+        };
+        let row = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT total_jobs FROM {} WHERE id = {}{}",
+                    self.batches,
+                    placeholder(self.backend(), 1)?,
+                    lock_clause
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches lock: {e}")))?;
+        row.map(|row| {
+            row.try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("job_batches total col: {e}")))
+        })
+        .transpose()
+    }
+
     /// The backend's "insert unless this key already exists" spelling.
     ///
     /// Every supported backend has one; none of them share a syntax. Doing it
@@ -530,12 +601,17 @@ impl DatabaseBatchRepository {
         job_id: Uuid,
         failed: bool,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
-        use sea_orm::TransactionTrait;
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        let txn = self.begin_serialized_transaction().await?;
+
+        // Settlement rows are the source of truth for callback gating. Lock
+        // their parent before insertion so concurrent jobs for one batch form
+        // a total order: exactly one final settlement observes pending zero.
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        }
 
         {
             use sea_orm::ConnectionTrait;
@@ -553,16 +629,15 @@ impl DatabaseBatchRepository {
             .map_err(|e| FrameworkError::internal(format!("job_batch_settlements insert: {e}")))?;
         }
 
-        // Read the derived counts inside the same transaction, so the snapshot
-        // the worker gates callbacks on is the one this settlement produced -
-        // not one a concurrent settlement moved underneath it.
+        // Read the derived counts while the parent lock is still held. The
+        // snapshot now includes every settlement that acquired this lock
+        // earlier, plus this transaction's own insert.
         let counts = self.counts(&txn, id).await?;
 
         let Some(counts) = counts else {
-            // No batch row: the settlement we just inserted would be an orphan,
-            // and rolling back is what removes it. Matches the in-memory
-            // repository, which errors on an unknown id rather than inventing
-            // one.
+            // The locked parent cannot normally disappear. Preserve the
+            // public missing-batch behavior if a backend violates that
+            // invariant rather than committing an orphan settlement.
             txn.rollback()
                 .await
                 .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
@@ -699,12 +774,25 @@ impl BatchRepository for DatabaseBatchRepository {
         delta: u64,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
         use crate::database::placeholder::placeholder;
-        use sea_orm::{ConnectionTrait, TransactionTrait};
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        use sea_orm::ConnectionTrait;
+        let txn = self.begin_serialized_transaction().await?;
+        let Some(total_jobs) = self.lock_batch(&txn, id).await? else {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        };
+        let before = self.counts(&txn, id).await?.ok_or_else(|| {
+            FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+        })?;
+        if delta > 0 && total_jobs > 0 && before.pending_jobs == 0 {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!(
+                "cannot add jobs to completed batch: {id}"
+            )));
+        }
         txn.execute_raw(sea_orm::Statement::from_sql_and_values(
             self.backend(),
             format!(
@@ -721,10 +809,9 @@ impl BatchRepository for DatabaseBatchRepository {
         .await
         .map_err(|e| FrameworkError::internal(format!("job_batches increment: {e}")))?;
 
-        // Existence is decided by the follow-up read rather than the update's
-        // `rows_affected`: MySQL reports zero rows changed when `delta` is 0
-        // even though the row matched, which would turn a no-op growth into a
-        // spurious "batch not found".
+        // Read the post-update state rather than relying on `rows_affected`:
+        // MySQL reports zero rows changed when `delta` is 0 even though the row
+        // matched, which would turn a no-op growth into a spurious error.
         let counts = self.counts(&txn, id).await?;
         let Some(counts) = counts else {
             txn.rollback()
@@ -787,15 +874,19 @@ impl BatchRepository for DatabaseBatchRepository {
 
     /// Removes the settlement rows with the batch, in one transaction. Leaving
     /// them behind would let a later batch reusing the id inherit somebody
-    /// else's settled jobs and start life already "finished".
+    /// else's settled jobs and start life already "finished". The parent lock
+    /// comes first so a concurrent settlement cannot land between child and
+    /// parent deletion.
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
         use crate::database::placeholder::placeholder;
-        use sea_orm::{ConnectionTrait, TransactionTrait};
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        use sea_orm::ConnectionTrait;
+        let txn = self.begin_serialized_transaction().await?;
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Ok(false);
+        }
 
         let delete = |table: &str, key: &str| -> Result<sea_orm::Statement, FrameworkError> {
             Ok(sea_orm::Statement::from_sql_and_values(
