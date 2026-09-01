@@ -22,7 +22,10 @@ use magnetar::sessions::{
 use magnetar::storage::{NewUser, SeaOrmStorage, UserStore};
 use sea_orm::Database;
 #[cfg(feature = "seaorm-sqlite")]
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Set, Statement};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set,
+    Statement,
+};
 #[cfg(feature = "seaorm-sqlite")]
 use sha2::{Digest, Sha256};
 
@@ -362,13 +365,13 @@ async fn sqlite_remember_selector_revocation_preserves_other_rows() {
 
     assert!(
         store
-            .revoke_remember_selector(&first.selector)
+            .revoke_remember_selector(&first.user_id, &first.selector)
             .await
             .unwrap()
     );
     assert!(
         !store
-            .revoke_remember_selector(&first.selector)
+            .revoke_remember_selector(&first.user_id, &first.selector)
             .await
             .unwrap()
     );
@@ -382,6 +385,61 @@ async fn sqlite_remember_selector_revocation_preserves_other_rows() {
             .await
             .unwrap(),
         Some(second)
+    );
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn sqlite_remember_selector_revocation_does_not_mutate_ambiguous_rows() {
+    let database = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory SQLite");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("create default auth tables");
+    let store = SqlRememberStore(database.clone());
+    let now = Utc::now();
+    let first = RememberRow {
+        id: "ambiguous-selector-first-id".to_owned(),
+        selector: "ambiguous-selector".to_owned(),
+        user_id: "ambiguous-selector-owner".to_owned(),
+        auth_epoch: 1,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::days(1),
+    };
+    let second = RememberRow {
+        id: "ambiguous-selector-second-id".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..first.clone()
+    };
+    store.insert_remember(first.clone()).await.unwrap();
+    store.insert_remember(second.clone()).await.unwrap();
+
+    assert!(
+        !store
+            .revoke_remember_selector("different-owner", &first.selector)
+            .await
+            .expect("owner mismatch must fail closed")
+    );
+    let error = store
+        .revoke_remember_selector(&first.user_id, &first.selector)
+        .await
+        .expect_err("ambiguous exact revocation must return an error");
+    assert!(matches!(
+        error,
+        magnetar::Error::Conflict { resource, message }
+            if resource == "remember credential"
+                && message == "owner and selector matched multiple rows"
+    ));
+    let remaining = magnetar::default_schema::remembers::Entity::find()
+        .filter(magnetar::default_schema::remembers::Column::Selector.eq(&first.selector))
+        .all(&database)
+        .await
+        .expect("query ambiguous selector rows after rejected revocation");
+    assert_eq!(
+        remaining.len(),
+        2,
+        "ambiguous selector revocation must roll back without mutating rows"
     );
 }
 

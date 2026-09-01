@@ -282,6 +282,21 @@ pub(crate) fn set_active_remember_carrier(guard_name: &str, selector: &str) {
     });
 }
 
+/// Return the active carrier's guard and non-secret selector.
+pub(crate) fn active_remember_carrier() -> Option<(String, String)> {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active_remember_carrier
+                .as_ref()
+                .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()))
+        })
+        .ok()
+        .flatten()
+}
+
 /// Return the active carrier selector when it belongs to one guard.
 pub(crate) fn active_remember_selector_for_guard(guard_name: &str) -> Option<String> {
     AUTH_STATE
@@ -321,6 +336,20 @@ pub(crate) fn clear_active_remember_carrier() {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .active_remember_carrier = None;
+    });
+}
+
+/// Forget the active carrier when it belongs to one guard.
+pub(crate) fn clear_active_remember_carrier_for_guard(guard_name: &str) {
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        if state
+            .active_remember_carrier
+            .as_ref()
+            .is_some_and(|carrier| carrier.guard == guard_name)
+        {
+            state.active_remember_carrier = None;
+        }
     });
 }
 

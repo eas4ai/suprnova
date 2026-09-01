@@ -44,8 +44,9 @@ pub(crate) fn bind_issued_session(
     crate::session::session_mut(|session| {
         session.rotate_id(crate::session::generate_session_id());
         session.csrf_token = crate::session::generate_csrf_token();
+        session.clear_magnetar_web_binding();
+        session.replace_auth_guard_id(&default_guard, user_id.clone());
         session.user_id = Some(user_id.clone());
-        session.set_auth_guard_id(&default_guard, user_id.clone());
         session.set_auth_guard_magnetar_binding(&default_guard, issued.web_binding.clone());
         session.set_magnetar_web_binding(issued.web_binding.clone());
         if password_confirmed {
@@ -53,6 +54,9 @@ pub(crate) fn bind_issued_session(
         }
         session.dirty = true;
     });
+    crate::auth::request_state::set_guard_user_id(&default_guard, user_id);
+    crate::auth::request_state::set_guard_via_remember(&default_guard, false);
+    crate::auth::request_state::clear_active_remember_carrier_for_guard(&default_guard);
 }
 pub use magnetar::passkey::PasskeyConfig;
 

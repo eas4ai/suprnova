@@ -343,6 +343,7 @@ impl Auth {
 
     pub(crate) async fn revoke_remember_selector(
         guard_name: &str,
+        expected_user_id: &str,
         selector: &str,
     ) -> Result<bool, crate::error::FrameworkError> {
         if request_state::take_active_remember_carrier(guard_name, selector) {
@@ -350,7 +351,7 @@ impl Auth {
         }
         if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
             engine
-                .revoke_remember_selector(selector)
+                .revoke_remember_selector(expected_user_id, selector)
                 .await
                 .map_err(|error| {
                     crate::error::FrameworkError::internal(format!(
@@ -358,7 +359,7 @@ impl Auth {
                     ))
                 })
         } else {
-            super::remember::revoke_by_selector(selector).await
+            super::remember::revoke_by_selector(expected_user_id, selector).await
         }
     }
 
@@ -396,9 +397,11 @@ impl Auth {
     /// logout. Reversing the order would leave a user fully authenticated
     /// when the revoke failed (the original implementation's gap).
     pub(crate) async fn clear_authentication() -> Result<(), crate::error::FrameworkError> {
-        // Capture the authenticated id BEFORE clearing - the revoke
-        // below needs it, and `Auth::id()` is about to become `None`.
-        let saved_id = Self::id();
+        // Revoke storage for the persisted identity. A request-only
+        // `once`/`set_user` override remains the effective identity for
+        // event attribution, but never owns the retained remember state.
+        let saved_id =
+            crate::session::middleware::persisted_guard_auth_user_id(&Self::default_guard_name());
 
         // STEP 1: Clear session auth + request-scoped cache + 2FA
         // pending state, and rotate the CSRF token. Clearing
@@ -446,6 +449,7 @@ impl Auth {
             return Self::clear_authentication().await;
         }
 
+        let saved_id = crate::session::middleware::persisted_guard_auth_user_id(guard_name);
         let mut selectors = session()
             .and_then(|session| session.auth_guard_remember_selector(guard_name))
             .into_iter()
@@ -462,10 +466,15 @@ impl Auth {
         });
         let mut first_revoke_error = None;
         for selector in selectors {
-            if let Err(error) = Self::revoke_remember_selector(guard_name, &selector).await
-                && first_revoke_error.is_none()
-            {
-                first_revoke_error = Some(error);
+            if let Some(ref expected_user_id) = saved_id {
+                if let Err(error) =
+                    Self::revoke_remember_selector(guard_name, expected_user_id, &selector).await
+                    && first_revoke_error.is_none()
+                {
+                    first_revoke_error = Some(error);
+                }
+            } else if request_state::take_active_remember_carrier(guard_name, &selector) {
+                Self::queue_remember_clear_cookie();
             }
         }
         if let Some(error) = first_revoke_error {
@@ -502,14 +511,16 @@ impl Auth {
     /// Use this for complete session destruction (e.g. "log out everywhere").
     /// Flushes the whole session (not just the auth user), revokes every
     /// remember-me token for the default user plus each retained named-guard
-    /// selector, clears every request-scoped guard identity, and dispatches a
-    /// [`Logout`](crate::auth::events::Logout) event.
+    /// owner/selector pair, clears every request-scoped guard identity, and
+    /// dispatches a [`Logout`](crate::auth::events::Logout) event.
     pub async fn logout_and_invalidate() -> Result<(), crate::error::FrameworkError> {
         // Capture the id before flushing so the event is attributed
         // AND so the revoke below can target the right user after the
         // session is gone. `Auth::id()` returns `None` once we flush.
         let user_id = Self::id();
         let default_guard = Self::default_guard_name();
+        let default_revoke_owner =
+            crate::session::middleware::persisted_guard_auth_user_id(&default_guard);
         let mut named_remember_selectors = session()
             .map(|session| {
                 session
@@ -517,14 +528,22 @@ impl Auth {
                     .into_iter()
                     .filter(|guard_name| guard_name != &default_guard)
                     .filter_map(|guard_name| {
-                        session
-                            .auth_guard_remember_selector(&guard_name)
-                            .map(|selector| (guard_name, selector))
+                        let owner_id = session.auth_guard_id(&guard_name)?;
+                        let selector = session.auth_guard_remember_selector(&guard_name)?;
+                        Some((guard_name, owner_id, selector))
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if let Some((guard_name, selector)) = request_state::active_remember_carrier()
+            && guard_name != default_guard
+            && let Some(owner_id) =
+                crate::session::middleware::persisted_guard_auth_user_id(&guard_name)
+        {
+            named_remember_selectors.push((guard_name, owner_id, selector));
+        }
         named_remember_selectors.sort_unstable();
+        named_remember_selectors.dedup();
 
         // STEP 1: Destroy session + request_state FIRST. Even if the
         // revoke errors below, the session is already gone - every
@@ -551,14 +570,15 @@ impl Auth {
         // deterministically even if one fails, then return the first error.
         // Cookie-first ordering still ensures the browser drops its carrier.
         let mut first_revoke_error = None;
-        for (guard_name, selector) in named_remember_selectors {
-            if let Err(error) = Self::revoke_remember_selector(&guard_name, &selector).await
+        for (guard_name, owner_id, selector) in named_remember_selectors {
+            if let Err(error) =
+                Self::revoke_remember_selector(&guard_name, &owner_id, &selector).await
                 && first_revoke_error.is_none()
             {
                 first_revoke_error = Some(error);
             }
         }
-        if let Some(ref id) = user_id {
+        if let Some(ref id) = default_revoke_owner {
             if let Err(error) = Self::revoke_remember_tokens_for_user(id).await
                 && first_revoke_error.is_none()
             {

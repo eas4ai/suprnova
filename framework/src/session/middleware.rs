@@ -903,7 +903,7 @@ impl Middleware for SessionMiddleware {
 
                                 session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
-                                session.set_auth_guard_id(&guard_name, user_id.clone());
+                                session.replace_auth_guard_id(&guard_name, user_id.clone());
                                 crate::auth::request_state::set_active_remember_carrier(
                                     &guard_name,
                                     &selector,
@@ -957,7 +957,7 @@ impl Middleware for SessionMiddleware {
 
                                 session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
-                                session.set_auth_guard_id(&guard_name, user_id.clone());
+                                session.replace_auth_guard_id(&guard_name, user_id.clone());
                                 crate::auth::request_state::set_active_remember_carrier(
                                     &guard_name,
                                     &selector,
@@ -1294,13 +1294,17 @@ pub fn auth_user_id() -> Option<String> {
 
 /// Return one session guard's request or persisted identifier.
 pub(crate) fn guard_auth_user_id(guard_name: &str) -> Option<String> {
-    crate::auth::request_state::guard_user_id(guard_name).or_else(|| {
-        session().and_then(|session| {
-            session.auth_guard_id(guard_name).or_else(|| {
-                (guard_name == crate::auth::Auth::default_guard_name())
-                    .then_some(session.user_id)
-                    .flatten()
-            })
+    crate::auth::request_state::guard_user_id(guard_name)
+        .or_else(|| persisted_guard_auth_user_id(guard_name))
+}
+
+/// Return one session guard's persisted identifier, ignoring request-only overrides.
+pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
+    session().and_then(|session| {
+        session.auth_guard_id(guard_name).or_else(|| {
+            (guard_name == crate::auth::Auth::default_guard_name())
+                .then_some(session.user_id)
+                .flatten()
         })
     })
 }
@@ -1310,8 +1314,9 @@ pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) 
     let user_id = user_id.into();
     let is_default = guard_name == crate::auth::Auth::default_guard_name();
     session_mut(|session| {
-        session.set_auth_guard_id(guard_name, user_id.clone());
+        session.replace_auth_guard_id(guard_name, user_id.clone());
         if is_default {
+            session.clear_magnetar_web_binding();
             session.user_id = Some(user_id.clone());
             session.dirty = true;
         }

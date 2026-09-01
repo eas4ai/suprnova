@@ -83,7 +83,7 @@
 //! Same reason passwords are hashed.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -269,17 +269,51 @@ pub async fn revoke_all_for_user(user_id: &str) -> Result<u64, FrameworkError> {
     Ok(result.rows_affected)
 }
 
-/// Revoke exactly one remember token by its non-secret selector.
-pub(crate) async fn revoke_by_selector(selector: &str) -> Result<bool, FrameworkError> {
+/// Revoke exactly one remember token by owner and non-secret selector.
+pub(crate) async fn revoke_by_selector(
+    user_id: &str,
+    selector: &str,
+) -> Result<bool, FrameworkError> {
     let conn = DB::connection()?;
+    let transaction = conn.inner().begin().await.map_err(|error| {
+        FrameworkError::database(format!("begin remember selector revocation: {error}"))
+    })?;
     let result = entity::Entity::delete_many()
+        .filter(entity::Column::UserId.eq(user_id))
         .filter(entity::Column::Selector.eq(selector))
-        .exec(conn.inner())
+        .exec(&transaction)
         .await
         .map_err(|error| {
             FrameworkError::database(format!("revoke remember token by selector: {error}"))
-        })?;
-    Ok(result.rows_affected == 1)
+        });
+    match result {
+        Ok(deleted) if deleted.rows_affected == 1 => {
+            transaction.commit().await.map_err(|error| {
+                FrameworkError::database(format!("commit remember selector revocation: {error}"))
+            })?;
+            Ok(true)
+        }
+        Ok(deleted) if deleted.rows_affected == 0 => {
+            transaction.rollback().await.map_err(|error| {
+                FrameworkError::database(format!("rollback remember selector revocation: {error}"))
+            })?;
+            Ok(false)
+        }
+        Ok(_) => {
+            transaction.rollback().await.map_err(|error| {
+                FrameworkError::database(format!("rollback remember selector revocation: {error}"))
+            })?;
+            Err(FrameworkError::database(
+                "remember selector matched multiple rows",
+            ))
+        }
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(FrameworkError::database(format!(
+                "revoke remember token by selector failed: {error}; rollback failed: {rollback_error}"
+            ))),
+        },
+    }
 }
 
 /// Delete a single remember-token row by id. Useful for "log out this

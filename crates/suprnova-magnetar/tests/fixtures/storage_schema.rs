@@ -975,13 +975,39 @@ pub mod sql_stores {
             }
         }
 
-        async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
-            let deleted = remembers::Entity::delete_many()
+        async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+            let transaction = self.0.begin().await.map_err(db_error)?;
+            let result = remembers::Entity::delete_many()
+                .filter(remembers::Column::UserId.eq(user_id.to_owned()))
                 .filter(remembers::Column::Selector.eq(selector.to_owned()))
-                .exec(&self.0)
+                .exec(&transaction)
                 .await
-                .map_err(db_error)?;
-            Ok(deleted.rows_affected == 1)
+                .map_err(db_error);
+            match result {
+                Ok(deleted) if deleted.rows_affected == 1 => {
+                    transaction.commit().await.map_err(db_error)?;
+                    Ok(true)
+                }
+                Ok(deleted) if deleted.rows_affected == 0 => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Ok(false)
+                }
+                Ok(_) => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Err(magnetar::Error::Conflict {
+                        resource: "remember credential".to_owned(),
+                        message: "owner and selector matched multiple rows".to_owned(),
+                    })
+                }
+                Err(error) => match transaction.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(magnetar::Error::Internal {
+                        message: format!(
+                            "revoke remember selector failed: {error}; rollback failed: {rollback_error}"
+                        ),
+                    }),
+                },
+            }
         }
 
         async fn revoke_all_remember(&self, user_id: &str) -> Result<u64> {

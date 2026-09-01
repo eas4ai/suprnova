@@ -87,18 +87,21 @@ pub trait RememberStore: Send + Sync {
             message: "atomic remember credential rotation is unavailable".to_owned(),
         })
     }
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
     ///
     /// Stores that do not support exact selector deletion fail closed rather
     /// than broadening the operation to every credential owned by the user.
+    /// Implementations return `false` without mutation when no row matches or
+    /// the selector belongs to another owner.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::DependencyUnavailable`] by default. Stores may
-    /// also return their normal persistence errors when exact deletion is
-    /// implemented but cannot be completed.
-    async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
-        let _ = selector;
+    /// Returns [`crate::Error::DependencyUnavailable`] by default. Stores
+    /// return [`crate::Error::Conflict`] without mutation when the
+    /// owner/selector pair matches multiple rows, and may return their normal
+    /// persistence errors when exact deletion cannot be completed.
+    async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        let _ = (user_id, selector);
         Err(crate::Error::DependencyUnavailable {
             dependency: "remember store".to_owned(),
             message: "exact remember credential revocation is unavailable".to_owned(),
@@ -186,14 +189,19 @@ pub trait RememberTokenService: Send + Sync {
         now: DateTime<Utc>,
         replacement_lifetime: Duration,
     ) -> Result<(String, u64, RememberCredential)>;
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
     ///
     /// # Errors
     ///
     /// Returns [`crate::Error::DependencyUnavailable`] by default so older
     /// token-service implementations cannot silently broaden the operation.
-    async fn revoke_selector(&self, selector: &str) -> Result<bool> {
-        let _ = selector;
+    /// Implementations return [`crate::Error::Conflict`] when persisted state
+    /// contains multiple matching rows.
+    async fn revoke_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        let _ = (user_id, selector);
         Err(crate::Error::DependencyUnavailable {
             dependency: "remember token service".to_owned(),
             message: "exact remember credential revocation is unavailable".to_owned(),
@@ -326,14 +334,18 @@ impl<S: RememberStore + ?Sized> RememberService<S> {
         Ok((row.user_id, row.auth_epoch, replacement))
     }
 
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
     ///
     /// # Errors
     ///
-    /// Propagates the store's exact-revocation error, including the default
-    /// fail-closed [`crate::Error::DependencyUnavailable`] result.
-    pub async fn revoke_selector(&self, selector: &str) -> Result<bool> {
-        self.store.revoke_remember_selector(selector).await
+    /// Propagates the store's exact-revocation error, including ambiguous-row
+    /// [`crate::Error::Conflict`] and the default fail-closed
+    /// [`crate::Error::DependencyUnavailable`] result.
+    pub async fn revoke_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        self.store.revoke_remember_selector(user_id, selector).await
     }
 
     /// Revoke all remember-me rows for a user.
@@ -372,8 +384,8 @@ impl<S: RememberStore + ?Sized> RememberTokenService for RememberService<S> {
         RememberService::rotate_at_epoch(self, credential, now, replacement_lifetime).await
     }
 
-    async fn revoke_selector(&self, selector: &str) -> Result<bool> {
-        RememberService::revoke_selector(self, selector).await
+    async fn revoke_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        RememberService::revoke_selector(self, user_id, selector).await
     }
 
     async fn revoke_all_for_user(&self, user_id: &str) -> Result<u64> {
@@ -488,15 +500,18 @@ impl<U: UserStore> RememberSignInService<U> {
         }
     }
 
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
     ///
     /// # Errors
     ///
-    /// Propagates the token service's exact-revocation error. Implementations
-    /// without that capability fail closed with
-    /// [`crate::Error::DependencyUnavailable`].
-    pub async fn revoke_selector(&self, selector: &str) -> Result<bool> {
-        self.remember.revoke_selector(selector).await
+    /// Propagates the token service's exact-revocation error, including
+    /// ambiguous-row [`crate::Error::Conflict`]. Implementations without that
+    /// capability fail closed with [`crate::Error::DependencyUnavailable`].
+    pub async fn revoke_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        self.remember.revoke_selector(user_id, selector).await
     }
 
     /// Revoke every remember credential for a user.

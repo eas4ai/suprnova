@@ -166,11 +166,33 @@ impl RememberStore for MemoryRemember {
         Ok((before - rows.len()) as u64)
     }
 
-    async fn revoke_remember_selector(&self, selector: &str) -> magnetar::Result<bool> {
+    async fn revoke_remember_selector(
+        &self,
+        user_id: &str,
+        selector: &str,
+    ) -> magnetar::Result<bool> {
         let mut rows = self.0.lock();
-        let before = rows.len();
-        rows.retain(|row| row.selector != selector);
-        Ok(rows.len() != before)
+        let matching = rows
+            .iter()
+            .filter(|row| row.user_id == user_id && row.selector == selector)
+            .count();
+        if matching == 0 {
+            return Ok(false);
+        }
+        if matching > 1 {
+            return Err(magnetar::Error::Conflict {
+                resource: "remember credential".to_owned(),
+                message: "owner and selector matched multiple rows".to_owned(),
+            });
+        }
+        let Some(index) = rows
+            .iter()
+            .position(|row| row.user_id == user_id && row.selector == selector)
+        else {
+            return Ok(false);
+        };
+        rows.remove(index);
+        Ok(true)
     }
 
     async fn prune_expired_remember(&self, now: chrono::DateTime<Utc>) -> magnetar::Result<u64> {
@@ -330,8 +352,18 @@ async fn remember_service_revokes_only_the_exact_selector() {
         .collect::<Vec<_>>();
     assert_eq!(selectors.len(), 2);
 
-    assert!(service.revoke_selector(&selectors[0]).await.unwrap());
-    assert!(!service.revoke_selector(&selectors[0]).await.unwrap());
+    assert!(
+        service
+            .revoke_selector("same-user", &selectors[0])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !service
+            .revoke_selector("same-user", &selectors[0])
+            .await
+            .unwrap()
+    );
     assert_eq!(
         store
             .0
@@ -351,6 +383,55 @@ async fn remember_service_revokes_only_the_exact_selector() {
 }
 
 #[tokio::test]
+async fn remember_service_does_not_mutate_ambiguous_selector_rows() {
+    let store = Arc::new(MemoryRemember::default());
+    let service = RememberService::new(store.clone(), Duration::days(30)).unwrap();
+    let now = Utc::now();
+    let first = RememberRow {
+        id: "ambiguous-selector-first".to_owned(),
+        selector: "ambiguous-selector".to_owned(),
+        user_id: "ambiguous-owner".to_owned(),
+        auth_epoch: 2,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::hours(1),
+    };
+    let second = RememberRow {
+        id: "ambiguous-selector-second".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..first.clone()
+    };
+    store.insert_remember(first.clone()).await.unwrap();
+    store.insert_remember(second.clone()).await.unwrap();
+
+    assert!(
+        !service
+            .revoke_selector("different-owner", &first.selector)
+            .await
+            .expect("owner mismatch must fail closed")
+    );
+    assert_eq!(
+        store.0.lock().as_slice(),
+        &[first.clone(), second.clone()],
+        "owner mismatch must not mutate either row"
+    );
+    let error = service
+        .revoke_selector(&first.user_id, &first.selector)
+        .await
+        .expect_err("ambiguous exact revocation must return an error");
+    assert!(matches!(
+        error,
+        magnetar::Error::Conflict { resource, message }
+            if resource == "remember credential"
+                && message == "owner and selector matched multiple rows"
+    ));
+    assert_eq!(
+        store.0.lock().as_slice(),
+        &[first, second],
+        "ambiguous selector revocation must not mutate either row"
+    );
+}
+
+#[tokio::test]
 async fn legacy_remember_store_fails_closed_for_selector_revocation() {
     let store = LegacyRememberStore::default();
     let row = RememberRow {
@@ -364,7 +445,7 @@ async fn legacy_remember_store_fails_closed_for_selector_revocation() {
     store.insert_remember(row.clone()).await.unwrap();
 
     let error = store
-        .revoke_remember_selector(&row.selector)
+        .revoke_remember_selector(&row.user_id, &row.selector)
         .await
         .expect_err("an old-method-only store must fail closed");
     assert!(matches!(

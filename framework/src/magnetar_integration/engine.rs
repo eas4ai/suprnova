@@ -765,14 +765,17 @@ where
         self.remember.revoke_all_for_user(user_id).await
     }
 
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
     ///
     /// # Errors
     ///
-    /// Propagates the remember service's exact-revocation error, including its
-    /// fail-closed unsupported-capability result.
-    pub async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
-        self.remember.revoke_selector(selector).await
+    /// Propagates the remember service's exact-revocation error, including an
+    /// ambiguous-row conflict and its fail-closed unsupported-capability result.
+    pub async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        self.remember.revoke_selector(user_id, selector).await
     }
 
     /// Register through the host's real Magnetar password provider.
@@ -951,15 +954,19 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession>;
     /// Revoke every remember credential for one user.
     async fn revoke_remember(&self, user_id: &str) -> Result<u64>;
-    /// Revoke exactly one remember credential by its non-secret selector.
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
     ///
     /// # Errors
     ///
     /// Returns [`Error::DependencyUnavailable`] by default so an older engine
     /// implementation cannot silently broaden a guard-scoped logout into
-    /// revoking every remember credential for the user.
-    async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
-        let _ = selector;
+    /// revoking every remember credential for the user. Implementations return
+    /// [`Error::Conflict`] when multiple persisted rows match.
+    async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        let _ = (user_id, selector);
         Err(Error::DependencyUnavailable {
             dependency: "Magnetar password authentication engine".to_owned(),
             message: "exact remember credential revocation is unavailable".to_owned(),
@@ -1111,8 +1118,8 @@ where
         MagnetarHostEngine::revoke_remember(self, user_id).await
     }
 
-    async fn revoke_remember_selector(&self, selector: &str) -> Result<bool> {
-        MagnetarHostEngine::revoke_remember_selector(self, selector).await
+    async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        MagnetarHostEngine::revoke_remember_selector(self, user_id, selector).await
     }
 
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {

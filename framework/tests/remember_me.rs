@@ -49,7 +49,8 @@ use suprnova::http::cookie::Cookie;
 use suprnova::session::SessionConfig;
 #[cfg(feature = "testing")]
 use suprnova::{
-    Auth, Authenticatable, FrameworkError, Guard, SessionGuard, StatefulGuard, UserProvider,
+    Auth, Authenticatable, Credentials, FrameworkError, Guard, SessionGuard, StatefulGuard,
+    UserProvider,
 };
 
 /// Shared runtime - SQLx pools die with their creating runtime.
@@ -222,7 +223,6 @@ impl MigrationTrait for CreateRememberTokensTable {
                     .name("idx_test_remember_tokens_selector")
                     .table(RememberTokens::Table)
                     .col(RememberTokens::Selector)
-                    .unique()
                     .to_owned(),
             )
             .await
@@ -310,6 +310,12 @@ struct NamedRememberProvider {
 }
 
 #[cfg(feature = "testing")]
+struct RequestOverrideProvider {
+    persisted_id: &'static str,
+    override_id: &'static str,
+}
+
+#[cfg(feature = "testing")]
 #[async_trait::async_trait]
 impl UserProvider for NamedRememberProvider {
     async fn retrieve_by_id(
@@ -336,6 +342,45 @@ impl UserProvider for NamedRememberProvider {
         _credentials: &serde_json::Value,
     ) -> Result<bool, FrameworkError> {
         Ok(false)
+    }
+}
+
+#[cfg(feature = "testing")]
+#[async_trait::async_trait]
+impl UserProvider for RequestOverrideProvider {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok([self.persisted_id, self.override_id]
+            .contains(&id)
+            .then(|| Arc::new(NamedRememberUser { id: id.to_owned() }) as Arc<dyn Authenticatable>))
+    }
+
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &serde_json::Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(
+            (credentials.get("email").and_then(serde_json::Value::as_str)
+                == Some("override@example.test"))
+            .then(|| {
+                Arc::new(NamedRememberUser {
+                    id: self.override_id.to_owned(),
+                }) as Arc<dyn Authenticatable>
+            }),
+        )
+    }
+
+    async fn validate_credentials(
+        &self,
+        _user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+    ) -> Result<bool, FrameworkError> {
+        Ok(credentials
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            == Some("secret"))
     }
 }
 
@@ -1258,6 +1303,129 @@ fn named_guard_remember_logout_revokes_only_its_selector() {
 
 #[cfg(feature = "testing")]
 #[test]
+fn named_logout_does_not_revoke_an_unverified_other_user_carrier() {
+    use suprnova::middleware::Middleware;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let carrier_owner_id = "test-user-unverified-carrier-owner";
+        let authenticated_user_id = "test-user-unverified-carrier-logout";
+        let ttl_minutes: i64 = 60 * 24;
+
+        let (result, pending) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let admin = SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: carrier_owner_id,
+                    }),
+                )
+                .with_remember_ttl(ttl_minutes);
+                admin
+                    .login(
+                        Arc::new(NamedRememberUser {
+                            id: carrier_owner_id.to_owned(),
+                        }) as Arc<dyn Authenticatable>,
+                        true,
+                    )
+                    .await
+            }))
+            .await;
+        result.expect("carrier owner remember login succeeds");
+        let other_user_carrier = pending
+            .iter()
+            .find(|cookie| cookie.name() == suprnova::auth::remember::COOKIE_NAME)
+            .map(|cookie| cookie.value().to_owned())
+            .expect("carrier owner login queues a remember cookie");
+
+        let (authenticated_session, _) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let admin = SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: authenticated_user_id,
+                    }),
+                );
+                admin
+                    .login(
+                        Arc::new(NamedRememberUser {
+                            id: authenticated_user_id.to_owned(),
+                        }) as Arc<dyn Authenticatable>,
+                        false,
+                    )
+                    .await
+                    .expect("authenticated user session login succeeds");
+                suprnova::session::session().expect("login leaves a session")
+            }))
+            .await;
+
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        config.remember_lifetime =
+            std::time::Duration::from_secs((ttl_minutes as u64).saturating_mul(60));
+        let middleware = suprnova::SessionMiddleware::new(config.clone());
+        middleware
+            .store()
+            .write(&authenticated_session)
+            .await
+            .expect("persist authenticated user's session");
+        let session_cookie = suprnova::Crypt::encrypt_string(
+            suprnova::CryptPurpose::Cookie,
+            &authenticated_session.id,
+        )
+        .expect("encrypt authenticated user's data-session cookie");
+        let request = request_with_cookies(&[
+            (&config.cookie_name, &session_cookie),
+            (suprnova::auth::remember::COOKIE_NAME, &other_user_carrier),
+        ])
+        .await;
+        let next: suprnova::middleware::Next = Arc::new(move |_request| {
+            Box::pin(async move {
+                SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: authenticated_user_id,
+                    }),
+                )
+                .logout()
+                .await
+                .expect("authenticated user's named logout succeeds");
+                Ok(suprnova::HttpResponse::text("logged out"))
+            })
+        });
+        let response =
+            match request_state::request_state_scope_for_test(middleware.handle(request, next))
+                .await
+            {
+                Ok(response) => response,
+                Err(_) => panic!("logout request must reach the handler"),
+            };
+
+        let cleared = response
+            .into_hyper()
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|header| header.starts_with("remember_me=") && header.contains("Max-Age=0"));
+        assert!(cleared, "logout must clear the presented browser carrier");
+        assert_eq!(
+            count_tokens_for(carrier_owner_id).await,
+            1,
+            "logout must not delete a selector owned by a different user"
+        );
+        assert_eq!(
+            observe_named_guard_ids_from_remember_cookie(&other_user_carrier, carrier_owner_id,)
+                .await,
+            (None, Some(carrier_owner_id.to_owned()), None),
+            "storage must retain the unverified other-user carrier"
+        );
+    });
+}
+
+#[cfg(feature = "testing")]
+#[test]
 fn named_guard_logout_preserves_newer_sibling_carrier() {
     Lazy::force(&SETUP);
 
@@ -1439,6 +1607,392 @@ fn logout_and_invalidate_revokes_named_guard_selectors() {
             observe_named_guard_ids_from_remember_cookie(&admin_cookie, admin_user_id).await,
             (None, None, None),
             "a copied named carrier must not survive full invalidation"
+        );
+    });
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn logout_and_invalidate_revokes_persisted_and_active_named_selectors() {
+    use suprnova::middleware::Middleware;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let user_id = "test-user-full-invalidate-selector-mismatch";
+        let ttl_minutes: i64 = 60 * 24;
+        let (session, pending) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let admin =
+                    SessionGuard::named("admin", Arc::new(NamedRememberProvider { id: user_id }))
+                        .with_remember_ttl(ttl_minutes);
+                let remembered_user = || {
+                    Arc::new(NamedRememberUser {
+                        id: user_id.to_owned(),
+                    }) as Arc<dyn Authenticatable>
+                };
+
+                admin.login(remembered_user(), true).await.unwrap();
+                admin.login(remembered_user(), true).await.unwrap();
+                suprnova::session::session().expect("login leaves a session")
+            }))
+            .await;
+        let issued_cookies = pending
+            .iter()
+            .filter(|cookie| cookie.name() == suprnova::auth::remember::COOKIE_NAME)
+            .collect::<Vec<_>>();
+        assert_eq!(issued_cookies.len(), 2);
+        let older_carrier = issued_cookies[0].value().to_owned();
+        assert_eq!(count_tokens_for(user_id).await, 2);
+
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        config.remember_lifetime =
+            std::time::Duration::from_secs((ttl_minutes as u64).saturating_mul(60));
+        let middleware = suprnova::SessionMiddleware::new(config.clone());
+        middleware
+            .store()
+            .write(&session)
+            .await
+            .expect("persist session retaining the newer selector");
+        let session_cookie =
+            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &session.id)
+                .expect("encrypt data-session cookie");
+        let request = request_with_cookies(&[
+            (&config.cookie_name, &session_cookie),
+            (suprnova::auth::remember::COOKIE_NAME, &older_carrier),
+        ])
+        .await;
+        let next: suprnova::middleware::Next = Arc::new(move |_request| {
+            Box::pin(async move {
+                Auth::logout_and_invalidate()
+                    .await
+                    .expect("full invalidation succeeds");
+                Ok(suprnova::HttpResponse::text("invalidated"))
+            })
+        });
+        let response =
+            match request_state::request_state_scope_for_test(middleware.handle(request, next))
+                .await
+            {
+                Ok(response) => response,
+                Err(_) => panic!("invalidation request must reach the handler"),
+            };
+        let cleared = response
+            .into_hyper()
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|header| header.starts_with("remember_me=") && header.contains("Max-Age=0"));
+        assert!(cleared, "full invalidation must clear the active carrier");
+
+        assert_eq!(
+            count_tokens_for(user_id).await,
+            0,
+            "full invalidation must revoke both persisted and presented named selectors"
+        );
+        assert_eq!(
+            observe_named_guard_ids_from_remember_cookie(&older_carrier, user_id).await,
+            (None, None, None),
+            "the presented older carrier must not survive full invalidation"
+        );
+    });
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn request_override_does_not_change_named_remember_revocation_owner() {
+    use suprnova::middleware::Middleware;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let default_owner_id = "test-user-request-override-default-owner";
+        let default_override_id = "test-user-request-override-default-override";
+        let ttl_minutes: i64 = 60 * 24;
+        let (default_logout_result, _) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let web = SessionGuard::named(
+                    "web",
+                    Arc::new(RequestOverrideProvider {
+                        persisted_id: default_owner_id,
+                        override_id: default_override_id,
+                    }),
+                )
+                .with_remember_ttl(ttl_minutes);
+                web.login(
+                    Arc::new(NamedRememberUser {
+                        id: default_owner_id.to_owned(),
+                    }) as Arc<dyn Authenticatable>,
+                    true,
+                )
+                .await?;
+                suprnova::auth::remember::issue(default_override_id, ttl_minutes).await?;
+                assert!(
+                    web.once(&Credentials::password("override@example.test", "secret"))
+                        .await?
+                );
+                assert_eq!(Auth::id().as_deref(), Some(default_override_id));
+
+                web.logout().await
+            }))
+            .await;
+        default_logout_result.expect("default logout after a once override succeeds");
+        assert_eq!(
+            count_tokens_for(default_owner_id).await,
+            0,
+            "default logout must revoke the persisted remembered owner"
+        );
+        assert_eq!(
+            count_tokens_for(default_override_id).await,
+            1,
+            "default logout must not target a request-only once override"
+        );
+
+        let logout_owner_id = "test-user-request-override-logout-owner";
+        let logout_override_id = "test-user-request-override-logout-override";
+        let (logout_result, _) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let admin = SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: logout_owner_id,
+                    }),
+                )
+                .with_remember_ttl(ttl_minutes);
+                admin
+                    .login(
+                        Arc::new(NamedRememberUser {
+                            id: logout_owner_id.to_owned(),
+                        }) as Arc<dyn Authenticatable>,
+                        true,
+                    )
+                    .await?;
+                suprnova::auth::remember::issue(logout_override_id, ttl_minutes).await?;
+                admin
+                    .set_user(Arc::new(NamedRememberUser {
+                        id: logout_override_id.to_owned(),
+                    }))
+                    .await;
+                assert_eq!(admin.id().await?.as_deref(), Some(logout_override_id));
+
+                admin.logout().await
+            }))
+            .await;
+        logout_result.expect("named logout after a request-only override succeeds");
+        assert_eq!(
+            count_tokens_for(logout_owner_id).await,
+            0,
+            "named logout must revoke the persisted remembered owner's selector"
+        );
+        assert_eq!(
+            count_tokens_for(logout_override_id).await,
+            1,
+            "named logout must not target a request-only override"
+        );
+
+        let invalidate_owner_id = "test-user-request-override-invalidate-owner";
+        let invalidate_override_id = "test-user-request-override-invalidate-override";
+        let (session, pending) =
+            run_in_request(request_state::request_state_scope_for_test(async {
+                let admin = SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: invalidate_owner_id,
+                    }),
+                )
+                .with_remember_ttl(ttl_minutes);
+                let remembered_user = || {
+                    Arc::new(NamedRememberUser {
+                        id: invalidate_owner_id.to_owned(),
+                    }) as Arc<dyn Authenticatable>
+                };
+
+                admin.login(remembered_user(), true).await.unwrap();
+                admin.login(remembered_user(), true).await.unwrap();
+                suprnova::auth::remember::issue(invalidate_override_id, ttl_minutes)
+                    .await
+                    .expect("issue request-only override sentinel");
+                suprnova::session::session().expect("login leaves a session")
+            }))
+            .await;
+        let issued_cookies = pending
+            .iter()
+            .filter(|cookie| cookie.name() == suprnova::auth::remember::COOKIE_NAME)
+            .collect::<Vec<_>>();
+        assert_eq!(issued_cookies.len(), 2);
+        let older_carrier = issued_cookies[0].value().to_owned();
+        assert_eq!(count_tokens_for(invalidate_owner_id).await, 2);
+
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        config.remember_lifetime =
+            std::time::Duration::from_secs((ttl_minutes as u64).saturating_mul(60));
+        let middleware = suprnova::SessionMiddleware::new(config.clone());
+        middleware
+            .store()
+            .write(&session)
+            .await
+            .expect("persist session retaining the newer selector");
+        let session_cookie =
+            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &session.id)
+                .expect("encrypt data-session cookie");
+        let request = request_with_cookies(&[
+            (&config.cookie_name, &session_cookie),
+            (suprnova::auth::remember::COOKIE_NAME, &older_carrier),
+        ])
+        .await;
+        let next: suprnova::middleware::Next = Arc::new(move |_request| {
+            Box::pin(async move {
+                let admin = SessionGuard::named(
+                    "admin",
+                    Arc::new(NamedRememberProvider {
+                        id: invalidate_owner_id,
+                    }),
+                );
+                admin
+                    .set_user(Arc::new(NamedRememberUser {
+                        id: invalidate_override_id.to_owned(),
+                    }))
+                    .await;
+                assert_eq!(
+                    admin
+                        .id()
+                        .await
+                        .expect("read request-only override")
+                        .as_deref(),
+                    Some(invalidate_override_id)
+                );
+                Auth::logout_and_invalidate()
+                    .await
+                    .expect("full invalidation succeeds");
+                Ok(suprnova::HttpResponse::text("invalidated"))
+            })
+        });
+        let response =
+            request_state::request_state_scope_for_test(middleware.handle(request, next)).await;
+        assert!(
+            response.is_ok(),
+            "invalidation request must reach the handler"
+        );
+        assert_eq!(
+            count_tokens_for(invalidate_owner_id).await,
+            0,
+            "full invalidation must revoke both named selectors for the persisted owner"
+        );
+        assert_eq!(
+            count_tokens_for(invalidate_override_id).await,
+            1,
+            "full invalidation must not target a request-only override"
+        );
+    });
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn full_invalidation_reports_ambiguous_selector_after_safe_teardown() {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let ambiguous_owner_id = "test-user-ambiguous-invalidation-owner";
+        let sibling_owner_id = "test-user-ambiguous-invalidation-sibling";
+        let ttl_minutes: i64 = 60 * 24;
+        let (result, _) = run_in_request(request_state::request_state_scope_for_test(async {
+            let admin = SessionGuard::named(
+                "admin",
+                Arc::new(NamedRememberProvider {
+                    id: ambiguous_owner_id,
+                }),
+            )
+            .with_remember_ttl(ttl_minutes);
+            let staff = SessionGuard::named(
+                "staff",
+                Arc::new(NamedRememberProvider {
+                    id: sibling_owner_id,
+                }),
+            )
+            .with_remember_ttl(ttl_minutes);
+            admin
+                .login(
+                    Arc::new(NamedRememberUser {
+                        id: ambiguous_owner_id.to_owned(),
+                    }) as Arc<dyn Authenticatable>,
+                    true,
+                )
+                .await
+                .expect("issue ambiguous-owner remember carrier");
+            staff
+                .login(
+                    Arc::new(NamedRememberUser {
+                        id: sibling_owner_id.to_owned(),
+                    }) as Arc<dyn Authenticatable>,
+                    true,
+                )
+                .await
+                .expect("issue sibling remember carrier");
+
+            let connection = suprnova::DB::connection().expect("remember database connection");
+            let row = suprnova::auth::remember::entity::Entity::find()
+                .filter(suprnova::auth::remember::entity::Column::UserId.eq(ambiguous_owner_id))
+                .one(connection.inner())
+                .await
+                .expect("query ambiguous-owner row")
+                .expect("ambiguous owner has one issued row");
+            suprnova::auth::remember::entity::ActiveModel {
+                user_id: Set(row.user_id),
+                selector: Set(row.selector),
+                token_hash: Set(row.token_hash),
+                expires_at: Set(row.expires_at),
+                created_at: Set(row.created_at),
+                last_used_at: Set(row.last_used_at),
+                ..Default::default()
+            }
+            .insert(connection.inner())
+            .await
+            .expect("insert duplicate owner/selector row");
+
+            let invalidation = Auth::logout_and_invalidate().await;
+            assert!(
+                admin
+                    .guest()
+                    .await
+                    .expect("read admin guard after teardown")
+            );
+            assert!(
+                staff
+                    .guest()
+                    .await
+                    .expect("read staff guard after teardown")
+            );
+            assert!(
+                suprnova::session::session()
+                    .expect("invalidation retains an empty data session")
+                    .user_id
+                    .is_none()
+            );
+            invalidation
+        }))
+        .await;
+
+        let error = result.expect_err("ambiguous exact revocation must be reported");
+        assert!(
+            error
+                .to_string()
+                .contains("remember selector matched multiple rows"),
+            "unexpected ambiguity error: {error}"
+        );
+        assert_eq!(
+            count_tokens_for(ambiguous_owner_id).await,
+            2,
+            "ambiguous rows must remain untouched after rollback"
+        );
+        assert_eq!(
+            count_tokens_for(sibling_owner_id).await,
+            0,
+            "full invalidation must continue revoking sibling selectors after the first error"
         );
     });
 }

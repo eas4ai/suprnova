@@ -134,6 +134,11 @@ impl SessionData {
         );
     }
 
+    pub(crate) fn replace_auth_guard_id(&mut self, guard: &str, user_id: impl Into<String>) {
+        self.remove_auth_guard(guard);
+        self.set_auth_guard_id(guard, user_id);
+    }
+
     pub(crate) fn auth_guard_remember_selector(&self, guard: &str) -> Option<String> {
         self.auth_guard_field(guard, AUTH_GUARD_REMEMBER_SELECTOR_KEY)
             .and_then(serde_json::Value::as_str)

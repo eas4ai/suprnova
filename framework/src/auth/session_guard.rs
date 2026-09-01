@@ -331,7 +331,7 @@ mod tests {
     use std::any::Any;
 
     use crate::auth::request_state;
-    use crate::session::{new_session_slot_for_test, session, session_scope_for_test};
+    use crate::session::{new_session_slot_for_test, session, session_mut, session_scope_for_test};
 
     #[derive(Clone)]
     struct TestUser {
@@ -492,6 +492,141 @@ mod tests {
             assert_eq!(web.id().await.unwrap().as_deref(), Some("7"));
             assert_eq!(admin.id().await.unwrap().as_deref(), Some("9"));
             assert_eq!(Auth::id().as_deref(), Some("7"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fresh_logins_discard_stale_guard_remember_state() {
+        with_scopes(async {
+            let stale_binding = magnetar::sessions::WebSessionBinding {
+                session_id: "stale-magnetar-session".to_owned(),
+                token_digest: [7; 32],
+            };
+            session_mut(|session| {
+                session.set_auth_guard_id("admin", "7");
+                session.set_auth_guard_remember_selector("admin", "stale-admin-selector");
+                session.set_auth_guard_magnetar_binding("admin", stale_binding.clone());
+
+                session.set_auth_guard_id("web", "7");
+                session.set_auth_guard_remember_selector("web", "stale-web-selector");
+                session.set_auth_guard_magnetar_binding("web", stale_binding.clone());
+                session.user_id = Some("7".to_owned());
+                session.set_magnetar_web_binding(stale_binding);
+            });
+
+            let admin = SessionGuard::named("admin", Arc::new(FixedProvider { id: "9" }));
+            admin
+                .login(
+                    Arc::new(TestUser { id: "9".into() }) as Arc<dyn Authenticatable>,
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "7" }));
+            web.login(
+                Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>,
+                false,
+            )
+            .await
+            .unwrap();
+
+            let session = session().expect("fresh logins retain the data session");
+            assert_eq!(session.auth_guard_id("admin").as_deref(), Some("9"));
+            assert_eq!(session.auth_guard_remember_selector("admin"), None);
+            assert_eq!(session.auth_guard_magnetar_binding("admin"), None);
+            assert_eq!(session.auth_guard_id("web").as_deref(), Some("7"));
+            assert_eq!(session.auth_guard_remember_selector("web"), None);
+            assert_eq!(session.auth_guard_magnetar_binding("web"), None);
+            assert_eq!(session.magnetar_web_binding(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn magnetar_binding_reconciles_default_guard_request_state() {
+        use sea_orm::EntityTrait;
+
+        let database = crate::testing::TestDatabase::sqlite_memory().await.unwrap();
+        database
+            .execute_unprepared(
+                "CREATE TABLE remember_tokens (\
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    user_id TEXT NOT NULL, \
+                    selector TEXT NOT NULL, \
+                    token_hash TEXT NOT NULL, \
+                    expires_at TIMESTAMP NOT NULL, \
+                    created_at TIMESTAMP NOT NULL, \
+                    last_used_at TIMESTAMP NULL\
+                )",
+            )
+            .await
+            .unwrap();
+        with_scopes(async {
+            request_state::set_guard_user(
+                "web",
+                Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>,
+            );
+            request_state::set_guard_via_remember("web", true);
+            session_mut(|session| {
+                session.set_auth_guard_id("web", "7");
+                session.set_auth_guard_remember_selector("web", "stale-selector");
+                session.user_id = Some("7".to_owned());
+            });
+            let issued = crate::magnetar_integration::engine::MagnetarIssuedSession {
+                session_id: "magnetar-session-for-9".to_owned(),
+                web_binding: magnetar::sessions::WebSessionBinding {
+                    session_id: "magnetar-session-for-9".to_owned(),
+                    token_digest: [9; 32],
+                },
+                session: crate::auth::Session::builder()
+                    .user_id(crate::auth::UserId::new("9"))
+                    .build()
+                    .unwrap(),
+            };
+
+            crate::magnetar_integration::bind_issued_session(&issued, true);
+
+            assert_eq!(Auth::id().as_deref(), Some("9"));
+            let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "9" }));
+            assert_eq!(
+                web.user()
+                    .await
+                    .unwrap()
+                    .map(|user| user.get_auth_identifier())
+                    .as_deref(),
+                Some("9")
+            );
+            assert!(!web.via_remember());
+            let session = session().expect("Magnetar binding retains the data session");
+            assert_eq!(session.auth_guard_id("web").as_deref(), Some("9"));
+            assert_eq!(session.user_id.as_deref(), Some("9"));
+            assert_eq!(session.auth_guard_remember_selector("web"), None);
+
+            database
+                .execute_unprepared(
+                    "INSERT INTO remember_tokens \
+                        (user_id, selector, token_hash, expires_at, created_at, last_used_at) \
+                     VALUES \
+                        ('7', 'selector-for-7', 'sha256:seven', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL), \
+                        ('9', 'selector-for-9', 'sha256:nine', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+                )
+                .await
+                .unwrap();
+            web.logout().await.unwrap();
+            let remaining = crate::auth::remember::entity::Entity::find()
+                .all(database.conn())
+                .await
+                .unwrap();
+            assert_eq!(
+                remaining
+                    .iter()
+                    .map(|row| row.user_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["7"],
+                "logout must revoke issued user 9, not stale cached user 7"
+            );
         })
         .await;
     }
