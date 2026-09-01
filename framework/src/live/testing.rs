@@ -1,6 +1,10 @@
 //! Focused assertion helpers for application Live tests.
 
+use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use crate::Request;
 
@@ -265,11 +269,37 @@ pub enum LiveTestRuntimeProvider {
     Cancellation,
     /// HTTP response-intent projection.
     ResponseIntent,
+    /// Authoritative upload state ledger.
+    UploadLedger,
+    /// Upload expiry and cleanup lease ledger.
+    UploadCleanupLedger,
+    /// Host-owned quarantine byte store.
+    UploadQuarantine,
+    /// Selected upload byte provider.
+    UploadProvider,
+    /// Reverse-proxy upload provider capability.
+    UploadReverseProxy,
+    /// Authoritative reverse-proxy progress capability.
+    UploadReverseProxyProgress,
+    /// Direct-upload provider capability.
+    UploadDirect,
+    /// Framework-owned upload authorization adapter.
+    UploadAuthorizationAdapter,
+    /// Upload authorization port.
+    UploadAuthorization,
+    /// Malware scanner port.
+    UploadScanner,
+    /// Application upload-validation port.
+    UploadApplicationValidation,
+    /// Immutable validation-evidence store.
+    UploadEvidence,
+    /// Host storage finalizer.
+    UploadFinalizer,
 }
 
 impl LiveTestRuntimeProvider {
     /// Every provider that must be present before traffic begins.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 24] = [
         Self::Clock,
         Self::Random,
         Self::KeyRing,
@@ -281,6 +311,19 @@ impl LiveTestRuntimeProvider {
         Self::Telemetry,
         Self::Cancellation,
         Self::ResponseIntent,
+        Self::UploadLedger,
+        Self::UploadCleanupLedger,
+        Self::UploadQuarantine,
+        Self::UploadProvider,
+        Self::UploadReverseProxy,
+        Self::UploadReverseProxyProgress,
+        Self::UploadDirect,
+        Self::UploadAuthorizationAdapter,
+        Self::UploadAuthorization,
+        Self::UploadScanner,
+        Self::UploadApplicationValidation,
+        Self::UploadEvidence,
+        Self::UploadFinalizer,
     ];
 
     /// Stable redacted provider name used in boot diagnostics.
@@ -310,6 +353,41 @@ const fn runtime_provider(
         LiveTestRuntimeProvider::Cancellation => super::runtime::RuntimeProviderSlot::Cancellation,
         LiveTestRuntimeProvider::ResponseIntent => {
             super::runtime::RuntimeProviderSlot::ResponseIntent
+        }
+        LiveTestRuntimeProvider::UploadLedger => super::runtime::RuntimeProviderSlot::UploadLedger,
+        LiveTestRuntimeProvider::UploadCleanupLedger => {
+            super::runtime::RuntimeProviderSlot::UploadCleanupLedger
+        }
+        LiveTestRuntimeProvider::UploadQuarantine => {
+            super::runtime::RuntimeProviderSlot::UploadQuarantine
+        }
+        LiveTestRuntimeProvider::UploadProvider => {
+            super::runtime::RuntimeProviderSlot::UploadProvider
+        }
+        LiveTestRuntimeProvider::UploadReverseProxy => {
+            super::runtime::RuntimeProviderSlot::UploadReverseProxy
+        }
+        LiveTestRuntimeProvider::UploadReverseProxyProgress => {
+            super::runtime::RuntimeProviderSlot::UploadReverseProxyProgress
+        }
+        LiveTestRuntimeProvider::UploadDirect => super::runtime::RuntimeProviderSlot::UploadDirect,
+        LiveTestRuntimeProvider::UploadAuthorizationAdapter => {
+            super::runtime::RuntimeProviderSlot::UploadAuthorizationAdapter
+        }
+        LiveTestRuntimeProvider::UploadAuthorization => {
+            super::runtime::RuntimeProviderSlot::UploadAuthorization
+        }
+        LiveTestRuntimeProvider::UploadScanner => {
+            super::runtime::RuntimeProviderSlot::UploadScanner
+        }
+        LiveTestRuntimeProvider::UploadApplicationValidation => {
+            super::runtime::RuntimeProviderSlot::UploadApplicationValidation
+        }
+        LiveTestRuntimeProvider::UploadEvidence => {
+            super::runtime::RuntimeProviderSlot::UploadEvidence
+        }
+        LiveTestRuntimeProvider::UploadFinalizer => {
+            super::runtime::RuntimeProviderSlot::UploadFinalizer
         }
     }
 }
@@ -542,27 +620,36 @@ pub fn register_live_mount_for_test<C: super::ComponentContract>(
     let empty_schema = || StateSchema::new(1, vec![]).map_err(|_| fixture_error());
     let schemas = SnapshotSchemaSet::new(empty_schema()?, empty_schema()?, empty_schema()?)
         .map_err(|_| fixture_error())?;
+    let component = descriptor.metadata().identity().clone();
+    let contract = descriptor.contract_digest().clone();
+    let selection = suprnova_live::host::MountSelection::new(
+        route.clone(),
+        slot.clone(),
+        component.clone(),
+        contract.clone(),
+        descriptor.metadata().versions().minimum_protocol(),
+    );
+    let document_key = suprnova_live::mount::DocumentMountKey::parse(slot.as_str())
+        .map_err(|_| fixture_error())?;
     let expected = ExpectedSeedV1::new(
-        SnapshotContract::new(
-            descriptor.metadata().identity().clone(),
-            descriptor.contract_digest().clone(),
-            1,
-            1,
-            1,
-        )
-        .map_err(|_| fixture_error())?,
+        SnapshotContract::new(component, contract, 1, 1, 1).map_err(|_| fixture_error())?,
         BuildId::parse("test-build").map_err(|_| fixture_error())?,
         route,
         slot,
         schemas,
     );
-    router.register_live_mount_entry(MountCatalogEntry::new(
-        expected,
-        MountScopeRequirements::new(
-            ScopeRequirement::Absent,
-            ScopeRequirement::Absent,
-            ScopeRequirement::Absent,
+    router.register_live_mount_entry(super::runtime::LiveMountRegistration::new(
+        MountCatalogEntry::new(
+            expected,
+            MountScopeRequirements::new(
+                ScopeRequirement::Absent,
+                ScopeRequirement::Absent,
+                ScopeRequirement::Absent,
+            ),
         ),
+        selection,
+        document_key,
+        BuildId::parse("test-build").map_err(|_| fixture_error())?,
     ))
 }
 
@@ -751,13 +838,19 @@ impl LiveContextHarness {
         );
         let registry = super::LiveRegistry::from_engine(engine_registry);
         let runtime = super::runtime::assemble_for_harness(super::LiveConfig::default(), registry)?;
-        runtime.register_mount(MountCatalogEntry::new(
-            expected_seed,
-            MountScopeRequirements::new(
-                ScopeRequirement::Absent,
-                ScopeRequirement::Absent,
-                ScopeRequirement::Absent,
+        runtime.register_mount(super::runtime::LiveMountRegistration::new(
+            MountCatalogEntry::new(
+                expected_seed,
+                MountScopeRequirements::new(
+                    ScopeRequirement::Absent,
+                    ScopeRequirement::Absent,
+                    ScopeRequirement::Absent,
+                ),
             ),
+            selection.clone(),
+            suprnova_live::mount::DocumentMountKey::parse(current_slot.as_str())
+                .map_err(|_| test_error())?,
+            BuildId::parse("test-build").map_err(|_| test_error())?,
         ))?;
         runtime.finalize_mount_catalog()?;
 
@@ -1233,6 +1326,8 @@ pub struct LiveRuntimeReport {
     execution: bool,
     context_validator: bool,
     host_ports: bool,
+    upload_ports: bool,
+    upload_services: bool,
     mount_catalog: bool,
     response_and_cancellation: bool,
 }
@@ -1249,6 +1344,8 @@ impl LiveRuntimeReport {
             && self.execution
             && self.context_validator
             && self.host_ports
+            && self.upload_ports
+            && self.upload_services
             && self.mount_catalog
             && self.response_and_cancellation
     }
@@ -1301,6 +1398,21 @@ impl LiveRuntimeReport {
         self.host_ports
     }
 
+    /// Returns whether every distinct framework-owned upload port was assembled.
+    ///
+    /// This reports immutable assembly only; it does not probe provider health or
+    /// turn an unavailable direct-provider default into a usable capability.
+    #[must_use]
+    pub const fn has_upload_ports(&self) -> bool {
+        self.upload_ports
+    }
+
+    /// Returns whether all engine upload coordinators were assembled from host ports.
+    #[must_use]
+    pub const fn has_upload_services(&self) -> bool {
+        self.upload_services
+    }
+
     /// Returns whether route construction sealed the mount catalog.
     #[must_use]
     pub const fn has_mount_catalog(&self) -> bool {
@@ -1327,9 +1439,747 @@ pub fn inspect_runtime(runtime: &LiveRuntime) -> LiveRuntimeReport {
         execution: readiness.execution,
         context_validator: readiness.context_validator,
         host_ports: readiness.host_ports,
+        upload_ports: readiness.upload_ports,
+        upload_services: readiness.upload_services,
         mount_catalog: readiness.mount_catalog,
         response_and_cancellation: readiness.response_and_cancellation,
     }
+}
+
+/// Resolves one browser-selectable upload mount only through the finalized catalog facts.
+pub fn select_upload_mount_for_test(
+    runtime: &LiveRuntime,
+    component: &str,
+    slot: &str,
+    document_key: &str,
+) -> Result<(), crate::FrameworkError> {
+    runtime.select_upload_mount_for_test(component, slot, document_key)
+}
+
+/// Redacted proof that one upload authority scope was derived from trusted mount facts.
+pub struct UploadMountAuthorityReport {
+    fixture: super::runtime::UploadMountAuthorityTestFixture,
+}
+
+/// Redacted deterministic upload-handle derivation and accepted key-rotation candidates.
+pub struct UploadHandleDerivationReport {
+    current: suprnova_live::upload::UploadHandle,
+    accepted: Vec<suprnova_live::upload::UploadHandle>,
+}
+
+/// Redacted read-only observation of one deterministic upload identity's host residue.
+pub struct UploadResidueReport {
+    ledger: bool,
+    provider: bool,
+    metadata: bool,
+}
+
+impl UploadResidueReport {
+    /// Returns whether no authoritative record, provider checkpoint, or create memo exists.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        !self.ledger && !self.provider && !self.metadata
+    }
+}
+
+impl fmt::Debug for UploadResidueReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadResidueReport:redacted>")
+    }
+}
+
+impl UploadHandleDerivationReport {
+    /// Returns whether both derivations mint the same current handle.
+    #[must_use]
+    pub fn same_current(&self, other: &Self) -> bool {
+        self.current == other.current
+    }
+
+    /// Returns whether this key ring accepts a handle issued by the other derivation.
+    #[must_use]
+    pub fn accepts(&self, other: &Self) -> bool {
+        self.accepted.contains(&other.current)
+    }
+
+    /// Returns whether the opaque wire identity retains the required UUIDv4 grammar.
+    #[must_use]
+    pub fn is_uuid_v4(&self) -> bool {
+        uuid::Uuid::parse_str(&self.current.to_string())
+            .is_ok_and(|uuid| uuid.get_version_num() == 4)
+    }
+}
+
+impl fmt::Debug for UploadHandleDerivationReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadHandleDerivationReport:redacted>")
+    }
+}
+
+impl UploadMountAuthorityReport {
+    /// Returns whether two authorities are bound to the same exact mount and host scope.
+    #[must_use]
+    pub fn same_scope(&self, other: &Self) -> bool {
+        self.fixture.scope == other.fixture.scope
+    }
+
+    /// Tests build-drift rejection without exposing the opaque scope value.
+    #[must_use]
+    pub fn matches_build(&self, build: &str) -> bool {
+        let Ok(build) = suprnova_live::identity::BuildId::parse(build) else {
+            return false;
+        };
+        let mut binding = self.fixture.binding.clone();
+        binding.build = build;
+        super::upload::derive_mount_scope(&binding).is_ok_and(|scope| scope == self.fixture.scope)
+    }
+
+    /// Tests generated-contract drift rejection without exposing the opaque scope value.
+    #[must_use]
+    pub fn matches_contract(&self, contract: &[u8]) -> bool {
+        let Ok(contract) = suprnova_live::identity::ContentDigest::from_bytes(contract) else {
+            return false;
+        };
+        let mut binding = self.fixture.binding.clone();
+        binding.contract = contract;
+        super::upload::derive_mount_scope(&binding).is_ok_and(|scope| scope == self.fixture.scope)
+    }
+}
+
+impl fmt::Debug for UploadMountAuthorityReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadMountAuthorityReport:redacted>")
+    }
+}
+
+/// Redacted unique mount resolution produced from opaque upload authority.
+pub struct UploadMountResolutionReport {
+    fixture: super::runtime::UploadMountResolutionTestFixture,
+}
+
+impl UploadMountResolutionReport {
+    /// Returns whether resolution selected this test-declared slot and document key.
+    #[must_use]
+    pub fn matches(&self, slot: &str, document_key: &str) -> bool {
+        self.fixture.slot.as_str() == slot && self.fixture.document_key.as_str() == document_key
+    }
+}
+
+impl fmt::Debug for UploadMountResolutionReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadMountResolutionReport:redacted>")
+    }
+}
+
+/// Derives one upload authority through the same finalized mount selector as production.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hostile test keeps every independently mutable host scope fact explicit"
+)]
+pub fn inspect_upload_mount_authority_for_test(
+    runtime: &LiveRuntime,
+    component: &str,
+    slot: &str,
+    document_key: &str,
+    session: Option<&[u8]>,
+    principal: Option<&[u8]>,
+    tenant: Option<&[u8]>,
+) -> Result<UploadMountAuthorityReport, crate::FrameworkError> {
+    let scope = upload_test_scope(session, principal, tenant)?;
+    runtime
+        .inspect_upload_mount_authority_for_test(component, slot, document_key, scope)
+        .map(|fixture| UploadMountAuthorityReport { fixture })
+}
+
+/// Resolves opaque upload authority by bounded enumeration of finalized eligible mounts.
+pub fn resolve_upload_mount_authority_for_test(
+    runtime: &LiveRuntime,
+    component: &str,
+    authority: &UploadMountAuthorityReport,
+    session: Option<&[u8]>,
+    principal: Option<&[u8]>,
+    tenant: Option<&[u8]>,
+) -> Result<UploadMountResolutionReport, crate::FrameworkError> {
+    let scope = upload_test_scope(session, principal, tenant)?;
+    runtime
+        .resolve_upload_mount_authority_for_test(component, scope, &authority.fixture.scope)
+        .map(|fixture| UploadMountResolutionReport { fixture })
+}
+
+/// Derives upload handles through the production purpose-separated keyed helper.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hostile test mutates each trusted authority and rotation input independently"
+)]
+pub fn inspect_deterministic_upload_handle_for_test(
+    authority: &UploadMountAuthorityReport,
+    field: &str,
+    idempotency_key: &str,
+    current_key: &[u8],
+    previous_keys: &[&[u8]],
+    build_override: Option<&str>,
+    contract_override: Option<&[u8]>,
+) -> Result<UploadHandleDerivationReport, crate::FrameworkError> {
+    let mut binding = authority.fixture.binding.clone();
+    if let Some(build) = build_override {
+        binding.build = suprnova_live::identity::BuildId::parse(build)
+            .map_err(|_| crate::FrameworkError::internal("upload handle test build rejected"))?;
+    }
+    if let Some(contract) = contract_override {
+        binding.contract = suprnova_live::identity::ContentDigest::from_bytes(contract)
+            .map_err(|_| crate::FrameworkError::internal("upload handle test contract rejected"))?;
+    }
+    let scope = super::upload::derive_mount_scope(&binding)?;
+    let field = suprnova_live::identity::ModelField::parse(field)
+        .map_err(|_| crate::FrameworkError::internal("upload handle test field rejected"))?;
+    let idempotency_key = suprnova_live::upload::UploadIdempotencyKey::parse(idempotency_key)
+        .map_err(|_| crate::FrameworkError::internal("upload handle test retry key rejected"))?;
+    let accepted = super::upload::derive_upload_handle_candidates(
+        current_key,
+        previous_keys,
+        &scope,
+        &field,
+        &idempotency_key,
+    )?;
+    let current = accepted.first().cloned().ok_or_else(|| {
+        crate::FrameworkError::internal("upload handle test derivation was empty")
+    })?;
+    Ok(UploadHandleDerivationReport { current, accepted })
+}
+
+/// Proves pre-semantic rejection did not touch any upload storage boundary.
+pub async fn inspect_configured_upload_residue_for_test(
+    runtime: &LiveRuntime,
+    authority: &UploadMountAuthorityReport,
+    field: &str,
+    idempotency_key: &str,
+) -> Result<UploadResidueReport, crate::FrameworkError> {
+    let field = suprnova_live::identity::ModelField::parse(field)
+        .map_err(|_| crate::FrameworkError::internal("upload residue field rejected"))?;
+    let idempotency_key = suprnova_live::upload::UploadIdempotencyKey::parse(idempotency_key)
+        .map_err(|_| crate::FrameworkError::internal("upload residue retry key rejected"))?;
+    let candidates = runtime.derive_upload_handle_candidates(
+        &authority.fixture.scope,
+        &field,
+        &idempotency_key,
+    )?;
+    let now = runtime.upload_now()?;
+    let mut report = UploadResidueReport {
+        ledger: false,
+        provider: false,
+        metadata: false,
+    };
+    for handle in candidates {
+        report.ledger |= runtime
+            .upload_ledger()
+            .load(&handle)
+            .await
+            .map_err(|_| crate::FrameworkError::internal("upload residue ledger read failed"))?
+            .is_some();
+        report.provider |= runtime
+            .upload_reverse_proxy_adapter()
+            .progress(&handle)
+            .is_ok();
+        report.metadata |= runtime
+            .upload_reverse_proxy_adapter()
+            .create_metadata(&handle, now)
+            .is_ok();
+    }
+    Ok(report)
+}
+
+fn upload_test_scope(
+    session: Option<&[u8]>,
+    principal: Option<&[u8]>,
+    tenant: Option<&[u8]>,
+) -> Result<suprnova_live::identity::ScopeFingerprint, crate::FrameworkError> {
+    let session =
+        session.map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Session, value));
+    let principal = principal
+        .map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Principal, value));
+    let tenant =
+        tenant.map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Tenant, value));
+    super::context::aggregate_scope(
+        session.as_ref().map(<[u8; 32]>::as_slice),
+        principal.as_ref().map(<[u8; 32]>::as_slice),
+        tenant.as_ref().map(<[u8; 32]>::as_slice),
+    )
+}
+
+/// Redacted evidence from exercising Suprnova's production upload-provider adapters.
+pub struct UploadProviderConformanceReport {
+    received_bytes: u64,
+    next_chunk_index: u32,
+    cancel_removed_quarantine: bool,
+    direct_provider_fails_closed: bool,
+    storage_provider_fails_closed: bool,
+    quarantine_permissions_are_private: bool,
+    memo_exact_replay: bool,
+    memo_mismatch_fails_closed: bool,
+    memo_missing_fails_closed: bool,
+    memo_exhaustion_fails_closed: bool,
+    memo_scope_isolation: bool,
+    memo_lifecycle_deletion: bool,
+    memo_partial_order_recovered: bool,
+    memo_redacted: bool,
+}
+
+impl UploadProviderConformanceReport {
+    /// Returns the byte count accepted by the real reverse-proxy provider.
+    #[must_use]
+    pub const fn received_bytes(&self) -> u64 {
+        self.received_bytes
+    }
+
+    /// Returns the sequential chunk index following the accepted chunk.
+    #[must_use]
+    pub const fn next_chunk_index(&self) -> u32 {
+        self.next_chunk_index
+    }
+
+    /// Returns whether cancellation removed the opaque quarantine object.
+    #[must_use]
+    pub const fn cancel_removed_quarantine(&self) -> bool {
+        self.cancel_removed_quarantine
+    }
+
+    /// Returns whether the default direct-provider adapter rejected preparation.
+    #[must_use]
+    pub const fn direct_provider_fails_closed(&self) -> bool {
+        self.direct_provider_fails_closed
+    }
+
+    /// Returns whether a failed quarantine store rejected work without fallback storage.
+    #[must_use]
+    pub const fn storage_provider_fails_closed(&self) -> bool {
+        self.storage_provider_fails_closed
+    }
+
+    /// Returns whether quarantine directories and objects deny group/other access on Unix.
+    #[must_use]
+    pub const fn quarantine_permissions_are_private(&self) -> bool {
+        self.quarantine_permissions_are_private
+    }
+
+    /// Returns whether exact normalized create metadata replays are immutable.
+    #[must_use]
+    pub const fn memo_exact_replay(&self) -> bool {
+        self.memo_exact_replay
+    }
+
+    /// Returns whether a conflicting create replay failed closed.
+    #[must_use]
+    pub const fn memo_mismatch_fails_closed(&self) -> bool {
+        self.memo_mismatch_fails_closed
+    }
+
+    /// Returns whether missing create metadata failed with the closed recovery class.
+    #[must_use]
+    pub const fn memo_missing_fails_closed(&self) -> bool {
+        self.memo_missing_fails_closed
+    }
+
+    /// Returns whether entry exhaustion was bounded and closed.
+    #[must_use]
+    pub const fn memo_exhaustion_fails_closed(&self) -> bool {
+        self.memo_exhaustion_fails_closed
+    }
+
+    /// Returns whether one full scope leaves independently bounded capacity for another.
+    #[must_use]
+    pub const fn memo_scope_isolation(&self) -> bool {
+        self.memo_scope_isolation
+    }
+
+    /// Returns whether terminal cleanup deleted retained create metadata.
+    #[must_use]
+    pub const fn memo_lifecycle_deletion(&self) -> bool {
+        self.memo_lifecycle_deletion
+    }
+
+    /// Returns whether provider-before-memo partial ordering recovered only from an exact replay.
+    #[must_use]
+    pub const fn memo_partial_order_recovered(&self) -> bool {
+        self.memo_partial_order_recovered
+    }
+
+    /// Returns whether memo diagnostics redact browser metadata.
+    #[must_use]
+    pub const fn memo_redacted(&self) -> bool {
+        self.memo_redacted
+    }
+}
+
+impl fmt::Debug for UploadProviderConformanceReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadProviderConformanceReport:redacted>")
+    }
+}
+
+/// Redacted evidence from one host-owned upload cleanup pass.
+pub struct UploadCleanupConformanceReport {
+    claimed: usize,
+    reclaimed: usize,
+    residue_is_empty: bool,
+}
+
+impl UploadCleanupConformanceReport {
+    /// Returns the bounded number of cleanup claims admitted by the engine.
+    #[must_use]
+    pub const fn claimed(&self) -> usize {
+        self.claimed
+    }
+
+    /// Returns the number of claims whose host residue was reclaimed.
+    #[must_use]
+    pub const fn reclaimed(&self) -> usize {
+        self.reclaimed
+    }
+
+    /// Returns whether ledger, provider, and metadata residue are all absent.
+    #[must_use]
+    pub const fn residue_is_empty(&self) -> bool {
+        self.residue_is_empty
+    }
+}
+
+impl fmt::Debug for UploadCleanupConformanceReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadCleanupConformanceReport:redacted>")
+    }
+}
+
+/// Runs the production cleanup coordinator for one terminal upload and checks residue.
+pub async fn run_upload_cleanup_for_test(
+    runtime: &LiveRuntime,
+    handle: &str,
+) -> Result<UploadCleanupConformanceReport, crate::FrameworkError> {
+    use suprnova_live::upload::{CleanupLeaseId, ReadUpload, UploadErrorKind, UploadHandle};
+
+    let handle = UploadHandle::parse(handle)
+        .map_err(|_| crate::FrameworkError::internal("upload cleanup handle was rejected"))?;
+    let outcome = runtime
+        .upload_cleanup_for_test()
+        .run_once(
+            CleanupLeaseId::parse("framework-upload-conformance").map_err(|_| {
+                crate::FrameworkError::internal("upload cleanup lease was rejected")
+            })?,
+        )
+        .await
+        .map_err(|_| crate::FrameworkError::internal("Live upload cleanup was rejected"))?;
+    let ledger_absent = runtime
+        .upload_ledger()
+        .load(&handle)
+        .await
+        .map_err(|_| crate::FrameworkError::internal("upload cleanup ledger check failed"))?
+        .is_none();
+    let provider_absent = runtime
+        .upload_provider()
+        .read(ReadUpload::new(&handle, 0, 1))
+        .await
+        .is_err();
+    let metadata_absent = runtime
+        .upload_reverse_proxy_adapter()
+        .create_metadata(
+            &handle,
+            runtime.upload_now().map_err(|_| {
+                crate::FrameworkError::internal("upload cleanup clock check failed")
+            })?,
+        )
+        .is_err_and(|error| error.kind() == UploadErrorKind::ValidationEvidenceUnavailable);
+
+    Ok(UploadCleanupConformanceReport {
+        claimed: outcome.claimed(),
+        reclaimed: outcome.reclaimed(),
+        residue_is_empty: ledger_absent && provider_absent && metadata_absent,
+    })
+}
+
+/// Exercises the actual framework quarantine, reverse-proxy, and unavailable-direct adapters.
+pub async fn run_upload_provider_conformance_for_test()
+-> Result<UploadProviderConformanceReport, crate::FrameworkError> {
+    use suprnova_live::identity::{ScopeFingerprint, UnixMillis};
+    use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
+    use suprnova_live::upload::{
+        ChunkBody, ClientUploadMetadata, DirectUploadProvider, PrepareTransfer, QuarantineBytes,
+        ReadUpload, ReverseProxyUploadProvider, UploadChecksum, UploadError, UploadErrorKind,
+        UploadFuture, UploadHandle, UploadProvider, VerifyTransfer, WriteChunk,
+    };
+
+    struct TestChunkBody {
+        parts: VecDeque<QuarantineBytes>,
+    }
+
+    impl ChunkBody for TestChunkBody {
+        fn next_chunk<'a>(
+            &'a mut self,
+            maximum_bytes: usize,
+        ) -> UploadFuture<'a, Result<Option<QuarantineBytes>, UploadError>> {
+            Box::pin(async move {
+                let next = self.parts.pop_front();
+                if next.as_ref().is_some_and(|part| part.len() > maximum_bytes) {
+                    return Err(UploadError::new(UploadErrorKind::InputTooLarge));
+                }
+                Ok(next)
+            })
+        }
+    }
+
+    fn framework_error(stage: &'static str) -> crate::FrameworkError {
+        crate::FrameworkError::internal(format!(
+            "Live upload provider conformance was rejected during {stage}"
+        ))
+    }
+
+    let limits = UploadLimits::new(UploadLimitConfig::reference())
+        .map_err(|_| framework_error("limit validation"))?;
+    let root = tempfile::tempdir().map_err(|_| framework_error("temporary root creation"))?;
+    let quarantine_root = root.path().join("quarantine");
+    let store = Arc::new(
+        super::ports::upload_provider::SuprnovaQuarantineStore::open(
+            &quarantine_root,
+            4,
+            limits.max_chunk_bytes(),
+        )
+        .map_err(|_| framework_error("quarantine store creation"))?,
+    );
+    let provider =
+        super::ports::upload_provider::SuprnovaReverseProxyUploadProvider::new(store, limits)
+            .map_err(|_| framework_error("reverse-proxy provider creation"))?;
+    let handle = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000001")
+        .map_err(|_| framework_error("handle parsing"))?;
+    let bytes = b"hello world";
+    let checksum = UploadChecksum::parse(&hex::encode(Sha256::digest(bytes)))
+        .map_err(|_| framework_error("checksum parsing"))?;
+
+    provider
+        .prepare(PrepareTransfer::new(
+            &handle,
+            bytes.len() as u64,
+            "client-name.txt",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .map_err(|_| framework_error("transfer preparation"))?;
+    #[cfg(unix)]
+    let quarantine_permissions_are_private = {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory_private = std::fs::metadata(&quarantine_root)
+            .map(|metadata| metadata.permissions().mode() & 0o077 == 0)
+            .unwrap_or(false);
+        let objects_private = std::fs::read_dir(&quarantine_root)
+            .map(|entries| {
+                entries.filter_map(Result::ok).all(|entry| {
+                    entry
+                        .metadata()
+                        .map(|metadata| metadata.permissions().mode() & 0o077 == 0)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        directory_private && objects_private
+    };
+    #[cfg(not(unix))]
+    let quarantine_permissions_are_private = true;
+    let missing_before_bind = provider
+        .create_metadata(&handle, UnixMillis::new(1_000))
+        .is_err_and(|error| error.kind() == UploadErrorKind::ValidationEvidenceUnavailable);
+    let client = ClientUploadMetadata::new("client-name.txt", Some("text/plain"))
+        .map_err(|_| framework_error("client metadata normalization"))?;
+    let metadata_scope =
+        ScopeFingerprint::from_bytes(&[7_u8; 32]).map_err(|_| framework_error("metadata scope"))?;
+    let metadata = super::ports::upload_provider::UploadCreateMetadata::new(
+        client,
+        bytes.len() as u64,
+        7,
+        UnixMillis::new(2_000),
+        metadata_scope.clone(),
+    );
+    let inserted = provider
+        .bind_create_metadata(handle.clone(), metadata.clone(), UnixMillis::new(1_000))
+        .map_err(|_| framework_error("create metadata bind"))?;
+    let existing = provider
+        .bind_create_metadata(handle.clone(), metadata.clone(), UnixMillis::new(1_000))
+        .map_err(|_| framework_error("exact create metadata replay"))?;
+    let mismatch = provider.bind_create_metadata(
+        handle.clone(),
+        super::ports::upload_provider::UploadCreateMetadata::new(
+            ClientUploadMetadata::new("other-name.txt", Some("text/plain"))
+                .map_err(|_| framework_error("mismatch metadata normalization"))?,
+            bytes.len() as u64,
+            7,
+            UnixMillis::new(2_000),
+            metadata_scope,
+        ),
+        UnixMillis::new(1_000),
+    );
+    let memo_partial_order_recovered = missing_before_bind
+        && provider
+            .create_metadata(&handle, UnixMillis::new(1_000))
+            .is_ok();
+    let memo_redacted = !format!("{metadata:?}").contains("client-name.txt");
+
+    let bounded =
+        super::ports::upload_provider::UploadCreateMetadataMemo::new(1, 2_048, 1, 2_048, 1_000)
+            .map_err(|_| framework_error("bounded metadata memo"))?;
+    let bounded_first = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000011")
+        .map_err(|_| framework_error("bounded first handle"))?;
+    let bounded_second = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000012")
+        .map_err(|_| framework_error("bounded second handle"))?;
+    bounded
+        .bind(bounded_first, metadata.clone(), UnixMillis::new(1_000))
+        .map_err(|_| framework_error("bounded first metadata"))?;
+    let memo_exhaustion_fails_closed = bounded
+        .bind(bounded_second, metadata.clone(), UnixMillis::new(1_000))
+        .is_err_and(|error| error.kind() == UploadErrorKind::ResourceExhausted);
+    let isolated =
+        super::ports::upload_provider::UploadCreateMetadataMemo::new(2, 4_096, 1, 2_048, 1_000)
+            .map_err(|_| framework_error("scope-isolated metadata memo"))?;
+    let isolated_a = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000021")
+        .map_err(|_| framework_error("isolated first handle"))?;
+    let isolated_b = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000022")
+        .map_err(|_| framework_error("isolated second handle"))?;
+    let isolated_a_overflow = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000023")
+        .map_err(|_| framework_error("isolated overflow handle"))?;
+    let scope_a = ScopeFingerprint::from_bytes(&[8_u8; 32])
+        .map_err(|_| framework_error("isolated first scope"))?;
+    let scope_b = ScopeFingerprint::from_bytes(&[9_u8; 32])
+        .map_err(|_| framework_error("isolated second scope"))?;
+    let isolated_metadata = |scope| {
+        super::ports::upload_provider::UploadCreateMetadata::new(
+            ClientUploadMetadata::new("isolated.txt", Some("text/plain"))
+                .expect("static isolated metadata"),
+            bytes.len() as u64,
+            8,
+            UnixMillis::new(2_000),
+            scope,
+        )
+    };
+    let isolated_first = isolated.bind(
+        isolated_a,
+        isolated_metadata(scope_a.clone()),
+        UnixMillis::new(1_000),
+    );
+    let isolated_second = isolated.bind(
+        isolated_b,
+        isolated_metadata(scope_b),
+        UnixMillis::new(1_000),
+    );
+    let isolated_overflow = isolated.bind(
+        isolated_a_overflow,
+        isolated_metadata(scope_a),
+        UnixMillis::new(1_000),
+    );
+    let memo_scope_isolation = isolated_first.is_ok()
+        && isolated_second.is_ok()
+        && isolated_overflow.is_err_and(|error| error.kind() == UploadErrorKind::ResourceExhausted);
+    let mut body = TestChunkBody {
+        parts: VecDeque::from([
+            QuarantineBytes::copy_from_slice(b"hello "),
+            QuarantineBytes::copy_from_slice(b"world"),
+        ]),
+    };
+    let receipt = provider
+        .write_chunk(
+            WriteChunk::new(&handle, 0, 0, bytes.len() as u64, &checksum),
+            &mut body,
+        )
+        .await
+        .map_err(|_| framework_error("chunk write"))?;
+    let progress = provider
+        .progress(&handle)
+        .map_err(|_| framework_error("authoritative progress checkpoint"))?;
+    if progress.expected_bytes != bytes.len() as u64 || progress.committed_bytes != receipt.bytes()
+    {
+        return Err(framework_error("authoritative progress comparison"));
+    }
+    provider
+        .verify(VerifyTransfer::new(&handle, &checksum))
+        .await
+        .map_err(|_| framework_error("whole-file verification"))?;
+    let stored = provider
+        .read(ReadUpload::new(&handle, 0, bytes.len()))
+        .await
+        .map_err(|_| framework_error("quarantine read"))?;
+    if stored.as_ref() != bytes {
+        return Err(framework_error("quarantine content comparison"));
+    }
+    provider
+        .cancel(&handle)
+        .await
+        .map_err(|_| framework_error("quarantine cancellation"))?;
+    provider.remove_create_metadata(&handle);
+    let memo_lifecycle_deletion = provider
+        .create_metadata(&handle, UnixMillis::new(1_000))
+        .is_err_and(|error| error.kind() == UploadErrorKind::ValidationEvidenceUnavailable);
+    let cancel_removed_quarantine = provider.read(ReadUpload::new(&handle, 0, 1)).await.is_err();
+
+    let direct = super::ports::upload_provider::UnavailableDirectUploadProvider;
+    let direct_provider_fails_closed = matches!(
+        UploadProvider::prepare(
+            &direct,
+            PrepareTransfer::new(
+                &handle,
+                bytes.len() as u64,
+                "client-name.txt",
+                UnixMillis::new(1_000),
+            ),
+        )
+        .await,
+        Err(error) if error.kind() == UploadErrorKind::ProviderUnavailable
+    );
+    let _direct_marker: &dyn DirectUploadProvider = &direct;
+
+    let failed_root =
+        tempfile::tempdir().map_err(|_| framework_error("failed-store temporary root creation"))?;
+    let failed_store = Arc::new(
+        super::ports::upload_provider::SuprnovaQuarantineStore::open(
+            failed_root.path(),
+            2,
+            limits.max_chunk_bytes(),
+        )
+        .map_err(|_| framework_error("failed quarantine store creation"))?,
+    );
+    let failed_provider = super::ports::upload_provider::SuprnovaReverseProxyUploadProvider::new(
+        failed_store,
+        limits,
+    )
+    .map_err(|_| framework_error("failed reverse-proxy provider creation"))?;
+    failed_root
+        .close()
+        .map_err(|_| framework_error("failed-store root removal"))?;
+    let failed_handle = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000099")
+        .map_err(|_| framework_error("failed-store handle parsing"))?;
+    let storage_provider_fails_closed = failed_provider
+        .prepare(PrepareTransfer::new(
+            &failed_handle,
+            bytes.len() as u64,
+            "failed-store.txt",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .is_err_and(|error| error.kind() == UploadErrorKind::ProviderUnavailable);
+
+    Ok(UploadProviderConformanceReport {
+        received_bytes: progress.committed_bytes,
+        next_chunk_index: progress.next_chunk_index,
+        cancel_removed_quarantine,
+        direct_provider_fails_closed,
+        storage_provider_fails_closed,
+        quarantine_permissions_are_private,
+        memo_exact_replay: inserted
+            == super::ports::upload_provider::UploadCreateMetadataDisposition::Inserted
+            && existing
+                == super::ports::upload_provider::UploadCreateMetadataDisposition::ExistingOutcome,
+        memo_mismatch_fails_closed: mismatch
+            .is_err_and(|error| error.kind() == UploadErrorKind::UploadConflict),
+        memo_missing_fails_closed: missing_before_bind,
+        memo_exhaustion_fails_closed,
+        memo_scope_isolation,
+        memo_lifecycle_deletion,
+        memo_partial_order_recovered,
+        memo_redacted,
+    })
 }
 
 /// Projects a synthetic engine response through the production HTTP adapter.

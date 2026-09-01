@@ -15,7 +15,11 @@ mod registry;
 mod response;
 mod routes;
 mod runtime;
+pub(crate) use runtime::LiveMountRegistration;
 mod tenant;
+mod upload;
+mod upload_host;
+mod upload_policy;
 
 /// Focused assertion helpers for application component tests.
 pub mod testing;
@@ -59,5 +63,20 @@ pub use error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCod
 pub use events::{AcceptedOutcomeKind, LiveOutcomeAccepted};
 pub use metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 pub use suprnova_live::canonical::CanonicalValue;
+pub use suprnova_live::identity::UnixMillis;
+pub use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 pub use suprnova_live::mount::MountFlags;
+pub use suprnova_live::upload::{
+    BoundedHeaders, ChunkDisposition, ChunkReceipt, DirectPartReference, DirectTransferInstruction,
+    DirectUploadProvider, DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest,
+    FinalizeToken, IntegrityEvidence, PrepareTransfer, PreparedFinalize, QuarantineBytes,
+    ReadUpload, ReportDirectPart, ScanDisposition, ScanInput, TransferDisposition,
+    TransferInstruction, TransferMethod, TransferPlan, TrustedProviderOrigin, TrustedProviderUrl,
+    UploadApplicationValidator, UploadError, UploadErrorKind, UploadFinalizer, UploadFuture,
+    UploadHandle, UploadPart, UploadProvider, UploadScanner, VerifyTransfer,
+};
+pub use upload_host::LiveUploadHost;
+pub use upload_policy::{
+    UploadPolicy, UploadPolicyBuilder, UploadReplacement, UploadScan, UploadScanFailure, UploadType,
+};
 pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};

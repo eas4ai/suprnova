@@ -377,6 +377,42 @@ async fn ready_content_is_not_durable_until_authorized_finalize() {
 }
 
 #[tokio::test]
+async fn ready_proposal_authority_requires_current_scope_evidence_and_finalize_action() {
+    let fixture = fixture();
+
+    let proposal = fixture
+        .service
+        .authorize_ready_proposal(
+            &fixture.context,
+            field(),
+            handle(),
+            &action_name(),
+            &fixture.policy,
+            UnixMillis::new(1_002),
+        )
+        .await
+        .expect("authorize exact Ready proposal");
+    assert_eq!(proposal.handle(), &handle());
+    assert_eq!(proposal.ready_revision(), UploadRevision::new(8));
+    assert!(!format!("{proposal:?}").contains(HANDLE));
+
+    let wrong_action = ActionName::parse("unrelated_action").expect("wrong action");
+    let error = fixture
+        .service
+        .authorize_ready_proposal(
+            &fixture.context,
+            field(),
+            handle(),
+            &wrong_action,
+            &fixture.policy,
+            UnixMillis::new(1_002),
+        )
+        .await
+        .expect_err("wrong action must not admit the handle");
+    assert_eq!(error.kind(), UploadErrorKind::AuthorizationDenied);
+}
+
+#[tokio::test]
 async fn successful_finalize_and_exact_retry_produce_one_durable_outcome() {
     let fixture = fixture();
     let first = fixture
@@ -388,6 +424,19 @@ async fn successful_finalize_and_exact_retry_produce_one_durable_outcome() {
         )
         .await
         .expect("finalize");
+    let finalized_proposal = fixture
+        .service
+        .authorize_ready_proposal(
+            &fixture.context,
+            field(),
+            handle(),
+            &action_name(),
+            &fixture.policy,
+            UnixMillis::new(1_003),
+        )
+        .await
+        .expect("an exact action replay can reauthorize finalized evidence");
+    assert_eq!(finalized_proposal.ready_revision(), UploadRevision::new(8));
     let replay = fixture
         .service
         .finalize(
@@ -435,6 +484,19 @@ async fn failed_commit_is_compensated_and_same_logical_request_can_retry() {
             .state(),
         UploadState::Finalizing
     );
+    let retry_proposal = fixture
+        .service
+        .authorize_ready_proposal(
+            &fixture.context,
+            field(),
+            handle(),
+            &action_name(),
+            &fixture.policy,
+            UnixMillis::new(1_003),
+        )
+        .await
+        .expect("the same committed action can reacquire its Ready evidence while reconciling");
+    assert_eq!(retry_proposal.ready_revision(), UploadRevision::new(8));
 
     fixture.finalizer.fail_commit.store(false, Ordering::SeqCst);
     fixture

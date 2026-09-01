@@ -3,12 +3,15 @@
 use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
 };
-use suprnova_live::identity::{ComponentName, ModelField, ScopeFingerprint, UnixMillis};
+use suprnova_live::identity::{
+    ActionName, ComponentName, ModelField, ScopeFingerprint, UnixMillis,
+};
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::resource::{BoundedQueue, PermitPool, ResourceBounds, ResourceError};
 use suprnova_live::upload::{
     ConditionalUploadCreate, TransferGrantScope, UploadCreateCommand, UploadErrorKind,
-    UploadHandle, UploadIdempotencyKey, UploadLedger, UploadRecord, UploadRevision, UploadState,
+    UploadFieldPolicy, UploadHandle, UploadIdempotencyKey, UploadLedger, UploadMediaType,
+    UploadRecord, UploadReplacementPolicy, UploadRevision, UploadScanPolicy, UploadState,
 };
 use suprnova_live_test_support::MemoryUploadLedger;
 
@@ -35,6 +38,19 @@ fn limits() -> UploadLimits {
     .expect("finite exhaustion profile")
 }
 
+fn policy() -> UploadFieldPolicy {
+    UploadFieldPolicy::new(
+        2,
+        1_024,
+        UploadReplacementPolicy::PreservePrevious,
+        vec![UploadMediaType::Png],
+        None,
+        UploadScanPolicy::Disabled,
+        ActionName::parse("finalize_upload").expect("fixture action"),
+    )
+    .expect("finite exhaustion policy")
+}
+
 fn command(handle: &str, scope: HostScopeFacts, key: &str) -> UploadCreateCommand {
     let authority = TransferGrantScope::new(
         UploadHandle::parse(handle).expect("handle"),
@@ -56,6 +72,8 @@ fn command(handle: &str, scope: HostScopeFacts, key: &str) -> UploadCreateComman
         UploadIdempotencyKey::parse(key).expect("idempotency"),
         UnixMillis::new(1_001),
         limits(),
+        1,
+        policy(),
     )
 }
 

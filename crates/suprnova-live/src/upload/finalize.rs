@@ -384,6 +384,62 @@ impl UploadFinalizationService {
         }
     }
 
+    /// Reauthorizes one browser-proposed handle and mints evidence that it is
+    /// Ready for the component field's deliberate finalize action.
+    pub async fn authorize_ready_proposal(
+        &self,
+        context: &TrustedLiveRequestContext,
+        field: ModelField,
+        handle: UploadHandle,
+        action: &ActionName,
+        policy: &UploadFieldPolicy,
+        now: UnixMillis,
+    ) -> Result<ReadyUploadProposal, UploadError> {
+        if action != policy.finalize_action() {
+            return Err(UploadError::new(UploadErrorKind::AuthorizationDenied));
+        }
+        let record = self
+            .authority
+            .trusted_status(
+                context,
+                field,
+                handle.clone(),
+                UploadControlKind::BeginFinalize,
+                now,
+            )
+            .await?;
+        let evidence = self
+            .evidence
+            .load(&handle)
+            .await?
+            .ok_or_else(|| UploadError::new(UploadErrorKind::ValidationEvidenceUnavailable))?;
+        let lifecycle_revision_matches = match record.state() {
+            UploadState::Ready => record.revision() == evidence.ready_revision(),
+            UploadState::Finalizing => evidence
+                .ready_revision()
+                .get()
+                .checked_add(1)
+                .is_some_and(|revision| revision == record.revision().get()),
+            UploadState::Finalized => evidence
+                .ready_revision()
+                .get()
+                .checked_add(2)
+                .is_some_and(|revision| revision == record.revision().get()),
+            _ => false,
+        };
+        if !lifecycle_revision_matches {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        if evidence.authority() != record.authority()
+            || evidence.policy_digest() != policy.contract_digest()
+        {
+            return Err(UploadError::new(
+                UploadErrorKind::ValidationEvidenceUnavailable,
+            ));
+        }
+        Ok(ReadyUploadProposal { evidence })
+    }
+
     /// Reauthorizes and idempotently finalizes one Ready upload.
     pub async fn finalize(
         &self,
@@ -530,6 +586,37 @@ impl UploadFinalizationService {
             durable,
             revision: commit.revision(),
         })
+    }
+}
+
+/// Engine-minted proof that one opaque handle was Ready under current request,
+/// field, policy, and finalize-action authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ReadyUploadProposal {
+    evidence: ValidatedUpload,
+}
+
+impl ReadyUploadProposal {
+    /// Returns the non-authoritative opaque handle admitted to component state.
+    #[must_use]
+    pub const fn handle(&self) -> &UploadHandle {
+        self.evidence.handle()
+    }
+
+    /// Returns the exact Ready revision proven at proposal admission.
+    #[must_use]
+    pub const fn ready_revision(&self) -> UploadRevision {
+        self.evidence.ready_revision()
+    }
+}
+
+impl fmt::Debug for ReadyUploadProposal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReadyUploadProposal")
+            .field("handle", &"<redacted>")
+            .field("ready_revision", &self.ready_revision())
+            .finish()
     }
 }
 

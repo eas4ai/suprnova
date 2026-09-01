@@ -1,7 +1,10 @@
 //! Immutable process runtime assembled before Live routes are constructed.
 
 use std::fmt;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::{App, FrameworkError};
 use sha2::{Digest, Sha256};
@@ -26,14 +29,14 @@ use suprnova_live::host::{
     MountSelection, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    BuildId, ComponentName, ContentDigest, IdempotencyKey, InstanceId, IslandSlot, KeyId, Revision,
-    RouteIdentity, ScopeFingerprint, UnixMillis,
+    BuildId, ComponentName, ContentDigest, IdempotencyKey, InstanceId, IslandSlot, KeyId,
+    ModelField, Revision, RouteIdentity, ScopeFingerprint, UnixMillis,
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, LedgerLimits,
     LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
 };
-use suprnova_live::limits::InputLimits;
+use suprnova_live::limits::{InputLimits, UploadLimitConfig, UploadLimits};
 use suprnova_live::mount::{
     DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
     PrivateMountOutput, PrivateMountRequest, PrivateMountService, PublicMountProviders,
@@ -42,12 +45,18 @@ use suprnova_live::mount::{
 use suprnova_live::promotion::{PromotionLimitConfig, PromotionLimits, PromotionService};
 use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
 use suprnova_live::random::{InstanceIdGenerator, SystemInstanceIdGenerator};
+use suprnova_live::resource::PermitPool;
 use suprnova_live::snapshot::{
     ComponentContract as SnapshotContract, CompositionChildLineageV1, CompositionLineageV1,
     CompositionOwnerLineageV1, ExpectedInstanceV1, InstanceBodyV1, InstanceFieldsV1,
     MountedDocumentPath, SnapshotLimits, verify_instance,
 };
 use suprnova_live::state::ProposalLimits;
+use suprnova_live::upload::{
+    BoundedBackoff, CleanupPolicy, TransferGrantCodec, UploadCleanupService, UploadControlKind,
+    UploadFieldPolicy, UploadFinalizationService, UploadHandle, UploadIdempotencyKey, UploadRecord,
+    UploadService, UploadValidationService,
+};
 use suprnova_live::validation::ValidationEngine;
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 use uuid::Uuid;
@@ -74,8 +83,143 @@ struct RuntimeGraph {
     endpoint_config: LiveEndpointConfig,
     context_validator: LiveRequestContextValidator,
     ports: super::ports::HostPorts,
+    uploads: UploadRuntimeGraph,
     mount_builder: Mutex<Option<MountCatalogBuilder>>,
     mount_catalog: OnceLock<Arc<MountCatalog>>,
+    upload_mount_builder: Mutex<Option<Vec<UploadMountSelector>>>,
+    upload_mounts: OnceLock<Arc<[UploadMountSelector]>>,
+}
+
+pub(crate) struct LiveMountRegistration {
+    entry: MountCatalogEntry,
+    upload_selector: UploadMountSelector,
+}
+
+impl LiveMountRegistration {
+    pub(crate) const fn new(
+        entry: MountCatalogEntry,
+        selection: MountSelection,
+        document_key: DocumentMountKey,
+        build: BuildId,
+    ) -> Self {
+        Self {
+            entry,
+            upload_selector: UploadMountSelector {
+                selection,
+                document_key,
+                build,
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+struct UploadMountSelector {
+    selection: MountSelection,
+    document_key: DocumentMountKey,
+    build: BuildId,
+}
+
+impl UploadMountSelector {
+    fn scope_binding(
+        &self,
+        base_scope: ScopeFingerprint,
+    ) -> super::upload::UploadMountScopeBinding {
+        super::upload::UploadMountScopeBinding {
+            base_scope,
+            route: self.selection.route().clone(),
+            slot: self.selection.slot().clone(),
+            component: self.selection.component().clone(),
+            contract: self.selection.contract_digest().clone(),
+            build: self.build.clone(),
+            document_key: self.document_key.clone(),
+            protocol: self.selection.protocol(),
+        }
+    }
+}
+
+pub(super) struct UploadMountAuthorityTestFixture {
+    pub(super) binding: super::upload::UploadMountScopeBinding,
+    pub(super) scope: ScopeFingerprint,
+}
+
+pub(super) struct UploadMountResolutionTestFixture {
+    pub(super) slot: IslandSlot,
+    pub(super) document_key: DocumentMountKey,
+}
+
+struct UploadRuntimeGraph {
+    limits: UploadLimits,
+    body_budget: super::upload::UploadBodyBudget,
+    authority: Arc<UploadService>,
+    validation: Arc<UploadValidationService>,
+    finalization: Arc<UploadFinalizationService>,
+    cleanup: Arc<UploadCleanupService>,
+    cleanup_runner: UploadCleanupRunner,
+}
+
+struct UploadCleanupRunner {
+    cleanup: Arc<UploadCleanupService>,
+    wake: Arc<tokio::sync::Notify>,
+    started: AtomicBool,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl UploadCleanupRunner {
+    fn new(cleanup: Arc<UploadCleanupService>) -> Self {
+        Self {
+            cleanup,
+            wake: Arc::new(tokio::sync::Notify::new()),
+            started: AtomicBool::new(false),
+            task: Mutex::new(None),
+        }
+    }
+
+    fn ensure_started(&self) -> Result<(), FrameworkError> {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| live_boot_error())?;
+        let cleanup = Arc::clone(&self.cleanup);
+        let wake = Arc::clone(&self.wake);
+        let task = handle.spawn(async move {
+            let lease =
+                suprnova_live::upload::CleanupLeaseId::parse("framework-production-upload-cleanup")
+                    .expect("static cleanup lease identity");
+            loop {
+                tokio::select! {
+                    () = wake.notified() => {}
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                let _ = cleanup.run_once(lease.clone()).await;
+            }
+        });
+        *self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+        Ok(())
+    }
+
+    fn wake(&self) -> Result<(), FrameworkError> {
+        self.ensure_started()?;
+        self.wake.notify_one();
+        Ok(())
+    }
+}
+
+impl Drop for UploadCleanupRunner {
+    fn drop(&mut self) {
+        self.cleanup.cancel();
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +235,19 @@ pub(super) enum RuntimeProviderSlot {
     Telemetry,
     Cancellation,
     ResponseIntent,
+    UploadLedger,
+    UploadCleanupLedger,
+    UploadQuarantine,
+    UploadProvider,
+    UploadReverseProxy,
+    UploadReverseProxyProgress,
+    UploadDirect,
+    UploadAuthorizationAdapter,
+    UploadAuthorization,
+    UploadScanner,
+    UploadApplicationValidation,
+    UploadEvidence,
+    UploadFinalizer,
 }
 
 impl RuntimeProviderSlot {
@@ -107,6 +264,19 @@ impl RuntimeProviderSlot {
             Self::Telemetry => "telemetry",
             Self::Cancellation => "cancellation",
             Self::ResponseIntent => "response intent",
+            Self::UploadLedger => "upload ledger",
+            Self::UploadCleanupLedger => "upload cleanup ledger",
+            Self::UploadQuarantine => "upload quarantine",
+            Self::UploadProvider => "upload provider",
+            Self::UploadReverseProxy => "upload reverse-proxy provider",
+            Self::UploadReverseProxyProgress => "upload reverse-proxy progress",
+            Self::UploadDirect => "upload direct provider",
+            Self::UploadAuthorizationAdapter => "upload authorization adapter",
+            Self::UploadAuthorization => "upload authorization",
+            Self::UploadScanner => "upload scanner",
+            Self::UploadApplicationValidation => "upload application validation",
+            Self::UploadEvidence => "upload validation evidence",
+            Self::UploadFinalizer => "upload finalizer",
         }
     }
 }
@@ -141,7 +311,7 @@ impl RuntimeProviderCandidates {
             random: Some(random),
             key_ring: Some(key_ring),
             ledger: Some(ledger),
-            ports: super::ports::HostPortCandidates::production(registry),
+            ports: super::ports::HostPortCandidates::production(registry)?,
         })
     }
 
@@ -168,6 +338,28 @@ impl RuntimeProviderCandidates {
             RuntimeProviderSlot::Telemetry => self.ports.trace = None,
             RuntimeProviderSlot::Cancellation => self.ports.cancellation = None,
             RuntimeProviderSlot::ResponseIntent => self.ports.response = None,
+            RuntimeProviderSlot::UploadLedger => self.ports.upload_ledger = None,
+            RuntimeProviderSlot::UploadCleanupLedger => self.ports.upload_cleanup_ledger = None,
+            RuntimeProviderSlot::UploadQuarantine => self.ports.upload_quarantine = None,
+            RuntimeProviderSlot::UploadProvider => {
+                self.ports.upload_provider = None;
+                self.ports.upload_provider_adapter = None;
+            }
+            RuntimeProviderSlot::UploadReverseProxy => self.ports.upload_reverse_proxy = None,
+            RuntimeProviderSlot::UploadReverseProxyProgress => {
+                self.ports.upload_reverse_proxy_adapter = None;
+            }
+            RuntimeProviderSlot::UploadDirect => self.ports.upload_direct = None,
+            RuntimeProviderSlot::UploadAuthorizationAdapter => {
+                self.ports.upload_authorization_adapter = None;
+            }
+            RuntimeProviderSlot::UploadAuthorization => self.ports.upload_authorization = None,
+            RuntimeProviderSlot::UploadScanner => self.ports.upload_scanner = None,
+            RuntimeProviderSlot::UploadApplicationValidation => {
+                self.ports.upload_application_validation = None;
+            }
+            RuntimeProviderSlot::UploadEvidence => self.ports.upload_evidence = None,
+            RuntimeProviderSlot::UploadFinalizer => self.ports.upload_finalizer = None,
         }
     }
 
@@ -695,7 +887,10 @@ impl LiveRuntime {
             .ok_or_else(live_boot_error)
     }
 
-    pub(crate) fn register_mount(&self, entry: MountCatalogEntry) -> Result<(), FrameworkError> {
+    pub(crate) fn register_mount(
+        &self,
+        registration: LiveMountRegistration,
+    ) -> Result<(), FrameworkError> {
         if self.graph.mount_catalog.get().is_some() {
             return Err(FrameworkError::internal(
                 "Live mount registration is closed after route construction",
@@ -707,10 +902,21 @@ impl LiveRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = builder.take().ok_or_else(live_boot_error)?;
+        let LiveMountRegistration {
+            entry,
+            upload_selector,
+        } = registration;
         let next = current
             .register(self.graph.registry.engine(), entry)
             .map_err(|_| FrameworkError::internal("Live mount catalog was rejected"))?;
         *builder = Some(next);
+        self.graph
+            .upload_mount_builder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .ok_or_else(live_boot_error)?
+            .push(upload_selector);
         Ok(())
     }
 
@@ -724,10 +930,301 @@ impl LiveRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let builder = builder.take().ok_or_else(live_boot_error)?;
+        let selectors = self
+            .graph
+            .upload_mount_builder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(live_boot_error)?;
+        self.graph
+            .upload_mounts
+            .set(Arc::from(selectors))
+            .map_err(|_| live_boot_error())?;
         self.graph
             .mount_catalog
             .set(Arc::new(builder.build()))
             .map_err(|_| live_boot_error())
+    }
+
+    pub(crate) fn validate_upload_request_context(
+        &self,
+        request: &Request,
+        component: &str,
+        slot: &str,
+        document_key: &str,
+    ) -> Result<TrustedLiveRequestContext, FrameworkError> {
+        let selector = self.select_upload_mount(component, slot, document_key)?;
+        let base_scope = super::context::request_scope(request)?;
+        let scope = super::upload::derive_mount_scope(&selector.scope_binding(base_scope))?;
+        self.validate_request_context_with_scope(request, selector.selection.clone(), Some(scope))
+    }
+
+    pub(crate) fn validate_upload_action_context(
+        &self,
+        request: &Request,
+        selection: &MountSelection,
+    ) -> Result<Option<TrustedLiveRequestContext>, FrameworkError> {
+        let descriptor = self
+            .graph
+            .engine_registry
+            .resolve(selection.component())
+            .map_err(|_| live_boot_error())?;
+        if !descriptor
+            .metadata()
+            .fields()
+            .iter()
+            .any(|field| field.upload_policy().is_some())
+        {
+            return Ok(None);
+        }
+        self.finalize_mount_catalog()?;
+        let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
+        let mut matches = selectors.iter().filter(|candidate| {
+            candidate.selection.route() == selection.route()
+                && candidate.selection.slot() == selection.slot()
+                && candidate.selection.component() == selection.component()
+                && candidate.selection.contract_digest() == selection.contract_digest()
+                && candidate.selection.protocol() == selection.protocol()
+        });
+        let selector = matches.next().ok_or_else(live_boot_error)?;
+        if matches.next().is_some() {
+            return Err(FrameworkError::internal(
+                "Live upload action mount authority was ambiguous",
+            ));
+        }
+        let base_scope = super::context::request_scope(request)?;
+        let scope = super::upload::derive_mount_scope(&selector.scope_binding(base_scope))?;
+        self.validate_request_context_with_scope(request, selector.selection.clone(), Some(scope))
+            .map(Some)
+    }
+
+    pub(crate) async fn resolve_upload_request_context(
+        &self,
+        request: &Request,
+        handle: &UploadHandle,
+    ) -> Result<(TrustedLiveRequestContext, UploadRecord), FrameworkError> {
+        self.finalize_mount_catalog()?;
+        let base_scope = super::context::request_scope(request)?;
+        let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
+        let mut contexts = Vec::with_capacity(selectors.len());
+        for selector in selectors.iter() {
+            let scope =
+                super::upload::derive_mount_scope(&selector.scope_binding(base_scope.clone()))?;
+            contexts.push(self.validate_request_context_with_scope(
+                request,
+                selector.selection.clone(),
+                Some(scope),
+            )?);
+        }
+        if contexts.is_empty() {
+            return Err(live_boot_error());
+        }
+
+        let record = self
+            .graph
+            .ports
+            .uploads
+            .ledger
+            .load(handle)
+            .await
+            .map_err(|_| live_boot_error())?
+            .ok_or_else(live_boot_error)?;
+        let mut matches = contexts.into_iter().filter(|context| {
+            context.mount().component() == record.authority().component()
+                && context.scope() == record.authority().host_scope().scope()
+        });
+        let context = matches.next().ok_or_else(live_boot_error)?;
+        if matches.next().is_some() {
+            return Err(FrameworkError::internal(
+                "Live upload mount authority was ambiguous",
+            ));
+        }
+        Ok((context, record))
+    }
+
+    pub(crate) fn upload_policy(
+        &self,
+        component: &ComponentName,
+        field: &ModelField,
+    ) -> Result<UploadFieldPolicy, FrameworkError> {
+        self.graph
+            .engine_registry
+            .resolve(component)
+            .map_err(|_| live_boot_error())?
+            .metadata()
+            .fields()
+            .iter()
+            .find(|candidate| candidate.name() == field)
+            .and_then(|candidate| candidate.upload_policy())
+            .cloned()
+            .ok_or_else(live_boot_error)
+    }
+
+    pub(crate) async fn authorize_upload_create(
+        &self,
+        component: &ComponentName,
+        field: &ModelField,
+    ) -> Result<(), FrameworkError> {
+        self.graph
+            .ports
+            .uploads
+            .authorization_adapter
+            .authorize_registered(component, field, UploadControlKind::Create)
+            .await
+            .map_err(|_| live_boot_error())
+    }
+
+    pub(crate) fn derive_upload_handle_candidates(
+        &self,
+        scope: &ScopeFingerprint,
+        field: &ModelField,
+        idempotency_key: &UploadIdempotencyKey,
+    ) -> Result<Vec<UploadHandle>, FrameworkError> {
+        let current = crate::crypto::Crypt::current_key_bytes().ok_or_else(live_boot_error)?;
+        let previous = crate::crypto::Crypt::previous_key_bytes();
+        let previous = previous.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        super::upload::derive_upload_handle_candidates(
+            &current,
+            &previous,
+            scope,
+            field,
+            idempotency_key,
+        )
+    }
+
+    pub(crate) fn upload_now(&self) -> Result<UnixMillis, FrameworkError> {
+        self.graph.clock.now().map_err(|_| live_boot_error())
+    }
+
+    pub(crate) fn upload_limits(&self) -> UploadLimits {
+        self.graph.uploads.limits
+    }
+
+    pub(crate) fn upload_body_budget(&self) -> &super::upload::UploadBodyBudget {
+        &self.graph.uploads.body_budget
+    }
+
+    pub(crate) fn upload_operation_locks(&self) -> &super::upload::UploadOperationLocks {
+        self.graph.ports.uploads.operation_locks.as_ref()
+    }
+
+    pub(crate) fn upload_authority(&self) -> &UploadService {
+        self.graph.uploads.authority.as_ref()
+    }
+
+    pub(crate) fn upload_validation(&self) -> &UploadValidationService {
+        self.graph.uploads.validation.as_ref()
+    }
+
+    pub(super) fn upload_cleanup_for_test(&self) -> &UploadCleanupService {
+        self.graph.uploads.cleanup.as_ref()
+    }
+
+    pub(crate) fn ensure_upload_cleanup_runner(&self) -> Result<(), FrameworkError> {
+        self.graph.uploads.cleanup_runner.ensure_started()
+    }
+
+    pub(crate) fn wake_upload_cleanup(&self) -> Result<(), FrameworkError> {
+        self.graph.uploads.cleanup_runner.wake()
+    }
+
+    pub(crate) fn upload_ledger(&self) -> &dyn suprnova_live::upload::UploadLedger {
+        self.graph.ports.uploads.ledger.as_ref()
+    }
+
+    pub(crate) fn upload_provider(&self) -> &dyn suprnova_live::upload::UploadProvider {
+        self.graph.ports.uploads.provider.as_ref()
+    }
+
+    pub(crate) fn upload_provider_adapter(
+        &self,
+    ) -> &super::ports::upload_provider::SuprnovaUploadProviderRouter {
+        self.graph.ports.uploads.provider_adapter.as_ref()
+    }
+
+    pub(crate) fn upload_reverse_proxy(
+        &self,
+    ) -> &dyn suprnova_live::upload::ReverseProxyUploadProvider {
+        self.graph.ports.uploads.reverse_proxy.as_ref()
+    }
+
+    pub(crate) fn upload_reverse_proxy_adapter(
+        &self,
+    ) -> &super::ports::upload_provider::SuprnovaReverseProxyUploadProvider {
+        self.graph.ports.uploads.reverse_proxy_adapter.as_ref()
+    }
+
+    fn select_upload_mount(
+        &self,
+        component: &str,
+        slot: &str,
+        document_key: &str,
+    ) -> Result<UploadMountSelector, FrameworkError> {
+        let component = ComponentName::parse(component).map_err(|_| live_boot_error())?;
+        let slot = IslandSlot::parse(slot).map_err(|_| live_boot_error())?;
+        let document_key = DocumentMountKey::parse(document_key).map_err(|_| live_boot_error())?;
+        let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
+        let mut matches = selectors.iter().filter(|candidate| {
+            candidate.selection.component() == &component
+                && candidate.selection.slot() == &slot
+                && candidate.document_key == document_key
+        });
+        let selected = matches.next().ok_or_else(live_boot_error)?;
+        if matches.next().is_some() {
+            return Err(FrameworkError::internal(
+                "Live upload mount selection was ambiguous",
+            ));
+        }
+        Ok(selected.clone())
+    }
+
+    pub(super) fn select_upload_mount_for_test(
+        &self,
+        component: &str,
+        slot: &str,
+        document_key: &str,
+    ) -> Result<(), FrameworkError> {
+        self.select_upload_mount(component, slot, document_key)
+            .map(|_| ())
+    }
+
+    pub(super) fn inspect_upload_mount_authority_for_test(
+        &self,
+        component: &str,
+        slot: &str,
+        document_key: &str,
+        base_scope: ScopeFingerprint,
+    ) -> Result<UploadMountAuthorityTestFixture, FrameworkError> {
+        let selector = self.select_upload_mount(component, slot, document_key)?;
+        let binding = selector.scope_binding(base_scope);
+        let scope = super::upload::derive_mount_scope(&binding)?;
+        Ok(UploadMountAuthorityTestFixture { binding, scope })
+    }
+
+    pub(super) fn resolve_upload_mount_authority_for_test(
+        &self,
+        component: &str,
+        base_scope: ScopeFingerprint,
+        expected_scope: &ScopeFingerprint,
+    ) -> Result<UploadMountResolutionTestFixture, FrameworkError> {
+        let component = ComponentName::parse(component).map_err(|_| live_boot_error())?;
+        let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
+        let mut matches = selectors.iter().filter(|selector| {
+            selector.selection.component() == &component
+                && super::upload::derive_mount_scope(&selector.scope_binding(base_scope.clone()))
+                    .is_ok_and(|scope| &scope == expected_scope)
+        });
+        let selected = matches.next().ok_or_else(live_boot_error)?;
+        if matches.next().is_some() {
+            return Err(FrameworkError::internal(
+                "Live upload mount authority was ambiguous",
+            ));
+        }
+        Ok(UploadMountResolutionTestFixture {
+            slot: selected.selection.slot().clone(),
+            document_key: selected.document_key.clone(),
+        })
     }
 
     pub(crate) fn prepare_request(
@@ -753,18 +1250,29 @@ impl LiveRuntime {
     pub(crate) fn validate_request_context(
         &self,
         request: &Request,
-        current_route: RouteIdentity,
-        current_slot: IslandSlot,
+        _current_route: RouteIdentity,
+        _current_slot: IslandSlot,
         selection: MountSelection,
+    ) -> Result<TrustedLiveRequestContext, FrameworkError> {
+        self.validate_request_context_with_scope(request, selection, None)
+    }
+
+    fn validate_request_context_with_scope(
+        &self,
+        request: &Request,
+        selection: MountSelection,
+        scope_override: Option<ScopeFingerprint>,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
         self.finalize_mount_catalog()?;
         let now = self.graph.clock.now().map_err(|_| live_boot_error())?;
         let candidate = super::context::candidate(
             request,
-            current_route,
-            current_slot,
+            selection.route().clone(),
+            selection.slot().clone(),
             selection,
+            scope_override,
             Arc::clone(&self.graph.ports.authorization),
+            Arc::clone(&self.graph.ports.uploads.authorization),
         )?;
         let catalog = self.graph.mount_catalog.get().ok_or_else(live_boot_error)?;
         self.graph
@@ -783,6 +1291,7 @@ impl LiveRuntime {
 
     pub(crate) fn endpoint_service(
         &self,
+        upload_context: Option<TrustedLiveRequestContext>,
     ) -> (
         LiveEndpointService,
         Arc<super::ports::response::PreparedResponseCompletion>,
@@ -795,6 +1304,9 @@ impl LiveRuntime {
             self.graph.proposal_limits,
             self.graph.validation_engine,
             &self.graph.ports,
+            Arc::clone(&self.graph.clock),
+            Arc::clone(&self.graph.uploads.finalization),
+            upload_context,
             Arc::clone(&completion),
         );
         let mount_catalog = Arc::clone(
@@ -859,6 +1371,22 @@ impl LiveRuntime {
                 && Arc::strong_count(&self.graph.ports.validation) > 0
                 && Arc::strong_count(&self.graph.ports.reporter) > 0
                 && Arc::strong_count(&self.graph.ports.trace) > 0,
+            upload_ports: Arc::strong_count(&self.graph.ports.uploads.ledger) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.cleanup_ledger) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.quarantine) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.provider) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.reverse_proxy) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.direct) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.authorization) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.scanner) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.application_validation) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.evidence) > 0
+                && Arc::strong_count(&self.graph.ports.uploads.finalizer) > 0,
+            upload_services: Arc::strong_count(&self.graph.uploads.authority) > 0
+                && Arc::strong_count(&self.graph.uploads.validation) > 0
+                && Arc::strong_count(&self.graph.uploads.finalization) > 0
+                && Arc::strong_count(&self.graph.uploads.cleanup) > 0
+                && self.graph.uploads.limits.max_chunk_bytes() > 0,
             response_and_cancellation: Arc::strong_count(&self.graph.ports.response) > 0
                 && Arc::strong_count(&self.graph.ports.cancellation) > 0,
             mount_catalog: self.graph.mount_catalog.get().is_some(),
@@ -980,6 +1508,7 @@ fn assemble_runtime(
     );
     let context_validator = LiveRequestContextValidator::new(config.max_context_lifetime_ms())
         .map_err(|_| live_boot_error())?;
+    let uploads = assemble_upload_runtime(&ports, Arc::clone(&clock))?;
 
     Ok(LiveRuntime {
         graph: Arc::new(RuntimeGraph {
@@ -1001,8 +1530,11 @@ fn assemble_runtime(
             endpoint_config,
             context_validator,
             ports,
+            uploads,
             mount_builder: Mutex::new(Some(MountCatalogBuilder::new())),
             mount_catalog: OnceLock::new(),
+            upload_mount_builder: Mutex::new(Some(Vec::new())),
+            upload_mounts: OnceLock::new(),
         }),
     })
 }
@@ -1049,8 +1581,78 @@ pub(crate) struct RuntimeReadiness {
     pub(crate) execution: bool,
     pub(crate) context_validator: bool,
     pub(crate) host_ports: bool,
+    pub(crate) upload_ports: bool,
+    pub(crate) upload_services: bool,
     pub(crate) mount_catalog: bool,
     pub(crate) response_and_cancellation: bool,
+}
+
+fn assemble_upload_runtime(
+    ports: &super::ports::HostPorts,
+    clock: Arc<dyn Clock>,
+) -> Result<UploadRuntimeGraph, FrameworkError> {
+    let limits = UploadLimits::new(UploadLimitConfig::reference())
+        .map_err(|_| FrameworkError::internal("Live upload limits were rejected"))?;
+    let authority = Arc::new(
+        UploadService::new(
+            Arc::clone(&ports.uploads.ledger),
+            TransferGrantCodec::new(build_key_ring()?),
+            limits,
+        )
+        .map_err(|_| FrameworkError::internal("Live upload authority was rejected"))?,
+    );
+    let validation = Arc::new(
+        UploadValidationService::new(
+            Arc::clone(&authority),
+            Arc::clone(&ports.uploads.provider),
+            Arc::clone(&ports.uploads.evidence),
+            Some(Arc::clone(&ports.uploads.scanner)),
+            Some(Arc::clone(&ports.uploads.application_validation)),
+            limits,
+        )
+        .map_err(|_| FrameworkError::internal("Live upload validation was rejected"))?,
+    );
+    let finalization = Arc::new(UploadFinalizationService::new(
+        Arc::clone(&authority),
+        Arc::clone(&ports.uploads.evidence),
+        Arc::clone(&ports.uploads.finalizer),
+    ));
+    let retry = BoundedBackoff::new(Duration::from_secs(1), Duration::from_secs(3_600), 8)
+        .map_err(|_| FrameworkError::internal("Live upload cleanup retry was rejected"))?;
+    let batch_items = NonZeroUsize::new(limits.max_cleanup_batch())
+        .ok_or_else(|| FrameworkError::internal("Live upload cleanup batch was rejected"))?;
+    let batch_bytes = usize::try_from(limits.max_aggregate_bytes())
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| FrameworkError::internal("Live upload cleanup bytes were rejected"))?;
+    let cleanup_policy =
+        CleanupPolicy::new(batch_items, batch_bytes, Duration::from_secs(30), retry)
+            .map_err(|_| FrameworkError::internal("Live upload cleanup policy was rejected"))?;
+    let cleanup_permits = PermitPool::new(limits.max_concurrent_transfers())
+        .map_err(|_| FrameworkError::internal("Live upload cleanup permits were rejected"))?;
+    let cleanup = Arc::new(
+        UploadCleanupService::new(
+            Arc::clone(&ports.uploads.cleanup_ledger),
+            Arc::clone(&ports.uploads.provider),
+            Arc::clone(&ports.uploads.evidence),
+            clock,
+            cleanup_permits,
+            cleanup_policy,
+            limits,
+        )
+        .map_err(|_| FrameworkError::internal("Live upload cleanup was rejected"))?,
+    );
+
+    let cleanup_runner = UploadCleanupRunner::new(Arc::clone(&cleanup));
+    Ok(UploadRuntimeGraph {
+        limits,
+        body_budget: super::upload::UploadBodyBudget::new(limits.max_in_flight_bytes())?,
+        authority,
+        validation,
+        finalization,
+        cleanup,
+        cleanup_runner,
+    })
 }
 
 fn build_key_ring() -> Result<SnapshotKeyRing, FrameworkError> {

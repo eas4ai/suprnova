@@ -166,7 +166,7 @@ impl UploadLimitConfig {
             max_scan_ms: 120_000,
             max_storage_bytes: 1024 * 1024 * 1024,
             max_cleanup_batch: 256,
-            max_idempotency_outcomes: 64,
+            max_idempotency_outcomes: 4_102,
         }
     }
 }
@@ -208,7 +208,8 @@ impl UploadLimits {
             && config.max_file_bytes >= config.max_chunk_bytes as u64
             && config.max_aggregate_bytes >= config.max_file_bytes
             && config.max_in_flight_bytes >= config.max_chunk_bytes
-            && config.max_storage_bytes >= config.max_aggregate_bytes;
+            && config.max_storage_bytes >= config.max_aggregate_bytes
+            && config.max_idempotency_outcomes >= config.max_chunks_per_file.saturating_add(6);
         let finite = config.max_files_per_field <= 1_024
             && config.max_pending_per_scope <= 100_000
             && config.max_file_bytes <= TIB

@@ -86,6 +86,7 @@ export interface PutUploadChunkRequest extends UploadRequestBase {
   readonly grant: SecretTransferGrant;
   readonly handle: UploadHandle;
   readonly idempotencyKey: string;
+  readonly offset: number;
 }
 
 export interface CompleteUploadRequest extends UploadRequestBase {

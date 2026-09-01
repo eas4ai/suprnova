@@ -139,6 +139,13 @@ impl MetadataError {
         Self { kind }
     }
 
+    /// Creates the closed upload-metadata failure used by framework generated-code adapters.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn invalid_upload_metadata() -> Self {
+        Self::new(MetadataErrorKind::InvalidUploadMetadata)
+    }
+
     /// Returns the closed construction failure.
     #[must_use]
     pub const fn kind(self) -> MetadataErrorKind {

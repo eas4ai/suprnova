@@ -191,6 +191,8 @@ export function validateUploadTransportRequest(request: UploadTransportRequest):
           !Number.isSafeInteger(request.chunkIndex) ||
           request.chunkIndex < 0 ||
           request.chunkIndex > MAX_U32 ||
+          !Number.isSafeInteger(request.offset) ||
+          request.offset < 0 ||
           request.bytes.byteLength < 1
         ) {
           fail("invalid_field");

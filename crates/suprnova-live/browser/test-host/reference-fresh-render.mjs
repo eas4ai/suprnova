@@ -41,7 +41,7 @@ async function pauseFirstChunk(handle, uploadRevision) {
 async function uploadFetch(input, init = {}) {
   const source = input instanceof Request ? input.url : String(input);
   const url = new URL(source, document.baseURI);
-  if (url.origin !== window.location.origin || url.pathname !== "/__live/upload") {
+  if (url.origin !== window.location.origin || url.pathname !== "/__live/v1/upload") {
     return originalFetch(input, init);
   }
   const headers = new Headers(init.headers);

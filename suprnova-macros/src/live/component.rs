@@ -115,6 +115,15 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
                 )?
             };
         }
+        if let Some(upload) = field_args.upload {
+            let policy = upload.policy;
+            metadata = quote! {
+                ::suprnova::live::__private::upload::attach_policy(
+                    #metadata,
+                    #policy(),
+                )?
+            };
+        }
         generated_fields.push((name.clone(), metadata));
         runtime_fields.push(RuntimeField {
             ident: ident.clone(),

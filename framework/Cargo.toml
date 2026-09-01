@@ -360,6 +360,7 @@ vector-pinecone = []
 
 [dev-dependencies]
 secrecy = "0.10"
+suprnova-live-test-support = { path = "../crates/suprnova-live/crates/suprnova-live-test-support" }
 # Smoke test for the `opendal::layers::PrometheusClientLayer` feature.
 # Pinned to the same line opendal-layer-prometheus-client 0.58 builds
 # against - different majors of `prometheus-client` would fracture the

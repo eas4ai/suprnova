@@ -40,6 +40,7 @@ pub struct LiveMount<C> {
     route: RouteIdentity,
     slot: IslandSlot,
     document_key: DocumentMountKey,
+    build: BuildId,
     expected: ExpectedSeedV1,
     component: suprnova_live::identity::ComponentName,
     contract: suprnova_live::identity::ContentDigest,
@@ -55,6 +56,7 @@ impl<C> Clone for LiveMount<C> {
             route: self.route.clone(),
             slot: self.slot.clone(),
             document_key: self.document_key.clone(),
+            build: self.build.clone(),
             expected: self.expected.clone(),
             component: self.component.clone(),
             contract: self.contract.clone(),
@@ -126,7 +128,7 @@ impl<C: ComponentContract> LiveMount<C> {
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
         let expected = ExpectedSeedV1::new(
             snapshot_contract,
-            build,
+            build.clone(),
             route.clone(),
             slot.clone(),
             schemas,
@@ -136,6 +138,7 @@ impl<C: ComponentContract> LiveMount<C> {
             route,
             slot,
             document_key,
+            build,
             expected,
             component,
             contract,
@@ -198,10 +201,20 @@ impl Router {
             &mount.route_pattern,
             mount.route_policy(),
         )?;
-        self.register_live_mount_entry(
+        let selection = MountSelection::new(
+            mount.route.clone(),
+            mount.slot.clone(),
+            mount.component.clone(),
+            mount.contract.clone(),
+            mount.protocol,
+        );
+        self.register_live_mount_entry(super::runtime::LiveMountRegistration::new(
             MountCatalogEntry::new(mount.expected.clone(), mount.scope_requirements())
                 .with_document_key(mount.document_key.clone()),
-        )?;
+            selection,
+            mount.document_key.clone(),
+            mount.build.clone(),
+        ))?;
         Ok(self)
     }
 }

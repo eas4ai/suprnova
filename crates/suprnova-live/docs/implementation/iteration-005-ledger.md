@@ -4,6 +4,64 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-01 -- Framework upload boundaries and application reacquisition
+
+Suprnova now registers the versioned `/__live/v1/upload` control/data endpoint
+and exposes an explicit router helper for authenticated application-owned
+reacquisition paths outside `/__live/`. Generated Live component metadata owns
+checked per-field upload policy, including count, declared and aggregate bytes,
+accepted media, and replacement behavior. The public `suprnova::live` facade
+exposes application configuration and typed policy/host contracts without
+leaking the internal engine crate.
+
+Host-owned adapters keep revisioned lifecycle persistence, bounded metadata,
+quarantine byte I/O, reverse-proxy transfer, constrained direct-provider
+instructions and reports, scanner and application validation, immutable
+evidence, finalization, and cleanup separate. The engine remains authoritative
+for handle identity, transfer grants, state transitions, ready proposals, and
+finalization semantics. Every request revalidates current mount and principal,
+session, tenant, component, field, and document scope; a per-handle operation
+lock serializes chunk, completion, cancellation, action, finalization, and
+cleanup races. Chunk bodies reserve the shared in-flight budget before
+buffering, carry an explicit authoritative offset, reject impossible permit
+requests, and preserve exact idempotent outcomes without writing bytes before
+revision acceptance.
+
+Action dispatch retains only signed ready-handle proposals, commits the Live
+outcome before durable finalization, and reconciles retryable finalizer failure
+without invoking the action again. Cleanup runs automatically and owns bounded
+retry/lease behavior. The browser and Rust host now agree on the versioned
+route, `queued` create state, chunk-response shape, and required offset header.
+The Rust reference host's ordinary-action fixture was also corrected to emit a
+typed base64url correlation identity and the normative v2 `invoke_action`
+operation; that correction turned seven shared-host regressions into a green
+26-case suite.
+
+Verification completed from the integration worktree:
+
+```bash
+rtk cargo test -p suprnova --test live_upload_routes --test live_upload_security --test live_upload_providers
+rtk cargo test -p suprnova-live --test upload_file_provider --test upload_service --test upload_direct_provider --test upload_protocol --test upload_state --test upload_validation --test upload_budget_contract --test upload_identity --test upload_finalization --test upload_cleanup --test upload_security --test upload_framework_budget_integrity
+rtk cargo test -p suprnova --test live_upload_policy
+rtk cargo test -p suprnova-macros --test live_ui
+rtk cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1
+(cd crates/suprnova-live/browser && rtk npm run test:unit -- tests/upload-*.test.ts)
+(cd crates/suprnova-live/browser && rtk npm run build)
+(cd crates/suprnova-live/browser && rtk npm run build:check)
+(cd crates/suprnova-live/browser && rtk npm run budget)
+(cd crates/suprnova-live/browser && rtk npm run budget:upload)
+(cd crates/suprnova-live/browser && rtk npx playwright test e2e/uploads.spec.ts --project=chromium)
+rtk cargo clippy -p suprnova -p suprnova-live -p suprnova-macros --all-targets --all-features
+```
+
+Those commands passed 22 framework route/security/provider cases, 98 engine
+upload cases, two policy cases, the macro UI suite, all 26 reference-host cases,
+134 browser upload unit cases, deterministic artifact checks, the existing
+artifact and upload budget gates, and the Chromium upload lifecycle. Clippy
+reported zero errors and retained the two previously reviewed
+`execution/service.rs` argument-count warnings; no blanket warning denial or
+new suppression was introduced.
+
 ## 2026-09-01 -- Exact-child delivery through the real endpoint
 
 Accepted protocol-v2 parent execution now derives changed-child transitions

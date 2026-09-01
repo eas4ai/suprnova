@@ -12,8 +12,9 @@ use suprnova_live::upload::{
     CleanupLedgerDisposition, ConditionalTransition, ConditionalUploadCreate,
     TransitionDisposition, TransitionOutcome, UploadAuthorizationDecision, UploadAuthorizationPort,
     UploadAuthorizationRequest, UploadCleanupLedger, UploadControlKind, UploadCreateCommand,
-    UploadError, UploadErrorKind, UploadFuture, UploadHandle, UploadLedger,
-    UploadLedgerCreateOutcome, UploadRecord, UploadState, UploadStateMachine, UploadTransition,
+    UploadError, UploadErrorKind, UploadFieldPolicy, UploadFuture, UploadHandle, UploadLedger,
+    UploadLedgerCreateOutcome, UploadRecord, UploadReplacementPolicy, UploadState,
+    UploadStateMachine, UploadTransition,
 };
 
 /// Mutable current upload-authorization control with deterministic observations.
@@ -85,6 +86,9 @@ impl UploadAuthorizationPort for ControlledUploadAuthorization {
 struct StoredUpload {
     record: UploadRecord,
     create_key: suprnova_live::upload::UploadIdempotencyKey,
+    declared_bytes: u64,
+    policy: Option<UploadFieldPolicy>,
+    creation_sequence: u64,
     machine: UploadStateMachine,
     transition_keys: HashSet<suprnova_live::upload::UploadIdempotencyKey>,
     cleanup: StoredCleanup,
@@ -117,6 +121,7 @@ struct MemoryUploadState {
     creations: Vec<CreationEvent>,
     cleanup_schedule: BTreeMap<UnixMillis, BTreeSet<UploadHandle>>,
     last_cleanup_examined: usize,
+    next_creation_sequence: u64,
 }
 
 impl MemoryUploadState {
@@ -239,6 +244,9 @@ impl MemoryUploadLedger {
             StoredUpload {
                 record,
                 create_key: suprnova_live::upload::UploadIdempotencyKey::parse("seeded")?,
+                declared_bytes: 0,
+                policy: None,
+                creation_sequence: 0,
                 machine,
                 transition_keys: HashSet::new(),
                 cleanup: StoredCleanup::default(),
@@ -335,7 +343,9 @@ impl UploadLedger for MemoryUploadLedger {
             if let Some(existing) = state.records.get(request.record().authority().handle()) {
                 let exact = existing.create_key == *request.idempotency_key()
                     && existing.record.authority() == request.record().authority()
-                    && existing.record.expires_at() == request.record().expires_at();
+                    && existing.record.expires_at() == request.record().expires_at()
+                    && existing.declared_bytes == request.declared_bytes()
+                    && existing.policy.as_ref() == Some(request.policy());
                 return if exact {
                     Ok(UploadLedgerCreateOutcome::new(
                         ConditionalUploadCreate::ExistingOutcome,
@@ -368,21 +378,10 @@ impl UploadLedger for MemoryUploadLedger {
                 return Err(UploadError::new(UploadErrorKind::CreationRateExceeded));
             }
 
-            let pending_count = state
+            let mut field_active = state
                 .records
-                .values()
-                .filter(|existing| {
-                    !existing.record.state().is_terminal()
-                        && existing.record.authority().host_scope() == scope
-                })
-                .count();
-            if pending_count >= request.limits().max_pending_per_scope() {
-                return Err(UploadError::new(UploadErrorKind::PendingLimitExceeded));
-            }
-            let field_count = state
-                .records
-                .values()
-                .filter(|existing| {
+                .iter()
+                .filter(|(_, existing)| {
                     !existing.record.state().is_terminal()
                         && existing.record.authority().host_scope() == scope
                         && existing.record.authority().component()
@@ -390,9 +389,74 @@ impl UploadLedger for MemoryUploadLedger {
                         && existing.record.authority().field()
                             == request.record().authority().field()
                 })
-                .count();
-            if field_count >= request.limits().max_files_per_field() {
+                .map(|(handle, existing)| (existing.creation_sequence, handle.clone()))
+                .collect::<Vec<_>>();
+            field_active.sort_unstable_by_key(|(sequence, _)| *sequence);
+            let retire_count = field_active
+                .len()
+                .saturating_add(1)
+                .saturating_sub(request.policy().maximum_files());
+            let retiring = if retire_count == 0 {
+                Vec::new()
+            } else if request.policy().replacement() == UploadReplacementPolicy::RetirePrevious {
+                field_active
+                    .into_iter()
+                    .take(retire_count)
+                    .map(|(_, handle)| handle)
+                    .collect::<Vec<_>>()
+            } else {
                 return Err(UploadError::new(UploadErrorKind::FileCountExceeded));
+            };
+            let retiring = retiring.into_iter().collect::<HashSet<_>>();
+            let pending_count = state
+                .records
+                .iter()
+                .filter(|(handle, existing)| {
+                    !existing.record.state().is_terminal()
+                        && existing.record.authority().host_scope() == scope
+                        && !retiring.contains(*handle)
+                })
+                .count();
+            if pending_count >= request.limits().max_pending_per_scope() {
+                return Err(UploadError::new(UploadErrorKind::PendingLimitExceeded));
+            }
+            state
+                .records
+                .iter()
+                .filter(|(handle, existing)| {
+                    !existing.record.state().is_terminal()
+                        && existing.record.authority().host_scope() == scope
+                        && !retiring.contains(*handle)
+                })
+                .try_fold(request.declared_bytes(), |total, (_, existing)| {
+                    total.checked_add(existing.declared_bytes)
+                })
+                .filter(|total| *total <= request.limits().max_aggregate_bytes())
+                .ok_or_else(|| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+            state
+                .records
+                .iter()
+                .filter(|(handle, existing)| {
+                    !existing.record.state().is_terminal() && !retiring.contains(*handle)
+                })
+                .try_fold(request.declared_bytes(), |total, (_, existing)| {
+                    total.checked_add(existing.declared_bytes)
+                })
+                .filter(|total| *total <= request.limits().max_storage_bytes())
+                .ok_or_else(|| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+
+            for retiring_handle in &retiring {
+                let stored = state
+                    .records
+                    .get_mut(retiring_handle)
+                    .ok_or_else(|| UploadError::new(UploadErrorKind::LedgerUnavailable))?;
+                let expired = stored
+                    .machine
+                    .expire_for_cleanup(stored.record.revision())?;
+                stored.record = stored.record.with_outcome(expired)?;
+            }
+            for retiring_handle in retiring {
+                state.schedule_cleanup(&retiring_handle, request.admitted_at());
             }
 
             let record = request.record().clone();
@@ -402,12 +466,17 @@ impl UploadLedger for MemoryUploadLedger {
                 admitted_at: request.admitted_at(),
             });
             let handle = record.authority().handle().clone();
+            let creation_sequence = state.next_creation_sequence;
+            state.next_creation_sequence = state.next_creation_sequence.saturating_add(1);
             let cleanup_at = cleanup_deadline(&record, record.created_at());
             state.records.insert(
                 handle.clone(),
                 StoredUpload {
                     record: record.clone(),
                     create_key: request.idempotency_key().clone(),
+                    declared_bytes: request.declared_bytes(),
+                    policy: Some(request.policy().clone()),
+                    creation_sequence,
                     machine,
                     transition_keys: HashSet::new(),
                     cleanup: StoredCleanup::default(),

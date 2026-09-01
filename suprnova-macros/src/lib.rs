@@ -52,6 +52,7 @@ mod workflow_step;
         secret,
         transient,
         url,
+        upload,
         mount,
         action,
         computed,

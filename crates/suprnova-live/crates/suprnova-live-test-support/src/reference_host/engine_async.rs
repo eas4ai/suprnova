@@ -564,19 +564,22 @@ impl ReferenceFreshRender {
         idempotency[15] = sequence.to_le_bytes()[0].wrapping_add(1).max(1);
         let idempotency = suprnova_live::identity::IdempotencyKey::from_bytes(&idempotency)
             .map_err(|_| "ordinary action idempotency")?;
-        let correlation = format!("ordinary-action-{sequence}");
+        let mut correlation = [0x92; 16];
+        correlation[15] = sequence.to_le_bytes()[0].wrapping_add(1).max(1);
+        let correlation = suprnova_live::identity::CorrelationId::from_bytes(&correlation)
+            .map_err(|_| "ordinary action correlation")?;
         let body = serde_json::to_vec(&json!({
             "base_revision": current.body().revision().get().to_string(),
             "child_parameters": null,
             "component": engine_metadata().identity().as_str(),
-            "correlation_id": correlation,
+            "correlation_id": correlation.to_base64url(),
             "extensions": { "x_suprnova_live_document_key_v1": "harness-root" },
             "idempotency_key": idempotency.to_base64url(),
             "model_proposals": {},
             "operations": [{
                 "arguments": {},
                 "name": "increment",
-                "kind": "invoke"
+                "kind": "invoke_action"
             }],
             "protocol_version": 2,
             "runtime_contract_version": 2,

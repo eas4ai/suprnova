@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use suprnova_live::action::RawActionArguments;
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::ChildParameterEligibilityErrorKind;
+use suprnova_live::clock::Clock;
 use suprnova_live::endpoint::{
     AcceptedResponseSealer, EndpointErrorKind, EndpointFuture, EndpointKernel, EndpointKernelError,
     LiveEndpointRequest, LiveEndpointResponse, ParsedLiveMediaType, RequestCachePolicy,
@@ -21,14 +22,15 @@ use suprnova_live::endpoint::{
     dispatch_execution_result,
 };
 use suprnova_live::execution::{
-    ActionExecutionRequest, ExecutionService, ExecutionTracePort, InstancedActionRequest,
-    InstancedFreshRenderRequest, InstancedLifecycleOperation, InstancedLifecycleRequest,
-    PromotedActionRequest, TransactionPort,
+    ActionExecutionRequest, ExecutionResult, ExecutionService, ExecutionTracePort,
+    InstancedActionRequest, InstancedFreshRenderRequest, InstancedLifecycleOperation,
+    InstancedLifecycleRequest, PromotedActionRequest, TransactionPort,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BrowserOperationName, ContentDigest, IdempotencyKey, InstanceId,
     ModelField,
 };
+use suprnova_live::ledger::AcceptedOutcomeKind;
 use suprnova_live::limits::InputLimits;
 use suprnova_live::promotion::PromotionService;
 use suprnova_live::protocol::{
@@ -37,6 +39,10 @@ use suprnova_live::protocol::{
 };
 use suprnova_live::state::{
     ModelBindingSchema, ModelFieldBinding, ProposalBatch, ProposalLimits, RawModelProposal,
+};
+use suprnova_live::upload::{
+    FinalizeUploadRequest, ReadyUploadProposal, UploadErrorKind, UploadFieldPolicy,
+    UploadFinalizationService, UploadHandle, UploadIdempotencyKey,
 };
 use suprnova_live::validation::{BagPolicy, ValidationEngine, ValidationPort};
 
@@ -201,6 +207,10 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(selection) => selection,
         Err(error) => return error_response(error.kind()),
     };
+    let upload_context = match runtime.validate_upload_action_context(&request, &selection) {
+        Ok(context) => context,
+        Err(_) => return error_response(EndpointErrorKind::ContextInconsistent),
+    };
     let current_route = selection.route().clone();
     let current_slot = selection.slot().clone();
     let context =
@@ -218,7 +228,7 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(request) => request,
         Err(error) => return error_response(error.kind()),
     };
-    let (service, completion) = runtime.endpoint_service();
+    let (service, completion) = runtime.endpoint_service(upload_context);
     let response = service.handle(endpoint_request).await;
     let completed = response.status.is_success();
     let projected = project_response(response);
@@ -261,9 +271,36 @@ pub(crate) struct SuprnovaEndpointKernel {
     validation: Arc<dyn ValidationPort>,
     trace: Arc<dyn ExecutionTracePort>,
     response_intents: super::ports::response::RequestResponseIntentPort,
+    clock: Arc<dyn Clock>,
+    upload_finalization: Arc<UploadFinalizationService>,
+    upload_operation_locks: Arc<super::upload::UploadOperationLocks>,
+    upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
+}
+
+struct PreparedProposalBatch {
+    batch: ProposalBatch,
+    uploads: Vec<PreparedUploadFinalization>,
+    authorized_action: Option<AuthorizedAction>,
+    _operation_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+struct PreparedUploadFinalization {
+    field: ModelField,
+    policy: UploadFieldPolicy,
+    proposal: ReadyUploadProposal,
+}
+
+struct UploadProposalCandidate {
+    field: ModelField,
+    policy: UploadFieldPolicy,
+    handles: Vec<UploadHandle>,
 }
 
 impl SuprnovaEndpointKernel {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the endpoint kernel receives each immutable authority and request-bound response capability explicitly"
+    )]
     pub(crate) fn new(
         promotion: Arc<PromotionService>,
         execution: Arc<ExecutionService>,
@@ -271,6 +308,9 @@ impl SuprnovaEndpointKernel {
         proposal_limits: ProposalLimits,
         validation_engine: ValidationEngine,
         ports: &super::ports::HostPorts,
+        clock: Arc<dyn Clock>,
+        upload_finalization: Arc<UploadFinalizationService>,
+        upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
         completion: Arc<super::ports::response::PreparedResponseCompletion>,
     ) -> Self {
         Self {
@@ -283,6 +323,10 @@ impl SuprnovaEndpointKernel {
             validation: Arc::clone(&ports.validation),
             trace: Arc::clone(&ports.trace),
             response_intents: ports.response.bind(completion),
+            clock,
+            upload_finalization,
+            upload_operation_locks: Arc::clone(&ports.uploads.operation_locks),
+            upload_context,
         }
     }
 
@@ -356,8 +400,9 @@ impl SuprnovaEndpointKernel {
                 synchronized,
                 proposals,
             } => {
-                let proposal_batch =
-                    self.prepare_proposals(request.descriptor(), &synchronized, proposals)?;
+                let proposal_batch = self
+                    .prepare_proposals(request.descriptor(), Some(name), &synchronized, proposals)
+                    .await?;
                 let action = ActionExecutionRequest::new(
                     name,
                     RawActionArguments::new(CanonicalValue::Object(arguments.clone())),
@@ -371,10 +416,11 @@ impl SuprnovaEndpointKernel {
                 .with_response_intent_preparation(&self.response_intents)
                 .with_response_sealer(response_sealer, request.response_binding());
                 let action = match proposal_batch.as_ref() {
-                    Some(proposals) => action.with_proposals(proposals),
+                    Some(proposals) => action.with_proposals(&proposals.batch),
                     None => action,
                 };
-                self.execution
+                let result = self
+                    .execution
                     .execute_instanced(InstancedActionRequest::new(
                         request.descriptor(),
                         request.context(),
@@ -384,7 +430,16 @@ impl SuprnovaEndpointKernel {
                         digest,
                         action,
                     ))
-                    .await
+                    .await;
+                if let Some(proposals) = proposal_batch.as_ref() {
+                    self.finalize_upload_proposals(
+                        &result,
+                        proposals,
+                        idempotency_key(request.request()),
+                    )
+                    .await?;
+                }
+                result
             }
             RequestedOperation::FreshRender => {
                 self.execution
@@ -407,7 +462,8 @@ impl SuprnovaEndpointKernel {
                 proposals,
             } => {
                 let proposal_batch = self
-                    .prepare_proposals(request.descriptor(), &synchronized, proposals)?
+                    .prepare_proposals(request.descriptor(), None, &synchronized, proposals)
+                    .await?
                     .ok_or_else(EndpointKernelError::unavailable)?;
                 self.execution
                     .execute_lifecycle(
@@ -418,7 +474,7 @@ impl SuprnovaEndpointKernel {
                             snapshot,
                             idempotency_key(request.request()).clone(),
                             digest,
-                            InstancedLifecycleOperation::SyncModels(&proposal_batch),
+                            InstancedLifecycleOperation::SyncModels(&proposal_batch.batch),
                             self.trace.as_ref(),
                         )
                         .with_response_sealer(response_sealer, request.response_binding()),
@@ -496,8 +552,9 @@ impl SuprnovaEndpointKernel {
         else {
             return Err(EndpointKernelError::unavailable());
         };
-        let proposal_batch =
-            self.prepare_proposals(request.descriptor(), &synchronized, proposals)?;
+        let proposal_batch = self
+            .prepare_proposals(request.descriptor(), Some(name), &synchronized, proposals)
+            .await?;
         let action = ActionExecutionRequest::new(
             name,
             RawActionArguments::new(CanonicalValue::Object(arguments.clone())),
@@ -511,10 +568,10 @@ impl SuprnovaEndpointKernel {
         .with_response_intent_preparation(&self.response_intents)
         .with_response_sealer(response_sealer, request.response_binding());
         let action = match proposal_batch.as_ref() {
-            Some(proposals) => action.with_proposals(proposals),
+            Some(proposals) => action.with_proposals(&proposals.batch),
             None => action,
         };
-        Ok(self
+        let result = self
             .execution
             .execute_promoted(PromotedActionRequest::new(
                 request.descriptor(),
@@ -526,15 +583,21 @@ impl SuprnovaEndpointKernel {
                 digest,
                 action,
             ))
-            .await)
+            .await;
+        if let Some(proposals) = proposal_batch.as_ref() {
+            self.finalize_upload_proposals(&result, proposals, idempotency_key(request.request()))
+                .await?;
+        }
+        Ok(result)
     }
 
-    fn prepare_proposals(
+    async fn prepare_proposals(
         &self,
         descriptor: &suprnova_live::registry::ComponentDescriptor,
+        action: Option<&ActionName>,
         synchronized: &[&ModelField],
         proposals: &std::collections::BTreeMap<ModelField, CanonicalValue>,
-    ) -> Result<Option<ProposalBatch>, EndpointKernelError> {
+    ) -> Result<Option<PreparedProposalBatch>, EndpointKernelError> {
         if synchronized.is_empty() {
             return Ok(None);
         }
@@ -556,20 +619,216 @@ impl SuprnovaEndpointKernel {
                 .map_err(|_| EndpointKernelError::unavailable())?,
         )
         .map_err(|_| EndpointKernelError::unavailable())?;
-        let raw = synchronized
+        let mut raw = Vec::with_capacity(synchronized.len());
+        let mut upload_candidates = Vec::new();
+        for field in synchronized {
+            let value = proposals
+                .get(*field)
+                .cloned()
+                .ok_or_else(EndpointKernelError::unavailable)?;
+            if let Some(policy) = descriptor
+                .metadata()
+                .fields()
+                .iter()
+                .find(|candidate| candidate.name() == *field)
+                .and_then(|candidate| candidate.upload_policy())
+            {
+                let handles = upload_proposal_handles(&value, policy.maximum_files())?;
+                if !handles.is_empty() {
+                    if action != Some(policy.finalize_action()) {
+                        return Err(EndpointKernelError::context_inconsistent());
+                    }
+                    upload_candidates.push(UploadProposalCandidate {
+                        field: (*field).clone(),
+                        policy: policy.clone(),
+                        handles,
+                    });
+                }
+            }
+            raw.push(RawModelProposal::new(field.as_str(), value));
+        }
+        let batch = ProposalBatch::prepare(&schema, raw, &self.proposal_limits)
+            .map_err(|_| EndpointKernelError::unavailable())?;
+        if upload_candidates.is_empty() {
+            return Ok(Some(PreparedProposalBatch {
+                batch,
+                uploads: Vec::new(),
+                authorized_action: None,
+                _operation_guards: Vec::new(),
+            }));
+        }
+        let context = self
+            .upload_context
+            .as_ref()
+            .ok_or_else(EndpointKernelError::context_inconsistent)?;
+        let action = action.expect("upload candidates require the declared finalize action");
+        let mut ordered_handles = upload_candidates
             .iter()
-            .map(|field| {
-                proposals
-                    .get(*field)
-                    .cloned()
-                    .map(|value| RawModelProposal::new(field.as_str(), value))
-                    .ok_or_else(EndpointKernelError::unavailable)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        ProposalBatch::prepare(&schema, raw, &self.proposal_limits)
-            .map(Some)
-            .map_err(|_| EndpointKernelError::unavailable())
+            .flat_map(|candidate| candidate.handles.iter().cloned())
+            .collect::<Vec<_>>();
+        ordered_handles.sort_unstable_by_key(ToString::to_string);
+        if ordered_handles.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(EndpointKernelError::context_inconsistent());
+        }
+        let mut operation_guards = Vec::with_capacity(ordered_handles.len());
+        for handle in &ordered_handles {
+            operation_guards.push(self.upload_operation_locks.acquire(handle).await);
+        }
+        let authorized_action = descriptor
+            .actions()
+            .authorize(
+                descriptor.metadata().identity(),
+                context.capabilities(),
+                action,
+            )
+            .await
+            .map_err(|_| EndpointKernelError::context_inconsistent())?;
+        let now = self
+            .clock
+            .now()
+            .map_err(|_| EndpointKernelError::unavailable())?;
+        let mut uploads = Vec::with_capacity(ordered_handles.len());
+        for candidate in upload_candidates {
+            for handle in candidate.handles {
+                let proposal = self
+                    .upload_finalization
+                    .authorize_ready_proposal(
+                        context,
+                        candidate.field.clone(),
+                        handle,
+                        action,
+                        &candidate.policy,
+                        now,
+                    )
+                    .await
+                    .map_err(|_| EndpointKernelError::context_inconsistent())?;
+                uploads.push(PreparedUploadFinalization {
+                    field: candidate.field.clone(),
+                    policy: candidate.policy.clone(),
+                    proposal,
+                });
+            }
+        }
+        Ok(Some(PreparedProposalBatch {
+            batch,
+            uploads,
+            authorized_action: Some(authorized_action),
+            _operation_guards: operation_guards,
+        }))
     }
+
+    async fn finalize_upload_proposals(
+        &self,
+        result: &ExecutionResult,
+        proposals: &PreparedProposalBatch,
+        request_idempotency: &IdempotencyKey,
+    ) -> Result<(), EndpointKernelError> {
+        if proposals.uploads.is_empty() {
+            return Ok(());
+        }
+        let action_committed = match result {
+            ExecutionResult::Accepted(accepted) => accepted.validation().is_empty(),
+            ExecutionResult::RefreshRequired(refresh) => {
+                refresh.accepted_metadata().is_some_and(|accepted| {
+                    accepted.outcome().kind() != AcceptedOutcomeKind::Validation
+                })
+            }
+            ExecutionResult::InProgress { .. } | ExecutionResult::IdempotencyConflict => false,
+        };
+        if !action_committed {
+            return Ok(());
+        }
+        let context = self
+            .upload_context
+            .as_ref()
+            .ok_or_else(EndpointKernelError::context_inconsistent)?;
+        let action = proposals
+            .authorized_action
+            .as_ref()
+            .ok_or_else(EndpointKernelError::context_inconsistent)?;
+        let now = self
+            .clock
+            .now()
+            .map_err(|_| EndpointKernelError::unavailable())?;
+        for upload in &proposals.uploads {
+            let idempotency =
+                upload_finalize_idempotency(request_idempotency, upload.proposal.handle())?;
+            for attempt in 0..2 {
+                let result = self
+                    .upload_finalization
+                    .finalize(
+                        context,
+                        FinalizeUploadRequest::new(
+                            upload.proposal.handle().clone(),
+                            upload.field.clone(),
+                            upload.proposal.ready_revision(),
+                            idempotency.clone(),
+                            action.clone(),
+                            upload.policy.clone(),
+                        ),
+                        now,
+                    )
+                    .await;
+                match result {
+                    Ok(_) => break,
+                    Err(error)
+                        if attempt == 0
+                            && matches!(
+                                error.kind(),
+                                UploadErrorKind::ProviderUnavailable
+                                    | UploadErrorKind::LedgerUnavailable
+                                    | UploadErrorKind::ReconciliationRequired
+                            ) => {}
+                    Err(_) => return Err(EndpointKernelError::unavailable()),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn upload_finalize_idempotency(
+    request: &IdempotencyKey,
+    handle: &UploadHandle,
+) -> Result<UploadIdempotencyKey, EndpointKernelError> {
+    let mut digest = Sha256::new();
+    digest.update(b"suprnova-live/framework-upload-finalize/v1\0");
+    digest.update(request.as_bytes());
+    digest.update(handle.to_string().as_bytes());
+    UploadIdempotencyKey::parse(&format!("live-action:{}", hex::encode(digest.finalize())))
+        .map_err(|_| EndpointKernelError::unavailable())
+}
+
+fn upload_proposal_handles(
+    value: &CanonicalValue,
+    maximum_files: usize,
+) -> Result<Vec<UploadHandle>, EndpointKernelError> {
+    let values = match value {
+        CanonicalValue::Null => return Ok(Vec::new()),
+        CanonicalValue::String(value) if maximum_files == 1 => vec![value.as_str()],
+        CanonicalValue::Array(values)
+            if maximum_files > 1 && !values.is_empty() && values.len() <= maximum_files =>
+        {
+            values
+                .iter()
+                .map(|value| match value {
+                    CanonicalValue::String(value) => Ok(value.as_str()),
+                    _ => Err(EndpointKernelError::context_inconsistent()),
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        _ => return Err(EndpointKernelError::context_inconsistent()),
+    };
+    let mut handles = Vec::with_capacity(values.len());
+    for value in values {
+        let handle =
+            UploadHandle::parse(value).map_err(|_| EndpointKernelError::context_inconsistent())?;
+        if handles.contains(&handle) {
+            return Err(EndpointKernelError::context_inconsistent());
+        }
+        handles.push(handle);
+    }
+    Ok(handles)
 }
 
 impl EndpointKernel for SuprnovaEndpointKernel {

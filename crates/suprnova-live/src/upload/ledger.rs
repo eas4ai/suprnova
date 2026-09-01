@@ -120,6 +120,8 @@ pub struct UploadCreateCommand {
     idempotency_key: UploadIdempotencyKey,
     admitted_at: UnixMillis,
     limits: UploadLimits,
+    declared_bytes: u64,
+    policy: super::UploadFieldPolicy,
 }
 
 impl UploadCreateCommand {
@@ -130,12 +132,16 @@ impl UploadCreateCommand {
         idempotency_key: UploadIdempotencyKey,
         admitted_at: UnixMillis,
         limits: UploadLimits,
+        declared_bytes: u64,
+        policy: super::UploadFieldPolicy,
     ) -> Self {
         Self {
             record,
             idempotency_key,
             admitted_at,
             limits,
+            declared_bytes,
+            policy,
         }
     }
 
@@ -161,6 +167,18 @@ impl UploadCreateCommand {
     #[must_use]
     pub const fn limits(&self) -> UploadLimits {
         self.limits
+    }
+
+    /// Returns the declared bytes atomically reserved by this creation.
+    #[must_use]
+    pub const fn declared_bytes(&self) -> u64 {
+        self.declared_bytes
+    }
+
+    /// Returns the registered field policy enforced at atomic creation.
+    #[must_use]
+    pub const fn policy(&self) -> &super::UploadFieldPolicy {
+        &self.policy
     }
 }
 

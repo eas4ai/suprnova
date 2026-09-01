@@ -116,6 +116,20 @@ pub mod metadata {
 }
 
 #[doc(hidden)]
+pub mod upload {
+    pub fn attach_policy(
+        field: suprnova_live::metadata::FieldMetadata,
+        policy: crate::live::UploadPolicy,
+    ) -> Result<suprnova_live::metadata::FieldMetadata, suprnova_live::metadata::MetadataError>
+    {
+        let policy = policy
+            .into_engine()
+            .map_err(|()| suprnova_live::metadata::MetadataError::invalid_upload_metadata())?;
+        field.with_upload_policy(policy)
+    }
+}
+
+#[doc(hidden)]
 pub mod registry {
     pub use suprnova_live::registry::ComponentDescriptor;
 }

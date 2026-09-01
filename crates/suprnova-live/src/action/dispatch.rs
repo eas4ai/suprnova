@@ -92,6 +92,7 @@ pub trait ActionAuthorizationPort: Send + Sync {
 }
 
 /// Opaque proof that this invocation satisfied its registered authorization policy.
+#[derive(Clone)]
 pub struct AuthorizedAction {
     component: ComponentName,
     action: ActionName,

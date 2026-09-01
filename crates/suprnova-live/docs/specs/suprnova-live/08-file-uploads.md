@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -102,7 +102,7 @@ randomness, and the optional application reacquisition port are injected before
 runtime boot through `configureUploads`; `resumeUpload` is the supported
 document/island-scoped explicit reacquisition entry rather than a second feature
 registration. The
-reference fetch adapter uses the fixed reserved `/__live/upload` endpoint and
+reference fetch adapter uses the fixed reserved `/__live/v1/upload` endpoint and
 places a transfer grant only in the `Authorization` header, never in the URL,
 history, diagnostics, or model proposal. It reads upload control responses
 through a 16 KiB bounded stream rather than an unbounded `response.json()`.
@@ -301,6 +301,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Integrated upload control and reverse-proxy data transfer through
+  the fixed versioned `/__live/v1/upload` route while keeping reacquisition an
+  explicitly registered authenticated application route outside `/__live/`.
+  Current middleware facts and application authorization gate every operation;
+  bounded per-handle serialization covers transfer, cancellation, cleanup, and
+  finalization; body-memory permits are acquired before buffering; and configured
+  direct providers retain the same signed authority, revision, validation,
+  cancellation, expiry, and cleanup state machine as the daemon-free provider.
 - 2026-08-25 -- Closed the upload security gate with bounded arbitrary-byte
   protocol, lifecycle-sequence, and capped media-header fuzz targets. Browser
   conformance now keeps a live grant sentinel absent from rendered HTML,

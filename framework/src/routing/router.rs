@@ -598,7 +598,7 @@ pub struct Router {
     /// Framework-owned metadata for routes that enter a Live trust boundary.
     live_routes: HashMap<(Method, String), crate::live::context::LiveRouteMetadata>,
     /// Startup declarations consumed into the immutable Live mount catalog.
-    live_mounts: Mutex<Option<Vec<suprnova_live::host::MountCatalogEntry>>>,
+    live_mounts: Mutex<Option<Vec<crate::live::LiveMountRegistration>>>,
     /// Every normalized application route pattern, independent of method.
     /// Live uses this startup-only ledger to reserve its namespace before
     /// mutating any method router.
@@ -703,7 +703,7 @@ impl Router {
 
     pub(crate) fn register_live_mount_entry(
         &mut self,
-        entry: suprnova_live::host::MountCatalogEntry,
+        registration: crate::live::LiveMountRegistration,
     ) -> Result<(), FrameworkError> {
         let declarations = self
             .live_mounts
@@ -715,13 +715,13 @@ impl Router {
                     "Live mount declarations are closed after server preparation",
                 )
             })?;
-        declarations.push(entry);
+        declarations.push(registration);
         Ok(())
     }
 
     pub(crate) fn take_live_mount_entries(
         &self,
-    ) -> Result<Vec<suprnova_live::host::MountCatalogEntry>, FrameworkError> {
+    ) -> Result<Vec<crate::live::LiveMountRegistration>, FrameworkError> {
         self.live_mounts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1902,6 +1902,28 @@ pub struct RouteBuilder {
 }
 
 impl RouteBuilder {
+    /// Attaches framework-owned Live metadata to the route just registered.
+    ///
+    /// This remains crate-private so application code cannot manufacture an
+    /// arbitrary Live attestation boundary. Callers must use a dedicated
+    /// framework route helper that fixes the operation and policy.
+    pub(crate) fn with_live_route_metadata(
+        mut self,
+        metadata: crate::live::context::LiveRouteMetadata,
+    ) -> Result<Self, FrameworkError> {
+        if pattern_overlaps_live_namespace(&self.last_path) {
+            return Err(FrameworkError::internal(
+                "An application-owned Live route cannot use the reserved /__live namespace",
+            ));
+        }
+        self.router.register_live_route_metadata(
+            self.last_method.clone(),
+            &self.last_path,
+            metadata,
+        )?;
+        Ok(self)
+    }
+
     /// Name the most recently registered route.
     ///
     /// # Panics

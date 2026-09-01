@@ -5,13 +5,14 @@ mod component_support;
 use std::sync::Arc;
 
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
-use suprnova_live::identity::{KeyId, ModelField, UnixMillis};
+use suprnova_live::identity::{ActionName, KeyId, ModelField, UnixMillis};
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::upload::{
     ConditionalUploadCreate, TransferGrant, TransferGrantCodec, TransferGrantRequest,
     TransferGrantScope, TransitionDisposition, UploadAuthorizationDecision, UploadControlKind,
-    UploadCreationRequest, UploadErrorKind, UploadHandle, UploadIdempotencyKey, UploadLedger,
-    UploadRecord, UploadRevision, UploadService, UploadState, UploadTransition,
+    UploadCreationRequest, UploadErrorKind, UploadFieldPolicy, UploadHandle, UploadIdempotencyKey,
+    UploadLedger, UploadMediaType, UploadReacquireRequest, UploadRecord, UploadReplacementPolicy,
+    UploadRevision, UploadScanPolicy, UploadService, UploadState, UploadTransition,
     UploadTransitionAdmission, UploadTransitionRequest,
 };
 use suprnova_live_test_support::{ControlledUploadAuthorization, MemoryUploadLedger};
@@ -51,6 +52,19 @@ fn codec() -> TransferGrantCodec {
 
 fn limits() -> UploadLimits {
     UploadLimits::new(UploadLimitConfig::reference()).expect("reference limits")
+}
+
+fn policy() -> UploadFieldPolicy {
+    UploadFieldPolicy::new(
+        3,
+        1_024,
+        UploadReplacementPolicy::PreservePrevious,
+        vec![UploadMediaType::Png],
+        None,
+        UploadScanPolicy::Disabled,
+        ActionName::parse("finalize_upload").expect("fixture action"),
+    )
+    .expect("fixture upload policy")
 }
 
 fn scope(
@@ -293,6 +307,116 @@ async fn current_authorization_is_rechecked_at_every_control_boundary() {
 }
 
 #[tokio::test]
+async fn reacquisition_reauthorizes_resumable_state_and_issues_a_fresh_bounded_grant() {
+    let authorization = Arc::new(ControlledUploadAuthorization::new());
+    let context = trusted_context_with_upload_authorization(authorization.clone());
+    let authority = scope(&context, handle(HANDLE));
+    let ledger = Arc::new(MemoryUploadLedger::new(limits()).expect("ledger"));
+    ledger
+        .seed(record(authority.clone(), UploadState::Transferring, 7))
+        .expect("seed record");
+    let service = UploadService::new(ledger, codec(), limits()).expect("service");
+
+    let outcome = service
+        .reacquire(
+            &context,
+            UploadReacquireRequest::new(
+                authority.handle().clone(),
+                field(),
+                UnixMillis::new(1_500),
+            ),
+            UnixMillis::new(1_001),
+        )
+        .await
+        .expect("reacquire resumable upload");
+
+    assert_eq!(outcome.record().state(), UploadState::Transferring);
+    assert_eq!(outcome.record().revision(), UploadRevision::new(7));
+    codec()
+        .verify(outcome.grant(), &authority, UnixMillis::new(1_002))
+        .expect("fresh grant remains bound to exact upload authority");
+    assert_eq!(authorization.call_count(), 1);
+    assert_eq!(
+        authorization.last_control(),
+        Some(UploadControlKind::Reacquire)
+    );
+}
+
+#[tokio::test]
+async fn reacquisition_rejects_non_resumable_state_and_expiry_beyond_upload_authority() {
+    let authorization = Arc::new(ControlledUploadAuthorization::new());
+    let context = trusted_context_with_upload_authorization(authorization);
+    let authority = scope(&context, handle(HANDLE));
+    let ledger = Arc::new(MemoryUploadLedger::new(limits()).expect("ledger"));
+    ledger
+        .seed(record(authority.clone(), UploadState::Ready, 7))
+        .expect("seed record");
+    let service = UploadService::new(ledger.clone(), codec(), limits()).expect("service");
+
+    let terminal = service
+        .reacquire(
+            &context,
+            UploadReacquireRequest::new(
+                authority.handle().clone(),
+                field(),
+                UnixMillis::new(1_500),
+            ),
+            UnixMillis::new(1_001),
+        )
+        .await
+        .expect_err("ready uploads are not resumable transfers");
+    assert_eq!(terminal.kind(), UploadErrorKind::InvalidTransition);
+
+    let resumable_ledger = Arc::new(MemoryUploadLedger::new(limits()).expect("resumable ledger"));
+    resumable_ledger
+        .seed(record(authority.clone(), UploadState::Transferring, 8))
+        .expect("seed resumable record");
+    let resumable_service =
+        UploadService::new(resumable_ledger, codec(), limits()).expect("resumable service");
+    let overlong = resumable_service
+        .reacquire(
+            &context,
+            UploadReacquireRequest::new(
+                authority.handle().clone(),
+                field(),
+                UnixMillis::new(1_901),
+            ),
+            UnixMillis::new(1_002),
+        )
+        .await
+        .expect_err("grant cannot outlive upload authority");
+    assert_eq!(overlong.kind(), UploadErrorKind::GrantExpired);
+
+    let cross_field = resumable_service
+        .reacquire(
+            &context,
+            UploadReacquireRequest::new(
+                authority.handle().clone(),
+                ModelField::parse("another_upload").expect("different upload field"),
+                UnixMillis::new(1_500),
+            ),
+            UnixMillis::new(1_003),
+        )
+        .await
+        .expect_err("a handle cannot be rebound to another model field");
+    assert_eq!(cross_field.kind(), UploadErrorKind::ScopeMismatch);
+
+    let expired = resumable_service
+        .reacquire(
+            &context,
+            UploadReacquireRequest::new(
+                authority.handle().clone(),
+                field(),
+                UnixMillis::new(1_901),
+            ),
+            UnixMillis::new(1_900),
+        )
+        .await
+        .expect_err("temporary upload authority expired independently");
+    assert_eq!(expired.kind(), UploadErrorKind::UploadExpired);
+}
+
+#[tokio::test]
 async fn grant_scope_failure_precedes_current_authorization_and_ledger_access() {
     let authorization = Arc::new(ControlledUploadAuthorization::new());
     let context = trusted_context_with_upload_authorization(authorization.clone());
@@ -366,6 +490,8 @@ async fn creation_rate_is_bounded_and_exact_retries_do_not_consume_capacity() {
         field(),
         idempotency("create-one"),
         UnixMillis::new(1_900),
+        64,
+        policy(),
     );
     let replay = first.clone();
     let second = UploadCreationRequest::new(
@@ -373,12 +499,16 @@ async fn creation_rate_is_bounded_and_exact_retries_do_not_consume_capacity() {
         field(),
         idempotency("create-two"),
         UnixMillis::new(1_900),
+        64,
+        policy(),
     );
     let third = UploadCreationRequest::new(
         handle(THIRD_HANDLE),
         field(),
         idempotency("create-three"),
         UnixMillis::new(1_900),
+        64,
+        policy(),
     );
 
     let created = service

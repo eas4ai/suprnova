@@ -9,6 +9,7 @@ use super::context::{LiveRouteMetadata, LiveRouteSecurityPolicy};
 
 pub(crate) const LIVE_ROUTE_VERSION: u16 = 1;
 pub(crate) const LIVE_UPDATE_PATH: &str = "/__live/v1/action";
+pub(crate) const LIVE_UPLOAD_PATH: &str = "/__live/v1/upload";
 const LIVE_HTTP_METHODS: [Method; 7] = [
     Method::GET,
     Method::POST,
@@ -43,11 +44,21 @@ fn install(mut router: Router) -> Result<Router, FrameworkError> {
             LiveRouteMetadata::new(LiveOperation::Action, strict_action_policy()),
         )?;
     }
+    router = router
+        .try_methods(&LIVE_HTTP_METHODS, LIVE_UPLOAD_PATH, super::upload::handle)?
+        .into();
+    for method in LIVE_HTTP_METHODS {
+        router.register_live_route_metadata(
+            method,
+            LIVE_UPLOAD_PATH,
+            LiveRouteMetadata::new(LiveOperation::Upload, strict_action_policy()),
+        )?;
+    }
     router.mark_live_installed(LIVE_ROUTE_VERSION);
     Ok(router)
 }
 
-const fn strict_action_policy() -> LiveRouteSecurityPolicy {
+pub(crate) const fn strict_action_policy() -> LiveRouteSecurityPolicy {
     LiveRouteSecurityPolicy {
         trusted_internal_origin: false,
         stateless_csrf: false,

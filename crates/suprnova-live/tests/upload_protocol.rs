@@ -150,7 +150,10 @@ fn upload_limits_cover_every_amplification_dimension_and_reject_unbounded_profil
     assert!(limits.max_scan_ms() > 0);
     assert!(limits.max_storage_bytes() >= limits.max_aggregate_bytes());
     assert!(limits.max_cleanup_batch() > 0);
-    assert!(limits.max_idempotency_outcomes() > 0);
+    assert!(
+        limits.max_idempotency_outcomes() >= limits.max_chunks_per_file().saturating_add(6),
+        "the reference profile must retain every chunk outcome plus the six lifecycle phases"
+    );
 
     let mut zero = config;
     zero.max_chunk_bytes = 0;
@@ -167,4 +170,9 @@ fn upload_limits_cover_every_amplification_dimension_and_reject_unbounded_profil
     let mut inconsistent = config;
     inconsistent.max_chunk_bytes = inconsistent.max_file_bytes as usize + 1;
     assert!(UploadLimits::new(inconsistent).is_err());
+
+    let mut insufficient_outcomes = config;
+    insufficient_outcomes.max_idempotency_outcomes =
+        insufficient_outcomes.max_chunks_per_file.saturating_add(5);
+    assert!(UploadLimits::new(insufficient_outcomes).is_err());
 }

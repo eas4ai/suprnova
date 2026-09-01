@@ -11,9 +11,9 @@ use crate::resource::{CancellationFlag, PermitPool, ResourceBounds, ResourceOwne
 use super::{
     ConditionalTransition, ConditionalUploadCreate, TransferGrant, TransferGrantCodec,
     TransferGrantRequest, TransferGrantScope, TransitionOutcome, UploadCreateCommand, UploadError,
-    UploadErrorKind, UploadFuture, UploadHandle, UploadIdempotencyKey, UploadLedger,
-    UploadLedgerCreateOutcome, UploadRecord, UploadRevision, UploadState, UploadTransition,
-    UploadTransitionRequest,
+    UploadErrorKind, UploadFieldPolicy, UploadFuture, UploadHandle, UploadIdempotencyKey,
+    UploadLedger, UploadLedgerCreateOutcome, UploadRecord, UploadRevision, UploadState,
+    UploadTransition, UploadTransitionRequest,
 };
 
 const UPLOAD_PROTOCOL_V1: u16 = 1;
@@ -25,6 +25,8 @@ pub enum UploadControlKind {
     Create,
     /// Reads current state without mutation.
     Status,
+    /// Reauthorizes one resumable transfer through an application-owned route.
+    Reacquire,
     /// Admits a created upload to the resource queue.
     Queue,
     /// Starts transfer work.
@@ -153,6 +155,8 @@ pub struct UploadCreationRequest {
     field: ModelField,
     idempotency_key: UploadIdempotencyKey,
     expires_at: UnixMillis,
+    declared_bytes: u64,
+    policy: UploadFieldPolicy,
 }
 
 impl UploadCreationRequest {
@@ -163,12 +167,16 @@ impl UploadCreationRequest {
         field: ModelField,
         idempotency_key: UploadIdempotencyKey,
         expires_at: UnixMillis,
+        declared_bytes: u64,
+        policy: UploadFieldPolicy,
     ) -> Self {
         Self {
             handle,
             field,
             idempotency_key,
             expires_at,
+            declared_bytes,
+            policy,
         }
     }
 
@@ -195,11 +203,49 @@ impl UploadCreationRequest {
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
     }
+
+    /// Returns the untrusted declared size already bounded by registered policy.
+    #[must_use]
+    pub const fn declared_bytes(&self) -> u64 {
+        self.declared_bytes
+    }
+
+    /// Returns the exact registered field policy enforced by atomic creation.
+    #[must_use]
+    pub const fn policy(&self) -> &UploadFieldPolicy {
+        &self.policy
+    }
 }
 
 impl fmt::Debug for UploadCreationRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<UploadCreationRequest:redacted>")
+    }
+}
+
+/// Trusted internal request to reacquire a short-lived transfer grant.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UploadReacquireRequest {
+    handle: UploadHandle,
+    field: ModelField,
+    expires_at: UnixMillis,
+}
+
+impl UploadReacquireRequest {
+    /// Groups the reauthorized upload identity, declared field, and grant expiry.
+    #[must_use]
+    pub const fn new(handle: UploadHandle, field: ModelField, expires_at: UnixMillis) -> Self {
+        Self {
+            handle,
+            field,
+            expires_at,
+        }
+    }
+}
+
+impl fmt::Debug for UploadReacquireRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadReacquireRequest:redacted>")
     }
 }
 
@@ -266,6 +312,32 @@ impl fmt::Debug for UploadCreateOutcome {
     }
 }
 
+/// Successful current reauthorization with a fresh secret transfer grant.
+pub struct UploadReacquireOutcome {
+    record: UploadRecord,
+    grant: TransferGrant,
+}
+
+impl UploadReacquireOutcome {
+    /// Returns the authoritative non-secret upload record.
+    #[must_use]
+    pub const fn record(&self) -> &UploadRecord {
+        &self.record
+    }
+
+    /// Returns the newly issued short-lived bearer capability.
+    #[must_use]
+    pub const fn grant(&self) -> &TransferGrant {
+        &self.grant
+    }
+}
+
+impl fmt::Debug for UploadReacquireOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<UploadReacquireOutcome:redacted>")
+    }
+}
+
 /// Conditional upload service over one host ledger and current-policy capability.
 pub struct UploadService {
     ledger: Arc<dyn UploadLedger>,
@@ -319,6 +391,13 @@ impl UploadService {
         {
             return Err(UploadError::new(UploadErrorKind::UploadExpired));
         }
+        if request.declared_bytes == 0
+            || request.declared_bytes > request.policy.maximum_file_bytes()
+            || request.declared_bytes > self.limits.max_file_bytes()
+            || request.policy.maximum_files() > self.limits.max_files_per_field()
+        {
+            return Err(UploadError::new(UploadErrorKind::InputTooLarge));
+        }
         self.require_active()?;
 
         let authority = self.authority(context, request.handle, request.field);
@@ -340,6 +419,8 @@ impl UploadService {
                 request.idempotency_key,
                 now,
                 self.limits,
+                request.declared_bytes,
+                request.policy,
             ))
             .await?;
         Ok(Self::creation_outcome(outcome, issued))
@@ -408,6 +489,59 @@ impl UploadService {
             return Err(UploadError::new(UploadErrorKind::UploadExpired));
         }
         Ok(record)
+    }
+
+    /// Reauthorizes one current resumable upload and issues a fresh bounded grant.
+    pub async fn reacquire(
+        &self,
+        context: &TrustedLiveRequestContext,
+        request: UploadReacquireRequest,
+        now: UnixMillis,
+    ) -> Result<UploadReacquireOutcome, UploadError> {
+        Self::require_current(context, now)?;
+        if request.expires_at <= now
+            || request.expires_at.get().saturating_sub(now.get()) > self.limits.max_age_ms()
+        {
+            return Err(UploadError::new(UploadErrorKind::GrantExpired));
+        }
+        let authority = self.authority(context, request.handle, request.field);
+        self.authorize_current(
+            context,
+            authority.handle(),
+            authority.field(),
+            UploadControlKind::Reacquire,
+            now,
+        )
+        .await?;
+        self.require_active()?;
+        let record = self
+            .ledger
+            .load(authority.handle())
+            .await?
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        if record.authority() != &authority {
+            return Err(UploadError::new(UploadErrorKind::ScopeMismatch));
+        }
+        if record.expires_at() <= now {
+            return Err(UploadError::new(UploadErrorKind::UploadExpired));
+        }
+        if request.expires_at > record.expires_at() {
+            return Err(UploadError::new(UploadErrorKind::GrantExpired));
+        }
+        if !matches!(
+            record.state(),
+            UploadState::Queued | UploadState::Transferring | UploadState::Verifying
+        ) {
+            return Err(UploadError::new(UploadErrorKind::InvalidTransition));
+        }
+        let issued = self.grants.issue(
+            TransferGrantRequest::new(authority, request.expires_at),
+            now,
+        )?;
+        Ok(UploadReacquireOutcome {
+            record,
+            grant: issued.grant().clone(),
+        })
     }
 
     pub(crate) async fn trusted_status(

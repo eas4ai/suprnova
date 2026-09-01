@@ -92,16 +92,18 @@ describe("bounded upload transfer", () => {
       grant: "secret-transfer-grant",
       handle: HANDLE,
       idempotencyKey: "chunk-1",
+      offset: 0,
       operation: "put_chunk",
       signal: new AbortController().signal,
     });
 
-    expect(calls[0]?.input).toBe("/__live/upload");
+    expect(calls[0]?.input).toBe("/__live/v1/upload");
     const requestInput = calls[0]?.input;
     if (typeof requestInput !== "string") throw new Error("expected string upload endpoint");
     expect(requestInput).not.toContain("secret-transfer-grant");
     const headers = new Headers(calls[0]?.init?.headers);
     expect(headers.get("Authorization")).toBe("SuprnovaUpload secret-transfer-grant");
+    expect(headers.get("X-Suprnova-Upload-Offset")).toBe("0");
     expect(calls[0]?.init?.body).toBeInstanceOf(ArrayBuffer);
   });
 

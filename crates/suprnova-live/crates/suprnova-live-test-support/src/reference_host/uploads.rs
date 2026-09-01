@@ -872,7 +872,7 @@ impl UploadRuntime {
         let field = ModelField::parse(&request.field)
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
         let client = ClientUploadMetadata::new(&request.filename, Some(&request.content_type)).ok();
-        let policy = reference_upload_policy(&request.filename, &request.content_type).ok();
+        let policy = reference_upload_policy(&request.filename, &request.content_type)?;
         let created = self
             .service
             .create(
@@ -882,6 +882,8 @@ impl UploadRuntime {
                     field.clone(),
                     idempotency(&format!("create-{}", &encoded[..12]))?,
                     UnixMillis::new(60_000),
+                    request.expected_bytes,
+                    policy.clone(),
                 ),
                 CREATED_AT,
             )
@@ -920,7 +922,7 @@ impl UploadRuntime {
             handle: handle.clone(),
             field,
             client,
-            policy,
+            policy: Some(policy),
             expected_bytes: request.expected_bytes,
             received_bytes: 0,
             next_part: 0,

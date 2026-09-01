@@ -36,6 +36,7 @@ interface PendingChunk {
   readonly checksum: string;
   readonly idempotencyKey: string;
   readonly index: number;
+  readonly offset: number;
 }
 
 export interface UploadTransferOptions {
@@ -448,6 +449,7 @@ export class UploadTransfer {
         checksum: sha256Hex(bytes),
         idempotencyKey: this.#nextKey(),
         index: this.#nextChunkIndex,
+        offset: this.#offset,
       });
       this.#changed();
     }
@@ -462,6 +464,7 @@ export class UploadTransfer {
         grant,
         handle,
         idempotencyKey: pending.idempotencyKey,
+        offset: pending.offset,
         operation: "put_chunk",
         signal: this.#abort.signal,
       }),

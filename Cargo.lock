@@ -7495,6 +7495,7 @@ dependencies = [
  "strum",
  "subtle",
  "suprnova-live",
+ "suprnova-live-test-support",
  "suprnova-macros",
  "suprnova-magnetar",
  "suprnova-web-push",

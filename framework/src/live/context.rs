@@ -10,6 +10,7 @@ use suprnova_live::host::{
     TenantFingerprint,
 };
 use suprnova_live::identity::{IslandSlot, RouteIdentity, ScopeFingerprint};
+use suprnova_live::upload::UploadAuthorizationPort;
 
 use crate::{FrameworkError, Request};
 use crate::{Middleware, Next, Response, async_trait};
@@ -173,7 +174,9 @@ pub(crate) fn candidate(
     current_route: RouteIdentity,
     current_slot: IslandSlot,
     selection: MountSelection,
+    scope_override: Option<ScopeFingerprint>,
     action_authorization: Arc<dyn ActionAuthorizationPort>,
+    upload_authorization: Arc<dyn UploadAuthorizationPort>,
 ) -> Result<LiveRequestContextCandidate, FrameworkError> {
     let identity = request.live_request_identity();
     let attestation = request.live_security_attestation();
@@ -205,14 +208,15 @@ pub(crate) fn candidate(
         .map(|bytes| TenantFingerprint::from_bytes(&bytes))
         .transpose()
         .map_err(|_| context_error())?;
-    let scope = aggregate_scope(
+    let scope = scope_override.unwrap_or(aggregate_scope(
         session_bytes.as_ref().map(<[u8; 32]>::as_slice),
         principal_bytes.as_ref().map(<[u8; 32]>::as_slice),
         tenant_bytes.as_ref().map(<[u8; 32]>::as_slice),
-    )?;
+    )?);
     let scope = HostScopeFacts::new(scope, session, principal, tenant);
-    let capabilities =
-        HostCapabilities::bound_to(scope.clone()).with_action_authorization(action_authorization);
+    let capabilities = HostCapabilities::bound_to(scope.clone())
+        .with_action_authorization(action_authorization)
+        .with_upload_authorization(upload_authorization);
 
     Ok(LiveRequestContextCandidate::new(
         current_route,
@@ -223,6 +227,22 @@ pub(crate) fn candidate(
         capabilities,
         expires_at,
     ))
+}
+
+pub(crate) fn request_scope(request: &Request) -> Result<ScopeFingerprint, FrameworkError> {
+    let identity = request.live_request_identity();
+    let attestation = request.live_security_attestation();
+    if !attestation.order_valid() {
+        return Err(context_error());
+    }
+    let session = identity_fingerprint(attestation, identity, SecurityCheck::Session)?;
+    let principal = identity_fingerprint(attestation, identity, SecurityCheck::Principal)?;
+    let tenant = identity_fingerprint(attestation, identity, SecurityCheck::Tenant)?;
+    aggregate_scope(
+        session.as_ref().map(<[u8; 32]>::as_slice),
+        principal.as_ref().map(<[u8; 32]>::as_slice),
+        tenant.as_ref().map(<[u8; 32]>::as_slice),
+    )
 }
 
 fn identity_fingerprint(

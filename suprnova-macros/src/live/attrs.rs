@@ -34,6 +34,12 @@ pub(crate) struct FieldArgs {
     pub(crate) kind: FieldKind,
     pub(crate) timing: Option<ModelTimingArgs>,
     pub(crate) url: Option<UrlArgs>,
+    pub(crate) upload: Option<UploadArgs>,
+}
+
+pub(crate) struct UploadArgs {
+    pub(crate) policy: Path,
+    pub(crate) span: Span,
 }
 
 #[derive(Clone, Copy)]
@@ -209,6 +215,7 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
     let mut kind = None;
     let mut timing = None;
     let mut url = None;
+    let mut upload = None;
 
     for attribute in attributes {
         let Some(name) = attribute
@@ -238,6 +245,15 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
             "url" => {
                 if url.replace(parse_url_args(attribute)?).is_some() {
                     return Err(syn::Error::new(attribute.span(), "duplicate #[url] helper"));
+                }
+                None
+            }
+            "upload" => {
+                if upload.replace(parse_upload_args(attribute)?).is_some() {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "duplicate #[upload] helper",
+                    ));
                 }
                 None
             }
@@ -284,7 +300,20 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
             "only ordinary, public, or model state can be URL-exposed",
         ));
     }
-    Ok(FieldArgs { kind, timing, url })
+    if let Some(upload) = &upload
+        && !matches!(kind, FieldKind::Model | FieldKind::Transient)
+    {
+        return Err(syn::Error::new(
+            upload.span,
+            "only model-backed state can declare an upload policy",
+        ));
+    }
+    Ok(FieldArgs {
+        kind,
+        timing,
+        url,
+        upload,
+    })
 }
 
 pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs> {
@@ -472,8 +501,45 @@ pub(crate) fn is_method_helper(name: &str) -> bool {
 pub(crate) fn is_field_helper(name: &str) -> bool {
     matches!(
         name,
-        "public" | "model" | "locked" | "server_only" | "session" | "secret" | "transient" | "url"
+        "public"
+            | "model"
+            | "locked"
+            | "server_only"
+            | "session"
+            | "secret"
+            | "transient"
+            | "url"
+            | "upload"
     )
+}
+
+fn parse_upload_args(attribute: &Attribute) -> syn::Result<UploadArgs> {
+    let mut policy = None;
+    match &attribute.meta {
+        syn::Meta::List(list) => list.parse_nested_meta(|meta| {
+            if meta.path.is_ident("policy") {
+                let parsed: Path = meta.value()?.parse()?;
+                return assign_once(&mut policy, parsed, meta.path.span(), "policy");
+            }
+            Err(meta.error("unknown upload helper"))
+        })?,
+        _ => {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "expected #[upload(policy = application::policy)]",
+            ));
+        }
+    }
+    let policy = policy.ok_or_else(|| {
+        syn::Error::new(
+            attribute.span(),
+            "upload policy helper requires `policy = path`",
+        )
+    })?;
+    Ok(UploadArgs {
+        policy,
+        span: attribute.span(),
+    })
 }
 
 fn parse_model_args(attribute: &Attribute) -> syn::Result<(FieldKind, ModelTimingArgs)> {

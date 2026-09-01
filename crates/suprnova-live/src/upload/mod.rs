@@ -26,7 +26,7 @@ pub use direct_provider::{
 pub use finalize::{
     DurableUpload, DurableUploadId, FailedFinalize, FinalizeDisposition, FinalizeFailureStage,
     FinalizeRequest, FinalizeToken, FinalizeUploadOutcome, FinalizeUploadRequest, PreparedFinalize,
-    UploadFinalizationService, UploadFinalizer,
+    ReadyUploadProposal, UploadFinalizationService, UploadFinalizer,
 };
 pub use identity::{
     IssuedTransferGrant, TransferGrant, TransferGrantCodec, TransferGrantRequest,
@@ -58,8 +58,8 @@ pub use quarantine::{
 };
 pub use service::{
     UploadAuthorizationDecision, UploadAuthorizationPort, UploadAuthorizationRequest,
-    UploadControlKind, UploadCreateOutcome, UploadCreationRequest, UploadService,
-    UploadTransitionAdmission,
+    UploadControlKind, UploadCreateOutcome, UploadCreationRequest, UploadReacquireOutcome,
+    UploadReacquireRequest, UploadService, UploadTransitionAdmission,
 };
 pub use state::{
     AcceptedChunk, TransitionDisposition, TransitionOutcome, UploadState, UploadStateMachine,

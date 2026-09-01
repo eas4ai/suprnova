@@ -29,7 +29,7 @@ import {
   type UploadHandle,
 } from "./types.js";
 
-const DEFAULT_UPLOAD_ENDPOINT = "/__live/upload";
+const DEFAULT_UPLOAD_ENDPOINT = "/__live/v1/upload";
 const DEFAULT_ACTIVE_UPLOADS = 4;
 const DEFAULT_MANAGER_BYTES = 256 * 1024;
 const MAX_UPLOAD_RESPONSE_BYTES = 16 * 1024;
@@ -172,6 +172,7 @@ export class FetchUploadTransport implements UploadTransport {
       headers.set("X-Suprnova-Upload-Chunk", String(request.chunkIndex));
       headers.set("X-Suprnova-Upload-Handle", request.handle);
       headers.set("X-Suprnova-Upload-Idempotency", request.idempotencyKey);
+      headers.set("X-Suprnova-Upload-Offset", String(request.offset));
       headers.set("X-Suprnova-Upload-Operation", request.operation);
       headers.set("X-Suprnova-Upload-Revision", request.expectedRevision);
       body = request.bytes;
