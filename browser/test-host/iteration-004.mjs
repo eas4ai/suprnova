@@ -716,7 +716,7 @@ class ReferenceWebSocketPort {
       if (value.kind !== "unsubscribed") deliverEnvelope(this, request, event.data);
     };
     this.socket.onerror = () => {
-      if (!this.closed) request.failed("transport_lost");
+      // `close` always follows `error` and carries the typed code and reason.
     };
     this.socket.onclose = (event) => {
       if (!this.closed) {

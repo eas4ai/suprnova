@@ -688,9 +688,9 @@ class BrowserWebSocketAdapter implements WebSocketPort {
       if (data === null) request.failed("protocol_invalid");
       else if (!this.#membershipAcknowledged(data)) request.message(data);
     });
-    setHandler(this.#native, "onerror", () => {
-      if (!this.#closed) request.failed("transport_lost");
-    });
+    // A WebSocket `error` event is always followed by `close`, and only `close`
+    // carries the authoritative code and reason, so classification waits for it.
+    setHandler(this.#native, "onerror", () => undefined);
     setHandler(this.#native, "onclose", () => {
       if (!this.#closed) request.failed("transport_lost");
     });

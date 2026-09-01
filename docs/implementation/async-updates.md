@@ -119,7 +119,10 @@ Server-sent events are same-origin. The built-in `BrowserWebSocketAdapter`
 accepts only `session_cookie` authorization. Browser WebSocket cannot attach an
 arbitrary `Authorization` header, and the built-in adapter rejects every other
 authorization kind. Fetch-based SSE and polling may use bearer authorization
-when the host policy permits it.
+when the host policy permits it. The built-in adapter classifies a lost
+WebSocket from its `close` event; an `error` event alone reports nothing because
+`close` always follows it and is the only event that carries the close code and
+reason.
 
 A custom bearer-authorized or cross-origin WebSocket transport requires an
 explicit non-wildcard Origin allowlist and separate non-cookie credentials. It
