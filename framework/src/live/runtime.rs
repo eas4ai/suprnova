@@ -5,7 +5,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{App, FrameworkError};
 use sha2::{Digest, Sha256};
+use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::child::{
+    AcceptedParentRevision, ChildParameterLimits, ExpectedChildParametersV2,
+    PreparedChildParametersV1, PreparedChildParametersV2, authorize_child_parameters_v2,
+    verify_child_parameters_v2,
+};
 use suprnova_live::clock::{Clock, SystemClock};
+use suprnova_live::component::composition::{
+    ChildDeclaration, ChildKey, ChildState, CompositionAncestry, CompositionLimits,
+    CompositionPlanner,
+};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::endpoint::{
     EndpointError, LiveEndpointConfig, LiveEndpointService, ParsedLiveMediaType,
@@ -15,8 +25,14 @@ use suprnova_live::host::{
     LiveRequestContextValidator, MountCatalog, MountCatalogBuilder, MountCatalogEntry,
     MountSelection, TrustedLiveRequestContext,
 };
-use suprnova_live::identity::{IslandSlot, KeyId, RouteIdentity, UnixMillis};
-use suprnova_live::ledger::{LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger};
+use suprnova_live::identity::{
+    BuildId, ComponentName, ContentDigest, IdempotencyKey, InstanceId, IslandSlot, KeyId, Revision,
+    RouteIdentity, ScopeFingerprint, UnixMillis,
+};
+use suprnova_live::ledger::{
+    AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, LedgerLimits,
+    LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
+};
 use suprnova_live::limits::InputLimits;
 use suprnova_live::mount::{
     DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
@@ -26,7 +42,11 @@ use suprnova_live::mount::{
 use suprnova_live::promotion::{PromotionLimitConfig, PromotionLimits, PromotionService};
 use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
 use suprnova_live::random::{InstanceIdGenerator, SystemInstanceIdGenerator};
-use suprnova_live::snapshot::{MountedDocumentPath, SnapshotLimits};
+use suprnova_live::snapshot::{
+    ComponentContract as SnapshotContract, CompositionChildLineageV1, CompositionLineageV1,
+    CompositionOwnerLineageV1, ExpectedInstanceV1, InstanceBodyV1, InstanceFieldsV1,
+    MountedDocumentPath, SnapshotLimits, verify_instance,
+};
 use suprnova_live::state::ProposalLimits;
 use suprnova_live::validation::ValidationEngine;
 use suprnova_live::view::{RenderLimits, ViewRenderer};
@@ -50,6 +70,7 @@ struct RuntimeGraph {
     input_limits: InputLimits,
     proposal_limits: ProposalLimits,
     validation_engine: ValidationEngine,
+    snapshot_limits: SnapshotLimits,
     endpoint_config: LiveEndpointConfig,
     context_validator: LiveRequestContextValidator,
     ports: super::ports::HostPorts,
@@ -172,6 +193,16 @@ pub struct LiveRuntime {
     graph: Arc<RuntimeGraph>,
 }
 
+pub(super) struct ChildParameterTestFixture {
+    pub(super) child_snapshot: Vec<u8>,
+    pub(super) envelope: Vec<u8>,
+    pub(super) historical_v1_envelope: Vec<u8>,
+    pub(super) parent_snapshot: Vec<u8>,
+    pub(super) scope: ScopeFingerprint,
+    pub(super) parent_instance: InstanceId,
+    pub(super) child_instance: InstanceId,
+}
+
 impl LiveRuntime {
     pub(crate) fn bind() -> Result<Self, FrameworkError> {
         if let Ok(runtime) = App::resolve::<Self>() {
@@ -204,6 +235,464 @@ impl LiveRuntime {
 
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.graph, &other.graph)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the test-only fixture keeps every independently signed binding explicit"
+    )]
+    pub(super) async fn prepare_child_parameter_fixture_for_test(
+        &self,
+        parent_component: &ComponentName,
+        parent_route: &RouteIdentity,
+        parent_slot: &IslandSlot,
+        parent_build_override: Option<BuildId>,
+        child_component: &ComponentName,
+        child_route: &RouteIdentity,
+        child_slot: &IslandSlot,
+        scope: ScopeFingerprint,
+        previous_parameters: CanonicalValue,
+        next_parameters: CanonicalValue,
+        parent_state: CanonicalValue,
+        child_state: CanonicalValue,
+    ) -> Result<ChildParameterTestFixture, FrameworkError> {
+        let parent = self
+            .graph
+            .engine_registry
+            .resolve(parent_component)
+            .map_err(|_| FrameworkError::internal("child fixture parent component rejected"))?;
+        let child = self
+            .graph
+            .engine_registry
+            .resolve(child_component)
+            .map_err(|_| FrameworkError::internal("child fixture child component rejected"))?;
+        let planner = CompositionPlanner::new(
+            CompositionLimits::new(8, 8, 64 * 1024, 8).map_err(|_| live_boot_error())?,
+        );
+        let ancestry = CompositionAncestry::root(parent_component.clone());
+        let declaration = |parameters| {
+            ChildDeclaration::new(
+                ChildKey::parse("delivered-child").expect("static child key"),
+                child_component.clone(),
+                parameters,
+            )
+        };
+        let initial = planner
+            .reconcile(
+                &self.graph.engine_registry,
+                &ancestry,
+                &[],
+                vec![declaration(previous_parameters)],
+            )
+            .map_err(|_| FrameworkError::internal("child fixture initial composition rejected"))?;
+        let [ChildState::Remount(prepared)] = initial.as_slice() else {
+            return Err(live_boot_error());
+        };
+        let child_instance = self
+            .graph
+            .random
+            .generate()
+            .map_err(|_| live_boot_error())?;
+        let handle = prepared.clone().into_handle(child_instance.clone());
+        let changed = planner
+            .reconcile(
+                &self.graph.engine_registry,
+                &ancestry,
+                std::slice::from_ref(&handle),
+                vec![declaration(next_parameters)],
+            )
+            .map_err(|_| FrameworkError::internal("child fixture changed composition rejected"))?;
+        let [ChildState::PendingParams(pending)] = changed.as_slice() else {
+            return Err(live_boot_error());
+        };
+
+        let parent_instance = self
+            .graph
+            .random
+            .generate()
+            .map_err(|_| live_boot_error())?;
+        let now = self.graph.clock.now().map_err(|_| live_boot_error())?;
+        let expires_at = UnixMillis::new(now.get().saturating_add(300_000));
+        self.graph
+            .ledger
+            .mount_instance(MountInstanceRecord::new(
+                scope.clone(),
+                parent_instance.clone(),
+                parent.contract_digest().clone(),
+                Revision::new(0),
+                expires_at,
+            ))
+            .await
+            .map_err(|_| live_boot_error())?;
+        self.graph
+            .ledger
+            .mount_instance(MountInstanceRecord::new(
+                scope.clone(),
+                child_instance.clone(),
+                child.contract_digest().clone(),
+                Revision::new(0),
+                expires_at,
+            ))
+            .await
+            .map_err(|_| live_boot_error())?;
+        let idempotency_bytes: [u8; 16] = Sha256::digest(b"framework-child-parent-acceptance")
+            [..16]
+            .try_into()
+            .map_err(|_| live_boot_error())?;
+        let claim = ClaimRequest::new(
+            scope.clone(),
+            parent_instance.clone(),
+            Revision::new(0),
+            IdempotencyKey::from_bytes(&idempotency_bytes).map_err(|_| live_boot_error())?,
+            ContentDigest::from_bytes(&Sha256::digest(b"framework-child-parent-request"))
+                .map_err(|_| live_boot_error())?,
+        );
+        let grant = match self
+            .graph
+            .ledger
+            .claim(claim.clone())
+            .await
+            .map_err(|_| live_boot_error())?
+        {
+            ClaimOutcome::Granted(grant) => grant,
+            _ => return Err(live_boot_error()),
+        };
+        self.graph
+            .ledger
+            .commit(
+                &grant.into_token(),
+                AcceptedOutcome::new(
+                    AcceptedOutcomeKind::Rendered,
+                    ContentDigest::from_bytes(&Sha256::digest(b"framework-child-parent-output"))
+                        .map_err(|_| live_boot_error())?,
+                ),
+            )
+            .await
+            .map_err(|_| live_boot_error())?;
+        let accepted = match self
+            .graph
+            .ledger
+            .claim(claim)
+            .await
+            .map_err(|_| live_boot_error())?
+        {
+            ClaimOutcome::Accepted(accepted) => accepted,
+            _ => return Err(live_boot_error()),
+        };
+        let parent_revision = accepted.successor_revision();
+        let accepted_parent = AcceptedParentRevision::from_accepted_outcome(&accepted);
+        let build = BuildId::parse(concat!("suprnova-", env!("CARGO_PKG_VERSION")))
+            .map_err(|_| live_boot_error())?;
+        let parent_build = parent_build_override.unwrap_or_else(|| build.clone());
+        let parent_contract = SnapshotContract::new(
+            parent_component.clone(),
+            parent.contract_digest().clone(),
+            parent
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .state()
+                .version(),
+            parent
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .memo()
+                .version(),
+            parent
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .mount()
+                .version(),
+        )
+        .map_err(|_| live_boot_error())?;
+        let child_contract = SnapshotContract::new(
+            child_component.clone(),
+            child.contract_digest().clone(),
+            child
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .state()
+                .version(),
+            child
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .memo()
+                .version(),
+            child
+                .snapshot_schemas()
+                .map_err(|_| live_boot_error())?
+                .mount()
+                .version(),
+        )
+        .map_err(|_| live_boot_error())?;
+        let mut parent_fields = InstanceFieldsV1 {
+            component: parent_contract.clone(),
+            build_id: parent_build.clone(),
+            route: parent_route.clone(),
+            slot: parent_slot.clone(),
+            key_id: self.graph.key_ring.active_key_id().clone(),
+            scope: scope.clone(),
+            instance_id: parent_instance.clone(),
+            revision: parent_revision,
+            issued_at: now,
+            expires_at,
+            state: parent_state,
+            memo: CanonicalValue::Object(Default::default()),
+            extensions: Default::default(),
+        };
+        parent_fields
+            .set_composition_lineage(
+                CompositionLineageV1::new(
+                    None,
+                    vec![
+                        CompositionChildLineageV1::new(
+                            parent_instance.clone(),
+                            parent_revision,
+                            pending.child().key().clone(),
+                            child.contract_digest().clone(),
+                            child_instance.clone(),
+                            1,
+                        )
+                        .map_err(|_| live_boot_error())?,
+                    ],
+                )
+                .map_err(|_| live_boot_error())?,
+            )
+            .map_err(|_| live_boot_error())?;
+        let parent_snapshot = InstanceBodyV1::new(
+            parent_fields,
+            &parent.snapshot_schemas().map_err(|_| live_boot_error())?,
+            &self.graph.snapshot_limits,
+        )
+        .map_err(|error| {
+            FrameworkError::internal(format!("child fixture parent snapshot rejected: {error}"))
+        })?
+        .sign(&self.graph.key_ring, now, &self.graph.snapshot_limits)
+        .map_err(|_| live_boot_error())?;
+        let verified_parent = verify_instance(
+            &parent_snapshot,
+            &ExpectedInstanceV1::new(
+                parent_contract,
+                parent_build,
+                parent_route.clone(),
+                parent_slot.clone(),
+                scope.clone(),
+                parent.snapshot_schemas().map_err(|_| live_boot_error())?,
+            ),
+            &self.graph.key_ring,
+            now,
+            &self.graph.snapshot_limits,
+        )
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "parent fixture self-verification rejected: {error}"
+            ))
+        })?;
+        let mut child_fields = InstanceFieldsV1 {
+            component: child_contract.clone(),
+            build_id: build.clone(),
+            route: child_route.clone(),
+            slot: child_slot.clone(),
+            key_id: self.graph.key_ring.active_key_id().clone(),
+            scope: scope.clone(),
+            instance_id: child_instance.clone(),
+            revision: Revision::new(0),
+            issued_at: now,
+            expires_at,
+            state: child_state,
+            memo: CanonicalValue::Object(Default::default()),
+            extensions: Default::default(),
+        };
+        child_fields
+            .set_composition_lineage(
+                CompositionLineageV1::new(
+                    Some(
+                        CompositionOwnerLineageV1::new(
+                            parent_instance.clone(),
+                            Revision::new(0),
+                            pending.child().key().clone(),
+                            child.contract_digest().clone(),
+                            child_instance.clone(),
+                            1,
+                        )
+                        .map_err(|_| live_boot_error())?,
+                    ),
+                    Vec::new(),
+                )
+                .map_err(|_| live_boot_error())?,
+            )
+            .map_err(|_| live_boot_error())?;
+        let child_snapshot = InstanceBodyV1::new(
+            child_fields,
+            &child.snapshot_schemas().map_err(|_| live_boot_error())?,
+            &self.graph.snapshot_limits,
+        )
+        .map_err(|error| {
+            FrameworkError::internal(format!("child fixture child snapshot rejected: {error}"))
+        })?
+        .sign(&self.graph.key_ring, now, &self.graph.snapshot_limits)
+        .map_err(|_| live_boot_error())?;
+        verify_instance(
+            &child_snapshot,
+            &ExpectedInstanceV1::new(
+                child_contract,
+                build,
+                child_route.clone(),
+                child_slot.clone(),
+                scope.clone(),
+                child.snapshot_schemas().map_err(|_| live_boot_error())?,
+            ),
+            &self.graph.key_ring,
+            now,
+            &self.graph.snapshot_limits,
+        )
+        .map_err(|error| {
+            FrameworkError::internal(format!("child fixture self-verification rejected: {error}"))
+        })?;
+        let parameter_limits = ChildParameterLimits::new(self.graph.input_limits, 0, 300_000)
+            .map_err(|_| live_boot_error())?;
+        let historical_v1_envelope = PreparedChildParametersV1::new(
+            scope.clone(),
+            parent_instance.clone(),
+            parent_revision,
+            pending.clone(),
+            now,
+            expires_at,
+            self.graph.key_ring.active_key_id().clone(),
+            &parameter_limits,
+        )
+        .map_err(|_| FrameworkError::internal("historical child fixture envelope rejected"))?
+        .publish(
+            &accepted_parent,
+            &self.graph.key_ring,
+            now,
+            &parameter_limits,
+        )
+        .map_err(|_| {
+            FrameworkError::internal("historical child fixture envelope signing rejected")
+        })?;
+        let envelope = PreparedChildParametersV2::new(
+            scope.clone(),
+            parent_instance.clone(),
+            parent_revision,
+            child_instance.clone(),
+            pending.clone(),
+            now,
+            expires_at,
+            self.graph.key_ring.active_key_id().clone(),
+            &parameter_limits,
+        )
+        .map_err(|_| FrameworkError::internal("child fixture envelope rejected"))?
+        .publish(
+            &accepted_parent,
+            &self.graph.key_ring,
+            now,
+            &parameter_limits,
+        )
+        .map_err(|_| FrameworkError::internal("child fixture envelope signing rejected"))?;
+        let verified_parameters = verify_child_parameters_v2(
+            &envelope,
+            &ExpectedChildParametersV2::new(
+                scope.clone(),
+                parent_instance.clone(),
+                parent_revision,
+                pending.child().key().clone(),
+                child.contract_digest().clone(),
+                child_instance.clone(),
+                child.parameter_schema().clone(),
+            )
+            .after_applied_parent_revision(Revision::new(0)),
+            &self.graph.key_ring,
+            now,
+            &parameter_limits,
+        )
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "child fixture envelope verification rejected: {error}"
+            ))
+        })?;
+        authorize_child_parameters_v2(
+            &verified_parameters,
+            &verified_parent,
+            self.graph.ledger.as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!("child fixture eligibility rejected: {error}"))
+        })?;
+        Ok(ChildParameterTestFixture {
+            child_snapshot,
+            envelope,
+            historical_v1_envelope,
+            parent_snapshot,
+            scope,
+            parent_instance,
+            child_instance,
+        })
+    }
+
+    pub(super) async fn advance_parent_revision_for_test(
+        &self,
+        scope: &ScopeFingerprint,
+        parent: &InstanceId,
+    ) -> Result<u64, FrameworkError> {
+        let revision = self
+            .graph
+            .ledger
+            .current_accepted_revision(scope, parent)
+            .await
+            .map_err(|_| live_boot_error())?
+            .ok_or_else(live_boot_error)?;
+        let idempotency_bytes: [u8; 16] = Sha256::digest(b"framework-child-parent-supersede")[..16]
+            .try_into()
+            .map_err(|_| live_boot_error())?;
+        let claim = ClaimRequest::new(
+            scope.clone(),
+            parent.clone(),
+            revision,
+            IdempotencyKey::from_bytes(&idempotency_bytes).map_err(|_| live_boot_error())?,
+            ContentDigest::from_bytes(&Sha256::digest(b"framework-child-parent-supersede-request"))
+                .map_err(|_| live_boot_error())?,
+        );
+        let grant = match self
+            .graph
+            .ledger
+            .claim(claim)
+            .await
+            .map_err(|_| live_boot_error())?
+        {
+            ClaimOutcome::Granted(grant) => grant,
+            _ => return Err(live_boot_error()),
+        };
+        let successor = grant.successor_revision();
+        self.graph
+            .ledger
+            .commit(
+                &grant.into_token(),
+                AcceptedOutcome::new(
+                    AcceptedOutcomeKind::Rendered,
+                    ContentDigest::from_bytes(&Sha256::digest(
+                        b"framework-child-parent-supersede-output",
+                    ))
+                    .map_err(|_| live_boot_error())?,
+                ),
+            )
+            .await
+            .map_err(|_| live_boot_error())?;
+        Ok(successor.get())
+    }
+
+    pub(super) async fn child_revision_for_test(
+        &self,
+        scope: &ScopeFingerprint,
+        child: &InstanceId,
+    ) -> Result<u64, FrameworkError> {
+        self.graph
+            .ledger
+            .current_accepted_revision(scope, child)
+            .await
+            .map_err(|_| live_boot_error())?
+            .map(Revision::get)
+            .ok_or_else(live_boot_error)
     }
 
     pub(crate) fn register_mount(&self, entry: MountCatalogEntry) -> Result<(), FrameworkError> {
@@ -308,10 +797,17 @@ impl LiveRuntime {
             &self.graph.ports,
             Arc::clone(&completion),
         );
+        let mount_catalog = Arc::clone(
+            self.graph
+                .mount_catalog
+                .get()
+                .expect("Live mount catalog is finalized before endpoint dispatch"),
+        );
         (
             LiveEndpointService::new(
                 self.graph.endpoint_config.clone(),
                 Arc::clone(&self.graph.engine_registry),
+                mount_catalog,
                 Arc::clone(&self.graph.clock),
                 Arc::clone(&self.graph.key_ring),
                 Arc::new(kernel),
@@ -477,7 +973,7 @@ fn assemble_runtime(
             Arc::clone(&ledger),
             Arc::clone(&clock),
             Arc::clone(&key_ring),
-            snapshot_limits,
+            snapshot_limits.clone(),
             renderer,
         )
         .with_reporter(Arc::clone(&ports.reporter)),
@@ -501,6 +997,7 @@ fn assemble_runtime(
             input_limits: input,
             proposal_limits,
             validation_engine,
+            snapshot_limits,
             endpoint_config,
             context_validator,
             ports,

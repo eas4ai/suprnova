@@ -68,6 +68,19 @@ eligible roots, retires removed roots exactly once, and never sends a request
 merely because a seed appeared. Each island owns its scheduler, model state,
 signal graph, feedback targets, morph state, and resource ledger.
 
+Accepted parent child-delivery metadata enters that same per-island scheduler,
+not a second router or queue. Only after response validation, successful parent
+morph, and snapshot/revision commit does discovery pair the exact accepted
+top-level parent snapshot with each validated changed-child delivery. The child
+intent carries its own current snapshot plus the exact v2 admission carrier;
+raw parameters are never sent. Navigation, malformed response, morph failure,
+removed/stale/mismatched child identity, or unchanged hash queues nothing.
+For each child incarnation, discovery distinguishes the current accepted hash
+from hashes pending in the existing scheduler. It promotes a pending hash only
+from the intent's accepted completion, releases every failed terminal outcome
+for retry, and coalesces only duplicate current or pending values. Retirement
+discards the incarnation-local state with the island record.
+
 `pagehide`, `pageshow`, freeze, resume, DOM removal, and explicit `stop()` flow
 through the same idempotent lifecycle. Suspension detaches active work without
 forgetting restorable state; final disposal releases observers, listeners,

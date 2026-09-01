@@ -90,11 +90,16 @@ describe("Live request builder", () => {
       element: Object.freeze({}),
       metadata: metadata("instance"),
     }) as unknown as IslandRecord;
+    const parentSnapshot = Object.freeze({
+      body: Object.freeze({ revision: "7" }),
+      signature: "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+    });
     const request = await new LiveRequestBuilder().build(
-      input(2, createParamsChangedIntent(record, envelope)),
+      input(2, createParamsChangedIntent(record, envelope, parentSnapshot)),
     );
     const parsed = JSON.parse(request.text) as Record<string, unknown>;
-    expect(parsed["child_parameters"]).toEqual(envelope);
+    expect(parsed["child_parameters"]).toEqual({ envelope, parent_snapshot: parentSnapshot });
+    expect(parsed["snapshot"]).toEqual({ envelope: record.metadata.snapshot, kind: "instance" });
     expect(parsed["operations"]).toEqual([{ kind: "params_changed" }]);
   });
 
@@ -111,8 +116,14 @@ describe("Live request builder", () => {
       input(2, intent("instance", [action])),
       input(2, intent("instance", [Object.freeze({ kind: "params_changed" })]), {
         childParameters: Object.freeze({
-          body: Object.freeze({ parameters: Object.freeze({ query: "rust" }) }),
-          signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          envelope: Object.freeze({
+            body: Object.freeze({ parameters: Object.freeze({ query: "rust" }) }),
+            signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          }),
+          parent_snapshot: Object.freeze({
+            body: Object.freeze({ revision: "7" }),
+            signature: "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          }),
         }),
       }),
       input(2, intent("instance", [Object.freeze({ kind: "lazy_complete" })])),
@@ -156,13 +167,19 @@ describe("Live request builder", () => {
     const lifecycle = intent("instance", [Object.freeze({ kind: "params_changed" })]);
     const firstChild = await builder.build(
       input(2, lifecycle, {
-        childParameters: Object.freeze({ body: Object.freeze({ query: "rust" }) }),
+        childParameters: Object.freeze({
+          envelope: Object.freeze({ body: Object.freeze({ query: "rust" }) }),
+          parent_snapshot: ENVELOPE,
+        }),
         randomness: identitySource,
       }),
     );
     const changedChild = await builder.build(
       input(2, lifecycle, {
-        childParameters: Object.freeze({ body: Object.freeze({ query: "zig" }) }),
+        childParameters: Object.freeze({
+          envelope: Object.freeze({ body: Object.freeze({ query: "zig" }) }),
+          parent_snapshot: ENVELOPE,
+        }),
         randomness: identitySource,
       }),
     );
@@ -228,6 +245,19 @@ describe("Live request builder", () => {
         protocolVersion: 3,
       } as unknown as LiveRequestBuildInput),
     ).rejects.toThrow("unsupported_protocol_version");
+  });
+
+  it("rejects a historical raw child-parameter envelope from the v2 admission path", async () => {
+    await expect(
+      new LiveRequestBuilder().build(
+        input(2, intent("instance", [Object.freeze({ kind: "params_changed" })]), {
+          childParameters: Object.freeze({
+            body: Object.freeze({ parameters: Object.freeze({ query: "rust" }) }),
+            signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          }),
+        }),
+      ),
+    ).rejects.toThrow("invalid_protocol_envelope");
   });
 
   it("closes a seed intent when identity randomness fails", async () => {

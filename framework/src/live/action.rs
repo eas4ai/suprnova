@@ -13,6 +13,7 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use suprnova_live::action::RawActionArguments;
 use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::child::ChildParameterEligibilityErrorKind;
 use suprnova_live::endpoint::{
     AcceptedResponseSealer, EndpointErrorKind, EndpointFuture, EndpointKernel, EndpointKernelError,
     LiveEndpointRequest, LiveEndpointResponse, ParsedLiveMediaType, RequestCachePolicy,
@@ -424,6 +425,34 @@ impl SuprnovaEndpointKernel {
                     )
                     .await
             }
+            RequestedOperation::ParamsChanged => {
+                let admission = request
+                    .child_admission()
+                    .ok_or_else(EndpointKernelError::unavailable)?;
+                let eligible = self
+                    .execution
+                    .authorize_child_parameters_v2(
+                        admission.parameters(),
+                        admission.parent_snapshot(),
+                    )
+                    .await
+                    .map_err(|error| child_eligibility_kernel_error(error.kind()))?;
+                self.execution
+                    .execute_lifecycle(
+                        InstancedLifecycleRequest::new(
+                            request.descriptor(),
+                            request.context(),
+                            browser,
+                            snapshot,
+                            idempotency_key(request.request()).clone(),
+                            digest,
+                            InstancedLifecycleOperation::ParamsChanged(&eligible),
+                            self.trace.as_ref(),
+                        )
+                        .with_response_sealer(response_sealer, request.response_binding()),
+                    )
+                    .await
+            }
             RequestedOperation::LazyComplete => {
                 self.execution
                     .execute_lifecycle(
@@ -563,6 +592,7 @@ enum RequestedOperation<'request> {
         synchronized: Vec<&'request ModelField>,
         proposals: &'request std::collections::BTreeMap<ModelField, CanonicalValue>,
     },
+    ParamsChanged,
     FreshRender,
     LazyComplete,
 }
@@ -595,6 +625,9 @@ fn requested_operation(
             }
         }
         VersionedUpdateRequest::V2(request) => {
+            if request.operations() == [OperationV2::ParamsChanged] {
+                return Ok(RequestedOperation::ParamsChanged);
+            }
             if request.operations() == [OperationV2::FreshRender] {
                 return Ok(RequestedOperation::FreshRender);
             }
@@ -680,5 +713,40 @@ fn idempotency_key(request: &VersionedUpdateRequest) -> &IdempotencyKey {
     match request {
         VersionedUpdateRequest::V1(request) => request.idempotency_key(),
         VersionedUpdateRequest::V2(request) => request.idempotency_key(),
+    }
+}
+
+const fn child_eligibility_kernel_error(
+    kind: ChildParameterEligibilityErrorKind,
+) -> EndpointKernelError {
+    match kind {
+        ChildParameterEligibilityErrorKind::ProviderUnavailable => {
+            EndpointKernelError::unavailable()
+        }
+        _ => EndpointKernelError::context_inconsistent(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_eligibility_errors_conceal_authority_rejections_but_preserve_provider_failure() {
+        for kind in [
+            ChildParameterEligibilityErrorKind::BindingMismatch,
+            ChildParameterEligibilityErrorKind::CompositionLineageMismatch,
+            ChildParameterEligibilityErrorKind::ParentAuthorityMissing,
+            ChildParameterEligibilityErrorKind::ParentRevisionMismatch,
+        ] {
+            assert_eq!(
+                child_eligibility_kernel_error(kind),
+                EndpointKernelError::context_inconsistent(),
+            );
+        }
+        assert_eq!(
+            child_eligibility_kernel_error(ChildParameterEligibilityErrorKind::ProviderUnavailable,),
+            EndpointKernelError::unavailable(),
+        );
     }
 }

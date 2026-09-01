@@ -192,7 +192,7 @@ async fn admitted_response_sealer_with_semantics_and_snapshot_limits(
         CorrelationId::from_bytes(&bytes::<16>(correlation_start)).expect("correlation identity");
     let snapshot: serde_json::Value =
         serde_json::from_slice(encoded_snapshot).expect("snapshot JSON");
-    let body = serde_json::to_vec(&serde_json::json!({
+    let mut request_json = serde_json::json!({
         "base_revision": base_revision.get().to_string(),
         "component": descriptor.metadata().identity().as_str(),
         "correlation_id": correlation.to_base64url(),
@@ -203,11 +203,17 @@ async fn admitted_response_sealer_with_semantics_and_snapshot_limits(
         "model_proposals": model_proposals,
         "operations": [{"arguments": arguments, "kind": "invoke_action", "name": action}],
         "protocol_version": protocol_version,
-        "runtime_contract_version": 1,
+        "runtime_contract_version": protocol_version,
         "snapshot": {"envelope": snapshot, "kind": "instance"},
         "snapshot_schema_version": 1,
-    }))
-    .expect("request JSON");
+    });
+    if protocol_version == 2 {
+        request_json
+            .as_object_mut()
+            .expect("request object")
+            .insert("child_parameters".to_owned(), serde_json::Value::Null);
+    }
+    let body = serde_json::to_vec(&request_json).expect("request JSON");
     let request = LiveEndpointRequest::try_new(
         Method::POST,
         media,
@@ -320,6 +326,7 @@ pub(crate) struct TraceFixture {
     pub(crate) serial: u64,
     pub(crate) metadata: &'static ComponentMetadata,
     pub(crate) action_gate: Option<Arc<ActionGate>>,
+    pub(crate) render_override: Option<IslandRender>,
 }
 
 impl TraceFixture {
@@ -415,6 +422,17 @@ impl ComponentInstance for TraceFixture {
         })
     }
 
+    fn params_changed_v2<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _parameters: &'a suprnova_live::child::EligibleChildParametersV2,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async move {
+            self.record("params_changed_v2");
+            Ok(())
+        })
+    }
+
     fn lazy_complete<'a>(
         &'a mut self,
         _context: &'a RenderContext<'a>,
@@ -447,6 +465,9 @@ impl ComponentInstance for TraceFixture {
             self.record("render");
             assert_ne!(self.failure, FailurePoint::RenderPanic, "render panic");
             self.fail(FailurePoint::Render)?;
+            if let Some(render) = &self.render_override {
+                return Ok(render.clone());
+            }
             let body = if self.failure == FailurePoint::ExecutableRender {
                 "<script data-suprnova-live-root=\"forged\"></script>".to_owned()
             } else {
@@ -518,6 +539,7 @@ pub(crate) struct FixtureControl {
     pub(crate) next_serial: std::sync::atomic::AtomicU64,
     pub(crate) metadata: &'static ComponentMetadata,
     pub(crate) action_gate: Option<Arc<ActionGate>>,
+    render_override: Mutex<Option<IslandRender>>,
 }
 
 impl FixtureControl {
@@ -528,6 +550,7 @@ impl FixtureControl {
             next_serial: std::sync::atomic::AtomicU64::new(1),
             metadata: metadata(),
             action_gate: None,
+            render_override: Mutex::new(None),
         })
     }
 
@@ -541,6 +564,7 @@ impl FixtureControl {
             next_serial: std::sync::atomic::AtomicU64::new(1),
             metadata: metadata(),
             action_gate: Some(action_gate),
+            render_override: Mutex::new(None),
         })
     }
 
@@ -554,7 +578,12 @@ impl FixtureControl {
             next_serial: std::sync::atomic::AtomicU64::new(1),
             metadata: component_metadata,
             action_gate: None,
+            render_override: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn set_render(&self, render: IslandRender) {
+        *self.render_override.lock().expect("render override lock") = Some(render);
     }
 
     pub(crate) fn values(&self) -> Vec<&'static str> {
@@ -570,6 +599,11 @@ impl FixtureControl {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             metadata: self.metadata,
             action_gate: self.action_gate.clone(),
+            render_override: self
+                .render_override
+                .lock()
+                .expect("render override lock")
+                .clone(),
         }
     }
 }

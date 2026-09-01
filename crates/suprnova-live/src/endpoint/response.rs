@@ -337,8 +337,25 @@ impl AcceptedResponseSealer {
             emissions_json(candidate.result.metadata().effects()),
         );
         if protocol == 2 {
-            fields.insert("child_deliveries".to_owned(), Value::Array(Vec::new()));
+            let child_deliveries = candidate
+                .child_deliveries
+                .iter()
+                .map(|delivery| {
+                    Ok(json!({
+                        "child_instance": delivery.child_instance().to_base64url(),
+                        "envelope": serde_json::from_slice::<Value>(delivery.envelope())
+                            .map_err(|_| EndpointKernelError::unavailable())?,
+                        "parameter_hash": delivery.parameter_hash().to_base64url(),
+                    }))
+                })
+                .collect::<Result<Vec<_>, EndpointKernelError>>()?;
+            fields.insert(
+                "child_deliveries".to_owned(),
+                Value::Array(child_deliveries),
+            );
             fields.entry("url_intent".to_owned()).or_insert(Value::Null);
+        } else if !candidate.child_deliveries.is_empty() {
+            return Err(EndpointKernelError::unavailable());
         }
         let candidate_body = serde_json_canonicalizer::to_vec(&Value::Object(fields))
             .map_err(|_| EndpointKernelError::unavailable())?;
@@ -387,6 +404,7 @@ pub(crate) struct AcceptedResponseCandidate<'a> {
     pub(crate) result: &'a ActionResult,
     pub(crate) intents: &'a EndpointResponseIntents,
     pub(crate) validation: &'a crate::validation::ErrorBag,
+    pub(crate) child_deliveries: &'a [crate::protocol::ChildParameterDelivery],
     pub(crate) authority: AcceptedResponseAuthority<'a>,
 }
 
@@ -830,6 +848,7 @@ mod tests {
                     result: &result,
                     intents: &EndpointResponseIntents::default(),
                     validation: &ErrorBag::default(),
+                    child_deliveries: &[],
                     authority: candidate_authority(&authority),
                 })
                 .is_err()
@@ -856,6 +875,7 @@ mod tests {
                     result: &result,
                     intents: &EndpointResponseIntents::default(),
                     validation: &ErrorBag::default(),
+                    child_deliveries: &[],
                     authority: candidate_authority(&authority),
                 })
                 .is_err()

@@ -332,7 +332,7 @@ fn binding_digest(
     digest.finalize().into()
 }
 
-fn purpose_fingerprint(check: SecurityCheck, value: &[u8]) -> [u8; 32] {
+pub(super) fn purpose_fingerprint(check: SecurityCheck, value: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"suprnova-live/request-fact/v1\0");
     digest.update([check.index() as u8]);

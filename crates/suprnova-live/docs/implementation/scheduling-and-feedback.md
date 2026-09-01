@@ -44,8 +44,31 @@ Transport timeouts, offline state, incompatible protocols, rejected/stale
 responses, morph-preflight failures, morph exceptions, and successor mismatch
 have distinct dispositions. A terminal redirect skips morphing and uses native
 navigation. A successful nonterminal response follows: validation, preflight,
-morph, focus restoration, successor metadata commit, events, effects, child
-parameter scheduling, URL reflection, then final feedback.
+morph, successor metadata commit, model/validation and focus reconciliation,
+child parameter scheduling, URL reflection, events, effects, then final
+feedback.
+
+Child deliveries are paired with the accepted top-level parent snapshot only
+after the parent morph and snapshot commit, then enter the child's existing
+scheduler as ordinary `params_changed` intents. The child keeps its own pending
+feedback, ordering, coalescing, and recovery; failure is non-atomic with and
+cannot roll back the accepted parent.
+
+Each child incarnation tracks its current accepted parameter hash separately
+from the bounded canonical carrier authorities pending in that child's
+scheduler. Enqueue records an exact envelope-plus-parent-snapshot authority,
+never an applied hash. Thus parent revisions N and N+1 may queue the same value
+hash without losing N+1, while only an exact pending authority coalesces. The
+intent completion observer promotes the hash to current only on accepted
+application and releases only that authority on rejection, cancellation,
+supersession, retirement, or other failure, so failed delivery is retryable and
+A -> B -> A remains valid.
+
+The parent application crosses its rollback/recovery boundary before child
+scheduling. Intent construction or enqueue failure is contained per delivery,
+does not roll back the accepted parent, and does not prevent later deliveries
+from entering their own schedulers. Remaining URL/event/effect work is likewise
+post-commit and reports failure without revoking installed server authority.
 
 If the server has advanced but the browser cannot commit the new DOM and
 metadata, the runtime never retries the original action from the old snapshot.

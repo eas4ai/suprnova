@@ -14,6 +14,7 @@ use bytes::Bytes;
 
 use crate::identity::{IslandSlot, ViewName};
 
+pub(crate) use contract::ChildMountTransition;
 pub use contract::{
     AssetSet, ChildMount, MountMetadata, MountSnapshotKind, RenderLimits, TemplateFailure,
     ViewTemplate,

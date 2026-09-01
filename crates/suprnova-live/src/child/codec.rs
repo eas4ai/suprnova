@@ -118,26 +118,59 @@ impl PreparedChildParametersV2 {
                 ChildParameterErrorKind::ParentNotAccepted,
             ));
         }
-        if &self.body.key_id != keys.active_key_id() {
+        publish_child_parameters_v2(self.body, keys, now, limits)
+    }
+
+    /// Seals a capability during accepted-response preparation for an exact claimed successor.
+    ///
+    /// The caller must retain the bytes until the enclosing parent transaction and ledger
+    /// acceptance complete. Production publication still occurs only through that accepted result.
+    pub(crate) fn seal_claimed_successor(
+        self,
+        parent_scope: &ScopeFingerprint,
+        parent_instance: &InstanceId,
+        parent_revision: Revision,
+        keys: &SnapshotKeyRing,
+        now: UnixMillis,
+        limits: &ChildParameterLimits,
+    ) -> Result<Vec<u8>, ChildParameterError> {
+        if &self.body.parent_scope != parent_scope
+            || &self.body.parent_instance != parent_instance
+            || self.body.parent_revision != parent_revision
+        {
             return Err(ChildParameterError::new(
-                ChildParameterErrorKind::SigningKeyMismatch,
+                ChildParameterErrorKind::ParentNotAccepted,
             ));
         }
-        validate_time_v2(&self.body, now, limits)?;
-        let body = canonical_from_serializable(&self.body, limits)?;
-        let canonical_body = to_canonical_bytes(&body, limits.input()).map_err(map_canonical)?;
-        let signed = keys
-            .sign(SnapshotPurpose::ChildParametersV2, &canonical_body, now)
-            .map_err(|_| ChildParameterError::new(ChildParameterErrorKind::SignatureInvalid))?;
-        let envelope = canonical_from_serializable(
-            &EnvelopeRef {
-                body: &body,
-                signature: signed.signature(),
-            },
-            limits,
-        )?;
-        to_canonical_bytes(&envelope, limits.input()).map_err(map_canonical)
+        publish_child_parameters_v2(self.body, keys, now, limits)
     }
+}
+
+fn publish_child_parameters_v2(
+    body: ChildParametersV2,
+    keys: &SnapshotKeyRing,
+    now: UnixMillis,
+    limits: &ChildParameterLimits,
+) -> Result<Vec<u8>, ChildParameterError> {
+    if &body.key_id != keys.active_key_id() {
+        return Err(ChildParameterError::new(
+            ChildParameterErrorKind::SigningKeyMismatch,
+        ));
+    }
+    validate_time_v2(&body, now, limits)?;
+    let body = canonical_from_serializable(&body, limits)?;
+    let canonical_body = to_canonical_bytes(&body, limits.input()).map_err(map_canonical)?;
+    let signed = keys
+        .sign(SnapshotPurpose::ChildParametersV2, &canonical_body, now)
+        .map_err(|_| ChildParameterError::new(ChildParameterErrorKind::SignatureInvalid))?;
+    let envelope = canonical_from_serializable(
+        &EnvelopeRef {
+            body: &body,
+            signature: signed.signature(),
+        },
+        limits,
+    )?;
+    to_canonical_bytes(&envelope, limits.input()).map_err(map_canonical)
 }
 
 /// Verifies integrity, current parent eligibility, child binding, and typed values.

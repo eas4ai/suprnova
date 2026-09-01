@@ -54,7 +54,7 @@ use suprnova_live::endpoint::{
 use suprnova_live::execution::ExecutionResult;
 use suprnova_live::host::{
     CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostScopeFacts,
-    LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalogBuilder,
+    LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalog, MountCatalogBuilder,
     MountCatalogEntry, MountScopeRequirements, MountSelection, PrincipalFingerprint,
     ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
@@ -529,6 +529,7 @@ impl ReferenceFreshRender {
             LiveEndpointConfig::new(reference_protocol_limits(), snapshot_limits)
                 .map_err(|_| "fresh render endpoint config")?,
             Arc::clone(&registry),
+            non_child_fresh_render_catalog(),
             Arc::clone(&clock) as Arc<dyn suprnova_live::clock::Clock>,
             Arc::clone(&keys),
             Arc::new(FreshRenderKernel {
@@ -705,6 +706,11 @@ impl ReferenceFreshRender {
     pub(super) fn render_paused(&self) -> bool {
         self.pause.entered_commit.load(Ordering::Acquire)
     }
+}
+
+/// Empty immutable catalog for the reference fresh-render harness, which admits no child request.
+fn non_child_fresh_render_catalog() -> Arc<MountCatalog> {
+    Arc::new(MountCatalogBuilder::new().build())
 }
 
 impl EngineMembershipRegistry {

@@ -63,6 +63,12 @@ Acceptance criteria:
 - Child-parameter schema v1 and v2 are distinct signed capability schemas.
   Exact-child delivery requires v2; a v1 body is not silently upgraded or
   accepted by the v2 verifier.
+- For a production `params_changed` request, `child_parameters` is an exact-key
+  bounded admission carrier with only `envelope` and `parent_snapshot`.
+  `envelope` is the separately signed child-parameter-v2 envelope and
+  `parent_snapshot` is the exact signed accepted parent successor snapshot. A
+  raw envelope, v1 envelope, duplicate/unknown key, oversized member, or any
+  other operation batch is rejected before kernel or component work.
 
 UX flow:
 1. Runtime schedules compatible work -> it creates one bounded request envelope
@@ -88,6 +94,9 @@ Acceptance criteria:
   action semantics permit them.
 - Runtime can distinguish accepted, rejected, retryable, refresh-required, and
   fatal outcomes.
+- The response carries the accepted parent successor snapshot once at top
+  level. Each child delivery carries only child instance, parameter hash, and
+  signed v2 envelope; it never duplicates the parent snapshot.
 - Response sizes are bounded and measured before browser application.
 - The runtime validates the complete envelope, correlation, and expected
   revision before applying any field.
@@ -125,6 +134,11 @@ Acceptance criteria:
   nor effect.
 - Idempotency storage is bounded and scoped to the correct principal/tenant,
   instance, component, and action.
+- Protocol-v2 `params_changed` idempotency binds a purpose-separated digest of
+  the exact bounded canonical child-admission carrier. Exact replay retains the
+  prior outcome; changing either carrier member under the same scoped instance,
+  base revision, and idempotency key is an idempotency conflict. Historical v1
+  digest bytes do not change.
 - Non-idempotent work is not automatically retried merely because the network
   response was lost.
 - Logs and traces can correlate browser, endpoint, action, render, and response.
@@ -207,8 +221,8 @@ registered effects, and feedback follow commit. A post-acceptance morph failure
 requests fresh rendering without replay. Iteration 002 owns the host-neutral
 endpoint/media service contract. The now-completed atomic repository-authority
 move assigned its actual Suprnova HTTP/middleware adapter to Iteration 005, but
-that adapter remains incomplete until framework tests pass. Iteration 003 owns
-scheduling and real DOM execution.
+the real framework route now proves exact-child v2 admission and execution
+through that adapter. Iteration 003 owns scheduling and real DOM execution.
 
 ## Historical Iteration 002 implementation profile
 
@@ -239,7 +253,9 @@ The idempotency request digest has its own versioned canonical profile. It
 includes the scoped instance, base revision, component contract, idempotency
 identity, snapshot/child authority digest, ordered operations, model proposals,
 and semantic extensions while excluding correlation IDs and transport-only
-metadata. A retry may change correlation but cannot change meaning. Because the
+metadata. For v2 child delivery the child authority includes the exact canonical
+admission carrier under a purpose-separated digest. A retry may change
+correlation but cannot change meaning. Because the
 instance ledger stores bounded accepted metadata rather than response bodies, a
 duplicate whose full response is unavailable returns refresh-required without
 rerunning the action; iteration 002 does not add a hidden component or response
@@ -256,12 +272,19 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Locked the canonical v2 child-admission carrier to exact keys
+  `envelope` and `parent_snapshot`. Parent response sealing validates every
+  bounded delivery and the complete response before host commit and ledger
+  acceptance. The browser forms the carrier only after accepting the parent
+  snapshot and sends the child's current snapshot separately; the real
+  Suprnova endpoint independently verifies both snapshots and the v2 envelope,
+  then consults ledger authority before eligible-only lifecycle dispatch.
 - 2026-09-01 -- Added the host-neutral child-parameter envelope-v2 foundation
   with a separate signing purpose and an exact child-instance binding. Server
   eligibility requires verified v2 data, the matching signed parent snapshot
   composition lineage, and the ledger's current accepted parent revision.
-  This decision does not yet claim framework HTTP delivery, parent response
-  emission, browser scheduling, or `params_changed` dispatch complete.
+  That foundation decision did not claim framework HTTP delivery, parent
+  response emission, browser scheduling, or `params_changed` dispatch complete.
 - 2026-08-31 -- Marked the Iteration 002 endpoint profile as historical after
   the repository-authority cutover. The move is complete; actual Suprnova HTTP
   and middleware adaptation remains required Iteration 005 work and is not

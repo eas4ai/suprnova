@@ -72,7 +72,7 @@ pub struct UpdateRequestV2 {
     component: ComponentName,
     base_revision: Revision,
     snapshot: SnapshotInput,
-    child_parameters: Option<Vec<u8>>,
+    child_parameters: Option<ChildParameterAdmissionCarrier>,
     model_proposals: BTreeMap<ModelField, CanonicalValue>,
     operations: Vec<OperationV2>,
     extensions: BTreeMap<String, CanonicalValue>,
@@ -127,10 +127,10 @@ impl UpdateRequestV2 {
         &self.snapshot
     }
 
-    /// Returns the separately signed parent-issued child parameter envelope, when required.
+    /// Returns the exact child-parameter admission carrier, when required.
     #[must_use]
-    pub fn child_parameters(&self) -> Option<&[u8]> {
-        self.child_parameters.as_deref()
+    pub const fn child_parameters(&self) -> Option<&ChildParameterAdmissionCarrier> {
+        self.child_parameters.as_ref()
     }
 
     /// Returns bounded model proposals pending registered schema validation.
@@ -149,6 +149,37 @@ impl UpdateRequestV2 {
     #[must_use]
     pub const fn extensions(&self) -> &BTreeMap<String, CanonicalValue> {
         &self.extensions
+    }
+}
+
+/// Exact protocol-v2 admission authority for one child-parameter request.
+pub struct ChildParameterAdmissionCarrier {
+    canonical: Vec<u8>,
+    envelope: Vec<u8>,
+    parent_snapshot: Vec<u8>,
+}
+
+impl ChildParameterAdmissionCarrier {
+    /// Returns the separately signed child-parameter-v2 envelope bytes.
+    #[must_use]
+    pub fn envelope(&self) -> &[u8] {
+        &self.envelope
+    }
+
+    /// Returns the exact signed accepted parent successor snapshot bytes.
+    #[must_use]
+    pub fn parent_snapshot(&self) -> &[u8] {
+        &self.parent_snapshot
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+}
+
+impl fmt::Debug for ChildParameterAdmissionCarrier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ChildParameterAdmissionCarrier:redacted>")
     }
 }
 
@@ -198,11 +229,8 @@ pub(crate) fn parse_update_request_v2_fields(
     {
         return Err(ProtocolError::new(ProtocolErrorKind::InvalidSnapshotForm));
     }
-    let child_parameters = parse_optional_envelope(
-        take(&mut fields, "child_parameters")?,
-        limits.max_snapshot_bytes(),
-        limits,
-    )?;
+    let child_parameters =
+        parse_child_parameter_carrier(take(&mut fields, "child_parameters")?, limits)?;
     let model_proposals = parse_model_proposals(
         take(&mut fields, "model_proposals")?,
         limits.max_model_proposals(),
@@ -223,6 +251,35 @@ pub(crate) fn parse_update_request_v2_fields(
         operations,
         extensions,
     })
+}
+
+fn parse_child_parameter_carrier(
+    value: CanonicalValue,
+    limits: &ProtocolLimits,
+) -> Result<Option<ChildParameterAdmissionCarrier>, ProtocolError> {
+    if matches!(value, CanonicalValue::Null) {
+        return Ok(None);
+    }
+    let canonical = to_canonical_bytes(&value, limits.input()).map_err(map_canonical)?;
+    let mut fields = object(value)?;
+    require_exact_keys(&fields, &["envelope", "parent_snapshot"])?;
+    let envelope = parse_optional_envelope(
+        take(&mut fields, "envelope")?,
+        limits.max_snapshot_bytes(),
+        limits,
+    )?
+    .ok_or_else(|| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))?;
+    let parent_snapshot = parse_optional_envelope(
+        take(&mut fields, "parent_snapshot")?,
+        limits.max_snapshot_bytes(),
+        limits,
+    )?
+    .ok_or_else(|| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))?;
+    Ok(Some(ChildParameterAdmissionCarrier {
+        canonical,
+        envelope,
+        parent_snapshot,
+    }))
 }
 
 fn parse_optional_envelope(
@@ -356,6 +413,18 @@ pub struct ChildParameterDelivery {
 }
 
 impl ChildParameterDelivery {
+    pub(crate) fn sealed(
+        child_instance: InstanceId,
+        parameter_hash: ContentDigest,
+        envelope: Vec<u8>,
+    ) -> Self {
+        Self {
+            child_instance,
+            parameter_hash,
+            envelope,
+        }
+    }
+
     /// Returns the independently scheduled child instance.
     #[must_use]
     pub const fn child_instance(&self) -> &InstanceId {

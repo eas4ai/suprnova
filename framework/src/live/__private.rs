@@ -83,6 +83,7 @@ pub mod component {
 
 #[doc(hidden)]
 pub mod child {
+    pub use suprnova_live::child::EligibleChildParametersV2;
     pub use suprnova_live::child::VerifiedChildParametersV1;
 }
 

@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -138,6 +138,9 @@ Acceptance criteria:
 - Stimulus controller roots are not duplicated during a retained morph.
 - Added and removed controllers receive connect/disconnect at defined phases.
 - Before/after morph hooks cannot veto security validation or apply stale HTML.
+- Changed-child delivery is observed only after successful parent morph and
+  snapshot commit. A removed, replaced, remounted, stale, or mismatched child
+  boundary receives no queued parameter intent.
 - Extension errors are isolated and produce actionable diagnostics.
 - Memory and observer leak tests cover repeated morph/remove cycles.
 
@@ -215,6 +218,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Made successful parent morph plus browser snapshot commit the
+  sole child-delivery pairing boundary. Failed morph, redirect/navigation,
+  child removal, or identity mismatch suppresses scheduling; any later child
+  failure recovers that child without undoing the accepted parent DOM.
 - 2026-08-25 -- Split selected-file continuity from upload retirement. Stable
   keyed native input identity may survive, while deliberate removal, forced
   replacement, or rekey allows the validated island morph to complete and then

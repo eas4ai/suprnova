@@ -1,5 +1,6 @@
 //! Validated endpoint byte and protocol policy.
 
+use crate::child::ChildParameterLimits;
 use crate::host::MountSelection;
 use crate::protocol::ProtocolLimits;
 use crate::snapshot::SnapshotLimits;
@@ -11,6 +12,7 @@ use super::{EndpointError, EndpointErrorKind};
 pub struct LiveEndpointConfig {
     protocol: ProtocolLimits,
     snapshot: SnapshotLimits,
+    child_parameters: ChildParameterLimits,
     max_request_bytes: usize,
     max_response_bytes: usize,
 }
@@ -23,6 +25,8 @@ impl LiveEndpointConfig {
             return Err(EndpointError::new(EndpointErrorKind::InvalidConfiguration));
         }
         Ok(Self {
+            child_parameters: ChildParameterLimits::new(*snapshot.input(), 0, 300_000)
+                .map_err(|_| EndpointError::new(EndpointErrorKind::InvalidConfiguration))?,
             protocol,
             snapshot,
             max_request_bytes,
@@ -72,5 +76,9 @@ impl LiveEndpointConfig {
 
     pub(crate) const fn snapshot(&self) -> &SnapshotLimits {
         &self.snapshot
+    }
+
+    pub(crate) const fn child_parameters(&self) -> &ChildParameterLimits {
+        &self.child_parameters
     }
 }

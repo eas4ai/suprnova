@@ -9,7 +9,7 @@ use crate::action::{
     ActionError, ActionErrorKind, ActionResult, RawActionArguments, TransactionPolicy,
 };
 use crate::canonical::CanonicalValue;
-use crate::child::VerifiedChildParametersV1;
+use crate::child::{EligibleChildParametersV2, VerifiedChildParametersV1};
 use crate::execution::{
     ActionExecutionRequest, ExecutionPhase, ExecutionTracePort, HostError, HostTransaction,
     NoopExecutionTrace, TransactionPort, record as record_execution_phase,
@@ -276,7 +276,8 @@ enum RegisteredOperation<'a> {
         proposals: &'a crate::state::ProposalBatch,
         trace: &'a dyn ExecutionTracePort,
     },
-    ParamsChanged(&'a VerifiedChildParametersV1),
+    ParamsChangedV1Historical(&'a VerifiedChildParametersV1),
+    ParamsChangedV2(&'a EligibleChildParametersV2),
     LazyComplete,
 }
 
@@ -499,7 +500,7 @@ impl ComponentExecutor {
             .await
     }
 
-    /// Reconstructs a child and applies one registered verified parameter update.
+    /// Historical v1 harness entry point; this does not authorize production endpoint dispatch.
     ///
     /// A raw canonical browser map cannot substitute for the separately verified
     /// child capability:
@@ -546,7 +547,41 @@ impl ComponentExecutor {
             instance,
             hydration.render(),
             true,
-            RegisteredOperation::ParamsChanged(parameters),
+            RegisteredOperation::ParamsChangedV1Historical(parameters),
+        )
+        .await
+    }
+
+    /// Reconstructs a child and applies one server-eligible exact-child v2 capability.
+    pub async fn params_changed_v2<'a>(
+        &self,
+        descriptor: &ComponentDescriptor,
+        hydration: &HydrationContext<'a>,
+        parameters: &'a EligibleChildParametersV2,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        if !descriptor.supports_params_changed() {
+            return Err(LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::ParamsChanged,
+            ));
+        }
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::ParamsChanged,
+            )
+        })?;
+        let instance = catch_future(
+            || hooks.factory().hydrate(hydration),
+            LifecyclePhase::Hydrate,
+        )?
+        .await?;
+        self.execute_owned(
+            descriptor,
+            instance,
+            hydration.render(),
+            true,
+            RegisteredOperation::ParamsChangedV2(parameters),
         )
         .await
     }
@@ -986,9 +1021,16 @@ impl ComponentExecutor {
                 record_execution_phase(trace, ExecutionPhase::Bind);
                 catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)?;
             }
-            RegisteredOperation::ParamsChanged(parameters) => {
+            RegisteredOperation::ParamsChangedV1Historical(parameters) => {
                 catch_future(
                     || instance.params_changed(context, parameters),
+                    LifecyclePhase::ParamsChanged,
+                )?
+                .await?;
+            }
+            RegisteredOperation::ParamsChangedV2(parameters) => {
+                catch_future(
+                    || instance.params_changed_v2(context, parameters),
                     LifecyclePhase::ParamsChanged,
                 )?
                 .await?;

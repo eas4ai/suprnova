@@ -241,7 +241,7 @@ fn identity_fingerprint(
     }
 }
 
-fn aggregate_scope(
+pub(super) fn aggregate_scope(
     session: Option<&[u8]>,
     principal: Option<&[u8]>,
     tenant: Option<&[u8]>,

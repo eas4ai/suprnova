@@ -15,6 +15,8 @@ use super::{ProtocolError, ProtocolErrorKind, VersionedUpdateRequest};
 
 const PROFILE_V1: &str = "suprnova.live.idempotency.v1";
 const SEMANTIC_REQUEST_PROFILE_V1: &str = "suprnova.live.semantic-request.v1";
+const CHILD_PARAMETERS_AUTHORITY_PROFILE_V2: &[u8] =
+    b"suprnova.live.idempotency.child-parameters-authority.v2\0";
 
 /// Trusted semantic inputs combined with one fully parsed versioned request.
 pub struct SemanticIdempotencyInputV1<'request> {
@@ -61,6 +63,8 @@ struct DigestDocument<'value, Operation> {
     idempotency_identity: &'value IdempotencyKey,
     authority_digest: &'value ContentDigest,
     operations: &'value [Operation],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_parameters_authority_digest: Option<&'value ContentDigest>,
     model_proposals: &'value BTreeMap<ModelField, CanonicalValue>,
     semantic_extensions: &'value BTreeMap<String, CanonicalValue>,
 }
@@ -104,7 +108,9 @@ pub(crate) fn semantic_request_digest_v1(
             request.base_revision(),
             request.idempotency_key(),
             request.operations(),
-            request.child_parameters(),
+            request
+                .child_parameters()
+                .map(super::ChildParameterAdmissionCarrier::canonical_bytes),
             request.model_proposals(),
             request.extensions(),
         ),
@@ -158,19 +164,37 @@ pub fn semantic_idempotency_digest_v1(
             request.base_revision(),
             request.idempotency_key(),
             request.operations(),
+            None,
             request.model_proposals(),
             request.extensions(),
         ),
-        VersionedUpdateRequest::V2(request) => digest_document(
-            input,
-            request.component(),
-            request.base_revision(),
-            request.idempotency_key(),
-            request.operations(),
-            request.model_proposals(),
-            request.extensions(),
-        ),
+        VersionedUpdateRequest::V2(request) => {
+            let child_parameters_authority_digest = request
+                .child_parameters()
+                .map(|carrier| digest_child_parameters_authority(carrier.canonical_bytes()))
+                .transpose()?;
+            digest_document(
+                input,
+                request.component(),
+                request.base_revision(),
+                request.idempotency_key(),
+                request.operations(),
+                child_parameters_authority_digest.as_ref(),
+                request.model_proposals(),
+                request.extensions(),
+            )
+        }
     }
+}
+
+fn digest_child_parameters_authority(
+    canonical_carrier: &[u8],
+) -> Result<ContentDigest, ProtocolError> {
+    let mut digest = Sha256::new();
+    digest.update(CHILD_PARAMETERS_AUTHORITY_PROFILE_V2);
+    digest.update(canonical_carrier);
+    ContentDigest::from_bytes(&digest.finalize())
+        .map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidIdentity))
 }
 
 #[allow(
@@ -183,6 +207,7 @@ fn digest_document<Operation: Serialize>(
     base_revision: Revision,
     idempotency_identity: &IdempotencyKey,
     operations: &[Operation],
+    child_parameters_authority_digest: Option<&ContentDigest>,
     model_proposals: &BTreeMap<ModelField, CanonicalValue>,
     semantic_extensions: &BTreeMap<String, CanonicalValue>,
 ) -> Result<ContentDigest, ProtocolError> {
@@ -198,6 +223,7 @@ fn digest_document<Operation: Serialize>(
         idempotency_identity,
         authority_digest: &input.authority,
         operations,
+        child_parameters_authority_digest,
         model_proposals,
         semantic_extensions,
     };
@@ -241,7 +267,7 @@ mod tests {
         let mut changed: Value =
             serde_json::from_str(cases[0]["encoded"].as_str().expect("params request"))
                 .expect("params request JSON");
-        changed["child_parameters"]["body"]["parameters"]["query"] =
+        changed["child_parameters"]["envelope"]["body"]["parameters"]["query"] =
             Value::String("zig".to_owned());
         let changed =
             serde_json_canonicalizer::to_vec(&changed).expect("canonical changed request");

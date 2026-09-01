@@ -23,7 +23,10 @@ pub use request::{Operation, SnapshotInput, UpdateRequest, parse_update_request}
 pub use response::{
     Emission, RenderPayload, ResponseOutcome, UpdateResponse, parse_update_response,
 };
-pub use v2::{ChildParameterDelivery, OperationV2, UpdateRequestV2, UpdateResponseV2, UrlIntent};
+pub use v2::{
+    ChildParameterAdmissionCarrier, ChildParameterDelivery, OperationV2, UpdateRequestV2,
+    UpdateResponseV2, UrlIntent,
+};
 
 /// Fully parsed request dispatched by protocol version before its version-specific schema.
 #[derive(Debug)]

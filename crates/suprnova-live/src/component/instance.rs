@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::action::{ActionResult, ActionTarget};
 use crate::canonical::CanonicalValue;
-use crate::child::VerifiedChildParametersV1;
+use crate::child::{EligibleChildParametersV2, VerifiedChildParametersV1};
 use crate::host::TrustedLiveRequestContext;
 use crate::identity::{ActionName, InstanceId, Revision, UnixMillis};
 use crate::metadata::ComponentMetadata;
@@ -275,11 +275,20 @@ pub trait ComponentInstance: ActionTarget {
         }
     }
 
-    /// Applies one separately verified child parameter capability before rendering.
+    /// Historical v1 compatibility hook; production endpoint dispatch never calls this method.
     fn params_changed<'a>(
         &'a mut self,
         _context: &'a RenderContext<'a>,
         _parameters: &'a VerifiedChildParametersV1,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Err(ComponentError::contract_failure()) })
+    }
+
+    /// Applies one server-eligible exact-child v2 capability before rendering.
+    fn params_changed_v2<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _parameters: &'a EligibleChildParametersV2,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async { Err(ComponentError::contract_failure()) })
     }

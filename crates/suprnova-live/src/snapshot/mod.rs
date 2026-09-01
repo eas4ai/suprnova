@@ -9,6 +9,7 @@ mod schema;
 pub mod state;
 mod verified;
 
+pub(crate) use codec::inspect_instance_authority;
 pub use codec::{verify_instance, verify_seed};
 pub use composition::{
     COMPOSITION_LINEAGE_EXTENSION_V1, CompositionChildLineageV1, CompositionLineageV1,

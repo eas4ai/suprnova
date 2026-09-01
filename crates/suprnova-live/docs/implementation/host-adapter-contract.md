@@ -98,6 +98,19 @@ purpose key and cannot be substituted with a snapshot or raw JSON. Request,
 response, context, provider, and endpoint errors retain closed categories and
 byte counts, never credentials, snapshots, state, proposals, or arguments.
 
+The real action route uses its existing middleware/context/attestation path for
+protocol-v2 `params_changed`. Its `child_parameters` value is an exact-key
+carrier containing a v2 envelope and signed accepted parent snapshot. Endpoint
+admission verifies that carrier, the independently supplied current child
+snapshot, exact route/slot/scope/session/tenant/component/instance bindings,
+and non-batched operation shape before protected component or host transaction
+work. Parent route/slot/component claims only select a candidate in the existing
+immutable catalog; the matched registration supplies trusted build, route,
+slot, contract, schemas, and current request scope for parent snapshot
+verification. Ledger eligibility distinguishes concealed logical authority
+failure from provider unavailability. Accepted response projection returns the
+engine's sealed bytes unchanged with the normal cache and content headers.
+
 ## Failure mapping
 
 Wrong method/media/charset/version, cache attempts, missing or expired context,

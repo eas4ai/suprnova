@@ -103,8 +103,11 @@ revision. Only `EligibleChildParametersV2` represents that server-side result.
 Missing/expired/consumed authority, a later accepted revision, foreign lineage,
 or a provider error fails closed before component work. `lazy_complete` and
 `params_changed` remain registered lifecycle operations, not arbitrary method
-dispatch or streamed HTML; framework delivery and dispatch are not implemented
-by this foundation slice.
+dispatch or streamed HTML. The production framework endpoint admits only the
+exact v2 carrier, resolves the signed parent's route/slot/build expectations
+from the immutable mount catalog, obtains ledger eligibility, applies typed
+mount-backed values, and runs the registered child lifecycle once. Historical
+v1 execution remains a non-endpoint compatibility harness.
 
 Parent morph and child parameter application are intentionally non-atomic. The
 child enters a bounded pending state; a child failure refreshes or remounts that

@@ -81,6 +81,37 @@ struct InstanceWire {
     extensions: BTreeMap<String, serde_json::Value>,
 }
 
+/// Bounded untrusted claims used only to select registered verification expectations.
+pub(crate) struct UnverifiedInstanceAuthorityV1 {
+    component: ComponentContract,
+    build_id: BuildId,
+    route: RouteIdentity,
+    slot: IslandSlot,
+    scope: ScopeFingerprint,
+}
+
+impl UnverifiedInstanceAuthorityV1 {
+    pub(crate) const fn component(&self) -> &ComponentContract {
+        &self.component
+    }
+
+    pub(crate) const fn build_id(&self) -> &BuildId {
+        &self.build_id
+    }
+
+    pub(crate) const fn route(&self) -> &RouteIdentity {
+        &self.route
+    }
+
+    pub(crate) const fn slot(&self) -> &IslandSlot {
+        &self.slot
+    }
+
+    pub(crate) const fn scope(&self) -> &ScopeFingerprint {
+        &self.scope
+    }
+}
+
 impl SeedBodyV1 {
     /// Produces a deterministic signed seed envelope.
     pub fn sign(
@@ -191,6 +222,38 @@ pub fn verify_instance(
     validate_instance_expectations(&body, expected)?;
     validate_instance_time(&body, now, limits)?;
     Ok(VerifiedInstanceV1::new(body))
+}
+
+/// Parses bounded instanced claims without granting signature or hydration authority.
+pub(crate) fn inspect_instance_authority(
+    encoded: &[u8],
+    limits: &SnapshotLimits,
+) -> Result<UnverifiedInstanceAuthorityV1, SnapshotError> {
+    let envelope = parse_canonical_value(encoded, limits.input()).map_err(map_canonical)?;
+    let CanonicalValue::Object(fields) = envelope else {
+        return Err(SnapshotError::new(SnapshotErrorKind::InvalidEnvelope));
+    };
+    if fields.len() != 2 || !fields.contains_key("body") || !fields.contains_key("signature") {
+        return Err(SnapshotError::new(SnapshotErrorKind::InvalidEnvelope));
+    }
+    let body = fields
+        .get("body")
+        .ok_or_else(|| SnapshotError::new(SnapshotErrorKind::InvalidEnvelope))?;
+    let wire: InstanceWire = deserialize_body(body)?;
+    if wire.form != "instance" {
+        return Err(SnapshotError::new(SnapshotErrorKind::WrongForm));
+    }
+    if wire.schema_version != SNAPSHOT_SCHEMA_V1 {
+        return Err(SnapshotError::new(SnapshotErrorKind::UnsupportedSchema));
+    }
+    let fields = instance_fields_from_wire(wire)?;
+    Ok(UnverifiedInstanceAuthorityV1 {
+        component: fields.component,
+        build_id: fields.build_id,
+        route: fields.route,
+        slot: fields.slot,
+        scope: fields.scope,
+    })
 }
 
 fn verify_envelope(

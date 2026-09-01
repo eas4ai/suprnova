@@ -2,7 +2,7 @@ import { EventRouter } from "../directives/events.js";
 import type { SubscriptionState } from "../async-updates/types.js";
 import { DirectiveOwnership } from "../directives/ownership.js";
 import { canonicalize, type JsonValue } from "../canonical.js";
-import { queueChildDeliveries } from "../application/children.js";
+import { ChildParameterDeliveryState, queueChildDeliveries } from "../application/children.js";
 import { dispatchValidatedEvents, runValidatedEffects } from "../application/emissions.js";
 import { ResponseApplicationMachine, type ApplicationPorts } from "../application/machine.js";
 import { ApplicationRecovery, type RecoveryDecision } from "../application/recovery.js";
@@ -117,7 +117,7 @@ export class DocumentRuntime {
   readonly #registeredEvents = new RegisteredEventAuthority();
   readonly #featureDriverClaims = new WeakSet<IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
-  readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
+  readonly #childParameterState = new WeakMap<IslandRecord, ChildParameterDeliveryState>();
   readonly #recoveries = new WeakMap<IslandRecord, ApplicationRecovery>();
   readonly #uploadProposals = new UploadProposalAuthority<IslandRecord>();
   readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
@@ -523,7 +523,7 @@ export class DocumentRuntime {
       },
       preflight: (response) => this.#preflightSuccessor(record, response),
       queueChildren: (response) => {
-        queueChildDeliveries(response.childDeliveries, {
+        queueChildDeliveries(response.childDeliveries, response.snapshot, {
           find: (instanceId) => {
             const child = [...this.#records.values()].find(
               (candidate) => candidate.metadata.instanceId === instanceId,
@@ -532,8 +532,8 @@ export class DocumentRuntime {
             return {
               active: () => child.active(),
               instanceId,
-              queueParamsChanged: (envelope, parameterHash) =>
-                this.#queueChildParameters(child, envelope, parameterHash),
+              queueParamsChanged: (envelope, parentSnapshot, parameterHash) =>
+                this.#queueChildParameters(child, envelope, parentSnapshot, parameterHash),
             };
           },
         });
@@ -733,18 +733,23 @@ export class DocumentRuntime {
   #queueChildParameters(
     child: IslandRecord,
     envelope: Readonly<Record<string, JsonValue>>,
+    parentSnapshot: Readonly<Record<string, JsonValue>>,
     parameterHash: string,
   ): boolean {
-    const hashes = this.#childParameterHashes.get(child) ?? [];
-    if (hashes.includes(parameterHash)) return false;
-    const intent = createParamsChangedIntent(child, envelope);
+    let state = this.#childParameterState.get(child);
+    if (state === undefined) {
+      state = new ChildParameterDeliveryState();
+      this.#childParameterState.set(child, state);
+    }
+    const intent = createParamsChangedIntent(child, envelope, parentSnapshot);
+    if (!state.track(parameterHash, intent)) {
+      intent.finish("rejected");
+      return false;
+    }
     if (!child.enqueue(intent)) {
       intent.finish("rejected");
       return false;
     }
-    hashes.push(parameterHash);
-    if (hashes.length > 64) hashes.shift();
-    this.#childParameterHashes.set(child, hashes);
     return true;
   }
 

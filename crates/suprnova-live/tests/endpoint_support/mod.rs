@@ -20,7 +20,7 @@ use suprnova_live::endpoint::{
     LiveEndpointConfig, LiveEndpointRequest, LiveEndpointService, ParsedLiveMediaType,
     RequestCachePolicy, VerifiedEndpointRequest,
 };
-use suprnova_live::host::TrustedLiveRequestContext;
+use suprnova_live::host::{MountCatalog, MountCatalogBuilder, TrustedLiveRequestContext};
 use suprnova_live::identity::{
     BuildId, InstanceId, IslandSlot, Revision, RouteIdentity, ScopeFingerprint, UnixMillis,
 };
@@ -270,6 +270,7 @@ pub(crate) fn service_at_with_registry(
         LiveEndpointConfig::new(protocol_limits(), component_support::snapshot_limits())
             .expect("endpoint config"),
         Arc::new(registry),
+        non_child_endpoint_catalog(),
         Arc::new(FixedClock(now)),
         Arc::new(component_support::key_ring()),
         kernel,
@@ -286,6 +287,7 @@ pub(crate) fn service_with_response_limit(
             .with_max_response_bytes(max_response_bytes)
             .expect("response limit"),
         Arc::new(registry()),
+        non_child_endpoint_catalog(),
         Arc::new(FixedClock(UnixMillis::new(1_200))),
         Arc::new(component_support::key_ring()),
         kernel,
@@ -300,10 +302,16 @@ pub(crate) fn service_with_clock(
         LiveEndpointConfig::new(protocol_limits(), component_support::snapshot_limits())
             .expect("endpoint config"),
         Arc::new(registry()),
+        non_child_endpoint_catalog(),
         clock,
         Arc::new(component_support::key_ring()),
         kernel,
     )
+}
+
+/// Empty immutable catalog for harnesses that never admit child-parameter operations.
+fn non_child_endpoint_catalog() -> Arc<MountCatalog> {
+    Arc::new(MountCatalogBuilder::new().build())
 }
 
 pub(crate) fn request(context: TrustedLiveRequestContext) -> LiveEndpointRequest {

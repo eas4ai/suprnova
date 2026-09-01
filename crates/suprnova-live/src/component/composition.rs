@@ -335,6 +335,12 @@ impl ChildHandle {
         &self.key
     }
 
+    /// Returns the registered child component identity.
+    #[must_use]
+    pub const fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
     /// Returns the independently authorized child instance.
     #[must_use]
     pub const fn instance_id(&self) -> &InstanceId {
@@ -354,7 +360,7 @@ impl ChildHandle {
     }
 }
 
-/// Internal verified value awaiting Task 9 capability signing and child scheduling.
+/// Internal verified transition material consumed by v2 capability signing and child scheduling.
 #[derive(Clone)]
 pub struct PendingChildParameters {
     child: ChildHandle,
@@ -377,7 +383,7 @@ impl PendingChildParameters {
         &self.parameters
     }
 
-    /// Returns the schema digest Task 9 binds into its signed capability.
+    /// Returns the schema digest bound into the signed child-parameter capability.
     #[must_use]
     pub const fn parameter_schema(&self) -> &ParameterSchemaDigest {
         &self.parameter_schema
@@ -389,7 +395,7 @@ impl PendingChildParameters {
         self.parameter_schema_version
     }
 
-    /// Returns the value digest Task 9 binds into its signed capability.
+    /// Returns the value digest bound into the signed child-parameter capability.
     #[must_use]
     pub const fn parameter_value(&self) -> &ParameterValueDigest {
         &self.parameter_value

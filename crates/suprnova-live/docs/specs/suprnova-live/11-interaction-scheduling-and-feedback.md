@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-08-26
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -109,6 +109,23 @@ Acceptance criteria:
   queue signed child deliveries and apply same-route URL reflection, dispatch
   events, run effects, then settle feedback. Child operations enter their own
   scheduler and are not atomic with the accepted parent morph.
+- Only after that parent commit, each validated delivery is paired with the
+  exact accepted top-level parent snapshot and queued as one ordinary child
+  `params_changed` intent. The request sends the child's current snapshot and
+  the exact v2 admission carrier, never raw parameters. Redirect, malformed
+  response, failed morph, stale/mismatched child boundary, unchanged hash, or
+  removed child schedules nothing.
+- Parameter coalescing is scoped to one child incarnation. The current applied
+  value is identified by hash, while pending work is identified by the exact
+  canonical envelope-plus-parent-snapshot authority. Enqueue never marks a hash
+  applied: parent revisions N and N+1 may queue the same hash, only exact pending
+  authority coalesces, and the hash becomes current solely after accepted child
+  application. Failure releases only its own authority for retry, and a later
+  A -> B -> A change remains schedulable.
+- Child scheduling runs after the accepted parent's rollback boundary. A single
+  child's intent construction or enqueue failure is contained to that delivery,
+  cannot recover or roll back the parent, and does not suppress other validated
+  deliveries.
 - Canceled, superseded, duplicate, and out-of-order outcomes have distinct
   handling.
 - A response can update accepted server state without overwriting a newer
@@ -182,6 +199,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Completed post-morph child pairing through the existing
+  per-island scheduler. The accepted parent snapshot is paired at queue time,
+  not duplicated in response deliveries; child coalescing, ordering, feedback,
+  and recovery remain ordinary scheduler behavior and cannot roll back the
+  accepted parent.
 - 2026-08-26 -- Bound poll failure policy to the existing scheduler intent's
   actual terminal application disposition rather than queue admission. The
   fresh-render port now carries one optional, isolated completion observer;

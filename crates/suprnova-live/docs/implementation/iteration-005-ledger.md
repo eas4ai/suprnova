@@ -4,6 +4,42 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-01 -- Exact-child delivery through the real endpoint
+
+Accepted protocol-v2 parent execution now derives changed-child transitions
+from rendered composition, binds each v2 envelope to the accepted successor
+lineage, and prepares one deterministic delivery for each changed surviving
+child. Unchanged, removed, replaced/remounted, duplicate/invalid-lineage, and
+v1-parent outcomes emit none. Envelope signing, response encoding and bounds,
+and complete response sealing all occur before host commit and ledger
+acceptance, so precommit failure exposes zero response bytes and cannot accept
+the parent.
+
+The browser validates the complete parent response, morphs and commits the
+successor, then pairs its one top-level signed parent snapshot with each child
+delivery. The resulting ordinary scheduler intent sends the child's own current
+snapshot and exact `child_parameters` carrier
+`{"envelope":...,"parent_snapshot":...}` without raw parameters or a second
+queue. Redirect, malformed response, morph failure, stale/mismatched boundary,
+unchanged hash, and removal schedule nothing.
+
+The existing Suprnova Live action route now parses exact/bounded carriers and
+independently verifies child snapshot, parent snapshot, and purpose-separated
+v2 envelope before kernel dispatch. The kernel consults authoritative parent
+ledger currentness: logical missing/stale/mismatched authority is concealed,
+while provider failure retains an unavailable failure. Modern
+`params_changed` consumes only `EligibleChildParametersV2`, hydrates and invokes
+the generated lifecycle once, renders/signs a successor child snapshot,
+advances the child's ledger, and records the applied parent revision in owner
+lineage. The macro generates both modern and explicitly historical v1 hooks
+from one declaration; raw v1 never enters production admission.
+
+Focused real-route coverage proves success, exact sealed response projection,
+raw-envelope/v1-shaped and malformed rejection, forged signature, cross-child,
+cross-session, cross-tenant, and superseded-parent rejection before component
+work or child-ledger acceptance. Rejected child delivery leaves the already
+accepted parent revision unchanged.
+
 ## 2026-09-01 -- Accepted-revision, signed lineage, and exact-child foundation
 
 The host-neutral engine now exposes a provider-neutral
@@ -27,9 +63,9 @@ instance binding without changing v1 decoding. Server authorization returns an
 `EligibleChildParametersV2` only when verified v2 data matches the signed parent
 snapshot lineage and the ledger still reports the exact issuing parent
 revision. Superseded revisions, foreign scope/parent/key/component/child,
-missing authority, and provider errors fail closed. This checkpoint deliberately
-does not implement framework HTTP child delivery, parent response emission,
-browser scheduling, or `params_changed` execution.
+missing authority, and provider errors fail closed. This foundation checkpoint
+deliberately deferred framework HTTP child delivery, parent response emission,
+browser scheduling, and `params_changed` execution to the slice recorded above.
 
 Strict TDD evidence includes compile-time REDs for the new ledger read,
 composition extension, and v2 envelope APIs; a behavioral RED showing a replay

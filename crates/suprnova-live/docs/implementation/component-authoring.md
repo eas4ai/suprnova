@@ -71,6 +71,19 @@ instance-only state. The inherent `#[live]` implementation consumes
 `#[rendering]`, `#[rendered]`, `#[dehydrate]`, `#[teardown]`,
 `#[params_changed]`, and `#[lazy_complete]` helpers.
 
+One `#[params_changed]` declaration generates both the modern eligible-v2 hook
+used by the production endpoint and the historical verified-v1 hook retained
+for byte-compatible engine harnesses. Application authors do not duplicate the
+annotation. Only the modern hook receives server-ledger eligibility; the v1
+bridge is not production authorization.
+
+For the modern hook, generated glue decodes the eligible canonical parameter
+object with the component's registered mount codecs and assigns each owned
+value to its matching typed mount-backed field on the hydrated child. It does
+this before invoking the application hook, rendering, and dehydrating the
+signed successor. No raw or merely verified map is exposed to application
+code, and the historical-v1 bridge does not gain this production authority.
+
 Unknown, duplicate, conflicting, misplaced, inaccessible, generic, borrowed,
 or unsupported declarations fail at compile time. Action methods are generated
 into a closed dispatch table; browser text never names a Rust type or arbitrary
@@ -112,9 +125,8 @@ final paths remain proved without introducing a framework dependency.
 browserless harness. These packages are unpublished and are not application
 dependencies.
 
-The host-neutral document adapter, endpoint types, and test host ports are
-conformance machinery inside the integrated internal crate. This conformance
-machinery does not claim registered Suprnova integration. The real
-`suprnova::live` facade, router registration, middleware adapters,
-session/auth/tenant services, and remaining framework integration work stay
-within Iteration 005 until their framework tests pass.
+The host-neutral document adapter, endpoint types, and test host ports remain
+internal conformance machinery. The real `suprnova::live` facade, router
+registration, middleware/context adapters, and exact-child `params_changed`
+path are additionally proved through the real framework endpoint; this does not
+turn internal engine types into application APIs.

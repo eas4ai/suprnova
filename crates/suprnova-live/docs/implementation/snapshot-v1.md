@@ -74,6 +74,13 @@ contract; every parent child entry must name the enclosing parent instance and
 revision. Public seeds reject the registered instance-only extension. Unknown
 well-formed namespaced extensions retain snapshot-v1 compatibility behavior.
 
+For a child snapshot, owner `parent_revision` is the last accepted parent
+revision whose eligible v2 parameters were applied. Successful modern
+`params_changed` execution advances the child's own snapshot/ledger revision
+and updates that owner revision together. Equal/older deliveries cannot replay
+the lifecycle. Historical v1 envelope parsing does not create this production
+eligibility.
+
 `LiveInstanceLedger` stores bounded concurrency and idempotency metadata, never
 a component object. The complete Tier 0 memory provider proves:
 

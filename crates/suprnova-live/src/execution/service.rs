@@ -9,7 +9,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::action::{ActionOutcome, ActionResult, RawActionArguments};
 use crate::canonical::CanonicalValue;
-use crate::child::VerifiedChildParametersV1;
+use crate::child::{
+    ChildParameterLimits, EligibleChildParametersV2, PreparedChildParametersV2,
+    VerifiedChildParametersV1, VerifiedChildParametersV2, authorize_child_parameters_v2,
+};
 use crate::clock::Clock;
 use crate::component::{
     ActionExecutionOutput, ActionExecutionParts, ComponentExecutor, HydrationContext, MountContext,
@@ -32,18 +35,19 @@ use crate::ledger::{
 };
 use crate::limits::InputLimits;
 use crate::promotion::{PromotedInstance, RefreshBeforeAction};
-use crate::protocol::BrowserRenderContext;
+use crate::protocol::{BrowserRenderContext, ChildParameterDelivery};
 use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
 use crate::snapshot::{
-    ComponentContract, InstanceBodyV1, InstanceFieldsV1, SeedBodyV1, SnapshotLimits,
-    SnapshotSchemaSet, VerifiedInstanceV1, mounted_document_path,
+    COMPOSITION_LINEAGE_EXTENSION_V1, ComponentContract, CompositionChildLineageV1,
+    CompositionLineageV1, CompositionOwnerLineageV1, InstanceBodyV1, InstanceFieldsV1, SeedBodyV1,
+    SnapshotLimits, SnapshotSchemaSet, VerifiedInstanceV1, mounted_document_path,
 };
 use crate::state::ProposalBatch;
 use crate::validation::{BagPolicy, ErrorBag, ValidationEngine, ValidationPort};
 use crate::view::{
-    IslandRender, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES, ViewRenderer,
-    assemble_island_root,
+    ChildMountTransition, IslandRender, IslandRootInput, IslandSnapshotForm,
+    MAX_SUCCESSOR_METADATA_BYTES, ViewRenderer, assemble_island_root,
 };
 
 use super::{
@@ -206,11 +210,14 @@ pub struct InstancedFreshRenderRequest<'a> {
 }
 
 /// One closed non-action lifecycle operation coordinated under island revision authority.
+#[derive(Clone, Copy)]
 pub enum InstancedLifecycleOperation<'a> {
     /// Apply a separately prepared model synchronization batch.
     SyncModels(&'a ProposalBatch),
-    /// Apply a separately verified parent-issued child parameter capability.
-    ParamsChanged(&'a VerifiedChildParametersV1),
+    /// Apply a server-eligible exact-child v2 capability.
+    ParamsChanged(&'a EligibleChildParametersV2),
+    /// Historical v1 harness compatibility; never used by the production endpoint.
+    ParamsChangedV1Historical(&'a VerifiedChildParametersV1),
     /// Complete one registered lazy lifecycle boundary.
     LazyComplete,
 }
@@ -442,6 +449,7 @@ pub struct AcceptedExecution {
     validation: ErrorBag,
     action_executed: bool,
     reporting_failed: bool,
+    child_deliveries: Vec<ChildParameterDelivery>,
     sealed_response: SealedAcceptedResponse,
 }
 
@@ -492,6 +500,12 @@ impl AcceptedExecution {
     #[must_use]
     pub const fn reporting_failed(&self) -> bool {
         self.reporting_failed
+    }
+
+    /// Returns changed surviving child deliveries sealed with this accepted parent outcome.
+    #[must_use]
+    pub fn child_deliveries(&self) -> &[ChildParameterDelivery] {
+        &self.child_deliveries
     }
 
     pub(crate) fn into_sealed_response(self) -> SealedAcceptedResponse {
@@ -626,7 +640,14 @@ struct SnapshotAuthority {
     instance_id: InstanceId,
     expires_at: UnixMillis,
     extensions: BTreeMap<String, CanonicalValue>,
+    composition_lineage: Option<CompositionLineageV1>,
+    owner_parent_revision: Option<Revision>,
     request_snapshot: RequestSnapshotAuthority,
+}
+
+struct SuccessorComposition {
+    extensions: BTreeMap<String, CanonicalValue>,
+    pending: Vec<crate::component::composition::PendingChildParameters>,
 }
 
 enum RequestSnapshotAuthority {
@@ -666,6 +687,15 @@ impl ExecutionService {
     pub fn with_reporter(mut self, reporter: Arc<dyn AcceptedOutcomeReporter>) -> Self {
         self.reporter = Some(reporter);
         self
+    }
+
+    /// Authorizes a verified child-v2 envelope against signed lineage and the current ledger.
+    pub async fn authorize_child_parameters_v2(
+        &self,
+        verified: &VerifiedChildParametersV2,
+        parent: &VerifiedInstanceV1,
+    ) -> Result<EligibleChildParametersV2, crate::child::ChildParameterEligibilityError> {
+        authorize_child_parameters_v2(verified, parent, self.ledger.as_ref()).await
     }
 
     /// Executes one verified instanced action under exact Tier 0 ordering.
@@ -723,6 +753,8 @@ impl ExecutionService {
                 instance_id: body.instance_id().clone(),
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
+                composition_lineage: body.composition_lineage().cloned(),
+                owner_parent_revision: None,
                 request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
             },
             SuccessorPresentation {
@@ -797,6 +829,8 @@ impl ExecutionService {
                 instance_id: body.instance_id().clone(),
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
+                composition_lineage: body.composition_lineage().cloned(),
+                owner_parent_revision: None,
                 request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
             },
             SuccessorPresentation {
@@ -851,6 +885,11 @@ impl ExecutionService {
             }
             InstancedLifecycleOperation::ParamsChanged(parameters) => {
                 ComponentExecutor::new()
+                    .params_changed_v2(request.descriptor, &hydration, parameters)
+                    .await
+            }
+            InstancedLifecycleOperation::ParamsChangedV1Historical(parameters) => {
+                ComponentExecutor::new()
                     .params_changed(request.descriptor, &hydration, parameters)
                     .await
             }
@@ -880,6 +919,15 @@ impl ExecutionService {
                 instance_id: body.instance_id().clone(),
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
+                composition_lineage: body.composition_lineage().cloned(),
+                owner_parent_revision: match request.operation {
+                    InstancedLifecycleOperation::ParamsChanged(parameters) => {
+                        Some(parameters.parent_revision())
+                    }
+                    InstancedLifecycleOperation::SyncModels(_)
+                    | InstancedLifecycleOperation::ParamsChangedV1Historical(_)
+                    | InstancedLifecycleOperation::LazyComplete => None,
+                },
                 request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
             },
             SuccessorPresentation {
@@ -962,6 +1010,8 @@ impl ExecutionService {
                 instance_id: authority.instance_id().clone(),
                 expires_at: authority.expires_at(),
                 extensions: seed.extensions().clone(),
+                composition_lineage: None,
+                owner_parent_revision: None,
                 request_snapshot: RequestSnapshotAuthority::SeedPromotion(request.browser_nonce),
             },
             SuccessorPresentation {
@@ -1085,6 +1135,165 @@ impl ExecutionService {
         }
     }
 
+    fn prepare_successor_composition(
+        &self,
+        authority: &SnapshotAuthority,
+        successor_revision: Revision,
+        render: Option<&IslandRender>,
+    ) -> Result<SuccessorComposition, ()> {
+        let mut extensions = authority.extensions.clone();
+        extensions.remove(COMPOSITION_LINEAGE_EXTENSION_V1);
+        let mut owner = authority
+            .composition_lineage
+            .as_ref()
+            .and_then(CompositionLineageV1::owner)
+            .cloned();
+        if let Some(parent_revision) = authority.owner_parent_revision {
+            let current = owner.as_ref().ok_or(())?;
+            owner = Some(
+                CompositionOwnerLineageV1::new(
+                    current.parent_instance().clone(),
+                    parent_revision,
+                    current.child_key().clone(),
+                    current.child_contract().clone(),
+                    current.child_instance().clone(),
+                    current.depth(),
+                )
+                .map_err(|_| ())?,
+            );
+        }
+        let previous = authority
+            .composition_lineage
+            .as_ref()
+            .map(CompositionLineageV1::children)
+            .unwrap_or_default();
+        let mut children = Vec::new();
+        let mut pending = Vec::new();
+
+        if let Some(render) = render {
+            for mount in &render.children {
+                let Some(transition) = mount.transition() else {
+                    if !previous.is_empty() {
+                        return Err(());
+                    }
+                    continue;
+                };
+                let child = match transition {
+                    ChildMountTransition::Surviving(child) => child,
+                    ChildMountTransition::Pending(parameters) => {
+                        pending.push(parameters.clone());
+                        parameters.child()
+                    }
+                };
+                let prior = previous
+                    .iter()
+                    .find(|entry| entry.child_key() == child.key())
+                    .filter(|entry| {
+                        entry.child_contract() == child.component_contract()
+                            && entry.child_instance() == child.instance_id()
+                    })
+                    .ok_or(())?;
+                children.push(
+                    CompositionChildLineageV1::new(
+                        authority.instance_id.clone(),
+                        successor_revision,
+                        child.key().clone(),
+                        child.component_contract().clone(),
+                        child.instance_id().clone(),
+                        prior.depth(),
+                    )
+                    .map_err(|_| ())?,
+                );
+            }
+        } else {
+            children = previous
+                .iter()
+                .map(|child| {
+                    CompositionChildLineageV1::new(
+                        authority.instance_id.clone(),
+                        successor_revision,
+                        child.child_key().clone(),
+                        child.child_contract().clone(),
+                        child.child_instance().clone(),
+                        child.depth(),
+                    )
+                    .map_err(|_| ())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+
+        if owner.is_some() || !children.is_empty() {
+            let lineage = CompositionLineageV1::new(owner, children).map_err(|_| ())?;
+            extensions.insert(
+                COMPOSITION_LINEAGE_EXTENSION_V1.to_owned(),
+                lineage.to_canonical(),
+            );
+        }
+
+        Ok(SuccessorComposition {
+            extensions,
+            pending,
+        })
+    }
+
+    fn seal_child_deliveries(
+        &self,
+        authority: &SnapshotAuthority,
+        successor_revision: Revision,
+        pending: Vec<crate::component::composition::PendingChildParameters>,
+        now: UnixMillis,
+    ) -> Result<Vec<ChildParameterDelivery>, ()> {
+        const MAX_CHILD_PARAMETER_LIFETIME_MS: u64 = 300_000;
+        let child_limits = ChildParameterLimits::new(
+            *self.snapshot_limits.input(),
+            0,
+            MAX_CHILD_PARAMETER_LIFETIME_MS,
+        )
+        .map_err(|_| ())?;
+        let expires_at = UnixMillis::new(
+            now.get()
+                .checked_add(MAX_CHILD_PARAMETER_LIFETIME_MS)
+                .ok_or(())?
+                .min(authority.expires_at.get()),
+        );
+        pending
+            .into_iter()
+            .map(|pending| {
+                let child_instance = pending.child().instance_id().clone();
+                let parameter_hash =
+                    ContentDigest::from_bytes(pending.parameter_value().as_bytes())
+                        .map_err(|_| ())?;
+                let envelope = PreparedChildParametersV2::new(
+                    authority.scope.clone(),
+                    authority.instance_id.clone(),
+                    successor_revision,
+                    child_instance.clone(),
+                    pending,
+                    now,
+                    expires_at,
+                    self.keys.active_key_id().clone(),
+                    &child_limits,
+                )
+                .and_then(|prepared| {
+                    prepared.seal_claimed_successor(
+                        &authority.scope,
+                        &authority.instance_id,
+                        successor_revision,
+                        &self.keys,
+                        now,
+                        &child_limits,
+                    )
+                })
+                .map_err(|_| ())?;
+                Ok(ChildParameterDelivery::sealed(
+                    child_instance,
+                    parameter_hash,
+                    envelope,
+                ))
+            })
+            .collect()
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "publication keeps every authority and rollback input visible in one stage"
@@ -1129,6 +1338,18 @@ impl ExecutionService {
             self.consume_failed_claim(claim).await;
             return refresh(ExecutionRefreshReason::ExecutionFailed);
         }
+        let successor_composition = match self.prepare_successor_composition(
+            &authority,
+            successor_revision,
+            render.as_ref(),
+        ) {
+            Ok(composition) => composition,
+            Err(()) => {
+                rollback(&mut transaction).await;
+                self.consume_failed_claim(claim).await;
+                return refresh(ExecutionRefreshReason::ExecutionFailed);
+            }
+        };
         let signed_snapshot = InstanceBodyV1::new(
             InstanceFieldsV1 {
                 component: authority.component.clone(),
@@ -1143,7 +1364,7 @@ impl ExecutionService {
                 expires_at: authority.expires_at,
                 state,
                 memo,
-                extensions: authority.extensions.clone(),
+                extensions: successor_composition.extensions,
             },
             schemas,
             &self.snapshot_limits,
@@ -1197,6 +1418,25 @@ impl ExecutionService {
                 }
             }
             None => None,
+        };
+        let child_deliveries = if presentation.protocol_version == 2
+            && !matches!(result.outcome(), ActionOutcome::Redirect(_))
+        {
+            match self.seal_child_deliveries(
+                &authority,
+                successor_revision,
+                successor_composition.pending,
+                now,
+            ) {
+                Ok(deliveries) => deliveries,
+                Err(()) => {
+                    rollback(&mut transaction).await;
+                    self.consume_failed_claim(claim).await;
+                    return refresh(ExecutionRefreshReason::ExecutionFailed);
+                }
+            }
+        } else {
+            Vec::new()
         };
         let response_intents =
             if response_intent_port.is_some() || response_intent_preparation_required(&result) {
@@ -1275,6 +1515,7 @@ impl ExecutionService {
             result: &result,
             intents: &response_intents,
             validation: &validation,
+            child_deliveries: &child_deliveries,
             authority: AcceptedResponseAuthority {
                 component: &authority.component,
                 route: &authority.route,
@@ -1340,6 +1581,7 @@ impl ExecutionService {
             validation,
             action_executed,
             reporting_failed,
+            child_deliveries,
             sealed_response,
         }))
     }

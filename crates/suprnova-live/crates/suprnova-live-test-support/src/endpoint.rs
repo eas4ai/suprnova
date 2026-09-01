@@ -10,6 +10,7 @@ use suprnova_live::endpoint::{
     EndpointKernel, EndpointKernelError, EndpointOutcomeKind, LiveEndpointConfig,
     LiveEndpointRequest, LiveEndpointService, VerifiedEndpointRequest,
 };
+use suprnova_live::host::{MountCatalog, MountCatalogBuilder};
 use suprnova_live::registry::ComponentRegistry;
 
 struct CaptureKernel {
@@ -80,7 +81,19 @@ pub async fn capture_verified_response_sealer(
     let kernel = Arc::new(CaptureKernel {
         sealer: Mutex::new(None),
     });
-    let service = LiveEndpointService::new(config, registry, clock, keys, kernel.clone());
+    let service = LiveEndpointService::new(
+        config,
+        registry,
+        non_child_endpoint_catalog(),
+        clock,
+        keys,
+        kernel.clone(),
+    );
     let _ = service.handle(request).await;
     kernel.take()
+}
+
+/// Empty immutable catalog for sealer fixtures that cannot admit child parameters.
+fn non_child_endpoint_catalog() -> Arc<MountCatalog> {
+    Arc::new(MountCatalogBuilder::new().build())
 }

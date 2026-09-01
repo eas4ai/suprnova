@@ -1,8 +1,10 @@
 //! Exact-child-bound child-parameter envelope v2 and server eligibility tests.
 
 mod child_parameter_support;
+mod component_support;
 mod snapshot_support;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -10,6 +12,7 @@ use child_parameter_support::{
     EXPIRES, NOW, accepted_parent, instance, issued_child, key_ring, parameter_limits,
     parameter_schema, pending_parameters,
 };
+use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::{
     ChildParameterEligibilityErrorKind, ChildParameterErrorKind, ExpectedChildParametersV2,
     PreparedChildParametersV2, VerifiedChildParametersV2, authorize_child_parameters_v2,
@@ -17,6 +20,7 @@ use suprnova_live::child::{
 };
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::component::composition::ChildKey;
+use suprnova_live::component::{ComponentExecutor, HydrationContext, RenderContext};
 use suprnova_live::identity::{
     BuildId, ContentDigest, IdempotencyKey, InstanceId, IslandSlot, Revision, ScopeFingerprint,
     UnixMillis,
@@ -26,6 +30,7 @@ use suprnova_live::ledger::{
     LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger,
 };
 use suprnova_live::limits::InputLimits;
+use suprnova_live::registry::ComponentDescriptor;
 use suprnova_live::snapshot::{
     CompositionChildLineageV1, CompositionLineageV1, ExpectedInstanceV1, InstanceBodyV1,
     SnapshotLimits, VerifiedInstanceV1, verify_instance,
@@ -467,5 +472,50 @@ async fn missing_or_failing_ledger_authority_fails_closed_with_provider_cause() 
             .and_then(|source| source.downcast_ref::<LedgerError>())
             .map(|error| error.kind()),
         Some(LedgerErrorKind::ClockUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn eligible_v2_capability_runs_the_registered_child_lifecycle_once() {
+    let fixture = eligible_fixture().await;
+    let eligible = authorize_child_parameters_v2(
+        &fixture.parameters,
+        &fixture.parent_snapshot,
+        &fixture.ledger,
+    )
+    .await
+    .expect("current parent authorizes exact child");
+    let control = component_support::FixtureControl::new(component_support::FailurePoint::None);
+    let descriptor = ComponentDescriptor::with_hooks(
+        component_support::metadata().clone(),
+        component_support::install(control.clone()),
+    )
+    .with_composition(parameter_schema(), true, false);
+    let request = component_support::trusted_context();
+    let instance = eligible.child_instance().clone();
+    let render = RenderContext::new(
+        &request,
+        &instance,
+        Revision::new(1),
+        UnixMillis::new(2_000),
+    );
+    let state = CanonicalValue::Object(BTreeMap::from([(
+        "serial".to_owned(),
+        CanonicalValue::String("1".to_owned()),
+    )]));
+    let hydration = HydrationContext::new(render, &state);
+
+    ComponentExecutor::new()
+        .params_changed_v2(&descriptor, &hydration, &eligible)
+        .await
+        .expect("only eligible v2 enters the modern params_changed lifecycle");
+
+    assert_eq!(
+        control
+            .values()
+            .into_iter()
+            .filter(|phase| *phase == "params_changed_v2")
+            .count(),
+        1
     );
 }

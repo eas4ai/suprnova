@@ -166,6 +166,7 @@ export class ServerIntent {
 export function createParamsChangedIntent(
   island: IslandRecord,
   envelope: Readonly<Record<string, JsonValue>>,
+  parentSnapshot: Readonly<Record<string, JsonValue>>,
 ): ServerIntent {
   return new ServerIntent(
     Object.freeze({
@@ -179,7 +180,7 @@ export function createParamsChangedIntent(
     null,
     Object.freeze({}),
     Object.freeze({}),
-    envelope,
+    Object.freeze({ envelope, parent_snapshot: parentSnapshot }),
   );
 }
 

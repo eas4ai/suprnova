@@ -17,20 +17,27 @@ or a public seed plus non-authoritative browser nonce.
 The closed v2 operations are:
 
 - `sync_model`, followed by at most one registered `invoke_action`;
-- `params_changed` with one separately signed child envelope;
+- `params_changed` with one exact admission carrier;
 - `lazy_complete`; and
 - `fresh_render`.
 
 Each lifecycle operation must be the only operation, carry no model proposals,
 and use exactly its required authority: `params_changed` requires child
-parameters; `lazy_complete` and `fresh_render` forbid them. Lifecycle names do
+parameters; `lazy_complete` and `fresh_render` forbid them. The
+`child_parameters` carrier has exactly `envelope` and `parent_snapshot`; the
+current child snapshot remains the ordinary top-level request snapshot.
+Lifecycle names do
 not expose arbitrary Rust hooks. Unknown, duplicated, reordered, oversized, or
 incompatible work fails during complete structural parsing.
 
 The semantic idempotency digest is versioned separately from the wire shape. It
 omits correlation, media, and transport details while binding current scope,
 instance/base revision, component contract, idempotency identity, signed
-authority, requested operations, proposals, and semantic extensions.
+authority, requested operations, proposals, and semantic extensions. For v2
+`params_changed`, it additionally binds a purpose-separated digest of the
+bounded canonical admission carrier; changing that carrier under the same base
+and retry identity is an idempotency conflict. The historical v1 profile bytes
+remain unchanged.
 
 ## Child parameter envelopes
 
@@ -67,9 +74,25 @@ parent revision. The resulting `EligibleChildParametersV2` is server-only.
 Missing or unavailable ledger authority and a valid but superseded browser
 snapshot fail closed.
 
-This checkpoint exposes engine contracts only. It does not yet emit
-`child_deliveries`, add a framework child endpoint, schedule browser work, or
-invoke `params_changed`; those remain the next coherent slice.
+Accepted parent execution builds one `ChildParameterDelivery` for each changed
+surviving independently owned child. Each delivery contains only exact child
+instance, parameter hash, and signed v2 envelope. The response's single
+top-level successor snapshot supplies the parent proof and is not copied into
+every delivery. Every envelope and the complete bounded response are signed,
+serialized, and sealed before host commit and ledger acceptance; any failure
+rolls back/releases the parent attempt without publishing partial bytes.
+
+After successful parent morph and browser snapshot commit, the runtime pairs
+that exact parent snapshot with each validated delivery and queues an ordinary
+child `params_changed` intent. Its request sends the child's current snapshot
+plus the exact carrier and no raw parameters. The endpoint verifies child
+snapshot, parent snapshot, and v2 envelope independently, then creates
+`EligibleChildParametersV2` from current parent-ledger authority. Only that
+eligible capability reaches modern lifecycle execution. Historical
+`VerifiedChildParametersV1` executor/harness APIs remain byte compatible but
+cannot authorize the production endpoint; even a correctly signed v1 envelope
+placed inside the exact two-member carrier is rejected before component or
+ledger work.
 
 ## Response ordering
 
@@ -86,13 +109,17 @@ The browser runtime must apply a completely validated response in this order:
    remains authoritative. For no-render, validate that disposition.
 3. Only after morph/no-render success, install the successor snapshot and
    revision.
-4. Reconcile model and validation state, restore focus/form continuity,
-   dispatch typed events, run registered effects, and settle feedback.
+4. Reconcile model and validation state and restore focus/form continuity.
+5. Pair/queue eligible child deliveries and apply same-route URL reflection.
+6. Dispatch typed events, run registered effects, and settle feedback.
 
 Signed child deliveries and reflected URL intent are eligible only with that
-same committed successor. Their exact browser scheduling hooks belong to
-Iteration 003; navigated URL intent is already terminal and mutually exclusive
-with committed state or child delivery.
+same committed successor. Redirect/navigation, malformed response, failed
+morph, stale or removed child identity, and unchanged parameter hash suppress
+child scheduling. Child scheduling begins only after the parent rollback
+boundary: one construction/enqueue failure is child-local and later deliveries
+continue. Navigated URL intent is terminal and mutually exclusive with committed
+state or child delivery.
 
 The server may advance to revision N+1 before the browser morphs revision N's
 DOM. Committing browser authority before morph success would attach new state

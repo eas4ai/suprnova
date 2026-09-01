@@ -151,6 +151,18 @@ impl<C: ComponentContract> LiveMount<C> {
         self.kind
     }
 
+    pub(crate) const fn route(&self) -> &RouteIdentity {
+        &self.route
+    }
+
+    pub(crate) const fn slot(&self) -> &IslandSlot {
+        &self.slot
+    }
+
+    pub(crate) const fn component(&self) -> &suprnova_live::identity::ComponentName {
+        &self.component
+    }
+
     fn route_policy(&self) -> LiveRouteSecurityPolicy {
         let public = self.kind == LiveMountKind::PublicSeed;
         LiveRouteSecurityPolicy {

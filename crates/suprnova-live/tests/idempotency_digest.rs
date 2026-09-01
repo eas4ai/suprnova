@@ -1,6 +1,16 @@
 //! Semantic idempotency digest profile tests.
 
-use suprnova_live::identity::{ContentDigest, InstanceId, ScopeFingerprint};
+mod ledger_support;
+
+use std::fs;
+use std::sync::Arc;
+
+use serde_json::Value;
+use suprnova_live::conformance::fixture_directory_v2;
+use suprnova_live::identity::{ContentDigest, InstanceId, Revision, ScopeFingerprint};
+use suprnova_live::ledger::{
+    AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, LiveInstanceLedger,
+};
 use suprnova_live::protocol::{
     SemanticIdempotencyInputV1, parse_versioned_update_request, semantic_idempotency_digest_v1,
 };
@@ -139,4 +149,80 @@ fn ordered_operations_are_digest_significant() {
     );
 
     assert_ne!(digest(&first, 0x73), digest(&reversed, 0x73));
+}
+
+#[tokio::test]
+async fn v2_child_carrier_is_idempotency_significant_and_exact_replay_remains_accepted() {
+    let fixture: Value = serde_json::from_slice(
+        &fs::read(fixture_directory_v2().join("protocol-success.json")).expect("v2 fixture file"),
+    )
+    .expect("v2 fixture JSON");
+    let encoded = fixture["cases"][0]["encoded"]
+        .as_str()
+        .expect("params request")
+        .as_bytes()
+        .to_vec();
+    let exact_digest = digest(&encoded, 0x73);
+    assert_eq!(exact_digest, digest(&encoded, 0x73));
+
+    let mut changed: Value = serde_json::from_slice(&encoded).expect("params request JSON");
+    changed["child_parameters"]["envelope"]["body"]["parameters"]["query"] =
+        Value::String("different-authority".to_owned());
+    let changed = serde_json_canonicalizer::to_vec(&changed).expect("changed canonical request");
+    let changed_digest = digest(&changed, 0x73);
+
+    let clock = Arc::new(ledger_support::ManualClock::new(1_000));
+    let ledger = ledger_support::ledger(clock, 2);
+    let scope = ScopeFingerprint::from_bytes(&bytes::<32>(0x70)).expect("scope is valid");
+    let instance = InstanceId::from_bytes(&bytes::<16>(0x71)).expect("instance is valid");
+    ledger_support::promote_default(&ledger, scope.clone(), instance.clone()).await;
+    let idempotency = ledger_support::idempotency(0x62);
+    let grant = match ledger
+        .claim(ClaimRequest::new(
+            scope.clone(),
+            instance.clone(),
+            Revision::new(0),
+            idempotency.clone(),
+            exact_digest.clone(),
+        ))
+        .await
+        .expect("initial claim")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected granted claim, got {other:?}"),
+    };
+    ledger
+        .commit(
+            &grant.into_token(),
+            AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, exact_digest.clone()),
+        )
+        .await
+        .expect("initial claim commits");
+
+    assert!(matches!(
+        ledger
+            .claim(ClaimRequest::new(
+                scope.clone(),
+                instance.clone(),
+                Revision::new(0),
+                idempotency.clone(),
+                exact_digest,
+            ))
+            .await
+            .expect("exact replay classifies"),
+        ClaimOutcome::Accepted(_)
+    ));
+    assert!(matches!(
+        ledger
+            .claim(ClaimRequest::new(
+                scope,
+                instance,
+                Revision::new(0),
+                idempotency,
+                changed_digest,
+            ))
+            .await
+            .expect("changed carrier classifies"),
+        ClaimOutcome::IdempotencyConflict
+    ));
 }

@@ -280,6 +280,11 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
 
   const childParameters = asNullableRecord(root["child_parameters"]);
   const hasChildParameters = childParameters !== undefined;
+  if (childParameters !== undefined) {
+    requireExactKeys(childParameters, ["envelope", "parent_snapshot"]);
+    asRecord(childParameters["envelope"]);
+    asRecord(childParameters["parent_snapshot"]);
+  }
 
   const operations = asArray(root["operations"]);
   if (operations.length === 0 || operations.length > 8) {

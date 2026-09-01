@@ -199,6 +199,13 @@ that exact accepted parent revision. Verification of the envelope or browser
 snapshot alone does not create eligibility.
 _Avoid_: raw child parameters, verified v1 envelope, browser delivery, snapshot revision
 
+**Child-parameter admission carrier**:
+The canonical protocol-v2 `child_parameters` object with exactly `envelope` and
+`parent_snapshot`, pairing one separately signed exact-child v2 envelope with
+the exact signed accepted parent successor snapshot. The child's own current
+snapshot remains the request snapshot and is not duplicated inside the carrier.
+_Avoid_: raw parameter map, response delivery, v1 envelope, sticky parent snapshot
+
 **Accepted Live outcome**:
 The one committed protocol outcome permitted for an island base revision. A
 rolled-back Rust method may run again, and external side effects require their

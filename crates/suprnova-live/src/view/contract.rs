@@ -6,6 +6,7 @@ use std::fmt;
 use askama::Template;
 use bytes::Bytes;
 
+use crate::component::composition::{ChildHandle, PendingChildParameters};
 use crate::identity::{ComponentName, IslandSlot, ViewName};
 
 use super::{ViewError, ViewErrorKind};
@@ -247,13 +248,44 @@ impl fmt::Debug for MountMetadata {
 pub struct ChildMount {
     slot: IslandSlot,
     component: ComponentName,
+    transition: Option<ChildMountTransition>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ChildMountTransition {
+    Surviving(ChildHandle),
+    Pending(PendingChildParameters),
 }
 
 impl ChildMount {
     /// Declares a child boundary without granting parent ownership of child state.
     #[must_use]
     pub const fn new(slot: IslandSlot, component: ComponentName) -> Self {
-        Self { slot, component }
+        Self {
+            slot,
+            component,
+            transition: None,
+        }
+    }
+
+    /// Declares an unchanged surviving child with exact signed-lineage identity.
+    #[must_use]
+    pub fn surviving(slot: IslandSlot, child: ChildHandle) -> Self {
+        Self {
+            slot,
+            component: child.component().clone(),
+            transition: Some(ChildMountTransition::Surviving(child)),
+        }
+    }
+
+    /// Declares a surviving child whose validated parameter value changed.
+    #[must_use]
+    pub fn pending_parameters(slot: IslandSlot, pending: PendingChildParameters) -> Self {
+        Self {
+            slot,
+            component: pending.child().component().clone(),
+            transition: Some(ChildMountTransition::Pending(pending)),
+        }
     }
 
     /// Returns the child slot local to its parent render.
@@ -266,6 +298,10 @@ impl ChildMount {
     #[must_use]
     pub const fn component(&self) -> &ComponentName {
         &self.component
+    }
+
+    pub(crate) const fn transition(&self) -> Option<&ChildMountTransition> {
+        self.transition.as_ref()
     }
 }
 

@@ -85,6 +85,9 @@ Acceptance criteria:
   contract and is never reinterpreted as v2.
 - After the parent morph, a changed hash queues one `params_changed` operation
   through the child's ordinary scheduler and revision-bearing protocol path.
+- The parent prepares exactly one bounded delivery for each changed surviving
+  independently owned child. Unchanged, removed, replaced/remounted, ambiguous,
+  or unsupported-v1 lineage produces no misleading delivery.
 - Browser-supplied raw parameters cannot substitute for the signed envelope.
 - Before component or action work, the server requires the exact child tuple in
   the signed parent snapshot's composition lineage and independently reads the
@@ -92,6 +95,11 @@ Acceptance criteria:
   ledger authority. Missing, expired, consumed, superseded, or unavailable
   authority fails closed; the child records/order-checks the applied parent
   revision.
+- After v2 eligibility, generated component glue decodes the authorized mount
+  parameter object with the registered typed codecs and applies those values to
+  the exact hydrated child's matching mount-backed fields before running
+  `params_changed`, rendering, or dehydrating the successor. Decode or binding
+  failure reaches none of those later stages.
 - Keys never contain secrets and are not treated as authorization evidence.
 
 UX flow:
@@ -198,13 +206,21 @@ remain iteration 003 behavior.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Completed exact-child delivery through the engine, browser, and
+  real Suprnova endpoint. Parent output prepares and seals every changed-child
+  delivery before host commit and ledger acceptance; the browser pairs each
+  delivery with the one accepted top-level parent snapshot only after morph and
+  browser-state commit; production child execution accepts only
+  `EligibleChildParametersV2`, advances the child's own revision and applied
+  owner lineage once, and never rolls an accepted parent back on later child
+  failure. Historical v1 execution remains an explicit non-endpoint harness.
 - 2026-09-01 -- Added signed bounded composition lineage to instanced snapshot
   schema v1 and a distinct exact-child-bound child-parameter envelope v2.
   Server eligibility now requires both the signed parent lineage tuple and the
   ledger's current accepted parent revision; a browser snapshot, historical v1
   envelope, superseded revision, or foreign child cannot supply that authority.
   Framework child delivery, response emission, browser scheduling, and
-  `params_changed` execution remain the next implementation slice.
+  `params_changed` execution were reserved for the next implementation slice.
 - 2026-08-21 -- Locked the development macro surface to
   `#[derive(LiveComponent)]` plus struct/field helpers and one `#[live]` impl
   containing action/lifecycle helpers. Event and effect payload types register

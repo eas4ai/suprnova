@@ -110,9 +110,6 @@ export class ResponseApplicationMachine<Prepared> {
       this.#ports.commit(response);
       this.#ports.reconcile(response);
       this.#ports.restoreFocus(response);
-      if (response.childDeliveries.length !== 0) this.#ports.queueChildren(response);
-      if (response.reflectedUrl !== null) this.#ports.reflectUrl(response);
-      this.#ports.dispatchEvents(response);
       if (!this.#ports.applicationCurrent(epoch)) throw new Error("application_epoch_stale");
     } catch (error: unknown) {
       try {
@@ -121,6 +118,25 @@ export class ResponseApplicationMachine<Prepared> {
         // Recovery remains mandatory even when projection rollback is incomplete.
       }
       return recoveryResult(this.#ports.recover(error, response, epoch));
+    }
+    if (response.childDeliveries.length !== 0) {
+      try {
+        this.#ports.queueChildren(response);
+      } catch (error: unknown) {
+        this.#reportPostCommitFailure(error, response);
+      }
+    }
+    if (response.reflectedUrl !== null) {
+      try {
+        this.#ports.reflectUrl(response);
+      } catch (error: unknown) {
+        this.#reportPostCommitFailure(error, response);
+      }
+    }
+    try {
+      this.#ports.dispatchEvents(response);
+    } catch (error: unknown) {
+      this.#reportPostCommitFailure(error, response);
     }
     try {
       await this.#ports.runEffects(response);

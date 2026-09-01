@@ -23,6 +23,6 @@ pub use response::{
 };
 pub use response::{EndpointResponseIntents, dispatch_execution_result};
 pub use service::{
-    EndpointFuture, EndpointKernel, LiveEndpointService, VerifiedEndpointExecutionRequest,
-    VerifiedEndpointRequest, VerifiedEndpointSnapshot,
+    EndpointFuture, EndpointKernel, LiveEndpointService, VerifiedChildAdmissionV2,
+    VerifiedEndpointExecutionRequest, VerifiedEndpointRequest, VerifiedEndpointSnapshot,
 };

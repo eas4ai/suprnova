@@ -268,12 +268,14 @@ creates ledger authority immediately before publishing the island. A render or
 signing failure creates no ledger record; a ledger failure publishes no HTML or
 snapshot. Creation retries for server-identity collision are explicitly bounded.
 
-Parent-to-child parameter changes use a separate purpose-derived
-`child-params-v1` HMAC envelope rather than overloading a seed or instanced
-snapshot. Its canonical body binds parent scope/instance/accepted revision,
-child key/component contract, parameter schema/value, issue/expiry time, and a
-value hash. Verification yields its own capability type; it never authorizes a
-browser-supplied raw parameter map.
+Historical parent-to-child parameter parsing retains the purpose-derived
+`child-params-v1` HMAC envelope and its original harness APIs. Production exact-
+child delivery uses the distinct `child-params-v2` purpose and adds the exact
+child instance. A request proves both the child's current signed instanced
+snapshot and the separately signed accepted parent successor snapshot; neither
+snapshot nor a browser-supplied raw parameter map substitutes for the v2
+envelope. Successful eligible execution signs a successor child snapshot whose
+owner lineage records the newly applied parent revision.
 
 ## Acceptance criteria
 
@@ -287,6 +289,12 @@ browser-supplied raw parameter map.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Bound production child admission to three independently checked
+  authorities: the current child snapshot, the accepted parent successor
+  snapshot and its exact signed lineage, and a purpose-separated v2 parameter
+  envelope. Ledger currentness creates `EligibleChildParametersV2`; accepted
+  child execution advances its own ledger revision and owner lineage. Raw v1
+  remains historical and cannot enter the production endpoint.
 - 2026-09-01 -- Preserved snapshot schema v1 while registering one optional
   bounded signed composition extension. Added an exact, provider-neutral,
   linearizable accepted-revision ledger read with explicit pending, missing,

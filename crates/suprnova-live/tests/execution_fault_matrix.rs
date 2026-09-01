@@ -1,5 +1,6 @@
 //! Deterministic faults at every accepted-outcome coordination boundary.
 
+mod child_parameter_support;
 mod component_support;
 
 use std::collections::BTreeMap;
@@ -21,7 +22,10 @@ use suprnova_live::execution::{
     HostErrorKind, HostTransaction, InstancedActionRequest, ResponseIntentPreparationPort,
     ResponseIntentPreparationRequest, RetryLegality, TransactionPort,
 };
-use suprnova_live::host::TrustedLiveRequestContext;
+use suprnova_live::host::{
+    MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
+    ScopeRequirement, TrustedLiveRequestContext,
+};
 use suprnova_live::identity::{
     ActionName, BuildId, ComponentName, InstanceId, IslandSlot, ModelField, Revision,
     RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
@@ -33,25 +37,27 @@ use suprnova_live::ledger::{
 };
 use suprnova_live::limits::InputLimits;
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
-use suprnova_live::registry::ComponentDescriptor;
+use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
 use suprnova_live::snapshot::{
-    ComponentContract, ExpectedInstanceV1, InstanceBodyV1, InstanceFieldsV1, VerifiedInstanceV1,
-    verify_instance,
+    ComponentContract, CompositionChildLineageV1, CompositionLineageV1, ExpectedInstanceV1,
+    InstanceBodyV1, InstanceFieldsV1, VerifiedInstanceV1, verify_instance,
 };
 use suprnova_live::state::{ModelBindingSchema, ProposalBatch, ProposalLimits};
 use suprnova_live::validation::{
     BagPolicy, ValidationFuture, ValidationPort, ValidationPortError, ValidationRequest,
     ValidationSelection,
 };
-use suprnova_live::view::{RenderLimits, ViewRenderer};
+use suprnova_live::view::{AssetSet, ChildMount, IslandRender, RenderLimits, ViewRenderer};
+use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 use suprnova_live_test_support::VerifiedResponseSealing;
 use tokio::sync::Notify;
 
 use component_support::{
     FailurePoint, FixtureControl, ManualClock, TraceFixture, admitted_response_sealer,
-    admitted_response_sealer_with_semantics, browser_context, bytes, digest, idempotency, install,
-    key_ring, ledger, schema_set, snapshot_limits, trusted_context_for,
+    admitted_response_sealer_with_semantics, admitted_response_sealer_with_snapshot_limits,
+    browser_context, bytes, digest, fixture_host_scope, idempotency, install, key_ring, ledger,
+    schema_set, snapshot_limits, trusted_context_for,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -450,6 +456,64 @@ fn fixture_failure(fault: Fault) -> FailurePoint {
     }
 }
 
+fn trusted_v2_context(
+    component_metadata: &'static ComponentMetadata,
+    authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+) -> TrustedLiveRequestContext {
+    let descriptor = ComponentDescriptor::new(component_metadata.clone());
+    let contract = ComponentContract::new(
+        component_metadata.identity().clone(),
+        descriptor.contract_digest().clone(),
+        1,
+        1,
+        1,
+    )
+    .expect("component contract");
+    let registry = ComponentRegistryBuilder::new()
+        .register(descriptor)
+        .expect("component registers")
+        .build();
+    let route = RouteIdentity::from_bytes(&bytes::<32>(0x30)).expect("route identity");
+    let slot = IslandSlot::parse("trace").expect("slot identity");
+    let catalog = MountCatalogBuilder::new()
+        .register(
+            &registry,
+            MountCatalogEntry::new(
+                suprnova_live::snapshot::ExpectedSeedV1::new(
+                    contract,
+                    BuildId::parse("build-lifecycle-tests").expect("build identity"),
+                    route.clone(),
+                    slot.clone(),
+                    schema_set(),
+                ),
+                MountScopeRequirements::new(
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                ),
+            ),
+        )
+        .expect("mount catalog entry")
+        .build();
+    let mut builder = SyntheticLiveRequestContextBuilder::new(
+        catalog,
+        MountSelection::new(
+            route,
+            slot,
+            component_metadata.identity().clone(),
+            component_metadata.contract_digest().clone(),
+            2,
+        ),
+        fixture_host_scope(),
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    );
+    if let Some(authorization) = authorization {
+        builder = builder.with_action_authorization(authorization);
+    }
+    builder.build().expect("trusted v2 context")
+}
+
 struct ClaimLifecycleFixture {
     service: ExecutionService,
     descriptor: ComponentDescriptor,
@@ -462,10 +526,25 @@ struct ClaimLifecycleFixture {
     acceptance: Arc<AcceptanceControl>,
     transaction: Arc<LifecycleTransactionControl>,
     transaction_port: LifecycleTransactionPort,
+    snapshot_limits: suprnova_live::snapshot::SnapshotLimits,
+    protocol: u16,
 }
 
 impl ClaimLifecycleFixture {
     async fn new() -> Self {
+        Self::build(None, 1).await
+    }
+
+    async fn new_with_pending_child(
+        pending: Option<suprnova_live::component::composition::PendingChildParameters>,
+    ) -> Self {
+        Self::build(pending, 2).await
+    }
+
+    async fn build(
+        pending: Option<suprnova_live::component::composition::PendingChildParameters>,
+        protocol: u16,
+    ) -> Self {
         let ledger_clock = Arc::new(LifecycleClock::new(1_000));
         let ledger = Arc::new(MemoryInstanceLedger::new(
             ledger_clock.clone(),
@@ -480,6 +559,18 @@ impl ClaimLifecycleFixture {
         let component_metadata = metadata();
         let component_control =
             FixtureControl::new_with_metadata(FailurePoint::None, component_metadata);
+        if let Some(pending) = pending.as_ref() {
+            component_control.set_render(IslandRender {
+                body: bytes::Bytes::from_static(
+                    b"<section data-suprnova-live-root=\"results\"></section>",
+                ),
+                assets: AssetSet::empty(),
+                children: vec![ChildMount::pending_parameters(
+                    IslandSlot::parse("results").expect("child slot"),
+                    pending.clone(),
+                )],
+            });
+        }
         let table = ActionTable::new(vec![ActionEntry::new(
             component_metadata.actions()[0].clone(),
             action,
@@ -489,10 +580,13 @@ impl ClaimLifecycleFixture {
             ComponentDescriptor::with_hooks(component_metadata.clone(), install(component_control))
                 .with_actions(table)
                 .expect("matching action table");
-        let context = trusted_context_for(
-            component_metadata,
-            Some(Arc::new(Authorization { fail: false })),
-        );
+        let authorization: Option<Arc<dyn ActionAuthorizationPort>> =
+            Some(Arc::new(Authorization { fail: false }));
+        let context = if protocol == 2 {
+            trusted_v2_context(component_metadata, authorization)
+        } else {
+            trusted_context_for(component_metadata, authorization)
+        };
         let instance_id = InstanceId::from_bytes(&bytes::<16>(0x70)).expect("instance identity");
         ledger
             .mount_instance(MountInstanceRecord::new(
@@ -506,7 +600,15 @@ impl ClaimLifecycleFixture {
             .expect("ledger authority");
 
         let keys = Arc::new(key_ring());
-        let limits = snapshot_limits();
+        let limits = suprnova_live::snapshot::SnapshotLimits::new(
+            InputLimits::new(64 * 1024, 8, 1_024, 512).expect("composition input limits"),
+            50,
+            10_000,
+            20_000,
+            8,
+            8,
+        )
+        .expect("composition snapshot limits");
         let contract = ComponentContract::new(
             component_metadata.identity().clone(),
             descriptor.contract_digest().clone(),
@@ -518,29 +620,46 @@ impl ClaimLifecycleFixture {
         let build = BuildId::parse("build-lifecycle-tests").expect("build identity");
         let route = RouteIdentity::from_bytes(&bytes::<32>(0x30)).expect("route identity");
         let slot = IslandSlot::parse("trace").expect("slot identity");
-        let body = InstanceBodyV1::new(
-            InstanceFieldsV1 {
-                component: contract.clone(),
-                build_id: build.clone(),
-                route: route.clone(),
-                slot: slot.clone(),
-                key_id: keys.active_key_id().clone(),
-                scope: context.scope().clone(),
-                instance_id: instance_id.clone(),
-                revision: Revision::new(0),
-                issued_at: UnixMillis::new(1_000),
-                expires_at: UnixMillis::new(1_900),
-                state: CanonicalValue::Object(BTreeMap::from([(
-                    "serial".to_owned(),
-                    CanonicalValue::String("7".to_owned()),
-                )])),
-                memo: CanonicalValue::Object(BTreeMap::new()),
-                extensions: BTreeMap::new(),
-            },
-            &schema_set(),
-            &limits,
-        )
-        .expect("instance body");
+        let mut fields = InstanceFieldsV1 {
+            component: contract.clone(),
+            build_id: build.clone(),
+            route: route.clone(),
+            slot: slot.clone(),
+            key_id: keys.active_key_id().clone(),
+            scope: context.scope().clone(),
+            instance_id: instance_id.clone(),
+            revision: Revision::new(0),
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(1_900),
+            state: CanonicalValue::Object(BTreeMap::from([(
+                "serial".to_owned(),
+                CanonicalValue::String("7".to_owned()),
+            )])),
+            memo: CanonicalValue::Object(BTreeMap::new()),
+            extensions: BTreeMap::new(),
+        };
+        if let Some(pending) = pending.as_ref() {
+            fields
+                .set_composition_lineage(
+                    CompositionLineageV1::new(
+                        None,
+                        vec![
+                            CompositionChildLineageV1::new(
+                                instance_id.clone(),
+                                Revision::new(0),
+                                pending.child().key().clone(),
+                                pending.child().component_contract().clone(),
+                                pending.child().instance_id().clone(),
+                                1,
+                            )
+                            .expect("child lineage"),
+                        ],
+                    )
+                    .expect("composition lineage"),
+                )
+                .expect("composition extension");
+        }
+        let body = InstanceBodyV1::new(fields, &schema_set(), &limits).expect("instance body");
         let encoded = body
             .sign(&keys, UnixMillis::new(1_000), &limits)
             .expect("signed instance");
@@ -560,7 +679,7 @@ impl ClaimLifecycleFixture {
             controlled_ledger,
             Arc::new(ManualClock::new(1_000)),
             keys,
-            limits,
+            limits.clone(),
             ViewRenderer::new(RenderLimits::standard()).expect("renderer"),
         );
         Self {
@@ -575,17 +694,32 @@ impl ClaimLifecycleFixture {
             acceptance,
             transaction,
             transaction_port,
+            snapshot_limits: limits,
+            protocol,
         }
     }
 
     async fn execute(&self) -> ExecutionResult {
-        let response_sealer = admitted_response_sealer(
+        self.execute_with_max_response_bytes(None).await
+    }
+
+    async fn execute_with_max_response_bytes(
+        &self,
+        max_response_bytes: Option<usize>,
+    ) -> ExecutionResult {
+        let response_context = if self.protocol == 2 {
+            trusted_v2_context(metadata(), None)
+        } else {
+            trusted_context_for(metadata(), None)
+        };
+        let response_sealer = admitted_response_sealer_with_snapshot_limits(
             self.descriptor.clone(),
-            trusted_context_for(metadata(), None),
+            response_context,
             &self.encoded_snapshot,
             Revision::new(0),
             0x45,
-            None,
+            max_response_bytes,
+            self.snapshot_limits.clone(),
         )
         .await;
         self.execute_with_response_sealer(response_sealer).await
@@ -645,6 +779,46 @@ impl ClaimLifecycleFixture {
             .expect("ledger inspection")
             .expect("instance authority")
     }
+}
+
+#[tokio::test]
+async fn accepted_parent_builds_one_changed_child_delivery_before_commit() {
+    let (pending, _) = child_parameter_support::pending_parameters("signed-update");
+    let child_instance = pending.child().instance_id().clone();
+    let parameter_hash =
+        suprnova_live::identity::ContentDigest::from_bytes(pending.parameter_value().as_bytes())
+            .expect("parameter hash");
+    let fixture = ClaimLifecycleFixture::new_with_pending_child(Some(pending)).await;
+
+    let ExecutionResult::Accepted(accepted) = fixture.execute().await else {
+        panic!("consistent changed child must be accepted");
+    };
+
+    let [delivery] = accepted.child_deliveries() else {
+        panic!("exactly one changed child delivery is produced");
+    };
+    assert_eq!(delivery.child_instance(), &child_instance);
+    assert_eq!(delivery.parameter_hash(), &parameter_hash);
+    assert!(!delivery.envelope().is_empty());
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 1);
+}
+
+#[tokio::test]
+async fn child_delivery_response_sealing_failure_rolls_back_before_acceptance() {
+    let (pending, _) = child_parameter_support::pending_parameters("bounded-update");
+    let fixture = ClaimLifecycleFixture::new_with_pending_child(Some(pending)).await;
+
+    let ExecutionResult::RefreshRequired(refresh) =
+        fixture.execute_with_max_response_bytes(Some(128)).await
+    else {
+        panic!("an unsealable complete response must not expose accepted bytes");
+    };
+
+    assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.transaction.rollbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
 }
 
 #[tokio::test]

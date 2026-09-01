@@ -68,6 +68,7 @@ function ports(
   failReconcile = false,
   failEffects = false,
   current = true,
+  failChildQueue = false,
 ): ApplicationPorts<string> {
   const epoch = Object.freeze({
     acceptedRevision: 8n,
@@ -90,7 +91,10 @@ function ports(
       trace.push("preflight_morph");
       return "prepared";
     },
-    queueChildren: () => trace.push("queue_child_deliveries"),
+    queueChildren: () => {
+      trace.push("queue_child_deliveries");
+      if (failChildQueue) throw new Error("child_queue_failed");
+    },
     reconcile: () => {
       trace.push("reconcile_models_and_validation");
       if (failReconcile) throw new Error("reconcile_failed");
@@ -185,6 +189,40 @@ describe("response application machine", () => {
     expect(trace).toContain("post_commit_failure");
     expect(trace).not.toContain("rollback_commit");
     expect(trace).not.toContain("request_fresh_render_without_replay");
+  });
+
+  it("contains child scheduling failure after the parent commit without parent recovery", async () => {
+    const trace: string[] = [];
+    const result = await new ResponseApplicationMachine(
+      ports(trace, false, false, false, true, true),
+    ).apply(
+      response({
+        child_deliveries: [
+          {
+            child_instance: "ICEiIyQlJicoKSorLC0uLw",
+            envelope: {},
+            parameter_hash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          },
+        ],
+      }),
+      authority(),
+      request(),
+    );
+
+    expect(result).toEqual({ disposition: "committed" });
+    expect(trace).toEqual([
+      "preflight_morph",
+      "morph",
+      "commit_snapshot_and_revision",
+      "reconcile_models_and_validation",
+      "restore_focus",
+      "queue_child_deliveries",
+      "post_commit_failure",
+      "reflect_url",
+      "dispatch_events",
+      "run_registered_effects",
+      "settle_feedback",
+    ]);
   });
 
   it("ignores a late response whose application epoch was invalidated during morph", async () => {

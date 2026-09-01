@@ -5,7 +5,133 @@ use std::fmt;
 use crate::Request;
 
 use super::attestation::{LiveOperation, SecurityCheck};
-use super::{ActionOutcome, ActionResult, LiveRuntime};
+use super::{ActionOutcome, ActionResult, ComponentContract, LiveMount, LiveRuntime};
+
+/// Signed, ledger-backed v2 child-delivery fixture for real HTTP adapter tests.
+pub struct LiveChildParameterDeliveryFixture {
+    runtime: LiveRuntime,
+    child_snapshot: serde_json::Value,
+    envelope: serde_json::Value,
+    historical_v1_envelope: serde_json::Value,
+    parent_snapshot: serde_json::Value,
+    scope: suprnova_live::identity::ScopeFingerprint,
+    parent_instance: suprnova_live::identity::InstanceId,
+    child_instance: suprnova_live::identity::InstanceId,
+}
+
+impl LiveChildParameterDeliveryFixture {
+    /// Returns the exact current signed child snapshot submitted by the browser.
+    #[must_use]
+    pub fn child_snapshot(&self) -> serde_json::Value {
+        self.child_snapshot.clone()
+    }
+
+    /// Returns the canonical v2 admission carrier paired after parent commit.
+    #[must_use]
+    pub fn admission_carrier(&self) -> serde_json::Value {
+        serde_json::json!({
+            "envelope": self.envelope,
+            "parent_snapshot": self.parent_snapshot,
+        })
+    }
+
+    /// Returns a genuinely signed historical-v1 envelope for rejection tests only.
+    #[must_use]
+    pub fn historical_v1_envelope(&self) -> serde_json::Value {
+        self.historical_v1_envelope.clone()
+    }
+
+    /// Reads the child ledger revision from the same runtime serving HTTP.
+    pub async fn current_child_revision(&self) -> Result<u64, crate::FrameworkError> {
+        self.runtime
+            .child_revision_for_test(&self.scope, &self.child_instance)
+            .await
+    }
+
+    /// Reads the accepted parent revision to prove later child failure is non-atomic.
+    pub async fn current_parent_revision(&self) -> Result<u64, crate::FrameworkError> {
+        self.runtime
+            .child_revision_for_test(&self.scope, &self.parent_instance)
+            .await
+    }
+
+    /// Advances only the parent ledger so this fixture's signed delivery becomes stale.
+    pub async fn advance_parent_revision(&self) -> Result<u64, crate::FrameworkError> {
+        self.runtime
+            .advance_parent_revision_for_test(&self.scope, &self.parent_instance)
+            .await
+    }
+}
+
+/// Mints one exact signed child request against the runtime used by the real Live route.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hostile-route fixture keeps state, parameters, mounts, and all scope facts explicit"
+)]
+pub async fn prepare_child_parameter_delivery_for_test<P, C>(
+    parent_mount: &LiveMount<P>,
+    child_mount: &LiveMount<C>,
+    parent_build_override: Option<&str>,
+    previous_parameters: suprnova_live::canonical::CanonicalValue,
+    next_parameters: suprnova_live::canonical::CanonicalValue,
+    parent_state: suprnova_live::canonical::CanonicalValue,
+    child_state: suprnova_live::canonical::CanonicalValue,
+    session: Option<&[u8]>,
+    principal: Option<&[u8]>,
+    tenant: Option<&[u8]>,
+) -> Result<LiveChildParameterDeliveryFixture, crate::FrameworkError>
+where
+    P: ComponentContract,
+    C: ComponentContract,
+{
+    let session =
+        session.map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Session, value));
+    let principal = principal
+        .map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Principal, value));
+    let tenant =
+        tenant.map(|value| super::attestation::purpose_fingerprint(SecurityCheck::Tenant, value));
+    let scope = super::context::aggregate_scope(
+        session.as_ref().map(<[u8; 32]>::as_slice),
+        principal.as_ref().map(<[u8; 32]>::as_slice),
+        tenant.as_ref().map(<[u8; 32]>::as_slice),
+    )?;
+    let runtime = LiveRuntime::bind()?;
+    let parent_build_override = parent_build_override
+        .map(suprnova_live::identity::BuildId::parse)
+        .transpose()
+        .map_err(|_| crate::FrameworkError::internal("parent fixture build rejected"))?;
+    let fixture = runtime
+        .prepare_child_parameter_fixture_for_test(
+            parent_mount.component(),
+            parent_mount.route(),
+            parent_mount.slot(),
+            parent_build_override,
+            child_mount.component(),
+            child_mount.route(),
+            child_mount.slot(),
+            scope.clone(),
+            previous_parameters,
+            next_parameters,
+            parent_state,
+            child_state,
+        )
+        .await?;
+    Ok(LiveChildParameterDeliveryFixture {
+        runtime,
+        child_snapshot: serde_json::from_slice(&fixture.child_snapshot)
+            .map_err(|_| crate::FrameworkError::internal("child fixture snapshot rejected"))?,
+        envelope: serde_json::from_slice(&fixture.envelope)
+            .map_err(|_| crate::FrameworkError::internal("child fixture envelope rejected"))?,
+        historical_v1_envelope: serde_json::from_slice(&fixture.historical_v1_envelope).map_err(
+            |_| crate::FrameworkError::internal("historical child fixture envelope rejected"),
+        )?,
+        parent_snapshot: serde_json::from_slice(&fixture.parent_snapshot)
+            .map_err(|_| crate::FrameworkError::internal("parent fixture snapshot rejected"))?,
+        scope: fixture.scope,
+        parent_instance: fixture.parent_instance,
+        child_instance: fixture.child_instance,
+    })
+}
 
 /// Ordered framework checks required before a protected Live operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

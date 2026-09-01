@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use suprnova_live::conformance::fixture_directory_v2;
 use suprnova_live::protocol::{
     CompatibilityDecision, CompatibilityWindow, OperationV2, UrlIntent, VersionSet,
@@ -70,6 +70,52 @@ fn params_changed_requires_signed_child_authority_and_fresh_render_never_replays
         panic!("expected v2");
     };
     assert!(fresh.operations()[0].is_recovery_without_replay());
+}
+
+#[test]
+fn params_changed_parses_the_exact_child_admission_carrier() {
+    let root = fixture("protocol-success.json");
+    let mut request: Value =
+        serde_json::from_slice(encoded(&cases(&root)[0])).expect("params_changed fixture is JSON");
+    let envelope = request["child_parameters"].take();
+    let parent_snapshot = request["snapshot"]["envelope"].clone();
+    request["child_parameters"] = json!({
+        "envelope": envelope,
+        "parent_snapshot": parent_snapshot,
+    });
+
+    let request = parse_versioned_update_request(
+        &serde_json::to_vec(&request).expect("carrier request serializes"),
+        &protocol_support::limits(),
+    )
+    .expect("exact child admission carrier parses");
+    let VersionedUpdateRequest::V2(request) = request else {
+        panic!("expected v2");
+    };
+    let carrier = request
+        .child_parameters()
+        .expect("params_changed carries admission authority");
+    assert_eq!(
+        serde_json::from_slice::<Value>(carrier.envelope()).expect("envelope is canonical JSON"),
+        request_fixture_child_envelope(&root),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(carrier.parent_snapshot())
+            .expect("parent snapshot is canonical JSON"),
+        request_fixture_snapshot(&root),
+    );
+}
+
+fn request_fixture_child_envelope(root: &Value) -> Value {
+    serde_json::from_slice::<Value>(encoded(&cases(root)[0]))
+        .expect("fixture is JSON")["child_parameters"]
+        .clone()
+}
+
+fn request_fixture_snapshot(root: &Value) -> Value {
+    serde_json::from_slice::<Value>(encoded(&cases(root)[0])).expect("fixture is JSON")["snapshot"]
+        ["envelope"]
+        .clone()
 }
 
 #[test]

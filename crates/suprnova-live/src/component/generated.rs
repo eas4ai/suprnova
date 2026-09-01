@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::action::ActionResult;
 use crate::canonical::CanonicalValue;
-use crate::child::VerifiedChildParametersV1;
+use crate::child::{EligibleChildParametersV2, VerifiedChildParametersV1};
 use crate::limits::InputLimits;
 use crate::metadata::ComponentMetadata;
 use crate::snapshot::state::{StateCodec, StateExposure};
@@ -92,6 +92,15 @@ pub trait GeneratedComponentRuntime: GeneratedComponentState {
         &'a mut self,
         _context: &'a RenderContext<'a>,
         _parameters: &'a VerifiedChildParametersV1,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Err(ComponentError::contract_failure()) })
+    }
+
+    /// Runs the modern generated parent-parameter hook after server eligibility.
+    fn params_changed_v2_generated<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _parameters: &'a EligibleChildParametersV2,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async { Err(ComponentError::contract_failure()) })
     }
@@ -218,6 +227,15 @@ where
         parameters: &'a VerifiedChildParametersV1,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         self.component.params_changed_generated(context, parameters)
+    }
+
+    fn params_changed_v2<'a>(
+        &'a mut self,
+        context: &'a RenderContext<'a>,
+        parameters: &'a EligibleChildParametersV2,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        self.component
+            .params_changed_v2_generated(context, parameters)
     }
 
     fn lazy_complete<'a>(

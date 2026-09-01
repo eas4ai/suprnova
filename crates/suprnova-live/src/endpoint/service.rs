@@ -7,18 +7,22 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::Method;
 
+use crate::child::{
+    ExpectedChildParametersV2, VerifiedChildParametersV2, verify_child_parameters_v2,
+};
 use crate::clock::Clock;
 use crate::crypto::SnapshotKeyRing;
-use crate::host::TrustedLiveRequestContext;
+use crate::host::{MountCatalog, MountSelection, TrustedLiveRequestContext};
 use crate::identity::{ComponentName, CorrelationId, InstanceId, Revision};
 use crate::protocol::{
-    ResponseOutcome, SnapshotInput, VersionedUpdateRequest, VersionedUpdateResponse,
+    OperationV2, ResponseOutcome, SnapshotInput, VersionedUpdateRequest, VersionedUpdateResponse,
     encode_versioned_update_response, parse_versioned_update_request,
     parse_versioned_update_response, semantic_request_digest_v1,
 };
 use crate::registry::{ComponentDescriptor, ComponentRegistry};
 use crate::snapshot::{
-    ExpectedInstanceV1, VerifiedInstanceV1, VerifiedSeedV1, verify_instance, verify_seed,
+    ExpectedInstanceV1, VerifiedInstanceV1, VerifiedSeedV1, inspect_instance_authority,
+    verify_instance, verify_seed,
 };
 
 use super::{
@@ -64,6 +68,7 @@ pub struct VerifiedEndpointRequest<'request> {
     snapshot: VerifiedEndpointSnapshot,
     descriptor: &'request ComponentDescriptor,
     context: &'request TrustedLiveRequestContext,
+    child_admission: Option<VerifiedChildAdmissionV2>,
     response_sealer: AcceptedResponseSealer,
 }
 
@@ -84,6 +89,7 @@ impl<'request> VerifiedEndpointRequest<'request> {
                 snapshot: self.snapshot,
                 descriptor: self.descriptor,
                 context: self.context,
+                child_admission: self.child_admission,
                 response_binding,
             },
             self.response_sealer,
@@ -97,7 +103,28 @@ pub struct VerifiedEndpointExecutionRequest<'request> {
     snapshot: VerifiedEndpointSnapshot,
     descriptor: &'request ComponentDescriptor,
     context: &'request TrustedLiveRequestContext,
+    child_admission: Option<VerifiedChildAdmissionV2>,
     response_binding: AcceptedResponseRequestBinding,
+}
+
+/// Independently verified child-v2 envelope and signed parent lineage awaiting ledger eligibility.
+pub struct VerifiedChildAdmissionV2 {
+    parameters: VerifiedChildParametersV2,
+    parent_snapshot: VerifiedInstanceV1,
+}
+
+impl VerifiedChildAdmissionV2 {
+    /// Returns the independently verified exact-child capability.
+    #[must_use]
+    pub const fn parameters(&self) -> &VerifiedChildParametersV2 {
+        &self.parameters
+    }
+
+    /// Returns the independently verified signed parent successor snapshot.
+    #[must_use]
+    pub const fn parent_snapshot(&self) -> &VerifiedInstanceV1 {
+        &self.parent_snapshot
+    }
 }
 
 impl<'request> VerifiedEndpointExecutionRequest<'request> {
@@ -131,6 +158,12 @@ impl<'request> VerifiedEndpointExecutionRequest<'request> {
         self.context
     }
 
+    /// Returns verified child admission material only for an exact params_changed-v2 request.
+    #[must_use]
+    pub const fn child_admission(&self) -> Option<&VerifiedChildAdmissionV2> {
+        self.child_admission.as_ref()
+    }
+
     /// Returns the opaque binding for this exact verified endpoint request.
     #[must_use]
     pub const fn response_binding(&self) -> AcceptedResponseRequestBinding {
@@ -154,17 +187,19 @@ impl std::fmt::Debug for VerifiedEndpointRequest<'_> {
 pub struct LiveEndpointService {
     config: LiveEndpointConfig,
     registry: Arc<ComponentRegistry>,
+    mount_catalog: Arc<MountCatalog>,
     clock: Arc<dyn Clock>,
     keys: Arc<SnapshotKeyRing>,
     kernel: Arc<dyn EndpointKernel>,
 }
 
 impl LiveEndpointService {
-    /// Creates a service from explicit immutable registry, time, key, and kernel providers.
+    /// Creates a service from explicit immutable registry/catalog, time, key, and kernel providers.
     #[must_use]
     pub fn new(
         config: LiveEndpointConfig,
         registry: Arc<ComponentRegistry>,
+        mount_catalog: Arc<MountCatalog>,
         clock: Arc<dyn Clock>,
         keys: Arc<SnapshotKeyRing>,
         kernel: Arc<dyn EndpointKernel>,
@@ -172,6 +207,7 @@ impl LiveEndpointService {
         Self {
             config,
             registry,
+            mount_catalog,
             clock,
             keys,
             kernel,
@@ -235,6 +271,8 @@ impl LiveEndpointService {
 
         let snapshot =
             self.verify_snapshot(&request, identity.snapshot, identity.base_revision, now)?;
+        let child_admission =
+            self.verify_child_admission(&request, &parsed, &snapshot, descriptor, now)?;
         let expected_instance_id = match &snapshot {
             VerifiedEndpointSnapshot::Instance(snapshot) => {
                 Some(snapshot.body().instance_id().clone())
@@ -277,6 +315,7 @@ impl LiveEndpointService {
             snapshot,
             descriptor,
             context: &request.context,
+            child_admission,
             response_sealer,
         };
         let dispatch = self
@@ -383,6 +422,100 @@ impl LiveEndpointService {
             .map(VerifiedEndpointSnapshot::Seed)
             .map_err(|_| EndpointError::new(EndpointErrorKind::SnapshotRejected)),
         }
+    }
+
+    fn verify_child_admission(
+        &self,
+        request: &LiveEndpointRequest,
+        parsed: &VersionedUpdateRequest,
+        snapshot: &VerifiedEndpointSnapshot,
+        child_descriptor: &ComponentDescriptor,
+        now: crate::identity::UnixMillis,
+    ) -> Result<Option<VerifiedChildAdmissionV2>, EndpointError> {
+        let VersionedUpdateRequest::V2(parsed) = parsed else {
+            return Ok(None);
+        };
+        let Some(carrier) = parsed.child_parameters() else {
+            return Ok(None);
+        };
+        if parsed.operations() != [OperationV2::ParamsChanged] {
+            return Err(EndpointError::new(EndpointErrorKind::MalformedProtocol));
+        }
+        let VerifiedEndpointSnapshot::Instance(child_snapshot) = snapshot else {
+            return Err(EndpointError::new(EndpointErrorKind::SnapshotRejected));
+        };
+        let child = child_snapshot.body();
+        let owner = child
+            .composition_lineage()
+            .and_then(|lineage| lineage.owner())
+            .ok_or_else(|| EndpointError::new(EndpointErrorKind::SnapshotRejected))?;
+
+        let parent_claims =
+            inspect_instance_authority(carrier.parent_snapshot(), self.config.snapshot())
+                .map_err(|_| EndpointError::new(EndpointErrorKind::SnapshotRejected))?;
+        let parent_mount = self
+            .mount_catalog
+            .resolve(&MountSelection::new(
+                parent_claims.route().clone(),
+                parent_claims.slot().clone(),
+                parent_claims.component().name().clone(),
+                parent_claims.component().contract_digest().clone(),
+                parsed.protocol_version(),
+            ))
+            .map_err(|_| EndpointError::new(EndpointErrorKind::SnapshotRejected))?;
+        let parent_seed = parent_mount.expected_seed();
+        if parent_claims.build_id() != parent_seed.build_id()
+            || parent_claims.scope() != request.context.scope()
+        {
+            return Err(EndpointError::new(EndpointErrorKind::SnapshotRejected));
+        }
+        let parent_expected = ExpectedInstanceV1::new(
+            parent_seed.component().clone(),
+            parent_seed.build_id().clone(),
+            parent_seed.route().clone(),
+            parent_seed.slot().clone(),
+            request.context.scope().clone(),
+            parent_seed.schemas().clone(),
+        );
+        let parent_snapshot = verify_instance(
+            carrier.parent_snapshot(),
+            &parent_expected,
+            &self.keys,
+            now,
+            self.config.snapshot(),
+        )
+        .map_err(|_| EndpointError::new(EndpointErrorKind::SnapshotRejected))?;
+        let parent = parent_snapshot.body();
+        if parent.scope() != request.context.scope()
+            || parent.scope() != child.scope()
+            || parent.route() != child.route()
+            || parent.instance_id() != owner.parent_instance()
+        {
+            return Err(EndpointError::new(EndpointErrorKind::SnapshotRejected));
+        }
+
+        let expected_parameters = ExpectedChildParametersV2::new(
+            parent.scope().clone(),
+            parent.instance_id().clone(),
+            parent.revision(),
+            owner.child_key().clone(),
+            child.component().contract_digest().clone(),
+            child.instance_id().clone(),
+            child_descriptor.parameter_schema().clone(),
+        )
+        .after_applied_parent_revision(owner.parent_revision());
+        let parameters = verify_child_parameters_v2(
+            carrier.envelope(),
+            &expected_parameters,
+            &self.keys,
+            now,
+            self.config.child_parameters(),
+        )
+        .map_err(|_| EndpointError::new(EndpointErrorKind::SnapshotRejected))?;
+        Ok(Some(VerifiedChildAdmissionV2 {
+            parameters,
+            parent_snapshot,
+        }))
     }
 
     fn validate_response_snapshot(
@@ -507,13 +640,13 @@ mod tests {
     use crate::crypto::{KeyRecord, RootKey};
     use crate::endpoint::{
         AcceptedResponseAuthority, AcceptedResponseCandidate, AcceptedResponseSnapshotAuthority,
-        EndpointResponseIntents, LIVE_MEDIA_TYPE_V1, RequestCachePolicy,
+        EndpointResponseIntents, LIVE_MEDIA_TYPE_V1, LIVE_MEDIA_TYPE_V2, RequestCachePolicy,
     };
     use crate::host::{
         CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostScopeFacts,
-        LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalogBuilder,
-        MountCatalogEntry, MountScopeRequirements, MountSelection, PrincipalFingerprint,
-        ScopeRequirement, SessionFingerprint, TenantFingerprint,
+        LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalog,
+        MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
+        PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
     };
     use crate::identity::{
         BuildId, InstanceId, IslandSlot, KeyId, ModelField, RouteIdentity, ScopeFingerprint,
@@ -532,6 +665,11 @@ mod tests {
     use crate::view::{AssetSet, IslandRender};
 
     struct FixedClock;
+
+    /// Empty immutable catalog for endpoint replay fixtures that cannot admit child parameters.
+    fn non_child_endpoint_catalog() -> Arc<MountCatalog> {
+        Arc::new(MountCatalogBuilder::new().build())
+    }
 
     impl Clock for FixedClock {
         fn now(&self) -> Result<UnixMillis, ClockError> {
@@ -573,6 +711,7 @@ mod tests {
                     result: &result,
                     intents: &intents,
                     validation: &validation,
+                    child_deliveries: &[],
                     authority: AcceptedResponseAuthority {
                         component: body.component(),
                         route: body.route(),
@@ -629,6 +768,7 @@ mod tests {
             LiveEndpointConfig::new(replay_protocol_limits(), replay_snapshot_limits())
                 .expect("endpoint config"),
             registry,
+            non_child_endpoint_catalog(),
             Arc::new(FixedClock),
             keys,
             kernel,
@@ -670,6 +810,7 @@ mod tests {
             LiveEndpointConfig::new(replay_protocol_limits(), replay_snapshot_limits())
                 .expect("endpoint config"),
             registry,
+            non_child_endpoint_catalog(),
             Arc::new(FixedClock),
             keys,
             kernel,
@@ -705,6 +846,41 @@ mod tests {
         assert_eq!(replayed.headers[http::header::CONTENT_LENGTH], "0");
     }
 
+    #[tokio::test]
+    async fn malformed_child_admission_carrier_fails_before_kernel_dispatch() {
+        let descriptor = replay_descriptor();
+        let registry = Arc::new(
+            ComponentRegistryBuilder::new()
+                .register(descriptor.clone())
+                .expect("replay descriptor")
+                .build(),
+        );
+        let keys = Arc::new(replay_keys());
+        let (context, snapshot) =
+            replay_authority_for_protocol(&registry, &descriptor, &keys, 0x30, 0x40, 0x50, 2);
+        let kernel = Arc::new(ReplayAcceptedKernel {
+            calls: AtomicUsize::new(0),
+            replay: Mutex::new(None),
+        });
+        let service = LiveEndpointService::new(
+            LiveEndpointConfig::new(replay_protocol_limits(), replay_snapshot_limits())
+                .expect("endpoint config"),
+            registry,
+            non_child_endpoint_catalog(),
+            Arc::new(FixedClock),
+            keys,
+            kernel.clone(),
+        );
+
+        let response = service
+            .handle(replay_params_changed_request(context, snapshot))
+            .await;
+
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert!(response.body.is_empty());
+        assert_eq!(kernel.calls.load(Ordering::SeqCst), 0);
+    }
+
     fn replay_descriptor() -> ComponentDescriptor {
         let metadata = ComponentMetadata::new(
             ComponentName::parse("tests.endpoint-replay").expect("component"),
@@ -729,6 +905,30 @@ mod tests {
         route_start: u8,
         scope_start: u8,
         instance_start: u8,
+    ) -> (TrustedLiveRequestContext, Vec<u8>) {
+        replay_authority_for_protocol(
+            registry,
+            descriptor,
+            keys,
+            route_start,
+            scope_start,
+            instance_start,
+            1,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the endpoint authority fixture keeps each varied binding explicit"
+    )]
+    fn replay_authority_for_protocol(
+        registry: &ComponentRegistry,
+        descriptor: &ComponentDescriptor,
+        keys: &SnapshotKeyRing,
+        route_start: u8,
+        scope_start: u8,
+        instance_start: u8,
+        protocol: u16,
     ) -> (TrustedLiveRequestContext, Vec<u8>) {
         let route = RouteIdentity::from_bytes(&test_bytes::<32>(route_start)).expect("route");
         let slot = IslandSlot::parse("root").expect("slot");
@@ -799,7 +999,7 @@ mod tests {
                         slot.clone(),
                         descriptor.metadata().identity().clone(),
                         descriptor.contract_digest().clone(),
-                        1,
+                        protocol,
                     ),
                     facts.clone(),
                     checks,
@@ -852,6 +1052,40 @@ mod tests {
             "default",
             "default",
         )
+    }
+
+    fn replay_params_changed_request(
+        context: TrustedLiveRequestContext,
+        snapshot: Vec<u8>,
+    ) -> LiveEndpointRequest {
+        let snapshot: serde_json::Value = serde_json::from_slice(&snapshot).expect("snapshot JSON");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "base_revision": "0",
+            "child_parameters": {"envelope": {}, "parent_snapshot": {}},
+            "component": "tests.endpoint-replay",
+            "correlation_id": CorrelationId::from_bytes(&test_bytes::<16>(0x71))
+                .expect("correlation")
+                .to_base64url(),
+            "extensions": {},
+            "idempotency_key": CorrelationId::from_bytes(&test_bytes::<16>(0x72))
+                .expect("idempotency")
+                .to_base64url(),
+            "model_proposals": {},
+            "operations": [{"kind": "params_changed"}],
+            "protocol_version": 2,
+            "runtime_contract_version": 2,
+            "snapshot": {"envelope": snapshot, "kind": "instance"},
+            "snapshot_schema_version": 1,
+        }))
+        .expect("request JSON");
+        LiveEndpointRequest::try_new(
+            Method::POST,
+            ParsedLiveMediaType::parse(LIVE_MEDIA_TYPE_V2).expect("media"),
+            Bytes::from(body),
+            Some(context),
+            RequestCachePolicy::Bypass,
+        )
+        .expect("endpoint request")
     }
 
     #[allow(

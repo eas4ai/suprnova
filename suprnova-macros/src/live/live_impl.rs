@@ -436,7 +436,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         generate_context_lifecycle_hook(&lifecycle_hooks, "rendered", "rendered_generated");
     let dehydrating_runtime =
         generate_context_lifecycle_hook(&lifecycle_hooks, "dehydrate", "dehydrating_generated");
-    let params_changed_runtime = generate_params_changed_hook(&lifecycle_hooks);
+    let params_changed_runtime = generate_params_changed_hook(&lifecycle_hooks, &mount);
     let lazy_complete_runtime = generate_context_lifecycle_hook(
         &lifecycle_hooks,
         "lazy_complete",
@@ -671,10 +671,40 @@ fn generate_context_lifecycle_hook(
     }
 }
 
-fn generate_params_changed_hook(hooks: &BTreeMap<String, RegisteredLifecycleHook>) -> TokenStream2 {
+fn generate_params_changed_hook(
+    hooks: &BTreeMap<String, RegisteredLifecycleHook>,
+    mount: &Option<RegisteredMount>,
+) -> TokenStream2 {
     let Some(hook) = hooks.get("params_changed") else {
         return quote! {};
     };
+    let expected_parameters = mount.as_ref().map_or(0, |mount| mount.parameters.len());
+    let decoded_parameters = mount.iter().flat_map(|mount| {
+        mount.parameters.iter().map(|parameter| {
+            let name = &parameter.name;
+            let ty = &parameter.ty;
+            let codec = model_codec_tokens(ty);
+            let decoded = format_ident!("__snv_live_parameter_{}", parameter.ident.unraw());
+            quote! {
+                let #decoded: #ty =
+                    ::suprnova::live::__private::component::generated::decode_model_field(
+                        parameters.get(#name).ok_or_else(
+                            ::suprnova::live::__private::component::ComponentError::contract_failure,
+                        )?,
+                        &#codec,
+                    )?;
+            }
+        })
+    });
+    let parameter_assignments = mount.iter().flat_map(|mount| {
+        mount.parameters.iter().map(|parameter| {
+            let field = &parameter.ident;
+            let decoded = format_ident!("__snv_live_parameter_{}", parameter.ident.unraw());
+            quote! {
+                self.#field = #decoded;
+            }
+        })
+    });
     let method = &hook.method;
     let invocation = if hook.asynchronous {
         quote!(self.#method().await)
@@ -694,6 +724,39 @@ fn generate_params_changed_hook(hooks: &BTreeMap<String, RegisteredLifecycleHook
             >,
         > {
             ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+
+        fn params_changed_v2_generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+            _parameters: &'a ::suprnova::live::__private::child::EligibleChildParametersV2,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let ::suprnova::live::__private::canonical::CanonicalValue::Object(parameters) =
+                    _parameters.parameters()
+                else {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                };
+                if parameters.len() != #expected_parameters {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                }
+                #(#decoded_parameters)*
+                #(#parameter_assignments)*
                 let output = #invocation;
                 ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
                     output,
