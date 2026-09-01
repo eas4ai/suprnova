@@ -12,8 +12,17 @@ pub use request::{
     LIVE_MEDIA_TYPE_V1, LIVE_MEDIA_TYPE_V2, LiveEndpointRequest, ParsedLiveMediaType,
     RequestCachePolicy,
 };
-pub use response::{EndpointDispatch, EndpointOutcomeKind, LiveEndpointResponse};
+pub(crate) use response::{
+    AcceptedRequestBinding, AcceptedRequestSnapshotBinding, AcceptedResponseAuthority,
+    AcceptedResponseCandidate, AcceptedResponseSnapshotAuthority, SealedAcceptedResponse,
+};
+pub use response::{
+    AcceptedResponseRequestBinding, AcceptedResponseSealer, EndpointDispatch,
+    EndpointNavigationTarget, EndpointNavigationTargetError, EndpointOutcomeKind,
+    LiveEndpointResponse,
+};
+pub use response::{EndpointResponseIntents, dispatch_execution_result};
 pub use service::{
-    EndpointFuture, EndpointKernel, LiveEndpointService, VerifiedEndpointRequest,
-    VerifiedEndpointSnapshot,
+    EndpointFuture, EndpointKernel, LiveEndpointService, VerifiedEndpointExecutionRequest,
+    VerifiedEndpointRequest, VerifiedEndpointSnapshot,
 };

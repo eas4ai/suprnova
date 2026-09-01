@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 
 use promotion_support::{
-    browser_context, context, context_for_route, harness, nonce, promotion_limits, signed_seed,
-    signed_seed_with_refresh, trusted_context_for_route,
+    admitted_seed_response_sealing, browser_context, context, context_for_route, harness, nonce,
+    promotion_limits, signed_seed, signed_seed_with_refresh, trusted_context_for_route,
 };
 use suprnova_live::action::{
     ActionEntry, ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget,
@@ -23,7 +23,7 @@ use suprnova_live::component::{
     LiveFuture, MountContext, RenderContext,
 };
 use suprnova_live::execution::{
-    ActionExecutionRequest, ExecutionResult, ExecutionService, NoopExecutionTrace,
+    ActionExecutionRequest, ExecutionPhase, ExecutionResult, ExecutionService, ExecutionTracePort,
     PromotedActionRequest, RetryLegality,
 };
 use suprnova_live::identity::{
@@ -43,6 +43,7 @@ use suprnova_live::validation::{
     BagPolicy, ValidationFuture, ValidationPort, ValidationPortError, ValidationRequest,
 };
 use suprnova_live::view::{AssetSet, IslandRender, RenderLimits, ViewRenderer};
+use suprnova_live_test_support::VerifiedResponseSealing;
 
 #[tokio::test]
 async fn verified_seed_promotes_to_a_server_identified_scoped_instance() {
@@ -347,6 +348,10 @@ impl ComponentInstance for SearchComponent {
         promotion_support::promotion_metadata()
     }
 
+    fn action_target(&mut self) -> &mut dyn ActionTarget {
+        self
+    }
+
     fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
         self.control.binds.fetch_add(1, Ordering::SeqCst);
         let path = ModelPath::parse("count").map_err(|_| ComponentError::contract_failure())?;
@@ -454,7 +459,10 @@ fn action_request<'a>(
     limits: &'a InputLimits,
     validation: &'a suprnova_live::validation::ValidationEngine,
     proposals: &'a ProposalBatch,
+    response_sealing: VerifiedResponseSealing,
+    trace: &'a dyn ExecutionTracePort,
 ) -> ActionExecutionRequest<'a> {
+    let (response_sealer, response_binding) = response_sealing.into_parts();
     ActionExecutionRequest::new(
         action,
         RawActionArguments::empty(),
@@ -463,9 +471,19 @@ fn action_request<'a>(
         &PassValidation,
         BagPolicy::Replace,
         None,
-        &NoopExecutionTrace,
+        trace,
     )
+    .with_response_sealer(response_sealer, response_binding)
     .with_proposals(proposals)
+}
+
+#[derive(Default)]
+struct Trace(Mutex<Vec<ExecutionPhase>>);
+
+impl ExecutionTracePort for Trace {
+    fn record(&self, phase: ExecutionPhase) {
+        self.0.lock().expect("trace lock").push(phase);
+    }
 }
 
 fn expected_instance(
@@ -485,13 +503,11 @@ fn expected_instance(
 async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
     let harness = harness(promotion_limits(), 64);
     let context = trusted_context_for_route(0xa0, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", false);
+    let browser_nonce = nonce(0x20);
     let promoted = harness
         .service
-        .promote(
-            &signed_seed_with_refresh(&harness.keys, "cached", false),
-            nonce(0x20),
-            &context.for_promotion(),
-        )
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
         .await
         .expect("seed promotes");
     let control = SearchControl::new(false);
@@ -508,6 +524,15 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
     let validation =
         suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
     let proposals = proposal_batch(7);
+    let response_sealing = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa0, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await;
+    let trace = Trace::default();
 
     let result = service
         .execute_promoted(PromotedActionRequest::new(
@@ -515,13 +540,24 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
             &context,
             browser_context(),
             promoted,
+            browser_nonce,
             promotion_support::idempotency(0x40),
             promotion_support::digest(0x50),
-            action_request(&action, &input_limits, &validation, &proposals),
+            action_request(
+                &action,
+                &input_limits,
+                &validation,
+                &proposals,
+                response_sealing,
+                &trace,
+            ),
         ))
         .await;
     let ExecutionResult::Accepted(accepted) = result else {
-        panic!("first action must be accepted");
+        panic!(
+            "first action must be accepted; trace={:?}",
+            trace.0.lock().expect("trace lock")
+        );
     };
     assert!(accepted.action_executed());
     let successor_html =
@@ -580,13 +616,11 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
 async fn promotion_mount_failure_consumes_authority_without_action_or_partial_snapshot() {
     let harness = harness(promotion_limits(), 64);
     let context = trusted_context_for_route(0xa1, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", false);
+    let browser_nonce = nonce(0x21);
     let promoted = harness
         .service
-        .promote(
-            &signed_seed_with_refresh(&harness.keys, "cached", false),
-            nonce(0x21),
-            &context.for_promotion(),
-        )
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
         .await
         .expect("seed promotes");
     let instance_id = promoted.instance_id().clone();
@@ -604,6 +638,15 @@ async fn promotion_mount_failure_consumes_authority_without_action_or_partial_sn
     let validation =
         suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
     let proposals = proposal_batch(7);
+    let response_sealing = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa1, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await;
+    let trace = Trace::default();
 
     let result = service
         .execute_promoted(PromotedActionRequest::new(
@@ -611,9 +654,17 @@ async fn promotion_mount_failure_consumes_authority_without_action_or_partial_sn
             &context,
             browser_context(),
             promoted,
+            browser_nonce,
             promotion_support::idempotency(0x41),
             promotion_support::digest(0x51),
-            action_request(&action, &input_limits, &validation, &proposals),
+            action_request(
+                &action,
+                &input_limits,
+                &validation,
+                &proposals,
+                response_sealing,
+                &trace,
+            ),
         ))
         .await;
     let ExecutionResult::RefreshRequired(refresh) = result else {
@@ -638,13 +689,11 @@ async fn promotion_mount_failure_consumes_authority_without_action_or_partial_sn
 async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operation() {
     let harness = harness(promotion_limits(), 64);
     let context = trusted_context_for_route(0xa2, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", true);
+    let browser_nonce = nonce(0x22);
     let promoted = harness
         .service
-        .promote(
-            &signed_seed_with_refresh(&harness.keys, "cached", true),
-            nonce(0x22),
-            &context.for_promotion(),
-        )
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
         .await
         .expect("seed promotes");
     let control = SearchControl::new(false);
@@ -661,6 +710,15 @@ async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operatio
     let validation =
         suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
     let proposals = proposal_batch(99);
+    let response_sealing = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa2, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await;
+    let trace = Trace::default();
 
     let result = service
         .execute_promoted(PromotedActionRequest::new(
@@ -668,13 +726,24 @@ async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operatio
             &context,
             browser_context(),
             promoted,
+            browser_nonce,
             promotion_support::idempotency(0x42),
             promotion_support::digest(0x52),
-            action_request(&action, &input_limits, &validation, &proposals),
+            action_request(
+                &action,
+                &input_limits,
+                &validation,
+                &proposals,
+                response_sealing,
+                &trace,
+            ),
         ))
         .await;
     let ExecutionResult::Accepted(accepted) = result else {
-        panic!("fresh recovery must be accepted");
+        panic!(
+            "fresh recovery must be accepted; trace={:?}",
+            trace.0.lock().expect("trace lock")
+        );
     };
     assert!(!accepted.action_executed());
     let verified = verify_instance(

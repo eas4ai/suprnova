@@ -112,6 +112,24 @@ impl ViewRenderer {
         )
     }
 
+    /// Renders checked component-owned markup before the engine adds its Live root.
+    pub fn render_component_fragment<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        assets: AssetSet,
+        children: Vec<ChildMount>,
+    ) -> Result<IslandRender, ViewError> {
+        let body = self.render_body(&view, template)?;
+        let output = IslandRender {
+            body,
+            assets,
+            children,
+        };
+        self.validate_island_fragment(view, &output)?;
+        Ok(output)
+    }
+
     /// Validates component-owned fragment bounds before engine wrapper allocation.
     pub fn validate_island_fragment(
         &self,

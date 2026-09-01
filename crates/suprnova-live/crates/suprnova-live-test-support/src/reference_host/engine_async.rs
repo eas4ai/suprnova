@@ -76,7 +76,7 @@ use suprnova_live::protocol::{
     OperationV2, ProtocolLimitConfig, ProtocolLimits, SemanticIdempotencyInputV1, SnapshotInput,
     VersionedUpdateRequest, semantic_idempotency_digest_v1,
 };
-use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+use suprnova_live::registry::{ComponentDescriptor, ComponentRegistry, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{
     FieldCategory, FieldSpec, SnapshotSchemaSet, StateCodec, StateSchema,
 };
@@ -87,7 +87,10 @@ use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::{ComponentHarness, ComponentHarnessConfig, HarnessRequestIdentity, HarnessServices};
+use crate::{
+    ComponentHarness, ComponentHarnessConfig, HarnessRequestIdentity, HarnessServices,
+    VerifiedResponseSealing, capture_verified_response_sealer,
+};
 
 type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -194,6 +197,10 @@ fn increment_domain<'a>(
 impl ComponentInstance for FreshRenderComponent {
     fn metadata(&self) -> &'static ComponentMetadata {
         engine_metadata()
+    }
+
+    fn action_target(&mut self) -> &mut dyn ActionTarget {
+        self
     }
 
     fn render<'a>(
@@ -370,6 +377,9 @@ impl EndpointKernel for FreshRenderKernel {
         request: VerifiedEndpointRequest<'request>,
     ) -> EndpointFuture<'request> {
         Box::pin(async move {
+            let (request, response_sealer) = request.into_execution_parts();
+            let response_sealing =
+                VerifiedResponseSealing::new(response_sealer, request.response_binding());
             let VersionedUpdateRequest::V2(parsed) = request.request() else {
                 return Ok(EndpointDispatch::new(
                     EndpointOutcomeKind::Concealed,
@@ -410,41 +420,10 @@ impl EndpointKernel for FreshRenderKernel {
             ))
             .map_err(|_| EndpointKernelError::unavailable())?;
             let result = harness
-                .execute_fresh_render(parsed.idempotency_key().clone(), digest)
+                .execute_fresh_render(parsed.idempotency_key().clone(), digest, response_sealing)
                 .await
                 .map_err(|_| EndpointKernelError::unavailable())?;
-            let ExecutionResult::Accepted(accepted) = result else {
-                return Ok(EndpointDispatch::new(
-                    EndpointOutcomeKind::Concealed,
-                    Bytes::new(),
-                ));
-            };
-            let snapshot: Value = serde_json::from_slice(accepted.signed_snapshot())
-                .map_err(|_| EndpointKernelError::unavailable())?;
-            let render = accepted
-                .render()
-                .ok_or_else(EndpointKernelError::unavailable)?;
-            let html = String::from_utf8(render.body.to_vec())
-                .map_err(|_| EndpointKernelError::unavailable())?;
-            let response = serde_json::to_vec(&json!({
-                "accepted_revision": accepted.revision().get().to_string(),
-                "child_deliveries": [],
-                "correlation_id": parsed.correlation_id().to_base64url(),
-                "effects": [],
-                "events": [],
-                "extensions": {},
-                "outcome": "accepted",
-                "protocol_version": 2,
-                "render": { "html": html, "kind": "html" },
-                "snapshot": snapshot,
-                "url_intent": null,
-                "validation": {},
-            }))
-            .map_err(|_| EndpointKernelError::unavailable())?;
-            Ok(EndpointDispatch::new(
-                EndpointOutcomeKind::Accepted,
-                Bytes::from(response),
-            ))
+            suprnova_live::endpoint::dispatch_execution_result(request.request(), result)
         })
     }
 }
@@ -452,6 +431,9 @@ impl EndpointKernel for FreshRenderKernel {
 pub(super) struct ReferenceFreshRender {
     endpoint: LiveEndpointService,
     harness: Arc<AsyncMutex<ComponentHarness>>,
+    registry: Arc<ComponentRegistry>,
+    clock: Arc<dyn suprnova_live::clock::Clock>,
+    keys: Arc<SnapshotKeyRing>,
     initial_html: String,
     ports: Arc<EngineSubscriptionPorts>,
     pause: Arc<FreshRenderPause>,
@@ -532,12 +514,13 @@ impl ReferenceFreshRender {
                 .map_err(|_| "fresh render registry")?
                 .build(),
         );
+        let keys = Arc::new(reference_key_ring());
         let endpoint = LiveEndpointService::new(
             LiveEndpointConfig::new(reference_protocol_limits(), snapshot_limits)
                 .map_err(|_| "fresh render endpoint config")?,
-            registry,
-            clock,
-            Arc::new(reference_key_ring()),
+            Arc::clone(&registry),
+            Arc::clone(&clock) as Arc<dyn suprnova_live::clock::Clock>,
+            Arc::clone(&keys),
             Arc::new(FreshRenderKernel {
                 harness: Arc::clone(&harness),
             }),
@@ -545,6 +528,9 @@ impl ReferenceFreshRender {
         Ok(Self {
             endpoint,
             harness,
+            registry,
+            clock,
+            keys,
             initial_html,
             ports,
             pause,
@@ -555,12 +541,65 @@ impl ReferenceFreshRender {
     pub(super) async fn execute_ordinary_action(&self) -> Result<Value, &'static str> {
         let sequence = self.action_sequence.fetch_add(1, Ordering::SeqCst);
         let mut harness = self.harness.lock().await;
+        let snapshot = harness
+            .current_encoded_snapshot()
+            .ok_or("ordinary action snapshot")?;
+        let snapshot_json: Value =
+            serde_json::from_slice(snapshot).map_err(|_| "ordinary action snapshot")?;
+        let current = harness
+            .current_snapshot()
+            .ok_or("ordinary action snapshot")?;
+        let mut idempotency = [0x91; 16];
+        idempotency[15] = sequence.to_le_bytes()[0].wrapping_add(1).max(1);
+        let idempotency = suprnova_live::identity::IdempotencyKey::from_bytes(&idempotency)
+            .map_err(|_| "ordinary action idempotency")?;
+        let correlation = format!("ordinary-action-{sequence}");
+        let body = serde_json::to_vec(&json!({
+            "base_revision": current.body().revision().get().to_string(),
+            "child_parameters": null,
+            "component": engine_metadata().identity().as_str(),
+            "correlation_id": correlation,
+            "extensions": { "x_suprnova_live_document_key_v1": "harness-root" },
+            "idempotency_key": idempotency.to_base64url(),
+            "model_proposals": {},
+            "operations": [{
+                "arguments": {},
+                "name": "increment",
+                "kind": "invoke"
+            }],
+            "protocol_version": 2,
+            "runtime_contract_version": 2,
+            "snapshot": { "envelope": snapshot_json, "kind": "instance" },
+            "snapshot_schema_version": 1,
+        }))
+        .map_err(|_| "ordinary action request")?;
+        let (context, _) = engine_context(engine_metadata().clone(), self.ports.clone())
+            .map_err(|_| "ordinary action context")?;
+        let request = LiveEndpointRequest::try_new(
+            Method::POST,
+            ParsedLiveMediaType::parse(LIVE_MEDIA_TYPE_V2).map_err(|_| "ordinary action media")?,
+            Bytes::from(body),
+            Some(context),
+            RequestCachePolicy::Bypass,
+        )
+        .map_err(|_| "ordinary action request")?;
+        let response_sealer = capture_verified_response_sealer(
+            LiveEndpointConfig::new(reference_protocol_limits(), reference_snapshot_limits()?)
+                .map_err(|_| "ordinary action endpoint config")?,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.clock),
+            Arc::clone(&self.keys),
+            request,
+        )
+        .await
+        .ok_or("ordinary action endpoint admission")?;
         let result = harness
             .execute_action(
                 &ActionName::parse("increment").map_err(|_| "ordinary action identity")?,
                 RawActionArguments::empty(),
                 None,
                 HarnessRequestIdentity::from_counter(sequence),
+                response_sealer,
             )
             .await
             .map_err(|_| "ordinary action execution")?;

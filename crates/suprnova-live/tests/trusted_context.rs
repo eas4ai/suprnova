@@ -11,6 +11,7 @@ use suprnova_live::identity::{
     ViewName,
 };
 use suprnova_live::metadata::{ComponentMetadata, ContractVersions};
+use suprnova_live::mount::DocumentMountKey;
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistry, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{SnapshotSchemaSet, StateSchema};
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1};
@@ -135,7 +136,12 @@ impl Fixture {
             .contract_digest()
             .clone();
         let catalog = MountCatalogBuilder::new()
-            .register(&registry, MountCatalogEntry::new(expected, requirements))
+            .register(
+                &registry,
+                MountCatalogEntry::new(expected, requirements).with_document_key(
+                    DocumentMountKey::parse("catalog-primary").expect("document key"),
+                ),
+            )
             .expect("catalog entry")
             .build();
         Self {
@@ -212,6 +218,7 @@ fn complete_current_host_facts_create_a_redacted_request_capability() {
     assert_eq!(trusted.mount().component().as_str(), "catalog.search");
     assert_eq!(trusted.mount().minimum_protocol(), 2);
     assert_eq!(trusted.mount().protocol(), 2);
+    assert_eq!(trusted.mount().document_key().as_str(), "catalog-primary");
     assert_eq!(
         trusted.checks().get(CheckKind::Csrf),
         CheckDisposition::Passed

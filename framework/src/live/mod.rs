@@ -4,12 +4,16 @@
 //! to synchronize typed state and invoke registered Rust actions through the
 //! shipped browser runtime.
 
+pub mod action;
 pub(crate) mod attestation;
 mod config;
 pub(crate) mod context;
+mod document;
 mod events;
 pub(crate) mod ports;
 mod registry;
+mod response;
+mod routes;
 mod runtime;
 mod tenant;
 
@@ -21,20 +25,15 @@ pub mod testing;
 pub mod __private;
 
 pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind};
+pub use document::{
+    LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind, MountedIsland,
+};
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
 pub use runtime::LiveRuntime;
 pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};
-
-/// Closed semantic results and metadata returned by registered Live actions.
-pub mod action {
-    pub use suprnova_live::action::{
-        ActionOutcome, ActionResult, AuthorizedAction, FlashIntent, OutcomeError, OutcomeErrorKind,
-        OutcomeMetadata, RouteIntent, UrlIntent,
-    };
-}
 
 /// Versioned browser event and effect contracts declared by Live components.
 pub mod metadata {
@@ -59,4 +58,6 @@ pub use action::{ActionOutcome, ActionResult, AuthorizedAction};
 pub use error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCode};
 pub use events::{AcceptedOutcomeKind, LiveOutcomeAccepted};
 pub use metadata::{EffectPayloadMetadata, EventPayloadMetadata};
+pub use suprnova_live::canonical::CanonicalValue;
+pub use suprnova_live::mount::MountFlags;
 pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};

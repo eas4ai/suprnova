@@ -13,6 +13,7 @@ pub mod live {
     /// Hidden generated-code support surface used only by macro compile tests.
     #[doc(hidden)]
     pub mod __private {
+        pub use askama;
         pub use suprnova_live::*;
 
         /// Generated validation conversion used only by this standalone fixture.

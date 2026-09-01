@@ -13,7 +13,7 @@ pub use error::{RegistryError, RegistryErrorKind};
 use crate::identity::{ComponentName, ContentDigest};
 
 /// Immutable process-local component registry built before serving requests.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ComponentRegistry {
     components: BTreeMap<ComponentName, ComponentDescriptor>,
 }

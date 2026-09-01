@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::{
@@ -39,7 +39,9 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
 
     let mut actions = BTreeMap::<String, RegisteredAction>::new();
     let mut singleton_helpers = BTreeMap::<String, Span>::new();
-    let mut mount_parameters = Vec::<(String, Type)>::new();
+    let mut mount = None::<RegisteredMount>;
+    let mut lifecycle_hooks = BTreeMap::<String, RegisteredLifecycleHook>::new();
+    let mut computed_methods = Vec::<RegisteredComputed>::new();
     let mut supports_params_changed = false;
     let mut supports_lazy_complete = false;
     let mut component_validation_hooks = Vec::new();
@@ -90,11 +92,16 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             "mount" => {
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
                 validate_mount_signature(method)?;
-                mount_parameters = extract_mount_parameters(method)?;
+                mount = Some(RegisteredMount {
+                    method: method.sig.ident.clone(),
+                    parameters: extract_mount_parameters(method)?,
+                    asynchronous: method.sig.asyncness.is_some(),
+                });
                 ensure_path_helper(&attribute)?;
             }
             "computed" => {
                 validate_computed_signature(method)?;
+                computed_methods.push(extract_computed(method)?);
                 ensure_path_helper(&attribute)?;
             }
             "validate" => {
@@ -129,9 +136,22 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             _ => {
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
                 validate_receiver_method(method, true)?;
+                if method.sig.inputs.len() != 1 {
+                    return Err(syn::Error::new(
+                        method.sig.ident.span(),
+                        "Live lifecycle hooks accept only `&mut self`",
+                    ));
+                }
                 ensure_path_helper(&attribute)?;
                 supports_params_changed |= helper_name == "params_changed";
                 supports_lazy_complete |= helper_name == "lazy_complete";
+                lifecycle_hooks.insert(
+                    helper_name,
+                    RegisteredLifecycleHook {
+                        method: method.sig.ident.clone(),
+                        asynchronous: method.sig.asyncness.is_some(),
+                    },
+                );
             }
         }
     }
@@ -243,17 +263,22 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         })
         .collect::<Vec<_>>();
-    let parameter_values = mount_parameters.iter().map(|(name, ty)| {
-        let codec = model_codec_tokens(ty);
-        quote! {
-            ::suprnova::live::__private::component::composition::ChildParameterField::new(
-                ::suprnova::live::__private::identity::ModelField::parse(#name)
-                    .expect("macro-validated Live mount parameter identity"),
-                #codec,
-                true,
-            )
-        }
-    });
+    let parameter_values =
+        mount
+            .iter()
+            .flat_map(|mount| mount.parameters.iter())
+            .map(|parameter| {
+                let name = &parameter.name;
+                let codec = model_codec_tokens(&parameter.ty);
+                quote! {
+                    ::suprnova::live::__private::component::composition::ChildParameterField::new(
+                        ::suprnova::live::__private::identity::ModelField::parse(#name)
+                            .expect("macro-validated Live mount parameter identity"),
+                        #codec,
+                        true,
+                    )
+                }
+            });
     let parameter_values = parameter_values.collect::<Vec<_>>();
     let validation_port = if component_validation_hooks.is_empty()
         && action_validation_hooks.is_empty()
@@ -402,8 +427,61 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         }
     };
+    let mount_runtime = generate_mount_runtime(&mount);
+    let hydrated_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "hydrate", "hydrated_generated");
+    let rendering_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "rendering", "rendering_generated");
+    let rendered_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "rendered", "rendered_generated");
+    let dehydrating_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "dehydrate", "dehydrating_generated");
+    let params_changed_runtime = generate_params_changed_hook(&lifecycle_hooks);
+    let lazy_complete_runtime = generate_context_lifecycle_hook(
+        &lifecycle_hooks,
+        "lazy_complete",
+        "lazy_complete_generated",
+    );
+    let teardown_runtime = generate_teardown_hook(&lifecycle_hooks);
+    let component_ident = self_type_ident(self_ty)?;
+    let view_ident = format_ident!("__SuprnovaLiveViewFor{component_ident}");
+    let computed_forwarders = computed_methods.iter().map(|computed| {
+        let method = &computed.method;
+        let inputs = &computed.inputs;
+        let arguments = &computed.arguments;
+        let output = &computed.output;
+        quote! {
+            fn #method(&self, #(#inputs),*) #output {
+                self.component.#method(#(#arguments),*)
+            }
+        }
+    });
+    let computed_view_impl = if computed_methods.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl<'__snv_live> #view_ident<'__snv_live> {
+                #(#computed_forwarders)*
+            }
+        }
+    };
     let tokens = quote! {
         #item
+
+        #computed_view_impl
+
+        impl ::suprnova::live::__private::component::generated::GeneratedComponentRuntime
+            for #self_ty
+        {
+            #mount_runtime
+            #hydrated_runtime
+            #rendering_runtime
+            #rendered_runtime
+            #dehydrating_runtime
+            #params_changed_runtime
+            #lazy_complete_runtime
+            #teardown_runtime
+        }
 
         impl ::suprnova::live::__private::metadata::LiveComponentContract for #self_ty {
             fn descriptor() -> ::std::result::Result<
@@ -422,8 +500,15 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                         metadata.versions().state_schema(),
                         ::std::vec![#(#parameter_values),*],
                     ).expect("macro-validated Live mount parameter schema");
+                let hooks =
+                    ::suprnova::live::__private::component::generated::component_hooks::<Self>(
+                        metadata.clone(),
+                    );
                 ::std::result::Result::Ok(
-                    ::suprnova::live::__private::registry::ComponentDescriptor::new(metadata)
+                    ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
+                        metadata,
+                        hooks,
+                    )
                         .with_composition(
                             parameter_schema,
                             #supports_params_changed,
@@ -471,6 +556,195 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
     };
     enforce_runtime_path_contract(&tokens)?;
     Ok(tokens)
+}
+
+fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
+    let (expected, decodes, invocation) = if let Some(mount) = mount {
+        let expected = mount.parameters.len();
+        let decodes = mount.parameters.iter().map(|parameter| {
+            let name = &parameter.name;
+            let ident = &parameter.ident;
+            let ty = &parameter.ty;
+            let codec = model_codec_tokens(ty);
+            quote! {
+                let #ident: #ty =
+                    ::suprnova::live::__private::component::generated::decode_model_field(
+                        parameters.get(#name).ok_or_else(
+                            ::suprnova::live::__private::component::ComponentError::contract_failure,
+                        )?,
+                        &#codec,
+                    )?;
+            }
+        });
+        let method = &mount.method;
+        let arguments = mount.parameters.iter().map(|parameter| &parameter.ident);
+        let invocation = if mount.asynchronous {
+            quote!(Self::#method(#(#arguments),*).await)
+        } else {
+            quote!(Self::#method(#(#arguments),*))
+        };
+        (
+            expected,
+            quote!(#(#decodes)*),
+            quote! {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentResult::into_component_result(
+                    output,
+                )
+            },
+        )
+    } else {
+        (
+            0,
+            quote! {},
+            quote! {
+                <Self as
+                    ::suprnova::live::__private::component::generated::GeneratedComponentState
+                >::default_mount_state()
+            },
+        )
+    };
+
+    quote! {
+        fn mount_generated<'a>(
+            context: &'a ::suprnova::live::__private::component::MountContext<'a>,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                Self,
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let ::suprnova::live::__private::canonical::CanonicalValue::Object(parameters) =
+                    context.parameters()
+                else {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                };
+                if parameters.len() != #expected {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                }
+                #decodes
+                #invocation
+            })
+        }
+    }
+}
+
+fn generate_context_lifecycle_hook(
+    hooks: &BTreeMap<String, RegisteredLifecycleHook>,
+    source: &str,
+    generated: &str,
+) -> TokenStream2 {
+    let Some(hook) = hooks.get(source) else {
+        return quote! {};
+    };
+    let generated = syn::Ident::new(generated, hook.method.span());
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn #generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn generate_params_changed_hook(hooks: &BTreeMap<String, RegisteredLifecycleHook>) -> TokenStream2 {
+    let Some(hook) = hooks.get("params_changed") else {
+        return quote! {};
+    };
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn params_changed_generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+            _parameters: &'a ::suprnova::live::__private::child::VerifiedChildParametersV1,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn generate_teardown_hook(hooks: &BTreeMap<String, RegisteredLifecycleHook>) -> TokenStream2 {
+    let Some(hook) = hooks.get("teardown") else {
+        return quote! {};
+    };
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn teardown_generated<'a>(
+            &'a mut self,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn self_type_ident(self_ty: &Type) -> syn::Result<&syn::Ident> {
+    let Type::Path(path) = self_ty else {
+        return Err(syn::Error::new(
+            self_ty.span(),
+            "Live component impl target must be a named type",
+        ));
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| &segment.ident)
+        .ok_or_else(|| syn::Error::new(self_ty.span(), "Live component impl target is empty"))
 }
 
 fn take_method_helper(method: &mut ImplItemFn) -> syn::Result<Option<(String, Attribute)>> {
@@ -576,6 +850,30 @@ struct ActionParameter {
     name: syn::Ident,
     ty: Type,
     required: bool,
+}
+
+struct RegisteredMount {
+    method: syn::Ident,
+    parameters: Vec<MountParameter>,
+    asynchronous: bool,
+}
+
+struct MountParameter {
+    name: String,
+    ident: syn::Ident,
+    ty: Type,
+}
+
+struct RegisteredLifecycleHook {
+    method: syn::Ident,
+    asynchronous: bool,
+}
+
+struct RegisteredComputed {
+    method: syn::Ident,
+    inputs: Vec<FnArg>,
+    arguments: Vec<syn::Ident>,
+    output: syn::ReturnType,
 }
 
 struct RegisteredValidationHook {
@@ -747,7 +1045,7 @@ fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<(String, Type)>> {
+fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<MountParameter>> {
     method
         .sig
         .inputs
@@ -775,10 +1073,11 @@ fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<(String, Typ
                     "mount parameters must be immutable owned values",
                 ));
             }
-            Ok((
-                pattern.ident.unraw().to_string(),
-                argument.ty.as_ref().clone(),
-            ))
+            Ok(MountParameter {
+                name: pattern.ident.unraw().to_string(),
+                ident: pattern.ident.clone(),
+                ty: argument.ty.as_ref().clone(),
+            })
         })
         .collect()
 }
@@ -798,6 +1097,39 @@ fn validate_computed_signature(method: &ImplItemFn) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn extract_computed(method: &ImplItemFn) -> syn::Result<RegisteredComputed> {
+    let mut inputs = Vec::new();
+    let mut arguments = Vec::new();
+    for argument in method.sig.inputs.iter().skip(1) {
+        let FnArg::Typed(argument) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "computed arguments must be typed named values",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "computed arguments must use simple stable names",
+            ));
+        };
+        if pattern.by_ref.is_some() || pattern.mutability.is_some() || pattern.subpat.is_some() {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "computed arguments must use immutable named values",
+            ));
+        }
+        inputs.push(FnArg::Typed(argument.clone()));
+        arguments.push(pattern.ident.clone());
+    }
+    Ok(RegisteredComputed {
+        method: method.sig.ident.clone(),
+        inputs,
+        arguments,
+        output: method.sig.output.clone(),
+    })
 }
 
 fn validate_receiver_method(method: &ImplItemFn, require_mutable: bool) -> syn::Result<()> {

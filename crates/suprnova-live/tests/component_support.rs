@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use http::Method;
 use suprnova_live::action::{
     ActionArgumentSchema, ActionAuthorizationPort, AuthorizationRequirement, TransactionPolicy,
 };
@@ -25,18 +26,22 @@ use suprnova_live::component::{
     ComponentError, ComponentFactory, ComponentHooks, ComponentInstance, HydrationContext,
     LiveFuture, MountContext, RenderContext,
 };
+use suprnova_live::endpoint::{
+    LIVE_MEDIA_TYPE_V1, LIVE_MEDIA_TYPE_V2, LiveEndpointConfig, LiveEndpointRequest,
+    ParsedLiveMediaType, RequestCachePolicy,
+};
 use suprnova_live::host::{
     HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
     PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
     TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    BuildId, ComponentName, InstanceId, IslandSlot, ModelField, ScopeFingerprint, UnixMillis,
-    ViewName,
+    BuildId, ComponentName, CorrelationId, InstanceId, IslandSlot, ModelField, Revision,
+    ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::mount::DocumentMountKey;
-use suprnova_live::protocol::BrowserRenderContext;
+use suprnova_live::protocol::{BrowserRenderContext, ProtocolLimitConfig, ProtocolLimits};
 use suprnova_live::random::{InstanceIdGenerator, RandomError};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{
@@ -47,6 +52,7 @@ use suprnova_live::upload::UploadAuthorizationPort;
 use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
+use suprnova_live_test_support::{VerifiedResponseSealing, capture_verified_response_sealer};
 use tokio::sync::Notify;
 
 #[path = "ledger_support.rs"]
@@ -59,6 +65,170 @@ pub(crate) use ledger_support::{ManualClock, digest, idempotency, ledger};
 pub(crate) fn browser_context() -> BrowserRenderContext {
     let expected = DocumentMountKey::parse("test-root").expect("document key");
     BrowserRenderContext::checked("test-root", &expected).expect("browser render context")
+}
+
+pub(crate) async fn admitted_response_sealer(
+    descriptor: ComponentDescriptor,
+    context: TrustedLiveRequestContext,
+    encoded_snapshot: &[u8],
+    base_revision: Revision,
+    correlation_start: u8,
+    max_response_bytes: Option<usize>,
+) -> VerifiedResponseSealing {
+    admitted_response_sealer_with_snapshot_limits(
+        descriptor,
+        context,
+        encoded_snapshot,
+        base_revision,
+        correlation_start,
+        max_response_bytes,
+        snapshot_limits(),
+    )
+    .await
+}
+
+pub(crate) async fn admitted_response_sealer_with_snapshot_limits(
+    descriptor: ComponentDescriptor,
+    context: TrustedLiveRequestContext,
+    encoded_snapshot: &[u8],
+    base_revision: Revision,
+    correlation_start: u8,
+    max_response_bytes: Option<usize>,
+    snapshot_limits: suprnova_live::snapshot::SnapshotLimits,
+) -> VerifiedResponseSealing {
+    admitted_response_sealer_with_semantics_and_snapshot_limits(
+        descriptor,
+        context,
+        encoded_snapshot,
+        base_revision,
+        correlation_start,
+        0x65,
+        "execute",
+        serde_json::json!({}),
+        serde_json::json!({}),
+        max_response_bytes,
+        snapshot_limits,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hostile fixture names each independently varied semantic request field"
+)]
+pub(crate) async fn admitted_response_sealer_with_semantics(
+    descriptor: ComponentDescriptor,
+    context: TrustedLiveRequestContext,
+    encoded_snapshot: &[u8],
+    base_revision: Revision,
+    correlation_start: u8,
+    idempotency_start: u8,
+    action: &str,
+    arguments: serde_json::Value,
+    model_proposals: serde_json::Value,
+) -> VerifiedResponseSealing {
+    admitted_response_sealer_with_semantics_and_snapshot_limits(
+        descriptor,
+        context,
+        encoded_snapshot,
+        base_revision,
+        correlation_start,
+        idempotency_start,
+        action,
+        arguments,
+        model_proposals,
+        None,
+        snapshot_limits(),
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hostile fixture names each independently varied semantic request field and limit"
+)]
+async fn admitted_response_sealer_with_semantics_and_snapshot_limits(
+    descriptor: ComponentDescriptor,
+    context: TrustedLiveRequestContext,
+    encoded_snapshot: &[u8],
+    base_revision: Revision,
+    correlation_start: u8,
+    idempotency_start: u8,
+    action: &str,
+    arguments: serde_json::Value,
+    model_proposals: serde_json::Value,
+    max_response_bytes: Option<usize>,
+    snapshot_limits: suprnova_live::snapshot::SnapshotLimits,
+) -> VerifiedResponseSealing {
+    let input = suprnova_live::limits::InputLimits::new(64 * 1024, 12, 512, 40 * 1024)
+        .expect("protocol input limits");
+    let protocol = ProtocolLimits::new(ProtocolLimitConfig {
+        input,
+        max_snapshot_bytes: 32 * 1024,
+        max_html_bytes: 32 * 1024,
+        max_model_proposals: 8,
+        max_operations: 8,
+        max_arguments: 16,
+        max_validation_entries: 16,
+        max_events: 8,
+        max_effects: 8,
+        max_extensions: 8,
+    })
+    .expect("protocol limits");
+    let mut config = LiveEndpointConfig::new(protocol, snapshot_limits).expect("endpoint config");
+    if let Some(max_response_bytes) = max_response_bytes {
+        config = config
+            .with_max_response_bytes(max_response_bytes)
+            .expect("response limit");
+    }
+    let protocol_version = context.mount().protocol();
+    let media = ParsedLiveMediaType::parse(if protocol_version == 1 {
+        LIVE_MEDIA_TYPE_V1
+    } else {
+        LIVE_MEDIA_TYPE_V2
+    })
+    .expect("live media type");
+    let correlation =
+        CorrelationId::from_bytes(&bytes::<16>(correlation_start)).expect("correlation identity");
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(encoded_snapshot).expect("snapshot JSON");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "base_revision": base_revision.get().to_string(),
+        "component": descriptor.metadata().identity().as_str(),
+        "correlation_id": correlation.to_base64url(),
+        "extensions": {},
+        "idempotency_key": CorrelationId::from_bytes(&bytes::<16>(idempotency_start))
+            .expect("idempotency bytes")
+            .to_base64url(),
+        "model_proposals": model_proposals,
+        "operations": [{"arguments": arguments, "kind": "invoke_action", "name": action}],
+        "protocol_version": protocol_version,
+        "runtime_contract_version": 1,
+        "snapshot": {"envelope": snapshot, "kind": "instance"},
+        "snapshot_schema_version": 1,
+    }))
+    .expect("request JSON");
+    let request = LiveEndpointRequest::try_new(
+        Method::POST,
+        media,
+        Bytes::from(body),
+        Some(context),
+        RequestCachePolicy::Bypass,
+    )
+    .expect("endpoint request");
+    let registry = ComponentRegistryBuilder::new()
+        .register(descriptor)
+        .expect("registry entry")
+        .build();
+    capture_verified_response_sealer(
+        config,
+        Arc::new(registry),
+        Arc::new(ManualClock::new(1_000)),
+        Arc::new(key_ring()),
+        request,
+    )
+    .await
+    .expect("verified response sealer")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +344,10 @@ impl ComponentInstance for TraceFixture {
     fn metadata(&self) -> &'static ComponentMetadata {
         assert_ne!(self.failure, FailurePoint::MetadataPanic, "metadata panic");
         self.metadata
+    }
+
+    fn action_target(&mut self) -> &mut dyn suprnova_live::action::ActionTarget {
+        self
     }
 
     fn hydrated<'a>(

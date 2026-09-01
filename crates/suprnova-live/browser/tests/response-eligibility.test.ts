@@ -39,6 +39,20 @@ function committed(overrides: Readonly<Record<string, unknown>> = {}): string {
   });
 }
 
+function navigation(target: string): string {
+  return JSON.stringify({
+    child_deliveries: [],
+    correlation_id: CORRELATION,
+    effects: [],
+    events: [],
+    extensions: {},
+    outcome: "accepted",
+    protocol_version: 2,
+    url_intent: { kind: "navigated", target },
+    validation: {},
+  });
+}
+
 function island(overrides: Partial<BrowserIslandAuthority> = {}): BrowserIslandAuthority {
   return Object.freeze({
     active: true,
@@ -116,6 +130,34 @@ describe("typed response parsing", () => {
   it("retains the void compatibility validator and closes malformed emission shape", () => {
     const malformed = committed({ events: [{ name: "saved", payload: {}, raw: "forged" }] });
     expect(() => parseUpdateResponse(malformed)).toThrow(ProtocolValidationError);
+  });
+
+  it.each([
+    "catalog/books",
+    "//evil.test/catalog",
+    "/catalog\\admin",
+    "/catalog/../admin",
+    "/catalog/./admin",
+    "/catalog/%2e%2e/admin",
+    "/catalog/.%2E/admin",
+    "/catalog/%2fadmin",
+    "/catalog/%5cadmin",
+    "/catalog/%",
+    "/catalog/%2",
+    "/catalog/%zz",
+    "/catalog/\u0000admin",
+    `/${"a".repeat(2_048)}`,
+  ])("rejects browser-unsafe navigation target %j", (target) => {
+    expect(() => parseUpdateResponse(navigation(target))).toThrow(ProtocolValidationError);
+  });
+
+  it.each([
+    "/catalog/books",
+    "/catalog/rust%20books?page=2&q=red+shoes",
+    "/catalog/books?literal_dot=%2E%2E",
+    "/catalog/books#details",
+  ])("accepts browser-safe navigation target %j", (target) => {
+    expect(parseUpdateResponse(navigation(target))).toMatchObject({ kind: "navigation", target });
   });
 });
 

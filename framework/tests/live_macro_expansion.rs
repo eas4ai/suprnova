@@ -45,3 +45,11 @@ fn live_macros_expand_only_through_the_public_framework_facade() {
 
     assert_eq!(registry.len(), 2);
 }
+
+#[test]
+fn macro_registration_attaches_request_owned_runtime_hooks() {
+    assert!(
+        suprnova::live::testing::component_registration_has_runtime_hooks::<Counter>(),
+        "a registered macro component must be executable, not metadata-only"
+    );
+}

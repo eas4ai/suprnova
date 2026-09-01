@@ -4,13 +4,14 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use suprnova_live::action::RawActionArguments;
+use suprnova_live::action::{ActionOutcome, RawActionArguments};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock as _;
 use suprnova_live::crypto::{SnapshotKeyRing, SnapshotPurpose};
+use suprnova_live::endpoint::{EndpointNavigationTarget, EndpointResponseIntents};
 use suprnova_live::execution::{
-    ActionExecutionRequest, ExecutionResult, ExecutionService, InstancedActionRequest,
-    InstancedFreshRenderRequest,
+    ActionExecutionRequest, ExecutionResult, ExecutionService, HostError, InstancedActionRequest,
+    InstancedFreshRenderRequest, ResponseIntentPreparationPort, ResponseIntentPreparationRequest,
 };
 use suprnova_live::host::TrustedLiveRequestContext;
 use suprnova_live::identity::{
@@ -32,6 +33,27 @@ use suprnova_live::validation::{BagPolicy, ValidationEngine};
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use crate::HarnessServices;
+use crate::endpoint::VerifiedResponseSealing;
+
+struct HarnessResponseIntentPort;
+
+impl ResponseIntentPreparationPort for HarnessResponseIntentPort {
+    fn prepare<'a>(
+        &'a self,
+        request: ResponseIntentPreparationRequest<'a>,
+    ) -> suprnova_live::component::LiveFuture<'a, Result<EndpointResponseIntents, HostError>> {
+        Box::pin(async move {
+            let intents = if matches!(request.result().outcome(), ActionOutcome::Redirect(_)) {
+                EndpointResponseIntents::default().with_redirect(
+                    EndpointNavigationTarget::parse("/harness").expect("safe harness target"),
+                )
+            } else {
+                EndpointResponseIntents::default()
+            };
+            Ok(intents)
+        })
+    }
+}
 
 /// Closed reason a dev-only component harness could not perform its request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -390,6 +412,7 @@ impl ComponentHarness {
         arguments: RawActionArguments,
         proposals: Option<&ProposalBatch>,
         identity: HarnessRequestIdentity,
+        response_sealing: VerifiedResponseSealing,
     ) -> Result<ExecutionResult, HarnessError> {
         let snapshot = self
             .current
@@ -400,6 +423,8 @@ impl ComponentHarness {
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
         let browser = BrowserRenderContext::checked("harness-root", &document_key)
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
+        let response_intents = HarnessResponseIntentPort;
+        let (response_sealer, response_binding) = response_sealing.into_parts();
         let mut request = ActionExecutionRequest::new(
             action,
             arguments,
@@ -409,7 +434,9 @@ impl ComponentHarness {
             BagPolicy::Replace,
             Some(self.services.transactions().as_ref()),
             self.services.trace(),
-        );
+        )
+        .with_response_intent_preparation(&response_intents)
+        .with_response_sealer(response_sealer, response_binding);
         if let Some(proposals) = proposals {
             request = request.with_proposals(proposals);
         }
@@ -451,6 +478,7 @@ impl ComponentHarness {
         &mut self,
         idempotency: IdempotencyKey,
         digest: ContentDigest,
+        response_sealing: VerifiedResponseSealing,
     ) -> Result<ExecutionResult, HarnessError> {
         let snapshot = self
             .current
@@ -460,17 +488,21 @@ impl ComponentHarness {
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
         let browser = BrowserRenderContext::checked("harness-root", &document_key)
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
+        let (response_sealer, response_binding) = response_sealing.into_parts();
         let result = self
             .execution_service
-            .execute_fresh_render(InstancedFreshRenderRequest::new(
-                &self.descriptor,
-                &self.context,
-                browser,
-                snapshot,
-                idempotency,
-                digest,
-                self.services.trace(),
-            ))
+            .execute_fresh_render(
+                InstancedFreshRenderRequest::new(
+                    &self.descriptor,
+                    &self.context,
+                    browser,
+                    snapshot,
+                    idempotency,
+                    digest,
+                    self.services.trace(),
+                )
+                .with_response_sealer(response_sealer, response_binding),
+            )
             .await;
         if let ExecutionResult::Accepted(accepted) = &result {
             let now = self

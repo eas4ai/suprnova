@@ -681,15 +681,40 @@ function validateRecovery(
 
 function validateSafeTarget(value: unknown): void {
   const target = asString(value);
+  const path = target.split(/[?#]/u, 1)[0] ?? "";
   if (
     !target.startsWith("/") ||
     target.startsWith("//") ||
     target.includes("\\") ||
     utf8Length(target) > 2_048 ||
-    hasControlCharacter(target)
+    hasControlCharacter(target) ||
+    !hasNormalizedPathSegments(path)
   ) {
     throw new ProtocolValidationError("unsafe_redirect");
   }
+}
+
+function hasNormalizedPathSegments(path: string): boolean {
+  return path.split("/").every((segment) => {
+    const decoded: number[] = [];
+    for (let index = 0; index < segment.length; index += 1) {
+      const character = segment[index];
+      if (character !== "%") {
+        decoded.push(character?.charCodeAt(0) ?? 0);
+        continue;
+      }
+      const encoded = segment.slice(index + 1, index + 3);
+      if (!/^[0-9A-Fa-f]{2}$/u.test(encoded)) return false;
+      const byte = Number.parseInt(encoded, 16);
+      if (byte === 0x2f || byte === 0x5c || byte <= 0x1f || byte === 0x7f) return false;
+      decoded.push(byte);
+      index += 2;
+    }
+    return (
+      !(decoded.length === 1 && decoded[0] === 0x2e) &&
+      !(decoded.length === 2 && decoded[0] === 0x2e && decoded[1] === 0x2e)
+    );
+  });
 }
 
 function hasControlCharacter(value: string): boolean {

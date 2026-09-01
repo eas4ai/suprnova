@@ -12,6 +12,7 @@ publish = false
 default = []
 
 [dependencies]
+askama = "=0.16.0"
 suprnova-live = { path = "../.." }
 suprnova-macros = { path = "../../../../suprnova-macros" }
 

@@ -17,17 +17,24 @@ pub(crate) mod snapshot_support;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
+use http::Method;
 pub(crate) use ledger_support::{ManualClock, digest, idempotency, instance, scope};
 use snapshot_support::{key_ring, seed_fields, snapshot_limits};
 use suprnova_live::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
 use suprnova_live::crypto::SnapshotKeyRing;
+use suprnova_live::endpoint::{
+    LIVE_MEDIA_TYPE_V2, LiveEndpointConfig, LiveEndpointRequest, ParsedLiveMediaType,
+    RequestCachePolicy,
+};
 use suprnova_live::host::{
     HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
     PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
     TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    BrowserNonce, BuildId, ComponentName, InstanceId, IslandSlot, UnixMillis, ViewName,
+    BrowserNonce, BuildId, ComponentName, CorrelationId, InstanceId, IslandSlot, UnixMillis,
+    ViewName,
 };
 use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
@@ -36,7 +43,7 @@ use suprnova_live::promotion::{
     InstanceIdGenerator, PromotionLimitConfig, PromotionLimits, PromotionService, RandomError,
     TrustedPromotionContext,
 };
-use suprnova_live::protocol::BrowserRenderContext;
+use suprnova_live::protocol::{BrowserRenderContext, ProtocolLimitConfig, ProtocolLimits};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{
@@ -44,7 +51,9 @@ use suprnova_live::snapshot::{
 };
 use suprnova_live::state::{BindingTiming, ModelCodec};
 use suprnova_live::validation::ValidationSelection;
-use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
+use suprnova_live_test_support::{
+    SyntheticLiveRequestContextBuilder, VerifiedResponseSealing, capture_verified_response_sealer,
+};
 
 pub(crate) fn nonce(start: u8) -> BrowserNonce {
     BrowserNonce::from_bytes(&ledger_support::bytes::<16>(start)).expect("nonce is valid")
@@ -53,6 +62,77 @@ pub(crate) fn nonce(start: u8) -> BrowserNonce {
 pub(crate) fn browser_context() -> BrowserRenderContext {
     let expected = DocumentMountKey::parse("test-root").expect("document key");
     BrowserRenderContext::checked("test-root", &expected).expect("browser render context")
+}
+
+pub(crate) async fn admitted_seed_response_sealing(
+    descriptor: ComponentDescriptor,
+    context: TrustedLiveRequestContext,
+    encoded_seed: &[u8],
+    browser_nonce: BrowserNonce,
+    correlation_start: u8,
+) -> VerifiedResponseSealing {
+    let input = suprnova_live::limits::InputLimits::new(64 * 1024, 12, 512, 40 * 1024)
+        .expect("protocol input limits");
+    let protocol = ProtocolLimits::new(ProtocolLimitConfig {
+        input,
+        max_snapshot_bytes: 32 * 1024,
+        max_html_bytes: 32 * 1024,
+        max_model_proposals: 8,
+        max_operations: 8,
+        max_arguments: 16,
+        max_validation_entries: 16,
+        max_events: 8,
+        max_effects: 8,
+        max_extensions: 8,
+    })
+    .expect("protocol limits");
+    let config = LiveEndpointConfig::new(protocol, snapshot_limits()).expect("endpoint config");
+    let media = ParsedLiveMediaType::parse(LIVE_MEDIA_TYPE_V2).expect("live media type");
+    let correlation = CorrelationId::from_bytes(&ledger_support::bytes::<16>(correlation_start))
+        .expect("correlation identity");
+    let seed: serde_json::Value = serde_json::from_slice(encoded_seed).expect("seed JSON");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "base_revision": "0",
+        "child_parameters": null,
+        "component": descriptor.metadata().identity().as_str(),
+        "correlation_id": correlation.to_base64url(),
+        "extensions": {"x_suprnova_live_document_key_v1": "test-root"},
+        "idempotency_key": CorrelationId::from_bytes(&ledger_support::bytes::<16>(0x65))
+            .expect("idempotency bytes")
+            .to_base64url(),
+        "model_proposals": {},
+        "operations": [{"arguments": {}, "kind": "invoke_action", "name": "search"}],
+        "protocol_version": 2,
+        "runtime_contract_version": 2,
+        "snapshot": {
+            "browser_nonce": browser_nonce.to_base64url(),
+            "envelope": seed,
+            "kind": "seed_promotion",
+        },
+        "snapshot_schema_version": 1,
+    }))
+    .expect("seed request JSON");
+    let request = LiveEndpointRequest::try_new(
+        Method::POST,
+        media,
+        Bytes::from(body),
+        Some(context),
+        RequestCachePolicy::Bypass,
+    )
+    .expect("seed endpoint request");
+    let registry = ComponentRegistryBuilder::new()
+        .register(descriptor)
+        .expect("seed registry entry")
+        .build();
+    capture_verified_response_sealer(
+        config,
+        Arc::new(registry),
+        Arc::new(ManualClock::new(1_000)),
+        Arc::new(key_ring()),
+        request,
+    )
+    .await
+    .expect("verified seed response sealing")
 }
 
 #[derive(Debug)]

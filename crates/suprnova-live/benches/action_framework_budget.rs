@@ -50,6 +50,7 @@ use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use suprnova_live_test_support::{
     ComponentHarness, ComponentHarnessConfig, HarnessRequestIdentity, HarnessServices,
+    VerifiedResponseSealing,
 };
 
 const STATE_BYTES: usize = 8 * 1024;
@@ -68,6 +69,10 @@ struct BudgetInstance {
 impl ComponentInstance for BudgetInstance {
     fn metadata(&self) -> &'static ComponentMetadata {
         metadata()
+    }
+
+    fn action_target(&mut self) -> &mut dyn ActionTarget {
+        self
     }
 
     fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
@@ -242,6 +247,8 @@ fn snapshot_limits() -> SnapshotLimits {
 
 struct Fixture {
     harness: ComponentHarness,
+    descriptor: ComponentDescriptor,
+    services: HarnessServices,
     action: ActionName,
     proposals: ProposalBatch,
     limits: ProtocolLimits,
@@ -282,12 +289,12 @@ impl Fixture {
             schemas,
         );
         let config = ComponentHarnessConfig::new(
-            descriptor,
+            descriptor.clone(),
             context,
             expected,
             component_support::key_ring(),
             snapshot_limits(),
-            services,
+            services.clone(),
         );
         let mut harness = ComponentHarness::new(config)?;
         let mounted = match harness.mount(CanonicalValue::Object(BTreeMap::new())).await {
@@ -320,6 +327,8 @@ impl Fixture {
         );
         Ok(Self {
             harness,
+            descriptor,
+            services,
             action: ActionName::parse("advance")?,
             proposals,
             limits: protocol_limits(),
@@ -358,7 +367,46 @@ impl Fixture {
         }))?)
     }
 
-    async fn process_once(&mut self, seed: u8) -> Result<Revision, Box<dyn Error>> {
+    async fn prepare_response_sealing(
+        &self,
+        seed: u8,
+    ) -> Result<VerifiedResponseSealing, Box<dyn Error>> {
+        let encoded = self
+            .harness
+            .current_encoded_snapshot()
+            .ok_or_else(|| std::io::Error::other("current snapshot is absent"))?
+            .to_vec();
+        let revision = self
+            .harness
+            .current_snapshot()
+            .ok_or_else(|| std::io::Error::other("current state is absent"))?
+            .body()
+            .revision();
+        let context = component_support::trusted_context_for_with_schemas(
+            metadata(),
+            Some(Arc::clone(self.services.authorization())
+                as Arc<dyn suprnova_live::action::ActionAuthorizationPort>),
+            schemas(),
+        );
+        Ok(
+            component_support::admitted_response_sealer_with_snapshot_limits(
+                self.descriptor.clone(),
+                context,
+                &encoded,
+                revision,
+                seed.wrapping_add(1),
+                None,
+                snapshot_limits(),
+            )
+            .await,
+        )
+    }
+
+    async fn process_once(
+        &mut self,
+        seed: u8,
+        response_sealing: VerifiedResponseSealing,
+    ) -> Result<Revision, Box<dyn Error>> {
         let request_bytes = self.request_bytes(seed)?;
         let parsed = parse_versioned_update_request(&request_bytes, &self.limits)?;
         let VersionedUpdateRequest::V2(parsed) = parsed else {
@@ -372,6 +420,7 @@ impl Fixture {
                 RawActionArguments::empty(),
                 Some(&self.proposals),
                 HarnessRequestIdentity::from_seed(seed),
+                response_sealing,
             )
             .await?;
         let ExecutionResult::Accepted(accepted) = result else {
@@ -487,19 +536,23 @@ fn run() -> Result<(), Box<dyn Error>> {
 async fn run_async() -> Result<(), Box<dyn Error>> {
     let mut fixture = Fixture::new().await?;
     if cfg!(debug_assertions) {
-        fixture.process_once(1).await?;
+        let response_sealing = fixture.prepare_response_sealing(1).await?;
+        fixture.process_once(1, response_sealing).await?;
         println!("action framework budget debug contract check only; release timing skipped");
         return Ok(());
     }
 
     for iteration in 0..WARMUP_ITERATIONS {
-        black_box(fixture.process_once(iteration as u8 + 1).await?);
+        let seed = iteration as u8 + 1;
+        let response_sealing = fixture.prepare_response_sealing(seed).await?;
+        black_box(fixture.process_once(seed, response_sealing).await?);
     }
     let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
     for iteration in 0..MEASURED_SAMPLES {
         let seed = (WARMUP_ITERATIONS + iteration + 1) as u8;
+        let response_sealing = fixture.prepare_response_sealing(seed).await?;
         let started = Instant::now();
-        black_box(fixture.process_once(seed).await?);
+        black_box(fixture.process_once(seed, response_sealing).await?);
         samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
     }
     samples.sort_by(f64::total_cmp);

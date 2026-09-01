@@ -157,6 +157,7 @@ impl fmt::Debug for RegisteredSanitizer {
 #[derive(Clone)]
 enum TrustedMarkupProvenance {
     FrameworkStatic,
+    EngineValidatedIsland,
     RegisteredSanitizer(SanitizerId),
 }
 
@@ -199,6 +200,14 @@ impl TrustedHtml {
     pub const fn reason(&self) -> &TrustedMarkupReason {
         &self.reason
     }
+
+    pub(crate) fn engine_validated_island(html: String) -> Self {
+        Self {
+            html,
+            reason: TrustedMarkupReason("engine-validated Live island".to_owned()),
+            provenance: TrustedMarkupProvenance::EngineValidatedIsland,
+        }
+    }
 }
 
 impl fmt::Display for TrustedHtml {
@@ -212,6 +221,9 @@ impl fmt::Debug for TrustedHtml {
         match &self.provenance {
             TrustedMarkupProvenance::FrameworkStatic => {
                 formatter.write_str("<TrustedHtml:framework-static>")
+            }
+            TrustedMarkupProvenance::EngineValidatedIsland => {
+                formatter.write_str("<TrustedHtml:engine-validated-island>")
             }
             TrustedMarkupProvenance::RegisteredSanitizer(id) => {
                 let _ = id;

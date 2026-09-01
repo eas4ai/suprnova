@@ -19,6 +19,8 @@ pub enum HostErrorKind {
     Rollback,
     /// Post-acceptance reporting failed without changing acceptance.
     Reporting,
+    /// Pre-commit host response-intent preparation failed.
+    ResponseIntent,
 }
 
 /// Redacted failure from a host-neutral execution port.
@@ -48,6 +50,7 @@ impl fmt::Display for HostError {
             HostErrorKind::Commit => "live_host_transaction_commit_failure",
             HostErrorKind::Rollback => "live_host_transaction_rollback_failure",
             HostErrorKind::Reporting => "live_post_acceptance_reporting_failure",
+            HostErrorKind::ResponseIntent => "live_response_intent_preparation_failure",
         })
     }
 }

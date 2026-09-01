@@ -7,6 +7,7 @@ mod assertions;
 mod async_reference_host;
 mod context;
 mod direct_provider;
+mod endpoint;
 mod file_quarantine_store;
 mod harness;
 mod host;
@@ -23,6 +24,7 @@ pub use async_reference_host::{
 };
 pub use context::SyntheticLiveRequestContextBuilder;
 pub use direct_provider::DirectProviderConformanceAdapter;
+pub use endpoint::{VerifiedResponseSealing, capture_verified_response_sealer};
 pub use file_quarantine_store::{FileStoreFault, TokioFileQuarantineStore};
 pub use harness::{
     ComponentHarness, ComponentHarnessConfig, HarnessError, HarnessErrorKind, HarnessMount,

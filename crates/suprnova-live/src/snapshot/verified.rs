@@ -23,6 +23,11 @@ impl VerifiedSeedV1 {
         &self.body
     }
 
+    /// Returns the verified host-bound document path, when the mount supplied one.
+    pub fn mounted_document_path(&self) -> Result<Option<&str>, SnapshotError> {
+        self.body.mounted_document_path()
+    }
+
     /// Hydrates state into the caller-selected registered Rust type.
     pub fn hydrate_state<T: DeserializeOwned>(
         &self,
@@ -68,6 +73,11 @@ impl VerifiedInstanceV1 {
     #[must_use]
     pub const fn body(&self) -> &InstanceBodyV1 {
         &self.body
+    }
+
+    /// Returns the verified host-bound document path, when the mount supplied one.
+    pub fn mounted_document_path(&self) -> Result<Option<&str>, SnapshotError> {
+        self.body.mounted_document_path()
     }
 
     /// Hydrates state into the caller-selected registered Rust type.

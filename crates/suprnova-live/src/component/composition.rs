@@ -13,6 +13,8 @@ use crate::limits::{
     HARD_MAX_STRING_BYTES as HARD_MAX_INPUT_STRING_BYTES, InputLimits,
 };
 use crate::registry::ComponentRegistry;
+use crate::snapshot::SnapshotError;
+use crate::snapshot::state::{FieldCategory, FieldSpec, StateCodec};
 use crate::state::ModelCodec;
 
 const MAX_KEY_BYTES: usize = 128;
@@ -65,6 +67,20 @@ impl ChildParameterField {
             codec,
             required,
         }
+    }
+
+    fn snapshot_field(&self) -> Result<FieldSpec, SnapshotError> {
+        let codec = match self.codec {
+            ModelCodec::I64 => StateCodec::I64Decimal,
+            ModelCodec::U64 => StateCodec::U64Decimal,
+            _ => StateCodec::Json,
+        };
+        FieldSpec::new(
+            self.name.as_str(),
+            codec,
+            FieldCategory::Public,
+            self.required,
+        )
     }
 }
 
@@ -151,7 +167,7 @@ impl ChildParameterSchema {
         self.fields.is_empty()
     }
 
-    fn validate(
+    pub(crate) fn validate(
         &self,
         value: &CanonicalValue,
         limits: &InputLimits,
@@ -199,6 +215,13 @@ impl ChildParameterSchema {
         let encoded = to_canonical_bytes(value, limits)
             .map_err(|_| CompositionError::new(CompositionErrorKind::InvalidParameters))?;
         Ok(value_digest(self.digest(), &encoded))
+    }
+
+    pub(crate) fn snapshot_fields(&self) -> Result<Vec<FieldSpec>, SnapshotError> {
+        self.fields
+            .values()
+            .map(ChildParameterField::snapshot_field)
+            .collect()
     }
 }
 

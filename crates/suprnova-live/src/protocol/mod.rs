@@ -15,6 +15,7 @@ use crate::canonical::parse_canonical_value;
 pub use browser_context::{BrowserRenderContext, DOCUMENT_KEY_EXTENSION_V1};
 pub use compatibility::{CompatibilityDecision, CompatibilityWindow, VersionSet};
 pub use error::{ProtocolError, ProtocolErrorKind};
+pub(crate) use idempotency::semantic_request_digest_v1;
 pub use idempotency::{SemanticIdempotencyInputV1, semantic_idempotency_digest_v1};
 pub use limits::{ProtocolLimitConfig, ProtocolLimits};
 pub use ordering::{ApplicationStep, MorphDisposition, application_plan, application_plan_v2};

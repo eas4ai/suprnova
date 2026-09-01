@@ -33,6 +33,10 @@ pub enum ExecutionPhase {
     Sign,
     /// The complete semantic response is validated.
     OutcomeValidation,
+    /// Fallible host response intents are resolved and staged before durability.
+    ResponseIntentPreparation,
+    /// The complete accepted protocol and HTTP response is encoded and bounded.
+    ResponseSealing,
     /// The owning host transaction commits.
     HostCommit,
     /// Bounded accepted metadata is committed to the instance ledger.

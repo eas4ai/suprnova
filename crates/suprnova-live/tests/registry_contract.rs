@@ -1,8 +1,14 @@
 //! Explicit immutable component-registry contracts.
 
-use suprnova_live::identity::{ActionName, ComponentName, ViewName};
-use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions};
+use std::collections::BTreeMap;
+
+use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::component::composition::{ChildParameterField, ChildParameterSchema};
+use suprnova_live::identity::{ActionName, ComponentName, ModelField, ViewName};
+use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder, RegistryErrorKind};
+use suprnova_live::snapshot::state::{FieldCategory, StateCodec, StateExposure};
+use suprnova_live::state::ModelCodec;
 
 fn descriptor(component: &str, view: &str, action: &str) -> ComponentDescriptor {
     let metadata = ComponentMetadata::new(
@@ -107,4 +113,76 @@ fn contract_mismatch_fails_without_exposing_browser_identity() {
     assert_eq!(error.kind(), RegistryErrorKind::ContractMismatch);
     assert_eq!(error.to_string(), "component_contract_mismatch");
     assert!(!format!("{error:?}").contains("account.profile"));
+}
+
+#[test]
+fn descriptor_derives_exact_snapshot_schemas_from_generated_contract_metadata() {
+    let metadata = ComponentMetadata::new(
+        ComponentName::parse("tests.schemas").expect("component identity"),
+        ViewName::parse("tests/schemas.html").expect("view identity"),
+        ContractVersions::new(1, 7, 1, 1, 1).expect("versions"),
+        vec![
+            FieldMetadata::new(
+                ModelField::parse("count").expect("field identity"),
+                FieldCategory::Public,
+                StateCodec::U64Decimal,
+                true,
+            ),
+            FieldMetadata::new(
+                ModelField::parse("label").expect("field identity"),
+                FieldCategory::State,
+                StateCodec::Json,
+                true,
+            ),
+            FieldMetadata::new(
+                ModelField::parse("connection").expect("field identity"),
+                FieldCategory::ServerOnly,
+                StateCodec::Json,
+                true,
+            ),
+        ],
+        vec![],
+    )
+    .expect("metadata");
+    let descriptor = ComponentDescriptor::new(metadata).with_composition(
+        ChildParameterSchema::new(
+            3,
+            vec![ChildParameterField::new(
+                ModelField::parse("account_id").expect("parameter identity"),
+                ModelCodec::U64,
+                true,
+            )],
+        )
+        .expect("parameter schema"),
+        false,
+        false,
+    );
+
+    let schemas = descriptor
+        .snapshot_schemas()
+        .expect("descriptor schemas are derivable");
+
+    assert_eq!(schemas.state().version(), 7);
+    assert_eq!(schemas.memo().version(), 1);
+    assert_eq!(schemas.mount().version(), 3);
+    schemas
+        .state()
+        .validate(
+            &CanonicalValue::Object(BTreeMap::from([(
+                "count".to_owned(),
+                suprnova_live::snapshot::state::encode_u64(4),
+            )])),
+            StateExposure::PublicSeed,
+        )
+        .expect("public state uses exact generated exposure and codec");
+    schemas
+        .mount()
+        .validate(
+            &CanonicalValue::Object(BTreeMap::from([(
+                "account_id".to_owned(),
+                suprnova_live::snapshot::state::encode_u64(9),
+            )])),
+            StateExposure::PublicSeed,
+        )
+        .expect("mount parameters preserve lossless integer encoding");
 }

@@ -21,8 +21,8 @@ use endpoint_support::{
 #[tokio::test]
 async fn transport_and_trusted_context_fail_before_kernel_dispatch() {
     let kernel = Arc::new(StaticKernel::new(
-        EndpointOutcomeKind::Accepted,
-        response_body(ResponseOutcome::Accepted),
+        EndpointOutcomeKind::Rejected,
+        response_body(ResponseOutcome::Rejected),
     ));
     let endpoint = service(kernel.clone());
 
@@ -224,8 +224,8 @@ async fn context_is_rechecked_after_kernel_completion_before_output_publication(
     use suprnova_live::identity::UnixMillis;
 
     let kernel = Arc::new(StaticKernel::new(
-        EndpointOutcomeKind::Accepted,
-        response_body(ResponseOutcome::Accepted),
+        EndpointOutcomeKind::Rejected,
+        response_body(ResponseOutcome::Rejected),
     ));
     let clock = Arc::new(SequenceClock::new(vec![
         UnixMillis::new(1_200),

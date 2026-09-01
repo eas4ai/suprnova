@@ -1,6 +1,5 @@
 //! Validate-render-sign-authorize orchestration for private initial mounts.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -203,6 +202,13 @@ impl PrivateMountService {
             self.views
                 .validate_island_fragment(descriptor.metadata().view().clone(), &render)
                 .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
+            let extensions = request
+                .document_path
+                .as_ref()
+                .map(crate::snapshot::MountedDocumentPath::extension)
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
             let signed_snapshot = InstanceBodyV1::new(
                 InstanceFieldsV1 {
                     component: expected.component().clone(),
@@ -217,7 +223,7 @@ impl PrivateMountService {
                     expires_at,
                     state,
                     memo,
-                    extensions: BTreeMap::new(),
+                    extensions,
                 },
                 expected.schemas(),
                 &self.snapshot_limits,
@@ -295,7 +301,8 @@ impl PrivateMountService {
                         return Err(MountError::new(MountErrorKind::LedgerRejected));
                     }
                     return Ok(PrivateMountOutput {
-                        body: validated.body,
+                        body: String::from_utf8(validated.body.to_vec())
+                            .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?,
                         metadata,
                         instance_id,
                         revision,

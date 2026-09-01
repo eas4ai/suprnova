@@ -93,6 +93,7 @@ impl EndpointKernel for StaticKernel {
         let response = self.response.clone();
         let outcome = self.outcome;
         Box::pin(async move {
+            let (request, _) = request.into_execution_parts();
             assert_eq!(request.component().as_str(), "tests.trace");
             Ok(EndpointDispatch::new(outcome, response))
         })

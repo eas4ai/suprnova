@@ -81,7 +81,7 @@ impl Error for ComponentError {}
 pub struct RenderContext<'a> {
     request: &'a TrustedLiveRequestContext,
     browser: Option<&'a BrowserRenderContext>,
-    instance_id: &'a InstanceId,
+    instance_id: Option<&'a InstanceId>,
     revision: Revision,
     expires_at: UnixMillis,
 }
@@ -98,7 +98,24 @@ impl<'a> RenderContext<'a> {
         Self {
             request,
             browser: None,
-            instance_id,
+            instance_id: Some(instance_id),
+            revision,
+            expires_at,
+        }
+    }
+
+    /// Binds reusable public-seed rendering to validated host authority without
+    /// inventing an instance identity or ledger authority.
+    #[must_use]
+    pub const fn for_public_seed(
+        request: &'a TrustedLiveRequestContext,
+        revision: Revision,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            request,
+            browser: None,
+            instance_id: None,
             revision,
             expires_at,
         }
@@ -123,9 +140,10 @@ impl<'a> RenderContext<'a> {
         self.browser
     }
 
-    /// Returns the server-assigned component instance identity.
+    /// Returns the server-assigned component identity for instanced execution.
+    /// Public-seed rendering deliberately returns `None`.
     #[must_use]
-    pub const fn instance_id(&self) -> &InstanceId {
+    pub const fn instance_id(&self) -> Option<&InstanceId> {
         self.instance_id
     }
 
@@ -235,7 +253,10 @@ impl fmt::Debug for HydrationContext<'_> {
 /// One request-owned component object. It is never retained by the engine.
 pub trait ComponentInstance: ActionTarget {
     /// Returns the generated component contract implemented by this object.
-    fn metadata(&self) -> &'static ComponentMetadata;
+    fn metadata(&self) -> &ComponentMetadata;
+
+    /// Returns the concrete application component targeted by generated actions.
+    fn action_target(&mut self) -> &mut dyn ActionTarget;
 
     /// Runs after verified state created this fresh request-owned object.
     fn hydrated<'a>(

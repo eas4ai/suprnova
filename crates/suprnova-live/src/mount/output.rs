@@ -3,12 +3,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use bytes::Bytes;
-
 use super::{MountError, MountErrorKind};
 use crate::canonical::CanonicalValue;
 use crate::identity::{InstanceId, Revision, UnixMillis};
-use crate::view::MountMetadata;
+use crate::view::{MountMetadata, TrustedHtml};
 
 const MAX_KEY_BYTES: usize = 128;
 const MAX_FLAG_NAME_BYTES: usize = 32;
@@ -156,6 +154,7 @@ pub struct PrivateMountRequest {
     pub(crate) key: DocumentMountKey,
     pub(crate) parameters: CanonicalValue,
     pub(crate) flags: MountFlags,
+    pub(crate) document_path: Option<crate::snapshot::MountedDocumentPath>,
 }
 
 impl PrivateMountRequest {
@@ -166,7 +165,18 @@ impl PrivateMountRequest {
             key,
             parameters,
             flags,
+            document_path: None,
         }
+    }
+
+    /// Seals the already-matched document path into the initial signed snapshot.
+    #[must_use]
+    pub fn with_document_path(
+        mut self,
+        document_path: crate::snapshot::MountedDocumentPath,
+    ) -> Self {
+        self.document_path = Some(document_path);
+        self
     }
 }
 
@@ -178,7 +188,7 @@ impl fmt::Debug for PrivateMountRequest {
 
 /// Browser-publishable private island returned only after ledger authority exists.
 pub struct PrivateMountOutput {
-    pub(crate) body: Bytes,
+    pub(crate) body: String,
     pub(crate) metadata: MountMetadata,
     pub(crate) instance_id: InstanceId,
     pub(crate) revision: Revision,
@@ -189,7 +199,7 @@ impl PrivateMountOutput {
     /// Returns complete engine-owned island HTML.
     #[must_use]
     pub fn body(&self) -> &[u8] {
-        &self.body
+        self.body.as_bytes()
     }
 
     /// Returns inert typed document mount metadata.
@@ -214,6 +224,15 @@ impl PrivateMountOutput {
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
+    }
+
+    /// Consumes the completed mount into checked document markup and inert metadata.
+    #[must_use]
+    pub fn into_document_parts(self) -> (TrustedHtml, MountMetadata) {
+        (
+            TrustedHtml::engine_validated_island(self.body),
+            self.metadata,
+        )
     }
 }
 

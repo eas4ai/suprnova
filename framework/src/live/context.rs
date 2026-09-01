@@ -38,6 +38,19 @@ impl LiveRouteMetadata {
     pub(crate) const fn completion(self) -> LiveMiddlewareCompletion {
         LiveMiddlewareCompletion::new(self.policy)
     }
+
+    pub(crate) fn merge_document_policy(
+        &mut self,
+        policy: LiveRouteSecurityPolicy,
+    ) -> Result<(), crate::FrameworkError> {
+        if self.operation != super::attestation::LiveOperation::Document {
+            return Err(crate::FrameworkError::internal(
+                "Live document metadata collided with another operation",
+            ));
+        }
+        self.policy = self.policy.intersect(policy);
+        Ok(())
+    }
 }
 
 /// Final route-owned marker proving the configured Live middleware chain ran.
@@ -53,9 +66,11 @@ pub(crate) struct LiveMiddlewareCompletion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LiveRouteSecurityPolicy {
     pub(crate) trusted_internal_origin: bool,
+    pub(crate) stateless_csrf: bool,
     pub(crate) stateless_session: bool,
     pub(crate) anonymous_principal: bool,
     pub(crate) tenantless: bool,
+    pub(crate) direct_peer: bool,
     pub(crate) upstream_rate_limit: bool,
     pub(crate) no_additional_middleware: bool,
 }
@@ -75,6 +90,11 @@ impl LiveMiddlewareCompletion {
                 PolicyReason::TrustedInternalOrigin,
             ),
             (
+                self.policy.stateless_csrf,
+                SecurityCheck::Csrf,
+                PolicyReason::StatelessCsrfPolicy,
+            ),
+            (
                 self.policy.stateless_session,
                 SecurityCheck::Session,
                 PolicyReason::StatelessRequest,
@@ -88,6 +108,11 @@ impl LiveMiddlewareCompletion {
                 self.policy.tenantless,
                 SecurityCheck::Tenant,
                 PolicyReason::TenantlessRoute,
+            ),
+            (
+                self.policy.direct_peer,
+                SecurityCheck::Proxy,
+                PolicyReason::DirectPeer,
             ),
             (
                 self.policy.upstream_rate_limit,
@@ -113,6 +138,22 @@ impl LiveMiddlewareCompletion {
             );
         } else {
             request.record_live_security_check(SecurityCheck::Middleware, None);
+        }
+    }
+}
+
+impl LiveRouteSecurityPolicy {
+    pub(crate) const fn intersect(self, other: Self) -> Self {
+        Self {
+            trusted_internal_origin: self.trusted_internal_origin && other.trusted_internal_origin,
+            stateless_csrf: self.stateless_csrf && other.stateless_csrf,
+            stateless_session: self.stateless_session && other.stateless_session,
+            anonymous_principal: self.anonymous_principal && other.anonymous_principal,
+            tenantless: self.tenantless && other.tenantless,
+            direct_peer: self.direct_peer && other.direct_peer,
+            upstream_rate_limit: self.upstream_rate_limit && other.upstream_rate_limit,
+            no_additional_middleware: self.no_additional_middleware
+                && other.no_additional_middleware,
         }
     }
 }

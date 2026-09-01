@@ -6,15 +6,18 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use super::{DocumentMountKey, DocumentMountScope, MountError, MountErrorKind, MountFlags};
+use crate::canonical::CanonicalValue;
 use crate::clock::Clock;
+use crate::component::{ComponentExecutor, MountContext, RenderContext};
 use crate::crypto::SnapshotKeyRing;
 use crate::host::TrustedLiveRequestContext;
-use crate::identity::Revision;
+use crate::identity::{Revision, UnixMillis};
 use crate::registry::ComponentRegistry;
-use crate::snapshot::{SeedBodyV1, SnapshotLimits};
+use crate::snapshot::state::StateExposure;
+use crate::snapshot::{MountedDocumentPath, SeedBodyV1, SeedFieldsV1, SnapshotLimits};
 use crate::view::{
     IslandRender, IslandRootFlag, IslandRootInput, IslandSnapshotForm, MountMetadata,
-    MountSnapshotKind, ViewRenderer, assemble_island_root,
+    MountSnapshotKind, TrustedHtml, ViewRenderer, assemble_island_root,
 };
 
 const HARD_MAX_METADATA_BYTES: usize = 1_048_576;
@@ -82,7 +85,7 @@ impl fmt::Debug for PublicSeedMountRequest {
 
 /// Browser-publishable public seed with no instance or ledger authority.
 pub struct PublicSeedMountOutput {
-    body: Bytes,
+    body: String,
     metadata: MountMetadata,
     revision: Revision,
 }
@@ -91,7 +94,7 @@ impl PublicSeedMountOutput {
     /// Returns complete engine-owned island HTML.
     #[must_use]
     pub fn body(&self) -> &[u8] {
-        &self.body
+        self.body.as_bytes()
     }
 
     /// Returns typed inert seed metadata.
@@ -104,6 +107,15 @@ impl PublicSeedMountOutput {
     #[must_use]
     pub const fn revision(&self) -> Revision {
         self.revision
+    }
+
+    /// Consumes the completed mount into checked document markup and inert metadata.
+    #[must_use]
+    pub fn into_document_parts(self) -> (TrustedHtml, MountMetadata) {
+        (
+            TrustedHtml::engine_validated_island(self.body),
+            self.metadata,
+        )
     }
 }
 
@@ -163,6 +175,131 @@ impl PublicSeedMountService {
             document.release(&key);
         }
         result
+    }
+
+    /// Runs the registered component mount lifecycle and publishes only its
+    /// public seed exposure, without generating or persisting an instance ID.
+    pub async fn mount_component(
+        &self,
+        document: &mut DocumentMountScope,
+        key: DocumentMountKey,
+        parameters: CanonicalValue,
+        flags: MountFlags,
+        context: &TrustedLiveRequestContext,
+    ) -> Result<PublicSeedMountOutput, MountError> {
+        document.reserve(key.clone())?;
+        let result = self
+            .mount_component_reserved(key.clone(), parameters, flags, None, context)
+            .await;
+        if result.is_err() {
+            document.release(&key);
+        }
+        result
+    }
+
+    /// Mounts a component while sealing its matched document path into the signed seed.
+    pub async fn mount_component_for_document(
+        &self,
+        document: &mut DocumentMountScope,
+        key: DocumentMountKey,
+        parameters: CanonicalValue,
+        flags: MountFlags,
+        document_path: &MountedDocumentPath,
+        context: &TrustedLiveRequestContext,
+    ) -> Result<PublicSeedMountOutput, MountError> {
+        document.reserve(key.clone())?;
+        let result = self
+            .mount_component_reserved(key.clone(), parameters, flags, Some(document_path), context)
+            .await;
+        if result.is_err() {
+            document.release(&key);
+        }
+        result
+    }
+
+    async fn mount_component_reserved(
+        &self,
+        key: DocumentMountKey,
+        parameters: CanonicalValue,
+        flags: MountFlags,
+        document_path: Option<&MountedDocumentPath>,
+        context: &TrustedLiveRequestContext,
+    ) -> Result<PublicSeedMountOutput, MountError> {
+        let now = self
+            .clock
+            .now()
+            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))?;
+        if !context.is_current(now) {
+            return Err(MountError::new(MountErrorKind::ContextRejected));
+        }
+        let catalog = context.mount();
+        let descriptor = self
+            .registry
+            .require_contract(catalog.component(), catalog.contract_digest())
+            .map_err(|_| MountError::new(MountErrorKind::ComponentRejected))?;
+        let expected = catalog.expected_seed();
+        expected
+            .schemas()
+            .mount()
+            .validate(&parameters, StateExposure::PublicSeed)
+            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+        descriptor
+            .parameter_schema()
+            .validate(&parameters, self.snapshot_limits.input())
+            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+        let expires_at = now
+            .get()
+            .checked_add(self.snapshot_limits.max_seed_age_ms())
+            .map(UnixMillis::new)
+            .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
+        let revision = Revision::new(0);
+        let render_context = RenderContext::for_public_seed(context, revision, expires_at);
+        let mount_context = MountContext::new(render_context, &parameters);
+        let lifecycle = ComponentExecutor::new()
+            .initial_public_mount(descriptor, &mount_context)
+            .await
+            .map_err(|_| MountError::new(MountErrorKind::LifecycleRejected))?;
+        let (render, state, memo) = lifecycle.into_parts();
+        expected
+            .schemas()
+            .state()
+            .validate(&state, StateExposure::PublicSeed)
+            .and_then(|_| {
+                expected
+                    .schemas()
+                    .memo()
+                    .validate(&memo, StateExposure::PublicSeed)
+            })
+            .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+        let extensions = document_path
+            .map(MountedDocumentPath::extension)
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect();
+        let seed = SeedBodyV1::new(
+            SeedFieldsV1 {
+                component: expected.component().clone(),
+                build_id: expected.build_id().clone(),
+                route: expected.route().clone(),
+                slot: expected.slot().clone(),
+                key_id: self.keys.active_key_id().clone(),
+                issued_at: now,
+                max_age_ms: self.snapshot_limits.max_seed_age_ms(),
+                mount: parameters,
+                state,
+                memo,
+                advisory_generations: Vec::new(),
+                refresh_on_promote: descriptor.metadata().refresh_on_promote(),
+                extensions,
+            },
+            expected.schemas(),
+            &self.snapshot_limits,
+        )
+        .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+        self.mount_reserved(
+            PublicSeedMountRequest::new(key, seed, render, flags),
+            context,
+        )
     }
 
     fn mount_reserved(
@@ -233,7 +370,8 @@ impl PublicSeedMountService {
             .validate_island_output(descriptor.metadata().view().clone(), assembled)
             .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
         Ok(PublicSeedMountOutput {
-            body: validated.body,
+            body: String::from_utf8(validated.body.to_vec())
+                .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?,
             metadata,
             revision,
         })

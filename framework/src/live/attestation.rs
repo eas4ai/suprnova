@@ -24,6 +24,7 @@ impl fmt::Debug for LiveRequestIdentity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LiveOperation {
+    Document,
     Action,
     Upload,
     SseControl,
@@ -37,6 +38,7 @@ impl LiveOperation {
 
     const fn label(self) -> &'static [u8] {
         match self {
+            Self::Document => b"document",
             Self::Action => b"action",
             Self::Upload => b"upload",
             Self::SseControl => b"sse-control",

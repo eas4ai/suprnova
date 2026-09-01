@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{ToTokens as _, quote};
+use quote::{ToTokens as _, format_ident, quote};
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::{Data, DeriveInput, Fields, ItemStruct, Type, Visibility};
@@ -48,6 +48,7 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
     };
     let args = parse_component_args(&input.attrs)?;
     let mut generated_fields = Vec::with_capacity(fields.named.len());
+    let mut runtime_fields = Vec::with_capacity(fields.named.len());
     let mut url_keys = BTreeMap::new();
     for field in &fields.named {
         if contains_reference(&field.ty) {
@@ -115,21 +116,38 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
             };
         }
         generated_fields.push((name.clone(), metadata));
+        runtime_fields.push(RuntimeField {
+            ident: ident.clone(),
+            name,
+            ty: field.ty.clone(),
+            kind: field_args.kind,
+            codec,
+        });
     }
     generated_fields.sort_by(|left, right| left.0.cmp(&right.0));
     let field_values = generated_fields
         .into_iter()
         .map(|(_, tokens)| tokens)
         .collect::<Vec<_>>();
-    expand_definition(&input, &args, &field_values)
+    expand_definition(&input, &args, &field_values, &runtime_fields)
+}
+
+struct RuntimeField {
+    ident: syn::Ident,
+    name: String,
+    ty: Type,
+    kind: FieldKind,
+    codec: TokenStream2,
 }
 
 fn expand_definition(
     input: &DeriveInput,
     args: &ComponentArgs,
     fields: &[TokenStream2],
+    runtime_fields: &[RuntimeField],
 ) -> syn::Result<TokenStream2> {
     let ident = &input.ident;
+    let view_ident = format_ident!("__SuprnovaLiveViewFor{ident}");
     let name = &args.name;
     let view = &args.view;
     let component_version = args.component_version;
@@ -144,8 +162,119 @@ fn expand_definition(
     let effects = args.effects.iter().map(|path| {
         quote!(::suprnova::live::__private::metadata::EffectMetadata::from_payload::<#path>()?)
     });
+    let visible_view_fields = runtime_fields
+        .iter()
+        .filter(|field| field.kind != FieldKind::Secret)
+        .map(|field| {
+            let ident = &field.ident;
+            let ty = &field.ty;
+            quote!(#ident: &'__snv_live #ty)
+        });
+    let visible_view_values = runtime_fields
+        .iter()
+        .filter(|field| field.kind != FieldKind::Secret)
+        .map(|field| {
+            let ident = &field.ident;
+            quote!(#ident: &self.#ident)
+        });
+    let default_fields = runtime_fields.iter().map(|field| {
+        let ident = &field.ident;
+        quote!(#ident: ::std::default::Default::default())
+    });
+    let hydrated_fields = runtime_fields.iter().map(|field| {
+        let ident = &field.ident;
+        let ty = &field.ty;
+        if matches!(
+            field.kind,
+            FieldKind::State | FieldKind::Public | FieldKind::Model | FieldKind::Locked
+        ) {
+            let name = &field.name;
+            let codec = &field.codec;
+            quote! {
+                #ident: ::suprnova::live::__private::component::generated::decode_field::<#ty>(
+                    fields.get(#name).ok_or_else(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure,
+                    )?,
+                    #codec,
+                )?
+            }
+        } else {
+            quote!(#ident: ::std::default::Default::default())
+        }
+    });
+    let expected_hydrated_fields = runtime_fields
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.kind,
+                FieldKind::State | FieldKind::Public | FieldKind::Model | FieldKind::Locked
+            )
+        })
+        .count();
+    let model_bindings = runtime_fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Model | FieldKind::Transient))
+        .map(|field| {
+            let ident = &field.ident;
+            let name = &field.name;
+            if let Some(inner) = option_inner(&field.ty) {
+                quote! {
+                    let path = ::suprnova::live::__private::state::ModelPath::parse(#name)
+                        .map_err(|_| {
+                            ::suprnova::live::__private::component::ComponentError::contract_failure()
+                        })?;
+                    let _application = proposals.apply_optional::<Self, #inner, _>(
+                        &path,
+                        self,
+                        |component, value| component.#ident = value,
+                    );
+                }
+            } else {
+                let ty = &field.ty;
+                quote! {
+                    let path = ::suprnova::live::__private::state::ModelPath::parse(#name)
+                        .map_err(|_| {
+                            ::suprnova::live::__private::component::ComponentError::contract_failure()
+                        })?;
+                    let _application = proposals.apply_required::<Self, #ty, _>(
+                        &path,
+                        self,
+                        |component, value| component.#ident = value,
+                    );
+                }
+            }
+        });
+    let public_dehydration = runtime_fields
+        .iter()
+        .filter(|field| field.kind == FieldKind::Public)
+        .map(dehydrate_field_tokens);
+    let instanced_dehydration = runtime_fields
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.kind,
+                FieldKind::State | FieldKind::Public | FieldKind::Model | FieldKind::Locked
+            )
+        })
+        .map(dehydrate_field_tokens);
 
     let tokens = quote! {
+        #[doc(hidden)]
+        #[allow(
+            dead_code,
+            non_camel_case_types,
+            reason = "generated checked Live view is private macro support"
+        )]
+        #[derive(::suprnova::live::__private::askama::Template)]
+        #[template(
+            askama = ::suprnova::live::__private::askama,
+            path = #view
+        )]
+        struct #view_ident<'__snv_live> {
+            component: &'__snv_live #ident,
+            #(#visible_view_fields,)*
+        }
+
         impl ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata for #ident {
             fn component_metadata(
                 actions: ::std::vec::Vec<::suprnova::live::__private::metadata::ActionMetadata>,
@@ -174,9 +303,126 @@ fn expand_definition(
                 )
             }
         }
+
+        impl ::suprnova::live::__private::component::generated::GeneratedComponentState
+            for #ident
+        {
+            fn default_mount_state() -> ::std::result::Result<
+                Self,
+                ::suprnova::live::__private::component::ComponentError,
+            > {
+                ::std::result::Result::Ok(Self {
+                    #(#default_fields,)*
+                })
+            }
+
+            fn hydrate_state(
+                state: &::suprnova::live::__private::canonical::CanonicalValue,
+            ) -> ::std::result::Result<
+                Self,
+                ::suprnova::live::__private::component::ComponentError,
+            > {
+                let ::suprnova::live::__private::canonical::CanonicalValue::Object(fields) = state
+                else {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                };
+                if fields.len() != #expected_hydrated_fields {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                }
+                ::std::result::Result::Ok(Self {
+                    #(#hydrated_fields,)*
+                })
+            }
+
+            fn bind_generated_models(
+                &mut self,
+                proposals: &::suprnova::live::__private::state::ProposalBatch,
+            ) -> ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            > {
+                #(#model_bindings)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn render_generated_view(
+                &self,
+                _context: &::suprnova::live::__private::component::RenderContext<'_>,
+                metadata: &::suprnova::live::__private::metadata::ComponentMetadata,
+            ) -> ::std::result::Result<
+                ::suprnova::live::__private::view::IslandRender,
+                ::suprnova::live::__private::component::ComponentError,
+            > {
+                let template = #view_ident {
+                    component: self,
+                    #(#visible_view_values,)*
+                };
+                ::suprnova::live::__private::component::generated::render_component_view(
+                    metadata,
+                    &template,
+                )
+            }
+
+            fn dehydrate_generated_state(
+                &self,
+                exposure: ::suprnova::live::__private::snapshot::state::StateExposure,
+            ) -> ::std::result::Result<
+                ::suprnova::live::__private::canonical::CanonicalValue,
+                ::suprnova::live::__private::component::ComponentError,
+            > {
+                let mut fields = ::std::collections::BTreeMap::new();
+                match exposure {
+                    ::suprnova::live::__private::snapshot::state::StateExposure::PublicSeed => {
+                        #(#public_dehydration)*
+                    }
+                    ::suprnova::live::__private::snapshot::state::StateExposure::Instanced => {
+                        #(#instanced_dehydration)*
+                    }
+                }
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::canonical::CanonicalValue::Object(fields),
+                )
+            }
+        }
     };
     enforce_runtime_path_contract(&tokens)?;
     Ok(tokens)
+}
+
+fn dehydrate_field_tokens(field: &RuntimeField) -> TokenStream2 {
+    let ident = &field.ident;
+    let name = &field.name;
+    let codec = &field.codec;
+    quote! {
+        fields.insert(
+            #name.to_owned(),
+            ::suprnova::live::__private::component::generated::encode_field(
+                &self.#ident,
+                #codec,
+            )?,
+        );
+    }
+}
+
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    match arguments.args.first()? {
+        syn::GenericArgument::Type(inner) if arguments.args.len() == 1 => Some(inner),
+        _ => None,
+    }
 }
 
 fn field_category_tokens(kind: FieldKind) -> TokenStream2 {

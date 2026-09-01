@@ -14,10 +14,12 @@ use suprnova_live::action::{
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::{Clock, ClockError};
+use suprnova_live::endpoint::{EndpointNavigationTarget, EndpointResponseIntents};
 use suprnova_live::execution::{
     AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest, ExecutionPhase,
     ExecutionRefreshReason, ExecutionResult, ExecutionService, ExecutionTracePort, HostError,
-    HostErrorKind, HostTransaction, InstancedActionRequest, RetryLegality, TransactionPort,
+    HostErrorKind, HostTransaction, InstancedActionRequest, ResponseIntentPreparationPort,
+    ResponseIntentPreparationRequest, RetryLegality, TransactionPort,
 };
 use suprnova_live::host::TrustedLiveRequestContext;
 use suprnova_live::identity::{
@@ -43,11 +45,13 @@ use suprnova_live::validation::{
     ValidationSelection,
 };
 use suprnova_live::view::{RenderLimits, ViewRenderer};
+use suprnova_live_test_support::VerifiedResponseSealing;
 use tokio::sync::Notify;
 
 use component_support::{
-    FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes, digest,
-    idempotency, install, key_ring, ledger, schema_set, snapshot_limits, trusted_context_for,
+    FailurePoint, FixtureControl, ManualClock, TraceFixture, admitted_response_sealer,
+    admitted_response_sealer_with_semantics, browser_context, bytes, digest, idempotency, install,
+    key_ring, ledger, schema_set, snapshot_limits, trusted_context_for,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +71,9 @@ enum Fault {
     Dehydrate,
     Sign,
     OutcomeValidation,
+    ResponseIntent,
+    ResponseIntentShape,
+    ResponseSealing,
     HostCommit,
     HostCommitPanic,
     LedgerAcceptance,
@@ -180,6 +187,29 @@ impl TransactionPort for TestTransactionPort {
                 Err(HostError::new(HostErrorKind::Begin))
             } else {
                 Ok(Box::new(TestTransaction(control)) as Box<dyn HostTransaction>)
+            }
+        })
+    }
+}
+
+struct TestResponseIntentPort {
+    fault: Fault,
+}
+
+impl ResponseIntentPreparationPort for TestResponseIntentPort {
+    fn prepare<'a>(
+        &'a self,
+        _request: ResponseIntentPreparationRequest<'a>,
+    ) -> suprnova_live::component::LiveFuture<'a, Result<EndpointResponseIntents, HostError>> {
+        Box::pin(async move {
+            if self.fault == Fault::ResponseIntent {
+                Err(HostError::new(HostErrorKind::ResponseIntent))
+            } else if self.fault == Fault::ResponseIntentShape {
+                Ok(EndpointResponseIntents::default().with_redirect(
+                    EndpointNavigationTarget::parse("/invalid").expect("safe test target"),
+                ))
+            } else {
+                Ok(EndpointResponseIntents::default())
             }
         })
     }
@@ -415,6 +445,7 @@ struct ClaimLifecycleFixture {
     descriptor: ComponentDescriptor,
     context: TrustedLiveRequestContext,
     snapshot: VerifiedInstanceV1,
+    encoded_snapshot: Vec<u8>,
     instance_id: InstanceId,
     ledger: Arc<MemoryInstanceLedger>,
     ledger_clock: Arc<LifecycleClock>,
@@ -527,6 +558,7 @@ impl ClaimLifecycleFixture {
             descriptor,
             context,
             snapshot,
+            encoded_snapshot: encoded,
             instance_id,
             ledger,
             ledger_clock,
@@ -537,6 +569,32 @@ impl ClaimLifecycleFixture {
     }
 
     async fn execute(&self) -> ExecutionResult {
+        let response_sealer = admitted_response_sealer(
+            self.descriptor.clone(),
+            trusted_context_for(metadata(), None),
+            &self.encoded_snapshot,
+            Revision::new(0),
+            0x45,
+            None,
+        )
+        .await;
+        self.execute_with_response_sealer(response_sealer).await
+    }
+
+    async fn execute_with_response_sealer(
+        &self,
+        response_sealing: VerifiedResponseSealing,
+    ) -> ExecutionResult {
+        let (response_sealer, response_binding) = response_sealing.into_parts();
+        self.execute_with_response_parts(response_sealer, response_binding)
+            .await
+    }
+
+    async fn execute_with_response_parts(
+        &self,
+        response_sealer: suprnova_live::endpoint::AcceptedResponseSealer,
+        response_binding: suprnova_live::endpoint::AcceptedResponseRequestBinding,
+    ) -> ExecutionResult {
         let validation_engine =
             suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
         let validation_port = Validation { fail: false };
@@ -565,6 +623,7 @@ impl ClaimLifecycleFixture {
                     Some(&self.transaction_port),
                     &trace,
                 )
+                .with_response_sealer(response_sealer, response_binding)
                 .with_proposals(&proposals),
             ))
             .await
@@ -576,6 +635,84 @@ impl ClaimLifecycleFixture {
             .expect("ledger inspection")
             .expect("instance authority")
     }
+}
+
+#[tokio::test]
+async fn foreign_request_sealer_fails_before_host_or_ledger_acceptance() {
+    let fixture = ClaimLifecycleFixture::new().await;
+    let admitted_request = admitted_response_sealer(
+        fixture.descriptor.clone(),
+        trusted_context_for(metadata(), None),
+        &fixture.encoded_snapshot,
+        Revision::new(0),
+        0x45,
+        None,
+    )
+    .await;
+    let foreign_request = admitted_response_sealer(
+        fixture.descriptor.clone(),
+        trusted_context_for(metadata(), None),
+        &fixture.encoded_snapshot,
+        Revision::new(0),
+        0x46,
+        None,
+    )
+    .await;
+    let (foreign_request_sealer, _) = foreign_request.into_parts();
+    let (_, admitted_request_binding) = admitted_request.into_parts();
+
+    let ExecutionResult::RefreshRequired(refresh) = fixture
+        .execute_with_response_parts(foreign_request_sealer, admitted_request_binding)
+        .await
+    else {
+        panic!("a sealer from another verified request must fail before acceptance");
+    };
+
+    assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
+}
+
+#[tokio::test]
+async fn semantic_request_sealer_swap_fails_before_host_or_ledger_acceptance() {
+    let fixture = ClaimLifecycleFixture::new().await;
+    let request_a = admitted_response_sealer_with_semantics(
+        fixture.descriptor.clone(),
+        trusted_context_for(metadata(), None),
+        &fixture.encoded_snapshot,
+        Revision::new(0),
+        0x45,
+        0x65,
+        "execute",
+        serde_json::json!({"value": "request-a"}),
+        serde_json::json!({"serial": "model-a"}),
+    )
+    .await;
+    let request_b = admitted_response_sealer_with_semantics(
+        fixture.descriptor.clone(),
+        trusted_context_for(metadata(), None),
+        &fixture.encoded_snapshot,
+        Revision::new(0),
+        0x45,
+        0x66,
+        "execute",
+        serde_json::json!({"value": "request-b"}),
+        serde_json::json!({"serial": "model-b"}),
+    )
+    .await;
+    let (request_a_sealer, _) = request_a.into_parts();
+    let (_, request_b_binding) = request_b.into_parts();
+
+    let ExecutionResult::RefreshRequired(refresh) = fixture
+        .execute_with_response_parts(request_a_sealer, request_b_binding)
+        .await
+    else {
+        panic!("a sealer from another semantic request must fail before acceptance");
+    };
+
+    assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
 }
 
 fn assert_consumed_refresh(result: ExecutionResult) {
@@ -788,6 +925,39 @@ fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
             Phase::Sign,
             Phase::OutcomeValidation,
         ],
+        Fault::ResponseIntent | Fault::ResponseIntentShape => &[
+            Phase::Claim,
+            Phase::Hydrate,
+            Phase::Bind,
+            Phase::Authorize,
+            Phase::Validate,
+            Phase::TransactionBegin,
+            Phase::BeforeAction,
+            Phase::Action,
+            Phase::AfterAction,
+            Phase::Render,
+            Phase::Dehydrate,
+            Phase::Sign,
+            Phase::OutcomeValidation,
+            Phase::ResponseIntentPreparation,
+        ],
+        Fault::ResponseSealing => &[
+            Phase::Claim,
+            Phase::Hydrate,
+            Phase::Bind,
+            Phase::Authorize,
+            Phase::Validate,
+            Phase::TransactionBegin,
+            Phase::BeforeAction,
+            Phase::Action,
+            Phase::AfterAction,
+            Phase::Render,
+            Phase::Dehydrate,
+            Phase::Sign,
+            Phase::OutcomeValidation,
+            Phase::ResponseIntentPreparation,
+            Phase::ResponseSealing,
+        ],
         Fault::HostCommit | Fault::HostCommitPanic => &[
             Phase::Claim,
             Phase::Hydrate,
@@ -802,6 +972,8 @@ fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
             Phase::Dehydrate,
             Phase::Sign,
             Phase::OutcomeValidation,
+            Phase::ResponseIntentPreparation,
+            Phase::ResponseSealing,
             Phase::HostCommit,
         ],
         Fault::LedgerAcceptance => &[
@@ -818,6 +990,8 @@ fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
             Phase::Dehydrate,
             Phase::Sign,
             Phase::OutcomeValidation,
+            Phase::ResponseIntentPreparation,
+            Phase::ResponseSealing,
             Phase::HostCommit,
             Phase::LedgerAcceptance,
         ],
@@ -835,6 +1009,8 @@ fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
             Phase::Dehydrate,
             Phase::Sign,
             Phase::OutcomeValidation,
+            Phase::ResponseIntentPreparation,
+            Phase::ResponseSealing,
             Phase::HostCommit,
             Phase::LedgerAcceptance,
             Phase::Reporting,
@@ -860,6 +1036,9 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
         Fault::Dehydrate,
         Fault::Sign,
         Fault::OutcomeValidation,
+        Fault::ResponseIntent,
+        Fault::ResponseIntentShape,
+        Fault::ResponseSealing,
         Fault::HostCommit,
         Fault::HostCommitPanic,
         Fault::LedgerAcceptance,
@@ -972,6 +1151,17 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
             ledger_clock,
         });
         let transaction_port = TestTransactionPort(transaction_control.clone());
+        let response_intent_port = TestResponseIntentPort { fault };
+        let response_sealer = admitted_response_sealer(
+            descriptor.clone(),
+            trusted_context_for(component_metadata, None),
+            &encoded,
+            Revision::new(0),
+            0x45,
+            (fault == Fault::ResponseSealing).then_some(64),
+        )
+        .await;
+        let (response_sealer, response_binding) = response_sealer.into_parts();
         let trace = Trace::default();
         let validation_engine =
             suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
@@ -1002,6 +1192,8 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
                     Some(&transaction_port),
                     &trace,
                 )
+                .with_response_intent_preparation(&response_intent_port)
+                .with_response_sealer(response_sealer, response_binding)
                 .with_proposals(&proposals),
             ))
             .await;
@@ -1031,6 +1223,9 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
                     | Fault::Dehydrate
                     | Fault::Sign
                     | Fault::OutcomeValidation
+                    | Fault::ResponseIntent
+                    | Fault::ResponseIntentShape
+                    | Fault::ResponseSealing
             )),
             "fault {fault:?}"
         );

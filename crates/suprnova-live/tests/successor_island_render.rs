@@ -30,9 +30,9 @@ use suprnova_live::validation::{
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use component_support::{
-    FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes, digest,
-    idempotency, install, key_ring, ledger, metadata, schema_set, snapshot_limits,
-    trusted_context_with_authorization,
+    FailurePoint, FixtureControl, ManualClock, TraceFixture, admitted_response_sealer,
+    browser_context, bytes, digest, idempotency, install, key_ring, ledger, metadata, schema_set,
+    snapshot_limits, trusted_context_with_authorization,
 };
 
 fn render_action<'a>(
@@ -164,6 +164,16 @@ async fn accepted_html_contains_the_signed_successor_and_authoritative_root_iden
     let action = ActionName::parse("execute").expect("action");
     let input_limits = InputLimits::default();
     let validation = suprnova_live::validation::ValidationEngine::new(16).expect("validation");
+    let response_sealer = admitted_response_sealer(
+        descriptor.clone(),
+        trusted_context_with_authorization(Arc::new(AllowAuthorization)),
+        &encoded,
+        Revision::new(0),
+        0x45,
+        None,
+    )
+    .await;
+    let (response_sealer, response_binding) = response_sealer.into_parts();
     let outcome = service
         .execute_instanced(InstancedActionRequest::new(
             &descriptor,
@@ -181,7 +191,8 @@ async fn accepted_html_contains_the_signed_successor_and_authoritative_root_iden
                 BagPolicy::Replace,
                 None,
                 &NoopTrace,
-            ),
+            )
+            .with_response_sealer(response_sealer, response_binding),
         ))
         .await;
     let ExecutionResult::Accepted(accepted) = outcome else {

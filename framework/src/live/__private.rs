@@ -61,13 +61,34 @@ pub mod action {
 
 #[doc(hidden)]
 pub mod component {
-    pub use suprnova_live::component::ComponentHooks;
+    pub use suprnova_live::component::{
+        ComponentError, ComponentHooks, LiveFuture, MountContext, RenderContext,
+    };
+
+    #[doc(hidden)]
+    pub mod generated {
+        pub use suprnova_live::component::generated::{
+            GeneratedComponentRuntime, GeneratedComponentState, IntoComponentHookResult,
+            IntoComponentResult, component_hooks, decode_field, decode_json_field,
+            decode_model_field, encode_field, render_component_view,
+        };
+    }
 
     #[doc(hidden)]
     pub mod composition {
         pub use suprnova_live::component::composition::ChildParameterField;
         pub use suprnova_live::component::composition::ChildParameterSchema;
     }
+}
+
+#[doc(hidden)]
+pub mod child {
+    pub use suprnova_live::child::VerifiedChildParametersV1;
+}
+
+#[doc(hidden)]
+pub mod canonical {
+    pub use suprnova_live::canonical::CanonicalValue;
 }
 
 #[doc(hidden)]
@@ -102,8 +123,7 @@ pub mod registry {
 pub mod snapshot {
     #[doc(hidden)]
     pub mod state {
-        pub use suprnova_live::snapshot::state::FieldCategory;
-        pub use suprnova_live::snapshot::state::StateCodec;
+        pub use suprnova_live::snapshot::state::{FieldCategory, StateCodec, StateExposure};
     }
 }
 
@@ -111,8 +131,15 @@ pub mod snapshot {
 pub mod state {
     pub use suprnova_live::state::BindingTiming;
     pub use suprnova_live::state::ModelCodec;
+    pub use suprnova_live::state::ModelPath;
+    pub use suprnova_live::state::ProposalBatch;
     pub use suprnova_live::state::UrlBinding;
     pub use suprnova_live::state::UrlBindingMode;
+}
+
+#[doc(hidden)]
+pub mod view {
+    pub use suprnova_live::view::IslandRender;
 }
 
 #[doc(hidden)]

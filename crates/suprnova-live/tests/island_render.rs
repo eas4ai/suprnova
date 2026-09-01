@@ -24,6 +24,12 @@ struct ExecutableMountTemplate;
 #[template(path = "tests/directives.html")]
 struct DirectiveTemplate;
 
+#[derive(Template)]
+#[template(source = "<button>{{ content }}</button>", ext = "html")]
+struct ComponentFragmentTemplate<'a> {
+    content: &'a str,
+}
+
 fn view(name: &str) -> ViewName {
     ViewName::parse(name).expect("view")
 }
@@ -125,4 +131,24 @@ fn raw_component_fragments_are_bounded_before_engine_wrapper_allocation() {
         .validate_island_fragment(view("tests/fragment.html"), &oversized)
         .expect_err("body is rejected before wrapper allocation");
     assert_eq!(error.kind(), ViewErrorKind::BodyTooLarge);
+}
+
+#[test]
+fn component_templates_render_checked_fragments_before_engine_root_assembly() {
+    let rendered = renderer()
+        .render_component_fragment(
+            view("tests/component-fragment.html"),
+            &ComponentFragmentTemplate { content: "ready" },
+            AssetSet::empty(),
+            Vec::new(),
+        )
+        .expect("checked component fragment");
+
+    assert_eq!(rendered.body, Bytes::from_static(b"<button>ready</button>"));
+    assert!(
+        !rendered
+            .body
+            .windows(23)
+            .any(|bytes| bytes == b"data-suprnova-live-root")
+    );
 }

@@ -5,7 +5,14 @@ use std::fmt;
 use bytes::Bytes;
 use http::Method;
 
+use crate::canonical::{CanonicalValue, parse_canonical_value};
+use crate::host::MountSelection;
 use crate::host::TrustedLiveRequestContext;
+use crate::identity::{ComponentName, ContentDigest, IslandSlot, RouteIdentity};
+use crate::protocol::{
+    ProtocolErrorKind, ProtocolLimits, SnapshotInput, VersionedUpdateRequest,
+    parse_versioned_update_request,
+};
 
 use super::{EndpointError, EndpointErrorKind};
 
@@ -134,4 +141,87 @@ impl fmt::Debug for LiveEndpointRequest {
             .field("context", &"<trusted:redacted>")
             .finish()
     }
+}
+
+pub(crate) fn inspect_mount(
+    body: &[u8],
+    media: ParsedLiveMediaType,
+    limits: &ProtocolLimits,
+) -> Result<MountSelection, EndpointError> {
+    let request = parse_versioned_update_request(body, limits).map_err(|error| {
+        EndpointError::new(match error.kind() {
+            ProtocolErrorKind::UnsupportedVersion => EndpointErrorKind::UnsupportedVersion,
+            ProtocolErrorKind::InputTooLarge | ProtocolErrorKind::SnapshotTooLarge => {
+                EndpointErrorKind::RequestTooLarge
+            }
+            _ => EndpointErrorKind::MalformedProtocol,
+        })
+    })?;
+    let (protocol, request_component, snapshot) = match &request {
+        VersionedUpdateRequest::V1(request) => (
+            request.protocol_version(),
+            request.component(),
+            request.snapshot(),
+        ),
+        VersionedUpdateRequest::V2(request) => (
+            request.protocol_version(),
+            request.component(),
+            request.snapshot(),
+        ),
+    };
+    if protocol != media.protocol_version() {
+        return Err(EndpointError::new(EndpointErrorKind::UnsupportedVersion));
+    }
+    let envelope = match snapshot {
+        SnapshotInput::Instance { envelope } | SnapshotInput::SeedPromotion { envelope, .. } => {
+            envelope
+        }
+    };
+    let (route, slot, component, contract_digest) = inspect_snapshot_identity(envelope, limits)?;
+    if &component != request_component {
+        return Err(EndpointError::new(EndpointErrorKind::ContextInconsistent));
+    }
+    Ok(MountSelection::new(
+        route,
+        slot,
+        component,
+        contract_digest,
+        protocol,
+    ))
+}
+
+fn inspect_snapshot_identity(
+    envelope: &[u8],
+    limits: &ProtocolLimits,
+) -> Result<(RouteIdentity, IslandSlot, ComponentName, ContentDigest), EndpointError> {
+    let envelope = parse_canonical_value(envelope, limits.input())
+        .map_err(|_| EndpointError::new(EndpointErrorKind::MalformedProtocol))?;
+    let CanonicalValue::Object(envelope) = envelope else {
+        return Err(EndpointError::new(EndpointErrorKind::MalformedProtocol));
+    };
+    let Some(CanonicalValue::Object(body)) = envelope.get("body") else {
+        return Err(EndpointError::new(EndpointErrorKind::MalformedProtocol));
+    };
+    let Some(CanonicalValue::Object(component)) = body.get("component") else {
+        return Err(EndpointError::new(EndpointErrorKind::MalformedProtocol));
+    };
+    let route = RouteIdentity::parse(string_field(body, "route")?)
+        .map_err(|_| EndpointError::new(EndpointErrorKind::MalformedProtocol))?;
+    let slot = IslandSlot::parse(string_field(body, "slot")?)
+        .map_err(|_| EndpointError::new(EndpointErrorKind::MalformedProtocol))?;
+    let component_name = ComponentName::parse(string_field(component, "name")?)
+        .map_err(|_| EndpointError::new(EndpointErrorKind::MalformedProtocol))?;
+    let contract_digest = ContentDigest::parse(string_field(component, "contract_digest")?)
+        .map_err(|_| EndpointError::new(EndpointErrorKind::MalformedProtocol))?;
+    Ok((route, slot, component_name, contract_digest))
+}
+
+fn string_field<'value>(
+    fields: &'value std::collections::BTreeMap<String, CanonicalValue>,
+    name: &str,
+) -> Result<&'value str, EndpointError> {
+    let Some(CanonicalValue::String(value)) = fields.get(name) else {
+        return Err(EndpointError::new(EndpointErrorKind::MalformedProtocol));
+    };
+    Ok(value)
 }

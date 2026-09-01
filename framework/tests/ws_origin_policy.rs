@@ -147,9 +147,11 @@ fn live_ws_router(
         LiveTestOperation::WebSocketHandshake,
         LiveTestRoutePolicy {
             trusted_internal_origin: false,
+            stateless_csrf: false,
             stateless_session: true,
             anonymous_principal: true,
             tenantless: true,
+            direct_peer: false,
             upstream_rate_limit: true,
             no_additional_middleware: true,
         },

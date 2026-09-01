@@ -7,6 +7,9 @@ use crate::{App, FrameworkError};
 use sha2::{Digest, Sha256};
 use suprnova_live::clock::{Clock, SystemClock};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+use suprnova_live::endpoint::{
+    EndpointError, LiveEndpointConfig, LiveEndpointService, ParsedLiveMediaType,
+};
 use suprnova_live::execution::ExecutionService;
 use suprnova_live::host::{
     LiveRequestContextValidator, MountCatalog, MountCatalogBuilder, MountCatalogEntry,
@@ -15,8 +18,17 @@ use suprnova_live::host::{
 use suprnova_live::identity::{IslandSlot, KeyId, RouteIdentity, UnixMillis};
 use suprnova_live::ledger::{LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger};
 use suprnova_live::limits::InputLimits;
+use suprnova_live::mount::{
+    DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
+    PrivateMountOutput, PrivateMountRequest, PrivateMountService, PublicMountProviders,
+    PublicSeedMountOutput, PublicSeedMountService,
+};
+use suprnova_live::promotion::{PromotionLimitConfig, PromotionLimits, PromotionService};
+use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
 use suprnova_live::random::{InstanceIdGenerator, SystemInstanceIdGenerator};
-use suprnova_live::snapshot::SnapshotLimits;
+use suprnova_live::snapshot::{MountedDocumentPath, SnapshotLimits};
+use suprnova_live::state::ProposalLimits;
+use suprnova_live::validation::ValidationEngine;
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 use uuid::Uuid;
 
@@ -30,7 +42,15 @@ struct RuntimeGraph {
     random: Arc<dyn InstanceIdGenerator>,
     key_ring: Arc<SnapshotKeyRing>,
     ledger: Arc<dyn LiveInstanceLedger>,
+    promotion: Arc<PromotionService>,
+    public_mount: Arc<PublicSeedMountService>,
+    private_mount: Arc<PrivateMountService>,
     execution: Arc<ExecutionService>,
+    engine_registry: Arc<suprnova_live::registry::ComponentRegistry>,
+    input_limits: InputLimits,
+    proposal_limits: ProposalLimits,
+    validation_engine: ValidationEngine,
+    endpoint_config: LiveEndpointConfig,
     context_validator: LiveRequestContextValidator,
     ports: super::ports::HostPorts,
     mount_builder: Mutex<Option<MountCatalogBuilder>>,
@@ -248,6 +268,7 @@ impl LiveRuntime {
         current_slot: IslandSlot,
         selection: MountSelection,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
+        self.finalize_mount_catalog()?;
         let now = self.graph.clock.now().map_err(|_| live_boot_error())?;
         let candidate = super::context::candidate(
             request,
@@ -263,12 +284,78 @@ impl LiveRuntime {
             .map_err(|_| FrameworkError::internal("Live request context was rejected"))
     }
 
+    pub(crate) fn inspect_mount(
+        &self,
+        body: &[u8],
+        media: ParsedLiveMediaType,
+    ) -> Result<MountSelection, EndpointError> {
+        self.graph.endpoint_config.inspect_mount(body, media)
+    }
+
+    pub(crate) fn endpoint_service(
+        &self,
+    ) -> (
+        LiveEndpointService,
+        Arc<super::ports::response::PreparedResponseCompletion>,
+    ) {
+        let completion = Arc::new(super::ports::response::PreparedResponseCompletion::default());
+        let kernel = super::action::SuprnovaEndpointKernel::new(
+            Arc::clone(&self.graph.promotion),
+            Arc::clone(&self.graph.execution),
+            self.graph.input_limits,
+            self.graph.proposal_limits,
+            self.graph.validation_engine,
+            &self.graph.ports,
+            Arc::clone(&completion),
+        );
+        (
+            LiveEndpointService::new(
+                self.graph.endpoint_config.clone(),
+                Arc::clone(&self.graph.engine_registry),
+                Arc::clone(&self.graph.clock),
+                Arc::clone(&self.graph.key_ring),
+                Arc::new(kernel),
+            ),
+            completion,
+        )
+    }
+
+    pub(crate) async fn mount_public_component(
+        &self,
+        document: &mut DocumentMountScope,
+        key: DocumentMountKey,
+        parameters: suprnova_live::canonical::CanonicalValue,
+        flags: MountFlags,
+        document_path: &MountedDocumentPath,
+        context: &TrustedLiveRequestContext,
+    ) -> Result<PublicSeedMountOutput, FrameworkError> {
+        self.graph
+            .public_mount
+            .mount_component_for_document(document, key, parameters, flags, document_path, context)
+            .await
+            .map_err(|_| FrameworkError::internal("Live public mount was rejected"))
+    }
+
+    pub(crate) async fn mount_private_component(
+        &self,
+        document: &mut DocumentMountScope,
+        request: PrivateMountRequest,
+        context: &TrustedLiveRequestContext,
+    ) -> Result<PrivateMountOutput, FrameworkError> {
+        self.graph
+            .private_mount
+            .mount(document, request, context)
+            .await
+            .map_err(|_| FrameworkError::internal("Live private mount was rejected"))
+    }
+
     pub(crate) fn readiness(&self) -> RuntimeReadiness {
         RuntimeReadiness {
             clock: Arc::strong_count(&self.graph.clock) > 0,
             random: Arc::strong_count(&self.graph.random) > 0,
             key_ring: Arc::strong_count(&self.graph.key_ring) > 0,
             ledger: Arc::strong_count(&self.graph.ledger) > 0,
+            promotion: Arc::strong_count(&self.graph.promotion) > 0,
             execution: Arc::strong_count(&self.graph.execution) > 0,
             context_validator: self.graph.config.max_context_lifetime_ms() > 0,
             host_ports: Arc::strong_count(&self.graph.ports.authorization) > 0
@@ -304,6 +391,22 @@ fn assemble_runtime(
     .map_err(|_| live_boot_error())?;
     let snapshot_limits = SnapshotLimits::new(input, 5_000, 86_400_000, 604_800_000, 1_024, 1_024)
         .map_err(|_| live_boot_error())?;
+    let protocol_limits = ProtocolLimits::new(ProtocolLimitConfig {
+        input,
+        max_snapshot_bytes: config.max_request_bytes(),
+        max_html_bytes: config.max_response_bytes(),
+        max_model_proposals: 128,
+        max_operations: 128,
+        max_arguments: 128,
+        max_validation_entries: 128,
+        max_events: 128,
+        max_effects: 128,
+        max_extensions: 128,
+    })
+    .map_err(|_| live_boot_error())?;
+    let endpoint_config = LiveEndpointConfig::new(protocol_limits, snapshot_limits.clone())
+        .and_then(|endpoint| endpoint.with_max_response_bytes(config.max_response_bytes()))
+        .map_err(|_| live_boot_error())?;
     let render_limits = RenderLimits::new(
         config.max_response_bytes(),
         128,
@@ -313,6 +416,62 @@ fn assemble_runtime(
     )
     .map_err(|_| live_boot_error())?;
     let renderer = ViewRenderer::new(render_limits).map_err(|_| live_boot_error())?;
+    let proposal_limits = ProposalLimits::new(128, 32, input).map_err(|_| live_boot_error())?;
+    let validation_engine = ValidationEngine::new(128).map_err(|_| live_boot_error())?;
+    let engine_registry = Arc::new(registry.engine().clone());
+    let promotion_limits = PromotionLimits::new(PromotionLimitConfig {
+        max_seed_bytes: config.max_request_bytes(),
+        window_ms: 60_000,
+        max_promotions_per_window: 256,
+        max_outstanding_per_scope: 1_024,
+        max_outstanding_per_route_component: 512,
+        promotion_lease_ms: 30_000,
+        abandoned_retention_ms: 300_000,
+        instance_lifetime_ms: 604_800_000,
+        max_reservations: 100_000,
+        max_rate_buckets: 100_000,
+    })
+    .map_err(|_| live_boot_error())?;
+    let promotion = Arc::new(
+        PromotionService::new(
+            Arc::clone(&ledger),
+            Arc::clone(&clock),
+            Arc::clone(&random),
+            Arc::clone(&key_ring),
+            snapshot_limits.clone(),
+            promotion_limits,
+        )
+        .map_err(|_| live_boot_error())?,
+    );
+    let public_mount = Arc::new(
+        PublicSeedMountService::new(
+            PublicMountProviders::new(
+                Arc::clone(&engine_registry),
+                Arc::clone(&clock),
+                Arc::clone(&key_ring),
+            ),
+            snapshot_limits.clone(),
+            renderer,
+            config.max_response_bytes(),
+        )
+        .map_err(|_| live_boot_error())?,
+    );
+    let private_mount = Arc::new(
+        PrivateMountService::new(
+            MountProviders::new(
+                Arc::clone(&engine_registry),
+                Arc::clone(&ledger),
+                Arc::clone(&clock),
+                Arc::clone(&random),
+                Arc::clone(&key_ring),
+            ),
+            snapshot_limits.clone(),
+            renderer,
+            MountLimits::new(604_800_000, 8, config.max_response_bytes(), 64)
+                .map_err(|_| live_boot_error())?,
+        )
+        .map_err(|_| live_boot_error())?,
+    );
     let execution = Arc::new(
         ExecutionService::new(
             Arc::clone(&ledger),
@@ -334,7 +493,15 @@ fn assemble_runtime(
             random,
             key_ring,
             ledger,
+            promotion,
+            public_mount,
+            private_mount,
             execution,
+            engine_registry,
+            input_limits: input,
+            proposal_limits,
+            validation_engine,
+            endpoint_config,
             context_validator,
             ports,
             mount_builder: Mutex::new(Some(MountCatalogBuilder::new())),
@@ -381,6 +548,7 @@ pub(crate) struct RuntimeReadiness {
     pub(crate) random: bool,
     pub(crate) key_ring: bool,
     pub(crate) ledger: bool,
+    pub(crate) promotion: bool,
     pub(crate) execution: bool,
     pub(crate) context_validator: bool,
     pub(crate) host_ports: bool,

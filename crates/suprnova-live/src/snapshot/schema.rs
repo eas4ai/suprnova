@@ -16,6 +16,99 @@ use crate::identity::{
 /// Snapshot schema version implemented by iteration 001.
 pub const SNAPSHOT_SCHEMA_V1: u16 = 1;
 
+const FRAMEWORK_DOCUMENT_PATH_EXTENSION: &str = "x_suprnova_framework_document_path_v1";
+const MAX_FRAMEWORK_DOCUMENT_PATH_BYTES: usize = 4096;
+
+/// Bounded root-relative document path sealed into a signed Live snapshot.
+///
+/// This is deliberately narrower than an extension map: hosts may bind only
+/// the already-matched document path, never an arbitrary URL or authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountedDocumentPath(String);
+
+impl MountedDocumentPath {
+    /// Validates a normalized root-relative path without query or fragment.
+    pub fn parse(path: &str) -> Result<Self, SnapshotError> {
+        let valid = !path.is_empty()
+            && path.len() <= MAX_FRAMEWORK_DOCUMENT_PATH_BYTES
+            && path.starts_with('/')
+            && !path.starts_with("//")
+            && !path.starts_with("/\\")
+            && !path
+                .chars()
+                .any(|character| matches!(character, '?' | '#' | '\\') || character.is_control())
+            && path_segments_are_normalized(path);
+        if !valid {
+            return Err(SnapshotError::new(SnapshotErrorKind::InvalidSchema));
+        }
+        Ok(Self(path.to_owned()))
+    }
+
+    /// Returns the validated root-relative document path.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn extension(&self) -> (&'static str, CanonicalValue) {
+        (
+            FRAMEWORK_DOCUMENT_PATH_EXTENSION,
+            CanonicalValue::String(self.0.clone()),
+        )
+    }
+}
+
+fn path_segments_are_normalized(path: &str) -> bool {
+    path.split('/').all(|segment| {
+        let bytes = segment.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte != b'%' {
+                decoded.push(byte);
+                index += 1;
+                continue;
+            }
+            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            let decoded_byte = high << 4 | low;
+            if matches!(decoded_byte, b'/' | b'\\' | 0..=31 | 127) {
+                return false;
+            }
+            decoded.push(decoded_byte);
+            index += 3;
+        }
+        decoded != b"." && decoded != b".."
+    })
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub(crate) fn mounted_document_path(
+    extensions: &BTreeMap<String, CanonicalValue>,
+) -> Result<Option<&str>, SnapshotError> {
+    let Some(value) = extensions.get(FRAMEWORK_DOCUMENT_PATH_EXTENSION) else {
+        return Ok(None);
+    };
+    let CanonicalValue::String(path) = value else {
+        return Err(SnapshotError::new(SnapshotErrorKind::InvalidSchema));
+    };
+    MountedDocumentPath::parse(path)?;
+    Ok(Some(path))
+}
+
 /// Distinct signed body form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +368,10 @@ impl SeedBodyV1 {
     pub(crate) const fn extensions(&self) -> &BTreeMap<String, CanonicalValue> {
         &self.extensions
     }
+
+    pub(crate) fn mounted_document_path(&self) -> Result<Option<&str>, SnapshotError> {
+        mounted_document_path(&self.extensions)
+    }
 }
 
 impl fmt::Debug for SeedBodyV1 {
@@ -442,6 +539,10 @@ impl InstanceBodyV1 {
 
     pub(crate) const fn extensions(&self) -> &BTreeMap<String, CanonicalValue> {
         &self.extensions
+    }
+
+    pub(crate) fn mounted_document_path(&self) -> Result<Option<&str>, SnapshotError> {
+        mounted_document_path(&self.extensions)
     }
 }
 

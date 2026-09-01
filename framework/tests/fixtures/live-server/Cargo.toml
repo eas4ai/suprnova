@@ -1,0 +1,10 @@
+[package]
+name = "suprnova-live-server-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova = { path = "../../.." }
+
+[workspace]

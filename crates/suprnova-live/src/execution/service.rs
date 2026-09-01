@@ -9,16 +9,22 @@ use sha2::{Digest as _, Sha256};
 
 use crate::action::{ActionOutcome, ActionResult, RawActionArguments};
 use crate::canonical::CanonicalValue;
+use crate::child::VerifiedChildParametersV1;
 use crate::clock::Clock;
 use crate::component::{
     ActionExecutionOutput, ActionExecutionParts, ComponentExecutor, HydrationContext, MountContext,
     RenderContext,
 };
 use crate::crypto::SnapshotKeyRing;
+use crate::endpoint::{
+    AcceptedResponseAuthority, AcceptedResponseCandidate, AcceptedResponseRequestBinding,
+    AcceptedResponseSealer, AcceptedResponseSnapshotAuthority, EndpointResponseIntents,
+    SealedAcceptedResponse,
+};
 use crate::host::TrustedLiveRequestContext;
 use crate::identity::{
-    ActionName, BuildId, ContentDigest, IdempotencyKey, InstanceId, IslandSlot, Revision,
-    RouteIdentity, ScopeFingerprint, UnixMillis,
+    ActionName, BrowserNonce, BuildId, ContentDigest, IdempotencyKey, InstanceId, IslandSlot,
+    Revision, RouteIdentity, ScopeFingerprint, UnixMillis,
 };
 use crate::ledger::{
     AcceptedOutcome, AcceptedOutcomeKind, AcceptedOutcomeMetadata, ClaimOutcome, ClaimRequest,
@@ -31,7 +37,7 @@ use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
 use crate::snapshot::{
     ComponentContract, InstanceBodyV1, InstanceFieldsV1, SeedBodyV1, SnapshotLimits,
-    SnapshotSchemaSet, VerifiedInstanceV1,
+    SnapshotSchemaSet, VerifiedInstanceV1, mounted_document_path,
 };
 use crate::state::ProposalBatch;
 use crate::validation::{BagPolicy, ErrorBag, ValidationEngine, ValidationPort};
@@ -56,6 +62,9 @@ pub struct ActionExecutionRequest<'a> {
     pub(crate) transaction_port: Option<&'a dyn TransactionPort>,
     pub(crate) trace: &'a dyn ExecutionTracePort,
     pub(crate) proposals: Option<&'a ProposalBatch>,
+    pub(crate) response_intents: Option<&'a dyn ResponseIntentPreparationPort>,
+    pub(crate) response_sealer: Option<AcceptedResponseSealer>,
+    pub(crate) response_binding: Option<AcceptedResponseRequestBinding>,
 }
 
 impl<'a> ActionExecutionRequest<'a> {
@@ -85,6 +94,9 @@ impl<'a> ActionExecutionRequest<'a> {
             transaction_port,
             trace,
             proposals: None,
+            response_intents: None,
+            response_sealer: None,
+            response_binding: None,
         }
     }
 
@@ -94,6 +106,79 @@ impl<'a> ActionExecutionRequest<'a> {
         self.proposals = Some(proposals);
         self
     }
+
+    /// Supplies fallible host semantic response preparation before durability.
+    #[must_use]
+    pub fn with_response_intent_preparation(
+        mut self,
+        response_intents: &'a dyn ResponseIntentPreparationPort,
+    ) -> Self {
+        self.response_intents = Some(response_intents);
+        self
+    }
+
+    /// Supplies request-bound accepted-response sealing before durability.
+    #[must_use]
+    pub fn with_response_sealer(
+        mut self,
+        response_sealer: AcceptedResponseSealer,
+        response_binding: AcceptedResponseRequestBinding,
+    ) -> Self {
+        self.response_sealer = Some(response_sealer);
+        self.response_binding = Some(response_binding);
+        self
+    }
+}
+
+/// Narrow verified snapshot authority visible to response-intent preparation.
+#[derive(Clone, Copy, Debug)]
+pub struct VerifiedResponseIntentAuthority<'a> {
+    mounted_document_path: Option<&'a str>,
+    protocol_version: u16,
+}
+
+impl<'a> VerifiedResponseIntentAuthority<'a> {
+    /// Returns the signed, normalized document path bound at mount time.
+    #[must_use]
+    pub const fn mounted_document_path(self) -> Option<&'a str> {
+        self.mounted_document_path
+    }
+
+    /// Returns the registry-verified protocol selected for this request.
+    #[must_use]
+    pub const fn protocol_version(self) -> u16 {
+        self.protocol_version
+    }
+}
+
+/// Validated semantic result and least-privilege signed authority for preparation.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseIntentPreparationRequest<'a> {
+    result: &'a ActionResult,
+    authority: VerifiedResponseIntentAuthority<'a>,
+}
+
+impl<'a> ResponseIntentPreparationRequest<'a> {
+    /// Returns the engine-validated action result.
+    #[must_use]
+    pub const fn result(self) -> &'a ActionResult {
+        self.result
+    }
+
+    /// Returns the narrow signed snapshot authority for host resolution.
+    #[must_use]
+    pub const fn authority(self) -> VerifiedResponseIntentAuthority<'a> {
+        self.authority
+    }
+}
+
+/// Fallible host semantic preparation that runs before transaction commit.
+pub trait ResponseIntentPreparationPort: Send + Sync {
+    /// Resolves host-owned intents and stages request-scoped completion work.
+    fn prepare<'a>(
+        &'a self,
+        request: ResponseIntentPreparationRequest<'a>,
+    ) -> crate::component::LiveFuture<'a, Result<EndpointResponseIntents, HostError>>;
 }
 
 /// Fully verified authority and semantic request for one ordinary instanced action.
@@ -116,6 +201,32 @@ pub struct InstancedFreshRenderRequest<'a> {
     idempotency_key: IdempotencyKey,
     request_digest: ContentDigest,
     trace: &'a dyn ExecutionTracePort,
+    response_sealer: Option<AcceptedResponseSealer>,
+    response_binding: Option<AcceptedResponseRequestBinding>,
+}
+
+/// One closed non-action lifecycle operation coordinated under island revision authority.
+pub enum InstancedLifecycleOperation<'a> {
+    /// Apply a separately prepared model synchronization batch.
+    SyncModels(&'a ProposalBatch),
+    /// Apply a separately verified parent-issued child parameter capability.
+    ParamsChanged(&'a VerifiedChildParametersV1),
+    /// Complete one registered lazy lifecycle boundary.
+    LazyComplete,
+}
+
+/// Verified authority and presentation context for one non-action lifecycle operation.
+pub struct InstancedLifecycleRequest<'a> {
+    descriptor: &'a ComponentDescriptor,
+    context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
+    snapshot: &'a VerifiedInstanceV1,
+    idempotency_key: IdempotencyKey,
+    request_digest: ContentDigest,
+    operation: InstancedLifecycleOperation<'a>,
+    trace: &'a dyn ExecutionTracePort,
+    response_sealer: Option<AcceptedResponseSealer>,
+    response_binding: Option<AcceptedResponseRequestBinding>,
 }
 
 /// Promoted public-seed authority and first semantic operation.
@@ -124,6 +235,7 @@ pub struct PromotedActionRequest<'a> {
     context: &'a TrustedLiveRequestContext,
     browser: BrowserRenderContext,
     promoted: PromotedInstance,
+    browser_nonce: BrowserNonce,
     idempotency_key: IdempotencyKey,
     request_digest: ContentDigest,
     action: ActionExecutionRequest<'a>,
@@ -137,6 +249,7 @@ impl<'a> PromotedActionRequest<'a> {
         context: &'a TrustedLiveRequestContext,
         browser: BrowserRenderContext,
         promoted: PromotedInstance,
+        browser_nonce: BrowserNonce,
         idempotency_key: IdempotencyKey,
         request_digest: ContentDigest,
         action: ActionExecutionRequest<'a>,
@@ -146,6 +259,7 @@ impl<'a> PromotedActionRequest<'a> {
             context,
             browser,
             promoted,
+            browser_nonce,
             idempotency_key,
             request_digest,
             action,
@@ -197,7 +311,65 @@ impl<'a> InstancedFreshRenderRequest<'a> {
             idempotency_key,
             request_digest,
             trace,
+            response_sealer: None,
+            response_binding: None,
         }
+    }
+
+    /// Supplies request-bound accepted-response sealing before durability.
+    #[must_use]
+    pub fn with_response_sealer(
+        mut self,
+        response_sealer: AcceptedResponseSealer,
+        response_binding: AcceptedResponseRequestBinding,
+    ) -> Self {
+        self.response_sealer = Some(response_sealer);
+        self.response_binding = Some(response_binding);
+        self
+    }
+}
+
+impl<'a> InstancedLifecycleRequest<'a> {
+    /// Binds one already verified lifecycle capability to revision coordination.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all lifecycle authority and host-observation inputs remain explicit"
+    )]
+    #[must_use]
+    pub fn new(
+        descriptor: &'a ComponentDescriptor,
+        context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
+        snapshot: &'a VerifiedInstanceV1,
+        idempotency_key: IdempotencyKey,
+        request_digest: ContentDigest,
+        operation: InstancedLifecycleOperation<'a>,
+        trace: &'a dyn ExecutionTracePort,
+    ) -> Self {
+        Self {
+            descriptor,
+            context,
+            browser,
+            snapshot,
+            idempotency_key,
+            request_digest,
+            operation,
+            trace,
+            response_sealer: None,
+            response_binding: None,
+        }
+    }
+
+    /// Supplies request-bound accepted-response sealing before durability.
+    #[must_use]
+    pub fn with_response_sealer(
+        mut self,
+        response_sealer: AcceptedResponseSealer,
+        response_binding: AcceptedResponseRequestBinding,
+    ) -> Self {
+        self.response_sealer = Some(response_sealer);
+        self.response_binding = Some(response_binding);
+        self
     }
 }
 
@@ -266,9 +438,11 @@ pub struct AcceptedExecution {
     signed_snapshot: Vec<u8>,
     render: Option<IslandRender>,
     result: ActionResult,
+    response_intents: EndpointResponseIntents,
     validation: ErrorBag,
     action_executed: bool,
     reporting_failed: bool,
+    sealed_response: SealedAcceptedResponse,
 }
 
 impl AcceptedExecution {
@@ -296,6 +470,12 @@ impl AcceptedExecution {
         &self.result
     }
 
+    /// Returns the host-prepared semantic intents sealed before acceptance.
+    #[must_use]
+    pub const fn response_intents(&self) -> &EndpointResponseIntents {
+        &self.response_intents
+    }
+
     /// Returns bounded validation state accepted with the outcome.
     #[must_use]
     pub const fn validation(&self) -> &ErrorBag {
@@ -312,6 +492,10 @@ impl AcceptedExecution {
     #[must_use]
     pub const fn reporting_failed(&self) -> bool {
         self.reporting_failed
+    }
+
+    pub(crate) fn into_sealed_response(self) -> SealedAcceptedResponse {
+        self.sealed_response
     }
 }
 
@@ -331,7 +515,7 @@ impl fmt::Debug for AcceptedExecution {
 #[derive(Debug)]
 pub enum ExecutionResult {
     /// One complete outcome committed and was accepted.
-    Accepted(AcceptedExecution),
+    Accepted(Box<AcceptedExecution>),
     /// The exact request is already running and was not invoked again.
     InProgress {
         /// Already claimed successor revision.
@@ -442,11 +626,19 @@ struct SnapshotAuthority {
     instance_id: InstanceId,
     expires_at: UnixMillis,
     extensions: BTreeMap<String, CanonicalValue>,
+    request_snapshot: RequestSnapshotAuthority,
+}
+
+enum RequestSnapshotAuthority {
+    Instance(InstanceId),
+    SeedPromotion(BrowserNonce),
 }
 
 struct SuccessorPresentation {
     document_key: String,
     protocol_minimum: u16,
+    protocol_version: u16,
+    context_expires_at: UnixMillis,
 }
 
 impl ExecutionService {
@@ -477,9 +669,15 @@ impl ExecutionService {
     }
 
     /// Executes one verified instanced action under exact Tier 0 ordering.
-    pub async fn execute_instanced(&self, request: InstancedActionRequest<'_>) -> ExecutionResult {
+    pub async fn execute_instanced(
+        &self,
+        mut request: InstancedActionRequest<'_>,
+    ) -> ExecutionResult {
         let body = request.snapshot.body();
         let trace = request.action.trace;
+        let response_intents = request.action.response_intents;
+        let response_sealer = request.action.response_sealer.take();
+        let response_binding = request.action.response_binding;
         let claimed = match self
             .claim(
                 body.scope(),
@@ -525,14 +723,20 @@ impl ExecutionService {
                 instance_id: body.instance_id().clone(),
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
+                request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
             },
             SuccessorPresentation {
                 document_key: request.browser.document_key().as_str().to_owned(),
                 protocol_minimum: request.context.mount().minimum_protocol(),
+                protocol_version: request.context.mount().protocol(),
+                context_expires_at: request.context.expires_at(),
             },
             request.context.mount().expected_seed().schemas(),
             output,
             None,
+            response_intents,
+            response_sealer,
+            response_binding,
         )
         .await
     }
@@ -593,21 +797,116 @@ impl ExecutionService {
                 instance_id: body.instance_id().clone(),
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
+                request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
             },
             SuccessorPresentation {
                 document_key: request.browser.document_key().as_str().to_owned(),
                 protocol_minimum: request.context.mount().minimum_protocol(),
+                protocol_version: request.context.mount().protocol(),
+                context_expires_at: request.context.expires_at(),
             },
             request.context.mount().expected_seed().schemas(),
             output,
             Some(AcceptedOutcomeKind::Recovery),
+            None,
+            request.response_sealer,
+            request.response_binding,
+        )
+        .await
+    }
+
+    /// Executes model-only and registered lifecycle requests without faking an action.
+    pub async fn execute_lifecycle(
+        &self,
+        request: InstancedLifecycleRequest<'_>,
+    ) -> ExecutionResult {
+        let body = request.snapshot.body();
+        let claimed = match self
+            .claim(
+                body.scope(),
+                body.instance_id(),
+                body.revision(),
+                request.idempotency_key,
+                request.request_digest,
+                request.trace,
+            )
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(result) => return result,
+        };
+        let render_context = RenderContext::new(
+            request.context,
+            body.instance_id(),
+            claimed.successor_revision,
+            body.expires_at(),
+        )
+        .with_browser_context(&request.browser);
+        let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
+        let output = match request.operation {
+            InstancedLifecycleOperation::SyncModels(proposals) => {
+                ComponentExecutor::new()
+                    .synchronize(request.descriptor, &hydration, proposals, request.trace)
+                    .await
+            }
+            InstancedLifecycleOperation::ParamsChanged(parameters) => {
+                ComponentExecutor::new()
+                    .params_changed(request.descriptor, &hydration, parameters)
+                    .await
+            }
+            InstancedLifecycleOperation::LazyComplete => {
+                ComponentExecutor::new()
+                    .lazy_complete(request.descriptor, &hydration)
+                    .await
+            }
+        };
+        let output = match output {
+            Ok(output) => ActionExecutionOutput::fresh_render(output),
+            Err(_) => {
+                self.consume_failed_claim(claimed.claim).await;
+                return refresh(ExecutionRefreshReason::ExecutionFailed);
+            }
+        };
+        self.accept_output(
+            request.descriptor,
+            request.trace,
+            claimed,
+            SnapshotAuthority {
+                component: body.component().clone(),
+                build_id: body.build_id().clone(),
+                route: body.route().clone(),
+                slot: body.slot().clone(),
+                scope: body.scope().clone(),
+                instance_id: body.instance_id().clone(),
+                expires_at: body.expires_at(),
+                extensions: body.extensions().clone(),
+                request_snapshot: RequestSnapshotAuthority::Instance(body.instance_id().clone()),
+            },
+            SuccessorPresentation {
+                document_key: request.browser.document_key().as_str().to_owned(),
+                protocol_minimum: request.context.mount().minimum_protocol(),
+                protocol_version: request.context.mount().protocol(),
+                context_expires_at: request.context.expires_at(),
+            },
+            request.context.mount().expected_seed().schemas(),
+            output,
+            None,
+            None,
+            request.response_sealer,
+            request.response_binding,
         )
         .await
     }
 
     /// Executes the first operation after public-seed promotion without publishing partial state.
-    pub async fn execute_promoted(&self, request: PromotedActionRequest<'_>) -> ExecutionResult {
+    pub async fn execute_promoted(
+        &self,
+        mut request: PromotedActionRequest<'_>,
+    ) -> ExecutionResult {
         let trace = request.action.trace;
+        let response_intents = request.action.response_intents;
+        let response_sealer = request.action.response_sealer.take();
+        let response_binding = request.action.response_binding;
         let (authority, verified_seed, refresh_before_action) = request.promoted.into_parts();
         let seed = verified_seed.body();
         let claimed = match self
@@ -663,14 +962,20 @@ impl ExecutionService {
                 instance_id: authority.instance_id().clone(),
                 expires_at: authority.expires_at(),
                 extensions: seed.extensions().clone(),
+                request_snapshot: RequestSnapshotAuthority::SeedPromotion(request.browser_nonce),
             },
             SuccessorPresentation {
                 document_key: request.browser.document_key().as_str().to_owned(),
                 protocol_minimum: request.context.mount().minimum_protocol(),
+                protocol_version: request.context.mount().protocol(),
+                context_expires_at: request.context.expires_at(),
             },
             schemas,
             output,
             kind_override,
+            response_intents,
+            response_sealer,
+            response_binding,
         )
         .await
     }
@@ -794,6 +1099,9 @@ impl ExecutionService {
         schemas: &SnapshotSchemaSet,
         output: ActionExecutionOutput,
         kind_override: Option<AcceptedOutcomeKind>,
+        response_intent_port: Option<&dyn ResponseIntentPreparationPort>,
+        response_sealer: Option<AcceptedResponseSealer>,
+        response_binding: Option<AcceptedResponseRequestBinding>,
     ) -> ExecutionResult {
         let successor_revision = claimed.successor_revision;
         let mut claim = claimed.claim;
@@ -816,6 +1124,11 @@ impl ExecutionService {
                 return refresh(ExecutionRefreshReason::ExecutionFailed);
             }
         };
+        if now >= presentation.context_expires_at {
+            rollback(&mut transaction).await;
+            self.consume_failed_claim(claim).await;
+            return refresh(ExecutionRefreshReason::ExecutionFailed);
+        }
         let signed_snapshot = InstanceBodyV1::new(
             InstanceFieldsV1 {
                 component: authority.component.clone(),
@@ -885,6 +1198,98 @@ impl ExecutionService {
             }
             None => None,
         };
+        let response_intents =
+            if response_intent_port.is_some() || response_intent_preparation_required(&result) {
+                record(trace, ExecutionPhase::ResponseIntentPreparation);
+                let document_path = match mounted_document_path(&authority.extensions) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        rollback(&mut transaction).await;
+                        self.consume_failed_claim(claim).await;
+                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                    }
+                };
+                let Some(port) = response_intent_port else {
+                    rollback(&mut transaction).await;
+                    self.consume_failed_claim(claim).await;
+                    return refresh(ExecutionRefreshReason::ExecutionFailed);
+                };
+                match run_host_future(
+                    || {
+                        port.prepare(ResponseIntentPreparationRequest {
+                            result: &result,
+                            authority: VerifiedResponseIntentAuthority {
+                                mounted_document_path: document_path,
+                                protocol_version: presentation.protocol_version,
+                            },
+                        })
+                    },
+                    HostErrorKind::ResponseIntent,
+                )
+                .await
+                {
+                    Ok(intents) => intents,
+                    Err(_) => {
+                        rollback(&mut transaction).await;
+                        self.consume_failed_claim(claim).await;
+                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                    }
+                }
+            } else {
+                EndpointResponseIntents::default()
+            };
+        if !response_intents.is_valid_for(&result, presentation.protocol_version) {
+            rollback(&mut transaction).await;
+            self.consume_failed_claim(claim).await;
+            return refresh(ExecutionRefreshReason::ExecutionFailed);
+        }
+        record(trace, ExecutionPhase::ResponseSealing);
+        let Some(response_sealer) = response_sealer else {
+            rollback(&mut transaction).await;
+            self.consume_failed_claim(claim).await;
+            return refresh(ExecutionRefreshReason::ExecutionFailed);
+        };
+        let Some(response_binding) = response_binding else {
+            rollback(&mut transaction).await;
+            self.consume_failed_claim(claim).await;
+            return refresh(ExecutionRefreshReason::ExecutionFailed);
+        };
+        if response_sealer.protocol_version() != presentation.protocol_version {
+            rollback(&mut transaction).await;
+            self.consume_failed_claim(claim).await;
+            return refresh(ExecutionRefreshReason::ExecutionFailed);
+        }
+        let snapshot_authority = match &authority.request_snapshot {
+            RequestSnapshotAuthority::Instance(instance_id) => {
+                AcceptedResponseSnapshotAuthority::Instance(instance_id)
+            }
+            RequestSnapshotAuthority::SeedPromotion(browser_nonce) => {
+                AcceptedResponseSnapshotAuthority::SeedPromotion(browser_nonce)
+            }
+        };
+        let sealed_response = match response_sealer.seal(AcceptedResponseCandidate {
+            request_binding: response_binding,
+            revision: successor_revision,
+            signed_snapshot: &signed_snapshot,
+            render: render.as_ref(),
+            result: &result,
+            intents: &response_intents,
+            validation: &validation,
+            authority: AcceptedResponseAuthority {
+                component: &authority.component,
+                route: &authority.route,
+                slot: &authority.slot,
+                scope: &authority.scope,
+                snapshot: snapshot_authority,
+            },
+        }) {
+            Ok(response) => response,
+            Err(_) => {
+                rollback(&mut transaction).await;
+                self.consume_failed_claim(claim).await;
+                return refresh(ExecutionRefreshReason::ExecutionFailed);
+            }
+        };
         if let Some(transaction) = transaction.take() {
             record(trace, ExecutionPhase::HostCommit);
             claim.begin_finalizing();
@@ -926,15 +1331,17 @@ impl ExecutionService {
         } else {
             false
         };
-        ExecutionResult::Accepted(AcceptedExecution {
+        ExecutionResult::Accepted(Box::new(AcceptedExecution {
             revision: successor_revision,
             signed_snapshot,
             render,
             result,
+            response_intents,
             validation,
             action_executed,
             reporting_failed,
-        })
+            sealed_response,
+        }))
     }
 
     fn validate_outcome(
@@ -990,6 +1397,12 @@ fn outcome_kind(result: &ActionResult, validation: &ErrorBag) -> AcceptedOutcome
         ActionOutcome::NoRender => AcceptedOutcomeKind::NoRender,
         ActionOutcome::Redirect(_) => AcceptedOutcomeKind::Redirect,
     }
+}
+
+fn response_intent_preparation_required(result: &ActionResult) -> bool {
+    matches!(result.outcome(), ActionOutcome::Redirect(_))
+        || result.metadata().url().is_some()
+        || !result.metadata().flash().is_empty()
 }
 
 fn overlay_verified_public(

@@ -37,12 +37,12 @@ use suprnova_live::state::{
 use suprnova_live::validation::{ValidationIssue, ValidationMessageId, ValidationSelection};
 use suprnova_live_test_support::{
     ComponentHarness, ComponentHarnessConfig, HarnessAssertions, HarnessRequestIdentity,
-    HarnessServices, HarnessTraceEvent, TransactionFault,
+    HarnessServices, HarnessTraceEvent, TransactionFault, VerifiedResponseSealing,
 };
 
 use component_support::{
-    FailurePoint, FixtureControl, TraceFixture, install, key_ring, metadata, schema_set,
-    snapshot_limits, trusted_context_for, trusted_context_for_with_schemas,
+    FailurePoint, FixtureControl, TraceFixture, admitted_response_sealer, install, key_ring,
+    metadata, schema_set, snapshot_limits, trusted_context_for, trusted_context_for_with_schemas,
 };
 
 #[derive(Serialize)]
@@ -167,6 +167,39 @@ fn expected_instance(
         context.scope().clone(),
         schemas,
     )
+}
+
+async fn admitted_harness_response(
+    harness: &ComponentHarness,
+    descriptor: &ComponentDescriptor,
+    component_metadata: &'static ComponentMetadata,
+    schemas: SnapshotSchemaSet,
+    services: &HarnessServices,
+    correlation_start: u8,
+) -> VerifiedResponseSealing {
+    let encoded = harness
+        .current_encoded_snapshot()
+        .expect("mounted snapshot")
+        .to_vec();
+    let revision = harness
+        .current_snapshot()
+        .expect("mounted snapshot")
+        .body()
+        .revision();
+    admitted_response_sealer(
+        descriptor.clone(),
+        trusted_context_for_with_schemas(
+            component_metadata,
+            Some(Arc::clone(services.authorization())
+                as Arc<dyn suprnova_live::action::ActionAuthorizationPort>),
+            schemas,
+        ),
+        &encoded,
+        revision,
+        correlation_start,
+        None,
+    )
+    .await
 }
 
 fn harness_schema_set() -> SnapshotSchemaSet {
@@ -307,7 +340,7 @@ async fn harness_mounts_and_advances_a_real_component_snapshot_without_a_framewo
     );
     let expected_instance = expected_instance(metadata(), &descriptor, &context, schemas);
     let config = ComponentHarnessConfig::new(
-        descriptor,
+        descriptor.clone(),
         context,
         expected_instance,
         key_ring(),
@@ -395,12 +428,22 @@ async fn harness_mounts_and_advances_a_real_component_snapshot_without_a_framewo
         suprnova_live::state::ModelPath::parse("query").expect("validation path"),
         ValidationMessageId::parse("validation.query").expect("validation message"),
     )]);
+    let rejected_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        metadata(),
+        harness_schema_set(),
+        &services,
+        0x81,
+    )
+    .await;
     let rejected = harness
         .execute_action(
             &action,
             RawActionArguments::empty(),
             Some(&proposals),
             HarnessRequestIdentity::from_seed(0x4f),
+            rejected_response,
         )
         .await
         .expect("validation outcome");
@@ -410,12 +453,22 @@ async fn harness_mounts_and_advances_a_real_component_snapshot_without_a_framewo
     assert!(!control.values().contains(&"action"));
 
     services.validation().set_issues(Vec::new());
+    let accepted_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        metadata(),
+        harness_schema_set(),
+        &services,
+        0x82,
+    )
+    .await;
     let result = harness
         .execute_action(
             &action,
             RawActionArguments::empty(),
             Some(&proposals),
             HarnessRequestIdentity::from_seed(0x50),
+            accepted_response,
         )
         .await
         .expect("harness action input");
@@ -487,12 +540,22 @@ async fn transaction_commit_failure_consumes_the_claim_and_retry_never_reinvokes
 
     services.transactions().set_fault(TransactionFault::Commit);
     let action = ActionName::parse("execute").expect("action name");
+    let failed_commit_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        component_metadata,
+        schema_set(),
+        &services,
+        0x83,
+    )
+    .await;
     let first = harness
         .execute_action(
             &action,
             RawActionArguments::empty(),
             None,
             HarnessRequestIdentity::from_seed(0x60),
+            failed_commit_response,
         )
         .await
         .expect("commit failure outcome");
@@ -511,12 +574,22 @@ async fn transaction_commit_failure_consumes_the_claim_and_retry_never_reinvokes
     );
 
     services.transactions().set_fault(TransactionFault::None);
+    let retry_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        component_metadata,
+        schema_set(),
+        &services,
+        0x84,
+    )
+    .await;
     let retry = harness
         .execute_action(
             &action,
             RawActionArguments::empty(),
             None,
             HarnessRequestIdentity::from_seed(0x60),
+            retry_response,
         )
         .await
         .expect("retry outcome");
@@ -566,12 +639,22 @@ async fn registered_events_effects_redirects_and_current_authorization_are_typed
         .expect("initial mount");
 
     let emit_action = ActionName::parse("emit").expect("action name");
+    let emitted_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        component_metadata,
+        schema_set(),
+        &services,
+        0x85,
+    )
+    .await;
     let emitted = harness
         .execute_action(
             &emit_action,
             RawActionArguments::empty(),
             None,
             HarnessRequestIdentity::from_seed(0x70),
+            emitted_response,
         )
         .await
         .expect("emission outcome");
@@ -581,12 +664,22 @@ async fn registered_events_effects_redirects_and_current_authorization_are_typed
     assert!(!format!("{emitted:?}").contains("browser-secret"));
 
     let redirect_action = ActionName::parse("redirect").expect("action name");
+    let redirect_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        component_metadata,
+        schema_set(),
+        &services,
+        0x86,
+    )
+    .await;
     let redirected = harness
         .execute_action(
             &redirect_action,
             RawActionArguments::empty(),
             None,
             HarnessRequestIdentity::from_seed(0x71),
+            redirect_response,
         )
         .await
         .expect("redirect outcome");
@@ -598,12 +691,22 @@ async fn registered_events_effects_redirects_and_current_authorization_are_typed
     services
         .authorization()
         .set_decision(AuthorizationDecision::Deny);
+    let denied_response = admitted_harness_response(
+        &harness,
+        &descriptor,
+        component_metadata,
+        schema_set(),
+        &services,
+        0x87,
+    )
+    .await;
     let denied = harness
         .execute_action(
             &emit_action,
             RawActionArguments::empty(),
             None,
             HarnessRequestIdentity::from_seed(0x72),
+            denied_response,
         )
         .await
         .expect("authorization outcome");

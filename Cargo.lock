@@ -7584,6 +7584,7 @@ dependencies = [
 name = "suprnova-live-macro-fixture"
 version = "1.3.7"
 dependencies = [
+ "askama",
  "suprnova-live",
  "suprnova-macros",
 ]
@@ -7595,6 +7596,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "futures-util",
  "getrandom 0.4.3",
  "http-body-util",

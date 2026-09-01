@@ -272,6 +272,10 @@ pub struct ComponentExecutor;
 #[derive(Clone, Copy)]
 enum RegisteredOperation<'a> {
     None,
+    SyncModels {
+        proposals: &'a crate::state::ProposalBatch,
+        trace: &'a dyn ExecutionTracePort,
+    },
     ParamsChanged(&'a VerifiedChildParametersV1),
     LazyComplete,
 }
@@ -304,6 +308,28 @@ impl ComponentExecutor {
         .await
     }
 
+    /// Constructs and renders reusable public state without allocating instance authority.
+    pub async fn initial_public_mount(
+        &self,
+        descriptor: &ComponentDescriptor,
+        mount: &MountContext<'_>,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(LifecycleErrorKind::HooksUnavailable, LifecyclePhase::Mount)
+        })?;
+        let instance =
+            catch_future(|| hooks.factory().mount(mount), LifecyclePhase::Mount)?.await?;
+        self.execute_owned_with_exposure(
+            descriptor,
+            instance,
+            mount.render(),
+            false,
+            RegisteredOperation::None,
+            StateExposure::PublicSeed,
+        )
+        .await
+    }
+
     /// Reconstructs a new object from verified state for one ordinary request.
     pub async fn reconstruct(
         &self,
@@ -327,6 +353,36 @@ impl ComponentExecutor {
             hydration.render(),
             true,
             RegisteredOperation::None,
+        )
+        .await
+    }
+
+    /// Reconstructs verified state, applies only a prepared model batch, and
+    /// renders/dehydrates a successor without inventing an action invocation.
+    pub async fn synchronize(
+        &self,
+        descriptor: &ComponentDescriptor,
+        hydration: &HydrationContext<'_>,
+        proposals: &crate::state::ProposalBatch,
+        trace: &dyn ExecutionTracePort,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::Hydrate,
+            )
+        })?;
+        let instance = catch_future(
+            || hooks.factory().hydrate(hydration),
+            LifecyclePhase::Hydrate,
+        )?
+        .await?;
+        self.execute_owned(
+            descriptor,
+            instance,
+            hydration.render(),
+            true,
+            RegisteredOperation::SyncModels { proposals, trace },
         )
         .await
     }
@@ -381,6 +437,9 @@ impl ComponentExecutor {
             transaction_port,
             trace,
             proposals,
+            response_intents: _,
+            response_sealer: _,
+            response_binding: _,
         } = request;
         let metadata = descriptor
             .actions()
@@ -528,10 +587,30 @@ impl ComponentExecutor {
     async fn execute_owned<'a>(
         &self,
         descriptor: &ComponentDescriptor,
+        instance: Box<dyn ComponentInstance>,
+        context: &RenderContext<'a>,
+        hydrated: bool,
+        operation: RegisteredOperation<'a>,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        self.execute_owned_with_exposure(
+            descriptor,
+            instance,
+            context,
+            hydrated,
+            operation,
+            StateExposure::Instanced,
+        )
+        .await
+    }
+
+    async fn execute_owned_with_exposure<'a>(
+        &self,
+        descriptor: &ComponentDescriptor,
         mut instance: Box<dyn ComponentInstance>,
         context: &RenderContext<'a>,
         hydrated: bool,
         operation: RegisteredOperation<'a>,
+        exposure: StateExposure,
     ) -> Result<LifecycleOutput, LifecycleError> {
         let identity_phase = if hydrated {
             LifecyclePhase::Hydrate
@@ -549,7 +628,7 @@ impl ComponentExecutor {
                 identity_phase,
             )),
             Ok(true) => {
-                self.run_pipeline(instance.as_mut(), context, hydrated, operation)
+                self.run_pipeline(instance.as_mut(), context, hydrated, operation, exposure)
                     .await
             }
         };
@@ -766,7 +845,7 @@ impl ComponentExecutor {
         )
         .with_action(action)
         .with_prepared_arguments(arguments)
-        .with_target(instance);
+        .with_target(instance.action_target());
         let status = validation_engine
             .validate(validation_port, request, &mut validation, bag_policy)
             .await
@@ -801,7 +880,7 @@ impl ComponentExecutor {
                 .await
                 .map_err(ActionExecutionError::lifecycle)?;
                 record_execution_phase(trace, ExecutionPhase::Action);
-                let target: &mut dyn crate::action::ActionTarget = instance;
+                let target = instance.action_target();
                 let result = descriptor
                     .actions()
                     .dispatch_prepared(action, target, &authorization, arguments)
@@ -896,12 +975,17 @@ impl ComponentExecutor {
         context: &RenderContext<'a>,
         hydrated: bool,
         operation: RegisteredOperation<'a>,
+        exposure: StateExposure,
     ) -> Result<LifecycleOutput, LifecycleError> {
         if hydrated {
             catch_future(|| instance.hydrated(context), LifecyclePhase::Hydrate)?.await?;
         }
         match operation {
             RegisteredOperation::None => {}
+            RegisteredOperation::SyncModels { proposals, trace } => {
+                record_execution_phase(trace, ExecutionPhase::Bind);
+                catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)?;
+            }
             RegisteredOperation::ParamsChanged(parameters) => {
                 catch_future(
                     || instance.params_changed(context, parameters),
@@ -925,10 +1009,7 @@ impl ComponentExecutor {
             LifecyclePhase::Dehydrating,
         )?
         .await?;
-        let state = catch_sync(
-            || instance.dehydrate(StateExposure::Instanced),
-            LifecyclePhase::Dehydrate,
-        )?;
+        let state = catch_sync(|| instance.dehydrate(exposure), LifecyclePhase::Dehydrate)?;
         let memo = catch_sync(|| instance.dehydrate_memo(), LifecyclePhase::Dehydrate)?;
         Ok(LifecycleOutput {
             render,

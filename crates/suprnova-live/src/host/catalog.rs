@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::SUPPORTED_PROTOCOL_VERSIONS;
 use crate::identity::{ComponentName, ContentDigest, IslandSlot, RouteIdentity};
+use crate::mount::DocumentMountKey;
 use crate::registry::ComponentRegistry;
 use crate::snapshot::ExpectedSeedV1;
 
@@ -63,6 +64,7 @@ impl MountScopeRequirements {
 pub struct MountCatalogEntry {
     expected_seed: ExpectedSeedV1,
     requirements: MountScopeRequirements,
+    document_key: Option<DocumentMountKey>,
 }
 
 impl MountCatalogEntry {
@@ -72,7 +74,15 @@ impl MountCatalogEntry {
         Self {
             expected_seed,
             requirements,
+            document_key: None,
         }
+    }
+
+    /// Binds the exact server-declared document key accepted from the browser.
+    #[must_use]
+    pub fn with_document_key(mut self, document_key: DocumentMountKey) -> Self {
+        self.document_key = Some(document_key);
+        self
     }
 }
 
@@ -134,6 +144,12 @@ impl MountSelection {
     pub const fn contract_digest(&self) -> &ContentDigest {
         &self.contract_digest
     }
+
+    /// Returns the browser-selected supported protocol pending catalog validation.
+    #[must_use]
+    pub const fn protocol(&self) -> u16 {
+        self.protocol
+    }
 }
 
 impl fmt::Debug for MountSelection {
@@ -147,6 +163,7 @@ impl fmt::Debug for MountSelection {
 pub struct VerifiedMountCatalogMatch {
     expected_seed: ExpectedSeedV1,
     contract_digest: ContentDigest,
+    document_key: DocumentMountKey,
     minimum_protocol: u16,
     protocol: u16,
     requirements: MountScopeRequirements,
@@ -175,6 +192,12 @@ impl VerifiedMountCatalogMatch {
     #[must_use]
     pub const fn contract_digest(&self) -> &ContentDigest {
         &self.contract_digest
+    }
+
+    /// Returns the exact server-declared document-local identity.
+    #[must_use]
+    pub const fn document_key(&self) -> &DocumentMountKey {
+        &self.document_key
     }
 
     /// Returns the component's generated minimum protocol.
@@ -227,33 +250,43 @@ impl MountCatalogBuilder {
         if self.entries.len() >= MAX_MOUNTS {
             return Err(HostContextError::new(HostContextErrorKind::CatalogConflict));
         }
-        let component = entry.expected_seed.component.name();
+        let MountCatalogEntry {
+            expected_seed,
+            requirements,
+            document_key,
+        } = entry;
+        let component = expected_seed.component.name();
         let descriptor = registry
             .resolve(component)
             .map_err(|_| HostContextError::new(HostContextErrorKind::ComponentMismatch))?;
-        if descriptor.contract_digest() != entry.expected_seed.component.contract_digest() {
+        if descriptor.contract_digest() != expected_seed.component.contract_digest() {
             return Err(HostContextError::new(
                 HostContextErrorKind::ContractMismatch,
             ));
         }
-        if !entry
-            .expected_seed
+        if !expected_seed
             .component
-            .matches_schemas(&entry.expected_seed.schemas)
+            .matches_schemas(&expected_seed.schemas)
         {
             return Err(HostContextError::new(
                 HostContextErrorKind::ContractMismatch,
             ));
         }
-        let route = entry.expected_seed.route.clone();
-        let slot = entry.expected_seed.slot.clone();
+        let route = expected_seed.route.clone();
+        let slot = expected_seed.slot.clone();
+        let document_key = match document_key {
+            Some(document_key) => document_key,
+            None => DocumentMountKey::parse(slot.as_str())
+                .map_err(|_| HostContextError::new(HostContextErrorKind::CatalogConflict))?,
+        };
         let key = (route.clone(), slot);
         let verified = VerifiedMountCatalogMatch {
-            expected_seed: entry.expected_seed,
+            expected_seed,
             contract_digest: descriptor.contract_digest().clone(),
+            document_key,
             minimum_protocol: descriptor.metadata().versions().minimum_protocol(),
             protocol: descriptor.metadata().versions().minimum_protocol(),
-            requirements: entry.requirements,
+            requirements,
         };
         if self.entries.insert(key, verified).is_some() {
             return Err(HostContextError::new(HostContextErrorKind::CatalogConflict));

@@ -1,5 +1,6 @@
 //! Validated endpoint byte and protocol policy.
 
+use crate::host::MountSelection;
 use crate::protocol::ProtocolLimits;
 use crate::snapshot::SnapshotLimits;
 
@@ -48,6 +49,21 @@ impl LiveEndpointConfig {
         }
         self.max_response_bytes = max;
         Ok(self)
+    }
+
+    /// Parses only the bounded browser-selected mount tuple needed for host catalog lookup.
+    ///
+    /// This does not grant authority or verify the embedded signature. The resulting tuple
+    /// remains untrusted until the host catalog and the complete endpoint service validate it.
+    pub fn inspect_mount(
+        &self,
+        body: &[u8],
+        media: super::ParsedLiveMediaType,
+    ) -> Result<MountSelection, EndpointError> {
+        if body.len() > self.max_request_bytes {
+            return Err(EndpointError::new(EndpointErrorKind::RequestTooLarge));
+        }
+        super::request::inspect_mount(body, media, &self.protocol)
     }
 
     pub(crate) const fn protocol(&self) -> &ProtocolLimits {

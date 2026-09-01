@@ -7,6 +7,8 @@ use crate::component::ComponentHooks;
 use crate::component::composition::ChildParameterSchema;
 use crate::identity::ContentDigest;
 use crate::metadata::ComponentMetadata;
+use crate::snapshot::SnapshotError;
+use crate::snapshot::state::{FieldSpec, SnapshotSchemaSet, StateSchema};
 
 /// Runtime descriptor generated for one component contract.
 #[derive(Clone)]
@@ -109,6 +111,31 @@ impl ComponentDescriptor {
     #[must_use]
     pub const fn supports_lazy_complete(&self) -> bool {
         self.lazy_complete
+    }
+
+    /// Derives the exact versioned snapshot schemas from the generated contract.
+    pub fn snapshot_schemas(&self) -> Result<SnapshotSchemaSet, SnapshotError> {
+        let state_fields = self
+            .metadata
+            .fields()
+            .iter()
+            .map(|field| {
+                FieldSpec::new(
+                    field.name().as_str(),
+                    field.codec(),
+                    field.category(),
+                    field.required(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        SnapshotSchemaSet::new(
+            StateSchema::new(self.metadata.versions().state_schema(), state_fields)?,
+            StateSchema::new(1, Vec::new())?,
+            StateSchema::new(
+                self.parameter_schema.version(),
+                self.parameter_schema.snapshot_fields()?,
+            )?,
+        )
     }
 }
 

@@ -30,9 +30,9 @@ use suprnova_live::validation::{
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use component_support::{
-    ActionGate, FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes,
-    digest, idempotency, install, key_ring, ledger, metadata, schema_set, snapshot_limits,
-    trusted_context_with_authorization,
+    ActionGate, FailurePoint, FixtureControl, ManualClock, TraceFixture, admitted_response_sealer,
+    browser_context, bytes, digest, idempotency, install, key_ring, ledger, metadata, schema_set,
+    snapshot_limits, trusted_context_with_authorization,
 };
 
 const COMPLETION_WATCHDOG: Duration = Duration::from_secs(5);
@@ -186,6 +186,26 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
     let second_trace = Trace::default();
     let retry_key = idempotency(0x50);
     let request_digest = digest(0x60);
+    let first_response_sealer = admitted_response_sealer(
+        descriptor.clone(),
+        trusted_context_with_authorization(Arc::new(AllowAuthorization)),
+        &encoded,
+        Revision::new(0),
+        0x45,
+        None,
+    )
+    .await;
+    let (first_response_sealer, first_response_binding) = first_response_sealer.into_parts();
+    let second_response_sealer = admitted_response_sealer(
+        descriptor.clone(),
+        trusted_context_with_authorization(Arc::new(AllowAuthorization)),
+        &encoded,
+        Revision::new(0),
+        0x45,
+        None,
+    )
+    .await;
+    let (second_response_sealer, second_response_binding) = second_response_sealer.into_parts();
 
     let first = service.execute_instanced(InstancedActionRequest::new(
         &descriptor,
@@ -203,7 +223,8 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
             BagPolicy::Replace,
             None,
             &first_trace,
-        ),
+        )
+        .with_response_sealer(first_response_sealer, first_response_binding),
     ));
     let mut first = Box::pin(first);
     tokio::time::timeout(COMPLETION_WATCHDOG, async {
@@ -233,7 +254,8 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
             BagPolicy::Replace,
             None,
             &second_trace,
-        ),
+        )
+        .with_response_sealer(second_response_sealer, second_response_binding),
     ));
     let second = tokio::time::timeout(COMPLETION_WATCHDOG, second)
         .await
@@ -276,6 +298,17 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
     )
     .expect("duplicate verified snapshot");
     let duplicate_trace = Trace::default();
+    let duplicate_response_sealer = admitted_response_sealer(
+        descriptor.clone(),
+        trusted_context_with_authorization(Arc::new(AllowAuthorization)),
+        &encoded,
+        Revision::new(0),
+        0x45,
+        None,
+    )
+    .await;
+    let (duplicate_response_sealer, duplicate_response_binding) =
+        duplicate_response_sealer.into_parts();
     let duplicate = service
         .execute_instanced(InstancedActionRequest::new(
             &descriptor,
@@ -293,7 +326,8 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
                 BagPolicy::Replace,
                 None,
                 &duplicate_trace,
-            ),
+            )
+            .with_response_sealer(duplicate_response_sealer, duplicate_response_binding),
         ))
         .await;
     let ExecutionResult::RefreshRequired(duplicate) = duplicate else {

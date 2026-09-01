@@ -40,10 +40,13 @@ use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::identity::RouteIdentity;
 
 /// Process-global registry mapping route names to path patterns.
 ///
@@ -179,6 +182,94 @@ fn lookup_route(name: &str) -> Option<String> {
         Err(poisoned) => poisoned.into_inner(),
     };
     map.get(name).cloned()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LiveRouteResolutionError {
+    UnknownRoute,
+    InvalidParameters,
+    AmbiguousIdentity,
+    InvalidIdentity,
+}
+
+pub(crate) fn prepare_live_route_identity(
+    name: &str,
+    parameters: &CanonicalValue,
+) -> Result<RouteIdentity, LiveRouteResolutionError> {
+    let pattern = lookup_route(name).ok_or(LiveRouteResolutionError::UnknownRoute)?;
+    let identity = live_route_identity(&pattern)?;
+    resolve_live_route(&identity, parameters)?;
+    Ok(identity)
+}
+
+pub(crate) fn resolve_live_route(
+    identity: &RouteIdentity,
+    parameters: &CanonicalValue,
+) -> Result<String, LiveRouteResolutionError> {
+    resolve_live_route_with_snapshot(identity, parameters, || {})
+}
+
+fn resolve_live_route_with_snapshot(
+    identity: &RouteIdentity,
+    parameters: &CanonicalValue,
+    after_snapshot: impl FnOnce(),
+) -> Result<String, LiveRouteResolutionError> {
+    let parameters = live_route_parameters(parameters)?;
+    let registry = ROUTE_REGISTRY
+        .get()
+        .ok_or(LiveRouteResolutionError::UnknownRoute)?;
+    let routes = match registry.read() {
+        Ok(routes) => routes,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut resolved_pattern = None;
+    for pattern in routes.values() {
+        if &live_route_identity(pattern)? != identity {
+            continue;
+        }
+        if resolved_pattern.replace(pattern.clone()).is_some() {
+            return Err(LiveRouteResolutionError::AmbiguousIdentity);
+        }
+    }
+    drop(routes);
+    let pattern = resolved_pattern.ok_or(LiveRouteResolutionError::UnknownRoute)?;
+    after_snapshot();
+    substitute_strict(&pattern, |key| {
+        parameters
+            .get(key)
+            .map(|value| utf8_percent_encode(value, PATH_SEGMENT_ENCODE).to_string())
+    })
+    .map_err(|_| LiveRouteResolutionError::InvalidParameters)
+}
+
+fn live_route_identity(pattern: &str) -> Result<RouteIdentity, LiveRouteResolutionError> {
+    let mut digest = Sha256::new();
+    digest.update(b"suprnova-live/route-identity/v1\0");
+    digest.update(pattern.as_bytes());
+    let bytes: [u8; 32] = digest.finalize().into();
+    RouteIdentity::from_bytes(&bytes).map_err(|_| LiveRouteResolutionError::InvalidIdentity)
+}
+
+fn live_route_parameters(
+    parameters: &CanonicalValue,
+) -> Result<HashMap<String, String>, LiveRouteResolutionError> {
+    let CanonicalValue::Object(parameters) = parameters else {
+        return Err(LiveRouteResolutionError::InvalidParameters);
+    };
+    parameters
+        .iter()
+        .map(|(name, value)| {
+            let value = match value {
+                CanonicalValue::Bool(value) => value.to_string(),
+                CanonicalValue::Number(value) => value.get().to_string(),
+                CanonicalValue::String(value) => value.clone(),
+                CanonicalValue::Null | CanonicalValue::Array(_) | CanonicalValue::Object(_) => {
+                    return Err(LiveRouteResolutionError::InvalidParameters);
+                }
+            };
+            Ok((name.clone(), value))
+        })
+        .collect()
 }
 
 /// Decode the captured `(key, value)` pairs from a successful
@@ -508,10 +599,23 @@ pub struct Router {
     live_routes: HashMap<(Method, String), crate::live::context::LiveRouteMetadata>,
     /// Startup declarations consumed into the immutable Live mount catalog.
     live_mounts: Mutex<Option<Vec<suprnova_live::host::MountCatalogEntry>>>,
+    /// Every normalized application route pattern, independent of method.
+    /// Live uses this startup-only ledger to reserve its namespace before
+    /// mutating any method router.
+    registered_patterns: Vec<String>,
+    /// Version of the one permitted Live route installation.
+    live_installation_version: Option<u16>,
     /// Fallback handler for when no routes match (overrides default 404)
     fallback_handler: Option<Arc<BoxedHandler>>,
     /// Middleware for the fallback route
     fallback_middleware: Vec<BoxedMiddleware>,
+}
+
+fn pattern_overlaps_live_namespace(pattern: &str) -> bool {
+    let Some(first) = pattern.split('/').find(|segment| !segment.is_empty()) else {
+        return false;
+    };
+    first == "__live" || (first.starts_with('{') && first.ends_with('}'))
 }
 
 impl Router {
@@ -530,6 +634,8 @@ impl Router {
             route_middleware: HashMap::new(),
             live_routes: HashMap::new(),
             live_mounts: Mutex::new(Some(Vec::new())),
+            registered_patterns: Vec::new(),
+            live_installation_version: None,
             fallback_handler: None,
             fallback_middleware: Vec::new(),
         }
@@ -562,6 +668,26 @@ impl Router {
                 "Live route metadata collided during route construction",
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn register_live_document_metadata(
+        &mut self,
+        method: Method,
+        pattern: &str,
+        policy: crate::live::context::LiveRouteSecurityPolicy,
+    ) -> Result<(), FrameworkError> {
+        let key = (method, pattern.to_string());
+        if let Some(metadata) = self.live_routes.get_mut(&key) {
+            return metadata.merge_document_policy(policy);
+        }
+        self.live_routes.insert(
+            key,
+            crate::live::context::LiveRouteMetadata::new(
+                crate::live::attestation::LiveOperation::Document,
+                policy,
+            ),
+        );
         Ok(())
     }
 
@@ -603,6 +729,34 @@ impl Router {
             .ok_or_else(|| {
                 FrameworkError::internal("Live mount declarations were consumed more than once")
             })
+    }
+
+    pub(crate) fn preflight_live_installation(&self, version: u16) -> Result<(), FrameworkError> {
+        if self.live_installation_version.is_some() {
+            return Err(FrameworkError::internal(
+                "Live routes may be installed exactly once",
+            ));
+        }
+        if version == 0 {
+            return Err(FrameworkError::internal(
+                "Live route installation version was invalid",
+            ));
+        }
+        if self
+            .registered_patterns
+            .iter()
+            .any(|pattern| pattern_overlaps_live_namespace(pattern))
+        {
+            return Err(FrameworkError::internal(
+                "an application route overlaps the reserved Live namespace",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_live_installed(&mut self, version: u16) {
+        debug_assert!(self.live_installation_version.is_none());
+        self.live_installation_version = Some(version);
     }
 
     /// Register middleware for a `(method, path)` pair (internal use).
@@ -662,7 +816,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert a POST route with a pre-boxed handler (internal use for groups).
@@ -687,7 +843,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert a PUT route with a pre-boxed handler (internal use for groups).
@@ -712,7 +870,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert a DELETE route with a pre-boxed handler (internal use for groups).
@@ -737,7 +897,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert a PATCH route with a pre-boxed handler (internal use for groups
@@ -762,7 +924,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert a HEAD route with a pre-boxed handler.
@@ -789,7 +953,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Insert an OPTIONS route with a pre-boxed handler.
@@ -817,7 +983,9 @@ impl Router {
             .insert(path, (path.to_string(), handler))
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
-            })
+            })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
     }
 
     /// Register a GET route.
@@ -855,11 +1023,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.get_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
-            })?;
+        self.try_insert_get(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -897,11 +1061,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.post_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
-            })?;
+        self.try_insert_post(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -935,11 +1095,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.put_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
-            })?;
+        self.try_insert_put(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -977,11 +1133,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.delete_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
-            })?;
+        self.try_insert_delete(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1019,11 +1171,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.patch_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
-            })?;
+        self.try_insert_patch(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1077,11 +1225,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.head_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
-            })?;
+        self.try_insert_head(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1125,11 +1269,7 @@ impl Router {
     {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.options_routes
-            .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
-            })?;
+        self.try_insert_options(&converted, Arc::new(handler))?;
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1510,6 +1650,7 @@ impl Router {
             .map_err(|e| {
                 FrameworkError::internal(format!("Failed to register WS route '{path}': {e}"))
             })?;
+        self.registered_patterns.push(converted);
         Ok(self)
     }
 
@@ -2392,6 +2533,99 @@ mod tests {
                 assert_eq!(missing, vec!["slug".to_string()]);
             }
             other => panic!("expected MissingParams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn live_route_resolution_fails_closed_on_ambiguous_identity() {
+        register_route_name("live.ambiguous.first", "/live-ambiguous/{id}");
+        register_route_name("live.ambiguous.second", "/live-ambiguous/{id}");
+        let parameters = suprnova_live::canonical::CanonicalValue::Object(
+            [(
+                "id".to_owned(),
+                suprnova_live::canonical::CanonicalValue::String("7".to_owned()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let identity = live_route_identity("/live-ambiguous/{id}")
+            .expect("registered pattern has a valid opaque identity");
+
+        assert!(matches!(
+            prepare_live_route_identity("live.ambiguous.first", &parameters),
+            Err(LiveRouteResolutionError::AmbiguousIdentity)
+        ));
+        assert!(matches!(
+            resolve_live_route(&identity, &parameters),
+            Err(LiveRouteResolutionError::AmbiguousIdentity)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn live_route_resolution_uses_validated_pattern_snapshot_during_concurrent_mutation() {
+        clear_route_names_for_test();
+        register_route_name("live.snapshot", "/snapshot-original/{id}");
+        let parameters = suprnova_live::canonical::CanonicalValue::Object(
+            [(
+                "id".to_owned(),
+                suprnova_live::canonical::CanonicalValue::String("42".to_owned()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let identity = prepare_live_route_identity("live.snapshot", &parameters)
+            .expect("initial named route is valid");
+        let mutation_started = Arc::new(std::sync::Barrier::new(2));
+        let mutation_finished = Arc::new(std::sync::Barrier::new(2));
+        let mutator = {
+            let mutation_started = Arc::clone(&mutation_started);
+            let mutation_finished = Arc::clone(&mutation_finished);
+            std::thread::spawn(move || {
+                mutation_started.wait();
+                clear_route_names_for_test();
+                register_route_name("live.snapshot", "/snapshot-replacement/{id}");
+                mutation_finished.wait();
+            })
+        };
+
+        let target = resolve_live_route_with_snapshot(&identity, &parameters, || {
+            mutation_started.wait();
+            mutation_finished.wait();
+        })
+        .expect("validated route snapshot remains resolvable");
+        mutator.join().expect("route mutator completed");
+
+        assert_eq!(target, "/snapshot-original/42");
+    }
+
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn live_route_parameters_reject_nested_and_null_values() {
+        register_route_name("live.scalar.only", "/live-scalar/{id}");
+        let nested = suprnova_live::canonical::CanonicalValue::Object(
+            [(
+                "id".to_owned(),
+                suprnova_live::canonical::CanonicalValue::Object(Default::default()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let null = suprnova_live::canonical::CanonicalValue::Object(
+            [(
+                "id".to_owned(),
+                suprnova_live::canonical::CanonicalValue::Null,
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        for parameters in [&nested, &null] {
+            assert!(matches!(
+                prepare_live_route_identity("live.scalar.only", parameters),
+                Err(LiveRouteResolutionError::InvalidParameters)
+            ));
         }
     }
 

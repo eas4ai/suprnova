@@ -14,11 +14,6 @@ use endpoint_support::{StaticKernel, context, request, response_body, service};
 async fn every_closed_kernel_outcome_has_one_http_mapping() {
     for (kind, protocol, status) in [
         (
-            EndpointOutcomeKind::Accepted,
-            ResponseOutcome::Accepted,
-            StatusCode::OK,
-        ),
-        (
             EndpointOutcomeKind::Duplicate,
             ResponseOutcome::Duplicate,
             StatusCode::OK,
@@ -52,6 +47,17 @@ async fn every_closed_kernel_outcome_has_one_http_mapping() {
             LIVE_MEDIA_TYPE_V1
         );
     }
+}
+
+#[tokio::test]
+async fn accepted_outcome_requires_engine_sealed_response_capability() {
+    let kernel = Arc::new(StaticKernel::new(
+        EndpointOutcomeKind::Accepted,
+        response_body(ResponseOutcome::Accepted),
+    ));
+    let response = service(kernel).handle(request(context())).await;
+    assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response.body.is_empty());
 }
 
 #[tokio::test]

@@ -94,19 +94,38 @@ impl Error for EndpointError {}
 
 /// Closed failure returned by the application-facing endpoint kernel.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub struct EndpointKernelError;
+pub struct EndpointKernelError {
+    kind: EndpointErrorKind,
+}
 
 impl EndpointKernelError {
     /// Creates a payload-free kernel availability failure.
     #[must_use]
     pub const fn unavailable() -> Self {
-        Self
+        Self {
+            kind: EndpointErrorKind::KernelUnavailable,
+        }
+    }
+
+    /// Creates a payload-free trusted-context inconsistency failure.
+    #[must_use]
+    pub const fn context_inconsistent() -> Self {
+        Self {
+            kind: EndpointErrorKind::ContextInconsistent,
+        }
+    }
+
+    pub(crate) const fn kind(self) -> EndpointErrorKind {
+        self.kind
     }
 }
 
 impl fmt::Display for EndpointKernelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("live_endpoint_kernel_unavailable")
+        formatter.write_str(match self.kind {
+            EndpointErrorKind::ContextInconsistent => "live_endpoint_context_inconsistent",
+            _ => "live_endpoint_kernel_unavailable",
+        })
     }
 }
 

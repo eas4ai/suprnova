@@ -268,6 +268,34 @@ pub fn dehydrate<T: Serialize>(
     Ok(canonical)
 }
 
+/// Serializes one generated JSON-codec field under the supplied canonical limits.
+#[doc(hidden)]
+pub fn encode_json<T: Serialize>(
+    value: &T,
+    limits: &InputLimits,
+) -> Result<CanonicalValue, SnapshotError> {
+    let mut writer = BoundedWriter::new(limits.max_bytes());
+    if serde_json::to_writer(&mut writer, value).is_err() {
+        let kind = if writer.exceeded {
+            SnapshotErrorKind::InputTooLarge
+        } else {
+            SnapshotErrorKind::DehydrationFailed
+        };
+        return Err(SnapshotError::new(kind));
+    }
+    parse_canonical_value(&writer.bytes, limits).map_err(map_canonical_state)
+}
+
+/// Deserializes one generated JSON-codec field from verified canonical state.
+#[doc(hidden)]
+pub fn decode_json<T: DeserializeOwned>(value: &CanonicalValue) -> Result<T, SnapshotError> {
+    let serde_value = value
+        .to_serde_value()
+        .map_err(|_| SnapshotError::new(SnapshotErrorKind::HydrationFailed))?;
+    serde_json::from_value(serde_value)
+        .map_err(|_| SnapshotError::new(SnapshotErrorKind::HydrationFailed))
+}
+
 pub(crate) fn hydrate<T: DeserializeOwned>(
     value: &CanonicalValue,
     schema: &StateSchema,

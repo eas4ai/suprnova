@@ -43,6 +43,9 @@ pub use router::{
     clear_route_names_for_test, register_route_name, route, route_name_for_pattern,
     route_with_params, try_register_route_name, try_route, try_route_with_params,
 };
+pub(crate) use router::{
+    LiveRouteResolutionError, prepare_live_route_identity, resolve_live_route,
+};
 pub use signed::{
     EXPIRES_KEY, SIGNATURE_KEY, SignatureVerdict, sign_route, sign_url, verify_signature,
 };

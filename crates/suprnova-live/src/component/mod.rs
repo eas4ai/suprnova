@@ -2,6 +2,8 @@
 
 pub mod composition;
 mod executor;
+#[doc(hidden)]
+pub mod generated;
 mod instance;
 pub mod lazy;
 mod lifecycle;

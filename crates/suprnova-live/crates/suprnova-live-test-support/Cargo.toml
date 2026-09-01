@@ -15,6 +15,7 @@ default = []
 async-trait = "=0.1.92"
 axum = { version = "=0.7.9", features = ["ws"] }
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+bytes = "=1.11.1"
 futures-util = { version = "=0.3.34", features = ["sink"] }
 getrandom = { version = "=0.4.3", features = ["std"] }
 http-body-util = "=0.1.3"

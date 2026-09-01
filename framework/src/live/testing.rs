@@ -320,12 +320,16 @@ pub fn prepare_live_request_for_test(
 pub struct LiveTestRoutePolicy {
     /// The route is admitted by a trusted internal-origin boundary.
     pub trusted_internal_origin: bool,
+    /// CSRF is explicitly inapplicable for this route class.
+    pub stateless_csrf: bool,
     /// The route deliberately has no session scope.
     pub stateless_session: bool,
     /// The route deliberately permits an anonymous principal.
     pub anonymous_principal: bool,
     /// The route deliberately has no tenant scope.
     pub tenantless: bool,
+    /// The request uses a direct peer without proxy interpretation.
+    pub direct_peer: bool,
     /// A declared upstream boundary owns rate admission.
     pub upstream_rate_limit: bool,
     /// No application-specific middleware is required after core checks.
@@ -335,9 +339,11 @@ pub struct LiveTestRoutePolicy {
 fn route_policy(policy: LiveTestRoutePolicy) -> super::context::LiveRouteSecurityPolicy {
     super::context::LiveRouteSecurityPolicy {
         trusted_internal_origin: policy.trusted_internal_origin,
+        stateless_csrf: policy.stateless_csrf,
         stateless_session: policy.stateless_session,
         anonymous_principal: policy.anonymous_principal,
         tenantless: policy.tenantless,
+        direct_peer: policy.direct_peer,
         upstream_rate_limit: policy.upstream_rate_limit,
         no_additional_middleware: policy.no_additional_middleware,
     }
@@ -349,9 +355,11 @@ impl LiveTestRoutePolicy {
     pub const fn strict() -> Self {
         Self {
             trusted_internal_origin: false,
+            stateless_csrf: false,
             stateless_session: false,
             anonymous_principal: false,
             tenantless: false,
+            direct_peer: false,
             upstream_rate_limit: false,
             no_additional_middleware: false,
         }
@@ -430,6 +438,30 @@ pub fn register_live_mount_for_test<C: super::ComponentContract>(
             ScopeRequirement::Absent,
         ),
     ))
+}
+
+/// Consumes test router mount declarations into the same immutable runtime path
+/// used by server preparation, without binding a listener.
+pub fn prepare_live_router_for_test(
+    router: &crate::Router,
+) -> Result<super::LiveRuntime, crate::FrameworkError> {
+    let config = crate::App::resolve::<super::LiveConfig>().unwrap_or_default();
+    let registry = crate::App::resolve::<super::LiveRegistry>()
+        .unwrap_or_else(|_| super::LiveRegistry::builder().build());
+    let runtime = super::runtime::assemble_for_harness(config, registry)?;
+    crate::container::testing::TestContainer::singleton(runtime.clone());
+    for entry in router.take_live_mount_entries()? {
+        runtime.register_mount(entry)?;
+    }
+    runtime.finalize_mount_catalog()?;
+    Ok(runtime)
+}
+
+/// Returns whether macro registration attached executable request-owned hooks.
+pub fn component_registration_has_runtime_hooks<C: super::ComponentContract>() -> bool {
+    C::__live_registration()
+        .map(|registration| registration.into_engine().hooks().is_some())
+        .unwrap_or(false)
 }
 
 /// Records one positive owner-middleware fact without exposing production authority.
@@ -1071,6 +1103,7 @@ pub struct LiveRuntimeReport {
     random: bool,
     key_ring: bool,
     ledger: bool,
+    promotion: bool,
     execution: bool,
     context_validator: bool,
     host_ports: bool,
@@ -1086,6 +1119,7 @@ impl LiveRuntimeReport {
             && self.random
             && self.key_ring
             && self.ledger
+            && self.promotion
             && self.execution
             && self.context_validator
             && self.host_ports
@@ -1115,6 +1149,12 @@ impl LiveRuntimeReport {
     #[must_use]
     pub const fn has_instance_ledger(&self) -> bool {
         self.ledger
+    }
+
+    /// Returns whether the runtime owns bounded public-seed promotion.
+    #[must_use]
+    pub const fn has_seed_promotion_service(&self) -> bool {
+        self.promotion
     }
 
     /// Returns whether the runtime owns the action execution coordinator.
@@ -1157,6 +1197,7 @@ pub fn inspect_runtime(runtime: &LiveRuntime) -> LiveRuntimeReport {
         random: readiness.random,
         key_ring: readiness.key_ring,
         ledger: readiness.ledger,
+        promotion: readiness.promotion,
         execution: readiness.execution,
         context_validator: readiness.context_validator,
         host_ports: readiness.host_ports,

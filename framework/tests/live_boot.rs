@@ -76,7 +76,7 @@ struct ActionEmail {
     email: String,
 }
 
-#[derive(Validate)]
+#[derive(serde::Deserialize, serde::Serialize, Validate)]
 struct NestedEmail {
     #[validate(email)]
     email: String,
@@ -190,6 +190,7 @@ fn runtime_is_bound_before_fallible_routes_and_reused_on_reentry() {
     assert!(runtime_report.has_random_source());
     assert!(runtime_report.has_key_ring());
     assert!(runtime_report.has_instance_ledger());
+    assert!(runtime_report.has_seed_promotion_service());
     assert!(runtime_report.has_execution_kernel());
     assert!(runtime_report.has_context_validator());
     assert!(runtime_report.has_host_ports());
