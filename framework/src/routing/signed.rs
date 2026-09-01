@@ -147,26 +147,16 @@ fn split_url(url: &str) -> (String, Vec<(String, String)>) {
         Some(i) => &url[..i],
         None => url,
     };
-    // Normalise trailing slash so sign and verify both hash the same canonical
-    // path regardless of whether a browser or proxy appended one.  Preserve "/"
-    // itself so the root path never collapses to an empty string.
-    let normalize = |p: &str| -> String {
-        if p.len() > 1 {
-            p.trim_end_matches('/').to_string()
-        } else {
-            p.to_string()
-        }
-    };
     match url.find('?') {
         Some(i) => {
-            let path = normalize(&url[..i]);
+            let path = url[..i].to_string();
             let pairs: Vec<(String, String)> =
                 url::form_urlencoded::parse(&url.as_bytes()[i + 1..])
                     .into_owned()
                     .collect();
             (path, pairs)
         }
-        None => (normalize(url), Vec::new()),
+        None => (url.to_string(), Vec::new()),
     }
 }
 
@@ -735,31 +725,107 @@ mod tests {
 
     #[test]
     #[serial_test::serial(crypt_install)]
-    fn trailing_slash_on_verify_matches_signed_path() {
-        // sign_url produces a canonical path without a trailing slash.
-        // A request that arrives at /orders/1/ (browser or proxy appended the
-        // slash) must still verify - split_url normalises both sides identically.
+    fn trailing_slash_is_part_of_the_signed_path() {
         ensure_key();
-        let signed = sign_url("/orders/1", None).expect("sign");
-        // Inject a trailing slash into the path portion before verifying.
-        let with_slash = signed.replacen("/orders/1", "/orders/1/", 1);
+        let without_slash = sign_url("/orders/1?scope=read", None).expect("sign without slash");
+        let with_slash = sign_url("/orders/1/?scope=read", None).expect("sign with slash");
+
+        assert_eq!(
+            verify_signature(&without_slash, 0).unwrap(),
+            SignatureVerdict::Valid,
+            "the URL without a trailing slash must validate itself",
+        );
         assert_eq!(
             verify_signature(&with_slash, 0).unwrap(),
             SignatureVerdict::Valid,
-            "trailing slash on the verify side must not invalidate the signature",
+            "the URL with a trailing slash must validate itself",
+        );
+
+        let without_slash_signature = without_slash
+            .rsplit_once("signature=")
+            .expect("signed URL without slash carries a signature")
+            .1;
+        let with_slash_signature = with_slash
+            .rsplit_once("signature=")
+            .expect("signed URL with slash carries a signature")
+            .1;
+
+        assert_eq!(
+            verify_signature(
+                &format!("/orders/1?scope=read&signature={with_slash_signature}"),
+                0,
+            )
+            .unwrap(),
+            SignatureVerdict::Invalid,
+            "the slash-path signature must not validate the non-slash path",
+        );
+        assert_eq!(
+            verify_signature(
+                &format!("/orders/1/?scope=read&signature={without_slash_signature}"),
+                0,
+            )
+            .unwrap(),
+            SignatureVerdict::Invalid,
+            "the non-slash-path signature must not validate the slash path",
         );
     }
 
     #[test]
     #[serial_test::serial(crypt_install)]
-    fn root_path_trailing_slash_normalisation_preserves_root() {
-        // Ensure "/" is never collapsed to "" during normalisation.
+    fn trailing_slash_is_part_of_the_signed_path_without_query() {
+        ensure_key();
+        let without_slash = sign_url("/orders/1", None).expect("sign without slash");
+        let with_slash = sign_url("/orders/1/", None).expect("sign with slash");
+
+        assert_eq!(
+            verify_signature(&without_slash, 0).unwrap(),
+            SignatureVerdict::Valid,
+            "the URL without a trailing slash must validate itself",
+        );
+        assert_eq!(
+            verify_signature(&with_slash, 0).unwrap(),
+            SignatureVerdict::Valid,
+            "the URL with a trailing slash must validate itself",
+        );
+
+        let without_slash_signature = without_slash
+            .rsplit_once("signature=")
+            .expect("signed URL without slash carries a signature")
+            .1;
+        let with_slash_signature = with_slash
+            .rsplit_once("signature=")
+            .expect("signed URL with slash carries a signature")
+            .1;
+
+        assert_eq!(
+            verify_signature(&format!("/orders/1?signature={with_slash_signature}"), 0,).unwrap(),
+            SignatureVerdict::Invalid,
+            "the slash-path signature must not validate the non-slash path",
+        );
+        assert_eq!(
+            verify_signature(
+                &format!("/orders/1/?signature={without_slash_signature}"),
+                0,
+            )
+            .unwrap(),
+            SignatureVerdict::Invalid,
+            "the non-slash-path signature must not validate the slash path",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn root_path_is_preserved_exactly() {
         ensure_key();
         let signed = sign_url("/", None).expect("sign root");
+        assert!(
+            signed.starts_with("/?signature="),
+            "the exact root path must remain '/' in the signed URL; got {signed}",
+        );
         assert_eq!(
             verify_signature(&signed, 0).unwrap(),
             SignatureVerdict::Valid,
-            "root path must remain valid after normalisation",
+            "the exact root path must validate itself",
         );
     }
 
