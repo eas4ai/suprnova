@@ -35,6 +35,13 @@ fn run_child(mode: &str) -> Output {
                 .env("APP_KEY", EncryptionKey::generate().to_base64())
                 .env("APP_KEY_PREVIOUS", EncryptionKey::generate().to_base64());
         }
+        "conflicting_previous" => {
+            command
+                .env("APP_ENV", "production")
+                .env("APP_KEY", EncryptionKey::generate().to_base64())
+                .env("APP_KEY_PREVIOUS", EncryptionKey::generate().to_base64())
+                .env("APP_PREVIOUS_KEYS", EncryptionKey::generate().to_base64());
+        }
         other => panic!("unknown child mode: {other}"),
     }
 
@@ -72,5 +79,20 @@ fn previous_key_notice_is_visible_without_a_tracing_subscriber() {
         stderr.matches("APP_KEY_PREVIOUS active").count(),
         1,
         "the repeated Server validation must not duplicate the first-install notice"
+    );
+}
+
+#[test]
+fn conflicting_previous_key_notice_is_visible_once_without_a_tracing_subscriber() {
+    let output = run_child("conflicting_previous");
+    assert!(output.status.success(), "child failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set")
+            .count(),
+        1,
+        "the conflict notice must survive pre-subscriber bootstrap without being duplicated by \
+         Server validation; stderr:\n{stderr}"
     );
 }

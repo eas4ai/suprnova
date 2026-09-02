@@ -793,24 +793,17 @@ pub(crate) fn initialize_from_environment(environment: &Environment) -> Result<(
     let app_key = std::env::var("APP_KEY").ok();
     // Suprnova canonical name is `APP_KEY_PREVIOUS`; Laravel uses
     // `APP_PREVIOUS_KEYS`. The canonical name wins when both are set.
-    let app_key_previous = match (
+    let (app_key_previous, previous_keys_conflict) = match (
         std::env::var("APP_KEY_PREVIOUS").ok(),
         std::env::var("APP_PREVIOUS_KEYS").ok(),
     ) {
         (Some(canonical), Some(laravel)) => {
-            if canonical.trim() != laravel.trim() {
-                tracing::warn!(
-                    "APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
-                     different values. Using APP_KEY_PREVIOUS (Suprnova \
-                     canonical name); APP_PREVIOUS_KEYS is ignored. Drop the \
-                     duplicate from your environment."
-                );
-            }
-            Some(canonical)
+            let conflict = canonical.trim() != laravel.trim();
+            (Some(canonical), conflict)
         }
-        (Some(canonical), None) => Some(canonical),
-        (None, Some(laravel)) => Some(laravel),
-        (None, None) => None,
+        (Some(canonical), None) => (Some(canonical), false),
+        (None, Some(laravel)) => (Some(laravel), false),
+        (None, None) => (None, false),
     };
     let boot_ring =
         resolve_boot_keyring(environment, app_key.as_deref(), app_key_previous.as_deref())?;
@@ -818,6 +811,13 @@ pub(crate) fn initialize_from_environment(environment: &Environment) -> Result<(
     // Only emit operator hints and install on the first boot. Resolving the
     // ring above is intentionally unconditional so later boots still validate.
     if !Crypt::is_initialized() {
+        if previous_keys_conflict {
+            eprintln!(
+                "suprnova: APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
+                 different values. Using APP_KEY_PREVIOUS (Suprnova canonical name); \
+                 APP_PREVIOUS_KEYS is ignored. Drop the duplicate from your environment."
+            );
+        }
         if boot_ring.is_current_generated() {
             eprintln!(
                 "suprnova: APP_KEY is not set - generated a transient development key. \
