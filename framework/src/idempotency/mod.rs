@@ -32,9 +32,13 @@
 //! variant - and because it is a distinct variant rather than a flag, an
 //! exhaustive `match` will not let it be ignored by accident.
 //!
-//! A transient refresh *error* is not treated as loss on its own: it means
-//! the backend could not be asked, not that somebody else holds the lock, so
-//! renewal retries and only gives up after several consecutive failures.
+//! A transient periodic refresh *error* is not treated as loss on its own: it
+//! means the backend could not be asked, not that somebody else holds the lock,
+//! so renewal retries and only gives up after several consecutive failures.
+//! After the body completes, however, one final owner-scoped refresh must prove
+//! the token is still current before the result can be reported as fenced. An
+//! error in that final check yields `FreshUnfenced` because ownership is then
+//! unknown.
 //!
 //! ## Key material
 //!
@@ -389,14 +393,14 @@ impl Idempotency {
 /// running, so a body that outlives its original `ttl` cannot let the lock
 /// expire and a second caller execute concurrently - the double-execution
 /// window the bare lock left open. The renewal task parks (never resolves) so
-/// the `select!` always completes via `body`; if a refresh ever fails (token
-/// lost or backend error) it logs once and stops renewing rather than spamming.
-/// Tested with `ttl >= 1s`; a very short `ttl` may not refresh before the first
-/// expiry.
+/// the `select!` always completes via `body`. Periodic errors are retried up to
+/// the configured limit. After `body` completes, an owner-scoped refresh is
+/// required before the lease can be reported as held. Tested with `ttl >= 1s`;
+/// a very short `ttl` may not refresh before the first expiry.
 /// Whether exclusivity held for the whole of `body`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseState {
-    /// Every refresh succeeded; no other caller could hold the lock.
+    /// No refresh established loss, and the final owner check succeeded.
     Held,
     /// The lease was lost, or could no longer be proven alive.
     Lost,
@@ -478,7 +482,24 @@ async fn run_under_lease<T>(
     let state = if lease_lost.load(std::sync::atomic::Ordering::Acquire) {
         LeaseState::Lost
     } else {
-        LeaseState::Held
+        match guard.refresh(ttl).await {
+            Ok(true) => LeaseState::Held,
+            Ok(false) => {
+                tracing::warn!(
+                    idempotency_key = %hashed_key,
+                    "idempotency lease ownership could not be confirmed after body completion"
+                );
+                LeaseState::Lost
+            }
+            Err(e) => {
+                tracing::warn!(
+                    idempotency_key = %hashed_key,
+                    error = %e,
+                    "idempotency lease ownership check failed after body completion"
+                );
+                LeaseState::Lost
+            }
+        }
     };
     Ok((result, state))
 }

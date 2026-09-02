@@ -684,6 +684,98 @@ async fn commit_on_success_owned_reports_the_owner_and_hands_it_to_the_body() {
     );
 }
 
+#[test]
+#[serial]
+fn synchronously_blocked_body_reports_unfenced_after_takeover() {
+    install_memory_cache();
+    assert_synchronously_blocked_body_reports_unfenced_after_takeover();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_synchronously_blocked_body_reports_unfenced_after_takeover() {
+    let config = suprnova::cache::CacheConfig {
+        driver: suprnova::cache::CacheDriver::Redis,
+        url: std::env::var("CACHE_REDIS_TEST_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned()),
+        prefix: format!("idem-final-proof:{}:", uuid::Uuid::new_v4()),
+        default_ttl: 0,
+    };
+    let store: Arc<dyn CacheStore> = Arc::new(
+        suprnova::cache::RedisCache::connect(&config)
+            .await
+            .expect("connect to test Redis"),
+    );
+    App::bind::<dyn CacheStore>(store);
+    assert_synchronously_blocked_body_reports_unfenced_after_takeover();
+}
+
+fn assert_synchronously_blocked_body_reports_unfenced_after_takeover() {
+    let ttl = Duration::from_millis(100);
+    let (body_entered_tx, body_entered_rx) = std::sync::mpsc::sync_channel(0);
+    let (takeover_tx, takeover_rx) = std::sync::mpsc::sync_channel(0);
+
+    let first = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("first runtime")
+            .block_on(Idempotency::commit_on_success_owned(
+                "owned-blocked-poll",
+                ttl,
+                move |_owner| async move {
+                    body_entered_tx.send(()).expect("announce first body");
+                    takeover_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("second caller must acquire before the first body returns");
+                    Ok::<_, suprnova::FrameworkError>(1_i32)
+                },
+            ))
+    });
+
+    let second = std::thread::spawn(move || {
+        body_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first body must acquire and start");
+        std::thread::sleep(ttl + Duration::from_millis(50));
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("second runtime")
+            .block_on(Idempotency::commit_on_success_owned(
+                "owned-blocked-poll",
+                Duration::from_secs(1),
+                move |_owner| async move {
+                    takeover_tx.send(()).expect("release first body");
+                    Ok::<_, suprnova::FrameworkError>(2_i32)
+                },
+            ))
+    });
+
+    let (second_outcome, second_owner) = second
+        .join()
+        .expect("second thread")
+        .expect("second caller succeeds");
+    assert_eq!(second_outcome, Idempotent::Fresh(2));
+    assert!(
+        second_owner.is_some(),
+        "the takeover owns the current lease"
+    );
+
+    let (first_outcome, first_owner) = first
+        .join()
+        .expect("first thread")
+        .expect("first caller succeeds");
+    assert_eq!(first_outcome, Idempotent::FreshUnfenced(1));
+    assert!(
+        first_owner.is_none(),
+        "an expired owner token must not escape as a currently held lease"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn release_owned_is_scoped_to_the_owner_that_took_the_lock() {
