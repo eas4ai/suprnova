@@ -552,3 +552,95 @@ async fn redis_backend_cross_hub_fanout() {
     assert_eq!(envelope.event, "MessagePosted");
     assert_eq!(envelope.data["from"], "hub_a");
 }
+
+/// Redis command failures are reported by the send receipt, after
+/// `SeaProducer::send` has accepted the message. Publishing must wait for
+/// that receipt instead of returning success for a failed `XADD`.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_publish_reports_stream_write_failure() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-wrong-type-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("Redis hub connect");
+
+    let client = redis::Client::open(url).expect("valid Redis URL");
+    let mut conn = redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("direct Redis connection");
+    redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("poison stream key with a string value");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        hub.publish(envelope("chat.receipt", "MessagePosted", json!({}))),
+    )
+    .await
+    .expect("publish must finish within the caller-visible bound");
+
+    redis::cmd("DEL")
+        .arg(&stream_key)
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("remove poisoned stream key");
+
+    let error = result.expect_err("a failed Redis XADD must not be reported as success");
+    let message = error.to_string();
+    assert!(message.contains("broadcast publish delivery receipt failed"));
+    assert!(!message.contains("chat.receipt"));
+    assert!(!message.contains(&stream_key));
+}
+
+/// Presence writes use the same backend receipt contract as ordinary
+/// publishes and must surface a failed Redis `XADD` to the caller.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_presence_reports_stream_write_failure() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-wrong-type-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("Redis hub connect");
+
+    let client = redis::Client::open(url).expect("valid Redis URL");
+    let mut conn = redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("direct Redis connection");
+    redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("poison stream key with a string value");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        hub.track_member("presence.receipt", "member-1", json!({ "user_id": 1 })),
+    )
+    .await
+    .expect("presence write must finish within the caller-visible bound");
+
+    redis::cmd("DEL")
+        .arg(&stream_key)
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("remove poisoned stream key");
+
+    let error = result.expect_err("a failed presence XADD must not be reported as success");
+    let message = error.to_string();
+    assert!(message.contains("presence update delivery receipt failed"));
+    assert!(!message.contains("presence.receipt"));
+    assert!(!message.contains("member-1"));
+    assert!(!message.contains(&stream_key));
+}
