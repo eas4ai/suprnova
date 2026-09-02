@@ -256,9 +256,9 @@ const semanticRequirements = new Map([
           /Suprnova application integration owns routes, authentication, session, configuration, provider, scanner, storage, and broadcast wiring\.[\s\S]{0,400}Iteration 005 must implement and prove that ownership through framework tests/u,
       },
       {
-        id: "operations_async_size_review_not_cap",
+        id: "operations_artifact_size_reported_not_budgeted",
         pattern:
-          /Async has no absolute\s+cap[\s\S]{0,500}15 percent[\s\S]{0,300}review trigger/u,
+          /Artifact size is reported, not budgeted[\s\S]{0,300}no\s+artifact has a cap or drift rule/u,
       },
       {
         id: "operations_fanout_replay_distinction",

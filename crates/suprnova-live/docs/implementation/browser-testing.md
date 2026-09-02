@@ -44,10 +44,10 @@ or failing evidence is always a failure.
 
 ## Budgets and diagnostics
 
-`npm run budget` verifies snapshot/control overhead, reports exact Brotli bytes
-for both core variants, enforces the 8 KiB per-format Stimulus adapter cap and the
-upload/async caps, and checks exact current ESM artifact identity against the
-browser baseline. Core size is measured but has no unsupported absolute ceiling.
+`npm run build` prints the exact raw and Brotli bytes of every artifact; no
+artifact has a byte ceiling. The protocol-overhead bounds (at most 768 bytes of
+snapshot framing and 1 KiB of response control envelope) are ordinary unit
+tests in `tests/protocol-overhead.test.ts`.
 `npm run budget:browser` records D100 connection plus M1K/M5K morph workloads
 using five warmups, thirty samples, thirty seconds idle, and 4x CPU throttling
 by default. The harness also records retained bytes per island with the counting

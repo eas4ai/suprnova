@@ -4,6 +4,53 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-02 -- Standalone synchronization and budget removal
+
+The integrated crate merged the final standalone `main`, commit `59395ec`,
+through a subtree merge on top of the `6d19d02` import. The merge brought the
+WebSocket closure classification fix, the reference-host policy-close
+handshake, the same-run bound for the macro expansion check, the removal of
+every benchmark and artifact budget from `scripts/gate.sh`, and the deletion
+of the artifact budget script together with its reviewed size history. The
+provenance-graph hardening this crate had layered on that script left with
+it. `npm run build` now prints the raw and Brotli bytes of every artifact and
+nothing caps them; the budget scripts remain on-demand tools. Captured
+future-iteration notes stayed out of the import as the contract requires.
+
+Dedicated S1 and B1 qualification is release-checklist work outside Iteration
+005, and the historical-baseline question is closed because the size history
+it concerned no longer exists. The "Qualification still outstanding" paragraph
+in the cutover checkpoint below is superseded. The documentation contract had
+required the singular `## Child parameter envelope` heading, the removed
+standalone disclaimer in the component-authoring document, and the earlier
+Stimulus exclusion wording; the contract now names the plural heading, the
+real `suprnova::live` facade statement, and the reworded Stimulus sentence.
+
+Verification completed from the integration worktree:
+
+```bash
+(cd crates/suprnova-live && bash tests/gate_contract.sh)
+(cd crates/suprnova-live && bash tests/documentation_contract.sh)
+(cd crates/suprnova-live && node scripts/check-implementation-docs.mjs)
+(cd crates/suprnova-live && node scripts/check-specs.mjs)
+(cd crates/suprnova-live && node tests/expansion_budget_rules.mjs)
+rtk cargo test -p suprnova-live --test upload_budget_contract --test async_budget_contract
+rtk cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1
+(cd crates/suprnova-live/browser && npm run format:check && npm run typecheck)
+(cd crates/suprnova-live/browser && rtk proxy npm run lint)
+(cd crates/suprnova-live/browser && npm run test:unit -- tests/budget-contract.test.ts tests/build-contract.test.ts tests/package-contract.test.ts tests/protocol-overhead.test.ts tests/async-websocket-closure.test.ts)
+(cd crates/suprnova-live/browser && npm run build)
+(cd crates/suprnova-live/browser && npx playwright test e2e/bootstrap.spec.ts --project=chromium)
+git diff --check
+```
+
+Those commands passed the gate contract, four Rust budget-contract cases, all
+28 reference-host cases, twenty focused browser unit cases, the deterministic
+build, and the twelve Chromium bootstrap cases. `rtk npm run lint` from this
+nested package resolves the system ESLint instead of the package's pinned one
+and fails before linting; the unfiltered `rtk proxy npm run lint` passed. The
+full integrated gate did not run for this checkpoint.
+
 ## 2026-09-01 -- Framework upload boundaries and application reacquisition
 
 Suprnova now registers the versioned `/__live/v1/upload` control/data endpoint

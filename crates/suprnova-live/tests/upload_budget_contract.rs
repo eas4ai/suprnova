@@ -124,7 +124,7 @@ fn checked_upload_budget_locks_workload_bounds_and_exclusions() {
 }
 
 #[test]
-fn upload_budget_has_a_release_safe_runner_contract() {
+fn upload_budget_is_an_on_demand_tool_with_a_release_safe_runner() {
     let cargo = fs::read_to_string(root().join("Cargo.toml")).expect("Cargo manifest");
     let package = fs::read_to_string(root().join("browser/package.json")).expect("browser package");
     let gate = fs::read_to_string(root().join("scripts/gate.sh")).expect("project gate");
@@ -133,8 +133,10 @@ fn upload_budget_has_a_release_safe_runner_contract() {
 
     assert!(cargo.contains("name = \"upload_framework_budget\""));
     assert!(package.contains("\"budget:upload\""));
-    assert!(gate.contains("SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh"));
-    assert!(gate.contains("SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh"));
+    assert!(
+        !gate.contains("run-upload-budget.sh"),
+        "the upload budget is an on-demand tool, not a gate phase"
+    );
     assert!(runner.contains("SUPRNOVA_LIVE_S1_DEDICATED"));
     assert!(runner.contains("SUPRNOVA_LIVE_B1_DEDICATED"));
     assert!(runner.contains("run-upload-server-processes.mjs"));

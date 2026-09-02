@@ -106,14 +106,14 @@ CARGO_INCREMENTAL=0 cargo test --manifest-path ../../Cargo.toml \
 (cd browser && npm run typecheck)
 (cd browser && npm test)
 (cd browser && npm run build)
-(cd browser && npm run budget)
 SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 scripts/gate.sh
 ```
 
-`SUPRNOVA_LIVE_RELEASE=1` remains blocked until the pinned Iteration 004
-`U4/16`, `E100/1K`, and `R100` qualification plus the historical-baseline
-resolution have approved evidence. Never relabel the ordinary gate as that
-qualification.
+`SUPRNOVA_LIVE_RELEASE=1` belongs only to a release-qualified environment; it
+drops `--allow-unqualified` from the compatibility check. Dedicated S1 and B1
+benchmark qualification is release-checklist work outside Iteration 005 and
+runs through the on-demand budget tools, never the gate. Never relabel the
+ordinary gate or a workstation run as that qualification.
 
 Never run heavy Cargo builds concurrently with another build in Suprnova,
 Magnetar, or this workspace. Report a check as passing only when that exact

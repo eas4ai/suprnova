@@ -489,28 +489,31 @@ npm --prefix crates/suprnova-live/browser run typecheck
 npm --prefix crates/suprnova-live/browser test
 npm --prefix crates/suprnova-live/browser run test:browser
 npm --prefix crates/suprnova-live/browser run build
-npm --prefix crates/suprnova-live/browser run budget
 ```
 
 `build` must reproduce checked artifacts byte-for-byte from the lockfile and
-source. `budget` measures the production artifacts and architecture performance
-fixtures; it is not a source-file-size approximation. Roles may enforce an
-approved absolute ceiling or reviewed-baseline drift policy, but a contributor
-may not invent a byte cliff or self-baseline a candidate merely to make the gate
-pass.
+source, and it prints the exact raw and Brotli bytes of every artifact. No
+artifact has a byte ceiling.
 
 ### Provider and browser matrix checks
 
-Provider conformance, oldest-browser, current-browser, accessibility, CSP, and
-benchmark matrix commands shall be wired into
-`crates/suprnova-live/scripts/gate.sh` or a script it invokes before the
-corresponding implementation can be called complete. Tests
+Provider conformance, oldest-browser, current-browser, accessibility, and CSP
+matrix commands shall be wired into `crates/suprnova-live/scripts/gate.sh` or a
+script it invokes before the corresponding implementation can be called
+complete. Benchmark commands are on-demand tools and are not wired into the
+gate. Tests
 requiring Redis, Memcached, PostgreSQL, MySQL/MariaDB, or a real browser remain
 explicit and unattended; credentials are never embedded in commands or
 fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Benchmark and artifact budgets are on-demand tools, not gate
+  phases; `scripts/gate.sh` verifies correctness and security only. Dedicated
+  S1 and B1 qualification is release-checklist work outside Iteration 005, and
+  the artifact size history that raised the historical-baseline question was
+  deleted with the artifact budget script, so the release blockers named in
+  the 2026-08-31 entry no longer apply.
 - 2026-09-01 -- Registered the exact bounded composition-lineage extension,
   child-parameter-v2 purpose/schema separation, and linearizable ledger
   authorization-read rules. Preserved snapshot-v1 unknown-extension

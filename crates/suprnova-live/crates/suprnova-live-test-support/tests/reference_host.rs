@@ -51,6 +51,8 @@ const REAL_ASYNC_MATRIX_PORT: u16 = 4_204;
 const REAL_UPLOAD_RACE_PORT: u16 = 4_205;
 const FINALIZER_SCOPE_PORT: u16 = 4_206;
 const REAUTH_REJECTION_PORT: u16 = 4_207;
+const POLICY_CLOSE_PORT: u16 = 4_208;
+const POLICY_CLOSE_DEADLINE_PORT: u16 = 4_209;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -2914,4 +2916,138 @@ async fn read_websocket_frame(stream: &mut TcpStream, buffered: &mut Vec<u8>) ->
         assert!(size > 0, "WebSocket closed before a complete frame");
         buffered.extend_from_slice(&response[..size]);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_policy_close_completes_the_closing_handshake_before_dropping_the_socket() {
+    let root = TestRoot::new("policy-close");
+    let host = start_host(POLICY_CLOSE_PORT, &root, ReferenceFaultSchedule::None).await;
+    for (case, hostile, expected_reason) in [
+        (
+            "truncated-message",
+            r#"{"kind":"subscribe","#.to_owned(),
+            "invalid_envelope",
+        ),
+        ("oversized-message", "x".repeat(513), "frame_too_large"),
+    ] {
+        let (status, _, transport) = json_request(
+            &host,
+            Method::POST,
+            "/__live/async/transports",
+            json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{case}: {transport}");
+        let transport_id = transport["transport"].as_str().expect("transport");
+        let mut stream = websocket_connect(&host, transport_id).await;
+        write_websocket_frame(&mut stream, &hostile).await;
+        let mut buffered = Vec::new();
+        let (code, reason) = read_websocket_close(&mut stream, &mut buffered).await;
+        assert_eq!((code, reason.as_str()), (1_008, expected_reason), "{case}");
+
+        let mut probe = [0_u8; 16];
+        let early = timeout(Duration::from_millis(200), stream.read(&mut probe)).await;
+        assert!(
+            early.is_err(),
+            "{case}: the host ended the connection before the client's close reply: {early:?}"
+        );
+        assert_eq!(
+            host.inspection().active_physical_transports,
+            1,
+            "{case}: the host released the transport before the closing handshake completed"
+        );
+
+        write_websocket_close(&mut stream, 1_000).await;
+        let ended = timeout(Duration::from_secs(1), stream.read(&mut probe))
+            .await
+            .expect("close handshake completion deadline")
+            .expect("clean end of stream after the close reply");
+        assert_eq!(
+            ended, 0,
+            "{case}: expected a clean end of stream after the close reply"
+        );
+    }
+    host.shutdown()
+        .await
+        .expect("clean policy-close host shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_policy_close_ends_the_socket_after_the_handshake_deadline_without_a_reply() {
+    let root = TestRoot::new("policy-close-deadline");
+    let host = start_host(
+        POLICY_CLOSE_DEADLINE_PORT,
+        &root,
+        ReferenceFaultSchedule::None,
+    )
+    .await;
+    let (status, _, transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{transport}");
+    let transport_id = transport["transport"].as_str().expect("transport");
+    let mut stream = websocket_connect(&host, transport_id).await;
+    write_websocket_frame(&mut stream, &"x".repeat(513)).await;
+    let mut buffered = Vec::new();
+    let (code, reason) = read_websocket_close(&mut stream, &mut buffered).await;
+    assert_eq!((code, reason.as_str()), (1_008, "frame_too_large"));
+
+    // The client never replies; the host must still end the socket within its bounded deadline.
+    let mut probe = [0_u8; 16];
+    let ended = timeout(Duration::from_secs(3), stream.read(&mut probe))
+        .await
+        .expect("the host must end an unanswered closing handshake within its deadline")
+        .expect("clean end of stream after the deadline");
+    assert_eq!(
+        ended, 0,
+        "expected a clean end of stream after the handshake deadline"
+    );
+    host.shutdown()
+        .await
+        .expect("clean policy-close-deadline host shutdown");
+}
+
+async fn read_websocket_close(stream: &mut TcpStream, buffered: &mut Vec<u8>) -> (u16, String) {
+    loop {
+        if buffered.len() >= 2 {
+            let opcode = buffered[0] & 0x0f;
+            let length = usize::from(buffered[1] & 0x7f);
+            assert!(length <= 125, "unexpected extended-length control frame");
+            if buffered.len() >= 2 + length {
+                assert_eq!(
+                    opcode, 0x8,
+                    "expected a Close frame, received opcode {opcode:#x}"
+                );
+                let payload = buffered[2..2 + length].to_vec();
+                buffered.drain(..2 + length);
+                assert!(payload.len() >= 2, "Close frame without a status code");
+                let code = u16::from_be_bytes([payload[0], payload[1]]);
+                return (code, String::from_utf8_lossy(&payload[2..]).into_owned());
+            }
+        }
+        let mut response = vec![0_u8; 4_096];
+        let size = timeout(Duration::from_secs(1), stream.read(&mut response))
+            .await
+            .expect("WebSocket Close frame deadline")
+            .expect("WebSocket Close frame read");
+        assert!(size > 0, "WebSocket ended before a Close frame");
+        buffered.extend_from_slice(&response[..size]);
+    }
+}
+
+async fn write_websocket_close(stream: &mut TcpStream, code: u16) {
+    let mask = [0x11, 0x22, 0x33, 0x44];
+    let mut frame = vec![0x88, 0x80 | 2];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        code.to_be_bytes()
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+    );
+    stream.write_all(&frame).await.unwrap();
 }

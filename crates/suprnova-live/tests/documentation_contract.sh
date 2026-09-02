@@ -99,7 +99,7 @@ require_heading docs/implementation/host-adapter-contract.md "Security boundary"
 require_heading docs/implementation/host-adapter-contract.md "Failure mapping"
 
 require_heading docs/implementation/protocol-v2.md "Protocol v2 request"
-require_heading docs/implementation/protocol-v2.md "Child parameter envelope"
+require_heading docs/implementation/protocol-v2.md "Child parameter envelopes"
 require_heading docs/implementation/protocol-v2.md "Response ordering"
 require_heading docs/implementation/protocol-v2.md "Failure and recovery"
 
@@ -176,7 +176,7 @@ require_text docs/implementation/iteration-004-operations.md \
 require_text docs/implementation/component-authoring.md \
     "final application facade" 'suprnova::live'
 require_text docs/implementation/component-authoring.md \
-    "standalone integration disclaimer" 'does not claim registered Suprnova integration'
+    "real facade ownership" 'The real `suprnova::live` facade'
 require_text docs/implementation/lifecycle-and-state.md \
     "mount authority operation" 'mount_instance'
 require_text docs/implementation/protocol-v2.md \
@@ -211,8 +211,7 @@ require_text docs/implementation/benchmarking.md \
 require_text docs/implementation/live-directives.md \
     "closed grammar authority" 'generated from the Rust directive catalog'
 require_text docs/implementation/local-reactivity.md \
-    "Stimulus and bridge exclusion" \
-    "Neither Stimulus nor Suprnova's bridge/continuity implementation is bundled"
+    "Stimulus and bridge exclusion" 'Stimulus is not bundled into the core runtime'
 require_text docs/implementation/scheduling-and-feedback.md \
     "one scheduler invariant" 'one bounded scheduler per island'
 require_text docs/implementation/morphing-and-continuity.md \

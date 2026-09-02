@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 import { build } from "esbuild";
 import { minify } from "terser";
@@ -972,5 +973,18 @@ export async function buildRuntimeAssets(outdir = DEFAULT_OUTDIR) {
 
 const invokedPath = process.argv[1] === undefined ? "" : resolve(process.argv[1]);
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  await buildRuntimeAssets(outputArgument(process.argv.slice(2)));
+  const built = await buildRuntimeAssets(outputArgument(process.argv.slice(2)));
+  // Artifact size is reported, never budgeted: exact raw and Brotli bytes per artifact.
+  const manifest = JSON.parse(
+    await readFile(join(built.destination, "suprnova-live.assets.json"), "utf8"),
+  );
+  for (const asset of manifest.assets) {
+    const content = await readFile(join(built.destination, asset.file));
+    const brotliBytes = brotliCompressSync(content, {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
+    }).byteLength;
+    process.stdout.write(
+      `artifact role=${asset.role} file=${asset.file} bytes=${String(content.byteLength)} brotli=${String(brotliBytes)}\n`,
+    );
+  }
 }

@@ -61,7 +61,6 @@
     "host:iteration-004": "npm run build && cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
     "build": "node scripts/build.mjs",
     "build:check": "node scripts/check-build.mjs",
-    "budget": "node scripts/check-budget.mjs",
     "budget:async": "node scripts/run-async-budget.mjs",
     "budget:browser": "node scripts/run-browser-budget.mjs",
     "budget:upload": "node scripts/run-upload-budget.mjs",

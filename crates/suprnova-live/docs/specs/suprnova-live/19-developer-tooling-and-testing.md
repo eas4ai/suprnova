@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-31
+Last revised: 2026-09-01
 
 ## Scope
 
@@ -441,33 +441,15 @@ baseline is not qualification evidence.
 
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
-queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
-bytes for each core and async variant without unsupported absolute ceilings and
-enforces 20 KiB for each upload variant. Async variants compare against
-`browser/benchmarks/baselines/artifact-size-v1.json`: its closed schema records
-an append-only reviewed history, deterministic build/compression method, and
-exact role hashes and measurements. Its immutable Task 6 anchor retains source
-commit `499eda2287f17d6a46c9b8c306df5791b1f671d8`, decision, rationale,
-16,356-byte ESM, and 14,155-byte classic measurements. The Task 7 entry references
-strictly prior source commit `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`
-and its recorded policy decision, with 18,713-byte ESM SHA-256
-`e030eb202f90312d002b2531dae8f42d12621910f800ff4ae29389f0dc9064ca`
-and 16,459-byte classic SHA-256
-`23effe66a533065544c19bef1c88819466ba2f514e28b0271dc14c1494e82b5e`.
-A candidate hash need not equal the historical hash: stored hashes authenticate
-past reviewed artifacts, while current deterministic bytes are measured as a
-candidate. More than 15 percent growth from the newest reviewed entry fails only
-as `unreviewed_regression`; it is a review trigger, not an absolute product
-limit. Intentional growth, including a substantially larger feature or
-dependency such as Three.js, may be correct after explicit review. A candidate
-cannot supply, overwrite, delete, collapse, or silently self-baseline the
-reviewed history. The binding browser benchmark independently
-compares a separately recorded current core candidate with its prior performance
-baseline and refuses a self-comparison path. Runtime workloads enforce the
-formula, count, and latency caps in the overview and the existing 15-percent
-performance-regression policy.
-Reduced deterministic budget cases run on every ordinary gate; the full-scale
-workloads run under explicit release qualification on pinned `S1`/`B1`. A larger
+queue, and reconnect limits on `S1`/`B1`. Every deterministic build reports
+exact Brotli bytes for each core, Stimulus, upload, and async variant; no
+artifact has an absolute ceiling or a drift rule, and there is no reviewed size
+history; the production build prints exact raw and Brotli bytes for every
+artifact. The benchmark tools (`npm run budget:browser`, the Rust
+`run-*-budget.sh` scripts, and `scripts/check-expansion-budget.mjs`) run on
+demand and never in `scripts/gate.sh`. The reduced deterministic cases and the
+full-scale `S1`/`B1` workloads are both on-demand, and a qualified result still
+requires the pinned dedicated-environment attestation. A larger
 application upload limit may increase stored file bytes but may not authorize
 unbounded framework memory, queues, connections, or diagnostic retention.
 
@@ -482,10 +464,14 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 - Observability and realistic benchmarks expose performance without secrets or
   hello-world theater.
 - Explicit runtime, morph, protocol, cache, and server budgets provide
-  reproducible release gates.
+  reproducible on-demand measurements outside the correctness gate.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Decision ID: budgets-are-on-demand-tools. Every benchmark and
+  artifact budget left `scripts/gate.sh`; the gate verifies correctness and
+  security only, budget tools run on demand and report numbers, and no artifact
+  carries an absolute ceiling, drift rule, or reviewed size history.
 - 2026-08-31 -- Marked the Iteration 002 harness placement as historical after
   the repository-authority cutover. The move is complete; production macro
   placement, public Live/view facades, CLI wiring, and generated-application

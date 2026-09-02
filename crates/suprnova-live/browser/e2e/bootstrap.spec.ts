@@ -49,6 +49,13 @@ async function installStoppingFeatureDriver(page: Page, event: 0 | 1 | null) {
   }, event);
 }
 
+async function waitForFeatureDriverStop(page: Page) {
+  await page.waitForFunction(() => {
+    const events: unknown = Reflect.get(window, "__featureDriverEvents");
+    return Array.isArray(events) && events.length > 0 && events[events.length - 1] === 5;
+  });
+}
+
 test("SSR content is visible before startup and a valid instanced island connects", async ({
   page,
 }) => {
@@ -99,6 +106,7 @@ test("a feature driver cannot resurrect startup after stopping core during event
   await runtime.open("manual");
   await installStoppingFeatureDriver(page, 0);
   await bootManually(page);
+  await waitForFeatureDriverStop(page);
 
   expect(
     await page.evaluate(() => {
@@ -128,6 +136,7 @@ test("a feature driver cannot continue island startup after stopping core during
   await runtime.open("manual");
   await installStoppingFeatureDriver(page, 1);
   await bootManually(page);
+  await waitForFeatureDriverStop(page);
 
   expect(
     await page.evaluate(() => {

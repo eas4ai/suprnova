@@ -117,11 +117,12 @@ failure rather than disappearing from evidence.
 
 ## Benchmarks
 
-Ordinary gates run deterministic reduced proofs. Qualified release evidence must
-come from the pinned dedicated environments: S1 for Rust/server control paths and
-B1 for Chromium/browser paths. The checked upload and async baselines currently
-contain only `exploratoryReference`; `qualifiedBaseline` is `null`. Local results
-are therefore useful unqualified evidence, never release qualification. Release
+No budget runs in the gate; the reduced and qualified runners below are
+on-demand tools. Qualified release evidence must come from the pinned dedicated
+environments: S1 for Rust/server control paths and B1 for Chromium/browser
+paths. The checked upload and async baselines currently contain only
+`exploratoryReference`; `qualifiedBaseline` is `null`. Local results are
+therefore useful unqualified evidence, never release qualification. Release
 evaluation fails closed when the qualified baseline is absent, the candidate is
 unqualified, the environment/artifact binding differs, or a hard cap/regression
 fails.
@@ -148,14 +149,9 @@ recovery-latency ceiling. After currentness it must return below 12 KiB retained
 runtime per island. A separate 16-document run attempts 16 handshakes and proves
 no more than eight concurrent handshakes per origin.
 
-Artifact size uses Brotli quality 11 over deterministic production builds. Core
-ESM/classic sizes are always reported and have no absolute cap. Stimulus has an
-8 KiB per-format cap; uploads has a 20 KiB per-format cap. Async has no absolute
-cap. Its append-only reviewed history currently records 21,396-byte ESM and
-19,156-byte classic Brotli artifacts as reviewed correctness growth. Growth over
-15 percent from the newest valid reviewed entry is an explicit review trigger,
-not a total download limit. A candidate cannot overwrite or self-derive that
-history.
+Artifact size is reported, not budgeted: `npm run build` prints the exact raw
+and Brotli (quality 11) bytes of every deterministic production artifact, and no
+artifact has a cap or drift rule.
 
 Run the ordinary reduced evidence locally:
 
@@ -184,9 +180,10 @@ The complete ordinary project gate is:
 rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 ```
 
-`SUPRNOVA_LIVE_RELEASE=1` selects release branches in the gate but does not
-create dedicated-runner attestations. A release runner must also provide the S1
-and B1 environment controls required by the invoked scripts. Fabricating those
+`SUPRNOVA_LIVE_RELEASE=1` makes the gate's compatibility check refuse
+unqualified evidence; it runs no budget and creates no dedicated-runner
+attestation. A release runner must also provide the S1 and B1 environment
+controls required by the budget scripts it runs on demand. Fabricating those
 flags on a shared workstation does not make the resulting evidence qualified.
 Clippy warnings are reviewed; the gate does not blanket-deny warnings.
 
@@ -197,7 +194,10 @@ authority, grants, ledger transitions, provider/quarantine I/O, validation,
 scanning, finalization, compensation, cleanup, signed subscriptions, exact
 WebSocket-origin validation, SSE/WebSocket membership, continuity, backpressure,
 and fresh-render semantics. It validates and serves exact production browser
-artifacts from the asset manifest.
+artifacts from the asset manifest. A WebSocket policy close for an oversized or
+invalid control frame sends a 1008 close frame and then completes the closing
+handshake, waiting at most one second for the peer's close reply before the
+socket is dropped.
 
 The Node host owns only static scenario HTML, CSS, JavaScript drivers, and browser
 test orchestration. It may reverse proxy those static scenarios through the Rust

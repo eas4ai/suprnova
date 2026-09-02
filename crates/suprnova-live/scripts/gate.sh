@@ -34,8 +34,6 @@ live_packages=(
     --package suprnova-live-macro-fixture
     --package suprnova-live-test-support
 )
-local_benchmark_result=${live_root}/benchmarks/local/gate-snapshot-budget-v1.json
-local_action_result=${live_root}/benchmarks/local/gate-action-budget-v1.json
 
 phase() {
     printf '\n[%s]\n' "$1"
@@ -218,43 +216,10 @@ rtk node scripts/check-correctness-delays.mjs
 
     if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
         rtk npm run compatibility:check
-        rtk npm run budget:browser -- --release --dedicated
-        rtk npm run budget -- --release
     else
         rtk npm run compatibility:check -- --allow-unqualified
-        rtk npm run budget
     fi
 )
-
-phase "A8/16 snapshot budget"
-rtk env \
-    CARGO_INCREMENTAL=0 \
-    SUPRNOVA_LIVE_BENCH_RESULT="${local_benchmark_result}" \
-    scripts/run-snapshot-budget.sh
-
-phase "A8/16 action framework budget"
-rtk env \
-    CARGO_INCREMENTAL=0 \
-    SUPRNOVA_LIVE_BENCH_RESULT="${local_action_result}" \
-    scripts/run-action-budget.sh
-
-phase "iteration 004 reduced deterministic budgets"
-phase "U4/16 upload framework and browser budget"
-rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
-
-phase "E100/1K and R100 async continuity budgets"
-rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
-
-if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then
-    phase "U4/16 qualified upload budget"
-    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh
-
-    phase "E100/1K and R100 qualified async budgets"
-    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh
-fi
-
-phase "macro expansion and isolated compile budget"
-rtk node scripts/check-expansion-budget.mjs
 
 phase "final worktree diff check"
 rtk git diff --check

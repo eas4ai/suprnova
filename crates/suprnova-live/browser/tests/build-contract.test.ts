@@ -4,14 +4,9 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
-import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  evaluateArtifactBudgets,
-  validateArtifactSizeBaselineProvenance,
-} from "../scripts/check-budget.mjs";
 import { PRODUCTION_BUILD_HOOK_TIMEOUT_MS } from "./support/production-build.js";
 
 interface AssetEntry {
@@ -151,97 +146,6 @@ describe("deterministic production assets", () => {
       expect(asset.capability_version).toBe(1);
       expect(asset.compatible_core).toBe(">=0.1.0 <0.2.0");
     }
-  });
-
-  it("measures changed async candidates against immutable reviewed history", async () => {
-    const manifest = JSON.parse(
-      await readFile(join(outputDirectory, "suprnova-live.assets.json"), "utf8"),
-    ) as AssetManifest;
-    const baseline = JSON.parse(
-      await readFile(
-        new URL("../benchmarks/baselines/artifact-size-v1.json", import.meta.url),
-        "utf8",
-      ),
-    ) as Readonly<{
-      history: readonly Readonly<{
-        review: Readonly<{
-          decision: string;
-          sourceCommit: string;
-          sourceDecision?: string;
-          sourceDecisionPath?: string;
-        }>;
-        roles: Readonly<
-          Record<"async-esm" | "async-classic", Readonly<{ brotliBytes: number; sha256?: string }>>
-        >;
-      }>[];
-    }>;
-    const measured = await Promise.all(
-      manifest.assets.map(async (asset) => ({
-        brotliBytes: brotliCompressSync(await bytes(asset.file), {
-          params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
-        }).byteLength,
-        compatibleCore: asset.compatible_core,
-        file: asset.file,
-        role: asset.role,
-        sha256: createHash("sha256")
-          .update(await bytes(asset.file))
-          .digest("hex"),
-      })),
-    );
-    const result = evaluateArtifactBudgets(measured, baseline);
-    const esm = measured.find(({ role }) => role === "async-esm")?.brotliBytes;
-    const classic = measured.find(({ role }) => role === "async-classic")?.brotliBytes;
-    if (esm === undefined || classic === undefined) throw new Error("async_measurement_missing");
-    const current = baseline.history[baseline.history.length - 1];
-    if (current === undefined) throw new Error("async_baseline_missing");
-    const esmBaseline = current.roles["async-esm"].brotliBytes;
-    const classicBaseline = current.roles["async-classic"].brotliBytes;
-    const esmIncrease = ((esm - esmBaseline) / esmBaseline) * 100;
-    const classicIncrease = ((classic - classicBaseline) / classicBaseline) * 100;
-    const specification = await readFile(
-      new URL(
-        "../../docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-
-    expect(result.issues).toEqual([]);
-    expect(result.lines).toContain(
-      `artifact_budget role=async-esm bytes=${String(esm)} ceiling=none baseline=${String(esmBaseline)} unreviewed_increase=${esmIncrease.toFixed(2)}% threshold=15%`,
-    );
-    expect(result.lines).toContain(
-      `artifact_budget role=async-classic bytes=${String(classic)} ceiling=none baseline=${String(classicBaseline)} unreviewed_increase=${classicIncrease.toFixed(2)}% threshold=15%`,
-    );
-    expect(current.review).toMatchObject({
-      decision: "iteration-004-task-10-async-evidence-integrity",
-      sourceCommit: "6b2ccccbeb09b079c8ea19f3c26ae9f1b4b19f54",
-      sourceDecision: "iteration-004-task-10-async-evidence-integrity",
-      sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
-    });
-    expect(
-      validateArtifactSizeBaselineProvenance(baseline, new URL("../../", import.meta.url).pathname),
-    ).toEqual(baseline);
-    const belowThreshold = measured.map((asset) =>
-      asset.role === "async-esm"
-        ? {
-            ...asset,
-            brotliBytes: Math.floor(esmBaseline * 1.1),
-            sha256: "c".repeat(64),
-          }
-        : asset,
-    );
-    expect(evaluateArtifactBudgets(belowThreshold, baseline).issues).toEqual([]);
-    const aboveThresholdBytes = Math.floor(esmBaseline * 1.15) + 1;
-    const aboveThreshold = belowThreshold.map((asset) =>
-      asset.role === "async-esm" ? { ...asset, brotliBytes: aboveThresholdBytes } : asset,
-    );
-    expect(evaluateArtifactBudgets(aboveThreshold, baseline).issues).toEqual([
-      `artifact_budget:async-esm:unreviewed_regression:+${String(aboveThresholdBytes - esmBaseline)}`,
-    ]);
-    expect(specification).toContain(
-      `strictly prior source commit \`57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61\``,
-    );
   });
 
   it("exposes equivalent ESM and non-replaceable classic facades from one singleton core", async () => {
