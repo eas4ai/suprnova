@@ -80,7 +80,7 @@ function validateMarkdown(file, fullPath, text) {
   if (/^[^\n]*[ \t]+$/m.test(text)) {
     fail(file, "contains trailing whitespace")
   }
-  if (text.includes("—")) {
+  if (text.includes("\u2014")) {
     fail(file, "contains an em dash; published Suprnova prose uses hyphens")
   }
   if (
