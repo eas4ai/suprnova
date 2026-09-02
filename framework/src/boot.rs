@@ -52,14 +52,19 @@ pub fn load_env() -> Result<Environment, FrameworkError> {
     Ok(env)
 }
 
-/// [`load_env`], but reports the failure to the operator and exits.
+/// Complete pre-runtime configuration, or report the failure and exit.
 ///
-/// This is what [`crate::main`] expands to. A boot that cannot read its
-/// configuration has nothing useful to do next, and an operator reading
-/// stderr is better served by one clear line than by a panic backtrace
-/// through a proc-macro expansion.
+/// This loads the environment, validates the configured encryption key ring,
+/// and installs [`crate::Crypt`] before application bootstrap runs. This is
+/// what [`crate::main`] expands to. A boot that cannot read its configuration
+/// has nothing useful to do next, and an operator reading stderr is better
+/// served by one clear line than by a panic backtrace through a proc-macro
+/// expansion.
 pub fn load_env_or_exit() -> Environment {
-    match load_env() {
+    match load_env().and_then(|env| {
+        crate::crypto::initialize_from_environment(&env)?;
+        Ok(env)
+    }) {
         Ok(env) => env,
         Err(e) => {
             eprintln!("framework configuration init failed: {e}");

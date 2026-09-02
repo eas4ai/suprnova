@@ -2,8 +2,8 @@
 //!
 //! [`Crypt`] is a Laravel-style static facade for AES-256-GCM encryption.
 //! The active key ring is held in a process-wide [`OnceLock`] populated
-//! by `Server::from_config()` from the `APP_KEY` and (optionally)
-//! `APP_KEY_PREVIOUS` environment variables.
+//! during pre-runtime application boot from the `APP_KEY` and
+//! (optionally) `APP_KEY_PREVIOUS` environment variables.
 //!
 //! # Key rotation
 //!
@@ -781,6 +781,66 @@ pub fn resolve_boot_keyring(
     let current = resolve_boot_key(environment, app_key)?;
     let previous = parse_previous_keys(app_key_previous)?;
     Ok(BootKeyRing { current, previous })
+}
+
+/// Validate the configured key ring and install it on the first boot.
+///
+/// Validation deliberately runs on every call even after [`Crypt`] is
+/// initialized. This keeps repeated production boots fail-closed when
+/// `APP_KEY` is missing or malformed while preserving process-wide key
+/// immutability.
+pub(crate) fn initialize_from_environment(environment: &Environment) -> Result<(), FrameworkError> {
+    let app_key = std::env::var("APP_KEY").ok();
+    // Suprnova canonical name is `APP_KEY_PREVIOUS`; Laravel uses
+    // `APP_PREVIOUS_KEYS`. The canonical name wins when both are set.
+    let app_key_previous = match (
+        std::env::var("APP_KEY_PREVIOUS").ok(),
+        std::env::var("APP_PREVIOUS_KEYS").ok(),
+    ) {
+        (Some(canonical), Some(laravel)) => {
+            if canonical.trim() != laravel.trim() {
+                tracing::warn!(
+                    "APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
+                     different values. Using APP_KEY_PREVIOUS (Suprnova \
+                     canonical name); APP_PREVIOUS_KEYS is ignored. Drop the \
+                     duplicate from your environment."
+                );
+            }
+            Some(canonical)
+        }
+        (Some(canonical), None) => Some(canonical),
+        (None, Some(laravel)) => Some(laravel),
+        (None, None) => None,
+    };
+    let boot_ring =
+        resolve_boot_keyring(environment, app_key.as_deref(), app_key_previous.as_deref())?;
+
+    // Only emit operator hints and install on the first boot. Resolving the
+    // ring above is intentionally unconditional so later boots still validate.
+    if !Crypt::is_initialized() {
+        if boot_ring.is_current_generated() {
+            tracing::warn!(
+                environment = %environment,
+                "APP_KEY is not set - generated a transient development key. \
+                 Sessions and cursors will reset on every restart. Set APP_KEY \
+                 in your environment to persist them. This path is gated to \
+                 local/development/testing; production fails closed."
+            );
+        }
+        if !boot_ring.previous.is_empty() {
+            tracing::info!(
+                previous_key_count = boot_ring.previous.len(),
+                "APP_KEY_PREVIOUS active - decrypt will fall back to {n} previous \
+                 key(s). Run a re-encrypt pass (load + save every encrypted \
+                 column) and then remove APP_KEY_PREVIOUS once complete.",
+                n = boot_ring.previous.len()
+            );
+        }
+        let (current, previous) = boot_ring.into_keys();
+        Crypt::init_with_keyring(current, previous);
+    }
+
+    Ok(())
 }
 
 /// Maximum number of keys accepted in `APP_KEY_PREVIOUS`.
