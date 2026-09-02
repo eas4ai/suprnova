@@ -59,6 +59,18 @@ fn is_canonical_counter_value(value: &str) -> bool {
     }
 }
 
+fn namespaced_key(prefix: &str, namespace: &str, key: &str) -> String {
+    format!("{prefix}\0{namespace}:{key}")
+}
+
+fn data_key(prefix: &str, key: &str) -> String {
+    if key.starts_with('\0') {
+        namespaced_key(prefix, "data", key)
+    } else {
+        format!("{prefix}{key}")
+    }
+}
+
 impl CacheEntry {
     fn is_expired(&self) -> bool {
         self.expires_at.map(|t| Instant::now() > t).unwrap_or(false)
@@ -141,20 +153,15 @@ impl InMemoryCache {
     }
 
     fn prefixed_key(&self, key: &str) -> String {
-        format!("{}{}", self.prefix, key)
+        data_key(&self.prefix, key)
     }
 
     /// Distributed-lock keyspace key for `key`.
     ///
-    /// Locks live under a NUL-byte sentinel after the configured prefix
-    /// so they cannot collide with any user-supplied cache key. User
-    /// keys are always passed through `prefixed_key(...)` which does not
-    /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
-    /// targets `<prefix>lock:foo` - distinct from the lock's
-    /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
-    /// `put` from releasing or overwriting a held distributed lock.
+    /// Values and locks carry distinct namespace components before the
+    /// caller-controlled key, so no user key can address a lock slot.
     fn locked_key(&self, key: &str) -> String {
-        format!("{}\0lock:{}", self.prefix, key)
+        namespaced_key(&self.prefix, "lock", key)
     }
 
     fn update_counter(
@@ -993,6 +1000,48 @@ mod tests {
                 .refresh_lock("job", &token, Duration::from_secs(30))
                 .await
                 .unwrap()
+        );
+        assert!(cache.release_lock("job", &token).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sentinel_prefixed_user_key_is_disjoint_from_lock_storage() {
+        let cache = InMemoryCache::with_prefix("t:");
+        let user_key = "\0lock:job";
+        cache
+            .put_raw(user_key, "user-value", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+
+        let token = cache
+            .acquire_lock("job", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("user data must not block lock acquisition");
+        assert_eq!(
+            cache.get_raw(user_key).await.unwrap().as_deref(),
+            Some("user-value")
+        );
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(cache.get_raw(user_key).await.unwrap().is_none());
+        assert!(
+            cache
+                .acquire_lock("job", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_none(),
+            "expiring user data must not expire the lock"
+        );
+
+        cache.put_raw(user_key, "replacement", None).await.unwrap();
+        assert!(cache.forget(user_key).await.unwrap());
+        assert!(
+            cache
+                .refresh_lock("job", &token, Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "user writes and deletion must not change lock ownership"
         );
         assert!(cache.release_lock("job", &token).await.unwrap());
     }

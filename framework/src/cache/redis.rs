@@ -18,6 +18,18 @@ use crate::error::FrameworkError;
 /// whole point of scanning instead of `SMEMBERS`.
 const TAG_SCAN_BATCH: usize = 256;
 
+fn namespaced_key(prefix: &str, namespace: &str, key: &str) -> String {
+    format!("{prefix}\0{namespace}:{key}")
+}
+
+fn data_key(prefix: &str, key: &str) -> String {
+    if key.starts_with('\0') {
+        namespaced_key(prefix, "data", key)
+    } else {
+        format!("{prefix}{key}")
+    }
+}
+
 /// Atomically settle one `SSCAN` batch of a tag's forward index.
 ///
 /// `KEYS[1]` is the tag index; `ARGV[1]` is the tag; `ARGV[2..]` alternates
@@ -126,20 +138,15 @@ impl RedisCache {
     }
 
     fn prefixed_key(&self, key: &str) -> String {
-        format!("{}{}", self.prefix, key)
+        data_key(&self.prefix, key)
     }
 
     /// Distributed-lock keyspace key for `key`.
     ///
-    /// Locks live under a NUL-byte sentinel after the configured prefix
-    /// so they cannot collide with any user-supplied cache key. User
-    /// keys are always passed through `prefixed_key(...)` which does not
-    /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
-    /// targets `<prefix>lock:foo` - distinct from the lock's
-    /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
-    /// `put` from releasing or overwriting a held distributed lock.
+    /// Values and locks carry distinct namespace components before the
+    /// caller-controlled key, so no user key can address a lock slot.
     fn locked_key(&self, key: &str) -> String {
-        format!("{}\0lock:{}", self.prefix, key)
+        namespaced_key(&self.prefix, "lock", key)
     }
 
     /// Tag forward-index key (`tag -> set of value keys`).
@@ -148,7 +155,7 @@ impl RedisCache {
     /// `Cache::forget("tag:users")` cannot drop the forward index for
     /// the `users` tag.
     fn tag_index_key(&self, tag: &str) -> String {
-        format!("{}\0tag:{}", self.prefix, tag)
+        namespaced_key(&self.prefix, "tag", tag)
     }
 
     /// Aux SET that records the tag memberships for a value key.
@@ -165,7 +172,7 @@ impl RedisCache {
     /// forward index so the bookkeeping is unreachable from caller-side
     /// `Cache::put/forget/get`.
     fn key_tags_set(&self, prefixed_key: &str) -> String {
-        format!("{}\0key_tags:{}", self.prefix, prefixed_key)
+        namespaced_key(&self.prefix, "key_tags", prefixed_key)
     }
 }
 
@@ -593,6 +600,19 @@ impl CacheStore for RedisCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_keys_cannot_enter_redis_internal_namespaces() {
+        let prefix = "t:";
+        let lock_key = namespaced_key(prefix, "lock", "job");
+        let tag_key = namespaced_key(prefix, "tag", "users");
+        let key_tags_key = namespaced_key(prefix, "key_tags", "stored-key");
+
+        assert_eq!(data_key(prefix, "ordinary"), "t:ordinary");
+        assert_ne!(data_key(prefix, "\0lock:job"), lock_key);
+        assert_ne!(data_key(prefix, "\0tag:users"), tag_key);
+        assert_ne!(data_key(prefix, "\0key_tags:stored-key"), key_tags_key);
+    }
 
     #[test]
     fn redis_ttl_ms_preserves_millisecond_resolution() {

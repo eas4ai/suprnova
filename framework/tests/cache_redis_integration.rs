@@ -306,6 +306,34 @@ async fn redis_put_with_lock_prefixed_key_does_not_overwrite_held_lock() {
     assert!(s.release_lock("job", &token).await.unwrap());
 }
 
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_sentinel_prefixed_user_key_is_disjoint_from_lock_storage() {
+    let s = fresh_store("redis-lock-iso-sentinel").await;
+    let user_key = "\0lock:job";
+    s.put_raw(user_key, "user-value", None).await.unwrap();
+
+    let token = s
+        .acquire_lock("job", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("user data must not block lock acquisition");
+    assert_eq!(
+        s.get_raw(user_key).await.unwrap().as_deref(),
+        Some("user-value")
+    );
+
+    assert!(s.forget(user_key).await.unwrap());
+    assert!(
+        s.acquire_lock("job", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .is_none(),
+        "user deletion must not change lock ownership"
+    );
+    assert!(s.release_lock("job", &token).await.unwrap());
+}
+
 /// A `Cache::forget("tag:users")` MUST NOT clobber the tag forward
 /// index for `users`. Pre-isolation, the forward index lived at
 /// `<prefix>tag:users` and could be deleted by a user-side
@@ -327,6 +355,24 @@ async fn redis_forget_with_tag_prefixed_key_does_not_clobber_tag_index() {
     assert!(
         !s.has("u:1").await.unwrap(),
         "flush_tags must still find and delete tagged keys"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_sentinel_prefixed_user_key_is_disjoint_from_tag_index() {
+    let s = fresh_store("redis-tag-iso-sentinel").await;
+    s.tagged_put_raw(&["users"], "u:1", "{\"id\":1}", None)
+        .await
+        .unwrap();
+
+    s.put_raw("\0tag:users", "user-value", None).await.unwrap();
+    s.flush_tags(&["users"]).await.unwrap();
+
+    assert!(!s.has("u:1").await.unwrap());
+    assert_eq!(
+        s.get_raw("\0tag:users").await.unwrap().as_deref(),
+        Some("user-value")
     );
 }
 
