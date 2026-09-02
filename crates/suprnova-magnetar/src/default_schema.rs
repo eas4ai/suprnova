@@ -759,7 +759,7 @@ pub mod sql_stores {
     use crate::storage::credential_writes::fenced_credential_write;
     use crate::storage::{AuthTransaction, CredentialActor, SeaOrmStorage};
     use sea_orm::sea_query::Expr;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
     fn hex(bytes: [u8; 32]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -949,7 +949,15 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            rows.first()
+            let mut rows = rows.into_iter().filter(|row| row.selector == selector);
+            let row = rows.next();
+            if rows.next().is_some() {
+                return Err(crate::Error::Conflict {
+                    resource: "remember credential".to_owned(),
+                    message: "selector matched multiple active rows".to_owned(),
+                });
+            }
+            row.as_ref()
                 .map(|row| {
                     Ok(RememberRow {
                         id: row.id.clone(),
@@ -982,6 +990,114 @@ pub mod sql_stores {
                 .await
                 .map_err(db_error)?;
             Ok(deleted.rows_affected == 1)
+        }
+
+        async fn replace_for_rotation(
+            &self,
+            id: &str,
+            selector: &str,
+            now: DateTime<Utc>,
+            replacement: RememberRow,
+        ) -> Result<bool> {
+            let auth_epoch =
+                i64::try_from(replacement.auth_epoch).map_err(|_| crate::Error::InvalidInput {
+                    field: "auth_epoch".to_owned(),
+                    message: "exceeds the database integer range".to_owned(),
+                })?;
+            let transaction = self.0.begin().await.map_err(db_error)?;
+            let result = async {
+                let deleted = remembers::Entity::delete_many()
+                    .filter(remembers::Column::Id.eq(id.to_owned()))
+                    .filter(remembers::Column::Selector.eq(selector.to_owned()))
+                    .filter(remembers::Column::ExpiresAt.gt(now))
+                    .exec(&transaction)
+                    .await
+                    .map_err(db_error)?;
+                if deleted.rows_affected != 1 {
+                    return Ok(false);
+                }
+                remembers::ActiveModel {
+                    id: Set(replacement.id),
+                    selector: Set(replacement.selector),
+                    user_id: Set(replacement.user_id),
+                    auth_epoch: Set(auth_epoch),
+                    verifier_hash: Set(replacement.verifier_hash),
+                    expires_at: Set(replacement.expires_at),
+                }
+                .insert(&transaction)
+                .await
+                .map_err(db_error)?;
+                Ok(true)
+            }
+            .await;
+
+            match result {
+                Ok(true) => transaction.commit().await.map_err(db_error).map(|()| true),
+                Ok(false) => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Ok(false)
+                }
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    Err(error)
+                }
+            }
+        }
+
+        async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+            let transaction = self.0.begin().await.map_err(db_error)?;
+            let result = async {
+                let rows = remembers::Entity::find()
+                    .filter(remembers::Column::UserId.eq(user_id.to_owned()))
+                    .filter(remembers::Column::Selector.eq(selector.to_owned()))
+                    .all(&transaction)
+                    .await
+                    .map_err(db_error)?;
+                let mut rows = rows
+                    .into_iter()
+                    .filter(|row| row.user_id == user_id && row.selector == selector);
+                let Some(row) = rows.next() else {
+                    return Ok(0);
+                };
+                if rows.next().is_some() {
+                    return Err(crate::Error::Conflict {
+                        resource: "remember credential".to_owned(),
+                        message: "owner and selector matched multiple rows".to_owned(),
+                    });
+                }
+                remembers::Entity::delete_many()
+                    .filter(remembers::Column::Id.eq(row.id))
+                    .exec(&transaction)
+                    .await
+                    .map(|deleted| deleted.rows_affected)
+                    .map_err(db_error)
+            }
+            .await;
+            match result {
+                Ok(1) => {
+                    transaction.commit().await.map_err(db_error)?;
+                    Ok(true)
+                }
+                Ok(0) => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Ok(false)
+                }
+                Ok(_) => {
+                    transaction.rollback().await.map_err(db_error)?;
+                    Err(crate::Error::Conflict {
+                        resource: "remember credential".to_owned(),
+                        message: "owner and selector matched multiple rows".to_owned(),
+                    })
+                }
+                Err(error) => match transaction.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(crate::Error::Internal {
+                        message: format!(
+                            "revoke remember selector failed: {error}; rollback failed: {rollback_error}"
+                        ),
+                    }),
+                },
+            }
         }
 
         async fn revoke_all_remember(&self, user_id: &str) -> Result<u64> {

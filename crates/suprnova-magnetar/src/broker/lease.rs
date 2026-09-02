@@ -25,9 +25,10 @@
 //! once the row is quiescent (no claim) and still shows a generation past
 //! what the caller holds.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -39,12 +40,74 @@ use super::{
 use crate::crypto::CryptoPurpose;
 use crate::oauth::grants::{client_credentials, refresh};
 use crate::oauth::provider::OAuthProvider;
-use crate::storage::{CommitProviderToken, NewProviderToken, ProviderTokenRow};
+use crate::plugin::{HttpRequest, HttpResponse, HttpTransport};
+use crate::storage::provider_tokens::{exchange_claim_id, is_exchange_claim_id};
+use crate::storage::{CommitProviderToken, NewProviderToken, ProviderTokenRow, ProviderTokenStore};
 
 /// Provider name used for failures not attributable to a resolved
 /// provider (a caller-protocol violation, a decode failure on a stored
 /// value) -- distinct from any real provider's registry name.
 const INTERNAL: &str = "broker";
+
+struct ExchangeFencingTransport<'a> {
+    inner: &'a dyn HttpTransport,
+    store: &'a dyn ProviderTokenStore,
+    record_id: &'a str,
+    claim_id: &'a str,
+    presented_generation: i64,
+    fence_error: Mutex<Option<crate::Error>>,
+}
+
+impl ExchangeFencingTransport<'_> {
+    fn record_fence_error(&self, error: crate::Error) {
+        let mut slot = self
+            .fence_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(error);
+    }
+
+    fn take_fence_error(&self) -> Option<crate::Error> {
+        self.fence_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+#[async_trait]
+impl HttpTransport for ExchangeFencingTransport<'_> {
+    async fn send(&self, request: HttpRequest) -> crate::Result<HttpResponse> {
+        let marked = match self
+            .store
+            .mark_exchange_started(
+                self.record_id,
+                self.claim_id,
+                self.presented_generation,
+                Utc::now(),
+            )
+            .await
+        {
+            Ok(marked) => marked,
+            Err(error) => {
+                self.record_fence_error(error);
+                return Err(crate::Error::Internal {
+                    message: "provider exchange fence failed before transport I/O".to_owned(),
+                });
+            }
+        };
+        if !marked {
+            self.record_fence_error(crate::Error::Internal {
+                message: "provider token store does not support durable exchange fencing"
+                    .to_owned(),
+            });
+            return Err(crate::Error::Internal {
+                message: "provider exchange fence failed before transport I/O".to_owned(),
+            });
+        }
+        self.inner.send(request).await
+    }
+}
 
 fn resolve_provider(
     service: &TokenBrokerService,
@@ -207,6 +270,22 @@ async fn linked_loop(
             });
         }
 
+        if row.claim_id.as_deref().is_some_and(is_exchange_claim_id) {
+            if row.has_live_claim(now) {
+                wait_a_bit(service).await;
+                if Instant::now() > deadline {
+                    return Err(BrokerError::LeaseTimeout {
+                        record_id: record_id.to_owned(),
+                    });
+                }
+                continue;
+            }
+            return Err(BrokerError::Revoked {
+                record_id: record_id.to_owned(),
+                reused: false,
+            });
+        }
+
         if provenance == GenerationProvenance::Observed && row_is_fresh(&row, now) {
             // Whatever generation this settled at (ours or adopted from a
             // sibling pod), the stored token is fresh right now: done.
@@ -325,14 +404,27 @@ async fn run_leader_linked(
             message: "stored refresh token is not valid utf-8".to_owned(),
         })?;
     let scopes = split_scopes(&row.scopes);
+    let exchange_claim_id = exchange_claim_id(claim_id);
+    let transport = ExchangeFencingTransport {
+        inner: service.transport.as_ref(),
+        store: service.store.as_ref(),
+        record_id,
+        claim_id,
+        presented_generation,
+        fence_error: Mutex::new(None),
+    };
 
     let outcome = refresh::execute_with_raw(
         provider.as_ref(),
-        service.transport.as_ref(),
+        &transport,
         SecretString::from(refresh_token_value),
         &scopes,
     )
     .await;
+
+    if let Some(error) = transport.take_fence_error() {
+        return Err(BrokerError::Storage(error));
+    }
 
     match outcome {
         Ok((success, raw_body)) => {
@@ -368,9 +460,9 @@ async fn run_leader_linked(
 
             let committed = service
                 .store
-                .commit(
+                .commit_exchange(
                     record_id,
-                    claim_id,
+                    &exchange_claim_id,
                     presented_generation,
                     CommitProviderToken {
                         access_ciphertext,
@@ -401,7 +493,12 @@ async fn run_leader_linked(
                 FailureClass::Reuse => {
                     let won = service
                         .store
-                        .mark_revoked_by_claim(record_id, claim_id, true)
+                        .mark_revoked_by_exchange(
+                            record_id,
+                            &exchange_claim_id,
+                            presented_generation,
+                            true,
+                        )
                         .await?;
                     if won && let Some(hook) = &service.reuse_hook {
                         hook.on_reuse_detected(record_id, provider.name()).await;
@@ -414,7 +511,12 @@ async fn run_leader_linked(
                 FailureClass::OrdinaryRevocation => {
                     service
                         .store
-                        .mark_revoked_by_claim(record_id, claim_id, false)
+                        .mark_revoked_by_exchange(
+                            record_id,
+                            &exchange_claim_id,
+                            presented_generation,
+                            false,
+                        )
                         .await?;
                     Err(BrokerError::Revoked {
                         record_id: record_id.to_owned(),

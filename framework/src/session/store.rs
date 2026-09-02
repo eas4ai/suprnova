@@ -12,6 +12,10 @@ use crate::error::FrameworkError;
 /// convention (`Illuminate/Session/Store.php:553-556`).
 const OLD_INPUT_KEY: &str = "_old_input";
 const MAGNETAR_WEB_BINDING_KEY: &str = "auth.magnetar_web_binding";
+const AUTH_GUARDS_KEY: &str = "_auth_guards";
+const AUTH_GUARD_ID_KEY: &str = "id";
+const AUTH_GUARD_REMEMBER_SELECTOR_KEY: &str = "remember_selector";
+const AUTH_GUARD_MAGNETAR_BINDING_KEY: &str = "magnetar_web_binding";
 
 /// Session data container
 ///
@@ -22,7 +26,8 @@ pub struct SessionData {
     pub id: String,
     /// Key-value data stored in the session
     pub data: HashMap<String, serde_json::Value>,
-    /// Authenticated user ID (if any)
+    /// Legacy/configured-default-guard authenticated user ID compatibility mirror.
+    /// Named guard identities live in the reserved guard-state object in [`Self::data`].
     pub user_id: Option<String>,
     /// CSRF token for this session
     pub csrf_token: String,
@@ -78,6 +83,134 @@ impl SessionData {
         self.id = new_id.into();
         self.loaded_from_store = false;
         self.dirty = true;
+    }
+
+    fn auth_guard_field(&self, guard: &str, field: &str) -> Option<&serde_json::Value> {
+        self.data
+            .get(AUTH_GUARDS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|guards| guards.get(guard))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|state| state.get(field))
+    }
+
+    fn set_auth_guard_field(&mut self, guard: &str, field: &str, value: serde_json::Value) {
+        if self.auth_guard_field(guard, field) == Some(&value) {
+            return;
+        }
+
+        let guards = self
+            .data
+            .entry(AUTH_GUARDS_KEY.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !guards.is_object() {
+            *guards = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(guards) = guards.as_object_mut() {
+            let state = guards
+                .entry(guard.to_owned())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !state.is_object() {
+                *state = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(state) = state.as_object_mut() {
+                state.insert(field.to_owned(), value);
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn auth_guard_id(&self, guard: &str) -> Option<String> {
+        self.auth_guard_field(guard, AUTH_GUARD_ID_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    }
+
+    pub(crate) fn set_auth_guard_id(&mut self, guard: &str, user_id: impl Into<String>) {
+        self.set_auth_guard_field(
+            guard,
+            AUTH_GUARD_ID_KEY,
+            serde_json::Value::String(user_id.into()),
+        );
+    }
+
+    pub(crate) fn replace_auth_guard_id(&mut self, guard: &str, user_id: impl Into<String>) {
+        self.remove_auth_guard(guard);
+        self.set_auth_guard_id(guard, user_id);
+    }
+
+    pub(crate) fn auth_guard_remember_selector(&self, guard: &str) -> Option<String> {
+        self.auth_guard_field(guard, AUTH_GUARD_REMEMBER_SELECTOR_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    }
+
+    pub(crate) fn set_auth_guard_remember_selector(
+        &mut self,
+        guard: &str,
+        selector: impl Into<String>,
+    ) {
+        self.set_auth_guard_field(
+            guard,
+            AUTH_GUARD_REMEMBER_SELECTOR_KEY,
+            serde_json::Value::String(selector.into()),
+        );
+    }
+
+    pub(crate) fn set_auth_guard_magnetar_binding(
+        &mut self,
+        guard: &str,
+        binding: magnetar::sessions::WebSessionBinding,
+    ) {
+        self.set_auth_guard_field(
+            guard,
+            AUTH_GUARD_MAGNETAR_BINDING_KEY,
+            serde_json::json!({
+                "session_id": binding.session_id,
+                "token_digest": binding.token_digest,
+            }),
+        );
+    }
+
+    pub(crate) fn auth_guard_names(&self) -> Vec<String> {
+        self.data
+            .get(AUTH_GUARDS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|guards| guards.keys().cloned())
+            .collect()
+    }
+
+    pub(crate) fn auth_guard_magnetar_binding(
+        &self,
+        guard: &str,
+    ) -> Option<magnetar::sessions::WebSessionBinding> {
+        self.auth_guard_field(guard, AUTH_GUARD_MAGNETAR_BINDING_KEY)
+            .and_then(|binding| serde_json::from_value(binding.clone()).ok())
+    }
+
+    pub(crate) fn has_auth_guard_magnetar_binding(&self, guard: &str) -> bool {
+        self.auth_guard_field(guard, AUTH_GUARD_MAGNETAR_BINDING_KEY)
+            .is_some()
+    }
+
+    pub(crate) fn remove_auth_guard(&mut self, guard: &str) {
+        let mut remove_container = false;
+        let removed = self
+            .data
+            .get_mut(AUTH_GUARDS_KEY)
+            .and_then(serde_json::Value::as_object_mut)
+            .is_some_and(|guards| {
+                let removed = guards.remove(guard).is_some();
+                remove_container = guards.is_empty();
+                removed
+            });
+        if remove_container {
+            self.data.remove(AUTH_GUARDS_KEY);
+        }
+        if removed {
+            self.dirty = true;
+        }
     }
 
     /// Get a value from the session
@@ -644,5 +777,19 @@ mod dirty_tracking_tests {
         let removed = s.forget("k");
         assert_eq!(removed, Some(serde_json::json!(42)));
         assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn setting_same_auth_guard_id_does_not_dirty_session() {
+        let mut session = SessionData::new("sid".into(), "tok".into());
+        session.set_auth_guard_id("web", "7");
+        session.mark_clean();
+
+        session.set_auth_guard_id("web", "7");
+
+        assert!(
+            !session.is_dirty(),
+            "an unchanged guard identity must not force a session-store write"
+        );
     }
 }

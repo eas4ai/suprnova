@@ -155,10 +155,11 @@ impl Checkout for StripeProvider {
                         managed_payments_enabled: self.managed_payments(),
                     };
 
-                    let session: CheckoutSession =
-                        RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
-                            .form(&params)
-                            .customize::<CheckoutSession>()
+                    let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
+                        .form(&params)
+                        .customize::<CheckoutSession>();
+                    let session =
+                        crate::apply_idempotency(request, req.idempotency_key.as_deref())?
                             .send(self.client())
                             .await
                             .map_err(|e| {
@@ -194,15 +195,15 @@ impl Checkout for StripeProvider {
                     description: None,
                 };
 
-                let intent: PaymentIntent =
-                    RequestBuilder::new(StripeMethod::Post, "/payment_intents")
-                        .form(&params)
-                        .customize::<PaymentIntent>()
-                        .send(self.client())
-                        .await
-                        .map_err(|e| {
-                            PaymentError::Provider(format!("stripe payment_intents.create: {e}"))
-                        })?;
+                let request = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
+                    .form(&params)
+                    .customize::<PaymentIntent>();
+                let intent = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
+                    .send(self.client())
+                    .await
+                    .map_err(|e| {
+                        PaymentError::Provider(format!("stripe payment_intents.create: {e}"))
+                    })?;
 
                 let client_secret = intent.client_secret.ok_or_else(|| {
                     PaymentError::Provider("PaymentIntent missing client_secret on create".into())
@@ -242,15 +243,15 @@ impl Checkout for StripeProvider {
                     managed_payments_enabled: false,
                 };
 
-                let session: CheckoutSession =
-                    RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
-                        .form(&params)
-                        .customize::<CheckoutSession>()
-                        .send(self.client())
-                        .await
-                        .map_err(|e| {
-                            PaymentError::Provider(format!("stripe checkout.sessions.create: {e}"))
-                        })?;
+                let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
+                    .form(&params)
+                    .customize::<CheckoutSession>();
+                let session = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
+                    .send(self.client())
+                    .await
+                    .map_err(|e| {
+                        PaymentError::Provider(format!("stripe checkout.sessions.create: {e}"))
+                    })?;
 
                 let url = session.url.ok_or_else(|| {
                     PaymentError::Provider("CheckoutSession missing url on create".into())

@@ -8,6 +8,8 @@ use crate::ui;
 
 const WORKFLOWS_MIGRATION: &str = "m20240101_000003_create_workflows_table";
 const WORKFLOW_STEPS_MIGRATION: &str = "m20240101_000004_create_workflow_steps_table";
+const NORMALIZE_WORKFLOW_DATETIMES_MIGRATION: &str =
+    "m20260901_000001_normalize_workflow_datetime_columns";
 
 pub fn run() {
     let migrations_dir = Path::new("src/migrations");
@@ -28,6 +30,8 @@ pub fn run() {
 
     let workflows_file = migrations_dir.join(format!("{}.rs", WORKFLOWS_MIGRATION));
     let steps_file = migrations_dir.join(format!("{}.rs", WORKFLOW_STEPS_MIGRATION));
+    let normalize_datetimes_file =
+        migrations_dir.join(format!("{}.rs", NORMALIZE_WORKFLOW_DATETIMES_MIGRATION));
 
     if !workflows_file.exists() {
         if let Err(e) = fs::write(&workflows_file, templates::create_workflows_migration()) {
@@ -49,6 +53,25 @@ pub fn run() {
         ui::warning(&format!("{} already exists", steps_file.display()));
     }
 
+    if !normalize_datetimes_file.exists() {
+        if let Err(e) = fs::write(
+            &normalize_datetimes_file,
+            templates::normalize_workflow_datetimes_migration(),
+        ) {
+            ui::error(&format!(
+                "Failed to write workflow datetime normalization migration: {}",
+                e
+            ));
+            std::process::exit(1);
+        }
+        ui::success(&format!("Created {}", normalize_datetimes_file.display()));
+    } else {
+        ui::warning(&format!(
+            "{} already exists",
+            normalize_datetimes_file.display()
+        ));
+    }
+
     if mod_file.exists() {
         if let Err(e) = update_mod_file(&mod_file, WORKFLOWS_MIGRATION) {
             ui::error(&format!("Failed to update mod.rs: {}", e));
@@ -58,10 +81,14 @@ pub fn run() {
             ui::error(&format!("Failed to update mod.rs: {}", e));
             std::process::exit(1);
         }
+        if let Err(e) = update_mod_file(&mod_file, NORMALIZE_WORKFLOW_DATETIMES_MIGRATION) {
+            ui::error(&format!("Failed to update mod.rs: {}", e));
+            std::process::exit(1);
+        }
         ui::success("Updated src/migrations/mod.rs");
     } else {
         let mod_content = format!(
-            "pub use sea_orm_migration::prelude::*;\n\nmod {};\nmod {};\n\n\
+            "pub use sea_orm_migration::prelude::*;\n\nmod {};\nmod {};\nmod {};\n\n\
             pub struct Migrator;\n\n\
             #[async_trait::async_trait]\n\
             impl MigratorTrait for Migrator {{\n\
@@ -69,13 +96,16 @@ pub fn run() {
                     vec![\n\
                         Box::new({}::Migration),\n\
                         Box::new({}::Migration),\n\
+                        Box::new({}::Migration),\n\
                     ]\n\
                 }}\n\
             }}\n",
             WORKFLOWS_MIGRATION,
             WORKFLOW_STEPS_MIGRATION,
+            NORMALIZE_WORKFLOW_DATETIMES_MIGRATION,
             WORKFLOWS_MIGRATION,
-            WORKFLOW_STEPS_MIGRATION
+            WORKFLOW_STEPS_MIGRATION,
+            NORMALIZE_WORKFLOW_DATETIMES_MIGRATION
         );
 
         if let Err(e) = fs::write(&mod_file, mod_content) {
@@ -97,12 +127,13 @@ fn update_mod_file(mod_file: &Path, module_name: &str) -> Result<(), String> {
         fs::read_to_string(mod_file).map_err(|e| format!("Failed to read mod.rs: {}", e))?;
 
     let mod_decl = format!("mod {};", module_name);
-    let entry_line = format!("            Box::new({}::Migration),", module_name);
+    let entry = format!("Box::new({}::Migration)", module_name);
+    let entry_line = format!("            {},", entry);
 
     let lines: Vec<&str> = content.lines().collect();
 
     let has_mod = content.contains(&mod_decl);
-    let has_entry = content.contains(&entry_line);
+    let has_entry = content.contains(&entry);
 
     let mut last_mod_idx = None;
     let mut last_entry_idx = None;

@@ -3,7 +3,7 @@
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 
-use super::{Session, User};
+use super::{Session, SignInOutcome, User};
 use crate::error::FrameworkError;
 use crate::session::session;
 
@@ -152,7 +152,28 @@ impl OAuthAuth {
         state: &str,
         form_post_user: Option<String>,
     ) -> Result<(User, Session), FrameworkError> {
-        self.complete_callback(code, state, form_post_user).await
+        self.complete_with_apple_form_post_outcome(code, state, form_post_user)
+            .await?
+            .into_legacy_tuple("OAuth sign-in requires a second factor")
+    }
+
+    /// Complete an Apple `form_post` callback and preserve a factor continuation.
+    ///
+    /// A [`SignInOutcome::FactorRequired`] result does not bind the framework
+    /// session. Its selector can be completed through the retained host engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for callback proof, identity policy, or session
+    /// issuance failure.
+    pub async fn complete_with_apple_form_post_outcome(
+        &self,
+        code: &str,
+        state: &str,
+        form_post_user: Option<String>,
+    ) -> Result<SignInOutcome, FrameworkError> {
+        self.complete_callback_outcome(code, state, form_post_user)
+            .await
     }
 
     /// Complete a standard OAuth callback and issue a session.
@@ -166,7 +187,26 @@ impl OAuthAuth {
         code: &str,
         state: &str,
     ) -> Result<(User, Session), FrameworkError> {
-        self.complete_callback(code, state, None).await
+        self.complete_outcome(code, state)
+            .await?
+            .into_legacy_tuple("OAuth sign-in requires a second factor")
+    }
+
+    /// Complete a standard OAuth callback and preserve a factor continuation.
+    ///
+    /// A [`SignInOutcome::FactorRequired`] result does not bind the framework
+    /// session. Its selector can be completed through the retained host engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for callback proof, identity policy, or session
+    /// issuance failure.
+    pub async fn complete_outcome(
+        &self,
+        code: &str,
+        state: &str,
+    ) -> Result<SignInOutcome, FrameworkError> {
+        self.complete_callback_outcome(code, state, None).await
     }
 
     async fn verify_identity(
@@ -189,12 +229,13 @@ impl OAuthAuth {
             .map_err(map_error)
     }
 
-    async fn complete_callback(
+    async fn complete_callback_outcome(
         &self,
         code: &str,
         state: &str,
         form_post_user: Option<String>,
-    ) -> Result<(User, Session), FrameworkError> {
+    ) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = oauth_engine(&self.provider)?;
         match engine
             .oauth_complete(super::engine::MagnetarOAuthCallback {
@@ -209,14 +250,14 @@ impl OAuthAuth {
             .map_err(map_error)?
         {
             super::engine::MagnetarOAuthCompletion::SessionAllowed { user, session } => {
-                super::bind_issued_session(&session, false);
-                Ok((user, session.session))
-            }
-            super::engine::MagnetarOAuthCompletion::FactorRequired { .. } => {
-                Err(FrameworkError::Domain {
-                    message: "OAuth sign-in requires a second factor".to_owned(),
-                    status_code: 401,
+                super::bind_issued_session(&session, false)?;
+                Ok(SignInOutcome::Authenticated {
+                    user,
+                    session: session.session,
                 })
+            }
+            super::engine::MagnetarOAuthCompletion::FactorRequired { challenge_selector } => {
+                Ok(SignInOutcome::FactorRequired { challenge_selector })
             }
             super::engine::MagnetarOAuthCompletion::EmailCompletionRequired { .. } => {
                 Err(FrameworkError::Domain {

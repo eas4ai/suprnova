@@ -15,12 +15,64 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::sea_query::{Expr, ExprTrait, IntoColumnRef};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter};
+use sha2::{Digest, Sha256};
 
 use super::{SeaOrmStorage, db_error, in_transaction};
 use crate::schema::{BrokerSchema, EntityBinding, ProviderTokenFields};
 use crate::{Error, Result};
+
+const EXCHANGE_CLAIM_PREFIX: &str = "98510432671946852037";
+const EXCHANGE_CLAIM_DIGEST_LEN: usize = 64;
+
+/// Derive the canonical opaque owner stored for an exchange-started claim.
+///
+/// Custom [`ProviderTokenStore`] implementations that opt into exchange
+/// fencing must persist this value as the row's `claim_id` while preserving
+/// the ordinary claim deadline.
+pub fn exchange_claim_id(claim_id: &str) -> String {
+    let digest = Sha256::digest(claim_id.as_bytes());
+    let mut encoded = String::with_capacity(EXCHANGE_CLAIM_PREFIX.len() + digest.len() * 2);
+    encoded.push_str(EXCHANGE_CLAIM_PREFIX);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+/// Return whether a claim identifier is a canonical exchange-fence owner.
+///
+/// Store implementations must never reclaim an identifier for which this
+/// returns `true`, even after its preserved deadline expires.
+pub fn is_exchange_claim_id(claim_id: &str) -> bool {
+    let Some(digest) = claim_id.strip_prefix(EXCHANGE_CLAIM_PREFIX) else {
+        return false;
+    };
+    digest.len() == EXCHANGE_CLAIM_DIGEST_LEN
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn exact_text_eq<C>(backend: DbBackend, column: C, value: &str) -> Expr
+where
+    C: IntoColumnRef,
+{
+    match backend {
+        DbBackend::MySql => Expr::cust_with_exprs(
+            "BINARY ? = BINARY ?",
+            [Expr::col(column), Expr::value(value.to_owned())],
+        ),
+        DbBackend::Sqlite => Expr::cust_with_exprs(
+            "CAST(? AS BLOB) = CAST(? AS BLOB)",
+            [Expr::col(column), Expr::value(value.to_owned())],
+        ),
+        DbBackend::Postgres => Expr::col(column).eq(value.to_owned()),
+        _ => Expr::value(false),
+    }
+}
 
 /// Input for provisioning a fresh, unclaimed record at generation zero.
 #[derive(Clone, Debug)]
@@ -120,7 +172,9 @@ pub trait ProviderTokenStore: Send + Sync {
 
     /// Conditionally claim `presented_generation` for `record_id`. Succeeds
     /// only when the stored generation matches, the record is not revoked,
-    /// and no live claim currently owns it.
+    /// and no live claim currently owns it. Implementations must reject the
+    /// reserved exchange-owner namespace and must never reclaim an owner for
+    /// which [`is_exchange_claim_id`] returns `true`.
     async fn claim(
         &self,
         record_id: &str,
@@ -138,6 +192,22 @@ pub trait ProviderTokenStore: Send + Sync {
         new_deadline: DateTime<Utc>,
     ) -> Result<bool>;
 
+    /// Atomically fence an owned ordinary claim immediately before its
+    /// linked-account provider exchange begins. The existing deadline is
+    /// preserved so followers can distinguish a live exchange from an
+    /// abandoned one. A successful implementation must replace the exact
+    /// ordinary `claim_id` with [`exchange_claim_id(claim_id)`]. The default
+    /// fails closed for custom stores.
+    async fn mark_exchange_started(
+        &self,
+        _record_id: &str,
+        _claim_id: &str,
+        _presented_generation: i64,
+        _now: DateTime<Utc>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Commit a successful provider exchange under an owned claim and
     /// release it. Succeeds only when `claim_id` and `presented_generation`
     /// still match the stored row (a stale, reclaimed leader's late result
@@ -150,6 +220,20 @@ pub trait ProviderTokenStore: Send + Sync {
         input: CommitProviderToken,
     ) -> Result<bool>;
 
+    /// Commit a linked-account exchange only under its exact fenced claim
+    /// and presented generation. The default fails closed for custom
+    /// stores; legacy [`Self::commit`] semantics remain available to direct
+    /// callers and the machine-to-machine cache.
+    async fn commit_exchange(
+        &self,
+        _record_id: &str,
+        _exchange_claim_id: &str,
+        _presented_generation: i64,
+        _input: CommitProviderToken,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Release an owned claim as a terminal, dossier-driven revocation
     /// (`invalid_grant`), marking the record revoked. Succeeds only when
     /// `claim_id` still matches.
@@ -159,6 +243,19 @@ pub trait ProviderTokenStore: Send + Sync {
         claim_id: &str,
         reused: bool,
     ) -> Result<bool>;
+
+    /// Revoke a linked-account family only under its exact fenced claim
+    /// and presented generation. The default fails closed for custom
+    /// stores.
+    async fn mark_revoked_by_exchange(
+        &self,
+        _record_id: &str,
+        _exchange_claim_id: &str,
+        _presented_generation: i64,
+        _reused: bool,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Revoke a stale-presenter's family as detected reuse, independent of
     /// any claim, conditioned on the record not already being revoked and
@@ -273,6 +370,12 @@ where
         if record_id.is_empty() || claim_id.is_empty() {
             return Err(empty("record_id/claim_id"));
         }
+        if claim_id.starts_with(EXCHANGE_CLAIM_PREFIX) {
+            return Err(Error::InvalidInput {
+                field: "claim_id".to_owned(),
+                message: "claim_id uses a reserved prefix".to_owned(),
+            });
+        }
         let result = <S::ProviderToken as EntityBinding>::Entity::update_many()
             .col_expr(
                 S::ProviderToken::claim_id_column(),
@@ -288,8 +391,48 @@ where
             .filter(
                 sea_orm::Condition::any()
                     .add(S::ProviderToken::claim_id_column().is_null())
-                    .add(S::ProviderToken::claim_deadline_column().lte(now)),
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(S::ProviderToken::claim_deadline_column().lte(now))
+                            .add(
+                                S::ProviderToken::claim_id_column()
+                                    .not_like(format!("{EXCHANGE_CLAIM_PREFIX}%")),
+                            ),
+                    ),
             )
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(result.rows_affected == 1)
+    }
+
+    async fn mark_exchange_started(
+        &self,
+        record_id: &str,
+        claim_id: &str,
+        presented_generation: i64,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if record_id.is_empty() || claim_id.is_empty() {
+            return Err(empty("record_id/claim_id"));
+        }
+        if claim_id.starts_with(EXCHANGE_CLAIM_PREFIX) {
+            return Ok(false);
+        }
+        let result = <S::ProviderToken as EntityBinding>::Entity::update_many()
+            .col_expr(
+                S::ProviderToken::claim_id_column(),
+                Expr::value(exchange_claim_id(claim_id)),
+            )
+            .filter(S::ProviderToken::id_column().eq(record_id.to_owned()))
+            .filter(exact_text_eq(
+                self.database().get_database_backend(),
+                S::ProviderToken::claim_id_column(),
+                claim_id,
+            ))
+            .filter(S::ProviderToken::claim_deadline_column().gt(now))
+            .filter(S::ProviderToken::generation_column().eq(presented_generation))
+            .filter(S::ProviderToken::revoked_at_column().is_null())
             .exec(self.database())
             .await
             .map_err(db_error)?;
@@ -305,13 +448,20 @@ where
         if record_id.is_empty() || claim_id.is_empty() {
             return Err(empty("record_id/claim_id"));
         }
+        if is_exchange_claim_id(claim_id) {
+            return Ok(false);
+        }
         let result = <S::ProviderToken as EntityBinding>::Entity::update_many()
             .col_expr(
                 S::ProviderToken::claim_deadline_column(),
                 Expr::value(new_deadline),
             )
             .filter(S::ProviderToken::id_column().eq(record_id.to_owned()))
-            .filter(S::ProviderToken::claim_id_column().eq(claim_id.to_owned()))
+            .filter(exact_text_eq(
+                self.database().get_database_backend(),
+                S::ProviderToken::claim_id_column(),
+                claim_id,
+            ))
             .filter(S::ProviderToken::revoked_at_column().is_null())
             .exec(self.database())
             .await
@@ -374,7 +524,11 @@ where
                 }
                 let result = query
                     .filter(S::ProviderToken::id_column().eq(record_id.clone()))
-                    .filter(S::ProviderToken::claim_id_column().eq(claim_id.clone()))
+                    .filter(exact_text_eq(
+                        tx.connection().get_database_backend(),
+                        S::ProviderToken::claim_id_column(),
+                        &claim_id,
+                    ))
                     .filter(S::ProviderToken::generation_column().eq(presented_generation))
                     .filter(S::ProviderToken::revoked_at_column().is_null())
                     .exec(tx.connection())
@@ -386,6 +540,20 @@ where
         .await
     }
 
+    async fn commit_exchange(
+        &self,
+        record_id: &str,
+        exchange_claim_id: &str,
+        presented_generation: i64,
+        input: CommitProviderToken,
+    ) -> Result<bool> {
+        if !is_exchange_claim_id(exchange_claim_id) {
+            return Ok(false);
+        }
+        self.commit(record_id, exchange_claim_id, presented_generation, input)
+            .await
+    }
+
     async fn mark_revoked_by_claim(
         &self,
         record_id: &str,
@@ -394,6 +562,9 @@ where
     ) -> Result<bool> {
         if record_id.is_empty() || claim_id.is_empty() {
             return Err(empty("record_id/claim_id"));
+        }
+        if is_exchange_claim_id(claim_id) {
+            return Ok(false);
         }
         let now = Utc::now();
         let result = <S::ProviderToken as EntityBinding>::Entity::update_many()
@@ -411,7 +582,53 @@ where
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
             .filter(S::ProviderToken::id_column().eq(record_id.to_owned()))
-            .filter(S::ProviderToken::claim_id_column().eq(claim_id.to_owned()))
+            .filter(exact_text_eq(
+                self.database().get_database_backend(),
+                S::ProviderToken::claim_id_column(),
+                claim_id,
+            ))
+            .filter(S::ProviderToken::revoked_at_column().is_null())
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(result.rows_affected == 1)
+    }
+
+    async fn mark_revoked_by_exchange(
+        &self,
+        record_id: &str,
+        exchange_claim_id: &str,
+        presented_generation: i64,
+        reused: bool,
+    ) -> Result<bool> {
+        if record_id.is_empty() || exchange_claim_id.is_empty() {
+            return Err(empty("record_id/exchange_claim_id"));
+        }
+        if !is_exchange_claim_id(exchange_claim_id) {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        let result = <S::ProviderToken as EntityBinding>::Entity::update_many()
+            .col_expr(S::ProviderToken::revoked_at_column(), Expr::value(now))
+            .col_expr(
+                S::ProviderToken::revoked_reused_column(),
+                Expr::value(reused),
+            )
+            .col_expr(
+                S::ProviderToken::claim_id_column(),
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                S::ProviderToken::claim_deadline_column(),
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
+            .filter(S::ProviderToken::id_column().eq(record_id.to_owned()))
+            .filter(exact_text_eq(
+                self.database().get_database_backend(),
+                S::ProviderToken::claim_id_column(),
+                exchange_claim_id,
+            ))
+            .filter(S::ProviderToken::generation_column().eq(presented_generation))
             .filter(S::ProviderToken::revoked_at_column().is_null())
             .exec(self.database())
             .await
@@ -443,7 +660,14 @@ where
             .filter(
                 sea_orm::Condition::any()
                     .add(S::ProviderToken::claim_id_column().is_null())
-                    .add(S::ProviderToken::claim_deadline_column().lte(now)),
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(S::ProviderToken::claim_deadline_column().lte(now))
+                            .add(
+                                S::ProviderToken::claim_id_column()
+                                    .not_like(format!("{EXCHANGE_CLAIM_PREFIX}%")),
+                            ),
+                    ),
             )
             .exec(self.database())
             .await
@@ -461,5 +685,60 @@ where
             .await
             .map_err(db_error)?;
         Ok(result.rows_affected > 0)
+    }
+}
+
+#[cfg(test)]
+mod exact_text_tests {
+    use sea_orm::sea_query::{
+        Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SqliteQueryBuilder,
+    };
+
+    use super::*;
+
+    #[test]
+    fn render_exact_text_predicates() {
+        let sqlite = Query::select()
+            .expr(exact_text_eq(
+                DbBackend::Sqlite,
+                Alias::new("claim_id"),
+                "AbC",
+            ))
+            .to_string(SqliteQueryBuilder);
+        let mysql = Query::select()
+            .expr(exact_text_eq(
+                DbBackend::MySql,
+                Alias::new("claim_id"),
+                "AbC",
+            ))
+            .to_string(MysqlQueryBuilder);
+        let postgres = Query::select()
+            .expr(exact_text_eq(
+                DbBackend::Postgres,
+                Alias::new("claim_id"),
+                "AbC",
+            ))
+            .to_string(PostgresQueryBuilder);
+
+        assert_eq!(
+            sqlite,
+            r#"SELECT CAST("claim_id" AS BLOB) = CAST('AbC' AS BLOB)"#
+        );
+        assert_eq!(mysql, "SELECT BINARY `claim_id` = BINARY 'AbC'");
+        assert_eq!(postgres, r#"SELECT "claim_id" = 'AbC'"#);
+    }
+
+    #[test]
+    fn exchange_owner_is_canonical_and_opaque() {
+        let owner = exchange_claim_id("Case-Sensitive-Ordinary-Owner");
+
+        assert!(is_exchange_claim_id(&owner));
+        assert_eq!(
+            owner.len(),
+            EXCHANGE_CLAIM_PREFIX.len() + EXCHANGE_CLAIM_DIGEST_LEN
+        );
+        assert!(!owner.contains("Case-Sensitive-Ordinary-Owner"));
+        assert!(!is_exchange_claim_id(&owner.to_uppercase()));
+        assert!(!is_exchange_claim_id(EXCHANGE_CLAIM_PREFIX));
     }
 }

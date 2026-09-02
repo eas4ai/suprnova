@@ -37,6 +37,10 @@ impl Subscription for PaddleProvider {
 
         match req.cancel_at_period_end {
             Some(true) => {
+                crate::reject_unsupported_idempotency_key(
+                    req.idempotency_key.as_deref(),
+                    "subscription cancellation scheduling",
+                )?;
                 // Mirror cancel(at_period_end=true): schedule via subscription_cancel
                 // with default (NextBillingPeriod).
                 let resp = self

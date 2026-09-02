@@ -140,18 +140,323 @@ impl RememberStore for MemoryRemember {
             })
             .unwrap_or(false))
     }
+
+    async fn replace_for_rotation(
+        &self,
+        id: &str,
+        selector: &str,
+        now: chrono::DateTime<Utc>,
+        replacement: RememberRow,
+    ) -> magnetar::Result<bool> {
+        let mut rows = self.0.lock();
+        let Some(index) = rows
+            .iter()
+            .position(|row| row.id == id && row.selector == selector && row.expires_at > now)
+        else {
+            return Ok(false);
+        };
+        rows[index] = replacement;
+        Ok(true)
+    }
+
     async fn revoke_all_remember(&self, user_id: &str) -> magnetar::Result<u64> {
         let mut rows = self.0.lock();
         let before = rows.len();
         rows.retain(|row| row.user_id != user_id);
         Ok((before - rows.len()) as u64)
     }
+
+    async fn revoke_remember_selector(
+        &self,
+        user_id: &str,
+        selector: &str,
+    ) -> magnetar::Result<bool> {
+        let mut rows = self.0.lock();
+        let matching = rows
+            .iter()
+            .filter(|row| row.user_id == user_id && row.selector == selector)
+            .count();
+        if matching == 0 {
+            return Ok(false);
+        }
+        if matching > 1 {
+            return Err(magnetar::Error::Conflict {
+                resource: "remember credential".to_owned(),
+                message: "owner and selector matched multiple rows".to_owned(),
+            });
+        }
+        let Some(index) = rows
+            .iter()
+            .position(|row| row.user_id == user_id && row.selector == selector)
+        else {
+            return Ok(false);
+        };
+        rows.remove(index);
+        Ok(true)
+    }
+
     async fn prune_expired_remember(&self, now: chrono::DateTime<Utc>) -> magnetar::Result<u64> {
         let mut rows = self.0.lock();
         let before = rows.len();
         rows.retain(|row| row.expires_at > now);
         Ok((before - rows.len()) as u64)
     }
+}
+
+#[derive(Default)]
+struct LegacyRememberStore(MemoryRemember);
+
+#[async_trait]
+impl RememberStore for LegacyRememberStore {
+    async fn insert_remember(&self, row: RememberRow) -> magnetar::Result<()> {
+        self.0.insert_remember(row).await
+    }
+
+    async fn find_for_rotation(
+        &self,
+        selector: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> magnetar::Result<Option<RememberRow>> {
+        self.0.find_for_rotation(selector, now).await
+    }
+
+    async fn consume_for_rotation(
+        &self,
+        id: &str,
+        selector: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0.consume_for_rotation(id, selector, now).await
+    }
+
+    async fn revoke_all_remember(&self, user_id: &str) -> magnetar::Result<u64> {
+        self.0.revoke_all_remember(user_id).await
+    }
+
+    async fn prune_expired_remember(&self, now: chrono::DateTime<Utc>) -> magnetar::Result<u64> {
+        self.0.prune_expired_remember(now).await
+    }
+}
+
+#[tokio::test]
+async fn memory_atomic_replace_has_single_winner_and_deterministic_state() {
+    let store = Arc::new(MemoryRemember::default());
+    let now = Utc::now();
+    let original = RememberRow {
+        id: "original-id".to_owned(),
+        selector: "original-selector".to_owned(),
+        user_id: "u1".to_owned(),
+        auth_epoch: 7,
+        verifier_hash: "sha256:original".to_owned(),
+        expires_at: now + Duration::hours(1),
+    };
+    let first_replacement = RememberRow {
+        id: "first-id".to_owned(),
+        selector: "first-selector".to_owned(),
+        verifier_hash: "sha256:first".to_owned(),
+        ..original.clone()
+    };
+    let second_replacement = RememberRow {
+        id: "second-id".to_owned(),
+        selector: "second-selector".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..original.clone()
+    };
+    store.insert_remember(original).await.unwrap();
+
+    let (first_won, second_won) = tokio::join!(
+        store.replace_for_rotation(
+            "original-id",
+            "original-selector",
+            now,
+            first_replacement.clone(),
+        ),
+        store.replace_for_rotation(
+            "original-id",
+            "original-selector",
+            now,
+            second_replacement.clone(),
+        ),
+    );
+    let first_won = first_won.unwrap();
+    let second_won = second_won.unwrap();
+    assert_ne!(first_won, second_won, "exactly one rotation must win");
+
+    let rows = store.0.lock().clone();
+    let winner = if first_won {
+        first_replacement
+    } else {
+        second_replacement
+    };
+    assert_eq!(rows, vec![winner]);
+}
+
+#[tokio::test]
+async fn legacy_remember_store_fails_closed_without_consuming_original() {
+    let store = LegacyRememberStore::default();
+    let now = Utc::now();
+    let original = RememberRow {
+        id: "legacy-id".to_owned(),
+        selector: "legacy-selector".to_owned(),
+        user_id: "legacy-user".to_owned(),
+        auth_epoch: 3,
+        verifier_hash: "sha256:legacy".to_owned(),
+        expires_at: now + Duration::hours(1),
+    };
+    store.insert_remember(original.clone()).await.unwrap();
+
+    let error = store
+        .replace_for_rotation(
+            &original.id,
+            &original.selector,
+            now,
+            RememberRow {
+                id: "replacement-id".to_owned(),
+                selector: "replacement-selector".to_owned(),
+                verifier_hash: "sha256:replacement".to_owned(),
+                ..original.clone()
+            },
+        )
+        .await
+        .expect_err("an old-method-only store must fail closed");
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable {
+            dependency,
+            message,
+        } if dependency == "remember store"
+            && message == "atomic remember credential rotation is unavailable"
+    ));
+    assert_eq!(store.0.0.lock().as_slice(), &[original]);
+}
+
+#[tokio::test]
+async fn remember_service_revokes_only_the_exact_selector() {
+    let store = Arc::new(MemoryRemember::default());
+    let service = RememberService::new(store.clone(), Duration::days(30)).unwrap();
+    let now = Utc::now();
+
+    let _first = service
+        .issue_at_epoch("same-user", 4, now, Duration::days(30))
+        .await
+        .unwrap();
+    let second = service
+        .issue_at_epoch("same-user", 4, now, Duration::days(30))
+        .await
+        .unwrap();
+    let selectors = store
+        .0
+        .lock()
+        .iter()
+        .map(|row| row.selector.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(selectors.len(), 2);
+
+    assert!(
+        service
+            .revoke_selector("same-user", &selectors[0])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !service
+            .revoke_selector("same-user", &selectors[0])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .0
+            .lock()
+            .iter()
+            .map(|row| row.selector.as_str())
+            .collect::<Vec<_>>(),
+        vec![selectors[1].as_str()]
+    );
+
+    let second = magnetar::sessions::RememberCredential::from_host(second.expose_once());
+    let (user_id, _, _) = service
+        .rotate_at_epoch(&second, now, Duration::days(30))
+        .await
+        .expect("the other selector must remain usable");
+    assert_eq!(user_id, "same-user");
+}
+
+#[tokio::test]
+async fn remember_service_does_not_mutate_ambiguous_selector_rows() {
+    let store = Arc::new(MemoryRemember::default());
+    let service = RememberService::new(store.clone(), Duration::days(30)).unwrap();
+    let now = Utc::now();
+    let first = RememberRow {
+        id: "ambiguous-selector-first".to_owned(),
+        selector: "ambiguous-selector".to_owned(),
+        user_id: "ambiguous-owner".to_owned(),
+        auth_epoch: 2,
+        verifier_hash: "sha256:first".to_owned(),
+        expires_at: now + Duration::hours(1),
+    };
+    let second = RememberRow {
+        id: "ambiguous-selector-second".to_owned(),
+        verifier_hash: "sha256:second".to_owned(),
+        ..first.clone()
+    };
+    store.insert_remember(first.clone()).await.unwrap();
+    store.insert_remember(second.clone()).await.unwrap();
+
+    assert!(
+        !service
+            .revoke_selector("different-owner", &first.selector)
+            .await
+            .expect("owner mismatch must fail closed")
+    );
+    assert_eq!(
+        store.0.lock().as_slice(),
+        &[first.clone(), second.clone()],
+        "owner mismatch must not mutate either row"
+    );
+    let error = service
+        .revoke_selector(&first.user_id, &first.selector)
+        .await
+        .expect_err("ambiguous exact revocation must return an error");
+    assert!(matches!(
+        error,
+        magnetar::Error::Conflict { resource, message }
+            if resource == "remember credential"
+                && message == "owner and selector matched multiple rows"
+    ));
+    assert_eq!(
+        store.0.lock().as_slice(),
+        &[first, second],
+        "ambiguous selector revocation must not mutate either row"
+    );
+}
+
+#[tokio::test]
+async fn legacy_remember_store_fails_closed_for_selector_revocation() {
+    let store = LegacyRememberStore::default();
+    let row = RememberRow {
+        id: "legacy-selector-id".to_owned(),
+        selector: "legacy-selector-only".to_owned(),
+        user_id: "legacy-selector-user".to_owned(),
+        auth_epoch: 3,
+        verifier_hash: "sha256:legacy-selector".to_owned(),
+        expires_at: Utc::now() + Duration::hours(1),
+    };
+    store.insert_remember(row.clone()).await.unwrap();
+
+    let error = store
+        .revoke_remember_selector(&row.user_id, &row.selector)
+        .await
+        .expect_err("an old-method-only store must fail closed");
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable {
+            dependency,
+            message,
+        } if dependency == "remember store"
+            && message == "exact remember credential revocation is unavailable"
+    ));
+    assert_eq!(store.0.0.lock().as_slice(), &[row]);
 }
 
 #[tokio::test]

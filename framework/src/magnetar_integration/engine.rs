@@ -51,8 +51,9 @@ use magnetar::{
     },
     sessions::{
         HostSessionApproval, OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore,
-        RememberCredential, RememberService, RememberSignInService, RememberStore, SessionGrant,
-        SessionMetadata, SessionQueries, SessionSummary, VerifiedSession, WebSessionBinding,
+        RememberCredential, RememberPostRotationDisposition, RememberService,
+        RememberSignInAttempt, RememberSignInService, RememberStore, SessionGrant, SessionMetadata,
+        SessionQueries, SessionSummary, VerifiedSession, WebSessionBinding,
     },
     storage::{
         CeremonyStore, IssueToken, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage,
@@ -178,6 +179,30 @@ pub struct MagnetarRememberSignIn {
     pub session: Box<MagnetarIssuedSession>,
     /// Rotated, single-use replacement remember credential.
     pub replacement: RememberCredential,
+}
+
+/// Commit-aware remembered sign-in result consumed by session middleware.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum MagnetarRememberSignInAttempt {
+    /// Rotation and framework session conversion both completed.
+    Authenticated(MagnetarRememberSignIn),
+    /// Rotation committed, but a later sign-in step did not complete.
+    RotationCommitted {
+        /// Owner of the live replacement credential.
+        user_id: String,
+        /// Sole live replacement for the consumed credential.
+        replacement: RememberCredential,
+        /// Failure returned by the post-rotation boundary.
+        error: Error,
+        /// Whether middleware should return or retire the replacement.
+        disposition: RememberPostRotationDisposition,
+    },
+    /// Rotation failed without a trustworthy commit-state guarantee.
+    RotationOutcomeUnknown {
+        /// Failure returned by the compatibility rotation boundary.
+        error: Error,
+    },
 }
 
 impl TryFrom<SessionGrant> for MagnetarIssuedSession {
@@ -750,6 +775,74 @@ where
         })
     }
 
+    /// Attempt remembered sign-in without losing a durably rotated replacement.
+    pub async fn remember_sign_in_attempt(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignInAttempt> {
+        match self
+            .remember
+            .attempt_sign_in_with_lifetime(
+                credential,
+                metadata,
+                chrono::Utc::now(),
+                replacement_lifetime,
+            )
+            .await?
+        {
+            RememberSignInAttempt::Authenticated(outcome) => {
+                let user_id = outcome.session.user_id().to_owned();
+                let session_id = outcome.session.session_id().to_owned();
+                let replacement = outcome.replacement;
+                match outcome.session.try_into() {
+                    Ok(session) => Ok(MagnetarRememberSignInAttempt::Authenticated(
+                        MagnetarRememberSignIn {
+                            session: Box::new(session),
+                            replacement,
+                        },
+                    )),
+                    Err(error) => {
+                        if let Err(revoke_error) =
+                            self.session_provider.revoke_session(&session_id).await
+                        {
+                            tracing::warn!(
+                                %revoke_error,
+                                "Magnetar session conversion cleanup did not complete"
+                            );
+                        }
+                        Ok(MagnetarRememberSignInAttempt::RotationCommitted {
+                            user_id,
+                            replacement,
+                            error,
+                            disposition: RememberPostRotationDisposition::Retryable,
+                        })
+                    }
+                }
+            }
+            RememberSignInAttempt::RotationCommitted {
+                user_id,
+                replacement,
+                failure,
+                ..
+            } => Ok(MagnetarRememberSignInAttempt::RotationCommitted {
+                user_id,
+                replacement,
+                error: failure.error,
+                disposition: failure.disposition,
+            }),
+            RememberSignInAttempt::RotationOutcomeUnknown { error } => {
+                Ok(MagnetarRememberSignInAttempt::RotationOutcomeUnknown { error })
+            }
+            _ => Ok(MagnetarRememberSignInAttempt::RotationOutcomeUnknown {
+                error: Error::Internal {
+                    message: "unsupported remember sign-in attempt outcome".to_owned(),
+                },
+            }),
+        }
+    }
+
     /// Resolve a digest-only binding against the current opaque session row and user epoch.
     pub async fn resolve_web_binding(
         &self,
@@ -763,6 +856,19 @@ where
     /// Revoke every remember credential for one user.
     pub async fn revoke_remember(&self, user_id: &str) -> Result<u64> {
         self.remember.revoke_all_for_user(user_id).await
+    }
+
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the remember service's exact-revocation error, including an
+    /// ambiguous-row conflict and its fail-closed unsupported-capability result.
+    pub async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        self.remember.revoke_selector(user_id, selector).await
     }
 
     /// Register through the host's real Magnetar password provider.
@@ -937,10 +1043,48 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         metadata: SessionMetadata,
         replacement_lifetime: chrono::Duration,
     ) -> Result<MagnetarRememberSignIn>;
+    /// Attempt remembered sign-in while preserving a committed replacement.
+    ///
+    /// The default keeps existing engine implementations source-compatible.
+    /// Such implementations can only distinguish success from an outer error,
+    /// while the built-in host engine overrides this method with commit-aware
+    /// behavior.
+    async fn remember_sign_in_attempt(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignInAttempt> {
+        match self
+            .remember_sign_in(credential, metadata, replacement_lifetime)
+            .await
+        {
+            Ok(outcome) => Ok(MagnetarRememberSignInAttempt::Authenticated(outcome)),
+            Err(error) => Ok(MagnetarRememberSignInAttempt::RotationOutcomeUnknown { error }),
+        }
+    }
     /// Resolve a digest-only web binding against the current session row and user epoch.
     async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession>;
     /// Revoke every remember credential for one user.
     async fn revoke_remember(&self, user_id: &str) -> Result<u64>;
+    /// Revoke exactly one remember credential by owner and non-secret selector.
+    ///
+    /// Returns `false` without mutation when no owner/selector row matches,
+    /// including owner mismatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DependencyUnavailable`] by default so an older engine
+    /// implementation cannot silently broaden a guard-scoped logout into
+    /// revoking every remember credential for the user. Implementations return
+    /// [`Error::Conflict`] when multiple persisted rows match.
+    async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        let _ = (user_id, selector);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "exact remember credential revocation is unavailable".to_owned(),
+        })
+    }
     /// Load a host-mapped users user by its opaque application id.
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
     /// Revoke one opaque session by its stable row identifier.
@@ -1079,12 +1223,31 @@ where
         MagnetarHostEngine::remember_sign_in(self, credential, metadata, replacement_lifetime).await
     }
 
+    async fn remember_sign_in_attempt(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignInAttempt> {
+        MagnetarHostEngine::remember_sign_in_attempt(
+            self,
+            credential,
+            metadata,
+            replacement_lifetime,
+        )
+        .await
+    }
+
     async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession> {
         MagnetarHostEngine::resolve_web_binding(self, binding).await
     }
 
     async fn revoke_remember(&self, user_id: &str) -> Result<u64> {
         MagnetarHostEngine::revoke_remember(self, user_id).await
+    }
+
+    async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
+        MagnetarHostEngine::revoke_remember_selector(self, user_id, selector).await
     }
 
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {

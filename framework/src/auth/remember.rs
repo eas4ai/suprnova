@@ -49,8 +49,8 @@
 //!
 //! - **Issuance**: random selector + random verifier → bcrypt-hash
 //!   the verifier → INSERT row → encrypt `"{selector}.{verifier}"`
-//!   under `Crypt` → place the encrypted blob in the `remember_me`
-//!   cookie.
+//!   inside a versioned, guard-named carrier under `Crypt` → place the
+//!   encrypted blob in the `remember_me` cookie.
 //!
 //! - **Verification**: decrypt cookie → split into
 //!   `(selector, verifier)` → `SELECT row WHERE selector = ? AND
@@ -70,11 +70,12 @@
 //!
 //! # Cookie format
 //!
-//! The on-wire cookie value is `Crypt::encrypt_string("{selector}.{verifier}")`.
-//! A successful decrypt yields the composite plaintext; the framework
-//! never stores or returns either half on its own. Tokens whose
-//! plaintext lacks the `.` separator are silently rejected (no DB hit,
-//! no bcrypt cost).
+//! New on-wire cookies encrypt a private, versioned carrier containing the
+//! complete guard name and `"{selector}.{verifier}"`. During the compatibility
+//! window, an unwrapped decrypted composite is accepted as a default-guard
+//! carrier. The framework never persists the verifier or plaintext carrier.
+//! Tokens whose credential lacks the `.` separator are silently rejected (no
+//! DB hit, no bcrypt cost).
 //!
 //! # Why bcrypt, not "store the verifier plaintext"
 //!
@@ -82,7 +83,7 @@
 //! Same reason passwords are hashed.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -209,17 +210,23 @@ pub async fn verify_and_rotate(
 
     // O(1) indexed lookup: the UNIQUE constraint on `selector` means
     // this returns 0 or 1 rows.
-    let row = entity::Entity::find()
+    let rows = entity::Entity::find()
         .filter(entity::Column::Selector.eq(selector))
         .filter(entity::Column::ExpiresAt.gt(now))
-        .one(conn.inner())
+        .all(conn.inner())
         .await
         .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
 
-    let row = match row {
+    let mut rows = rows.into_iter().filter(|row| row.selector == selector);
+    let row = match rows.next() {
         Some(r) => r,
         None => return Ok(None),
     };
+    if rows.next().is_some() {
+        return Err(FrameworkError::database(
+            "remember selector matched multiple exact rows",
+        ));
+    }
 
     // Exactly one `bcrypt::verify` per request - constant-time
     // comparison, no scanning. Audit HIGH `hashing` #1: the async
@@ -266,6 +273,77 @@ pub async fn revoke_all_for_user(user_id: &str) -> Result<u64, FrameworkError> {
         .await
         .map_err(|e| FrameworkError::database(format!("revoke remember tokens: {e}")))?;
     Ok(result.rows_affected)
+}
+
+/// Revoke exactly one remember token by owner and non-secret selector.
+pub(crate) async fn revoke_by_selector(
+    user_id: &str,
+    selector: &str,
+) -> Result<bool, FrameworkError> {
+    let conn = DB::connection()?;
+    let transaction = conn.inner().begin().await.map_err(|error| {
+        FrameworkError::database(format!("begin remember selector revocation: {error}"))
+    })?;
+    let result = async {
+        let rows = entity::Entity::find()
+            .filter(entity::Column::UserId.eq(user_id))
+            .filter(entity::Column::Selector.eq(selector))
+            .all(&transaction)
+            .await
+            .map_err(|error| {
+                FrameworkError::database(format!(
+                    "find remember token for selector revocation: {error}"
+                ))
+            })?;
+        let mut rows = rows
+            .into_iter()
+            .filter(|row| row.user_id == user_id && row.selector == selector);
+        let Some(row) = rows.next() else {
+            return Ok(0);
+        };
+        if rows.next().is_some() {
+            return Err(FrameworkError::database(
+                "remember selector matched multiple exact rows",
+            ));
+        }
+        entity::Entity::delete_many()
+            .filter(entity::Column::Id.eq(row.id))
+            .exec(&transaction)
+            .await
+            .map(|deleted| deleted.rows_affected)
+            .map_err(|error| {
+                FrameworkError::database(format!("revoke remember token by selector: {error}"))
+            })
+    }
+    .await;
+    match result {
+        Ok(1) => {
+            transaction.commit().await.map_err(|error| {
+                FrameworkError::database(format!("commit remember selector revocation: {error}"))
+            })?;
+            Ok(true)
+        }
+        Ok(0) => {
+            transaction.rollback().await.map_err(|error| {
+                FrameworkError::database(format!("rollback remember selector revocation: {error}"))
+            })?;
+            Ok(false)
+        }
+        Ok(_) => {
+            transaction.rollback().await.map_err(|error| {
+                FrameworkError::database(format!("rollback remember selector revocation: {error}"))
+            })?;
+            Err(FrameworkError::database(
+                "remember selector matched multiple rows",
+            ))
+        }
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(FrameworkError::database(format!(
+                "revoke remember token by selector failed: {error}; rollback failed: {rollback_error}"
+            ))),
+        },
+    }
 }
 
 /// Delete a single remember-token row by id. Useful for "log out this

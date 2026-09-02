@@ -16,6 +16,8 @@ use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
 use super::store::{SessionData, SessionStore};
 
+pub(crate) type PendingRememberRevocation = (String, String, String);
+
 // Per-request session slot. `tokio::task_local!` (not `thread_local!`)
 // so the binding survives `.await` points that resume on a different
 // worker thread - the same fix applied to `InertiaContext` in Tier 0.
@@ -44,6 +46,52 @@ tokio::task_local! {
     /// middleware layer that already owns the response. A task-local
     /// slot is the same shape we use for the session itself.
     pub(crate) static PENDING_COOKIES: Arc<Mutex<Vec<Cookie>>>;
+    /// Exact remember credentials invalidated by synchronous identity
+    /// transitions. `SessionMiddleware` drains these after the handler and
+    /// before persisting the replacement session.
+    pub(crate) static PENDING_REMEMBER_REVOCATIONS: Arc<Mutex<Vec<PendingRememberRevocation>>>;
+}
+
+/// Queue one exact remember credential for end-of-request revocation.
+#[must_use = "a synchronous identity transition must not silently drop exact remember cleanup"]
+pub(crate) fn push_pending_remember_revocation(
+    guard_name: &str,
+    user_id: String,
+    selector: String,
+) -> bool {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| {
+            slot.lock()
+                .unwrap()
+                .push((guard_name.to_owned(), user_id, selector));
+        })
+        .is_ok()
+}
+
+/// Remove every exact remember credential queued in the active request.
+pub(crate) fn take_pending_remember_revocations() -> Option<Vec<PendingRememberRevocation>> {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| std::mem::take(&mut *slot.lock().unwrap()))
+        .ok()
+}
+
+/// Restore revocations that could not yet be completed so middleware can retry.
+#[must_use = "failed remember cleanup must remain queued for the middleware fail-closed gate"]
+pub(crate) fn restore_pending_remember_revocations(
+    mut revocations: Vec<PendingRememberRevocation>,
+) -> bool {
+    PENDING_REMEMBER_REVOCATIONS
+        .try_with(|slot| {
+            let mut queued = slot.lock().unwrap();
+            revocations.append(&mut queued);
+            *queued = revocations;
+        })
+        .is_ok()
+}
+
+/// Whether synchronous identity transitions can queue exact remember cleanup.
+pub(crate) fn pending_remember_revocations_scope_installed() -> bool {
+    PENDING_REMEMBER_REVOCATIONS.try_with(|_| ()).is_ok()
 }
 
 /// Push a cookie into the per-request pending-cookies slot.
@@ -83,11 +131,20 @@ pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
 /// Silently does nothing outside a request scope - the same posture
 /// `inertia::flash::push` takes outside a flash scope.
 pub(crate) fn queue_cookie(cookie: Cookie) {
-    let _ = PENDING_COOKIES.try_with(|slot| {
-        let mut guard = slot.lock().unwrap();
-        guard.retain(|c| c.name() != cookie.name());
-        guard.push(cookie);
-    });
+    let _ = replace_pending_cookie(cookie);
+}
+
+/// Replace any queued cookie with the same name and report whether the
+/// request-scoped pending-cookie jar was available.
+#[must_use = "callers replacing a fail-closed cookie must verify the replacement reached the response jar"]
+pub(crate) fn replace_pending_cookie(cookie: Cookie) -> bool {
+    PENDING_COOKIES
+        .try_with(|slot| {
+            let mut guard = slot.lock().unwrap();
+            guard.retain(|c| c.name() != cookie.name());
+            guard.push(cookie);
+        })
+        .is_ok()
 }
 
 /// Look up a cookie queued under `name`, whether by `queue_cookie` or
@@ -478,6 +535,127 @@ impl SessionMiddleware {
     }
 }
 
+const REMEMBER_GUARD_CARRIER_PREFIX: &str = "suprnova.remember.v1:";
+const REMEMBER_GUARD_CARRIER_VERSION_PREFIX: &str = "suprnova.remember.v";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RememberGuardCarrier {
+    guard: String,
+    credential: String,
+}
+
+enum DecodedRememberCarrier {
+    Supported(String, String),
+    UnknownVersion,
+    Malformed,
+}
+
+pub(crate) fn remember_selector(credential: &str) -> Result<String, FrameworkError> {
+    let (selector, verifier) = credential.split_once('.').ok_or_else(|| {
+        FrameworkError::internal("issued remember credential has no selector separator")
+    })?;
+    if selector.is_empty() || verifier.is_empty() {
+        return Err(FrameworkError::internal(
+            "issued remember credential has an empty selector or verifier",
+        ));
+    }
+    Ok(selector.to_owned())
+}
+
+pub(crate) fn encode_remember_carrier(
+    guard: &str,
+    credential: &str,
+) -> Result<String, FrameworkError> {
+    let encoded = serde_json::to_string(&RememberGuardCarrier {
+        guard: guard.to_owned(),
+        credential: credential.to_owned(),
+    })
+    .map_err(|error| FrameworkError::internal(format!("encode remember carrier: {error}")))?;
+    Ok(format!("{REMEMBER_GUARD_CARRIER_PREFIX}{encoded}"))
+}
+
+async fn retire_committed_selector(
+    engine: &dyn crate::magnetar_integration::engine::MagnetarPasswordAuthEngine,
+    user_id: &str,
+    selector: &str,
+) -> Result<(), FrameworkError> {
+    let exact_error = match engine.revoke_remember_selector(user_id, selector).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => "exact replacement was not found".to_owned(),
+        Err(error) => format!("exact retirement failed: {error}"),
+    };
+    match engine.revoke_remember(user_id).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(FrameworkError::internal(format!(
+            "retire committed remember replacement ({exact_error}); owner-wide fallback failed: {error}"
+        ))),
+    }
+}
+
+async fn retire_committed_replacement(
+    engine: &dyn crate::magnetar_integration::engine::MagnetarPasswordAuthEngine,
+    user_id: &str,
+    replacement: &str,
+) -> Result<(), FrameworkError> {
+    match remember_selector(replacement) {
+        Ok(selector) => retire_committed_selector(engine, user_id, &selector).await,
+        Err(selector_error) => engine.revoke_remember(user_id).await.map(|_| ()).map_err(|error| {
+            FrameworkError::internal(format!(
+                "retire malformed committed remember replacement ({selector_error}); owner-wide fallback failed: {error}"
+            ))
+        }),
+    }
+}
+
+type PendingRememberedOpaqueSession = (String, String, magnetar::sessions::WebSessionBinding);
+
+async fn retire_unpersisted_opaque_session(
+    engine: Option<&Arc<dyn crate::magnetar_integration::engine::MagnetarPasswordAuthEngine>>,
+    pending: &mut Option<PendingRememberedOpaqueSession>,
+    reason: &'static str,
+) {
+    let Some((_, session_id, _)) = pending.take() else {
+        return;
+    };
+    let Some(engine) = engine else {
+        return;
+    };
+    match engine.revoke_session(&session_id).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            session_id = %session_id,
+            reason,
+            "Magnetar remembered session was not found during cleanup"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            session_id = %session_id,
+            reason,
+            "Magnetar remembered session cleanup did not complete"
+        ),
+    }
+}
+
+fn decode_remember_carrier(plaintext: &str) -> DecodedRememberCarrier {
+    let Some(encoded) = plaintext.strip_prefix(REMEMBER_GUARD_CARRIER_PREFIX) else {
+        return if plaintext.starts_with(REMEMBER_GUARD_CARRIER_VERSION_PREFIX) {
+            DecodedRememberCarrier::UnknownVersion
+        } else {
+            DecodedRememberCarrier::Supported(
+                crate::auth::Auth::default_guard_name(),
+                plaintext.to_owned(),
+            )
+        };
+    };
+    let Ok(carrier) = serde_json::from_str::<RememberGuardCarrier>(encoded) else {
+        return DecodedRememberCarrier::Malformed;
+    };
+    if carrier.guard.is_empty() || carrier.credential.is_empty() {
+        return DecodedRememberCarrier::Malformed;
+    }
+    DecodedRememberCarrier::Supported(carrier.guard, carrier.credential)
+}
+
 /// Build an outbound remember-me cookie carrying the encrypted plaintext.
 ///
 /// Framework-internal helper. `Auth::login_remember` and the
@@ -714,12 +892,18 @@ impl Middleware for SessionMiddleware {
         // and `Auth::revoke_remember_tokens`) and drained below right
         // next to where the session cookie is attached.
         let pending: Arc<Mutex<Vec<Cookie>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending_remember_revocations: Arc<Mutex<Vec<PendingRememberRevocation>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         let magnetar_engine = crate::magnetar_integration::optional_password_engine();
+        let mut pending_remembered_opaque_session: Option<PendingRememberedOpaqueSession> = None;
 
-        // An installed engine makes its digest-only binding authoritative.
-        // Bare framework user ids are never enough to hydrate authentication.
+        // An installed engine makes the default guard's digest-only binding
+        // authoritative, as well as any named guard record that explicitly
+        // carries such a binding. Binding-less named records remain valid for
+        // provider-backed SessionGuard implementations.
         if let Some(engine) = magnetar_engine.as_ref() {
+            let default_guard_name = crate::auth::Auth::default_guard_name();
             let binding = session.magnetar_web_binding();
             let valid_user_id = match (session.user_id.as_deref(), binding.as_ref()) {
                 (Some(expected_user_id), Some(binding)) => {
@@ -745,27 +929,95 @@ impl Middleware for SessionMiddleware {
             };
             if session.user_id.is_some() && valid_user_id.is_none() {
                 session.user_id = None;
+                session.remove_auth_guard(&default_guard_name);
                 session.clear_magnetar_web_binding();
                 session.dirty = true;
-                crate::auth::request_state::clear_current_user();
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
+            } else if let Some(valid_user_id) = valid_user_id {
+                session.set_auth_guard_id(&default_guard_name, valid_user_id);
             } else if session.user_id.is_none() && session.magnetar_web_binding().is_some() {
+                session.remove_auth_guard(&default_guard_name);
                 session.clear_magnetar_web_binding();
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
+            } else if session.auth_guard_id(&default_guard_name).is_some() {
+                session.remove_auth_guard(&default_guard_name);
+                crate::auth::request_state::clear_guard_user(&default_guard_name);
+            }
+
+            for guard_name in session.auth_guard_names() {
+                if guard_name == default_guard_name {
+                    continue;
+                }
+                if !session.has_auth_guard_magnetar_binding(&guard_name) {
+                    continue;
+                }
+                let expected_user_id = session.auth_guard_id(&guard_name);
+                let binding = session.auth_guard_magnetar_binding(&guard_name);
+                let valid = match (expected_user_id.as_deref(), binding.as_ref()) {
+                    (Some(expected_user_id), Some(binding)) => {
+                        match engine.resolve_web_binding(binding).await {
+                            Ok(verified) => verified.user_id() == expected_user_id,
+                            Err(
+                                magnetar::Error::InvalidInput { .. }
+                                | magnetar::Error::NotFound { .. }
+                                | magnetar::Error::Conflict { .. },
+                            ) => false,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    guard = %guard_name,
+                                    "Magnetar named web-session validation failed closed"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    session.remove_auth_guard(&guard_name);
+                    crate::auth::request_state::clear_guard_user(&guard_name);
+                }
             }
         }
 
         // Remember-me hydration uses Magnetar whenever its engine is installed.
         // The legacy auth::remember table is consulted only with no engine.
-        if session.user_id.is_none()
-            && let Some(raw_cookie) = request.cookie(
-                &self
-                    .config
-                    .cookie_prefix
-                    .apply(super::super::auth::remember::COOKIE_NAME),
-            )
-        {
-            match Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
-            {
-                Ok(plaintext) => {
+        if let Some(raw_cookie) = request.cookie(
+            &self
+                .config
+                .cookie_prefix
+                .apply(super::super::auth::remember::COOKIE_NAME),
+        ) {
+            let decoded = match Cookie::read_encrypted_for(
+                super::super::auth::remember::COOKIE_NAME,
+                &raw_cookie,
+            ) {
+                Ok(plaintext) => decode_remember_carrier(&plaintext),
+                Err(_) => DecodedRememberCarrier::Malformed,
+            };
+            let decoded = match decoded {
+                DecodedRememberCarrier::Supported(guard_name, credential) => {
+                    Some((guard_name, credential))
+                }
+                DecodedRememberCarrier::UnknownVersion => None,
+                DecodedRememberCarrier::Malformed => {
+                    crate::auth::request_state::clear_active_remember_carrier();
+                    pending
+                        .lock()
+                        .unwrap()
+                        .push(create_forget_remember_cookie(&self.config));
+                    None
+                }
+            };
+            if let Some((guard_name, credential)) = decoded {
+                let is_default = guard_name == crate::auth::Auth::default_guard_name();
+                if let Ok(selector) = remember_selector(&credential) {
+                    crate::auth::request_state::set_active_remember_carrier(&guard_name, &selector);
+                }
+                let already_authenticated = session.auth_guard_id(&guard_name).is_some()
+                    || (is_default && session.user_id.is_some());
+                if !already_authenticated {
                     if let Some(engine) = magnetar_engine.as_ref() {
                         let metadata = magnetar::sessions::SessionMetadata {
                             user_agent: request
@@ -784,39 +1036,218 @@ impl Middleware for SessionMiddleware {
                             )
                         })?;
                         match engine
-                            .remember_sign_in(
+                              .remember_sign_in_attempt(
                                 magnetar::sessions::RememberCredential::from_host(
-                                    SecretString::from(plaintext),
+                                    SecretString::from(credential),
                                 ),
                                 metadata,
                                 replacement_lifetime,
                             )
                             .await
                         {
-                            Ok(outcome) => {
-                                session.rotate_id(generate_session_id());
+                                Ok(crate::magnetar_integration::engine::MagnetarRememberSignInAttempt::Authenticated(outcome)) => {
+                                    let user_id = outcome.session.session.user_id.to_string();
+                                    let opaque_session_id = outcome.session.session_id.clone();
+                                    let binding = outcome.session.web_binding.clone();
+                                  let replacement = outcome.replacement.expose_once();
+                                  let replacement = replacement.expose_secret();
+                                  let selector = match remember_selector(replacement) {
+                                        Ok(selector) => selector,
+                                        Err(error) => {
+                                            if let Err(cleanup_error) = retire_committed_replacement(
+                                                engine.as_ref(),
+                                                &user_id,
+                                                replacement,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    %cleanup_error,
+                                                    "Magnetar remember replacement cleanup did not complete"
+                                                );
+                                            }
+                                            if let Err(cleanup_error) =
+                                                engine.revoke_session(&opaque_session_id).await
+                                            {
+                                                tracing::warn!(
+                                                    %cleanup_error,
+                                                    "Magnetar remembered session cleanup did not complete"
+                                                );
+                                            }
+                                            return Err(error.into());
+                                        }
+                                  };
+                                  let cookie = match encode_remember_carrier(&guard_name, replacement)
+                                      .and_then(|carrier| {
+                                          create_remember_cookie(
+                                              &self.config,
+                                              &carrier,
+                                              self.config.remember_lifetime,
+                                          )
+                                      })
+                                    {
+                                        Ok(cookie) => cookie,
+                                        Err(error) => {
+                                            if let Err(cleanup_error) = retire_committed_selector(
+                                                engine.as_ref(),
+                                                &user_id,
+                                                &selector,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    %cleanup_error,
+                                                    "Magnetar remember replacement cleanup did not complete"
+                                                );
+                                            }
+                                            if let Err(cleanup_error) =
+                                                engine.revoke_session(&opaque_session_id).await
+                                            {
+                                                tracing::warn!(
+                                                    %cleanup_error,
+                                                    "Magnetar remembered session cleanup did not complete"
+                                                );
+                                            }
+                                            return Err(error.into());
+                                        }
+                                    };
+
+                                    pending_remembered_opaque_session = Some((
+                                        guard_name.clone(),
+                                        opaque_session_id,
+                                        binding.clone(),
+                                    ));
+
+                                  session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
-                                session.user_id = Some(outcome.session.session.user_id.to_string());
+                                session.replace_auth_guard_id(&guard_name, user_id.clone());
+                                crate::auth::request_state::set_active_remember_carrier(
+                                    &guard_name,
+                                    &selector,
+                                );
+                                session.set_auth_guard_remember_selector(&guard_name, selector);
                                 session
-                                    .set_magnetar_web_binding(outcome.session.web_binding.clone());
-                                crate::auth::request_state::set_via_remember(true);
-                                let replacement = outcome.replacement.expose_once();
-                                if let Ok(cookie) = create_remember_cookie(
-                                    &self.config,
-                                    replacement.expose_secret(),
-                                    self.config.remember_lifetime,
-                                ) {
-                                    pending.lock().unwrap().push(cookie);
+                                    .set_auth_guard_magnetar_binding(&guard_name, binding.clone());
+                                if is_default {
+                                    session.user_id = Some(user_id.clone());
+                                    session.set_magnetar_web_binding(binding);
                                 }
-                            }
-                            Err(
+                                crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
+                                crate::auth::request_state::set_guard_via_remember(
+                                    &guard_name,
+                                    true,
+                                  );
+                                  pending.lock().unwrap().push(cookie);
+                              }
+                              Ok(crate::magnetar_integration::engine::MagnetarRememberSignInAttempt::RotationCommitted {
+                                  user_id,
+                                  replacement,
+                                  error,
+                                  disposition,
+                              }) => {
+                                  let replacement = replacement.expose_once();
+                                  let replacement = replacement.expose_secret();
+                                  match disposition {
+                                      magnetar::sessions::RememberPostRotationDisposition::Retryable => {
+                                          let selector = match remember_selector(replacement) {
+                                                Ok(selector) => selector,
+                                                Err(host_error) => {
+                                                    if let Err(cleanup_error) = retire_committed_replacement(
+                                                        engine.as_ref(),
+                                                        &user_id,
+                                                        replacement,
+                                                    )
+                                                    .await
+                                                    {
+                                                        tracing::warn!(
+                                                            %cleanup_error,
+                                                            "Magnetar remember replacement cleanup did not complete"
+                                                        );
+                                                    }
+                                                    return Err(host_error.into());
+                                                }
+                                          };
+                                          let cookie = match encode_remember_carrier(
+                                              &guard_name,
+                                              replacement,
+                                          )
+                                          .and_then(|carrier| {
+                                              create_remember_cookie(
+                                                  &self.config,
+                                                  &carrier,
+                                                  self.config.remember_lifetime,
+                                              )
+                                          }) {
+                                                Ok(cookie) => cookie,
+                                                Err(host_error) => {
+                                                    if let Err(cleanup_error) = retire_committed_selector(
+                                                        engine.as_ref(),
+                                                        &user_id,
+                                                        &selector,
+                                                    )
+                                                    .await
+                                                    {
+                                                        tracing::warn!(
+                                                            %cleanup_error,
+                                                            "Magnetar remember replacement cleanup did not complete"
+                                                        );
+                                                    }
+                                                    return Err(host_error.into());
+                                                }
+                                          };
+                                          crate::auth::request_state::set_verified_active_remember_carrier(
+                                              &guard_name,
+                                              &user_id,
+                                              &selector,
+                                          );
+                                          pending.lock().unwrap().push(cookie);
+                                          tracing::warn!(
+                                              %error,
+                                              "Magnetar remember sign-in will retry with the rotated credential"
+                                          );
+                                        }
+                                        magnetar::sessions::RememberPostRotationDisposition::Reject => {
+                                            if let Err(revoke_error) = retire_committed_replacement(
+                                                engine.as_ref(),
+                                                &user_id,
+                                                replacement,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    %revoke_error,
+                                                    "Magnetar rejected remember replacement could not be retired"
+                                                );
+                                            }
+                                            crate::auth::request_state::clear_active_remember_carrier();
+                                          pending
+                                              .lock()
+                                              .unwrap()
+                                              .push(create_forget_remember_cookie(&self.config));
+                                          tracing::warn!(
+                                              %error,
+                                              "Magnetar remember sign-in rejected the rotated credential"
+                                          );
+                                      }
+                                    }
+                                }
+                                Ok(crate::magnetar_integration::engine::MagnetarRememberSignInAttempt::RotationOutcomeUnknown {
+                                    error,
+                                }) => tracing::warn!(
+                                    %error,
+                                    "Magnetar remember rotation outcome is unknown; continuing anonymously"
+                                ),
+                                Err(
                                 magnetar::Error::InvalidInput { .. }
                                 | magnetar::Error::NotFound { .. }
                                 | magnetar::Error::Conflict { .. },
-                            ) => pending
-                                .lock()
-                                .unwrap()
-                                .push(create_forget_remember_cookie(&self.config)),
+                            ) => {
+                                crate::auth::request_state::clear_active_remember_carrier();
+                                pending
+                                    .lock()
+                                    .unwrap()
+                                    .push(create_forget_remember_cookie(&self.config));
+                            }
                             Err(error) => tracing::warn!(
                                 %error,
                                 "Magnetar remember sign-in failed; continuing anonymously"
@@ -826,26 +1257,44 @@ impl Middleware for SessionMiddleware {
                         let ttl_minutes =
                             i64::try_from(self.config.remember_lifetime.as_secs() / 60)
                                 .unwrap_or(i64::MAX);
-                        match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes)
+                        match crate::auth::remember::verify_and_rotate(&credential, ttl_minutes)
                             .await
                         {
-                            Ok(Some((user_id, new_plaintext))) => {
-                                session.rotate_id(generate_session_id());
-                                session.user_id = Some(user_id);
-                                session.csrf_token = generate_csrf_token();
-                                crate::auth::request_state::set_via_remember(true);
-                                if let Ok(cookie) = create_remember_cookie(
+                            Ok(Some((user_id, new_credential))) => {
+                                let selector = remember_selector(&new_credential)?;
+                                let carrier =
+                                    encode_remember_carrier(&guard_name, &new_credential)?;
+                                let cookie = create_remember_cookie(
                                     &self.config,
-                                    &new_plaintext,
+                                    &carrier,
                                     self.config.remember_lifetime,
-                                ) {
-                                    pending.lock().unwrap().push(cookie);
+                                )?;
+
+                                session.rotate_id(generate_session_id());
+                                session.csrf_token = generate_csrf_token();
+                                session.replace_auth_guard_id(&guard_name, user_id.clone());
+                                crate::auth::request_state::set_active_remember_carrier(
+                                    &guard_name,
+                                    &selector,
+                                );
+                                session.set_auth_guard_remember_selector(&guard_name, selector);
+                                if is_default {
+                                    session.user_id = Some(user_id.clone());
                                 }
+                                crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
+                                crate::auth::request_state::set_guard_via_remember(
+                                    &guard_name,
+                                    true,
+                                );
+                                pending.lock().unwrap().push(cookie);
                             }
-                            Ok(None) => pending
-                                .lock()
-                                .unwrap()
-                                .push(create_forget_remember_cookie(&self.config)),
+                            Ok(None) => {
+                                crate::auth::request_state::clear_active_remember_carrier();
+                                pending
+                                    .lock()
+                                    .unwrap()
+                                    .push(create_forget_remember_cookie(&self.config));
+                            }
                             Err(error) => tracing::warn!(
                                 %error,
                                 "legacy remember-me verification failed; continuing without it"
@@ -853,10 +1302,6 @@ impl Middleware for SessionMiddleware {
                         }
                     }
                 }
-                Err(_) => pending
-                    .lock()
-                    .unwrap()
-                    .push(create_forget_remember_cookie(&self.config)),
             }
         }
 
@@ -905,10 +1350,59 @@ impl Middleware for SessionMiddleware {
                 self.config.clone(),
                 SESSION_CONTEXT.scope(
                     slot.clone(),
-                    PENDING_COOKIES.scope(pending.clone(), next(request)),
+                    PENDING_COOKIES.scope(
+                        pending.clone(),
+                        PENDING_REMEMBER_REVOCATIONS
+                            .scope(pending_remember_revocations.clone(), next(request)),
+                    ),
                 ),
             )
             .await;
+
+        let remembered_binding_preserved = pending_remembered_opaque_session.as_ref().is_none_or(
+            |(guard_name, _, expected_binding)| {
+                slot.lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|session| session.auth_guard_magnetar_binding(guard_name))
+                    .as_ref()
+                    == Some(expected_binding)
+            },
+        );
+        if !remembered_binding_preserved {
+            retire_unpersisted_opaque_session(
+                magnetar_engine.as_ref(),
+                &mut pending_remembered_opaque_session,
+                "remembered binding changed before persistence",
+            )
+            .await;
+        }
+
+        let pending_revocations =
+            std::mem::take(&mut *pending_remember_revocations.lock().unwrap());
+        for (guard_name, user_id, selector) in pending_revocations {
+            if let Err(error) =
+                crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector).await
+            {
+                retire_unpersisted_opaque_session(
+                    magnetar_engine.as_ref(),
+                    &mut pending_remembered_opaque_session,
+                    "deferred remember cleanup failed",
+                )
+                .await;
+                tracing::error!(
+                    %error,
+                    guard = %guard_name,
+                    "deferred remember credential revocation failed; discarding identity transition"
+                );
+                let pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
+                let failure = Err(crate::http::HttpResponse::text(
+                    "Internal Server Error: identity transition cleanup failed",
+                )
+                .status(500));
+                return attach_pending_cookies(failure, pending_cookies);
+            }
+        }
 
         // Take the potentially-modified session back out of the slot.
         let mut session = slot.lock().unwrap().take();
@@ -979,6 +1473,12 @@ impl Middleware for SessionMiddleware {
             pending_cookies.push(self.create_forget_session_cookie());
         }
         if session_read_failed && session.as_ref().is_some_and(SessionData::is_dirty) {
+            retire_unpersisted_opaque_session(
+                magnetar_engine.as_ref(),
+                &mut pending_remembered_opaque_session,
+                "framework session state was unavailable",
+            )
+            .await;
             tracing::error!(
                 session_id = %session_id,
                 "session mutated after existing state could not be loaded; failing closed"
@@ -1031,6 +1531,12 @@ impl Middleware for SessionMiddleware {
                         );
                     }
                     Err(e) => {
+                        retire_unpersisted_opaque_session(
+                            magnetar_engine.as_ref(),
+                            &mut pending_remembered_opaque_session,
+                            "prior framework session row could not be destroyed",
+                        )
+                        .await;
                         tracing::error!(
                             error = %e,
                             "session id rotation cleanup failed; failing closed with 500"
@@ -1045,6 +1551,26 @@ impl Middleware for SessionMiddleware {
                 }
             }
 
+            // Build the only carrier for a fresh or rotated session before
+            // committing its row. If construction fails, no undeliverable
+            // session is left in the store.
+            let session_cookie = match self.create_session_cookie(&session.id, touched_at) {
+                Ok(cookie) => cookie,
+                Err(_) => {
+                    retire_unpersisted_opaque_session(
+                        magnetar_engine.as_ref(),
+                        &mut pending_remembered_opaque_session,
+                        "framework session cookie construction failed",
+                    )
+                    .await;
+                    let failure = Err(crate::http::HttpResponse::text(
+                        "Internal Server Error: session cookie encryption failed",
+                    )
+                    .status(500));
+                    return attach_pending_cookies(failure, pending_cookies);
+                }
+            };
+
             let write_succeeded = match self.store.write(&session).await {
                 Ok(()) => true,
                 Err(e) if !session.is_dirty() => {
@@ -1056,6 +1582,12 @@ impl Middleware for SessionMiddleware {
                     false
                 }
                 Err(e) => {
+                    retire_unpersisted_opaque_session(
+                        magnetar_engine.as_ref(),
+                        &mut pending_remembered_opaque_session,
+                        "framework session write failed",
+                    )
+                    .await;
                     // The session was mutated this request (login, logout,
                     // CSRF rotation, flash, remember-me hydration, ...) and
                     // we could not persist it. Returning the handler's
@@ -1063,10 +1595,9 @@ impl Middleware for SessionMiddleware {
                     // a session cookie for state the store never recorded,
                     // so the next request loads an empty session and the
                     // mutation silently vanishes - e.g. a "successful"
-                    // login that didn't stick. Fail closed. We return
-                    // BEFORE create_session_cookie below, so no cookie is
-                    // attached: a cookie for an id the store never saw is
-                    // worse than none.
+                    // login that didn't stick. Fail closed without attaching
+                    // the prebuilt cookie: a cookie for an id the store never
+                    // saw is worse than none.
                     tracing::error!(
                         error = %e,
                         session_id = %session.id,
@@ -1081,26 +1612,20 @@ impl Middleware for SessionMiddleware {
             };
 
             if write_succeeded {
-                // Add session cookie to response. Encryption must succeed
-                // here - we already verified Crypt is initialized at the
-                // top of `handle`. If it doesn't, fail the request closed.
-                let cookie = match self.create_session_cookie(&session.id, touched_at) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let failure = Err(crate::http::HttpResponse::text(
-                            "Internal Server Error: session cookie encryption failed",
-                        )
-                        .status(500));
-                        return attach_pending_cookies(failure, pending_cookies);
-                    }
-                };
-
                 response = match response {
-                    Ok(res) => Ok(res.cookie(cookie)),
-                    Err(res) => Err(res.cookie(cookie)),
+                    Ok(res) => Ok(res.cookie(session_cookie)),
+                    Err(res) => Err(res.cookie(session_cookie)),
                 };
+                pending_remembered_opaque_session = None;
             }
         }
+
+        retire_unpersisted_opaque_session(
+            magnetar_engine.as_ref(),
+            &mut pending_remembered_opaque_session,
+            "remembered framework session was not persisted",
+        )
+        .await;
 
         // Attach every pending cookie. Done after the session cookie
         // so the relative ordering in the `Set-Cookie` header list is
@@ -1168,21 +1693,60 @@ pub fn auth_user_id() -> Option<String> {
     crate::auth::request_state::current_user_id().or_else(|| session().and_then(|s| s.user_id))
 }
 
+/// Return one session guard's request or persisted identifier.
+pub(crate) fn guard_auth_user_id(guard_name: &str) -> Option<String> {
+    crate::auth::request_state::guard_user_id(guard_name)
+        .or_else(|| persisted_guard_auth_user_id(guard_name))
+}
+
+/// Return one session guard's persisted identifier, ignoring request-only overrides.
+pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
+    session().and_then(|session| {
+        session.auth_guard_id(guard_name).or_else(|| {
+            (guard_name == crate::auth::Auth::default_guard_name())
+                .then_some(session.user_id)
+                .flatten()
+        })
+    })
+}
+
+/// Persist one session guard's identifier and mirror the default guard.
+pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) {
+    let user_id = user_id.into();
+    let is_default = guard_name == crate::auth::Auth::default_guard_name();
+    session_mut(|session| {
+        session.replace_auth_guard_id(guard_name, user_id.clone());
+        if is_default {
+            session.clear_magnetar_web_binding();
+            session.user_id = Some(user_id.clone());
+            session.dirty = true;
+        }
+    });
+    crate::auth::request_state::set_guard_user_id(guard_name, user_id);
+}
+
 /// Helper to set the authenticated user
 pub fn set_auth_user(user_id: impl Into<String>) {
-    let user_id = user_id.into();
+    set_guard_auth_user(&crate::auth::Auth::default_guard_name(), user_id);
+}
+
+/// Clear one session guard without touching sibling guards.
+pub(crate) fn clear_guard_auth_user(guard_name: &str) {
+    let is_default = guard_name == crate::auth::Auth::default_guard_name();
     session_mut(|session| {
-        session.user_id = Some(user_id);
-        session.dirty = true;
+        session.remove_auth_guard(guard_name);
+        if is_default {
+            session.user_id = None;
+            session.clear_magnetar_web_binding();
+            session.dirty = true;
+        }
     });
+    crate::auth::request_state::clear_guard_user(guard_name);
 }
 
 /// Helper to clear the authenticated user (logout)
 pub fn clear_auth_user() {
-    session_mut(|session| {
-        session.user_id = None;
-        session.dirty = true;
-    });
+    clear_guard_auth_user(&crate::auth::Auth::default_guard_name());
 }
 
 /// Reserved key under `SessionData::data` for the "password verified

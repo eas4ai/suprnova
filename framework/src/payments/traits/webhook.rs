@@ -60,7 +60,8 @@ pub trait WebhookHandler: Send + Sync {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()>;
     /// Parse the raw body into a [`WebhookEvent`] with the provider's
     /// event identifier, type string, and (when recognised) a neutral
-    /// classification.
+    /// classification. Implementations must reject missing, non-string, or
+    /// whitespace-only provider event identifiers.
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent>;
 
     /// Extract well-known entity IDs from the webhook's `raw_payload` so the
@@ -80,6 +81,22 @@ pub trait WebhookHandler: Send + Sync {
     /// `payments_transactions` upsert for this event.
     fn extract_payment_snapshot(&self, _event: &WebhookEvent) -> Option<PaymentSnapshot> {
         None
+    }
+
+    /// Fallible form of [`Self::extract_payment_snapshot`] used by the
+    /// framework's mirror-table hydration path.
+    ///
+    /// Providers should override this method when a mapped payment event can
+    /// be distinguished from a malformed payload. Returning `Err` leaves the
+    /// webhook pending so the provider can retry it; returning `Ok(None)` is
+    /// reserved for events that cannot provide a complete transaction
+    /// snapshot. The default preserves compatibility with existing provider
+    /// drivers.
+    fn try_extract_payment_snapshot(
+        &self,
+        event: &WebhookEvent,
+    ) -> PaymentResult<Option<PaymentSnapshot>> {
+        Ok(self.extract_payment_snapshot(event))
     }
 
     /// Build a [`CustomerSnapshot`] from a customer-type webhook payload.

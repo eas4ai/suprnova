@@ -30,19 +30,32 @@
 //!    `SessionMiddleware`'s hydration path) rather than from an active
 //!    session, surfaced through `StatefulGuard::via_remember`.
 //!
-//! # Deliberate v1 divergence
-//!
-//! Session guards still share one generic current-user slot. Laravel caches
-//! per guard. Bearer identity is the exception because allowing a web
-//! principal to satisfy a token guard crosses an authentication boundary.
+//! Session guard identities and remember provenance are keyed by the complete
+//! guard name. The generic slots remain the compatibility view used by
+//! [`crate::Auth`] and are mirrored only from the configured default guard.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::authenticatable::Authenticatable;
 
+struct ActiveRememberCarrier {
+    guard: String,
+    selector: String,
+    verified_owner: Option<String>,
+}
+
 /// The per-request authentication slot. See the module docs.
 #[derive(Default)]
 struct AuthRequestState {
+    /// Users resolved through session guards, keyed by complete guard name.
+    guard_users: HashMap<String, Arc<dyn Authenticatable>>,
+    /// Session-guard identifiers known before their user is resolved.
+    guard_user_ids: HashMap<String, String>,
+    /// Guards whose current identity came from remember-me hydration.
+    remembered_guards: HashSet<String>,
+    /// The single inbound or most recently queued remember carrier.
+    active_remember_carrier: Option<ActiveRememberCarrier>,
     /// The user resolved for this request, if any.
     current_user: Option<Arc<dyn Authenticatable>>,
     /// The authenticated identifier when only the id is known.
@@ -106,6 +119,280 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
         })
         .ok()
         .flatten()
+}
+
+fn is_default_guard(guard: &str) -> bool {
+    guard == super::guard::Auth::default_guard_name()
+}
+
+/// Cache a user for one named session guard.
+pub(crate) fn set_guard_user(guard_name: &str, user: Arc<dyn Authenticatable>) {
+    let user_id = user.get_auth_identifier();
+    let mirror_generic = is_default_guard(guard_name);
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .guard_users
+            .insert(guard_name.to_owned(), user.clone());
+        state
+            .guard_user_ids
+            .insert(guard_name.to_owned(), user_id.clone());
+        if mirror_generic {
+            state.current_user = Some(user);
+            state.current_user_id = Some(user_id);
+        }
+    });
+}
+
+/// Return the user cached for one named session guard.
+pub(crate) fn guard_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .guard_users
+                .get(guard_name)
+                .cloned()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Record an identifier for one named session guard.
+pub(crate) fn set_guard_user_id(guard_name: &str, user_id: impl Into<String>) {
+    let user_id = user_id.into();
+    let mirror_generic = is_default_guard(guard_name);
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let resolved_id = state
+            .guard_users
+            .get(guard_name)
+            .map(|user| user.get_auth_identifier());
+        if resolved_id.as_deref() != Some(user_id.as_str()) {
+            state.guard_users.remove(guard_name);
+        }
+        state
+            .guard_user_ids
+            .insert(guard_name.to_owned(), user_id.clone());
+        if mirror_generic {
+            let generic_resolved_id = state
+                .current_user
+                .as_ref()
+                .map(|user| user.get_auth_identifier());
+            if generic_resolved_id.as_deref() != Some(user_id.as_str()) {
+                state.current_user = None;
+            }
+            state.current_user_id = Some(user_id);
+        }
+    });
+}
+
+/// Return the identifier known for one named session guard.
+pub(crate) fn guard_user_id(guard_name: &str) -> Option<String> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .guard_users
+                .get(guard_name)
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| state.guard_user_ids.get(guard_name).cloned())
+        })
+        .ok()
+        .flatten()
+}
+
+/// Clear one named session guard without touching sibling guards.
+pub(crate) fn clear_guard_user(guard_name: &str) {
+    let clear_generic = is_default_guard(guard_name);
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.guard_users.remove(guard_name);
+        state.guard_user_ids.remove(guard_name);
+        state.remembered_guards.remove(guard_name);
+        if clear_generic {
+            state.current_user = None;
+            state.current_user_id = None;
+            state.bearer_user = None;
+            state.bearer_user_id = None;
+            state.via_remember = false;
+        }
+    });
+}
+
+/// Clear every authentication identity and provenance slot in this request.
+pub(crate) fn clear_all_authentication() {
+    let _ = AUTH_STATE.try_with(|state| {
+        *state.lock().unwrap_or_else(|error| error.into_inner()) = AuthRequestState::default();
+    });
+}
+
+/// Whether one named session guard already resolved a user instance.
+pub(crate) fn has_guard_user(guard_name: &str) -> bool {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .guard_users
+                .contains_key(guard_name)
+        })
+        .unwrap_or(false)
+}
+
+/// Mark whether one guard was hydrated from a remember carrier.
+pub(crate) fn set_guard_via_remember(guard_name: &str, value: bool) {
+    let mirror_generic = is_default_guard(guard_name);
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        if value {
+            state.remembered_guards.insert(guard_name.to_owned());
+        } else {
+            state.remembered_guards.remove(guard_name);
+        }
+        if mirror_generic {
+            state.via_remember = value;
+        }
+    });
+}
+
+/// Whether one guard was hydrated from a remember carrier this request.
+pub(crate) fn guard_via_remember(guard_name: &str) -> bool {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remembered_guards
+                .contains(guard_name)
+        })
+        .unwrap_or(false)
+}
+
+/// Record the guard and non-secret selector carried by the browser.
+pub(crate) fn set_active_remember_carrier(guard_name: &str, selector: &str) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_remember_carrier = Some(ActiveRememberCarrier {
+            guard: guard_name.to_owned(),
+            selector: selector.to_owned(),
+            verified_owner: None,
+        });
+    });
+}
+
+/// Record a rotated carrier whose owner was verified before a retryable failure.
+pub(crate) fn set_verified_active_remember_carrier(
+    guard_name: &str,
+    user_id: &str,
+    selector: &str,
+) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_remember_carrier = Some(ActiveRememberCarrier {
+            guard: guard_name.to_owned(),
+            selector: selector.to_owned(),
+            verified_owner: Some(user_id.to_owned()),
+        });
+    });
+}
+
+/// Return the verified owner and selector for one retryable rotated carrier.
+pub(crate) fn verified_active_remember_carrier_for_guard(
+    guard_name: &str,
+) -> Option<(String, String)> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .active_remember_carrier
+                .as_ref()
+                .filter(|carrier| carrier.guard == guard_name)
+                .and_then(|carrier| {
+                    carrier
+                        .verified_owner
+                        .as_ref()
+                        .map(|owner| (owner.clone(), carrier.selector.clone()))
+                })
+        })
+        .ok()
+        .flatten()
+}
+
+/// Return the active carrier's guard and non-secret selector.
+pub(crate) fn active_remember_carrier() -> Option<(String, String)> {
+    AUTH_STATE
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active_remember_carrier
+                .as_ref()
+                .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()))
+        })
+        .ok()
+        .flatten()
+}
+
+/// Return the active carrier selector when it belongs to one guard.
+pub(crate) fn active_remember_selector_for_guard(guard_name: &str) -> Option<String> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .active_remember_carrier
+                .as_ref()
+                .filter(|carrier| carrier.guard == guard_name)
+                .map(|carrier| carrier.selector.clone())
+        })
+        .ok()
+        .flatten()
+}
+
+/// Forget the active carrier only when both its guard and selector match.
+pub(crate) fn take_active_remember_carrier(guard_name: &str, selector: &str) -> bool {
+    AUTH_STATE
+        .try_with(|state| {
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            let matches = state
+                .active_remember_carrier
+                .as_ref()
+                .is_some_and(|carrier| carrier.guard == guard_name && carrier.selector == selector);
+            if matches {
+                state.active_remember_carrier = None;
+            }
+            matches
+        })
+        .unwrap_or(false)
+}
+
+/// Forget whichever inbound or outbound remember carrier is active.
+pub(crate) fn clear_active_remember_carrier() {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_remember_carrier = None;
+    });
+}
+
+/// Forget the active carrier when it belongs to one guard.
+pub(crate) fn clear_active_remember_carrier_for_guard(guard_name: &str) {
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        if state
+            .active_remember_carrier
+            .as_ref()
+            .is_some_and(|carrier| carrier.guard == guard_name)
+        {
+            state.active_remember_carrier = None;
+        }
+    });
 }
 
 /// Record the authenticated identifier when the full user has not been
@@ -245,14 +532,6 @@ pub(crate) fn has_current_user() -> bool {
         .unwrap_or(false)
 }
 
-/// Mark whether the current user was re-authenticated from a remember-me
-/// cookie this request. Set by `SessionMiddleware`'s hydration path.
-pub(crate) fn set_via_remember(value: bool) {
-    let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap_or_else(|e| e.into_inner()).via_remember = value;
-    });
-}
-
 /// Whether the current user came from a remember-me cookie this request.
 /// Backs [`StatefulGuard::via_remember`](super::StatefulGuard::via_remember).
 pub(crate) fn via_remember() -> bool {
@@ -307,6 +586,28 @@ mod tests {
             clear_current_user();
             assert!(!has_current_user());
             assert_eq!(current_user_id(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn named_session_guard_state_is_independent() {
+        scope(async {
+            set_guard_user("web", Arc::new(TestUser { id: "7".into() }));
+            set_guard_user("admin", Arc::new(TestUser { id: "9".into() }));
+            set_guard_via_remember("admin", true);
+
+            assert_eq!(guard_user_id("web").as_deref(), Some("7"));
+            assert_eq!(guard_user_id("admin").as_deref(), Some("9"));
+            assert_eq!(current_user_id().as_deref(), Some("7"));
+            assert!(!guard_via_remember("web"));
+            assert!(guard_via_remember("admin"));
+            assert!(!via_remember());
+
+            clear_guard_user("admin");
+            assert_eq!(guard_user_id("admin"), None);
+            assert_eq!(guard_user_id("web").as_deref(), Some("7"));
+            assert_eq!(current_user_id().as_deref(), Some("7"));
         })
         .await;
     }
@@ -389,7 +690,7 @@ mod tests {
     async fn via_remember_round_trips_within_scope() {
         scope(async {
             assert!(!via_remember());
-            set_via_remember(true);
+            set_guard_via_remember("web", true);
             assert!(via_remember());
         })
         .await;
@@ -409,7 +710,7 @@ mod tests {
         set_current_user(Arc::new(TestUser { id: "1".into() }));
         set_bearer_user(Arc::new(TestUser { id: "2".into() }));
         set_bearer_user_id("3");
-        set_via_remember(true);
+        set_guard_via_remember("web", true);
         assert!(current_user().is_none());
         assert!(bearer_user().is_none());
         assert!(!via_remember());

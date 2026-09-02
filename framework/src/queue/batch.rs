@@ -105,6 +105,19 @@ pub struct UpdatedBatchJobCounts {
     pub failed_jobs: u64,
 }
 
+/// Metadata captured while atomically claiming a batch's terminal callbacks.
+///
+/// Both fields come from the same repository critical section as the claim,
+/// so a worker cannot choose `then` from a cancellation snapshot that became
+/// stale before callback ownership was elected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalCallbackClaim {
+    /// Durable completion time stored by the winning claim.
+    pub finished_at: DateTime<Utc>,
+    /// Cancellation time visible when the claim was serialized, if any.
+    pub cancelled_at: Option<DateTime<Utc>>,
+}
+
 /// Persistence backend for queued-batch metadata. Drivers (memory,
 /// database) implement this so workers can update per-job progress
 /// atomically and decide when to fire callbacks.
@@ -121,6 +134,9 @@ pub trait BatchRepository: Send + Sync {
     async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError>;
     /// Atomically add `delta` jobs to the batch's `total_jobs` and
     /// `pending_jobs` counters, returning the post-update snapshot.
+    /// A non-empty batch whose pending count has reached zero is sealed and
+    /// rejects positive growth so a terminal callback decision cannot become
+    /// stale after settlement commits.
     async fn increment_total_jobs(
         &self,
         id: &str,
@@ -160,7 +176,34 @@ pub trait BatchRepository: Send + Sync {
     /// `Ok(true)` if the batch has been cancelled.
     async fn is_cancelled(&self, id: &str) -> Result<bool, FrameworkError>;
     /// Stamp `finished_at` once `pending_jobs` reaches zero.
+    ///
+    /// Built-in repositories validate that the batch is terminal and treat
+    /// this as consuming the same completion marker used by
+    /// [`claim_terminal_callbacks`](Self::claim_terminal_callbacks). Workers
+    /// use the claim method directly so they can tell whether to run callbacks.
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError>;
+    /// Atomically claim the terminal callback bundle for a finished batch.
+    ///
+    /// The first caller to claim a batch whose `pending_jobs` is zero stores
+    /// its completion time and returns it. Later callers return `Ok(None)` and
+    /// must skip the callbacks. Implementations must make the test-and-set
+    /// durable and atomic and return cancellation metadata captured in the
+    /// same critical section. The provided implementation fails with an
+    /// actionable error: existing custom repositories keep compiling, but
+    /// cannot silently claim a guarantee they do not implement.
+    ///
+    /// This elects at most one callback *attempt*. It cannot make arbitrary
+    /// callback side effects atomic with repository state: a process crash
+    /// after the claim can omit or partially execute the bundle. Callbacks
+    /// that require retryable delivery should enqueue an idempotent outbox job.
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
+        Err(FrameworkError::internal(format!(
+            "batch repository must implement atomic terminal callback claims: {id}"
+        )))
+    }
     /// Permanently delete the batch row. Returns `Ok(true)` if a row was
     /// removed.
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError>;
@@ -234,6 +277,11 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
+        if delta > 0 && entry.batch.total_jobs > 0 && entry.batch.pending_jobs == 0 {
+            return Err(FrameworkError::internal(format!(
+                "cannot add jobs to completed batch: {id}"
+            )));
+        }
         entry.batch.total_jobs += delta;
         entry.batch.pending_jobs += delta;
         Ok(UpdatedBatchJobCounts {
@@ -306,14 +354,34 @@ impl BatchRepository for MemoryBatchRepository {
         Ok(self.find(id).await?.is_some_and(|b| b.cancelled()))
     }
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
+        self.claim_terminal_callbacks(id).await.map(|_| ())
+    }
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        if let Some(e) = g.get_mut(id) {
-            e.batch.finished_at = Some(Utc::now());
+        let entry = g
+            .get_mut(id)
+            .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
+        if entry.batch.pending_jobs != 0 {
+            return Err(FrameworkError::internal(format!(
+                "batch is not terminal: {id} has {} pending jobs",
+                entry.batch.pending_jobs
+            )));
         }
-        Ok(())
+        if entry.batch.finished_at.is_some() {
+            return Ok(None);
+        }
+        let claimed_at = Utc::now();
+        entry.batch.finished_at = Some(claimed_at);
+        Ok(Some(TerminalCallbackClaim {
+            finished_at: claimed_at,
+            cancelled_at: entry.batch.cancelled_at,
+        }))
     }
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
         let mut g = self
@@ -440,6 +508,69 @@ impl DatabaseBatchRepository {
         self.db.get_database_backend()
     }
 
+    /// Begin a transaction that can serialize mutations through the parent
+    /// batch row on every supported backend.
+    async fn begin_serialized_transaction(
+        &self,
+    ) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
+        use sea_orm::{
+            IsolationLevel, SqliteTransactionMode, TransactionOptions, TransactionTrait,
+        };
+        let options = match self.backend() {
+            sea_orm::DatabaseBackend::Sqlite => TransactionOptions {
+                sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+                ..Default::default()
+            },
+            sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => {
+                TransactionOptions {
+                    isolation_level: Some(IsolationLevel::ReadCommitted),
+                    ..Default::default()
+                }
+            }
+            backend => return Err(crate::database::unsupported_database_backend(backend)),
+        };
+        self.db
+            .begin_with_options(options)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))
+    }
+
+    /// Lock the parent batch before changing or counting its settlements.
+    ///
+    /// PostgreSQL and MySQL provide row locks. SQLite has no `FOR UPDATE`, so
+    /// [`Self::begin_serialized_transaction`] acquires its writer lock before
+    /// this existence read instead.
+    async fn lock_batch<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Option<i64>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let lock_clause = match self.backend() {
+            sea_orm::DatabaseBackend::Sqlite => "",
+            sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => " FOR UPDATE",
+            backend => return Err(crate::database::unsupported_database_backend(backend)),
+        };
+        let row = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT total_jobs FROM {} WHERE id = {}{}",
+                    self.batches,
+                    placeholder(self.backend(), 1)?,
+                    lock_clause
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches lock: {e}")))?;
+        row.map(|row| {
+            row.try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("job_batches total col: {e}")))
+        })
+        .transpose()
+    }
+
     /// The backend's "insert unless this key already exists" spelling.
     ///
     /// Every supported backend has one; none of them share a syntax. Doing it
@@ -521,6 +652,36 @@ impl DatabaseBatchRepository {
         }))
     }
 
+    /// Read cancellation metadata while the caller holds the parent-row lock.
+    async fn locked_cancelled_at<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let row = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT cancelled_at FROM {} WHERE id = {}",
+                    self.batches,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled: {e}")))?
+            .ok_or_else(|| {
+                FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+            })?;
+        let cancelled_at: Option<i64> = row
+            .try_get_by_index(0)
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled col: {e}")))?;
+        cancelled_at
+            .map(|value| timestamp(value, "cancelled_at"))
+            .transpose()
+    }
+
     /// Shared body of [`BatchRepository::record_successful_job`] and
     /// [`BatchRepository::record_failed_job`]: they differ only in the `failed`
     /// flag they stamp on the settlement row.
@@ -530,12 +691,17 @@ impl DatabaseBatchRepository {
         job_id: Uuid,
         failed: bool,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
-        use sea_orm::TransactionTrait;
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        let txn = self.begin_serialized_transaction().await?;
+
+        // Settlement rows are the source of truth for callback gating. Lock
+        // their parent before insertion so concurrent jobs for one batch form
+        // a total order: exactly one final settlement observes pending zero.
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        }
 
         {
             use sea_orm::ConnectionTrait;
@@ -553,16 +719,15 @@ impl DatabaseBatchRepository {
             .map_err(|e| FrameworkError::internal(format!("job_batch_settlements insert: {e}")))?;
         }
 
-        // Read the derived counts inside the same transaction, so the snapshot
-        // the worker gates callbacks on is the one this settlement produced -
-        // not one a concurrent settlement moved underneath it.
+        // Read the derived counts while the parent lock is still held. The
+        // snapshot now includes every settlement that acquired this lock
+        // earlier, plus this transaction's own insert.
         let counts = self.counts(&txn, id).await?;
 
         let Some(counts) = counts else {
-            // No batch row: the settlement we just inserted would be an orphan,
-            // and rolling back is what removes it. Matches the in-memory
-            // repository, which errors on an unknown id rather than inventing
-            // one.
+            // The locked parent cannot normally disappear. Preserve the
+            // public missing-batch behavior if a backend violates that
+            // invariant rather than committing an orphan settlement.
             txn.rollback()
                 .await
                 .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
@@ -699,12 +864,25 @@ impl BatchRepository for DatabaseBatchRepository {
         delta: u64,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
         use crate::database::placeholder::placeholder;
-        use sea_orm::{ConnectionTrait, TransactionTrait};
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        use sea_orm::ConnectionTrait;
+        let txn = self.begin_serialized_transaction().await?;
+        let Some(total_jobs) = self.lock_batch(&txn, id).await? else {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        };
+        let before = self.counts(&txn, id).await?.ok_or_else(|| {
+            FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+        })?;
+        if delta > 0 && total_jobs > 0 && before.pending_jobs == 0 {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!(
+                "cannot add jobs to completed batch: {id}"
+            )));
+        }
         txn.execute_raw(sea_orm::Statement::from_sql_and_values(
             self.backend(),
             format!(
@@ -721,10 +899,9 @@ impl BatchRepository for DatabaseBatchRepository {
         .await
         .map_err(|e| FrameworkError::internal(format!("job_batches increment: {e}")))?;
 
-        // Existence is decided by the follow-up read rather than the update's
-        // `rows_affected`: MySQL reports zero rows changed when `delta` is 0
-        // even though the row matched, which would turn a no-op growth into a
-        // spurious "batch not found".
+        // Read the post-update state rather than relying on `rows_affected`:
+        // MySQL reports zero rows changed when `delta` is 0 even though the row
+        // matched, which would turn a no-op growth into a spurious error.
         let counts = self.counts(&txn, id).await?;
         let Some(counts) = counts else {
             txn.rollback()
@@ -782,20 +959,84 @@ impl BatchRepository for DatabaseBatchRepository {
     }
 
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
-        self.stamp(id, "finished_at").await
+        self.claim_terminal_callbacks(id).await.map(|_| ())
+    }
+
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+
+        let txn = self.begin_serialized_transaction().await?;
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        }
+        let counts = self.counts(&txn, id).await?.ok_or_else(|| {
+            FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+        })?;
+        if counts.pending_jobs != 0 {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!(
+                "batch is not terminal: {id} has {} pending jobs",
+                counts.pending_jobs
+            )));
+        }
+
+        let cancelled_at = self.locked_cancelled_at(&txn, id).await?;
+        let claimed_at_secs = Utc::now().timestamp();
+        let claimed_at = timestamp(claimed_at_secs, "finished_at")?;
+        let result = txn
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "UPDATE {} SET finished_at = {} WHERE id = {} AND finished_at IS NULL",
+                    self.batches,
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
+                ),
+                vec![
+                    sea_orm::Value::from(claimed_at_secs),
+                    sea_orm::Value::from(id.to_string()),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches callback claim: {e}")))?;
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches commit: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(TerminalCallbackClaim {
+                finished_at: claimed_at,
+                cancelled_at,
+            }))
+        }
     }
 
     /// Removes the settlement rows with the batch, in one transaction. Leaving
     /// them behind would let a later batch reusing the id inherit somebody
-    /// else's settled jobs and start life already "finished".
+    /// else's settled jobs and start life already "finished". The parent lock
+    /// comes first so a concurrent settlement cannot land between child and
+    /// parent deletion.
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
         use crate::database::placeholder::placeholder;
-        use sea_orm::{ConnectionTrait, TransactionTrait};
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        use sea_orm::ConnectionTrait;
+        let txn = self.begin_serialized_transaction().await?;
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Ok(false);
+        }
 
         let delete = |table: &str, key: &str| -> Result<sea_orm::Statement, FrameworkError> {
             Ok(sea_orm::Statement::from_sql_and_values(
@@ -882,6 +1123,13 @@ pub trait BatchCallback: Send + Sync + 'static {
     /// Run the callback for `batch`. `error` is `Some` for `catch`/`finally`
     /// invocations after a failure; `None` for `then` and for successful
     /// `finally`.
+    ///
+    /// Built-in repositories durably claim the terminal callback bundle
+    /// before invoking it, so queue redelivery does not repeat a completed or
+    /// failed attempt. That also means a process crash after the claim, or an
+    /// error returned here, is not retried automatically. For retryable
+    /// external side effects, enqueue an idempotent outbox job from the
+    /// callback and use the batch id as part of its deduplication key.
     async fn handle(&self, batch: Batch, error: Option<String>) -> Result<(), FrameworkError>;
 }
 
@@ -970,6 +1218,10 @@ pub struct PendingBatch {
     /// `add` time because `add` returns `Self` and cannot fail; surfaced by
     /// [`PendingBatch::dispatch`] before anything is stored.
     debounce_rejected: Vec<String>,
+    /// Envelope-construction failures collected by [`PendingBatch::add`]. The
+    /// fluent builder remains infallible, while dispatch rejects the entire
+    /// batch before repository or driver mutation.
+    build_errors: Vec<String>,
 }
 
 impl Default for PendingBatch {
@@ -986,6 +1238,7 @@ impl PendingBatch {
             options: BatchOptions::default(),
             envelopes: Vec::new(),
             debounce_rejected: Vec::new(),
+            build_errors: Vec::new(),
         }
     }
 
@@ -1009,7 +1262,11 @@ impl PendingBatch {
         let now = Utc::now();
         let mut env = match crate::queue::build_envelope::<J>(&job, now) {
             Ok(e) => e,
-            Err(_) => return self,
+            Err(error) => {
+                self.build_errors
+                    .push(format!("job `{}`: {error}", J::job_name()));
+                return self;
+            }
         };
         env.batch_id = None; // overwritten on dispatch with the batch id
         self.envelopes.push(env);
@@ -1094,6 +1351,12 @@ impl PendingBatch {
                 self.debounce_rejected.join(", ")
             )));
         }
+        if !self.build_errors.is_empty() {
+            return Err(FrameworkError::internal(format!(
+                "cannot dispatch batch because job envelope construction failed: {}",
+                self.build_errors.join("; ")
+            )));
+        }
         ensure_default_repository();
         let repo = current_repository()
             .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
@@ -1168,21 +1431,17 @@ async fn settle_undispatched(
     // fires the callbacks on the normal path. With none, this is the last
     // chance anything runs them.
     if nothing_was_pushed {
-        if let Err(e) = repo.mark_finished(id).await {
-            tracing::warn!(batch_id = %id, error = %e, "queue batch dispatch: mark_finished failed");
-        }
         match repo.find(id).await {
             Ok(Some(batch)) => {
-                crate::queue::worker::fire_batch_callbacks(
-                    &batch,
-                    crate::queue::worker::BatchPhase::Catch,
-                )
-                .await;
-                crate::queue::worker::fire_batch_callbacks(
-                    &batch,
-                    crate::queue::worker::BatchPhase::Finally,
-                )
-                .await;
+                if let Err(e) =
+                    crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
+                {
+                    tracing::warn!(
+                        batch_id = %id,
+                        error = %e,
+                        "queue batch dispatch: could not claim terminal callbacks"
+                    );
+                }
             }
             Ok(None) => tracing::warn!(
                 batch_id = %id,

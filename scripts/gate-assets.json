@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "branch": "local/gate-infra",
+  "assets": [
+    "scripts/gate-assets.json",
+    "scripts/gate.sh",
+    "scripts/gate-runner.py",
+    "scripts/gate-steps.json",
+    "scripts/bump-workspace-version.py",
+    "scripts/check-doc-references.sh",
+    "scripts/check-prose-dashes.sh",
+    "scripts/check-manual-translations.sh",
+    "scripts/check-manual-structure.py",
+    "scripts/check-postgres.sh",
+    "scripts/check-mysql.sh",
+    "scripts/check-magnetar-live.sh",
+    "scripts/check-msrv.sh",
+    "scripts/check-feature-matrix.sh",
+    "scripts/check-audit.sh",
+    "scripts/check-downstream-dependencies.sh",
+    "scripts/check-downstream-dependencies.py",
+    "scripts/release.sh",
+    "scripts/tests/release-normal-smoke.sh",
+    "scripts/tests/release-bump-smoke.sh",
+    "scripts/install-gate.py",
+    ".githooks/pre-push",
+    ".cargo/audit.toml"
+  ],
+  "capabilities": ["bash", "cargo", "docker", "git", "python3"]
+}

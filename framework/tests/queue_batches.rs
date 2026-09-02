@@ -4,17 +4,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 use suprnova::App;
 use suprnova::cache::{Cache, CacheStore, InMemoryCache};
 use suprnova::error::FrameworkError;
 use suprnova::queue::batch::register_callback;
 use suprnova::queue::{
-    Batch, BatchCallback, Job, MemoryBatchRepository, MemoryQueueDriver, Queue,
+    Batch, BatchCallback, BatchRepository, Job, MemoryBatchRepository, MemoryQueueDriver, Queue,
+    QueueDriver, UpdatedBatchJobCounts,
     worker::{WorkerConfig, register_job, run_worker},
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 fn cache_init() {
     if !Cache::is_initialized() {
@@ -38,6 +40,127 @@ impl Job for BatchedJob {
         BATCHED_RUNS.fetch_add(self.n, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[derive(Deserialize, Clone)]
+struct SerializationErrorJob;
+
+impl Serialize for SerializationErrorJob {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(<S::Error as serde::ser::Error>::custom(
+            "planned batch serialization failure",
+        ))
+    }
+}
+
+#[async_trait]
+impl Job for SerializationErrorJob {
+    fn job_name() -> &'static str {
+        "queue_batches::SerializationErrorJob"
+    }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct StoreCountingBatchRepository {
+    stores: AtomicUsize,
+}
+
+#[async_trait]
+impl BatchRepository for StoreCountingBatchRepository {
+    async fn store(&self, _batch: Batch) -> Result<(), FrameworkError> {
+        self.stores.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn find(&self, _id: &str) -> Result<Option<Batch>, FrameworkError> {
+        panic!("serialization rejection must happen before repository lookup")
+    }
+
+    async fn increment_total_jobs(
+        &self,
+        _id: &str,
+        _delta: u64,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        panic!("serialization rejection must happen before repository accounting")
+    }
+
+    async fn record_successful_job(
+        &self,
+        _id: &str,
+        _job_id: Uuid,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        panic!("serialization rejection must happen before repository accounting")
+    }
+
+    async fn record_failed_job(
+        &self,
+        _id: &str,
+        _job_id: Uuid,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        panic!("serialization rejection must happen before repository accounting")
+    }
+
+    async fn cancel(&self, _id: &str) -> Result<(), FrameworkError> {
+        panic!("serialization rejection must happen before repository cancellation")
+    }
+
+    async fn is_cancelled(&self, _id: &str) -> Result<bool, FrameworkError> {
+        panic!("serialization rejection must happen before repository lookup")
+    }
+
+    async fn mark_finished(&self, _id: &str) -> Result<(), FrameworkError> {
+        panic!("serialization rejection must happen before repository finalization")
+    }
+
+    async fn delete(&self, _id: &str) -> Result<bool, FrameworkError> {
+        panic!("serialization rejection must happen before repository deletion")
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn batch_dispatch_rejects_serialization_failure_before_storing_or_pushing() {
+    cache_init();
+    let repository = Arc::new(StoreCountingBatchRepository::default());
+    Queue::set_batch_repository(repository.clone());
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let error = Queue::batch()
+        .name("serialization-must-be-atomic")
+        .add(BatchedJob { n: 1 })
+        .add(SerializationErrorJob)
+        .add(BatchedJob { n: 2 })
+        .dispatch()
+        .await
+        .expect_err("one invalid job must reject the whole batch");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("queue_batches::SerializationErrorJob"),
+        "the error must identify the rejected job: {message}"
+    );
+    assert!(
+        message.contains("planned batch serialization failure"),
+        "the error must preserve the serialization cause: {message}"
+    );
+    assert_eq!(
+        repository.stores.load(Ordering::SeqCst),
+        0,
+        "an invalid batch must not be persisted"
+    );
+    assert_eq!(
+        driver.size().await.expect("read memory queue size"),
+        0,
+        "an invalid batch must not push its valid prefix"
+    );
 }
 
 static CALLBACK_HITS: AtomicU32 = AtomicU32::new(0);

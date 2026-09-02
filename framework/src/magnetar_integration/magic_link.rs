@@ -1,6 +1,6 @@
 //! Magic-link authentication through the installed Magnetar engine.
 
-use super::{Session, User};
+use super::{Session, SignInOutcome, User};
 use crate::error::FrameworkError;
 
 /// Magic-link authentication facade returned by `Auth::magic_link`.
@@ -36,6 +36,22 @@ impl MagicLinkAuth {
     /// Returns an error when the token is invalid or used, a second factor is
     /// required, the engine is not installed, or session issuance fails.
     pub async fn consume(&self, token: &str) -> Result<(User, Session), FrameworkError> {
+        self.consume_outcome(token)
+            .await?
+            .into_legacy_tuple("second-factor authentication is required")
+    }
+
+    /// Consume a single-use token and preserve any factor continuation.
+    ///
+    /// A [`SignInOutcome::FactorRequired`] result does not bind the framework
+    /// session. Its selector can be completed through the retained host engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the token is invalid or used, the engine is not
+    /// installed, user lookup fails, or session issuance fails.
+    pub async fn consume_outcome(&self, token: &str) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = super::password_engine()?;
         let decision = engine
             .magic_link_consume(token, magnetar::sessions::SessionMetadata::default())
@@ -43,20 +59,20 @@ impl MagicLinkAuth {
             .map_err(map_magnetar_magic_link_error)?;
         let issued = match decision {
             super::engine::HostSignInDecision::SessionAllowed(issued) => issued,
-            super::engine::HostSignInDecision::FactorRequired { .. } => {
-                return Err(FrameworkError::Domain {
-                    message: "second-factor authentication is required".to_owned(),
-                    status_code: 401,
-                });
+            super::engine::HostSignInDecision::FactorRequired { challenge_selector } => {
+                return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
-        super::bind_issued_session(&issued, false);
+        super::bind_issued_session(&issued, false)?;
         let user = engine
             .user_by_id(issued.session.user_id.as_str())
             .await
             .map_err(map_magnetar_magic_link_error)?
             .ok_or_else(|| FrameworkError::internal("magic-link session user was not found"))?;
-        Ok((user, issued.session))
+        Ok(SignInOutcome::Authenticated {
+            user,
+            session: issued.session,
+        })
     }
 }
 

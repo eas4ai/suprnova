@@ -40,6 +40,7 @@
 #![cfg(feature = "testing")]
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::middleware::{Middleware, Next};
@@ -77,6 +78,59 @@ impl SessionStore for NullStore {
     async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
         Ok(0)
     }
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+#[derive(Default)]
+struct RecordingStore {
+    sessions: std::sync::Mutex<HashMap<String, SessionData>>,
+    destroyed_ids: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingStore {
+    fn seed(&self, mut session: SessionData) {
+        session.loaded_from_store = true;
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sessions.lock().unwrap().is_empty()
+    }
+
+    fn destroyed_ids(&self) -> Vec<String> {
+        self.destroyed_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl SessionStore for RecordingStore {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(self.sessions.lock().unwrap().get(id).cloned())
+    }
+
+    async fn write(&self, session: &SessionData) -> Result<(), FrameworkError> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
+        self.destroyed_ids.lock().unwrap().push(id.to_string());
+        self.sessions.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
     async fn gc(&self) -> Result<u64, FrameworkError> {
         Ok(0)
     }
@@ -719,13 +773,12 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
         })
     });
 
-    // `NullStore` reads `None` and writes `Ok(())`, so the dirtied
-    // session reaches `create_session_cookie` - the request has no
-    // inbound cookie and hydrates no remember-me token, so
+    // The request has no inbound cookie and hydrates no remember-me token, so
     // `create_session_cookie`'s `Cookie::encrypted` call (which uses
     // `Crypt::encrypt_string_for`) is the only cookie encryption this
     // request makes, and the armed flag lands on it exactly.
-    let middleware = SessionMiddleware::with_store(config(), Arc::new(NullStore));
+    let store = Arc::new(RecordingStore::default());
+    let middleware = SessionMiddleware::with_store(config(), store.clone());
     let request = post_request(None).await;
     suprnova::crypto::_test_force_next_encrypt_failure();
     let response = tokio::time::timeout(WAIT, middleware.handle(request, next))
@@ -737,6 +790,10 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
         Ok(_) => panic!("a forced session-cookie encryption failure must fail closed"),
     };
     assert_eq!(error.status_code(), 500);
+    assert!(
+        store.is_empty(),
+        "a session whose response cookie was never built must not be persisted"
+    );
     let hyper_response = error.into_hyper();
     let set_cookie = hyper_response
         .headers()
@@ -748,4 +805,67 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
             "a cookie queued before the session-cookie encryption failure must still reach the 500",
         );
     assert!(set_cookie.contains("promo=10OFF"), "got: {set_cookie}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotated_session_cookie_failure_removes_old_row_without_writing_new_row() {
+    ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
+
+    let old_session_id = "a".repeat(40);
+    let mut old_session = SessionData::new(old_session_id.clone(), "b".repeat(40));
+    old_session.user_id = Some("user-1".to_string());
+    let store = Arc::new(RecordingStore::default());
+    store.seed(old_session);
+
+    let mut session_config = config();
+    session_config.cookie_name = "rotated_session".to_string();
+    let old_cookie = Cookie::encrypted(&session_config.cookie_name, &old_session_id)
+        .expect("encrypt inbound session cookie");
+    let next: Next = Arc::new(|_req| {
+        Box::pin(async {
+            Cookie::queue(Cookie::new("promo", "10OFF"));
+            suprnova::session::regenerate_session_id();
+            Ok(suprnova::HttpResponse::text("ok"))
+        })
+    });
+
+    let middleware = SessionMiddleware::with_store(session_config.clone(), store.clone());
+    let request = post_request(Some((&session_config.cookie_name, old_cookie.value()))).await;
+    suprnova::crypto::_test_force_next_encrypt_failure();
+    let response = tokio::time::timeout(WAIT, middleware.handle(request, next))
+        .await
+        .expect("SessionMiddleware::handle timed out");
+
+    let error = match response {
+        Err(error) => error,
+        Ok(_) => panic!("a forced rotated-session cookie failure must fail closed"),
+    };
+    assert_eq!(error.status_code(), 500);
+    assert_eq!(store.destroyed_ids(), vec![old_session_id]);
+    assert!(
+        store.is_empty(),
+        "the destroyed old row must not be replaced when its new cookie was never built"
+    );
+
+    let hyper_response = error.into_hyper();
+    let set_cookies: Vec<&str> = hyper_response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    assert!(
+        set_cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("promo=")),
+        "queued non-session cookies must survive the failure"
+    );
+    let session_prefix = format!("{}=", session_config.cookie_name);
+    assert!(
+        set_cookies
+            .iter()
+            .all(|cookie| !cookie.starts_with(&session_prefix)),
+        "a failed session cookie must not be emitted"
+    );
 }

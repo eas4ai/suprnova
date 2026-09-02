@@ -363,11 +363,7 @@ fn create_api_project(
     }
 
     if !no_git {
-        Command::new("git")
-            .args(["init"])
-            .current_dir(project_path)
-            .output()
-            .map_err(|e| format!("Failed to initialize git repository: {}", e))?;
+        initialize_git_repository(project_path)?;
     }
 
     Ok(())
@@ -651,14 +647,39 @@ fn create_project(
 
     // Initialize git repository
     if !no_git {
-        Command::new("git")
-            .args(["init"])
-            .current_dir(project_path)
-            .output()
-            .map_err(|e| format!("Failed to initialize git repository: {}", e))?;
+        initialize_git_repository(project_path)?;
     }
 
     Ok(())
+}
+
+fn initialize_git_repository(project_path: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("init")
+        .current_dir(project_path)
+        .output()
+        .map_err(|error| format!("Failed to initialize git repository: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let outcome = output
+        .status
+        .code()
+        .map(|code| format!("exited with {code}"))
+        .unwrap_or_else(|| "terminated without an exit code".to_string());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(": {stderr}")
+    };
+
+    Err(format!(
+        "Failed to initialize git repository (`git init` {outcome}){detail}"
+    ))
 }
 
 #[cfg(test)]

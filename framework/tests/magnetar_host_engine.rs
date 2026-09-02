@@ -16,18 +16,18 @@ use magnetar::{
     passkey::PasskeyConfig,
     password::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver},
     plugin::{LifecycleEvent, LifecycleEventKind},
-    plugins::password::{PasswordAttempt, PasswordAuthProvider, PasswordAuthService},
+    plugins::password::{PasswordAttempt, PasswordAuthService},
     schema::{
         AuthSchema, CeremonyFields, EntityBinding, LinkedAccountFields, PasskeyFields,
-        SessionEpoch, SessionFields, TokenFields, UserBinding, UserFields, UserOptionalFields,
+        SessionEpoch, SessionFields, TokenFields, UserFields, UserOptionalFields,
     },
     sessions::{
         OpaqueConfig, OpaqueSessionStore, SessionMetadata, SessionQueries, StoredSession,
         WebSessionBinding,
     },
     storage::{
-        CeremonyStore, LinkedAccountInitializer, NewLinkedAccount, NewUser, PasskeyStore,
-        SeaOrmStorage, TokenStore, UserStore,
+        LinkedAccountInitializer, NewLinkedAccount, NewUser, PasskeyStore, SeaOrmStorage,
+        TokenStore, UserStore,
     },
 };
 use sea_orm::{
@@ -40,13 +40,12 @@ use serial_test::serial;
 use suprnova::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 use suprnova::testing::TestContainer;
 use suprnova::{
-    EventFacade, User, UserId,
+    EventFacade, SignInOutcome, User, UserId,
     events::testing::{assert_dispatched_once, dispatched},
     magnetar_integration::engine::{
         HostLifecycleDeduplication, HostPasswordLockout, HostUserAdapter, LifecycleDeliveryClaim,
         LifecycleForwardResult, MagnetarAuthStore, MagnetarBinding, MagnetarHostEngine,
-        MagnetarHostEngineParts, MagnetarLifecycleEvent, MagnetarPasskeyAuthEngine,
-        MagnetarPasswordAuthEngine,
+        MagnetarHostEngineParts, MagnetarLifecycleEvent, MagnetarPasswordAuthEngine,
     },
     model,
 };
@@ -1084,19 +1083,34 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
     assert!(matches!(
         factor_required,
         Err(suprnova::FrameworkError::Domain {
+            message,
             status_code: 401,
-            ..
-        })
+        }) if message == "second-factor authentication is required"
     ));
 
-    let first = issue_factor_approved_session(
-        &engine,
-        engine
-            .authenticate_password(password_attempt())
-            .await
-            .expect("host engine authenticates through Magnetar password storage"),
-    )
-    .await;
+    let password_factor_slot = suprnova::session::new_session_slot_for_test();
+    let password_outcome = TestContainer::scope(async {
+        TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
+        suprnova::session::session_scope_for_test(password_factor_slot.clone(), async {
+            suprnova::Auth::password()
+                .authenticate_outcome(
+                    "host-engine@example.test",
+                    "correct horse battery staple",
+                    Some("framework-host-engine-test".to_owned()),
+                    Some("127.0.0.1".to_owned()),
+                )
+                .await
+        })
+        .await
+    })
+    .await
+    .expect("password facade preserves the factor continuation");
+    let password_factor_selector = require_factor_selector(password_outcome);
+    assert_factor_outcome_does_not_bind_session(&password_factor_slot);
+    let first = engine
+        .complete_challenge(&password_factor_selector, "654321")
+        .await
+        .expect("password factor completion issues through OpaqueSessionProvider");
     let first_token = first
         .session
         .token
@@ -1137,14 +1151,29 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
         created.user_id
     );
 
-    let second = issue_factor_approved_session(
-        &engine,
-        engine
-            .authenticate_password(password_attempt())
-            .await
-            .expect("host engine authenticates second real sign-in"),
-    )
-    .await;
+    let second_factor_slot = suprnova::session::new_session_slot_for_test();
+    let second_outcome = TestContainer::scope(async {
+        TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
+        suprnova::session::session_scope_for_test(second_factor_slot.clone(), async {
+            suprnova::Auth::password()
+                .authenticate_outcome(
+                    "host-engine@example.test",
+                    "correct horse battery staple",
+                    Some("framework-host-engine-test".to_owned()),
+                    Some("127.0.0.1".to_owned()),
+                )
+                .await
+        })
+        .await
+    })
+    .await
+    .expect("password facade preserves a second factor continuation");
+    let second_factor_selector = require_factor_selector(second_outcome);
+    assert_factor_outcome_does_not_bind_session(&second_factor_slot);
+    let second = engine
+        .complete_challenge(&second_factor_selector, "654321")
+        .await
+        .expect("second password factor completion issues through OpaqueSessionProvider");
     let second_token = second
         .session
         .token
@@ -1189,6 +1218,47 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
             .await
             .is_err()
     );
+
+    let legacy_magic_token = TestContainer::scope(async {
+        TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
+        suprnova::Auth::magic_link()
+            .send("magic-link@example.test", "http://localhost/auth/magic")
+            .await
+    })
+    .await
+    .expect("mint a token for the legacy magic-link contract");
+    assert!(matches!(
+        suprnova::Auth::magic_link().consume(&legacy_magic_token).await,
+        Err(suprnova::FrameworkError::Domain {
+            message,
+            status_code: 401,
+        }) if message == "second-factor authentication is required"
+    ));
+
+    let outcome_magic_token = TestContainer::scope(async {
+        TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
+        suprnova::Auth::magic_link()
+            .send("magic-link@example.test", "http://localhost/auth/magic")
+            .await
+    })
+    .await
+    .expect("mint a token for the outcome-returning magic-link contract");
+    let magic_factor_slot = suprnova::session::new_session_slot_for_test();
+    let magic_outcome =
+        suprnova::session::session_scope_for_test(magic_factor_slot.clone(), async {
+            suprnova::Auth::magic_link()
+                .consume_outcome(&outcome_magic_token)
+                .await
+        })
+        .await
+        .expect("magic-link facade preserves the factor continuation");
+    let magic_factor_selector = require_factor_selector(magic_outcome);
+    assert_factor_outcome_does_not_bind_session(&magic_factor_slot);
+    let magic_factor_session = engine
+        .complete_challenge(&magic_factor_selector, "654321")
+        .await
+        .expect("magic-link factor completion issues through OpaqueSessionProvider");
+    assert!(magic_factor_session.session.token.is_some());
 
     factor_verifier
         .enrolled
@@ -1513,44 +1583,40 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
     let authentication_response = authenticator
         .do_authentication(origin.clone(), authentication.raw_options)
         .expect("software authenticator completes WebAuthn assertion");
-    let public_factor_required = suprnova::session::session_scope_for_test(session_slot, async {
-        suprnova::Auth::passkey()
-            .finish_authentication(EMAIL, authentication_response)
-            .await
-    })
-    .await;
+    let public_factor_required =
+        suprnova::session::session_scope_for_test(session_slot.clone(), async {
+            suprnova::Auth::passkey()
+                .finish_authentication(EMAIL, authentication_response)
+                .await
+        })
+        .await;
     assert!(matches!(
         public_factor_required,
         Err(suprnova::FrameworkError::Domain {
+            message,
             status_code: 401,
-            ..
-        })
+        }) if message == "second-factor authentication is required"
     ));
 
-    let direct_authentication = passkey_engine
-        .passkey_begin_authentication(EMAIL)
+    let outcome_slot = suprnova::session::new_session_slot_for_test();
+    let outcome_authentication =
+        suprnova::session::session_scope_for_test(outcome_slot.clone(), async {
+            suprnova::Auth::passkey().begin_authentication(EMAIL).await
+        })
         .await
-        .expect("host engine begins a second real Magnetar assertion ceremony");
-    let direct_response = authenticator
-        .do_authentication(origin.clone(), direct_authentication.options)
+        .expect("public facade begins a second real Magnetar assertion ceremony");
+    let outcome_response = authenticator
+        .do_authentication(origin.clone(), outcome_authentication.raw_options)
         .expect("software authenticator completes a second assertion");
-    let factor_selector = match passkey_engine
-        .passkey_finish_authentication(
-            &direct_authentication.selector,
-            EMAIL,
-            &direct_response,
-            SessionMetadata::default(),
-        )
-        .await
-        .expect("host engine verifies the assertion through Magnetar")
-    {
-        suprnova::magnetar_integration::engine::HostSignInDecision::FactorRequired {
-            challenge_selector,
-        } => challenge_selector,
-        suprnova::magnetar_integration::engine::HostSignInDecision::SessionAllowed(_) => {
-            panic!("the configured host factor verifier must require a ceremony")
-        }
-    };
+    let passkey_outcome = suprnova::session::session_scope_for_test(outcome_slot.clone(), async {
+        suprnova::Auth::passkey()
+            .finish_authentication_outcome(EMAIL, outcome_response)
+            .await
+    })
+    .await
+    .expect("passkey facade preserves the factor continuation");
+    let factor_selector = require_factor_selector(passkey_outcome);
+    assert_factor_outcome_does_not_bind_session(&outcome_slot);
     let issued = engine
         .complete_challenge(&factor_selector, "654321")
         .await
@@ -2135,6 +2201,14 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         offline_response("verified"),
         offline_token(),
         offline_response("verified"),
+        offline_token(),
+        offline_response("verified"),
+        offline_response(
+            r#"{"access_token":"offline-apple-access","token_type":"Bearer","id_token":"offline-apple-id-token"}"#,
+        ),
+        offline_response(
+            r#"{"access_token":"offline-apple-access","token_type":"Bearer","id_token":"offline-apple-id-token"}"#,
+        ),
         offline_response(
             r#"{"access_token":"offline-apple-access","token_type":"Bearer","id_token":"offline-apple-id-token"}"#,
         ),
@@ -2160,10 +2234,34 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
     assert!(matches!(
         factor_required,
         Err(suprnova::FrameworkError::Domain {
+            message,
             status_code: 401,
-            ..
-        })
+        }) if message == "OAuth sign-in requires a second factor"
     ));
+
+    let oauth_factor_slot = suprnova::session::new_session_slot_for_test();
+    let outcome_kickoff =
+        suprnova::session::session_scope_for_test(oauth_factor_slot.clone(), async {
+            suprnova::Auth::oauth("offline").begin().await
+        })
+        .await
+        .expect("start a standard OAuth flow for the outcome-returning facade");
+    let oauth_outcome =
+        suprnova::session::session_scope_for_test(oauth_factor_slot.clone(), async {
+            suprnova::Auth::oauth("offline")
+                .complete_outcome("code", &outcome_kickoff.state)
+                .await
+        })
+        .await
+        .expect("standard OAuth facade preserves the factor continuation");
+    let oauth_factor_selector = require_factor_selector(oauth_outcome);
+    assert_factor_outcome_does_not_bind_session(&oauth_factor_slot);
+    let oauth_factor_session = engine
+        .complete_challenge(&oauth_factor_selector, "654321")
+        .await
+        .expect("standard OAuth factor completion issues through OpaqueSessionProvider");
+    assert!(oauth_factor_session.session.token.is_some());
+
     factors
         .enrolled
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2280,7 +2378,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
             .is_some(),
         "the rotated framework session id must be persisted and usable"
     );
-    assert_eq!(public_transport.request_count(), 4);
+    assert_eq!(public_transport.request_count(), 6);
     let unsupported_provider = suprnova::session::session_scope_for_test(slot.clone(), async {
         suprnova::Auth::oauth("github").begin().await
     })
@@ -2297,54 +2395,101 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
     })
     .await
     .expect("Apple ceremony starts through Magnetar");
-    let (apple_user, apple_session) = suprnova::session::session_scope_for_test(slot, async {
-        suprnova::Auth::oauth("apple")
-            .complete_with_apple_form_post(
-                "apple-code",
-                &apple_kickoff.state,
-                Some(r#"{"name":{"firstName":"Ada"}}"#.to_owned()),
-            )
-            .await
-    })
-    .await
-    .expect("Apple form_post callback preserves ID token and user payload");
+    let (apple_user, apple_session) =
+        suprnova::session::session_scope_for_test(slot.clone(), async {
+            suprnova::Auth::oauth("apple")
+                .complete_with_apple_form_post(
+                    "apple-code",
+                    &apple_kickoff.state,
+                    Some(r#"{"name":{"firstName":"Ada"}}"#.to_owned()),
+                )
+                .await
+        })
+        .await
+        .expect("Apple form_post callback preserves ID token and user payload");
     assert_eq!(apple_user.email, "offline-apple@example.test");
     assert!(apple_session.token.is_some());
-    assert_eq!(public_transport.request_count(), 5);
+    assert_eq!(public_transport.request_count(), 7);
+
+    factors
+        .enrolled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let apple_legacy_factor_slot = suprnova::session::new_session_slot_for_test();
+    let apple_legacy_factor_kickoff =
+        suprnova::session::session_scope_for_test(apple_legacy_factor_slot.clone(), async {
+            suprnova::Auth::oauth("apple").begin().await
+        })
+        .await
+        .expect("start an Apple form_post flow for the legacy facade");
+    let apple_legacy_factor_required =
+        suprnova::session::session_scope_for_test(apple_legacy_factor_slot, async {
+            suprnova::Auth::oauth("apple")
+                .complete_with_apple_form_post(
+                    "apple-code",
+                    &apple_legacy_factor_kickoff.state,
+                    Some(r#"{"name":{"firstName":"Ada"}}"#.to_owned()),
+                )
+                .await
+        })
+        .await;
+    assert!(matches!(
+        apple_legacy_factor_required,
+        Err(suprnova::FrameworkError::Domain {
+            message,
+            status_code: 401,
+        }) if message == "OAuth sign-in requires a second factor"
+    ));
+    assert_eq!(public_transport.request_count(), 8);
+
+    let apple_factor_slot = suprnova::session::new_session_slot_for_test();
+    let apple_outcome_kickoff =
+        suprnova::session::session_scope_for_test(apple_factor_slot.clone(), async {
+            suprnova::Auth::oauth("apple").begin().await
+        })
+        .await
+        .expect("start an Apple form_post flow for the outcome-returning facade");
+    let apple_outcome =
+        suprnova::session::session_scope_for_test(apple_factor_slot.clone(), async {
+            suprnova::Auth::oauth("apple")
+                .complete_with_apple_form_post_outcome(
+                    "apple-code",
+                    &apple_outcome_kickoff.state,
+                    Some(r#"{"name":{"firstName":"Ada"}}"#.to_owned()),
+                )
+                .await
+        })
+        .await
+        .expect("Apple form_post facade preserves the factor continuation");
+    let apple_factor_selector = require_factor_selector(apple_outcome);
+    assert_factor_outcome_does_not_bind_session(&apple_factor_slot);
+    let apple_factor_session = engine
+        .complete_challenge(&apple_factor_selector, "654321")
+        .await
+        .expect("Apple factor completion issues through OpaqueSessionProvider");
+    assert!(apple_factor_session.session.token.is_some());
+    assert_eq!(public_transport.request_count(), 9);
 }
 
-async fn issue_factor_approved_session<S, O, C, F, P, A, D>(
-    engine: &MagnetarHostEngine<S, O, C, F, P, A, D>,
-    principal: magnetar::auth::VerifiedPrincipal,
-) -> suprnova::magnetar_integration::engine::MagnetarIssuedSession
-where
-    S: AuthSchema,
-    O: OpaqueSessionStore + 'static,
-    C: CeremonyStore + 'static,
-    F: FactorVerifier + 'static,
-    P: PasswordAuthProvider,
-    A: HostUserAdapter,
-    D: HostLifecycleDeduplication,
-    S::User: UserBinding + UserOptionalFields + SessionEpoch,
-    S::Session: SessionFields,
-    S::Token: TokenFields,
-{
-    let selector = match engine
-        .complete_sign_in(principal)
-        .await
-        .expect("factor gate creates a real ceremony")
-    {
-        suprnova::magnetar_integration::engine::HostSignInDecision::FactorRequired {
-            challenge_selector,
-        } => challenge_selector,
-        suprnova::magnetar_integration::engine::HostSignInDecision::SessionAllowed(_) => {
-            panic!("configured host factor verifier must require a ceremony")
+fn require_factor_selector(outcome: SignInOutcome) -> String {
+    match outcome {
+        SignInOutcome::FactorRequired { challenge_selector } => challenge_selector,
+        SignInOutcome::Authenticated { .. } => {
+            panic!("the configured host factor verifier must require a ceremony")
         }
-    };
-    engine
-        .complete_challenge(&selector, "654321")
-        .await
-        .expect("factor completion issues through OpaqueSessionProvider")
+        _ => panic!("unexpected sign-in outcome"),
+    }
+}
+
+fn assert_factor_outcome_does_not_bind_session(
+    slot: &Arc<std::sync::Mutex<Option<suprnova::session::SessionData>>>,
+) {
+    let guard = slot.lock().expect("framework session slot");
+    let session = guard.as_ref().expect("framework session remains installed");
+    assert_eq!(session.id, "test_session");
+    assert_eq!(session.csrf_token, "test_csrf_token");
+    assert!(session.user_id.is_none());
+    assert!(session.magnetar_web_binding().is_none());
 }
 
 fn password_attempt() -> PasswordAttempt {

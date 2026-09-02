@@ -1,6 +1,6 @@
 //! Password authentication through the installed Magnetar engine.
 
-use super::{Session, User};
+use super::{Session, SignInOutcome, User};
 use crate::error::FrameworkError;
 
 /// Password authentication facade returned by `Auth::password`.
@@ -41,6 +41,28 @@ impl PasswordAuth {
         user_agent: Option<String>,
         ip_address: Option<String>,
     ) -> Result<(User, Session), FrameworkError> {
+        self.authenticate_outcome(email, password, user_agent, ip_address)
+            .await?
+            .into_legacy_tuple("second-factor authentication is required")
+    }
+
+    /// Verify a password and preserve any required factor continuation.
+    ///
+    /// A [`SignInOutcome::FactorRequired`] result does not bind the framework
+    /// session. Its selector can be completed through the retained host engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid credentials, lockout, missing engine
+    /// initialization, or storage failure.
+    pub async fn authenticate_outcome(
+        &self,
+        email: &str,
+        password: &str,
+        user_agent: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = super::password_engine()?;
         let (user, decision) = engine
             .password_sign_in(magnetar::plugins::password::PasswordAttempt {
@@ -55,14 +77,14 @@ impl PasswordAuth {
             .map_err(map_magnetar_password_error)?;
         match decision {
             super::engine::HostSignInDecision::SessionAllowed(issued) => {
-                super::bind_issued_session(&issued, true);
-                Ok((user, issued.session))
-            }
-            super::engine::HostSignInDecision::FactorRequired { .. } => {
-                Err(FrameworkError::Domain {
-                    message: "second-factor authentication is required".to_owned(),
-                    status_code: 401,
+                super::bind_issued_session(&issued, true)?;
+                Ok(SignInOutcome::Authenticated {
+                    user,
+                    session: issued.session,
                 })
+            }
+            super::engine::HostSignInDecision::FactorRequired { challenge_selector } => {
+                Ok(SignInOutcome::FactorRequired { challenge_selector })
             }
         }
     }

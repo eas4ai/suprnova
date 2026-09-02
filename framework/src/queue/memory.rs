@@ -260,6 +260,10 @@ impl QueueDriver for MemoryQueueDriver {
         self.pop_filtered(visibility_timeout, queues).await
     }
 
+    fn queue_filter_capability(&self) -> crate::queue::driver::QueueFilterCapability {
+        crate::queue::driver::QueueFilterCapability::Supported
+    }
+
     async fn pop(
         &self,
         visibility_timeout: Duration,

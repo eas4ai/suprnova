@@ -1,9 +1,10 @@
 //! Integration tests for webhook → mirror-table hydration.
 //!
-//! Each test:
+//! Each route-level test:
 //!   1. Spins up an in-memory SQLite with the payments migration applied.
-//!   2. Registers a fresh `MockPaymentProvider` under a unique name and keeps
-//!      a direct handle on it so the test can pre-populate provider state.
+//!   2. Registers an isolated provider under a unique name. Most use a fresh
+//!      `MockPaymentProvider`; the signature regression uses a dedicated
+//!      HMAC-verifying provider.
 //!   3. Drives the route via a real TCP server + raw hyper client (same
 //!      pattern as `payments_webhook_idempotency.rs`).
 //!   4. Asserts the relevant mirror rows in `payments_subscriptions`,
@@ -19,6 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use hmac::digest::KeyInit;
+use hmac::{Hmac, Mac};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -26,10 +29,13 @@ use hyper_util::rt::TokioIo;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
+use sha2::Sha256;
 use suprnova::handle_request;
 use suprnova::payments::{
-    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
-    UpdateSubscriptionRequest,
+    Checkout, CreateCustomerRequest, CustomerRef, CustomerStore, MockPaymentProvider, PayloadIds,
+    PaymentError, PaymentProvider, PaymentProviderRegistry, PaymentResult, SessionPayload,
+    StartSessionRequest, SubscribeRequest, Subscription, SubscriptionResult, UpdateCustomerRequest,
+    UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler, constant_time_eq,
     entities::{customer, subscription, subscription_item, transaction, webhook_event},
     webhook_routes,
 };
@@ -45,6 +51,123 @@ impl MigratorTrait for PaymentsTestMigrator {
     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         suprnova::payments::migrations::migrations()
     }
+}
+
+type TestHmacSha256 = Hmac<Sha256>;
+
+const TEST_WEBHOOK_SIGNING_SECRET: &[u8] = b"f05-webhook-signing-secret";
+
+/// Minimal provider that authenticates the regression event with HMAC-SHA256
+/// and then reports the referenced subscription as missing.
+struct SignedMissingSubscriptionProvider;
+
+impl PaymentProvider for SignedMissingSubscriptionProvider {
+    fn name(&self) -> &'static str {
+        "signed-missing-subscription"
+    }
+}
+
+#[async_trait::async_trait]
+impl WebhookHandler for SignedMissingSubscriptionProvider {
+    fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
+        let provided = ctx
+            .headers
+            .get("x-test-webhook-signature")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| PaymentError::WebhookSignature("missing test signature".into()))?;
+        let expected = sign_test_webhook(ctx.body);
+        if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            Ok(())
+        } else {
+            Err(PaymentError::WebhookSignature(
+                "invalid test signature".into(),
+            ))
+        }
+    }
+
+    fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
+        let raw: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|error| PaymentError::Validation(format!("invalid test webhook: {error}")))?;
+        let provider_event_id = raw
+            .get("id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| PaymentError::Validation("missing event id".into()))?;
+
+        Ok(WebhookEvent {
+            provider: self.name().into(),
+            provider_event_id: provider_event_id.into(),
+            provider_event_type: "subscription.created".into(),
+            neutral: Some(suprnova::payments::NeutralEventKind::SubscriptionCreated),
+            raw_payload: raw,
+        })
+    }
+
+    fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds {
+        PayloadIds {
+            subscription_id: event
+                .raw_payload
+                .pointer("/data/object/id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Checkout for SignedMissingSubscriptionProvider {
+    async fn start_session(&self, _req: StartSessionRequest) -> PaymentResult<SessionPayload> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Subscription for SignedMissingSubscriptionProvider {
+    async fn subscribe(&self, _req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn update(&self, _req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn cancel(
+        &self,
+        _provider_subscription_id: &str,
+        _at_period_end: bool,
+    ) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotFound(provider_subscription_id.into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomerStore for SignedMissingSubscriptionProvider {
+    async fn create_customer(&self, _req: CreateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn update_customer(&self, _req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn get_customer(&self, _provider_customer_id: &str) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+
+    async fn delete_customer(&self, _provider_customer_id: &str) -> PaymentResult<()> {
+        Err(PaymentError::NotSupported("test provider".into()))
+    }
+}
+
+fn sign_test_webhook(body: &[u8]) -> String {
+    let mut mac = TestHmacSha256::new_from_slice(TEST_WEBHOOK_SIGNING_SECRET)
+        .expect("HMAC accepts any key length");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 // ── test server helpers ───────────────────────────────────────────────────────
@@ -87,6 +210,24 @@ async fn send_webhook(
     path: &str,
     body: Bytes,
 ) -> (hyper::http::StatusCode, Bytes) {
+    send_webhook_with_signature(addr, path, body, None).await
+}
+
+async fn send_signed_webhook(
+    addr: SocketAddr,
+    path: &str,
+    body: Bytes,
+) -> (hyper::http::StatusCode, Bytes) {
+    let signature = sign_test_webhook(&body);
+    send_webhook_with_signature(addr, path, body, Some(&signature)).await
+}
+
+async fn send_webhook_with_signature(
+    addr: SocketAddr,
+    path: &str,
+    body: Bytes,
+    signature: Option<&str>,
+) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
@@ -97,14 +238,16 @@ async fn send_webhook(
     });
 
     let content_len = body.len().to_string();
-    let req = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method("POST")
         .uri(path)
         .header("Host", "localhost")
         .header("Content-Type", "application/json")
-        .header("Content-Length", content_len)
-        .body(Full::new(body))
-        .unwrap();
+        .header("Content-Length", content_len);
+    if let Some(signature) = signature {
+        request = request.header("X-Test-Webhook-Signature", signature);
+    }
+    let req = request.body(Full::new(body)).unwrap();
 
     let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
         .await
@@ -700,6 +843,69 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
     );
 }
 
+/// Provider failures remain retryable even when their human-readable text
+/// happens to contain language commonly emitted for database collisions.
+#[tokio::test]
+async fn provider_error_text_containing_duplicate_remains_retryable() {
+    let provider_name: &'static str = "mock-hydration-duplicate-error-text";
+    let provider: Arc<dyn PaymentProvider> = Arc::new(SignedMissingSubscriptionProvider);
+    PaymentProviderRegistry::bind(provider_name, provider);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 2).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let missing_subscription_id = "sub_duplicate_provider_failure";
+    let body = Bytes::from(
+        json!({
+            "id": "evt_duplicate_provider_failure",
+            "type": "subscription.created",
+            "data": {
+                "object": {
+                    "id": missing_subscription_id,
+                    "customer": "cus_duplicate_provider_failure"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (status, response_body) = send_signed_webhook(addr, &path, body).await;
+    assert_eq!(
+        status.as_u16(),
+        503,
+        "provider lookup failure must remain retryable, got body: {}",
+        String::from_utf8_lossy(&response_body)
+    );
+    assert_eq!(response_body.as_ref(), b"hydration-failed");
+
+    let audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_duplicate_provider_failure"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(audit.processed_at.is_none(), "must not be marked processed");
+    assert_eq!(
+        audit.process_error.as_deref(),
+        Some("requested resource not found: sub_duplicate_provider_failure"),
+        "process_error must describe the current provider failure"
+    );
+
+    let subscriptions = subscription::Entity::find()
+        .all(&*conn)
+        .await
+        .expect("db ok");
+    assert!(
+        subscriptions.is_empty(),
+        "failed provider prefetch must not write subscription mirror rows"
+    );
+}
+
 /// Retrying a previously-failed event re-runs hydration. After the bad
 /// payload's first attempt fails, posting a corrected payload with the same
 /// event_id must... hmm - actually Stripe retries the SAME body. The
@@ -892,4 +1098,287 @@ async fn unmapped_event_records_audit_row_only() {
         .await
         .expect("db ok");
     assert!(txns.is_empty());
+}
+
+#[tokio::test]
+async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mirror() {
+    let provider_name: &'static str = "mock-hydration-malformed-payment";
+    let _mock = register_mock(provider_name);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 6).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let initial = Bytes::from(
+        json!({
+            "id": "evt_snapshot_seed",
+            "type": "payment.succeeded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_original",
+                    "subscription": "sub_snapshot_original",
+                    "amount": 4200,
+                    "tax": 200,
+                    "currency": "EUR",
+                    "paid_at": "2026-05-22T12:00:00+00:00"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (initial_status, _) = send_webhook(addr, &path, initial).await;
+    assert_eq!(initial_status.as_u16(), 200);
+    let seeded = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+
+    let malformed = Bytes::from(
+        json!({
+            "id": "evt_snapshot_retry",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_changed",
+                    "amount": "not-a-number",
+                    "tax": 300,
+                    "currency": "USD"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (malformed_status, _) = send_webhook(addr, &path, malformed.clone()).await;
+    assert_eq!(malformed_status.as_u16(), 503);
+
+    let unchanged = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+    assert_eq!(
+        unchanged, seeded,
+        "failed extraction must leave the complete mirror row unchanged"
+    );
+
+    let failed_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(failed_audit.processed_at.is_none());
+    assert!(
+        failed_audit
+            .process_error
+            .as_deref()
+            .is_some_and(|error| error.contains("amount"))
+    );
+
+    let (same_body_retry_status, _) = send_webhook(addr, &path, malformed).await;
+    assert_eq!(same_body_retry_status.as_u16(), 503);
+    let failed_audits = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_retry"))
+        .all(&*conn)
+        .await
+        .expect("db ok");
+    assert_eq!(failed_audits.len(), 1, "retry must reuse the audit row");
+    assert!(failed_audits[0].processed_at.is_none());
+    assert!(failed_audits[0].process_error.is_some());
+    let still_unchanged = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+    assert_eq!(still_unchanged, seeded);
+
+    let valid_update = Bytes::from(
+        json!({
+            "id": "evt_snapshot_valid_update",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_original",
+                    "amount": 4200,
+                    "tax": 200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (valid_status, _) = send_webhook(addr, &path, valid_update).await;
+    assert_eq!(valid_status.as_u16(), 200);
+
+    let updated = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("updated transaction mirror");
+    assert_eq!(updated.status, "refunded");
+    assert_eq!(updated.amount_total_minor, 4200);
+    assert_eq!(
+        updated.provider_subscription_id.as_deref(),
+        Some("sub_snapshot_original"),
+        "a partial update must preserve the existing subscription link"
+    );
+
+    let processed_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_valid_update"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(processed_audit.processed_at.is_some());
+    assert!(processed_audit.process_error.is_none());
+
+    let partial_dispute = Bytes::from(
+        json!({
+            "id": "evt_snapshot_partial_dispute",
+            "type": "payment.disputed",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (dispute_status, _) = send_webhook(addr, &path, partial_dispute).await;
+    assert_eq!(dispute_status.as_u16(), 200);
+
+    let disputed = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("disputed transaction mirror");
+    assert_eq!(disputed.status, "disputed");
+    let mut normalized_disputed = disputed.clone();
+    normalized_disputed.status = updated.status.clone();
+    normalized_disputed.updated_at = updated.updated_at.clone();
+    assert_eq!(
+        normalized_disputed, updated,
+        "a customerless dispute must only change status and updated_at"
+    );
+
+    let dispute_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_partial_dispute"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("dispute audit row present");
+    assert!(dispute_audit.processed_at.is_some());
+    assert!(dispute_audit.process_error.is_none());
+
+    let partial_refund = Bytes::from(
+        json!({
+            "id": "evt_snapshot_partial_refund",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (refund_status, _) = send_webhook(addr, &path, partial_refund).await;
+    assert_eq!(refund_status.as_u16(), 200);
+
+    let refunded = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("refunded transaction mirror");
+    assert_eq!(refunded.status, "refunded");
+    let mut normalized_refunded = refunded;
+    normalized_refunded.status = disputed.status.clone();
+    normalized_refunded.updated_at = disputed.updated_at.clone();
+    assert_eq!(
+        normalized_refunded, disputed,
+        "a customerless refund must only change status and updated_at"
+    );
+
+    let refund_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_partial_refund"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("refund audit row present");
+    assert!(refund_audit.processed_at.is_some());
+    assert!(refund_audit.process_error.is_none());
+}
+
+#[tokio::test]
+async fn customerless_partial_payment_without_existing_mirror_is_retryable() {
+    let provider_name: &'static str = "mock-hydration-missing-partial-payment";
+    let _mock = register_mock(provider_name);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 1).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+    let partial_dispute = Bytes::from(
+        json!({
+            "id": "evt_missing_partial_payment",
+            "type": "payment.disputed",
+            "data": {
+                "object": {
+                    "id": "txn_missing_partial_payment",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+
+    let (status, _) = send_webhook(addr, &path, partial_dispute).await;
+    assert_eq!(status.as_u16(), 503);
+    assert!(
+        transaction::Entity::find()
+            .filter(transaction::Column::ProviderTransactionId.eq("txn_missing_partial_payment"))
+            .one(&*conn)
+            .await
+            .expect("db ok")
+            .is_none(),
+        "a partial event must not create an incomplete transaction mirror"
+    );
+
+    let audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_missing_partial_payment"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(audit.processed_at.is_none());
+    assert!(
+        audit
+            .process_error
+            .as_deref()
+            .is_some_and(|error| error.contains("unknown transaction_id"))
+    );
 }

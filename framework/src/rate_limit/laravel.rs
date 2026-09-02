@@ -366,7 +366,13 @@ impl RateLimiter {
         decay_seconds: u64,
         amount: i64,
     ) -> Result<i64, FrameworkError> {
-        Self::increment(key, decay_seconds, -amount).await
+        let key = Self::clean_rate_limiter_key(key);
+        let timer_key = format!("{key}{TIMER_SUFFIX}");
+        let decay = Duration::from_secs(decay_seconds);
+        let available_at = unix_now_secs() + decay_seconds as i64;
+        Cache::add(&timer_key, &available_at, Some(decay)).await?;
+        Cache::add(&key, &0_i64, Some(decay)).await?;
+        Cache::decrement(&key, amount).await
     }
 
     /// Number of retries remaining before the bucket trips. Mirrors
@@ -626,6 +632,27 @@ mod tests {
         RateLimiter::increment("dec", 60, 10).await.unwrap();
         let n = RateLimiter::decrement("dec", 60, 3).await.unwrap();
         assert_eq!(n, 7);
+    }
+
+    #[tokio::test]
+    async fn decrement_reports_unrepresentable_i64_min_without_panicking() {
+        let _g = fresh_test_container();
+
+        let error = RateLimiter::decrement("dec-min", 60, i64::MIN)
+            .await
+            .expect_err("zero minus i64::MIN must report overflow");
+
+        assert!(error.to_string().contains("overflow"));
+        assert_eq!(RateLimiter::attempts("dec-min").await.unwrap(), 0);
+        assert!(RateLimiter::available_in("dec-min").await.unwrap() > 0);
+
+        RateLimiter::increment("dec-min-representable", 60, -1)
+            .await
+            .unwrap();
+        let value = RateLimiter::decrement("dec-min-representable", 60, i64::MIN)
+            .await
+            .expect("-1 minus i64::MIN is representable");
+        assert_eq!(value, i64::MAX);
     }
 
     #[test]

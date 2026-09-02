@@ -17,11 +17,14 @@ mod event_map;
 mod subscription;
 mod webhook;
 
+#[cfg(test)]
+mod idempotency_tests;
+
 pub use event_map::paddle_event_to_neutral;
 
 use paddle_rust_sdk::Paddle;
 use std::sync::Arc;
-use suprnova::payments::PaymentProvider;
+use suprnova::payments::{PaymentError, PaymentProvider, PaymentResult};
 
 /// Paddle environment selector - Sandbox for testing, Production for live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,19 @@ fn require_nonempty(name: &str, val: String) -> Result<String, String> {
         Err(format!("{name} is set but empty"))
     } else {
         Ok(val)
+    }
+}
+
+pub(crate) fn reject_unsupported_idempotency_key(
+    key: Option<&str>,
+    operation: &str,
+) -> PaymentResult<()> {
+    if key.is_some() {
+        Err(PaymentError::NotSupported(format!(
+            "Paddle cannot forward idempotency_key for {operation}"
+        )))
+    } else {
+        Ok(())
     }
 }
 

@@ -7,10 +7,10 @@
 //! delegates to.
 //!
 //! The guard owns no per-request state itself (it is a container
-//! singleton). The "who is authenticated this request" cache and the
-//! via-remember flag live in [`crate::auth::request_state`], scoped once
-//! per request, so repeated `user()` calls don't re-query the provider
-//! and `once`/`set_user` are visible to the whole request.
+//! singleton). The guard-keyed "who is authenticated this request" cache and
+//! via-remember provenance live in [`crate::auth::request_state`], scoped once
+//! per request. Persisted identities are likewise keyed by the complete guard
+//! name; only the configured default guard mirrors the generic [`Auth`] view.
 
 use std::sync::Arc;
 
@@ -59,8 +59,11 @@ impl SessionGuard {
         Self::named("web", provider)
     }
 
-    /// Create a session guard with an explicit name (the manager passes the
-    /// registered guard name so lifecycle events are attributed correctly).
+    /// Create a session guard with an explicit name.
+    ///
+    /// The complete name keys this guard's persisted identity, request cache,
+    /// remember provenance, and lifecycle events. Only the configured default
+    /// guard mirrors the generic [`Auth`] facade identity.
     pub fn named(name: impl Into<String>, provider: Arc<dyn UserProvider>) -> Self {
         let remember_ttl_minutes = i64::try_from(
             crate::session::SessionConfig::from_env()
@@ -87,24 +90,24 @@ impl SessionGuard {
 impl Guard for SessionGuard {
     async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
         // Per-request cache: a prior resolution, or a `once`/`set_user`.
-        if let Some(user) = request_state::current_user() {
+        if let Some(user) = request_state::guard_user(&self.name) {
             return Ok(Some(user));
         }
 
-        let id = match crate::session::auth_user_id() {
+        let id = match crate::session::middleware::guard_auth_user_id(&self.name) {
             Some(id) => id,
             None => return Ok(None),
         };
 
         let user = self.provider.retrieve_by_id(&id).await?;
         if let Some(user) = &user {
-            request_state::set_current_user(user.clone());
+            request_state::set_guard_user(&self.name, user.clone());
         }
         Ok(user)
     }
 
     async fn id(&self) -> Result<Option<String>, FrameworkError> {
-        Ok(crate::session::auth_user_id())
+        Ok(crate::session::middleware::guard_auth_user_id(&self.name))
     }
 
     async fn validate(&self, credentials: &Credentials) -> Result<bool, FrameworkError> {
@@ -116,11 +119,11 @@ impl Guard for SessionGuard {
     }
 
     async fn set_user(&self, user: Arc<dyn Authenticatable>) {
-        request_state::set_current_user(user);
+        request_state::set_guard_user(&self.name, user);
     }
 
     async fn has_user(&self) -> bool {
-        request_state::has_current_user()
+        request_state::has_guard_user(&self.name)
     }
 }
 
@@ -157,8 +160,12 @@ impl StatefulGuard for SessionGuard {
                 //
                 // After `login`, not before: `login` regenerates the session
                 // id to defeat fixation, and the stamp must land on the
-                // session the caller ends up holding.
-                crate::session::session_mut(|s| s.password_confirmed());
+                // session the caller ends up holding. The stamp is the legacy
+                // generic/default-guard confirmation gate, so a named guard's
+                // password proof must never authorize it.
+                if self.name == Auth::default_guard_name() {
+                    crate::session::session_mut(|s| s.password_confirmed());
+                }
                 return Ok(Some(user));
             }
             // Identifier matched, credentials did not.
@@ -198,7 +205,8 @@ impl StatefulGuard for SessionGuard {
         if let Some(user) = self.provider.retrieve_by_credentials(&creds).await? {
             if self.provider.validate_credentials(&*user, &creds).await? {
                 let user_id = user.get_auth_identifier();
-                request_state::set_current_user(user);
+                request_state::set_guard_user(&self.name, user);
+                request_state::set_guard_via_remember(&self.name, false);
                 EventFacade::dispatch(events::Authenticated {
                     guard: self.name.clone(),
                     user_id,
@@ -232,18 +240,27 @@ impl StatefulGuard for SessionGuard {
         remember: bool,
     ) -> Result<(), FrameworkError> {
         let user_id = user.get_auth_identifier();
+        Auth::flush_pending_remember_revocations().await?;
+        let remember_to_revoke = Auth::prepare_guard_remember_identity_replacement(&self.name);
+
+        if let Some((previous_user_id, selector)) = remember_to_revoke {
+            Auth::revoke_remember_selector(&self.name, &previous_user_id, &selector).await?;
+        }
 
         // Delegate session persistence (+ remember-me row/cookie) to the
         // proven facade helpers: both regenerate the session id and CSRF
         // token to defeat session fixation.
         if remember {
-            Auth::login_remember(user_id.clone(), self.remember_ttl_minutes).await?;
+            Auth::login_guard_id(&self.name, user_id.clone())?;
+            Auth::issue_remember_cookie_for_guard(&self.name, &user_id, self.remember_ttl_minutes)
+                .await?;
         } else {
-            Auth::login_id(user_id.clone())?;
+            Auth::login_guard_id(&self.name, user_id.clone())?;
         }
 
         // Cache the resolved user for the rest of the request.
-        request_state::set_current_user(user);
+        request_state::set_guard_user(&self.name, user);
+        request_state::set_guard_via_remember(&self.name, false);
 
         EventFacade::dispatch(events::Login {
             guard: self.name.clone(),
@@ -280,7 +297,8 @@ impl StatefulGuard for SessionGuard {
         match self.provider.retrieve_by_id(id).await? {
             Some(user) => {
                 let user_id = user.get_auth_identifier();
-                request_state::set_current_user(user.clone());
+                request_state::set_guard_user(&self.name, user.clone());
+                request_state::set_guard_via_remember(&self.name, false);
                 EventFacade::dispatch(events::Authenticated {
                     guard: self.name.clone(),
                     user_id,
@@ -293,17 +311,17 @@ impl StatefulGuard for SessionGuard {
     }
 
     fn via_remember(&self) -> bool {
-        request_state::via_remember()
+        request_state::guard_via_remember(&self.name)
     }
 
     async fn logout(&self) -> Result<(), FrameworkError> {
         // Capture the id before clearing so the Logout event is attributed.
-        let user_id = crate::session::auth_user_id();
+        let user_id = self.id().await?;
 
         // Tear down session + remember-me + request-scoped user. We call the
         // event-free primitive rather than `Auth::logout` so the Logout event
         // is dispatched exactly once, here, attributed to *this* guard's name.
-        Auth::clear_authentication().await?;
+        Auth::clear_guard_authentication(&self.name).await?;
 
         EventFacade::dispatch(events::Logout {
             guard: self.name.clone(),
@@ -320,7 +338,7 @@ mod tests {
     use std::any::Any;
 
     use crate::auth::request_state;
-    use crate::session::{new_session_slot_for_test, session, session_scope_for_test};
+    use crate::session::{new_session_slot_for_test, session, session_mut, session_scope_for_test};
 
     #[derive(Clone)]
     struct TestUser {
@@ -342,6 +360,13 @@ mod tests {
     /// A provider that knows one user: id `"7"`, email `"a@b.com"`,
     /// password `"secret"`.
     struct FakeProvider;
+
+    /// A provider with exactly one fixed identity. Named-guard isolation
+    /// tests use different instances so a guard can never accidentally
+    /// resolve the other guard's principal through its provider.
+    struct FixedProvider {
+        id: &'static str,
+    }
 
     fn the_user() -> Arc<dyn Authenticatable> {
         Arc::new(TestUser { id: "7".into() })
@@ -370,6 +395,35 @@ mod tests {
             credentials: &serde_json::Value,
         ) -> Result<bool, FrameworkError> {
             Ok(credentials.get("password").and_then(|v| v.as_str()) == Some("secret"))
+        }
+    }
+
+    #[async_trait]
+    impl UserProvider for FixedProvider {
+        async fn retrieve_by_id(
+            &self,
+            id: &str,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok((id == self.id).then(|| {
+                Arc::new(TestUser {
+                    id: self.id.to_string(),
+                }) as Arc<dyn Authenticatable>
+            }))
+        }
+
+        async fn retrieve_by_credentials(
+            &self,
+            _credentials: &serde_json::Value,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok(None)
+        }
+
+        async fn validate_credentials(
+            &self,
+            _user: &dyn Authenticatable,
+            _credentials: &serde_json::Value,
+        ) -> Result<bool, FrameworkError> {
+            Ok(false)
         }
     }
 
@@ -414,6 +468,183 @@ mod tests {
             // user() returns the cached instance.
             let u = g.user().await.unwrap().expect("user resolved");
             assert_eq!(u.get_auth_identifier(), "7");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn named_session_guards_keep_independent_identities() {
+        with_scopes(async {
+            let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "7" }));
+            let admin = SessionGuard::named("admin", Arc::new(FixedProvider { id: "9" }));
+
+            web.login(
+                Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>,
+                false,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(web.id().await.unwrap().as_deref(), Some("7"));
+            assert_eq!(admin.id().await.unwrap(), None);
+
+            admin
+                .login(
+                    Arc::new(TestUser { id: "9".into() }) as Arc<dyn Authenticatable>,
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(web.id().await.unwrap().as_deref(), Some("7"));
+            assert_eq!(admin.id().await.unwrap().as_deref(), Some("9"));
+            assert_eq!(Auth::id().as_deref(), Some("7"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fresh_logins_discard_stale_guard_remember_state() {
+        with_scopes(async {
+            let stale_binding = magnetar::sessions::WebSessionBinding {
+                session_id: "stale-magnetar-session".to_owned(),
+                token_digest: [7; 32],
+            };
+            session_mut(|session| {
+                session.set_auth_guard_id("admin", "7");
+                session.set_auth_guard_remember_selector("admin", "stale-admin-selector");
+                session.set_auth_guard_magnetar_binding("admin", stale_binding.clone());
+
+                session.set_auth_guard_id("web", "7");
+                session.set_auth_guard_remember_selector("web", "stale-web-selector");
+                session.set_auth_guard_magnetar_binding("web", stale_binding.clone());
+                session.user_id = Some("7".to_owned());
+                session.set_magnetar_web_binding(stale_binding);
+            });
+
+            let admin = SessionGuard::named("admin", Arc::new(FixedProvider { id: "9" }));
+            admin
+                .login(
+                    Arc::new(TestUser { id: "9".into() }) as Arc<dyn Authenticatable>,
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "7" }));
+            web.login(
+                Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>,
+                false,
+            )
+            .await
+            .unwrap();
+
+            let session = session().expect("fresh logins retain the data session");
+            assert_eq!(session.auth_guard_id("admin").as_deref(), Some("9"));
+            assert_eq!(session.auth_guard_remember_selector("admin"), None);
+            assert_eq!(session.auth_guard_magnetar_binding("admin"), None);
+            assert_eq!(session.auth_guard_id("web").as_deref(), Some("7"));
+            assert_eq!(session.auth_guard_remember_selector("web"), None);
+            assert_eq!(session.auth_guard_magnetar_binding("web"), None);
+            assert_eq!(session.magnetar_web_binding(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn magnetar_binding_reconciles_default_guard_request_state() {
+        use sea_orm::EntityTrait;
+
+        let database = crate::testing::TestDatabase::sqlite_memory().await.unwrap();
+        database
+            .execute_unprepared(
+                "CREATE TABLE remember_tokens (\
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    user_id TEXT NOT NULL, \
+                    selector TEXT NOT NULL, \
+                    token_hash TEXT NOT NULL, \
+                    expires_at TIMESTAMP NOT NULL, \
+                    created_at TIMESTAMP NOT NULL, \
+                    last_used_at TIMESTAMP NULL\
+                )",
+            )
+            .await
+            .unwrap();
+        with_scopes(async {
+            request_state::set_guard_user(
+                "web",
+                Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>,
+            );
+            request_state::set_guard_via_remember("web", true);
+            session_mut(|session| {
+                session.set_auth_guard_id("web", "7");
+                session.set_auth_guard_remember_selector("web", "stale-selector");
+                session.user_id = Some("7".to_owned());
+            });
+            let issued = crate::magnetar_integration::engine::MagnetarIssuedSession {
+                session_id: "magnetar-session-for-9".to_owned(),
+                web_binding: magnetar::sessions::WebSessionBinding {
+                    session_id: "magnetar-session-for-9".to_owned(),
+                    token_digest: [9; 32],
+                },
+                session: crate::auth::Session::builder()
+                    .user_id(crate::auth::UserId::new("9"))
+                    .build()
+                    .unwrap(),
+            };
+
+              let pending_cookies = crate::session::new_pending_cookies_slot_for_test();
+              let pending_revocations = Arc::new(std::sync::Mutex::new(Vec::new()));
+              crate::session::pending_cookies_scope_for_test(
+                  pending_cookies,
+                  crate::session::middleware::PENDING_REMEMBER_REVOCATIONS.scope(
+                      pending_revocations,
+                      async {
+                          crate::magnetar_integration::bind_issued_session(&issued, true).unwrap();
+                      },
+                  ),
+              )
+              .await;
+
+            assert_eq!(Auth::id().as_deref(), Some("9"));
+            let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "9" }));
+            assert_eq!(
+                web.user()
+                    .await
+                    .unwrap()
+                    .map(|user| user.get_auth_identifier())
+                    .as_deref(),
+                Some("9")
+            );
+            assert!(!web.via_remember());
+            let session = session().expect("Magnetar binding retains the data session");
+            assert_eq!(session.auth_guard_id("web").as_deref(), Some("9"));
+            assert_eq!(session.user_id.as_deref(), Some("9"));
+            assert_eq!(session.auth_guard_remember_selector("web"), None);
+
+            database
+                .execute_unprepared(
+                    "INSERT INTO remember_tokens \
+                        (user_id, selector, token_hash, expires_at, created_at, last_used_at) \
+                     VALUES \
+                        ('7', 'selector-for-7', 'sha256:seven', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL), \
+                        ('9', 'selector-for-9', 'sha256:nine', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+                )
+                .await
+                .unwrap();
+            web.logout().await.unwrap();
+            let remaining = crate::auth::remember::entity::Entity::find()
+                .all(database.conn())
+                .await
+                .unwrap();
+            assert_eq!(
+                remaining
+                    .iter()
+                    .map(|row| row.user_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["7"],
+                "logout must revoke issued user 9, not stale cached user 7"
+            );
         })
         .await;
     }

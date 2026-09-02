@@ -26,11 +26,13 @@ use magnetar::oauth::{
     ProviderResponse, RefreshPolicy, TokenHint, TokenRequestShape,
 };
 use magnetar::plugin::{HttpRequest, HttpResponse, HttpTransport};
+use magnetar::storage::provider_tokens::exchange_claim_id;
 use magnetar::storage::{
     CommitProviderToken, NewProviderToken, ProviderTokenRow, ProviderTokenStore, SeaOrmStorage,
 };
 use magnetar::{Error, Result};
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 
 use super::storage_schema::{StorageSchema, database};
 
@@ -137,6 +139,7 @@ type Scripted = (Option<Duration>, std::result::Result<HttpResponse, Error>);
 pub struct DelayedScriptedHttpTransport {
     responses: Mutex<VecDeque<Scripted>>,
     pub requests: Mutex<Vec<HttpRequest>>,
+    request_started: Notify,
 }
 
 impl DelayedScriptedHttpTransport {
@@ -209,12 +212,19 @@ impl DelayedScriptedHttpTransport {
     pub fn request_count(&self) -> usize {
         self.requests.lock().len()
     }
+
+    pub async fn wait_for_request_count(&self, expected: usize) {
+        while self.request_count() < expected {
+            self.request_started.notified().await;
+        }
+    }
 }
 
 #[async_trait]
 impl HttpTransport for DelayedScriptedHttpTransport {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse> {
         self.requests.lock().push(request);
+        self.request_started.notify_one();
         let scripted = self.responses.lock().pop_front();
         let Some((delay, outcome)) = scripted else {
             return Err(Error::Internal {
@@ -270,6 +280,95 @@ pub struct BrokerHarness {
     pub encryptor: Arc<AeadEncryptor>,
 }
 
+/// A custom-store compatibility fixture that implements only the original
+/// provider-token operations. New additive trait defaults are intentionally
+/// omitted so broker tests can prove they fail closed before provider I/O.
+pub struct LegacyDelegatingProviderTokenStore {
+    inner: Arc<dyn ProviderTokenStore>,
+}
+
+impl LegacyDelegatingProviderTokenStore {
+    pub fn new(inner: Arc<dyn ProviderTokenStore>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ProviderTokenStore for LegacyDelegatingProviderTokenStore {
+    async fn create_if_missing(&self, input: NewProviderToken) -> Result<ProviderTokenRow> {
+        self.inner.create_if_missing(input).await
+    }
+
+    async fn read(&self, record_id: &str) -> Result<Option<ProviderTokenRow>> {
+        self.inner.read(record_id).await
+    }
+
+    async fn claim(
+        &self,
+        record_id: &str,
+        presented_generation: i64,
+        claim_id: &str,
+        claim_deadline: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.inner
+            .claim(
+                record_id,
+                presented_generation,
+                claim_id,
+                claim_deadline,
+                now,
+            )
+            .await
+    }
+
+    async fn heartbeat(
+        &self,
+        record_id: &str,
+        claim_id: &str,
+        new_deadline: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.inner
+            .heartbeat(record_id, claim_id, new_deadline)
+            .await
+    }
+
+    async fn commit(
+        &self,
+        record_id: &str,
+        claim_id: &str,
+        presented_generation: i64,
+        input: CommitProviderToken,
+    ) -> Result<bool> {
+        self.inner
+            .commit(record_id, claim_id, presented_generation, input)
+            .await
+    }
+
+    async fn mark_revoked_by_claim(
+        &self,
+        record_id: &str,
+        claim_id: &str,
+        reused: bool,
+    ) -> Result<bool> {
+        self.inner
+            .mark_revoked_by_claim(record_id, claim_id, reused)
+            .await
+    }
+
+    async fn revoke_family_if_unrevoked(
+        &self,
+        record_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.inner.revoke_family_if_unrevoked(record_id, now).await
+    }
+
+    async fn delete(&self, record_id: &str) -> Result<bool> {
+        self.inner.delete(record_id).await
+    }
+}
+
 impl BrokerHarness {
     /// Build a [`TokenBrokerService`] over this harness's shared storage
     /// and encryptor, with per-test transport, registry, config, and
@@ -289,6 +388,48 @@ impl BrokerHarness {
             config,
         )
         .with_reuse_hook(reuse_hook)
+    }
+
+    /// Seed the standard expired linked-token shape used by refresh tests.
+    pub async fn seed_expired(&self, record_id: &str, provider: &str) -> ProviderTokenRow {
+        self.seed(
+            record_id,
+            provider,
+            Some("access-v0"),
+            Some("refresh-v0"),
+            Some(Utc::now() - chrono::Duration::hours(1)),
+        )
+        .await
+    }
+
+    /// Claim and fence a seeded row, returning its exact exchange owner.
+    pub async fn start_exchange(
+        &self,
+        record_id: &str,
+        presented_generation: i64,
+        claim_id: &str,
+        claim_deadline: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> String {
+        assert!(
+            self.store
+                .claim(
+                    record_id,
+                    presented_generation,
+                    claim_id,
+                    claim_deadline,
+                    now,
+                )
+                .await
+                .expect("claim exchange fixture")
+        );
+        assert!(
+            self.store
+                .mark_exchange_started(record_id, claim_id, presented_generation, now)
+                .await
+                .expect("fence exchange fixture")
+        );
+        exchange_claim_id(claim_id)
     }
 
     /// Provision a fresh record at generation zero and immediately commit

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -11,7 +12,10 @@ use bytes::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use sea_orm::{Database, EntityTrait};
+use sea_orm::{
+    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DbBackend, EntityTrait, QueryFilter,
+    Statement,
+};
 use suprnova::middleware::Middleware;
 use suprnova::session::{SessionConfig, SessionData, SessionStore};
 use suprnova::{
@@ -19,9 +23,47 @@ use suprnova::{
     SessionMiddleware, SlidingWindowConfig, init_magnetar,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OnceCell, oneshot};
 
 struct AllowingLimiter;
+
+static MAGNETAR_SETUP: OnceCell<sea_orm::DatabaseConnection> = OnceCell::const_new();
+static MAGNETAR_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn magnetar_db_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "magnetar-remember-middleware-{}.sqlite",
+        std::process::id()
+    ))
+}
+
+async fn magnetar_connection() -> sea_orm::DatabaseConnection {
+    MAGNETAR_SETUP
+        .get_or_init(|| async {
+            Crypt::init(EncryptionKey::generate());
+            suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
+            // Each `#[tokio::test]` owns a runtime. If the runtime that opened
+            // an in-memory SQLite connection exits, sqlx may reopen the pool's
+            // sole connection against an empty database. A file-backed fixture
+            // keeps the schema intact across those per-test runtime boundaries.
+            let db_path = magnetar_db_path();
+            for suffix in ["", "-wal", "-shm"] {
+                let mut path = db_path.clone().into_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+            }
+            let mut options =
+                ConnectOptions::new(format!("sqlite://{}?mode=rwc", db_path.display()));
+            options.max_connections(1).min_connections(1);
+            let connection = Database::connect(options).await.expect("connect SQLite");
+            init_magnetar(MagnetarConfig::from_sea_orm(connection.clone()))
+                .await
+                .expect("install default Magnetar engine");
+            connection
+        })
+        .await
+        .clone()
+}
 
 #[async_trait]
 impl RateLimiterDriver for AllowingLimiter {
@@ -39,30 +81,51 @@ impl RateLimiterDriver for AllowingLimiter {
 }
 
 #[derive(Default)]
-struct MemorySessionStore(Mutex<HashMap<String, SessionData>>);
+struct MemorySessionStore {
+    sessions: Mutex<HashMap<String, SessionData>>,
+    fail_next_write: AtomicBool,
+}
 
 impl MemorySessionStore {
     async fn seed(&self, mut session: SessionData) {
         session.loaded_from_store = true;
-        self.0.lock().await.insert(session.id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
     }
 
     async fn stored(&self, id: &str) -> Option<SessionData> {
-        self.0.lock().await.get(id).cloned()
+        self.sessions.lock().await.get(id).cloned()
+    }
+
+    fn fail_next_write(&self) {
+        self.fail_next_write.store(true, Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl SessionStore for MemorySessionStore {
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
-        Ok(self.0.lock().await.get(id).cloned().map(|mut session| {
-            session.loaded_from_store = true;
-            session
-        }))
+        Ok(self
+            .sessions
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .map(|mut session| {
+                session.loaded_from_store = true;
+                session
+            }))
     }
 
     async fn write(&self, session: &SessionData) -> Result<(), FrameworkError> {
-        self.0
+        if self.fail_next_write.swap(false, Ordering::SeqCst) {
+            return Err(FrameworkError::internal(
+                "injected framework session write failure",
+            ));
+        }
+        self.sessions
             .lock()
             .await
             .insert(session.id.clone(), session.clone());
@@ -70,12 +133,12 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
-        self.0.lock().await.remove(id);
+        self.sessions.lock().await.remove(id);
         Ok(())
     }
 
     async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
-        let mut sessions = self.0.lock().await;
+        let mut sessions = self.sessions.lock().await;
         let before = sessions.len();
         sessions.retain(|_, session| session.user_id.as_deref() != Some(user_id));
         Ok((before - sessions.len()) as u64)
@@ -144,14 +207,8 @@ fn response_cookie(headers: &hyper::HeaderMap, name: &str) -> String {
 
 #[tokio::test]
 async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
-    Crypt::init(EncryptionKey::generate());
-    suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
-    let connection = Database::connect("sqlite::memory:")
-        .await
-        .expect("connect SQLite");
-    init_magnetar(MagnetarConfig::from_sea_orm(connection.clone()))
-        .await
-        .expect("install default Magnetar engine");
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let connection = magnetar_connection().await;
 
     let user = Auth::password()
         .register("remember-middleware@example.test", "correct-password")
@@ -300,5 +357,613 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
         *observed_after_revoke.lock().await,
         None,
         "an installed engine must validate the Magnetar binding, never trust bare user_id",
+    );
+
+    // Named provider-backed session guards do not own Magnetar bindings and
+    // must survive merely because an engine is installed. Named identities
+    // that do carry a binding remain fail-closed, including malformed values.
+    let named_session_id = "b".repeat(40);
+    let mut named_session = SessionData::new(named_session_id.clone(), "named-csrf".to_owned());
+    named_session.data.insert(
+        "_auth_guards".to_owned(),
+        serde_json::json!({
+            "provider": { "id": "provider-user" },
+            "revoked": {
+                "id": "revoked-user",
+                "magnetar_web_binding": {
+                    "session_id": "missing-session",
+                    "token_digest": vec![0_u8; 32],
+                },
+            },
+            "malformed": {
+                "id": "malformed-user",
+                "magnetar_web_binding": "not-a-binding",
+            },
+        }),
+    );
+    store.seed(named_session).await;
+    let named_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &named_session_id)
+        .expect("encrypt named-guard data-session cookie");
+    let observed_named = Arc::new(Mutex::new(None::<SessionData>));
+    let observed_in_handler = observed_named.clone();
+    let named_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = suprnova::session::session();
+            Ok(suprnova::HttpResponse::text("named checked"))
+        })
+    });
+    assert!(
+        middleware
+            .handle(
+                request_with_cookies(&[(&config.cookie_name, &named_cookie)]).await,
+                named_next,
+            )
+            .await
+            .is_ok(),
+        "named binding validation request must reach the handler",
+    );
+    let observed_named = observed_named
+        .lock()
+        .await
+        .clone()
+        .expect("handler sees named-guard data session");
+    let guards = observed_named
+        .data
+        .get("_auth_guards")
+        .and_then(serde_json::Value::as_object)
+        .expect("guard container remains for the provider-backed identity");
+    assert!(
+        guards.contains_key("provider"),
+        "binding-less provider-backed named guards must survive",
+    );
+    assert!(
+        !guards.contains_key("revoked"),
+        "an explicitly bound named guard must fail closed when its binding is revoked",
+    );
+    assert!(
+        !guards.contains_key("malformed"),
+        "a present but malformed named binding must fail closed",
+    );
+}
+
+#[tokio::test]
+async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry() {
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let connection = magnetar_connection().await;
+
+    let user = Auth::password()
+        .register("remember-session-retry@example.test", "correct-password")
+        .await
+        .expect("register remembered-session retry user");
+    let user_db_id = user
+        .id
+        .as_str()
+        .parse::<i64>()
+        .expect("default Magnetar user ids are database integers");
+    let store = Arc::new(MemorySessionStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.remember_lifetime = std::time::Duration::from_secs(24 * 60 * 60);
+    let middleware = SessionMiddleware::with_store(config, store);
+
+    let remembered_user = user.id.to_string();
+    let issue_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let remembered_user = remembered_user.clone();
+        Box::pin(async move {
+            Auth::login_remember(remembered_user, 24 * 60)
+                .await
+                .expect("issue original Magnetar remember credential");
+            Ok(suprnova::HttpResponse::text("issued"))
+        })
+    });
+    let issue_response = match middleware
+        .handle(request_with_cookies(&[]).await, issue_next)
+        .await
+    {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("remember issue request must succeed"),
+    };
+    let original_cookie = response_cookie(issue_response.headers(), "remember_me");
+
+    connection
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "CREATE TRIGGER fail_remembered_session_insert
+                 BEFORE INSERT ON auth_sessions
+                 WHEN NEW.user_id = {user_db_id}
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected remembered session failure');
+                 END",
+            ),
+        ))
+        .await
+        .expect("install scoped remembered-session failure trigger");
+
+    let first_observed = Arc::new(Mutex::new(None::<String>));
+    let observed_in_handler = first_observed.clone();
+    let first_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = Auth::id();
+            Ok(suprnova::HttpResponse::text("first attempt"))
+        })
+    });
+    let first_response = match middleware
+        .handle(
+            request_with_cookies(&[("remember_me", &original_cookie)]).await,
+            first_next,
+        )
+        .await
+    {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("failed remembered session issuance must continue anonymously"),
+    };
+    assert_eq!(
+        *first_observed.lock().await,
+        None,
+        "failed session issuance must not authenticate the request",
+    );
+    let successor_cookie = response_cookie(first_response.headers(), "remember_me");
+    assert_ne!(
+        successor_cookie, original_cookie,
+        "the response must carry the sole rotated successor credential",
+    );
+    assert_eq!(
+        magnetar::default_schema::remembers::Entity::find()
+            .filter(magnetar::default_schema::remembers::Column::UserId.eq(user_db_id))
+            .all(&connection)
+            .await
+            .expect("query live remember rows after failed session issuance")
+            .len(),
+        1,
+        "failed session issuance must leave exactly one live remember row",
+    );
+
+    connection
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_remembered_session_insert".to_owned(),
+        ))
+        .await
+        .expect("remove remembered-session failure trigger before retry");
+
+    let retry_observed = Arc::new(Mutex::new(None::<String>));
+    let observed_in_handler = retry_observed.clone();
+    let retry_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = Auth::id();
+            Ok(suprnova::HttpResponse::text("retried"))
+        })
+    });
+    if middleware
+        .handle(
+            request_with_cookies(&[("remember_me", &successor_cookie)]).await,
+            retry_next,
+        )
+        .await
+        .is_err()
+    {
+        panic!("successor credential must retry remembered sign-in");
+    }
+    assert_eq!(
+        retry_observed.lock().await.as_deref(),
+        Some(user.id.as_str()),
+        "the successor credential must authenticate after the dependency recovers",
+    );
+
+    let replay_observed = Arc::new(Mutex::new(None::<String>));
+    let observed_in_handler = replay_observed.clone();
+    let replay_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = Auth::id();
+            Ok(suprnova::HttpResponse::text("replayed"))
+        })
+    });
+    if middleware
+        .handle(
+            request_with_cookies(&[("remember_me", &original_cookie)]).await,
+            replay_next,
+        )
+        .await
+        .is_err()
+    {
+        panic!("consumed original must continue anonymously");
+    }
+    assert_eq!(
+        *replay_observed.lock().await,
+        None,
+        "the consumed original credential must not authenticate",
+    );
+}
+
+#[tokio::test]
+async fn failed_framework_session_write_retires_the_unpersisted_opaque_session() {
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let _connection = magnetar_connection().await;
+    let user = Auth::password()
+        .register("remember-write-failure@example.test", "correct-password")
+        .await
+        .expect("register framework-write failure user");
+    let store = Arc::new(MemorySessionStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.remember_lifetime = std::time::Duration::from_secs(24 * 60 * 60);
+    let middleware = SessionMiddleware::with_store(config, store.clone());
+
+    let remembered_user = user.id.to_string();
+    let issue_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let remembered_user = remembered_user.clone();
+        Box::pin(async move {
+            Auth::login_remember(remembered_user, 24 * 60)
+                .await
+                .expect("issue remember credential before write failure");
+            Ok(suprnova::HttpResponse::text("issued"))
+        })
+    });
+    let issue_response = match middleware
+        .handle(request_with_cookies(&[]).await, issue_next)
+        .await
+    {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("remember issue request must succeed"),
+    };
+    let original_cookie = response_cookie(issue_response.headers(), "remember_me");
+    let sessions_before = suprnova::magnetar_integration::list_sessions(user.id.as_str())
+        .await
+        .expect("list opaque sessions before remembered hydration")
+        .len();
+
+    store.fail_next_write();
+    let expected_user_id = user.id.to_string();
+    let hydrate_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let expected_user_id = expected_user_id.clone();
+        Box::pin(async move {
+            assert_eq!(Auth::id().as_deref(), Some(expected_user_id.as_str()));
+            Ok(suprnova::HttpResponse::text("hydrated"))
+        })
+    });
+    let failure_response = match middleware
+        .handle(
+            request_with_cookies(&[("remember_me", &original_cookie)]).await,
+            hydrate_next,
+        )
+        .await
+    {
+        Ok(_) => panic!("dirty framework session write failure must fail closed"),
+        Err(response) => response.into_hyper(),
+    };
+    let successor_cookie = response_cookie(failure_response.headers(), "remember_me");
+    assert_ne!(
+        successor_cookie, original_cookie,
+        "the failed response must still return the committed successor",
+    );
+    assert_eq!(
+        suprnova::magnetar_integration::list_sessions(user.id.as_str())
+            .await
+            .expect("list opaque sessions after framework write failure")
+            .len(),
+        sessions_before,
+        "an opaque session that was never bound durably must be retired",
+    );
+}
+
+#[tokio::test]
+async fn handler_identity_transition_retires_a_retryable_successor() {
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let connection = magnetar_connection().await;
+    let user = Auth::password()
+        .register("remember-retry-transition@example.test", "correct-password")
+        .await
+        .expect("register retry-transition user");
+    let user_db_id = user
+        .id
+        .as_str()
+        .parse::<i64>()
+        .expect("default Magnetar user ids are database integers");
+    let store = Arc::new(MemorySessionStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.remember_lifetime = std::time::Duration::from_secs(24 * 60 * 60);
+    let middleware = SessionMiddleware::with_store(config, store);
+
+    let remembered_user = user.id.to_string();
+    let issue_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let remembered_user = remembered_user.clone();
+        Box::pin(async move {
+            Auth::login_remember(remembered_user, 24 * 60)
+                .await
+                .expect("issue remember credential before retryable outcome");
+            Ok(suprnova::HttpResponse::text("issued"))
+        })
+    });
+    let issue_response = match middleware
+        .handle(request_with_cookies(&[]).await, issue_next)
+        .await
+    {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("remember issue request must succeed"),
+    };
+    let original_cookie = response_cookie(issue_response.headers(), "remember_me");
+
+    connection
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "CREATE TRIGGER fail_retry_transition_session_insert
+                 BEFORE INSERT ON auth_sessions
+                 WHEN NEW.user_id = {user_db_id}
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected retry-transition session failure');
+                 END",
+            ),
+        ))
+        .await
+        .expect("install retry-transition session failure trigger");
+
+    let transition_user = user.id.to_string();
+    let transition_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let transition_user = transition_user.clone();
+        Box::pin(async move {
+            assert_eq!(Auth::id(), None, "retryable outcome stays anonymous");
+            Auth::login_id(transition_user).expect("handler identity transition succeeds");
+            Ok(suprnova::HttpResponse::text("transitioned"))
+        })
+    });
+    let transition_response =
+        match suprnova::auth::request_state::request_state_scope_for_test(middleware.handle(
+            request_with_cookies(&[("remember_me", &original_cookie)]).await,
+            transition_next,
+        ))
+        .await
+        {
+            Ok(response) => response.into_hyper(),
+            Err(_) => panic!("handler identity transition request must succeed"),
+        };
+
+    connection
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_retry_transition_session_insert".to_owned(),
+        ))
+        .await
+        .expect("remove retry-transition session failure trigger");
+
+    let remember_headers = transition_response
+        .headers()
+        .get_all("Set-Cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|header| header.starts_with("remember_me="))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remember_headers.len(),
+        1,
+        "the handler transition must replace the queued successor cookie",
+    );
+    assert!(
+        remember_headers[0].contains("Max-Age=0"),
+        "the replacement cookie must clear the browser carrier",
+    );
+    assert_eq!(
+        magnetar::default_schema::remembers::Entity::find()
+            .filter(magnetar::default_schema::remembers::Column::UserId.eq(user_db_id))
+            .all(&connection)
+            .await
+            .expect("query remember rows after handler transition")
+            .len(),
+        0,
+        "the handler transition must retire the exact committed successor",
+    );
+}
+
+#[tokio::test]
+async fn installed_engine_rejects_default_guard_identity_without_compatibility_user_id() {
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let _connection = magnetar_connection().await;
+    let store = Arc::new(MemorySessionStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+
+    let binding = serde_json::json!({
+        "session_id": "missing-session",
+        "token_digest": vec![0_u8; 32],
+    });
+    for (case, session_byte, top_level_binding) in [
+        ("binding-present", 'c', true),
+        ("binding-absent", 'd', false),
+    ] {
+        let session_id = session_byte.to_string().repeat(40);
+        let mut session = SessionData::new(session_id.clone(), format!("{case}-csrf"));
+        if top_level_binding {
+            session
+                .data
+                .insert("auth.magnetar_web_binding".to_owned(), binding.clone());
+        }
+        let guard_state = if top_level_binding {
+            serde_json::json!({
+                "id": "one-sided-user",
+                "magnetar_web_binding": binding,
+            })
+        } else {
+            serde_json::json!({ "id": "one-sided-user" })
+        };
+        session.data.insert(
+            "_auth_guards".to_owned(),
+            serde_json::json!({ "web": guard_state }),
+        );
+        store.seed(session).await;
+        let session_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &session_id)
+            .expect("encrypt one-sided data-session cookie");
+
+        let observed = Arc::new(Mutex::new(None::<(Option<String>, SessionData)>));
+        let observed_in_handler = observed.clone();
+        let next: suprnova::middleware::Next = Arc::new(move |_request| {
+            let observed = observed_in_handler.clone();
+            Box::pin(async move {
+                let session = suprnova::session::session().expect("handler sees data session");
+                *observed.lock().await = Some((Auth::id(), session));
+                Ok(suprnova::HttpResponse::text("checked"))
+            })
+        });
+
+        assert!(
+            middleware
+                .handle(
+                    request_with_cookies(&[(&config.cookie_name, &session_cookie)]).await,
+                    next,
+                )
+                .await
+                .is_ok(),
+            "{case} default identity request must reach the handler",
+        );
+        let (auth_id, observed_session) = observed
+            .lock()
+            .await
+            .clone()
+            .expect("handler records reconciled state");
+        assert_eq!(auth_id, None, "{case} default identity must fail closed");
+        assert!(
+            observed_session
+                .data
+                .get("_auth_guards")
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|guards| !guards.contains_key("web")),
+            "{case} unverified default guard record must be removed",
+        );
+    }
+}
+
+#[tokio::test]
+async fn installed_engine_fresh_binding_clears_hydrated_identity_carrier() {
+    let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
+    let _connection = magnetar_connection().await;
+    let previous = Auth::password()
+        .register("remember-switch-previous@example.test", "previous-password")
+        .await
+        .expect("register previous remembered identity");
+    let fresh = Auth::password()
+        .register("remember-switch-fresh@example.test", "fresh-password")
+        .await
+        .expect("register fresh identity");
+
+    let store = Arc::new(MemorySessionStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.remember_lifetime = std::time::Duration::from_secs(24 * 60 * 60);
+    let middleware = SessionMiddleware::with_store(config, store);
+
+    let previous_user_id = previous.id.clone();
+    let issue_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let previous_user_id = previous_user_id.clone();
+        Box::pin(async move {
+            Auth::login_remember(previous_user_id, 24 * 60)
+                .await
+                .expect("issue previous identity's Magnetar remember credential");
+            Ok(suprnova::HttpResponse::text("issued"))
+        })
+    });
+    let issue_response = suprnova::auth::request_state::request_state_scope_for_test(
+        middleware.handle(request_with_cookies(&[]).await, issue_next),
+    )
+    .await;
+    let issue_response = match issue_response {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("remember issue request must reach the handler"),
+    };
+    let previous_remember_cookie = response_cookie(issue_response.headers(), "remember_me");
+
+    let previous_user_id = previous.id.clone();
+    let fresh_user_id = fresh.id.clone();
+    let switch_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let previous_user_id = previous_user_id.clone();
+        let fresh_user_id = fresh_user_id.clone();
+        Box::pin(async move {
+            assert_eq!(Auth::id().as_deref(), Some(previous_user_id.as_str()));
+            assert!(Auth::via_remember());
+            let (authenticated, _) = Auth::password()
+                .authenticate(
+                    "remember-switch-fresh@example.test",
+                    "fresh-password",
+                    None,
+                    None,
+                )
+                .await
+                .expect("fresh Magnetar password authentication succeeds");
+            assert_eq!(authenticated.id, fresh_user_id);
+            assert_eq!(Auth::id().as_deref(), Some(authenticated.id.as_str()));
+            assert!(!Auth::via_remember());
+            Ok(suprnova::HttpResponse::text("switched"))
+        })
+    });
+    let switch_response =
+        suprnova::auth::request_state::request_state_scope_for_test(middleware.handle(
+            request_with_cookies(&[("remember_me", &previous_remember_cookie)]).await,
+            switch_next,
+        ))
+        .await;
+    let switch_response = match switch_response {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("identity-switch request must reach the handler"),
+    };
+
+    let remember_headers = switch_response
+        .headers()
+        .get_all("Set-Cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|header| header.starts_with("remember_me="))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut browser_remember_cookie = Some(previous_remember_cookie);
+    for header in &remember_headers {
+        if header.contains("Max-Age=0") {
+            browser_remember_cookie = None;
+        } else {
+            browser_remember_cookie = header
+                .split(';')
+                .next()
+                .and_then(|pair| pair.strip_prefix("remember_me="))
+                .map(ToOwned::to_owned);
+        }
+    }
+
+    // Drop B's data-session cookie and replay only what the browser retained.
+    let replay_request = match browser_remember_cookie.as_deref() {
+        Some(cookie) => request_with_cookies(&[("remember_me", cookie)]).await,
+        None => request_with_cookies(&[]).await,
+    };
+    let observed_after_expiry = Arc::new(Mutex::new(None::<String>));
+    let observed_in_handler = observed_after_expiry.clone();
+    let replay_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_in_handler.clone();
+        Box::pin(async move {
+            *observed.lock().await = Auth::id();
+            Ok(suprnova::HttpResponse::text("replayed"))
+        })
+    });
+    if suprnova::auth::request_state::request_state_scope_for_test(
+        middleware.handle(replay_request, replay_next),
+    )
+    .await
+    .is_err()
+    {
+        panic!("post-expiry request must reach the handler");
+    }
+
+    assert_eq!(
+        remember_headers.len(),
+        1,
+        "fresh binding must replace A's queued carrier with one forget directive"
+    );
+    assert_eq!(browser_remember_cookie, None);
+    assert_eq!(
+        *observed_after_expiry.lock().await,
+        None,
+        "after B's data session expires, the browser must not reauthenticate A"
     );
 }

@@ -18,6 +18,7 @@ mod harness;
 mod storage_schema;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -26,12 +27,13 @@ use magnetar::auth::{
 };
 use magnetar::sessions::{
     JwtEpochStore, RememberAnomaly, RememberAnomalyHook, RememberAnomalyKind, RememberCredential,
-    RememberRow, RememberService, RememberSignInService, RememberStore, RememberTokenService,
-    SessionMetadata, SessionQueries,
+    RememberPostRotationDisposition, RememberRow, RememberService, RememberSignInAttempt,
+    RememberSignInService, RememberStore, RememberTokenService, SessionMetadata, SessionQueries,
 };
-use magnetar::storage::{NewUser, UserStore};
+use magnetar::storage::{CredentialActor, NewUser, UserRecord, UserStore};
 use magnetar::{Error, Result};
 use parking_lot::Mutex;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use secrecy::{ExposeSecret, SecretString};
 
 use factor::{credential_actor, factor_world, totp_code_now};
@@ -149,6 +151,474 @@ fn service(world: &factor::FactorWorld) -> (Arc<RecordingFactorGate>, TestRememb
     service_with_token_service(world, remember)
 }
 
+struct FailOnceUserStore<U> {
+    inner: Arc<U>,
+    fail_next_id_lookup: AtomicBool,
+}
+
+impl<U> FailOnceUserStore<U> {
+    fn new(inner: Arc<U>) -> Self {
+        Self {
+            inner,
+            fail_next_id_lookup: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl<U: UserStore> UserStore for FailOnceUserStore<U> {
+    async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>> {
+        self.inner.find_by_email(email).await
+    }
+
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>> {
+        if self.fail_next_id_lookup.swap(false, Ordering::SeqCst) {
+            return Err(Error::DependencyUnavailable {
+                dependency: "user store".to_owned(),
+                message: "injected one-shot lookup failure".to_owned(),
+            });
+        }
+        self.inner.find_by_id(user_id).await
+    }
+
+    async fn create_user(&self, input: NewUser) -> Result<UserRecord> {
+        self.inner.create_user(input).await
+    }
+
+    async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()> {
+        self.inner.set_password_hash(actor, password_hash).await
+    }
+
+    async fn mark_email_verified(&self, user_id: &str, at: chrono::DateTime<Utc>) -> Result<()> {
+        self.inner.mark_email_verified(user_id, at).await
+    }
+
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: chrono::DateTime<Utc>,
+        window_start: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        self.inner
+            .lock_if_unlocked_by_email(email, locked_at, window_start)
+            .await
+    }
+
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        locked_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
+        self.inner.set_locked_at_by_email(email, locked_at).await
+    }
+}
+
+struct FailOnceFactorGate {
+    inner: Arc<dyn FactorGate>,
+    fail_next_sign_in: AtomicBool,
+}
+
+struct ExternalRememberTokenService {
+    inner: Arc<RememberService<TestRememberStore>>,
+    fail_after_rotation: AtomicBool,
+    fail_revoke_all: AtomicBool,
+    revoke_all_attempts: AtomicUsize,
+}
+
+impl ExternalRememberTokenService {
+    fn new(inner: Arc<RememberService<TestRememberStore>>) -> Self {
+        Self {
+            inner,
+            fail_after_rotation: AtomicBool::new(false),
+            fail_revoke_all: AtomicBool::new(false),
+            revoke_all_attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl RememberTokenService for ExternalRememberTokenService {
+    fn default_lifetime(&self) -> Duration {
+        Duration::days(30)
+    }
+
+    async fn issue_at_epoch(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        now: chrono::DateTime<Utc>,
+        lifetime: Duration,
+    ) -> Result<RememberCredential> {
+        self.inner
+            .issue_at_epoch(user_id, auth_epoch, now, lifetime)
+            .await
+    }
+
+    async fn rotate_at_epoch(
+        &self,
+        credential: &RememberCredential,
+        now: chrono::DateTime<Utc>,
+        replacement_lifetime: Duration,
+    ) -> Result<(String, u64, RememberCredential)> {
+        let rotation = self
+            .inner
+            .rotate_at_epoch(credential, now, replacement_lifetime)
+            .await?;
+        if self.fail_after_rotation.swap(false, Ordering::SeqCst) {
+            return Err(Error::Internal {
+                message: "external rotation outcome unavailable".to_owned(),
+            });
+        }
+        Ok(rotation)
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &str) -> Result<u64> {
+        self.revoke_all_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_revoke_all.load(Ordering::SeqCst) {
+            return Err(Error::DependencyUnavailable {
+                dependency: "external remember service".to_owned(),
+                message: "injected broad cleanup failure".to_owned(),
+            });
+        }
+        self.inner.revoke_all_for_user(user_id).await
+    }
+}
+
+#[async_trait]
+impl FactorGate for FailOnceFactorGate {
+    async fn complete_sign_in(
+        &self,
+        principal: VerifiedPrincipal,
+        context: AuthenticationContext,
+    ) -> Result<SignInDecision> {
+        if self.fail_next_sign_in.swap(false, Ordering::SeqCst) {
+            return Err(Error::DependencyUnavailable {
+                dependency: "factor gate".to_owned(),
+                message: "injected one-shot gate failure".to_owned(),
+            });
+        }
+        self.inner.complete_sign_in(principal, context).await
+    }
+
+    async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> Result<magnetar::sessions::SessionGrant> {
+        self.inner.complete_challenge(selector, code).await
+    }
+}
+
+#[tokio::test]
+async fn attempt_returns_successor_when_user_lookup_fails_after_rotation() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-user-retry@example.test").await;
+    let users = Arc::new(FailOnceUserStore::new(world.storage.clone()));
+    let remember: Arc<dyn RememberTokenService> = world.remember.clone();
+    let service = RememberSignInService::new(remember, users, world.gate.clone());
+    let now = Utc::now();
+    let original = world
+        .remember
+        .issue_at_epoch(&user.user_id, user.auth_epoch, now, Duration::days(30))
+        .await
+        .expect("issue original")
+        .expose_once();
+    let sessions_before = world
+        .sessions
+        .list_for_user(&user.user_id)
+        .await
+        .expect("list initial sessions")
+        .len();
+
+    let attempt = service
+        .attempt_sign_in_with_lifetime(
+            RememberCredential::from_host(original.clone()),
+            SessionMetadata::default(),
+            now,
+            Duration::days(30),
+        )
+        .await
+        .expect("rotation itself commits");
+    let replacement = match attempt {
+        RememberSignInAttempt::RotationCommitted {
+            failure,
+            replacement,
+            ..
+        } => {
+            assert_eq!(
+                failure.disposition,
+                RememberPostRotationDisposition::Retryable
+            );
+            assert!(matches!(failure.error, Error::DependencyUnavailable { .. }));
+            replacement.expose_once()
+        }
+        other => panic!("expected recoverable committed rotation, got {other:?}"),
+    };
+
+    assert!(
+        service
+            .attempt_sign_in_with_lifetime(
+                RememberCredential::from_host(original),
+                SessionMetadata::default(),
+                now,
+                Duration::days(30)
+            )
+            .await
+            .is_err(),
+        "the consumed original must not replay"
+    );
+    let retry = service
+        .attempt_sign_in_with_lifetime(
+            RememberCredential::from_host(replacement),
+            SessionMetadata::default(),
+            now,
+            Duration::days(30),
+        )
+        .await
+        .expect("successor retry reaches the service");
+    assert!(matches!(retry, RememberSignInAttempt::Authenticated(_)));
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .unwrap()
+            .len(),
+        sessions_before + 1
+    );
+}
+
+#[tokio::test]
+async fn attempt_returns_successor_when_factor_gate_fails_after_rotation() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-factor-retry@example.test").await;
+    let gate: Arc<dyn FactorGate> = Arc::new(FailOnceFactorGate {
+        inner: world.gate.clone(),
+        fail_next_sign_in: AtomicBool::new(true),
+    });
+    let remember: Arc<dyn RememberTokenService> = world.remember.clone();
+    let service = RememberSignInService::new(remember, world.storage.clone(), gate);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original")
+        .expose_once();
+    let sessions_before = world
+        .sessions
+        .list_for_user(&user.user_id)
+        .await
+        .unwrap()
+        .len();
+
+    let attempt = service
+        .attempt_sign_in_with_lifetime(
+            RememberCredential::from_host(original.clone()),
+            SessionMetadata::default(),
+            now,
+            Duration::days(30),
+        )
+        .await
+        .expect("rotation itself commits");
+    let replacement = match attempt {
+        RememberSignInAttempt::RotationCommitted {
+            failure,
+            replacement,
+            ..
+        } => {
+            assert_eq!(
+                failure.disposition,
+                RememberPostRotationDisposition::Retryable
+            );
+            replacement.expose_once()
+        }
+        other => panic!("expected recoverable committed rotation, got {other:?}"),
+    };
+
+    assert!(
+        service
+            .sign_in(
+                RememberCredential::from_host(original),
+                SessionMetadata::default(),
+                now
+            )
+            .await
+            .is_err()
+    );
+    let retry = service
+        .attempt_sign_in_with_lifetime(
+            RememberCredential::from_host(replacement),
+            SessionMetadata::default(),
+            now,
+            Duration::days(30),
+        )
+        .await
+        .expect("successor retry reaches the service");
+    assert!(matches!(retry, RememberSignInAttempt::Authenticated(_)));
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .unwrap()
+            .len(),
+        sessions_before + 1
+    );
+}
+
+#[tokio::test]
+async fn compatibility_sign_in_retires_successor_before_returning_post_rotation_error() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-compat-cleanup@example.test").await;
+    let gate: Arc<dyn FactorGate> = Arc::new(FailOnceFactorGate {
+        inner: world.gate.clone(),
+        fail_next_sign_in: AtomicBool::new(true),
+    });
+    let remember: Arc<dyn RememberTokenService> = world.remember.clone();
+    let service = RememberSignInService::new(remember, world.storage.clone(), gate);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original");
+
+    let error = service
+        .sign_in(original, SessionMetadata::default(), now)
+        .await
+        .expect_err("compatibility adapter surfaces the gate failure");
+    assert!(matches!(error, Error::DependencyUnavailable { .. }));
+    assert_eq!(
+        service
+            .revoke_all_for_user(&user.user_id)
+            .await
+            .expect("inspect remaining remember rows"),
+        0,
+        "the compatibility adapter must not strand its unreturnable successor",
+    );
+}
+
+#[tokio::test]
+async fn external_token_service_default_cleanup_retires_successor_without_masking_error() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-external-cleanup@example.test").await;
+    let store = Arc::new(storage_schema::sql_stores::SqlRememberStore(
+        world.db.clone(),
+    ));
+    let inner = Arc::new(
+        RememberService::new(store, Duration::days(30)).expect("compose concrete token service"),
+    );
+    let external = Arc::new(ExternalRememberTokenService::new(inner));
+    let token_service: Arc<dyn RememberTokenService> = external.clone();
+    let gate: Arc<dyn FactorGate> = Arc::new(FailOnceFactorGate {
+        inner: world.gate.clone(),
+        fail_next_sign_in: AtomicBool::new(true),
+    });
+    let service = RememberSignInService::new(token_service, world.storage.clone(), gate);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original");
+
+    let error = service
+        .sign_in(original, SessionMetadata::default(), now)
+        .await
+        .expect_err("compatibility call surfaces the downstream error");
+    assert!(matches!(
+        error,
+        Error::DependencyUnavailable { dependency, .. } if dependency == "factor gate"
+    ));
+    assert_eq!(external.revoke_all_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        service.revoke_all_for_user(&user.user_id).await.unwrap(),
+        0,
+        "the broad compatibility fallback must retire the successor",
+    );
+}
+
+#[tokio::test]
+async fn external_rotation_error_is_reported_as_unknown_commit_state() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-external-unknown@example.test").await;
+    let store = Arc::new(storage_schema::sql_stores::SqlRememberStore(
+        world.db.clone(),
+    ));
+    let inner = Arc::new(
+        RememberService::new(store, Duration::days(30)).expect("compose concrete token service"),
+    );
+    let external = Arc::new(ExternalRememberTokenService::new(inner));
+    external.fail_after_rotation.store(true, Ordering::SeqCst);
+    let token_service: Arc<dyn RememberTokenService> = external.clone();
+    let service =
+        RememberSignInService::new(token_service, world.storage.clone(), world.gate.clone());
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original");
+
+    let attempt = service
+        .attempt_sign_in_with_lifetime(
+            original,
+            SessionMetadata::default(),
+            now,
+            Duration::days(30),
+        )
+        .await
+        .expect("unknown commit state is an explicit attempt outcome");
+    assert!(matches!(
+        attempt,
+        RememberSignInAttempt::RotationOutcomeUnknown {
+            error: Error::Internal { message }
+        } if message == "external rotation outcome unavailable"
+    ));
+    external
+        .inner
+        .revoke_all_for_user(&user.user_id)
+        .await
+        .expect("clean up committed fixture successor");
+}
+
+#[tokio::test]
+async fn external_compatibility_cleanup_failure_does_not_mask_downstream_error() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-cleanup-error@example.test").await;
+    let store = Arc::new(storage_schema::sql_stores::SqlRememberStore(
+        world.db.clone(),
+    ));
+    let inner = Arc::new(
+        RememberService::new(store, Duration::days(30)).expect("compose concrete token service"),
+    );
+    let external = Arc::new(ExternalRememberTokenService::new(inner));
+    external.fail_revoke_all.store(true, Ordering::SeqCst);
+    let token_service: Arc<dyn RememberTokenService> = external.clone();
+    let gate: Arc<dyn FactorGate> = Arc::new(FailOnceFactorGate {
+        inner: world.gate.clone(),
+        fail_next_sign_in: AtomicBool::new(true),
+    });
+    let service = RememberSignInService::new(token_service, world.storage.clone(), gate);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original");
+
+    let error = service
+        .sign_in(original, SessionMetadata::default(), now)
+        .await
+        .expect_err("compatibility call surfaces the downstream error");
+    assert!(matches!(
+        error,
+        Error::DependencyUnavailable { dependency, .. } if dependency == "factor gate"
+    ));
+    assert_eq!(external.revoke_all_attempts.load(Ordering::SeqCst), 1);
+    external
+        .inner
+        .revoke_all_for_user(&user.user_id)
+        .await
+        .expect("clean up successor after injected cleanup failure");
+}
+
 #[tokio::test]
 async fn trusted_remember_proof_enters_factor_gate_and_mints_real_opaque_session() {
     let world = factor_world().await;
@@ -235,6 +705,146 @@ async fn trusted_remember_proof_enters_factor_gate_and_mints_real_opaque_session
 }
 
 #[tokio::test]
+async fn replacement_insert_failure_preserves_original_credential_for_retry() {
+    let world = factor_world().await;
+    let user = user(&world, "remembered-rotation-failure@example.test").await;
+    let store = Arc::new(storage_schema::sql_stores::SqlRememberStore(
+        world.db.clone(),
+    ));
+    let hook = Arc::new(RecordingRememberAnomalyHook::default());
+    let remember = Arc::new(
+        RememberService::new(store.clone(), Duration::days(30))
+            .expect("compose remember service")
+            .with_anomaly_hook(hook.clone()),
+    );
+    let token_service: Arc<dyn RememberTokenService> = remember;
+    let (gate, service) = service_with_token_service(&world, token_service);
+    let now = Utc::now();
+    let original = service
+        .issue(&user.user_id, now)
+        .await
+        .expect("issue original remember credential")
+        .expose_once();
+    let original_plaintext = original.expose_secret().to_owned();
+    let (original_selector, _) = credential_parts(&original);
+    let original_row = store
+        .find_for_rotation(&original_selector, now)
+        .await
+        .expect("read original remember row")
+        .expect("original remember row exists");
+    let sessions_before = world
+        .sessions
+        .list_for_user(&user.user_id)
+        .await
+        .expect("list sessions before failed rotation")
+        .len();
+
+    world
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "CREATE TRIGGER fail_remember_replacement
+                 BEFORE INSERT ON storage_remembers
+                 WHEN NEW.user_id = '{}'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected remember replacement failure');
+                 END",
+                user.user_id
+            ),
+        ))
+        .await
+        .expect("install scoped replacement failure trigger");
+
+    let error = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext.clone())),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect_err("replacement insertion failure must surface");
+    assert!(matches!(error, Error::Internal { .. }));
+    assert_eq!(
+        store
+            .find_for_rotation(&original_selector, now)
+            .await
+            .expect("inspect original row after failed rotation"),
+        Some(original_row),
+        "failed replacement insertion must preserve the exact original row",
+    );
+    assert!(gate.methods().is_empty());
+    assert!(hook.events().is_empty());
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .expect("list sessions after failed rotation")
+            .len(),
+        sessions_before,
+    );
+
+    world
+        .db
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_remember_replacement".to_owned(),
+        ))
+        .await
+        .expect("remove replacement failure trigger before retry");
+
+    let replacement = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext.clone())),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect("retry with the preserved original credential succeeds")
+        .replacement
+        .expose_once();
+
+    let replay_error = service
+        .sign_in(
+            RememberCredential::from_host(SecretString::from(original_plaintext)),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect_err("the successfully rotated original must not replay");
+    assert!(matches!(
+        replay_error,
+        Error::NotFound {
+            resource,
+            identifier,
+        } if resource == "remember token" && identifier == "expired or revoked"
+    ));
+
+    service
+        .sign_in(
+            RememberCredential::from_host(replacement),
+            SessionMetadata::default(),
+            now,
+        )
+        .await
+        .expect("the returned replacement remains usable");
+    assert_eq!(
+        gate.methods(),
+        vec![SignInMethod::Remembered, SignInMethod::Remembered]
+    );
+    assert_eq!(
+        world
+            .sessions
+            .list_for_user(&user.user_id)
+            .await
+            .expect("list sessions after successful rotations")
+            .len(),
+        sessions_before + 2,
+    );
+}
+
+#[tokio::test]
 async fn auth_epoch_change_fences_an_unconsumed_remember_credential() {
     let world = factor_world().await;
     let user = user(&world, "remembered-epoch@example.test").await;
@@ -272,6 +882,14 @@ async fn auth_epoch_change_fences_an_unconsumed_remember_credential() {
             .expect("list sessions after epoch fence")
             .len(),
         sessions_before,
+    );
+    assert_eq!(
+        service
+            .revoke_all_for_user(&user.user_id)
+            .await
+            .expect("inspect rows after rejected compatibility sign-in"),
+        0,
+        "the compatibility adapter must retire a rejected successor",
     );
 }
 

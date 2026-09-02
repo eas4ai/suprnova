@@ -124,6 +124,31 @@ impl Middleware for FakeSessionScope {
     }
 }
 
+/// Install a session carrying a stale identity for a guard absent from the
+/// configured `AuthManager`.
+struct StaleNamedSessionScope;
+
+#[async_trait::async_trait]
+impl Middleware for StaleNamedSessionScope {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let session = suprnova::session::new_session_slot_for_test();
+        {
+            let mut slot = session.lock().expect("lock test session");
+            let session = slot.as_mut().expect("test session slot");
+            session.data.insert(
+                "_auth_guards".to_string(),
+                serde_json::json!({ "missing": { "id": "7" } }),
+            );
+        }
+        let pending = suprnova::session::new_pending_cookies_slot_for_test();
+        suprnova::session::session_scope_for_test(
+            session,
+            suprnova::session::pending_cookies_scope_for_test(pending, next(request)),
+        )
+        .await
+    }
+}
+
 fn router() -> Router {
     Router::new()
         .get("/protected", |_req| async { text("reached") })
@@ -322,6 +347,20 @@ async fn basic_stateful_valid_credentials_reach_handler() {
 
     assert_eq!(status, 200);
     assert_eq!(body, "reached");
+}
+
+#[tokio::test]
+async fn stale_named_session_identity_does_not_bypass_missing_stateful_guard() {
+    Lazy::force(&SETUP);
+    let registry = MiddlewareRegistry::new()
+        .append(StaleNamedSessionScope)
+        .append(BasicAuthMiddleware::new().for_guard("missing"));
+    let addr = spawn_server(router(), registry, 1).await;
+
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
+
+    assert_eq!(status, 500);
+    assert_ne!(body, "reached");
 }
 
 // ── AuthMiddleware::for_guard ────────────────────────────────────────────────

@@ -5,7 +5,9 @@
 //! own `Migrator`:
 //!
 //! ```rust,no_run
-//! use suprnova::workflow::migrations::{CreateWorkflowsTable, CreateWorkflowStepsTable};
+//! use suprnova::workflow::migrations::{
+//!     CreateWorkflowStepsTable, CreateWorkflowsTable, NormalizeWorkflowDateTimesForMysql,
+//! };
 //! use sea_orm_migration::MigratorTrait;
 //!
 //! pub struct Migrator;
@@ -15,6 +17,7 @@
 //!         vec![
 //!             Box::new(CreateWorkflowsTable),
 //!             Box::new(CreateWorkflowStepsTable),
+//!             Box::new(NormalizeWorkflowDateTimesForMysql),
 //!         ]
 //!     }
 //! }
@@ -30,6 +33,7 @@
 
 pub mod m_create_workflow_steps_table;
 pub mod m_create_workflows_table;
+pub mod m_normalize_mysql_datetime_columns;
 
 /// Public alias so consumers can write `CreateWorkflowsTable` instead
 /// of the date-prefixed module name. The actual migration name on the
@@ -38,3 +42,6 @@ pub mod m_create_workflows_table;
 /// the type ident.
 pub use m_create_workflow_steps_table::Migration as CreateWorkflowStepsTable;
 pub use m_create_workflows_table::Migration as CreateWorkflowsTable;
+/// Additive migration that makes MySQL workflow date columns compatible with
+/// the framework's `chrono::NaiveDateTime` entities.
+pub use m_normalize_mysql_datetime_columns::Migration as NormalizeWorkflowDateTimesForMysql;
