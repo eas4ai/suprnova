@@ -1,5 +1,6 @@
 //! Typed registration and request-time assembly for canonical Live documents.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
@@ -21,6 +22,9 @@ use crate::view::{
 };
 use crate::{App, FrameworkError, HttpResponse, Request, Router};
 
+use super::assets::{
+    BootstrapFailure, LiveBootstrap, LiveBootstrapOptions, RequiredCapability, render_bootstrap,
+};
 use super::attestation::LiveOperation;
 use super::context::LiveRouteSecurityPolicy;
 use super::{ComponentContract, LiveRuntime};
@@ -167,17 +171,7 @@ impl<C: ComponentContract> LiveMount<C> {
     }
 
     fn route_policy(&self) -> LiveRouteSecurityPolicy {
-        let public = self.kind == LiveMountKind::PublicSeed;
-        LiveRouteSecurityPolicy {
-            trusted_internal_origin: true,
-            stateless_csrf: true,
-            stateless_session: public,
-            anonymous_principal: public,
-            tenantless: public,
-            direct_peer: true,
-            upstream_rate_limit: true,
-            no_additional_middleware: true,
-        }
+        document_policy(self.kind == LiveMountKind::PublicSeed)
     }
 
     fn scope_requirements(&self) -> MountScopeRequirements {
@@ -190,7 +184,39 @@ impl<C: ComponentContract> LiveMount<C> {
     }
 }
 
+const fn document_policy(public: bool) -> LiveRouteSecurityPolicy {
+    LiveRouteSecurityPolicy {
+        trusted_internal_origin: true,
+        stateless_csrf: true,
+        stateless_session: public,
+        anonymous_principal: public,
+        tenantless: public,
+        direct_peer: true,
+        upstream_rate_limit: true,
+        no_additional_middleware: true,
+    }
+}
+
 impl Router {
+    /// Declares a Live document route that mounts no island at startup.
+    ///
+    /// The document still emits bootstrap markup, so islands inserted later
+    /// connect through the same runtime. Routes with declared mounts use
+    /// [`Router::try_live_mount`] instead.
+    pub fn try_live_document(mut self, route_pattern: &str) -> Result<Self, FrameworkError> {
+        if !route_pattern.starts_with('/') || route_pattern.starts_with("/__live/") {
+            return Err(FrameworkError::internal(
+                "Live document routes must be application paths",
+            ));
+        }
+        self.register_live_document_metadata(
+            hyper::Method::GET,
+            route_pattern,
+            document_policy(true),
+        )?;
+        Ok(self)
+    }
+
     /// Seals one typed document mount into the startup catalog.
     pub fn try_live_mount<C: ComponentContract>(
         mut self,
@@ -244,6 +270,7 @@ pub struct LiveDocument<'a> {
     runtime: LiveRuntime,
     scope: DocumentMountScope,
     metadata: Vec<MountMetadata>,
+    bootstrapped: bool,
 }
 
 impl<'a> LiveDocument<'a> {
@@ -261,6 +288,7 @@ impl<'a> LiveDocument<'a> {
             runtime,
             scope: DocumentMountScope::new(),
             metadata: Vec::new(),
+            bootstrapped: false,
         })
     }
 
@@ -271,6 +299,11 @@ impl<'a> LiveDocument<'a> {
         parameters: CanonicalValue,
         flags: MountFlags,
     ) -> Result<MountedIsland, LiveDocumentError> {
+        if self.bootstrapped {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::MountAfterBootstrap,
+            ));
+        }
         if self.request.route_pattern() != Some(declaration.route_pattern.as_str()) {
             return Err(LiveDocumentError::new(LiveDocumentErrorKind::RouteMismatch));
         }
@@ -321,6 +354,63 @@ impl<'a> LiveDocument<'a> {
         };
         self.metadata.push(metadata);
         Ok(MountedIsland { html })
+    }
+
+    /// Emits the inert configuration and ordered artifact tags this document needs.
+    ///
+    /// Roles follow every mounted component: the upload feature when a field
+    /// declares an upload policy, the asynchronous feature when a component
+    /// declares streams, and the Stimulus bridge only when requested. Call it
+    /// once after the last mount; later mounts are rejected so the emitted
+    /// roles always cover every island.
+    pub fn bootstrap(
+        &mut self,
+        options: LiveBootstrapOptions,
+    ) -> Result<LiveBootstrap, LiveDocumentError> {
+        if self.bootstrapped {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::BootstrapRepeated,
+            ));
+        }
+        let mut required = BTreeSet::new();
+        for mount in &self.metadata {
+            let metadata = self
+                .runtime
+                .component_metadata(mount.component())
+                .ok_or_else(|| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+            if metadata
+                .fields()
+                .iter()
+                .any(|field| field.upload_policy().is_some())
+            {
+                required.insert(RequiredCapability::Uploads);
+            }
+            if !metadata.subscriptions().is_empty() {
+                required.insert(RequiredCapability::AsyncUpdates);
+            }
+        }
+        let protocol = (
+            suprnova_live::SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(1),
+            suprnova_live::SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(1),
+        );
+        let bootstrap = render_bootstrap(&options, &required, self.runtime.config(), protocol)
+            .map_err(|failure| {
+                LiveDocumentError::new(match failure {
+                    BootstrapFailure::AssetsUnavailable => LiveDocumentErrorKind::AssetsUnavailable,
+                    BootstrapFailure::InvalidNonce => LiveDocumentErrorKind::InvalidBootstrap,
+                    BootstrapFailure::MarkupRejected => LiveDocumentErrorKind::RenderRejected,
+                })
+            })?;
+        self.bootstrapped = true;
+        Ok(bootstrap)
     }
 
     /// Renders and adapts one complete canonical document after every mount succeeds.
@@ -377,6 +467,14 @@ pub enum LiveDocumentErrorKind {
     InvalidMount,
     /// The complete checked document could not be rendered or adapted.
     RenderRejected,
+    /// The embedded browser artifacts failed validation and cannot be served.
+    AssetsUnavailable,
+    /// The bootstrap options carried an invalid value such as a malformed nonce.
+    InvalidBootstrap,
+    /// Bootstrap markup was requested twice for one document.
+    BootstrapRepeated,
+    /// An island was mounted after the bootstrap markup was already emitted.
+    MountAfterBootstrap,
 }
 
 /// Redacted Live document failure.
@@ -407,6 +505,10 @@ impl fmt::Display for LiveDocumentError {
             LiveDocumentErrorKind::ContextRejected => "live_document_context_rejected",
             LiveDocumentErrorKind::InvalidMount => "live_document_mount_rejected",
             LiveDocumentErrorKind::RenderRejected => "live_document_render_rejected",
+            LiveDocumentErrorKind::AssetsUnavailable => "live_document_assets_unavailable",
+            LiveDocumentErrorKind::InvalidBootstrap => "invalid_live_bootstrap",
+            LiveDocumentErrorKind::BootstrapRepeated => "live_bootstrap_repeated",
+            LiveDocumentErrorKind::MountAfterBootstrap => "live_mount_after_bootstrap",
         })
     }
 }

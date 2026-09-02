@@ -4,6 +4,66 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-02 -- Framework artifact delivery and document bootstrap
+
+Suprnova now serves the exact reviewed browser artifacts and emits typed
+bootstrap markup from documents, closing plan Task 8. The ten deterministic
+build outputs are tracked under `browser/dist/` and embedded into the engine
+by the new `suprnova_live::artifacts` module, which validates the manifest
+against the embedded bytes on first use and fails closed on any drift in
+digest, length, file name, role, capability, or version. The Live gate gained a
+"tracked artifact parity" phase that rejects a rebuilt `dist/` differing from
+the tracked bytes, so the embedded bytes and the reproducible build cannot
+diverge silently.
+
+`Router::try_live()` registers `/__live/v1/assets/<asset_identity>/<file>` for
+`GET` and `HEAD` with immutable caching, strong digest validators, conditional
+requests, `nosniff`, closed misses, and two framework-owned external boot
+scripts, so a document loads no inline executable code and a strict
+`script-src 'self'` policy holds. `LiveDocument::bootstrap` maps mounted
+components to the upload and asynchronous roles, adds the Stimulus bridge on
+request, emits the inert configuration element plus ordered preload and script
+tags with integrity values for the ESM or classic strategy, and rejects a
+second bootstrap or a mount after bootstrap. `Router::try_live_document`
+declares a document route without startup mounts. Two engine additions
+support the host: `TrustedHtml::framework_generated` for framework-assembled
+markup and the public `TrustedLiveRequestContext::host_scope_facts` accessor
+from Task 7. The reference host's artifact validation was not replaced; the
+engine module is the shared home a later cleanup can point it at.
+
+Verification completed from the integration worktree:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live --test runtime_artifacts --test trusted_markup
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_assets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --lib live::assets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_public_api --test live_facade_contract --test live_dependency_topology --test live_document_routes --test live_routes --test live_boot --test live_hostile_adapter --test live_view_contract
+rtk cargo fmt -p suprnova -p suprnova-live -- --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo clippy -p suprnova -p suprnova-live --all-targets --all-features
+(cd crates/suprnova-live/browser && rtk npm run format:check && rtk npm run lint && rtk npm run typecheck)
+(cd crates/suprnova-live/browser && rtk npm run test:unit -- tests/build-contract.test.ts tests/optional-artifacts.test.ts)
+(cd crates/suprnova-live/browser && rtk npx playwright test e2e/framework-bootstrap.spec.ts --project=chromium --project=firefox --project=webkit)
+(cd crates/suprnova-live && rtk git diff --exit-code --stat -- browser/dist)
+rtk tests/gate_contract.sh
+rtk tests/documentation_contract.sh
+rtk node scripts/check-implementation-docs.mjs
+rtk node scripts/check-specs.mjs
+```
+
+Those commands passed six engine artifact and trusted-markup cases, seven
+framework asset and bootstrap cases plus four unit cases, 49 cases across the
+eight existing Live suites, zero new Clippy findings, 18 browser artifact unit
+cases, and the nine-case real-server Playwright scenario on Chromium,
+Firefox, and WebKit (an example binary, `live_bootstrap_host`, is the real
+Suprnova server the Playwright configuration starts on port 4177). The
+scenario covers ESM and classic role selection, a core-only document, the
+optional Stimulus role, duplicate boot tags, an incompatible optional
+feature, an integrity failure that leaves SSR content intact, a strict
+self-only Content Security Policy, and byte-exact immutable artifacts with
+conditional requests. The full Live crate gate and the Suprnova repository
+gate were not rerun for this checkpoint; the repository gate runs before the
+next push.
+
 ## 2026-09-02 -- Framework asynchronous transport routes
 
 Suprnova now registers the reserved versioned `/__live/v1/async/subscriptions`,

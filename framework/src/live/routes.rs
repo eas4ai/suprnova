@@ -106,6 +106,20 @@ fn install(mut router: Router) -> Result<Router, FrameworkError> {
         LIVE_ASYNC_SOCKET_PATH,
         LiveRouteMetadata::new(LiveOperation::WebSocketHandshake, strict_action_policy()),
     )?;
+    router = router
+        .try_methods(
+            &LIVE_HTTP_METHODS,
+            super::assets::LIVE_ASSET_ROUTE,
+            super::assets::handle,
+        )?
+        .into();
+    router = router
+        .try_methods(
+            &LIVE_HTTP_METHODS,
+            super::assets::LIVE_ASSET_MISS_ROUTE,
+            super::assets::handle_miss,
+        )?
+        .into();
     router.mark_live_installed(LIVE_ROUTE_VERSION);
     Ok(router)
 }

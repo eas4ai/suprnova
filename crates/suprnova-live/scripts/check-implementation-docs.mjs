@@ -97,7 +97,7 @@ const semanticRequirements = new Map([
       {
         id: "browser_assets_current_host_ownership",
         pattern:
-          /Iteration 005's Suprnova host adapter owns asset authorization, compression, CDN purge, and framework route registration\.[\s\S]{0,300}not complete until/u,
+          /Iteration 005's Suprnova host adapter owns asset authorization, compression, CDN\s+purge, and framework route registration; the framework delivery path below is\s+exercised by real framework asset-route tests/u,
       },
     ],
   ],

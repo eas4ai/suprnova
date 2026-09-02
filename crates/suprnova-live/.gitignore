@@ -26,7 +26,6 @@ rustc-ice-*.txt
 # Standalone reference catalog and generated build/runtime artifacts
 /reference/
 /browser/node_modules/
-/browser/dist/
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/corpus/*/

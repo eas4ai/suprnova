@@ -46,11 +46,57 @@ when supported and permitted; link-prefetch fallback remains available, and a
 CSP refusal is a bounded enhancement failure rather than an action failure.
 
 Cross-origin Live endpoints are rejected unless the embedding application
-passes the exact origin at boot. Asset authorization, compression, CDN purge,
-and framework route registration are application-host responsibilities.
+passes the exact origin at boot. Asset authorization, compression, and CDN
+purge remain application-host responsibilities.
 Iteration 005's Suprnova host adapter owns asset authorization, compression, CDN
-purge, and framework route registration. That production delivery path is not
-complete until real framework asset-route tests pass.
+purge, and framework route registration; the framework delivery path below is
+exercised by real framework asset-route tests and by a Playwright scenario
+against a real Suprnova server.
+
+## Suprnova delivery
+
+The ten build outputs are tracked under `browser/dist/` and embedded into the
+engine crate by `suprnova_live::artifacts`. On first use the engine validates
+the manifest against the embedded bytes: exact schema, runtime, protocol, and
+snapshot versions; every role recorded once with its contracted file name,
+capability, execution kind, preload relationship, media type, and cache
+policy; and a byte length, SHA-256 digest, and integrity value that match the
+bytes. Any drift fails closed before a byte is served. The reproducible build
+check plus the tracked bytes mean a rebuilt `dist/` must be byte-identical to
+what the engine embeds.
+
+`Router::try_live()` serves the artifacts at
+`/__live/v1/assets/<asset_identity>/<file>` for `GET` and `HEAD`. The asset
+identity is `suprnova-live-<runtime version>-<first sixteen hex characters of
+the manifest digest>`, so the URLs are immutable and carry the recorded
+`public, max-age=31536000, immutable` policy; the manifest itself is served
+with `must-revalidate`. Every response carries an exact `Content-Type`,
+`Content-Length`, a strong `ETag` equal to the quoted SHA-256 digest,
+`X-Content-Type-Options: nosniff`, and honours `If-None-Match` with 304. A
+wrong identity, an unknown or differently cased name, a query string, or a
+path segment that is not a recorded file is a closed 404 with no body; other
+methods are 405 with `Allow: GET, HEAD`. Two framework-owned boot scripts,
+`suprnova-live.boot.esm.js` (`import { boot } ...; boot();`) and
+`suprnova-live.boot.classic.js` (`window.SuprnovaLive.boot();`), are served
+the same way with their own integrity values, so a document loads only
+external scripts.
+
+A document calls `LiveDocument::bootstrap(LiveBootstrapOptions)` after its
+last mount and inserts the returned markup in `<head>` through
+`|trusted_html`. The markup is the inert `suprnova-live-config` JSON element
+(canonical key order, `endpoint` `/__live/v1/action`, the asset identity, the
+protocol range, and bounded limits; the response budget is the configured
+`LiveConfig` limit bounded to the runtime's accepted 1 KiB to 4 MiB range)
+followed by one delivery form: for ESM a
+`modulepreload` link for the core, one `type="module"` script per optional
+role, and the boot module; for classic a `preload` link, deferred optional
+scripts, the deferred core, and the deferred boot script. Every artifact tag
+carries its manifest integrity value and `crossorigin="anonymous"`; an
+optional nonce is stamped on script elements. The upload role is emitted when
+a mounted component declares an upload policy, the asynchronous role when a
+component declares streams, and the Stimulus bridge only with
+`with_stimulus()`. Roles are a set, so repeated islands never duplicate a
+tag; a second `bootstrap()` call or a mount after bootstrap fails closed.
 
 ## Dependency notices
 

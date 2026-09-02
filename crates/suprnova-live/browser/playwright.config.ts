@@ -38,6 +38,13 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 60_000,
     },
+    {
+      command:
+        "SUPRNOVA_LIVE_BOOTSTRAP_PORT=4177 cargo run --manifest-path ../Cargo.toml -p suprnova --example live_bootstrap_host",
+      url: "http://127.0.0.1:4177/health",
+      reuseExistingServer: false,
+      timeout: 600_000,
+    },
   ],
   projects: [
     {

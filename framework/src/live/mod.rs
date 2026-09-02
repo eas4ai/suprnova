@@ -5,6 +5,8 @@
 //! shipped browser runtime.
 
 pub mod action;
+/// Exact reviewed browser artifacts, their catalog, and document bootstrap markup.
+pub mod assets;
 mod async_transport;
 pub(crate) mod async_updates;
 pub(crate) mod attestation;
@@ -31,6 +33,7 @@ pub mod testing;
 #[doc(hidden)]
 pub mod __private;
 
+pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
 pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind};
 pub use document::{
     LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind, MountedIsland,

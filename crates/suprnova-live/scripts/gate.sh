@@ -142,6 +142,9 @@ phase "browser dependency and conformance gates"
     rtk npm run build:check
 )
 
+phase "tracked artifact parity"
+rtk git diff --exit-code --stat -- browser/dist
+
 phase "iteration 004 reference host"
 rtk env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \

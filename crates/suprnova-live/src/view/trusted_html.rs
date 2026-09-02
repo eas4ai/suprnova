@@ -157,6 +157,7 @@ impl fmt::Debug for RegisteredSanitizer {
 #[derive(Clone)]
 enum TrustedMarkupProvenance {
     FrameworkStatic,
+    FrameworkGenerated,
     EngineValidatedIsland,
     RegisteredSanitizer(SanitizerId),
 }
@@ -195,6 +196,27 @@ impl TrustedHtml {
         })
     }
 
+    /// Trusts bounded markup a framework host generated from its own typed facts.
+    ///
+    /// This is the same trust level as [`Self::framework_static`]: the caller
+    /// is framework code assembling markup from validated identities,
+    /// digests, and URLs, never from request or application data.
+    pub fn framework_generated(
+        html: String,
+        reason: TrustedMarkupReason,
+    ) -> Result<Self, TrustedMarkupError> {
+        if html.len() > HARD_MAX_TRUSTED_HTML_BYTES {
+            return Err(TrustedMarkupError::new(
+                TrustedMarkupErrorKind::MarkupTooLarge,
+            ));
+        }
+        Ok(Self {
+            html,
+            reason,
+            provenance: TrustedMarkupProvenance::FrameworkGenerated,
+        })
+    }
+
     /// Returns the audited construction reason without exposing it through Debug.
     #[must_use]
     pub const fn reason(&self) -> &TrustedMarkupReason {
@@ -221,6 +243,9 @@ impl fmt::Debug for TrustedHtml {
         match &self.provenance {
             TrustedMarkupProvenance::FrameworkStatic => {
                 formatter.write_str("<TrustedHtml:framework-static>")
+            }
+            TrustedMarkupProvenance::FrameworkGenerated => {
+                formatter.write_str("<TrustedHtml:framework-generated>")
             }
             TrustedMarkupProvenance::EngineValidatedIsland => {
                 formatter.write_str("<TrustedHtml:engine-validated-island>")

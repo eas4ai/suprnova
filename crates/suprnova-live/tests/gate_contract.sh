@@ -183,6 +183,7 @@ write_expected_gate_commands() {
         $'npm\trun\tgenerate:check' \
         $'npm\trun\tbuild' \
         $'npm\trun\tbuild:check' \
+        $'git\tdiff\t--exit-code\t--stat\t--\tbrowser/dist' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live-test-support\t--test\treference_host\t--\t--test-threads=1' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--all-targets\t--all-features\t--no-fail-fast' \
         $'env\tCARGO_INCREMENTAL=0\tcargo\ttest\t--manifest-path\t<workspace>/Cargo.toml\t--package\tsuprnova-live\t--package\tsuprnova-macros\t--package\tsuprnova-live-macro-fixture\t--package\tsuprnova-live-test-support\t--doc\t--all-features' \
@@ -244,6 +245,7 @@ write_expected_gate_phases() {
         "Rust MSRV" \
         "nightly fuzz build" \
         "browser dependency and conformance gates" \
+        "tracked artifact parity" \
         "iteration 004 reference host" \
         "Rust all-target and documentation tests" \
         "correctness-delay scanner" \
@@ -357,6 +359,7 @@ require_text "focused deterministic build contract" "build-contract.test.ts"
 require_text "focused browser benchmark runner contract" "budget-contract.test.ts"
 require_text "production browser build" "npm run build"
 require_text "deterministic browser assets" "npm run build:check"
+require_text "tracked artifact parity" "git diff --exit-code --stat -- browser/dist"
 require_text "focused CSP browser coverage" "e2e/csp.spec.ts"
 require_text "Chromium browser suite" "--project=chromium"
 require_text "Firefox browser suite" "--project=firefox"
@@ -597,6 +600,8 @@ require_order "browser lockfile install" "npm ci" \
     "deterministic browser build" "npm run build:check"
 require_order "deterministic browser build" "npm run build:check" \
     "reference host" 'phase "iteration 004 reference host"'
+require_order "deterministic browser build" "npm run build:check" \
+    "tracked artifact parity" 'phase "tracked artifact parity"'
 require_order "gate contract" 'phase "gate contract"' \
     "correctness-delay scanner" 'phase "correctness-delay scanner"'
 require_order "browser lockfile install" "npm ci" \

@@ -1020,6 +1020,18 @@ impl LiveRuntime {
         Ok((context, parameters))
     }
 
+    /// Returns the generated metadata of one registered component.
+    pub(crate) fn component_metadata(
+        &self,
+        component: &ComponentName,
+    ) -> Option<suprnova_live::metadata::ComponentMetadata> {
+        self.graph
+            .engine_registry
+            .resolve(component)
+            .ok()
+            .map(|descriptor| descriptor.metadata().clone())
+    }
+
     /// Returns the shared asynchronous-update runtime state.
     pub(crate) fn async_state(&self) -> &Arc<AsyncState> {
         &self.graph.async_state
