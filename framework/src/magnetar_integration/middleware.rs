@@ -18,7 +18,7 @@ impl Middleware for BearerTokenMiddleware {
         {
             let token = token.trim();
             if !token.is_empty()
-                && let Some(engine) = super::optional_password_engine()
+                && let Some(engine) = super::optional_factor_engine()
                 && let Ok(Some(user_id)) = engine.bearer_user_id(token).await
             {
                 set_bearer_user_id(&user_id);

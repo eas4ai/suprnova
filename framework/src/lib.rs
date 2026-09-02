@@ -195,7 +195,8 @@ pub use magnetar_integration::{
     MagnetarOAuthOnlyConfig,
     abuse_limiter::FrameworkAbuseLimiter,
     engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig},
-    init_magnetar_oauth_only,
+    init_magnetar_oauth_only, install_magnetar_oauth_engine,
+    install_magnetar_oauth_engine_with_factor,
     oauth_transport::ReqwestOAuthTransport,
 };
 #[cfg(feature = "magnetar-oauth")]

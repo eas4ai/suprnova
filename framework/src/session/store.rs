@@ -338,6 +338,16 @@ impl SessionData {
         self.get(MAGNETAR_WEB_BINDING_KEY)
     }
 
+    pub(crate) fn checked_magnetar_web_binding(
+        &self,
+    ) -> Result<Option<magnetar::sessions::WebSessionBinding>, serde_json::Error> {
+        self.data
+            .get(MAGNETAR_WEB_BINDING_KEY)
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+    }
+
     /// Remove the Magnetar web-session binding from this framework session.
     pub fn clear_magnetar_web_binding(&mut self) {
         self.forget(MAGNETAR_WEB_BINDING_KEY);

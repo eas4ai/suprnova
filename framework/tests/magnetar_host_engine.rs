@@ -2225,7 +2225,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
     })
     .await
     .expect("facade routes configured provider to Magnetar");
-    let factor_required = suprnova::session::session_scope_for_test(slot.clone(), async {
+    let factor_required = suprnova::session::session_bind_scopes_for_test(slot.clone(), async {
         suprnova::Auth::oauth("offline")
             .complete("code", &kickoff.state)
             .await
@@ -2247,7 +2247,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         .await
         .expect("start a standard OAuth flow for the outcome-returning facade");
     let oauth_outcome =
-        suprnova::session::session_scope_for_test(oauth_factor_slot.clone(), async {
+        suprnova::session::session_bind_scopes_for_test(oauth_factor_slot.clone(), async {
             suprnova::Auth::oauth("offline")
                 .complete_outcome("code", &outcome_kickoff.state)
                 .await
@@ -2396,7 +2396,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
     .await
     .expect("Apple ceremony starts through Magnetar");
     let (apple_user, apple_session) =
-        suprnova::session::session_scope_for_test(slot.clone(), async {
+        suprnova::session::session_bind_scopes_for_test(slot.clone(), async {
             suprnova::Auth::oauth("apple")
                 .complete_with_apple_form_post(
                     "apple-code",
@@ -2423,7 +2423,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         .await
         .expect("start an Apple form_post flow for the legacy facade");
     let apple_legacy_factor_required =
-        suprnova::session::session_scope_for_test(apple_legacy_factor_slot, async {
+        suprnova::session::session_bind_scopes_for_test(apple_legacy_factor_slot, async {
             suprnova::Auth::oauth("apple")
                 .complete_with_apple_form_post(
                     "apple-code",
@@ -2450,7 +2450,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         .await
         .expect("start an Apple form_post flow for the outcome-returning facade");
     let apple_outcome =
-        suprnova::session::session_scope_for_test(apple_factor_slot.clone(), async {
+        suprnova::session::session_bind_scopes_for_test(apple_factor_slot.clone(), async {
             suprnova::Auth::oauth("apple")
                 .complete_with_apple_form_post_outcome(
                     "apple-code",

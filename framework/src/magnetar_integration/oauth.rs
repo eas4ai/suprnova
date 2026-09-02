@@ -235,7 +235,8 @@ impl OAuthAuth {
         state: &str,
         form_post_user: Option<String>,
     ) -> Result<SignInOutcome, FrameworkError> {
-        super::bind_scope_preflight()?;
+        let _session_authority = super::factor_engine()?;
+        super::factor_bind_scope_preflight()?;
         let engine = oauth_engine(&self.provider)?;
         match engine
             .oauth_complete(super::engine::MagnetarOAuthCallback {

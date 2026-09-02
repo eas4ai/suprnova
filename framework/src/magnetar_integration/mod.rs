@@ -283,6 +283,32 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
         self.password.user_by_id(user_id).await
     }
+
+    async fn resolve_web_binding(
+        &self,
+        binding: &magnetar::sessions::WebSessionBinding,
+    ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
+        self.password.resolve_web_binding(binding).await
+    }
+
+    async fn bearer_user_id(&self, token: &str) -> magnetar::Result<Option<String>> {
+        self.password.bearer_user_id(token).await
+    }
+
+    async fn revoke_session(&self, session_id: &str) -> magnetar::Result<bool> {
+        self.password.revoke_session(session_id).await
+    }
+
+    async fn revoke_all_sessions(&self, user_id: &str) -> magnetar::Result<u64> {
+        self.password.revoke_all_sessions(user_id).await
+    }
+
+    async fn list_sessions(
+        &self,
+        user_id: &str,
+    ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
+        self.password.list_sessions(user_id).await
+    }
 }
 
 pub(crate) fn password_factor_engine(
@@ -332,11 +358,14 @@ pub fn install_magnetar_engines(
     reserve_magnetar_engines()?.install(password, passkey, factor, no_oauth_engine())
 }
 
-/// Atomically install distinct password, passkey, and factor-completion owners.
+/// Atomically install distinct password, passkey, and factor/session owners.
 ///
 /// Use this form when provider adapters are separate objects. Every adapter
 /// that can return [`SignInOutcome::FactorRequired`] must issue selectors into
-/// the supplied factor owner's store.
+/// the supplied factor owner's store. Every provider-issued web binding,
+/// including an immediately authenticated outcome, must use that same owner's
+/// opaque-session store so [`crate::session::SessionMiddleware`] can validate
+/// it through one authoritative path.
 ///
 /// # Errors
 ///
@@ -356,14 +385,21 @@ pub fn install_magnetar_password_engine_for_test(
     engine: Arc<dyn engine::MagnetarPasswordAuthEngine>,
 ) -> Result<(), FrameworkError> {
     let guard = engine_install_guard()?;
-    if guard.reserved || MAGNETAR_PASSWORD_ENGINE.get().is_some() {
+    if guard.reserved
+        || MAGNETAR_PASSWORD_ENGINE.get().is_some()
+        || MAGNETAR_FACTOR_ENGINE.get().is_some()
+    {
         return Err(FrameworkError::internal(
             "Magnetar password engine is already installed or reserved",
         ));
     }
+    let factor = password_factor_engine(engine.clone());
     MAGNETAR_PASSWORD_ENGINE
         .set(engine)
-        .map_err(|_| FrameworkError::internal("Magnetar password engine installation raced"))
+        .map_err(|_| FrameworkError::internal("Magnetar password engine installation raced"))?;
+    MAGNETAR_FACTOR_ENGINE
+        .set(factor)
+        .map_err(|_| FrameworkError::internal("Magnetar factor engine installation raced"))
 }
 
 /// Test-only passkey adapter installation for isolated facade harnesses.
@@ -502,7 +538,15 @@ fn factor_engine() -> Result<Arc<dyn engine::MagnetarFactorAuthEngine>, Framewor
     MAGNETAR_FACTOR_ENGINE
         .get()
         .cloned()
-        .ok_or_else(|| FrameworkError::internal("Magnetar factor engine is not installed"))
+        .ok_or_else(|| FrameworkError::internal("Magnetar factor/session engine is not installed"))
+}
+
+pub(crate) fn optional_factor_engine() -> Option<Arc<dyn engine::MagnetarFactorAuthEngine>> {
+    let guard = engine_install_guard().ok()?;
+    if guard.reserved {
+        return None;
+    }
+    MAGNETAR_FACTOR_ENGINE.get().cloned()
 }
 
 pub(crate) fn password_engine()
@@ -516,7 +560,7 @@ pub(crate) fn password_engine()
     MAGNETAR_PASSWORD_ENGINE
         .get()
         .cloned()
-        .ok_or_else(|| FrameworkError::internal("Magnetar engine is not installed"))
+        .ok_or_else(|| FrameworkError::internal("Magnetar password engine is not installed"))
 }
 
 pub(crate) fn password_engine_if_installed()
@@ -558,11 +602,16 @@ fn engine_install_guard()
         .lock()
         .map_err(|_| FrameworkError::internal("Magnetar engine install lock poisoned"))
 }
-/// Install an OAuth adapter assembled by a custom retained host engine.
+/// Install an OAuth adapter for identity verification.
 ///
 /// Default-engine applications configure OAuth through
 /// [`MagnetarConfig::oauth`] so password, passkey, and OAuth adapters publish
-/// under one reservation. Replacing an adapter is rejected.
+/// under one reservation. This compatibility installer publishes no
+/// factor/session authority. OAuth identity verification remains available,
+/// but sign-in completion fails before consuming the callback unless another
+/// installation already supplied that authority. Use
+/// [`install_magnetar_oauth_engine_with_factor`] for a standalone custom OAuth
+/// sign-in installation. Replacing an adapter is rejected.
 #[cfg(feature = "magnetar-oauth")]
 pub fn install_magnetar_oauth_engine(
     engine: Arc<dyn engine::MagnetarOAuthAuthEngine>,
@@ -578,9 +627,26 @@ pub fn install_magnetar_oauth_engine(
         .map_err(|_| FrameworkError::internal("Magnetar OAuth engine installation raced"))
 }
 
+/// Atomically install a custom OAuth adapter and its factor/session authority.
+///
+/// The supplied authority must own every factor selector and opaque session
+/// issued by the OAuth adapter.
+///
+/// # Errors
+///
+/// Returns an error without publishing either component when another Magnetar
+/// engine installation is reserved or already visible.
+#[cfg(feature = "magnetar-oauth")]
+pub fn install_magnetar_oauth_engine_with_factor(
+    oauth: Arc<dyn engine::MagnetarOAuthAuthEngine>,
+    factor: Arc<dyn engine::MagnetarFactorAuthEngine>,
+) -> Result<(), FrameworkError> {
+    reserve_magnetar_engines()?.install_oauth_only(oauth, factor)
+}
+
 /// Revoke one active Magnetar session by its stable row identifier.
 pub async fn revoke_session(session_id: &str) -> Result<bool, FrameworkError> {
-    let engine = password_engine()?;
+    let engine = factor_engine()?;
     engine
         .revoke_session(session_id)
         .await
@@ -589,7 +655,7 @@ pub async fn revoke_session(session_id: &str) -> Result<bool, FrameworkError> {
 
 /// Revoke every active Magnetar session for one application user.
 pub async fn revoke_all_sessions(user_id: &str) -> Result<u64, FrameworkError> {
-    let engine = password_engine()?;
+    let engine = factor_engine()?;
     engine
         .revoke_all_sessions(user_id)
         .await
@@ -600,7 +666,7 @@ pub async fn revoke_all_sessions(user_id: &str) -> Result<u64, FrameworkError> {
 pub async fn list_sessions(
     user_id: &str,
 ) -> Result<Vec<magnetar::sessions::SessionSummary>, FrameworkError> {
-    let engine = password_engine()?;
+    let engine = factor_engine()?;
     engine
         .list_sessions(user_id)
         .await

@@ -1,9 +1,8 @@
 //! Magnetar storage and hybrid-dispatch binding for framework authentication.
 //!
 //! This module binds Magnetar's application-owned SeaORM descriptors to the
-//! framework connection. When an engine is installed, password facades and
-//! bearer resolution prefer Magnetar; Magnetar remains the explicit fallback for
-//! absent engines and bearer tokens Magnetar does not recognize.
+//! framework connection. When an engine is installed, password facades and the
+//! shared factor/session authority use this schema and connection.
 
 #[cfg(feature = "magnetar-oauth")]
 use std::collections::HashMap;
@@ -1129,7 +1128,8 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     ) -> Result<HostSignInDecision>;
 }
 
-/// Factor challenge completion shared by every installed sign-in provider.
+/// Factor challenge completion and opaque-session authority shared by every
+/// installed sign-in provider.
 #[async_trait]
 pub trait MagnetarFactorAuthEngine: Send + Sync {
     /// Consume one selector and proof, then issue its authenticated session.
@@ -1138,6 +1138,21 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
 
     /// Load the host-mapped user referenced by a completed session.
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
+
+    /// Resolve a digest-only binding issued by the shared session authority.
+    async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession>;
+
+    /// Resolve one bearer token through the shared session authority.
+    async fn bearer_user_id(&self, token: &str) -> Result<Option<String>>;
+
+    /// Revoke one opaque session by its stable row identifier.
+    async fn revoke_session(&self, session_id: &str) -> Result<bool>;
+
+    /// Revoke all active opaque sessions for one application user.
+    async fn revoke_all_sessions(&self, user_id: &str) -> Result<u64>;
+
+    /// List active opaque sessions for one application user.
+    async fn list_sessions(&self, user_id: &str) -> Result<Vec<SessionSummary>>;
 }
 
 #[async_trait]
@@ -1168,6 +1183,30 @@ where
             Err(Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession> {
+        MagnetarHostEngine::resolve_web_binding(self, binding).await
+    }
+
+    async fn bearer_user_id(&self, token: &str) -> Result<Option<String>> {
+        match self.session_provider.verify_bearer(token).await {
+            Ok(session) => Ok(Some(session.user_id().to_owned())),
+            Err(Error::NotFound { .. } | Error::InvalidInput { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn revoke_session(&self, session_id: &str) -> Result<bool> {
+        self.session_provider.revoke_session(session_id).await
+    }
+
+    async fn revoke_all_sessions(&self, user_id: &str) -> Result<u64> {
+        self.session_provider.revoke_all_for_user(user_id).await
+    }
+
+    async fn list_sessions(&self, user_id: &str) -> Result<Vec<SessionSummary>> {
+        self.session_provider.list_for_user(user_id).await
     }
 }
 

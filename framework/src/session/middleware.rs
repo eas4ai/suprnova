@@ -94,6 +94,24 @@ pub(crate) fn pending_remember_revocations_scope_installed() -> bool {
     PENDING_REMEMBER_REVOCATIONS.try_with(|_| ()).is_ok()
 }
 
+#[cfg(feature = "testing")]
+pub(super) async fn session_bind_scopes_for_test<F: std::future::Future>(
+    session: Arc<Mutex<Option<SessionData>>>,
+    future: F,
+) -> F::Output {
+    let pending_cookies = Arc::new(Mutex::new(Vec::new()));
+    let pending_revocations = Arc::new(Mutex::new(Vec::new()));
+    SESSION_CONTEXT
+        .scope(
+            session,
+            PENDING_COOKIES.scope(
+                pending_cookies,
+                PENDING_REMEMBER_REVOCATIONS.scope(pending_revocations, future),
+            ),
+        )
+        .await
+}
+
 /// Push a cookie into the per-request pending-cookies slot.
 ///
 /// Internal helper used by `Auth::login_remember` /
@@ -896,52 +914,69 @@ impl Middleware for SessionMiddleware {
             Arc::new(Mutex::new(Vec::new()));
 
         let magnetar_engine = crate::magnetar_integration::optional_password_engine();
+        let magnetar_session_authority = crate::magnetar_integration::optional_factor_engine();
         let mut pending_remembered_opaque_session: Option<PendingRememberedOpaqueSession> = None;
 
-        // An installed engine makes the default guard's digest-only binding
-        // authoritative, as well as any named guard record that explicitly
-        // carries such a binding. Binding-less named records remain valid for
-        // provider-backed SessionGuard implementations.
-        if let Some(engine) = magnetar_engine.as_ref() {
+        // The installed factor/session owner validates every digest-only
+        // binding, including bindings issued by other provider adapters. Named
+        // guard records without a binding remain valid for provider-backed
+        // SessionGuard implementations.
+        if let Some(engine) = magnetar_session_authority.as_ref() {
             let default_guard_name = crate::auth::Auth::default_guard_name();
-            let binding = session.magnetar_web_binding();
-            let valid_user_id = match (session.user_id.as_deref(), binding.as_ref()) {
-                (Some(expected_user_id), Some(binding)) => {
-                    match engine.resolve_web_binding(binding).await {
-                        Ok(verified) if verified.user_id() == expected_user_id => {
-                            Some(expected_user_id.to_owned())
-                        }
-                        Ok(_)
-                        | Err(magnetar::Error::InvalidInput { .. })
-                        | Err(magnetar::Error::NotFound { .. })
-                        | Err(magnetar::Error::Conflict { .. }) => None,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "Magnetar web-session validation failed closed"
-                            );
-                            None
+            let binding = session.checked_magnetar_web_binding();
+            let binding_key_present = matches!(&binding, Ok(Some(_)) | Err(_));
+            let binding = match binding {
+                Ok(binding) => binding,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "malformed Magnetar web-session binding failed closed"
+                    );
+                    None
+                }
+            };
+            // OAuth-only mode does not own binding-less legacy sessions. A
+            // full password/session installation keeps the stricter rule that
+            // every default-guard identity must carry a Magnetar binding.
+            if binding_key_present || magnetar_engine.is_some() {
+                let valid_user_id = match (session.user_id.as_deref(), binding.as_ref()) {
+                    (Some(expected_user_id), Some(binding)) => {
+                        match engine.resolve_web_binding(binding).await {
+                            Ok(verified) if verified.user_id() == expected_user_id => {
+                                Some(expected_user_id.to_owned())
+                            }
+                            Ok(_)
+                            | Err(magnetar::Error::InvalidInput { .. })
+                            | Err(magnetar::Error::NotFound { .. })
+                            | Err(magnetar::Error::Conflict { .. }) => None,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "Magnetar web-session validation failed closed"
+                                );
+                                None
+                            }
                         }
                     }
+                    (None, None) => None,
+                    _ => None,
+                };
+                if session.user_id.is_some() && valid_user_id.is_none() {
+                    session.user_id = None;
+                    session.remove_auth_guard(&default_guard_name);
+                    session.clear_magnetar_web_binding();
+                    session.dirty = true;
+                    crate::auth::request_state::clear_guard_user(&default_guard_name);
+                } else if let Some(valid_user_id) = valid_user_id {
+                    session.set_auth_guard_id(&default_guard_name, valid_user_id);
+                } else if session.user_id.is_none() && binding_key_present {
+                    session.remove_auth_guard(&default_guard_name);
+                    session.clear_magnetar_web_binding();
+                    crate::auth::request_state::clear_guard_user(&default_guard_name);
+                } else if session.auth_guard_id(&default_guard_name).is_some() {
+                    session.remove_auth_guard(&default_guard_name);
+                    crate::auth::request_state::clear_guard_user(&default_guard_name);
                 }
-                (None, None) => None,
-                _ => None,
-            };
-            if session.user_id.is_some() && valid_user_id.is_none() {
-                session.user_id = None;
-                session.remove_auth_guard(&default_guard_name);
-                session.clear_magnetar_web_binding();
-                session.dirty = true;
-                crate::auth::request_state::clear_guard_user(&default_guard_name);
-            } else if let Some(valid_user_id) = valid_user_id {
-                session.set_auth_guard_id(&default_guard_name, valid_user_id);
-            } else if session.user_id.is_none() && session.magnetar_web_binding().is_some() {
-                session.remove_auth_guard(&default_guard_name);
-                session.clear_magnetar_web_binding();
-                crate::auth::request_state::clear_guard_user(&default_guard_name);
-            } else if session.auth_guard_id(&default_guard_name).is_some() {
-                session.remove_auth_guard(&default_guard_name);
-                crate::auth::request_state::clear_guard_user(&default_guard_name);
             }
 
             for guard_name in session.auth_guard_names() {

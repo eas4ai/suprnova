@@ -110,6 +110,16 @@ pub async fn session_scope_for_test<F: std::future::Future>(
     middleware::SESSION_CONTEXT.scope(slot, fut).await
 }
 
+/// Test-only: install every request scope required for session binding.
+#[doc(hidden)]
+#[cfg(feature = "testing")]
+pub async fn session_bind_scopes_for_test<F: std::future::Future>(
+    slot: std::sync::Arc<std::sync::Mutex<Option<SessionData>>>,
+    future: F,
+) -> F::Output {
+    middleware::session_bind_scopes_for_test(slot, future).await
+}
+
 /// Test-only: a fresh pending-cookies slot. Use with
 /// [`pending_cookies_scope_for_test`] to drive `Auth::login_remember`
 /// and friends without booting `SessionMiddleware`.
