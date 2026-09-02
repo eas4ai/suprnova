@@ -55,7 +55,7 @@ pub use middleware::{
     set_auth_user, set_two_factor_pending, set_two_factor_pending_remember,
     two_factor_pending_remember, two_factor_pending_user_id,
 };
-pub use store::{SessionData, SessionStore, is_valid_session_id};
+pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_session_id};
 
 /// Destroy every session belonging to `user_id`. Returns the number of
 /// session rows deleted.

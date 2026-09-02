@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
-use super::store::{SessionData, SessionStore};
+use super::store::{SessionData, SessionMigrationError, SessionStore};
 
 pub(crate) type PendingRememberRevocation = (String, String, String);
 
@@ -300,6 +300,69 @@ fn attach_pending_cookies(response: Response, pending_cookies: Vec<Cookie>) -> R
         };
     }
     response
+}
+
+async fn suppress_and_retire_uncommitted_remember(
+    session: &SessionData,
+    config: &SessionConfig,
+    pending_cookies: &mut Vec<Cookie>,
+) {
+    let clear = create_forget_remember_cookie(config);
+    let remember_cookie_name = clear.name().to_owned();
+    let issued_carrier = pending_cookies
+        .iter()
+        .any(|cookie| cookie.name() == remember_cookie_name && !cookie.value().is_empty());
+    if !issued_carrier {
+        return;
+    }
+
+    // Suppress the bearer before awaiting storage. Even a timeout or backend
+    // failure must never attach a credential for an uncommitted framework
+    // session. The server-side credential remains bounded by its issue TTL.
+    pending_cookies.retain(|cookie| cookie.name() != remember_cookie_name);
+    pending_cookies.push(clear);
+
+    let guard_name = crate::auth::Auth::default_guard_name();
+    let Some(user_id) = session.user_id.as_deref() else {
+        tracing::error!(
+            operation = "remember_credential_retirement",
+            classification = "missing_owner",
+            "uncommitted remember credential was suppressed but could not be retired"
+        );
+        return;
+    };
+    let Some(selector) = session.auth_guard_remember_selector(&guard_name) else {
+        tracing::error!(
+            operation = "remember_credential_retirement",
+            classification = "missing_selector",
+            "uncommitted remember credential was suppressed but could not be retired"
+        );
+        return;
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::auth::Auth::revoke_remember_selector(&guard_name, user_id, &selector),
+    )
+    .await
+    {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => tracing::error!(
+            operation = "remember_credential_retirement",
+            classification = "not_confirmed",
+            "uncommitted remember credential was suppressed but retirement was not confirmed"
+        ),
+        Ok(Err(_)) => tracing::error!(
+            operation = "remember_credential_retirement",
+            classification = "backend_failure",
+            "uncommitted remember credential was suppressed but retirement failed"
+        ),
+        Err(_) => tracing::error!(
+            operation = "remember_credential_retirement",
+            classification = "timeout",
+            "uncommitted remember credential was suppressed but retirement timed out"
+        ),
+    }
 }
 
 /// Whether the per-request pending-cookies slot is installed.
@@ -1047,6 +1110,18 @@ impl Middleware for SessionMiddleware {
                 }
             };
 
+        // Only a row actually loaded with pending 2FA state can enter the
+        // atomic promotion path after the handler. A fresh same-request
+        // challenge has no old persisted row to migrate.
+        let loaded_two_factor_pending = original_session_id.is_some()
+            && !stale_session_cookie
+            && !session_read_failed
+            && session
+                .data
+                .get(TWO_FACTOR_PENDING_KEY)
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+
         // Age flash data from previous request
         session.age_flash_data();
 
@@ -1672,6 +1747,16 @@ impl Middleware for SessionMiddleware {
         if let Some(session) = session
             && (session.is_dirty() || touch_due)
         {
+            let two_factor_promotion_old_id = (loaded_two_factor_pending
+                && session.user_id.is_some()
+                && !session.data.contains_key(TWO_FACTOR_PENDING_KEY)
+                && original_session_id
+                    .as_ref()
+                    .is_some_and(|old_id| old_id != &session.id))
+            .then_some(original_session_id.as_deref())
+            .flatten();
+            let is_two_factor_promotion = two_factor_promotion_old_id.is_some();
+
             // Regeneration-aware migration: when the session id changed
             // during this request (login, 2FA promotion, remember-me
             // hydration, manual regenerate, logout_and_invalidate),
@@ -1694,7 +1779,8 @@ impl Middleware for SessionMiddleware {
             // security boundary: if it fails, the old authenticated row
             // remains replayable. Fail closed, expire the browser's old
             // credential, and return before writing or issuing the new id.
-            if let Some(ref old_id) = original_session_id
+            if !is_two_factor_promotion
+                && let Some(ref old_id) = original_session_id
                 && old_id != &session.id
             {
                 match self.store.destroy(old_id).await {
@@ -1726,12 +1812,22 @@ impl Middleware for SessionMiddleware {
                 }
             }
 
-            // Build the only carrier for a fresh or rotated session before
-            // committing its row. If construction fails, no undeliverable
-            // session is left in the store.
+            // This runs before the atomic 2FA migration, but after the
+            // unchanged destroy-first boundary for ordinary rotations. A
+            // cookie-construction failure therefore preserves the pending
+            // challenge without weakening replay protection for an old
+            // authenticated session.
             let session_cookie = match self.create_session_cookie(&session.id, touched_at) {
                 Ok(cookie) => cookie,
                 Err(_) => {
+                    if is_two_factor_promotion {
+                        suppress_and_retire_uncommitted_remember(
+                            &session,
+                            &self.config,
+                            &mut pending_cookies,
+                        )
+                        .await;
+                    }
                     retire_unpersisted_opaque_session(
                         magnetar_session_authority.as_ref(),
                         &pending_opaque_session,
@@ -1746,7 +1842,72 @@ impl Middleware for SessionMiddleware {
                 }
             };
 
-            let write_succeeded = match self.store.write(&session).await {
+            let persistence = match two_factor_promotion_old_id {
+                Some(old_id) => match self
+                    .store
+                    .migrate_two_factor_session(old_id, &session)
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(SessionMigrationError::RolledBack(_)) => {
+                        suppress_and_retire_uncommitted_remember(
+                            &session,
+                            &self.config,
+                            &mut pending_cookies,
+                        )
+                        .await;
+                        retire_unpersisted_opaque_session(
+                            magnetar_session_authority.as_ref(),
+                            &pending_opaque_session,
+                            "framework session promotion was rolled back",
+                        )
+                        .await;
+                        tracing::error!(
+                            operation = "two_factor_session_promotion",
+                            classification = "rollback_confirmed",
+                            "atomic two-factor session promotion failed; pending session remains retryable"
+                        );
+                        let failure = Err(crate::http::HttpResponse::text(
+                            "Internal Server Error: two-factor session promotion failed",
+                        )
+                        .status(500));
+                        return attach_pending_cookies(failure, pending_cookies);
+                    }
+                    Err(SessionMigrationError::OutcomeUnknown(_)) => {
+                        suppress_and_retire_uncommitted_remember(
+                            &session,
+                            &self.config,
+                            &mut pending_cookies,
+                        )
+                        .await;
+                        retire_unpersisted_opaque_session(
+                            magnetar_session_authority.as_ref(),
+                            &pending_opaque_session,
+                            "framework session promotion outcome was unknown",
+                        )
+                        .await;
+                        let reconciliation = self.store.destroy(&session.id).await;
+                        tracing::error!(
+                            operation = "two_factor_session_promotion",
+                            classification = if reconciliation.is_ok() {
+                                "outcome_unknown_replacement_retired"
+                            } else {
+                                "outcome_unknown_reconciliation_failed"
+                            },
+                            "atomic two-factor session promotion acknowledgement was lost; client state invalidated"
+                        );
+                        pending_cookies.push(self.create_forget_session_cookie());
+                        let failure = Err(crate::http::HttpResponse::text(
+                            "Internal Server Error: two-factor session promotion outcome unknown",
+                        )
+                        .status(500));
+                        return attach_pending_cookies(failure, pending_cookies);
+                    }
+                },
+                None => self.store.write(&session).await,
+            };
+
+            let write_succeeded = match persistence {
                 Ok(()) => true,
                 Err(e) if !session.is_dirty() => {
                     tracing::warn!(

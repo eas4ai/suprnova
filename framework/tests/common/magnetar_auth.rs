@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use magnetar::sessions::{SessionSummary, WebSessionBinding};
+use once_cell::sync::Lazy;
 use secrecy::{ExposeSecret, SecretString};
 use suprnova::magnetar_integration::engine::{
     HostSignInDecision, LockoutAdmission, LockoutFinalization, MagnetarIssuedSession,
@@ -15,13 +16,48 @@ use suprnova::{LockoutStatus, Session, SessionToken, User, UserId};
 use tokio::sync::Barrier;
 
 static FAIL_NEXT_REMEMBER_ISSUE: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_REMEMBER_REVOKE: AtomicBool = AtomicBool::new(false);
 static FAIL_NEXT_ATTEMPT_WRITE: AtomicBool = AtomicBool::new(false);
 static FAIL_NEXT_ATTEMPT_CANCEL: AtomicBool = AtomicBool::new(false);
 static FAIL_NEXT_ATTEMPT_LOCK: AtomicBool = AtomicBool::new(false);
 static ATTEMPT_ADMISSION_BARRIER: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
+static LIVE_REMEMBER_SELECTORS: Lazy<Mutex<HashSet<(String, String)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+static REMEMBER_SELECTOR_REVOCATIONS: Lazy<Mutex<Vec<(String, String)>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn reset_remember_tracking() {
+    FAIL_NEXT_REMEMBER_REVOKE.store(false, Ordering::SeqCst);
+    LIVE_REMEMBER_SELECTORS
+        .lock()
+        .expect("live remember selectors")
+        .clear();
+    REMEMBER_SELECTOR_REVOCATIONS
+        .lock()
+        .expect("remember selector revocations")
+        .clear();
+}
+
+pub fn live_remember_selector_count() -> usize {
+    LIVE_REMEMBER_SELECTORS
+        .lock()
+        .expect("live remember selectors")
+        .len()
+}
+
+pub fn remember_selector_revocation_count() -> usize {
+    REMEMBER_SELECTOR_REVOCATIONS
+        .lock()
+        .expect("remember selector revocations")
+        .len()
+}
 
 pub fn fail_next_remember_issue() {
     FAIL_NEXT_REMEMBER_ISSUE.store(true, Ordering::SeqCst);
+}
+
+pub fn fail_next_remember_revoke() {
+    FAIL_NEXT_REMEMBER_REVOKE.store(true, Ordering::SeqCst);
 }
 
 pub fn take_unconsumed_remember_issue_failure() -> bool {
@@ -229,8 +265,13 @@ impl MagnetarPasswordAuthEngine for TestEngine {
                 message: "scripted remember issuance failure".to_owned(),
             });
         }
+        let selector = format!("test-selector-{user_id}");
+        LIVE_REMEMBER_SELECTORS
+            .lock()
+            .expect("live remember selectors")
+            .insert((user_id.to_owned(), selector.clone()));
         Ok(magnetar::sessions::RememberCredential::from_host(
-            SecretString::from(format!("test-selector-{user_id}.test-verifier")),
+            SecretString::from(format!("{selector}.test-verifier")),
         ))
     }
 
@@ -257,6 +298,26 @@ impl MagnetarPasswordAuthEngine for TestEngine {
 
     async fn revoke_remember(&self, _user_id: &str) -> magnetar::Result<u64> {
         Ok(0)
+    }
+
+    async fn revoke_remember_selector(
+        &self,
+        user_id: &str,
+        selector: &str,
+    ) -> magnetar::Result<bool> {
+        REMEMBER_SELECTOR_REVOCATIONS
+            .lock()
+            .expect("remember selector revocations")
+            .push((user_id.to_owned(), selector.to_owned()));
+        if FAIL_NEXT_REMEMBER_REVOKE.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::Internal {
+                message: "scripted exact remember revocation failure".to_owned(),
+            });
+        }
+        Ok(LIVE_REMEMBER_SELECTORS
+            .lock()
+            .expect("live remember selectors")
+            .remove(&(user_id.to_owned(), selector.to_owned())))
     }
 
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {

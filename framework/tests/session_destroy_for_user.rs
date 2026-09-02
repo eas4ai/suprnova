@@ -13,14 +13,43 @@
 
 use sea_orm_migration::MigrationName;
 use sea_orm_migration::prelude::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use suprnova::TransactionTrait;
+use suprnova::database::{DatabaseConfig, DbConnection};
 use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
-use suprnova::testing::TestDatabase;
+use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
+use suprnova::{FrameworkError, SessionMigrationError};
 
 /// Migrator containing just the sessions table - matches the schema
 /// the example app installs in production via
 /// `app/src/migrations/m20251208_220000_create_sessions_table.rs`.
 struct TestMigrator;
+
+async fn multi_connection_test_database() -> (TestContainerGuard, DbConnection, PathBuf) {
+    let guard = TestContainer::fake();
+    let target_dir = std::env::current_dir()
+        .expect("test workspace")
+        .join("target");
+    std::fs::create_dir_all(&target_dir).expect("create target directory");
+    let database_path = target_dir.join(format!("p3_07_{}.sqlite", uuid::Uuid::new_v4().simple()));
+    let config = DatabaseConfig::builder()
+        .url(format!("sqlite://{}?mode=rwc", database_path.display()))
+        .max_connections(3)
+        .min_connections(3)
+        .logging(false)
+        .build();
+    let connection = DbConnection::connect(&config)
+        .await
+        .expect("connect shared-memory SQLite pool");
+    TestMigrator::up(connection.inner(), None)
+        .await
+        .expect("migrate file-backed SQLite pool");
+    TestContainer::singleton(connection.clone());
+    (guard, connection, database_path)
+}
 
 #[async_trait::async_trait]
 impl MigratorTrait for TestMigrator {
@@ -80,6 +109,52 @@ enum Sessions {
     Payload,
     CsrfToken,
     LastActivity,
+}
+
+struct LegacySessionStore {
+    mutations: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SessionStore for LegacySessionStore {
+    async fn read(&self, _id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn destroy(&self, _id: &str) -> Result<(), FrameworkError> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+async fn legacy_store_atomic_migration_default_fails_before_mutation() {
+    let store = LegacySessionStore {
+        mutations: AtomicUsize::new(0),
+    };
+    let replacement = SessionData::new("replacement".into(), "csrf".into());
+
+    let error = store
+        .migrate_two_factor_session("pending", &replacement)
+        .await
+        .expect_err("legacy stores must fail closed instead of emulating atomic migration");
+
+    assert!(matches!(&error, SessionMigrationError::RolledBack(_)));
+    assert!(error.to_string().contains("does not support atomic"));
+    assert_eq!(store.mutations.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -245,4 +320,147 @@ async fn write_after_rotate_id_creates_the_new_row() {
         "write after rotate_id must CREATE the new row, not silently \
          no-op via the update-only branch"
     );
+}
+
+#[tokio::test]
+async fn atomic_migration_replaces_the_old_row_with_one_authenticated_row() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let pending = SessionData::new("pending-two-factor".into(), "pending-csrf".into());
+    driver.write(&pending).await.unwrap();
+
+    let mut authenticated = pending.clone();
+    authenticated.rotate_id("authenticated-two-factor");
+    authenticated.user_id = Some("promoted-user".into());
+    driver
+        .migrate_two_factor_session("pending-two-factor", &authenticated)
+        .await
+        .expect("database driver must atomically migrate a 2FA session");
+
+    assert!(driver.read("pending-two-factor").await.unwrap().is_none());
+    let stored = driver
+        .read("authenticated-two-factor")
+        .await
+        .unwrap()
+        .expect("authenticated replacement must exist");
+    assert_eq!(stored.user_id.as_deref(), Some("promoted-user"));
+}
+
+#[tokio::test]
+async fn atomic_migration_insert_failure_rolls_back_the_old_row() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let pending = SessionData::new("pending-two-factor".into(), "pending-csrf".into());
+    driver.write(&pending).await.unwrap();
+    let collision = SessionData::new("occupied-new-id".into(), "other-csrf".into());
+    driver.write(&collision).await.unwrap();
+
+    let mut authenticated = pending.clone();
+    authenticated.rotate_id("occupied-new-id");
+    authenticated.user_id = Some("promoted-user".into());
+    let error = driver
+        .migrate_two_factor_session("pending-two-factor", &authenticated)
+        .await
+        .expect_err("replacement insert collision must fail the whole migration");
+    assert!(matches!(error, SessionMigrationError::RolledBack(_)));
+
+    assert!(
+        driver.read("pending-two-factor").await.unwrap().is_some(),
+        "failed replacement insert must roll back deletion of the pending row"
+    );
+    let occupied = driver
+        .read("occupied-new-id")
+        .await
+        .unwrap()
+        .expect("pre-existing replacement id must remain untouched");
+    assert!(occupied.user_id.is_none());
+}
+
+#[tokio::test]
+async fn concurrent_atomic_migrations_from_one_pending_row_elect_one_winner() {
+    let (guard, database, database_path) = multi_connection_test_database().await;
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let pending = SessionData::new("shared-pending-two-factor".into(), "pending-csrf".into());
+    driver.write(&pending).await.unwrap();
+    let mut first = pending.clone();
+    first.rotate_id("first-authenticated-session");
+    first.user_id = Some("promoted-user".into());
+    let mut second = pending;
+    second.rotate_id("second-authenticated-session");
+    second.user_id = Some("promoted-user".into());
+
+    // Hold SQLite's write lock before either real driver call reaches DELETE.
+    // Both migrations can BEGIN on distinct pooled connections, but their
+    // deletes remain blocked. Observing all three pool connections in use is
+    // the deterministic overlap witness; only then do we release the writer.
+    let blocker = database.inner().begin().await.unwrap();
+    blocker
+        .execute_unprepared(
+            "UPDATE sessions SET csrf_token = csrf_token WHERE id = 'shared-pending-two-factor'",
+        )
+        .await
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let pool = database.inner().get_sqlite_connection_pool().clone();
+    let (first_result, second_result, ()) = tokio::join!(
+        async {
+            barrier.wait().await;
+            driver
+                .migrate_two_factor_session("shared-pending-two-factor", &first)
+                .await
+        },
+        async {
+            barrier.wait().await;
+            driver
+                .migrate_two_factor_session("shared-pending-two-factor", &second)
+                .await
+        },
+        async {
+            barrier.wait().await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if pool.size() as usize - pool.num_idle() == 3 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both migrations must hold distinct transaction connections");
+            blocker.commit().await.unwrap();
+        },
+    );
+    assert_eq!(
+        usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
+        1,
+        "exactly one promotion may consume the pending session row"
+    );
+    assert!(
+        driver
+            .read("shared-pending-two-factor")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let reachable = usize::from(
+        driver
+            .read("first-authenticated-session")
+            .await
+            .unwrap()
+            .is_some(),
+    ) + usize::from(
+        driver
+            .read("second-authenticated-session")
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    assert_eq!(reachable, 1, "only the winning auth row may exist");
+
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
+    std::fs::remove_file(database_path).expect("remove isolated SQLite test database");
 }
