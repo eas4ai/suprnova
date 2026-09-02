@@ -187,7 +187,7 @@ pub use magnetar_integration::SignInOutcome;
     feature = "database-mysql"
 ))]
 pub use magnetar_integration::{
-    MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
+    FactorAuth, MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar_integration::{

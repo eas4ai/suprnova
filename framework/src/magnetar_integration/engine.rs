@@ -1016,6 +1016,20 @@ where
 pub trait MagnetarPasswordAuthEngine: Send + Sync {
     /// Verify a password and run its shared factor gate.
     async fn password_sign_in(&self, input: PasswordAttempt) -> Result<(User, HostSignInDecision)>;
+    /// Complete a factor challenge through the engine shared by every sign-in facade.
+    ///
+    /// The default keeps existing custom engine implementations source-compatible.
+    async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> Result<MagnetarIssuedSession> {
+        let _ = (selector, code);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "factor challenge completion is unavailable".to_owned(),
+        })
+    }
     /// Issue a password-reset token through Magnetar's unified token store.
     async fn issue_password_reset(&self, email: &str) -> Result<Option<HostPasswordResetIssued>>;
     /// Check one password-reset token without consuming it.
@@ -1131,6 +1145,14 @@ where
 {
     async fn password_sign_in(&self, input: PasswordAttempt) -> Result<(User, HostSignInDecision)> {
         MagnetarHostEngine::password_sign_in(self, input).await
+    }
+
+    async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> Result<MagnetarIssuedSession> {
+        MagnetarHostEngine::complete_challenge(self, selector, code).await
     }
 
     async fn password_register(&self, input: RegisterInput) -> Result<User> {

@@ -35,6 +35,44 @@ pub use default_engine::{MagnetarConfig, init_magnetar};
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 pub use sign_in::SignInOutcome;
 
+/// Completion facade for factor challenges returned by Magnetar sign-in providers.
+pub struct FactorAuth;
+
+impl FactorAuth {
+    /// Complete one factor challenge and establish the framework session.
+    ///
+    /// Use the selector from [`SignInOutcome::FactorRequired`]. Successful
+    /// completion rotates the framework session id and CSRF token before the
+    /// request ends, matching an immediately authenticated sign-in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when session middleware or the installed engine is
+    /// unavailable, the selector or code is invalid or already used, user
+    /// lookup fails, or session binding fails.
+    pub async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> Result<(User, Session), FrameworkError> {
+        bind_scope_preflight()?;
+        let engine = password_engine()?;
+        let issued = engine
+            .complete_challenge(selector, code)
+            .await
+            .map_err(password::map_magnetar_password_error)?;
+        let user = engine
+            .user_by_id(issued.session.user_id.as_str())
+            .await
+            .map_err(password::map_magnetar_password_error)?
+            .ok_or_else(|| {
+                FrameworkError::internal("factor-completed session user was not found")
+            })?;
+        bind_issued_session(&issued, false)?;
+        Ok((user, issued.session))
+    }
+}
+
 pub(crate) fn bind_scope_preflight() -> Result<(), FrameworkError> {
     let default_guard = crate::auth::Auth::default_guard_name();
     let replaces_remember =

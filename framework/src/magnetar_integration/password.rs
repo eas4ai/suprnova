@@ -90,7 +90,7 @@ impl PasswordAuth {
     }
 }
 
-fn map_magnetar_password_error(error: magnetar::Error) -> FrameworkError {
+pub(super) fn map_magnetar_password_error(error: magnetar::Error) -> FrameworkError {
     match error {
         magnetar::Error::Conflict { message, .. }
         | magnetar::Error::NotFound {
