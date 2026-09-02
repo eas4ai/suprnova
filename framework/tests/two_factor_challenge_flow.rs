@@ -366,22 +366,29 @@ fn complete_challenge_with_remember_true_reissues_remember_me_cookie() {
         })
         .await;
 
-        // start_challenge queues a clear cookie (revoke); complete_
-        // challenge with remember=true must add a FRESH remember_me
-        // cookie on top of whatever's already there.
-        assert!(
-            after_complete.len() > after_start.len(),
-            "remember=true must push an additional cookie at complete_challenge; \
-             start={start}, complete={complete}",
-            start = after_start.len(),
-            complete = after_complete.len(),
+        // start_challenge queues a clear directive for the browser's single
+        // remember-me slot. Completing the challenge replaces that directive
+        // with one fresh credential instead of leaving duplicate headers whose
+        // order could determine the browser's final state.
+        assert_eq!(
+            after_start.len(),
+            1,
+            "start_challenge must queue one cookie"
         );
-        // The new entry is the remember-me cookie carrying a value
-        // (not the empty-value clear cookie).
+        assert_eq!(after_start[0].name(), "remember_me");
         assert!(
-            after_complete
-                .iter()
-                .any(|c| c.name() == "remember_me" && !c.value().is_empty()),
+            after_start[0].value().is_empty(),
+            "start_challenge must clear the prior remember_me cookie"
+        );
+
+        assert_eq!(
+            after_complete.len(),
+            1,
+            "complete_challenge must replace, not append, the remember_me directive"
+        );
+        assert_eq!(after_complete[0].name(), "remember_me");
+        assert!(
+            !after_complete[0].value().is_empty(),
             "remember=true must queue a fresh remember_me cookie with a non-empty value"
         );
 
