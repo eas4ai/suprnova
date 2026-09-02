@@ -2,8 +2,13 @@
 
 use hyper::Method;
 
+use crate::ws::{OriginPolicy, WsConfig};
 use crate::{FrameworkError, Router};
 
+use super::async_updates::{
+    LIVE_ASYNC_EVENTS_PATH, LIVE_ASYNC_MEMBERSHIP_PATH, LIVE_ASYNC_SOCKET_PATH,
+    LIVE_ASYNC_SUBSCRIPTION_PATH,
+};
 use super::attestation::LiveOperation;
 use super::context::{LiveRouteMetadata, LiveRouteSecurityPolicy};
 
@@ -54,6 +59,53 @@ fn install(mut router: Router) -> Result<Router, FrameworkError> {
             LiveRouteMetadata::new(LiveOperation::Upload, strict_action_policy()),
         )?;
     }
+    router = router
+        .try_methods(
+            &LIVE_HTTP_METHODS,
+            LIVE_ASYNC_SUBSCRIPTION_PATH,
+            super::async_transport::subscriptions,
+        )?
+        .into();
+    router = router
+        .try_methods(
+            &LIVE_HTTP_METHODS,
+            LIVE_ASYNC_MEMBERSHIP_PATH,
+            super::async_transport::memberships,
+        )?
+        .into();
+    router = router
+        .try_methods(
+            &LIVE_HTTP_METHODS,
+            LIVE_ASYNC_EVENTS_PATH,
+            super::async_transport::events,
+        )?
+        .into();
+    for path in [
+        LIVE_ASYNC_SUBSCRIPTION_PATH,
+        LIVE_ASYNC_MEMBERSHIP_PATH,
+        LIVE_ASYNC_EVENTS_PATH,
+    ] {
+        for method in LIVE_HTTP_METHODS {
+            router.register_live_route_metadata(
+                method,
+                path,
+                LiveRouteMetadata::new(LiveOperation::SseControl, strict_action_policy()),
+            )?;
+        }
+    }
+    router = router.try_ws_with_config(
+        LIVE_ASYNC_SOCKET_PATH,
+        super::async_transport::AsyncSocketHandler,
+        WsConfig {
+            origin_policy: OriginPolicy::SameOrigin,
+            ..WsConfig::default()
+        },
+    )?;
+    router.register_live_route_metadata(
+        Method::GET,
+        LIVE_ASYNC_SOCKET_PATH,
+        LiveRouteMetadata::new(LiveOperation::WebSocketHandshake, strict_action_policy()),
+    )?;
     router.mark_live_installed(LIVE_ROUTE_VERSION);
     Ok(router)
 }

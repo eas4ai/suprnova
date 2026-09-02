@@ -398,7 +398,7 @@ describe("browser SSE authorization adapters", () => {
     port.unsubscribe("subscription-001");
 
     expect(native).toHaveBeenCalledOnce();
-    expect(native.mock.calls[0]?.[0]).toBe("https://app.example.test/__live/async/events");
+    expect(native.mock.calls[0]?.[0]).toBe("https://app.example.test/__live/v1/async/events");
     expect(native.mock.calls[0]?.[1]).toEqual({ withCredentials: true });
     expect(fetchPort).not.toHaveBeenCalled();
     expect(membership.mock.calls.map(([request]) => request.operation)).toEqual([
@@ -432,7 +432,7 @@ describe("browser SSE authorization adapters", () => {
     const [input, init] = fetchPort.mock.calls[0] ?? [];
     const requestUrl =
       typeof input === "string" ? input : input instanceof URL ? input.href : (input?.url ?? "");
-    expect(requestUrl).toBe("https://app.example.test/__live/async/events");
+    expect(requestUrl).toBe("https://app.example.test/__live/v1/async/events");
     expect(requestUrl).not.toContain(secret);
     expect(new Headers(init?.headers).get("Authorization")).toBe(`SuprnovaAsync ${secret}`);
     expect(native).not.toHaveBeenCalled();

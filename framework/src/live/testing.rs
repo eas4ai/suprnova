@@ -295,11 +295,15 @@ pub enum LiveTestRuntimeProvider {
     UploadEvidence,
     /// Host storage finalizer.
     UploadFinalizer,
+    /// Current stream subscription authorization.
+    SubscriptionAuthorization,
+    /// Descriptor-scoped transport credential store.
+    SubscriptionCredentials,
 }
 
 impl LiveTestRuntimeProvider {
     /// Every provider that must be present before traffic begins.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::Clock,
         Self::Random,
         Self::KeyRing,
@@ -324,6 +328,8 @@ impl LiveTestRuntimeProvider {
         Self::UploadApplicationValidation,
         Self::UploadEvidence,
         Self::UploadFinalizer,
+        Self::SubscriptionAuthorization,
+        Self::SubscriptionCredentials,
     ];
 
     /// Stable redacted provider name used in boot diagnostics.
@@ -388,6 +394,12 @@ const fn runtime_provider(
         }
         LiveTestRuntimeProvider::UploadFinalizer => {
             super::runtime::RuntimeProviderSlot::UploadFinalizer
+        }
+        LiveTestRuntimeProvider::SubscriptionAuthorization => {
+            super::runtime::RuntimeProviderSlot::SubscriptionAuthorization
+        }
+        LiveTestRuntimeProvider::SubscriptionCredentials => {
+            super::runtime::RuntimeProviderSlot::SubscriptionCredentials
         }
     }
 }
@@ -668,6 +680,123 @@ pub fn prepare_live_router_for_test(
     }
     runtime.finalize_mount_catalog()?;
     Ok(runtime)
+}
+
+/// Test clock whose reading only moves when a test advances it.
+pub struct AdjustableTestClock {
+    now_ms: std::sync::atomic::AtomicU64,
+}
+
+impl AdjustableTestClock {
+    /// Starts the clock at `now_ms` milliseconds since the Unix epoch.
+    #[must_use]
+    pub const fn new(now_ms: u64) -> Self {
+        Self {
+            now_ms: std::sync::atomic::AtomicU64::new(now_ms),
+        }
+    }
+
+    /// Returns the current reading.
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        self.now_ms.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Moves the clock forward by `delta_ms`.
+    pub fn advance_ms(&self, delta_ms: u64) {
+        self.now_ms
+            .fetch_add(delta_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl suprnova_live::clock::Clock for AdjustableTestClock {
+    fn now(&self) -> Result<suprnova_live::identity::UnixMillis, suprnova_live::clock::ClockError> {
+        Ok(suprnova_live::identity::UnixMillis::new(self.now_ms()))
+    }
+}
+
+/// Prepares the runtime like [`prepare_live_router_for_test`] with an adjustable clock.
+pub fn prepare_live_router_with_clock_for_test(
+    router: &crate::Router,
+    clock: Arc<AdjustableTestClock>,
+) -> Result<super::LiveRuntime, crate::FrameworkError> {
+    let config = crate::App::resolve::<super::LiveConfig>().unwrap_or_default();
+    let registry = crate::App::resolve::<super::LiveRegistry>()
+        .unwrap_or_else(|_| super::LiveRegistry::builder().build());
+    let clock: Arc<dyn suprnova_live::clock::Clock> = clock;
+    let runtime = super::runtime::assemble_for_harness_with_clock(config, registry, clock)?;
+    crate::container::testing::TestContainer::singleton(runtime.clone());
+    for entry in router.take_live_mount_entries()? {
+        runtime.register_mount(entry)?;
+    }
+    runtime.finalize_mount_catalog()?;
+    Ok(runtime)
+}
+
+/// Bounded observation of one asynchronous document transport.
+pub struct AsyncTransportReport {
+    kind: &'static str,
+    credential: Option<String>,
+    /// Number of committed logical memberships.
+    pub memberships: usize,
+    /// Envelopes currently retained in the bounded delivery buffer.
+    pub retained_events: usize,
+    /// Bytes currently retained in the bounded delivery buffer.
+    pub retained_bytes: usize,
+    /// Whether the document degraded under backpressure.
+    pub degraded: bool,
+    /// Whether a physical reader is attached.
+    pub reader_active: bool,
+    /// Coalesced refreshes since the reader attached.
+    pub coalesced: u64,
+    /// Lanes that had to re-baseline after a delivery gap.
+    pub degraded_lanes: u64,
+}
+
+impl AsyncTransportReport {
+    /// Returns the transport kind (`sse` or `websocket`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// Returns whether this transport is bound to `credential`.
+    #[must_use]
+    pub fn credential_matches(&self, credential: &str) -> bool {
+        self.credential.as_deref() == Some(credential)
+    }
+}
+
+impl fmt::Debug for AsyncTransportReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AsyncTransportReport:redacted>")
+    }
+}
+
+/// Returns bounded reports for every asynchronous transport of the runtime.
+#[must_use]
+pub fn inspect_async_transports_for_test(runtime: &LiveRuntime) -> Vec<AsyncTransportReport> {
+    runtime
+        .async_state()
+        .reports()
+        .into_iter()
+        .map(|report| AsyncTransportReport {
+            kind: report.kind,
+            credential: report.credential,
+            memberships: report.memberships,
+            retained_events: report.retained_events,
+            retained_bytes: report.retained_bytes,
+            degraded: report.degraded,
+            reader_active: report.reader_active,
+            coalesced: report.coalesced,
+            degraded_lanes: report.degraded_lanes,
+        })
+        .collect()
+}
+
+/// Waits until the SSE transport bound to `credential` has no attached reader.
+pub async fn await_async_transport_retirement_for_test(runtime: &LiveRuntime, credential: &str) {
+    runtime.async_state().await_retirement(credential).await;
 }
 
 /// Returns whether macro registration attached executable request-owned hooks.
@@ -1330,6 +1459,8 @@ pub struct LiveRuntimeReport {
     upload_services: bool,
     mount_catalog: bool,
     response_and_cancellation: bool,
+    subscription_ports: bool,
+    async_state: bool,
 }
 
 impl LiveRuntimeReport {
@@ -1348,6 +1479,20 @@ impl LiveRuntimeReport {
             && self.upload_services
             && self.mount_catalog
             && self.response_and_cancellation
+            && self.subscription_ports
+            && self.async_state
+    }
+
+    /// Returns whether the subscription authorization and credential ports are installed.
+    #[must_use]
+    pub const fn has_subscription_ports(&self) -> bool {
+        self.subscription_ports
+    }
+
+    /// Returns whether the asynchronous-update runtime state was assembled.
+    #[must_use]
+    pub const fn has_async_state(&self) -> bool {
+        self.async_state
     }
 
     /// Returns whether the runtime owns a wall-clock provider.
@@ -1443,6 +1588,8 @@ pub fn inspect_runtime(runtime: &LiveRuntime) -> LiveRuntimeReport {
         upload_services: readiness.upload_services,
         mount_catalog: readiness.mount_catalog,
         response_and_cancellation: readiness.response_and_cancellation,
+        subscription_ports: readiness.subscription_ports,
+        async_state: readiness.async_state,
     }
 }
 

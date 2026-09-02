@@ -298,6 +298,11 @@ impl Request {
             .record_passed(self.live_request_identity, check, fact)
     }
 
+    pub(crate) fn record_live_security_check_before_chain(&mut self, check: SecurityCheck) -> bool {
+        self.live_security_attestation
+            .record_passed_before_chain(self.live_request_identity, check)
+    }
+
     pub(crate) fn record_live_security_not_required(
         &mut self,
         check: SecurityCheck,

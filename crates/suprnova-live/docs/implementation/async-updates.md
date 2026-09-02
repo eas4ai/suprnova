@@ -3,9 +3,10 @@
 Iteration 004 implements typed server events, authorized logical
 subscriptions, polling, multiplexed push transports, continuity recovery, and
 the optional `async@1` browser artifact. This host-neutral engine and
-conformance machinery now lives in the integrated internal crate. It does not
-claim that Iteration 005's production broadcaster, Suprnova route adapter, or a
-document-wide scheduler shared with uploads and Live actions is complete.
+conformance machinery now lives in the integrated internal crate. Iteration
+005 adds the Suprnova route adapter described under "Suprnova routes" below. It
+does not claim that a durable production broadcaster or a document-wide
+scheduler shared with uploads and Live actions is complete.
 
 Suprnova can serve SSR pages, links, and forms without JavaScript, and a Live
 island's initial HTML is server rendered. `live:poll`, `live:stream`, registered
@@ -248,3 +249,76 @@ arbiter that would prioritize actions, fresh renders, background refreshes, and
 upload chunks together. Upload and async features each enforce their shipped
 bounded ownership and lifecycle contracts; describing inter-feature priority,
 fairness, or coalescing as present would be inaccurate.
+
+## Suprnova routes
+
+`Router::try_live()` registers four reserved versioned paths next to the
+action and upload endpoints. They are collision-checked like every other
+`/__live/` path and run through the ordinary middleware chain, so session,
+principal, tenant, origin, and rate-limit facts are recorded before any
+subscription authority is touched.
+
+| Path | Method | Purpose |
+|---|---|---|
+| `/__live/v1/async/subscriptions` | `POST` | `issue` or `renew` one logical subscription for a browser-selected mount |
+| `/__live/v1/async/memberships` | `POST` | `subscribe` or `unsubscribe` one issued subscription on an open SSE transport |
+| `/__live/v1/async/events` | `GET` | The single reader of one SSE document transport |
+| `/__live/v1/async/socket` | WebSocket | One same-origin WebSocket document transport |
+
+Control bodies are JSON objects of at most 16 KiB with unknown fields
+rejected, the `x-suprnova-live: async-v1` header, and `protocol_version` 1. A
+browser identifies its document with an opaque `document_instance` of 16 to
+64 topic-segment characters; the runtime never accepts a browser-proposed
+baseline, credential, or scope. Issuance validates the mount through the same
+catalog as actions and uploads, installs the engine's subscription ports only
+for that request, and lets the engine sign the descriptor. The response is the
+browser projection of the signed claims plus a document authorization scope
+derived from the current session, principal, and tenant. The descriptor itself
+never leaves the server; the browser holds only the subscription identity, the
+descriptor binding, and for SSE a bearer credential shared by every island of
+the same document transport. WebSocket documents authenticate with the session
+cookie and no bearer. Renewal presents the prior binding and the last observed
+position; it re-authorizes through the engine, rotates the binding, replays the
+retained log tail as `complete_replay`, or answers `authoritative_no_tail`
+when the browser is current. A position ahead of the log is
+`async_position_invalid`, and a consumed binding is `async_subscription_unknown`.
+
+Stream authorization is a Suprnova Gate ability named
+`live:{component}.stream.{stream}` with resource `{component}::{stream}`;
+anonymous requests are denied before any Gate runs. Trusted mount parameters
+for topic templates are `component`, `slot`, `document_key`, `principal`
+(the authenticated identifier), and `tenant`, each only when it is a single
+topic segment, so a template that needs an unspellable identity fails closed.
+Transport credentials are minted in process from 32 random bytes and rotate on
+every connect and renewal; a process restart invalidates them and browsers
+issue afresh.
+
+Application code publishes through `suprnova::live::LiveStreams`:
+`refresh(topic)` and `event::<T>(topic, LiveEventTarget, CanonicalValue)`
+append to the bounded per-subscription log of every current subscription
+whose signed topics contain `topic`. The log keeps at most 256 envelopes or
+64 KiB per subscription; heartbeats are appended to idle memberships every
+five seconds and the browser heartbeat timeout is fifteen seconds. Delivery
+runs through the engine's bounded document transport with the Iteration 004
+limits (64 retained events, 256 KiB, 32 KiB payloads, 128 memberships per
+document). A gap or degraded lane is re-baselined at its delivery cursor
+through `recover_from_authoritative_refresh`; the browser deduplicates the
+overlap. One SSE transport has exactly one reader; a second reader is
+`async_transport_reader_exists`, a reader disconnect retires the transport and
+releases every membership, and a later reader must present a new
+`Suprnova-Transport-Generation`. Membership controls carry a per-generation
+nonce of at most 128 bytes; a replay is `async_control_replayed`, a stale
+generation `async_generation_stale`, and a control before the reader exists
+`async_transport_closed`. WebSocket frames are text only, at most 512 bytes
+per control, and at most 64 controls per connection; violations close the
+socket with code 1008 and a bounded reason. Cross-origin, `null`, wildcard,
+and missing `Origin` upgrades are rejected with HTTP 403 before any middleware
+runs, and the engine's `WebSocketOriginPolicy` rechecks the exact application
+origin after the upgrade.
+
+Per scope the runtime keeps at most 8 transports and 512 issued subscriptions;
+expired authority is pruned on the next control. Every failure is one JSON
+object `{"error": code}` with a stable `async_*` code and `Cache-Control:
+no-store`. Test-only inspection lives in `suprnova::live::testing`
+(`inspect_async_transports_for_test`, `await_async_transport_retirement_for_test`,
+`AdjustableTestClock`, `prepare_live_router_with_clock_for_test`).

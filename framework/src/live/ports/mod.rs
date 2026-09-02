@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use suprnova_live::action::ActionAuthorizationPort;
+use suprnova_live::async_updates::SubscriptionAuthorizationPort;
 use suprnova_live::execution::{AcceptedOutcomeReporter, ExecutionTracePort, TransactionPort};
 use suprnova_live::upload::{
     DirectUploadProvider, QuarantineStore, ReverseProxyUploadProvider, UploadApplicationValidator,
@@ -15,6 +16,7 @@ pub(crate) mod authorization;
 pub(crate) mod cancellation;
 pub(crate) mod events;
 pub(crate) mod response;
+pub(crate) mod subscription;
 pub(crate) mod telemetry;
 pub(crate) mod transaction;
 pub(crate) mod upload;
@@ -33,6 +35,8 @@ pub(crate) struct HostPorts {
     pub(crate) cancellation: Arc<cancellation::SuprnovaCancellationPort>,
     pub(crate) response: Arc<response::SuprnovaResponseIntentPort>,
     pub(crate) uploads: UploadHostPorts,
+    pub(crate) subscription_authorization: Arc<dyn SubscriptionAuthorizationPort>,
+    pub(crate) subscription_credentials: Arc<subscription::SuprnovaSubscriptionCredentials>,
 }
 
 pub(crate) struct UploadHostPorts {
@@ -128,6 +132,10 @@ impl HostPorts {
             cancellation: Arc::new(cancellation::SuprnovaCancellationPort),
             response: Arc::new(response::SuprnovaResponseIntentPort),
             uploads,
+            subscription_authorization: Arc::new(subscription::SuprnovaSubscriptionAuthorization),
+            subscription_credentials: Arc::new(
+                subscription::SuprnovaSubscriptionCredentials::default(),
+            ),
         })
     }
 
@@ -155,6 +163,8 @@ impl HostPorts {
             upload_application_validation: Some(Arc::clone(&self.uploads.application_validation)),
             upload_evidence: Some(Arc::clone(&self.uploads.evidence)),
             upload_finalizer: Some(Arc::clone(&self.uploads.finalizer)),
+            subscription_authorization: Some(Arc::clone(&self.subscription_authorization)),
+            subscription_credentials: Some(Arc::clone(&self.subscription_credentials)),
         }
     }
 }
@@ -183,6 +193,8 @@ pub(super) struct HostPortCandidates {
     pub(super) upload_application_validation: Option<Arc<dyn UploadApplicationValidator>>,
     pub(super) upload_evidence: Option<Arc<dyn UploadValidationStore>>,
     pub(super) upload_finalizer: Option<Arc<dyn UploadFinalizer>>,
+    pub(super) subscription_authorization: Option<Arc<dyn SubscriptionAuthorizationPort>>,
+    pub(super) subscription_credentials: Option<Arc<subscription::SuprnovaSubscriptionCredentials>>,
 }
 
 impl HostPortCandidates {
@@ -249,6 +261,12 @@ impl HostPortCandidates {
                     .upload_finalizer
                     .ok_or_else(|| missing("upload finalizer"))?,
             },
+            subscription_authorization: self
+                .subscription_authorization
+                .ok_or_else(|| missing("subscription authorization"))?,
+            subscription_credentials: self
+                .subscription_credentials
+                .ok_or_else(|| missing("subscription credentials"))?,
         })
     }
 }

@@ -313,7 +313,7 @@ async function trackedFetch(input, init) {
     }
     return response;
   }
-  if (!url.endsWith("/__live/async/events")) return fetch(input, init);
+  if (!url.endsWith("/__live/v1/async/events")) return fetch(input, init);
   observations.connections += 1;
   observations.activeConnections += 1;
   observations.resources.connections = observations.activeConnections;

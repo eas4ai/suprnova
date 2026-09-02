@@ -4,6 +4,64 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-02 -- Framework asynchronous transport routes
+
+Suprnova now registers the reserved versioned `/__live/v1/async/subscriptions`,
+`/__live/v1/async/memberships`, `/__live/v1/async/events`, and
+`/__live/v1/async/socket` paths next to the action and upload endpoints, using
+the existing router, middleware chain, response, and WebSocket upgrade
+machinery. Components declare `streams(...)` in the `#[live]` attribute and the
+macro emits the engine's subscription metadata. The framework installs the
+engine's subscription registry, authorization, continuity, and credential ports
+only for asynchronous requests; the engine signs every descriptor, verifies
+every membership, and drives bounded document delivery. Stream authorization is
+the Gate ability `live:{component}.stream.{stream}`, application code publishes
+through `suprnova::live::LiveStreams`, and the route, credential, limit, and
+failure contracts are recorded in `docs/implementation/async-updates.md`.
+
+Two engine accessors became public for the host: `SubscriptionError::new` and
+`TrustedLiveRequestContext::host_scope_facts`. The production browser artifact
+and the async reference host now use the versioned SSE and WebSocket paths. The
+framework's WebSocket upgrade path records its pre-chain `Origin` proof through
+a new `record_passed_before_chain` attestation entry, because that check runs
+before the middleware chain and therefore cannot claim a position in the
+enforced execution order. Engine document sessions sit behind per-transport
+asynchronous locks so engine callbacks into the host ports never re-enter the
+runtime's table mutex.
+
+Verification completed from the integration worktree:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_async_backpressure --test live_async_routes --test live_async_security
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_async_backpressure --test live_async_routes --test live_async_security --test live_boot --test live_dependency_topology --test live_document_routes --test live_external_authoring --test live_facade_contract --test live_hostile_adapter --test live_macro_expansion --test live_public_api --test live_routes --test live_trusted_context --test live_upload_policy --test live_upload_providers --test live_upload_routes --test live_upload_security --test live_view_contract
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --lib live::async_transport
+rtk cargo fmt -p suprnova -p suprnova-live -p suprnova-live-test-support -- --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo clippy -p suprnova -p suprnova-live -p suprnova-live-test-support --all-targets --all-features
+(cd crates/suprnova-live/browser && rtk npm run format:check && rtk npm run lint && rtk npm run typecheck)
+(cd crates/suprnova-live/browser && rtk npm run test:unit -- tests/async-connections.test.ts tests/async-feature.test.ts)
+(cd crates/suprnova-live/browser && rtk npm run build && rtk npm run build:check)
+(cd crates/suprnova-live/browser && rtk npx playwright test e2e/async-lifecycle.spec.ts --project=chromium)
+rtk tests/documentation_contract.sh
+rtk node scripts/check-implementation-docs.mjs
+rtk node scripts/check-specs.mjs
+rtk git diff --check
+```
+
+The three new framework suites passed 14 cases on two consecutive runs, the
+complete framework Live sweep passed 102 cases across 18 binaries, the four
+transport parser unit cases passed, and 69 browser async unit cases, the
+deterministic artifact check, and the five Chromium async lifecycle cases
+passed against the rebuilt artifact and the reference host. Clippy reported
+zero errors and no new warnings; the previously reviewed
+`execution/service.rs` argument-count warning and the pre-existing test-module
+notes outside the Live tree remain. The fairness assertion in
+`live_async_backpressure` is a liveness bound (the sibling is served within the
+backlog admitted before it joined) because kernel socket buffering makes a
+tighter interleaving bound nondeterministic through a real socket; the
+coalescing assertion is checked only after envelopes were read, which is the
+state barrier proving the document drained. The full integrated gate was not
+rerun for this checkpoint.
+
 ## 2026-09-02 -- Standalone synchronization and budget removal
 
 The integrated crate merged the final standalone `main`, commit `59395ec`,

@@ -5,6 +5,8 @@
 //! shipped browser runtime.
 
 pub mod action;
+mod async_transport;
+pub(crate) mod async_updates;
 pub(crate) mod attestation;
 mod config;
 pub(crate) mod context;
@@ -16,6 +18,7 @@ mod response;
 mod routes;
 mod runtime;
 pub(crate) use runtime::LiveMountRegistration;
+mod streams;
 mod tenant;
 mod upload;
 mod upload_host;
@@ -36,6 +39,7 @@ pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
 pub use runtime::LiveRuntime;
+pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};
 

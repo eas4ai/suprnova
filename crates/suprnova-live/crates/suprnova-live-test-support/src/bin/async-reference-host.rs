@@ -125,8 +125,8 @@ fn serve(mut stream: TcpStream, state: Arc<Mutex<HostState>>) -> std::io::Result
         ("POST", "/navigation/post") => navigation_post(&mut stream, &request),
         ("POST", "/authorize") => authorize(&mut stream, &request, &state),
         ("POST", "/membership") => membership(&mut stream, &request, &state),
-        ("GET", "/__live/async/events") => event_stream(stream, request, state),
-        ("GET", "/__live/async/websocket") => respond(
+        ("GET", "/__live/v1/async/events") => event_stream(stream, request, state),
+        ("GET", "/__live/v1/async/socket") => respond(
             &mut stream,
             426,
             "text/plain",

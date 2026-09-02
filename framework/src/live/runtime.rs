@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use crate::{App, FrameworkError};
 use sha2::{Digest, Sha256};
+use suprnova_live::async_updates::{
+    StreamPosition, SubscriptionCredentialPort, TrustedMountParameters,
+};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::{
     AcceptedParentRevision, ChildParameterLimits, ExpectedChildParametersV2,
@@ -61,6 +64,9 @@ use suprnova_live::validation::ValidationEngine;
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 use uuid::Uuid;
 
+use super::async_updates::{AsyncErrorKind, AsyncState};
+use super::context::SubscriptionCapabilities;
+use super::ports::subscription::{FixedSubscriptionBaseline, SuprnovaSubscriptionRegistry};
 use super::{LiveConfig, LiveRegistry};
 use crate::Request;
 
@@ -84,6 +90,7 @@ struct RuntimeGraph {
     context_validator: LiveRequestContextValidator,
     ports: super::ports::HostPorts,
     uploads: UploadRuntimeGraph,
+    async_state: Arc<AsyncState>,
     mount_builder: Mutex<Option<MountCatalogBuilder>>,
     mount_catalog: OnceLock<Arc<MountCatalog>>,
     upload_mount_builder: Mutex<Option<Vec<UploadMountSelector>>>,
@@ -248,6 +255,8 @@ pub(super) enum RuntimeProviderSlot {
     UploadApplicationValidation,
     UploadEvidence,
     UploadFinalizer,
+    SubscriptionAuthorization,
+    SubscriptionCredentials,
 }
 
 impl RuntimeProviderSlot {
@@ -277,6 +286,8 @@ impl RuntimeProviderSlot {
             Self::UploadApplicationValidation => "upload application validation",
             Self::UploadEvidence => "upload validation evidence",
             Self::UploadFinalizer => "upload finalizer",
+            Self::SubscriptionAuthorization => "subscription authorization",
+            Self::SubscriptionCredentials => "subscription credentials",
         }
     }
 }
@@ -360,6 +371,12 @@ impl RuntimeProviderCandidates {
             }
             RuntimeProviderSlot::UploadEvidence => self.ports.upload_evidence = None,
             RuntimeProviderSlot::UploadFinalizer => self.ports.upload_finalizer = None,
+            RuntimeProviderSlot::SubscriptionAuthorization => {
+                self.ports.subscription_authorization = None;
+            }
+            RuntimeProviderSlot::SubscriptionCredentials => {
+                self.ports.subscription_credentials = None;
+            }
         }
     }
 
@@ -954,10 +971,58 @@ impl LiveRuntime {
         slot: &str,
         document_key: &str,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
-        let selector = self.select_upload_mount(component, slot, document_key)?;
+        let selector = self.select_mount(component, slot, document_key)?;
         let base_scope = super::context::request_scope(request)?;
         let scope = super::upload::derive_mount_scope(&selector.scope_binding(base_scope))?;
-        self.validate_request_context_with_scope(request, selector.selection.clone(), Some(scope))
+        self.validate_request_context_with_scope(
+            request,
+            selector.selection.clone(),
+            Some(scope),
+            None,
+        )
+    }
+
+    /// Validates one asynchronous-update request against the browser-selected mount.
+    ///
+    /// The subscription ports are installed only here, so action and upload
+    /// contexts can never mint or renew subscription authority.
+    pub(crate) fn validate_async_request_context(
+        &self,
+        request: &Request,
+        component: &str,
+        slot: &str,
+        document_key: &str,
+        baseline: StreamPosition,
+    ) -> Result<(TrustedLiveRequestContext, TrustedMountParameters), AsyncErrorKind> {
+        let selector = self
+            .select_mount(component, slot, document_key)
+            .map_err(|_| AsyncErrorKind::MountUnknown)?;
+        let parameters = trusted_mount_parameters(request, &selector)
+            .map_err(|_| AsyncErrorKind::ContextRejected)?;
+        let subscription = SubscriptionCapabilities {
+            registry: Arc::new(SuprnovaSubscriptionRegistry::new(
+                Arc::clone(&self.graph.engine_registry),
+                parameters.clone(),
+            )),
+            authorization: Arc::clone(&self.graph.ports.subscription_authorization),
+            continuity: Arc::new(FixedSubscriptionBaseline::new(baseline)),
+            credentials: Arc::clone(&self.graph.ports.subscription_credentials)
+                as Arc<dyn SubscriptionCredentialPort>,
+        };
+        let context = self
+            .validate_request_context_with_scope(
+                request,
+                selector.selection.clone(),
+                None,
+                Some(subscription),
+            )
+            .map_err(|_| AsyncErrorKind::ContextRejected)?;
+        Ok((context, parameters))
+    }
+
+    /// Returns the shared asynchronous-update runtime state.
+    pub(crate) fn async_state(&self) -> &Arc<AsyncState> {
+        &self.graph.async_state
     }
 
     pub(crate) fn validate_upload_action_context(
@@ -995,8 +1060,13 @@ impl LiveRuntime {
         }
         let base_scope = super::context::request_scope(request)?;
         let scope = super::upload::derive_mount_scope(&selector.scope_binding(base_scope))?;
-        self.validate_request_context_with_scope(request, selector.selection.clone(), Some(scope))
-            .map(Some)
+        self.validate_request_context_with_scope(
+            request,
+            selector.selection.clone(),
+            Some(scope),
+            None,
+        )
+        .map(Some)
     }
 
     pub(crate) async fn resolve_upload_request_context(
@@ -1015,6 +1085,7 @@ impl LiveRuntime {
                 request,
                 selector.selection.clone(),
                 Some(scope),
+                None,
             )?);
         }
         if contexts.is_empty() {
@@ -1155,7 +1226,7 @@ impl LiveRuntime {
         self.graph.ports.uploads.reverse_proxy_adapter.as_ref()
     }
 
-    fn select_upload_mount(
+    fn select_mount(
         &self,
         component: &str,
         slot: &str,
@@ -1185,8 +1256,7 @@ impl LiveRuntime {
         slot: &str,
         document_key: &str,
     ) -> Result<(), FrameworkError> {
-        self.select_upload_mount(component, slot, document_key)
-            .map(|_| ())
+        self.select_mount(component, slot, document_key).map(|_| ())
     }
 
     pub(super) fn inspect_upload_mount_authority_for_test(
@@ -1196,7 +1266,7 @@ impl LiveRuntime {
         document_key: &str,
         base_scope: ScopeFingerprint,
     ) -> Result<UploadMountAuthorityTestFixture, FrameworkError> {
-        let selector = self.select_upload_mount(component, slot, document_key)?;
+        let selector = self.select_mount(component, slot, document_key)?;
         let binding = selector.scope_binding(base_scope);
         let scope = super::upload::derive_mount_scope(&binding)?;
         Ok(UploadMountAuthorityTestFixture { binding, scope })
@@ -1254,7 +1324,7 @@ impl LiveRuntime {
         _current_slot: IslandSlot,
         selection: MountSelection,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
-        self.validate_request_context_with_scope(request, selection, None)
+        self.validate_request_context_with_scope(request, selection, None, None)
     }
 
     fn validate_request_context_with_scope(
@@ -1262,6 +1332,7 @@ impl LiveRuntime {
         request: &Request,
         selection: MountSelection,
         scope_override: Option<ScopeFingerprint>,
+        subscription: Option<SubscriptionCapabilities>,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
         self.finalize_mount_catalog()?;
         let now = self.graph.clock.now().map_err(|_| live_boot_error())?;
@@ -1273,6 +1344,7 @@ impl LiveRuntime {
             scope_override,
             Arc::clone(&self.graph.ports.authorization),
             Arc::clone(&self.graph.ports.uploads.authorization),
+            subscription,
         )?;
         let catalog = self.graph.mount_catalog.get().ok_or_else(live_boot_error)?;
         self.graph
@@ -1390,8 +1462,53 @@ impl LiveRuntime {
             response_and_cancellation: Arc::strong_count(&self.graph.ports.response) > 0
                 && Arc::strong_count(&self.graph.ports.cancellation) > 0,
             mount_catalog: self.graph.mount_catalog.get().is_some(),
+            subscription_ports: Arc::strong_count(&self.graph.ports.subscription_authorization) > 0
+                && Arc::strong_count(&self.graph.ports.subscription_credentials) > 0,
+            async_state: Arc::strong_count(&self.graph.async_state) > 0,
         }
     }
+}
+
+/// Trusted topic parameters of one request for one finalized mount.
+///
+/// Every value is a single topic segment; identities that cannot be spelled
+/// as one segment are omitted so templates needing them fail closed.
+fn trusted_mount_parameters(
+    request: &Request,
+    selector: &UploadMountSelector,
+) -> Result<TrustedMountParameters, FrameworkError> {
+    let mut values = vec![
+        (
+            "component".to_owned(),
+            selector.selection.component().as_str().to_owned(),
+        ),
+        (
+            "slot".to_owned(),
+            selector.selection.slot().as_str().to_owned(),
+        ),
+        (
+            "document_key".to_owned(),
+            selector.document_key.as_str().to_owned(),
+        ),
+    ];
+    if let Some(principal) = crate::auth::guard::Auth::id() {
+        values.push(("principal".to_owned(), principal));
+    }
+    if let Some(tenant) = request.live_tenant() {
+        values.push(("tenant".to_owned(), tenant.to_owned()));
+    }
+    values.retain(|(_, value)| topic_segment(value));
+    TrustedMountParameters::new(values)
+        .map_err(|_| FrameworkError::internal("Live mount parameters were rejected"))
+}
+
+fn topic_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn assemble_runtime(
@@ -1509,6 +1626,11 @@ fn assemble_runtime(
     let context_validator = LiveRequestContextValidator::new(config.max_context_lifetime_ms())
         .map_err(|_| live_boot_error())?;
     let uploads = assemble_upload_runtime(&ports, Arc::clone(&clock))?;
+    let async_state = AsyncState::new(
+        build_key_ring()?,
+        Arc::clone(&clock),
+        Arc::clone(&engine_registry),
+    )?;
 
     Ok(LiveRuntime {
         graph: Arc::new(RuntimeGraph {
@@ -1531,6 +1653,7 @@ fn assemble_runtime(
             context_validator,
             ports,
             uploads,
+            async_state,
             mount_builder: Mutex::new(Some(MountCatalogBuilder::new())),
             mount_catalog: OnceLock::new(),
             upload_mount_builder: Mutex::new(Some(Vec::new())),
@@ -1544,6 +1667,19 @@ pub(super) fn assemble_for_harness(
     registry: LiveRegistry,
 ) -> Result<LiveRuntime, FrameworkError> {
     let candidates = RuntimeProviderCandidates::production(&registry)?;
+    assemble_runtime(config, registry, candidates)
+}
+
+pub(super) fn assemble_for_harness_with_clock(
+    config: LiveConfig,
+    registry: LiveRegistry,
+    clock: Arc<dyn Clock>,
+) -> Result<LiveRuntime, FrameworkError> {
+    let mut candidates = RuntimeProviderCandidates::production(&registry)?;
+    let ledger_limits =
+        LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())?;
+    candidates.clock = Some(Arc::clone(&clock));
+    candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
     assemble_runtime(config, registry, candidates)
 }
 
@@ -1585,6 +1721,8 @@ pub(crate) struct RuntimeReadiness {
     pub(crate) upload_services: bool,
     pub(crate) mount_catalog: bool,
     pub(crate) response_and_cancellation: bool,
+    pub(crate) subscription_ports: bool,
+    pub(crate) async_state: bool,
 }
 
 fn assemble_upload_runtime(

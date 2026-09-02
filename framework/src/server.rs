@@ -1308,8 +1308,9 @@ async fn handle_ws_upgrade(
                 .status(500)
                 .into_hyper();
         }
-        initial_request
-            .record_live_security_check(crate::live::attestation::SecurityCheck::Origin, None);
+        initial_request.record_live_security_check_before_chain(
+            crate::live::attestation::SecurityCheck::Origin,
+        );
         initial_request.record_live_security_not_required(
             crate::live::attestation::SecurityCheck::Csrf,
             suprnova_live::host::PolicyReason::StatelessCsrfPolicy,

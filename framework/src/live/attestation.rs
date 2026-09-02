@@ -179,6 +179,18 @@ impl LiveSecurityAttestation {
         )
     }
 
+    /// Records a check the server proved before any middleware could run.
+    ///
+    /// The WebSocket upgrade path verifies `Origin` ahead of the chain, so
+    /// that evidence must not claim a position in the middleware order.
+    pub(crate) fn record_passed_before_chain(
+        &mut self,
+        request: LiveRequestIdentity,
+        check: SecurityCheck,
+    ) -> bool {
+        self.record(request, check, CheckDisposition::Passed, None, false)
+    }
+
     pub(crate) fn record_not_required(
         &mut self,
         request: LiveRequestIdentity,

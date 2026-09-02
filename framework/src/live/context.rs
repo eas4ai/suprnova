@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use suprnova_live::action::ActionAuthorizationPort;
+use suprnova_live::async_updates::{
+    SubscriptionAuthorizationPort, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionRegistryPort,
+};
 use suprnova_live::host::{
     CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostScopeFacts,
     LiveRequestContextCandidate, MountSelection, PrincipalFingerprint, SessionFingerprint,
@@ -169,6 +173,18 @@ impl Middleware for LiveMiddlewareCompletion {
     }
 }
 
+/// Host ports installed only for the asynchronous subscription boundaries.
+pub(crate) struct SubscriptionCapabilities {
+    pub(crate) registry: Arc<dyn SubscriptionRegistryPort>,
+    pub(crate) authorization: Arc<dyn SubscriptionAuthorizationPort>,
+    pub(crate) continuity: Arc<dyn SubscriptionContinuityPort>,
+    pub(crate) credentials: Arc<dyn SubscriptionCredentialPort>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the candidate names every trusted authority input explicitly"
+)]
 pub(crate) fn candidate(
     request: &Request,
     current_route: RouteIdentity,
@@ -177,6 +193,7 @@ pub(crate) fn candidate(
     scope_override: Option<ScopeFingerprint>,
     action_authorization: Arc<dyn ActionAuthorizationPort>,
     upload_authorization: Arc<dyn UploadAuthorizationPort>,
+    subscription: Option<SubscriptionCapabilities>,
 ) -> Result<LiveRequestContextCandidate, FrameworkError> {
     let identity = request.live_request_identity();
     let attestation = request.live_security_attestation();
@@ -193,6 +210,46 @@ pub(crate) fn candidate(
         }
     }
 
+    let scope = scope_facts(request, scope_override)?;
+    let capabilities = HostCapabilities::bound_to(scope.clone())
+        .with_action_authorization(action_authorization)
+        .with_upload_authorization(upload_authorization);
+    let capabilities = match subscription {
+        Some(subscription) => capabilities
+            .with_subscription_registry(subscription.registry)
+            .with_subscription_authorization(subscription.authorization)
+            .with_subscription_continuity(subscription.continuity)
+            .with_subscription_credentials(subscription.credentials),
+        None => capabilities,
+    };
+
+    Ok(LiveRequestContextCandidate::new(
+        current_route,
+        current_slot,
+        selection,
+        scope,
+        checks,
+        capabilities,
+        expires_at,
+    ))
+}
+
+/// Returns the normalized identity facts of one attested request without a mount.
+pub(crate) fn request_host_scope_facts(
+    request: &Request,
+) -> Result<HostScopeFacts, FrameworkError> {
+    scope_facts(request, None)
+}
+
+fn scope_facts(
+    request: &Request,
+    scope_override: Option<ScopeFingerprint>,
+) -> Result<HostScopeFacts, FrameworkError> {
+    let identity = request.live_request_identity();
+    let attestation = request.live_security_attestation();
+    if !attestation.order_valid() {
+        return Err(context_error());
+    }
     let session_bytes = identity_fingerprint(attestation, identity, SecurityCheck::Session)?;
     let principal_bytes = identity_fingerprint(attestation, identity, SecurityCheck::Principal)?;
     let tenant_bytes = identity_fingerprint(attestation, identity, SecurityCheck::Tenant)?;
@@ -213,20 +270,7 @@ pub(crate) fn candidate(
         principal_bytes.as_ref().map(<[u8; 32]>::as_slice),
         tenant_bytes.as_ref().map(<[u8; 32]>::as_slice),
     )?);
-    let scope = HostScopeFacts::new(scope, session, principal, tenant);
-    let capabilities = HostCapabilities::bound_to(scope.clone())
-        .with_action_authorization(action_authorization)
-        .with_upload_authorization(upload_authorization);
-
-    Ok(LiveRequestContextCandidate::new(
-        current_route,
-        current_slot,
-        selection,
-        scope,
-        checks,
-        capabilities,
-        expires_at,
-    ))
+    Ok(HostScopeFacts::new(scope, session, principal, tenant))
 }
 
 pub(crate) fn request_scope(request: &Request) -> Result<ScopeFingerprint, FrameworkError> {

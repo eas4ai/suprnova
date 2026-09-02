@@ -134,7 +134,9 @@ pub struct SubscriptionError {
 }
 
 impl SubscriptionError {
-    pub(crate) const fn new(kind: SubscriptionErrorKind) -> Self {
+    /// Creates one closed subscription failure for a host-owned port.
+    #[must_use]
+    pub const fn new(kind: SubscriptionErrorKind) -> Self {
         Self { kind }
     }
 

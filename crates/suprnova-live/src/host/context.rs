@@ -117,7 +117,9 @@ pub struct TrustedLiveRequestContext {
 }
 
 impl TrustedLiveRequestContext {
-    pub(crate) const fn host_scope_facts(&self) -> &HostScopeFacts {
+    /// Returns the normalized identity facts this context was validated for.
+    #[must_use]
+    pub const fn host_scope_facts(&self) -> &HostScopeFacts {
         &self.scope
     }
 
