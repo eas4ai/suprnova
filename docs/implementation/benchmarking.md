@@ -80,13 +80,9 @@ contract and runs on demand with `node tests/expansion_budget_rules.mjs`.
 
 ## Browser runtime benchmark
 
-The browser budget has two layers. `rtk npm --prefix browser run budget` is the
-on-demand artifact check: it rebuilds the exact production artifacts, reports
-both core variants' Brotli sizes, enforces response/snapshot and optional-artifact
-caps, requires the checked baseline to name the exact ESM artifact, and evaluates
-all applicable hard/regression limits. Core size has no absolute ceiling until a
-completed implementation provides evidence for one. The check does not rerun noisy
-wall-clock measurements.
+Artifact sizes are not a budget: `npm run build` prints the exact raw and
+Brotli bytes of every artifact, and no artifact has a ceiling. The browser
+benchmark below is the only browser-side budget tool.
 
 Record an exploratory result with:
 

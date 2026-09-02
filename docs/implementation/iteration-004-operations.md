@@ -149,14 +149,9 @@ recovery-latency ceiling. After currentness it must return below 12 KiB retained
 runtime per island. A separate 16-document run attempts 16 handshakes and proves
 no more than eight concurrent handshakes per origin.
 
-Artifact size uses Brotli quality 11 over deterministic production builds. Core
-ESM/classic sizes are always reported and have no absolute cap. Stimulus has an
-8 KiB per-format cap; uploads has a 20 KiB per-format cap. Async has no absolute
-cap. Its append-only reviewed history currently records 21,396-byte ESM and
-19,156-byte classic Brotli artifacts as reviewed correctness growth. Growth over
-15 percent from the newest valid reviewed entry is an explicit review trigger,
-not a total download limit. A candidate cannot overwrite or self-derive that
-history.
+Artifact size is reported, not budgeted: `npm run build` prints the exact raw
+and Brotli (quality 11) bytes of every deterministic production artifact, and no
+artifact has a cap or drift rule.
 
 Run the ordinary reduced evidence locally:
 

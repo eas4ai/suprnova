@@ -44,11 +44,10 @@ or failing evidence is always a failure.
 
 ## Budgets and diagnostics
 
-`npm run budget` is an on-demand tool, not a gate phase. It verifies
-snapshot/control overhead, reports exact Brotli bytes for every artifact, and
-checks exact current ESM artifact identity against the browser baseline. The
-legacy per-role caps and reviewed size history it still applies are slated for
-removal; no artifact size gates development.
+`npm run build` prints the exact raw and Brotli bytes of every artifact; no
+artifact has a byte ceiling. The protocol-overhead bounds (at most 768 bytes of
+snapshot framing and 1 KiB of response control envelope) are ordinary unit
+tests in `tests/protocol-overhead.test.ts`.
 `npm run budget:browser` records D100 connection plus M1K/M5K morph workloads
 using five warmups, thirty samples, thirty seconds idle, and 4x CPU throttling
 by default. The harness also records retained bytes per island with the counting

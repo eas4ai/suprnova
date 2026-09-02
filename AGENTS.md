@@ -94,7 +94,6 @@ CARGO_INCREMENTAL=0 cargo test --doc --all-features
 (cd browser && npm run typecheck)
 (cd browser && npm test)
 (cd browser && npm run build)
-(cd browser && npm run budget)
 CARGO_INCREMENTAL=0 scripts/gate.sh
 ```
 

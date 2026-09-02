@@ -15,7 +15,6 @@ interface PackageManifest {
 }
 
 const EXPECTED_SCRIPTS = [
-  "budget",
   "budget:async",
   "budget:browser",
   "budget:upload",
@@ -123,7 +122,7 @@ describe("production browser package contract", () => {
       expect(source).toContain("mkdtemp");
       expect(source).toContain("runBuild(outputDirectory)");
     }
-    for (const file of ["budget-contract.test.ts", "compatibility-evidence.test.ts"]) {
+    for (const file of ["compatibility-evidence.test.ts"]) {
       const source = await readFile(new URL(file, import.meta.url), "utf8");
       expect(source).toContain("withProductionBuildLock");
     }

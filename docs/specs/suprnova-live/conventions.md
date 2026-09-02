@@ -507,13 +507,11 @@ npm run typecheck
 npm test
 npm run test:browser
 npm run build
-npm run budget
 ```
 
 `build` must reproduce checked artifacts byte-for-byte from the lockfile and
-source. `budget` measures the production artifacts and architecture performance
-fixtures on demand and reports exact bytes; it is not a source-file-size
-approximation, it enforces no byte ceiling, and it is not a gate phase.
+source, and it prints the exact raw and Brotli bytes of every artifact. No
+artifact has a byte ceiling.
 
 ### Provider and browser matrix checks
 

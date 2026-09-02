@@ -441,7 +441,8 @@ artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
 queue, and reconnect limits on `S1`/`B1`. Every deterministic build reports
 exact Brotli bytes for each core, Stimulus, upload, and async variant; no
 artifact has an absolute ceiling or a drift rule, and there is no reviewed size
-history. The budget tools (`npm run budget`, `npm run budget:browser`, the Rust
+history; the production build prints exact raw and Brotli bytes for every
+artifact. The benchmark tools (`npm run budget:browser`, the Rust
 `run-*-budget.sh` scripts, and `scripts/check-expansion-budget.mjs`) run on
 demand and never in `scripts/gate.sh`. The reduced deterministic cases and the
 full-scale `S1`/`B1` workloads are both on-demand, and a qualified result still
