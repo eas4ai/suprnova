@@ -24,15 +24,19 @@ async fn password_register_and_authenticate_round_trip() {
         .register("parity@example.test", "correct-password")
         .await
         .expect("register through Magnetar");
-    let (authenticated, session) = Auth::password()
-        .authenticate(
-            "PARITY@example.test",
-            "correct-password",
-            Some("integration-test".to_owned()),
-            Some("127.0.0.1".to_owned()),
-        )
-        .await
-        .expect("authenticate through Magnetar");
+    let slot = suprnova::session::new_session_slot_for_test();
+    let (authenticated, session) = suprnova::session::session_bind_scopes_for_test(slot, async {
+        Auth::password()
+            .authenticate(
+                "PARITY@example.test",
+                "correct-password",
+                Some("integration-test".to_owned()),
+                Some("127.0.0.1".to_owned()),
+            )
+            .await
+    })
+    .await
+    .expect("authenticate through Magnetar");
     assert_eq!(authenticated.id, user.id);
     assert!(session.token.is_some());
 }
@@ -68,10 +72,12 @@ async fn magic_link_is_single_use_and_issues_a_session() {
         )
         .await
         .expect("mint magic link");
-    let (user, session) = Auth::magic_link()
-        .consume(&token)
-        .await
-        .expect("consume magic link");
+    let slot = suprnova::session::new_session_slot_for_test();
+    let (user, session) = suprnova::session::session_bind_scopes_for_test(slot, async {
+        Auth::magic_link().consume(&token).await
+    })
+    .await
+    .expect("consume magic link");
     assert_eq!(user.email, "magic-parity@example.test");
     assert!(session.token.is_some());
     assert!(Auth::magic_link().consume(&token).await.is_err());

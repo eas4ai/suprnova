@@ -1,7 +1,7 @@
 #![cfg(feature = "testing")]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -24,6 +24,7 @@ use suprnova::magnetar_integration::engine::{
 use suprnova::middleware::{Middleware, Next};
 use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
 use suprnova::{FrameworkError, LockoutStatus, Session, SessionToken, SignInOutcome, User, UserId};
+use tokio::sync::Notify;
 
 const USER_ID: &str = "factor-user";
 const FACTOR_CODE: &str = "654321";
@@ -35,6 +36,14 @@ enum Origin {
     Passkey,
     #[cfg(feature = "magnetar-oauth")]
     OAuth,
+}
+
+#[derive(Clone, Copy)]
+enum StoreFailure {
+    Read,
+    Write,
+    Destroy,
+    Cookie,
 }
 
 impl Origin {
@@ -53,12 +62,27 @@ impl Origin {
 struct EngineState {
     pending: HashMap<String, User>,
     sessions: HashMap<String, StoredSession>,
+    revocations: HashMap<String, usize>,
+    last_issued_id: Option<String>,
     completion_calls: usize,
+    direct_allowed: bool,
+    passkey_lookup_fails: bool,
+    block_passkey_lookup: bool,
+    magic_lookup_missing: bool,
+    remember_returns_malformed_replacement: bool,
+    revoke_failures_remaining: usize,
+    block_next_revoke: bool,
 }
 
 #[derive(Clone, Default)]
 struct FactorEngine {
     state: Arc<Mutex<EngineState>>,
+    revoke_started: Arc<Notify>,
+    revoke_release: Arc<Notify>,
+    passkey_lookup_started: Arc<Notify>,
+    passkey_lookup_release: Arc<Notify>,
+    revoke_attempts: Arc<AtomicUsize>,
+    hold_revocations: Arc<AtomicBool>,
 }
 
 struct PasswordEngine {
@@ -96,6 +120,113 @@ impl FactorEngine {
         }
     }
 
+    fn issue_session(&self, user: &User) -> MagnetarIssuedSession {
+        let session_id = format!("opaque-{}", uuid::Uuid::new_v4().simple());
+        let token = SessionToken::new_random();
+        let token_digest: [u8; 32] = Sha256::digest(token.expose_secret().as_bytes()).into();
+        let session = Session::builder()
+            .token(token)
+            .user_id(user.id.clone())
+            .build()
+            .expect("fixture opaque session");
+        let mut state = self.state.lock().expect("factor engine state");
+        state.last_issued_id = Some(session_id.clone());
+        state.sessions.insert(
+            session_id.clone(),
+            StoredSession {
+                session_id: session_id.clone(),
+                user_id: user.id.to_string(),
+                auth_epoch: 0,
+                token_hash: token_digest,
+                token_digest,
+                expires_at: suprnova::chrono::Utc::now() + suprnova::chrono::Duration::hours(1),
+                revoked_at: None,
+                metadata: SessionMetadata::default(),
+            },
+        );
+        MagnetarIssuedSession {
+            session_id: session_id.clone(),
+            web_binding: WebSessionBinding {
+                session_id,
+                token_digest,
+            },
+            session,
+        }
+    }
+
+    fn set_direct_allowed(&self, allowed: bool) {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .direct_allowed = allowed;
+    }
+
+    fn set_malformed_remember_replacement(&self, enabled: bool) {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .remember_returns_malformed_replacement = enabled;
+    }
+
+    fn fail_next_revocations(&self, count: usize) {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .revoke_failures_remaining = count;
+    }
+
+    fn block_next_revoke(&self) {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .block_next_revoke = true;
+    }
+
+    fn hold_revocations(&self, hold: bool) {
+        self.hold_revocations.store(hold, Ordering::SeqCst);
+    }
+
+    fn block_next_passkey_lookup(&self) {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .block_passkey_lookup = true;
+    }
+
+    fn revoke_attempts(&self) -> usize {
+        self.revoke_attempts.load(Ordering::SeqCst)
+    }
+
+    fn active_session_ids(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .sessions
+            .values()
+            .filter(|session| session.revoked_at.is_none())
+            .map(|session| session.session_id.clone())
+            .collect()
+    }
+
+    fn last_issued_id(&self) -> String {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .last_issued_id
+            .clone()
+            .expect("fixture issued a session")
+    }
+
+    fn revocation_count(&self, session_id: &str) -> usize {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .revocations
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
     fn unsupported<T>() -> magnetar::Result<T> {
         Err(magnetar::Error::DependencyUnavailable {
             dependency: "unused test operation".to_owned(),
@@ -131,39 +262,7 @@ impl MagnetarFactorAuthEngine for FactorEngine {
                 resource: "factor challenge".to_owned(),
                 identifier: "invalid or expired selector".to_owned(),
             })?;
-        let session_id = format!("opaque-{}", uuid::Uuid::new_v4().simple());
-        let token = SessionToken::new_random();
-        let token_digest: [u8; 32] = Sha256::digest(token.expose_secret().as_bytes()).into();
-        let session = Session::builder()
-            .token(token)
-            .user_id(user.id)
-            .build()
-            .expect("fixture opaque session");
-        self.state
-            .lock()
-            .expect("factor engine state")
-            .sessions
-            .insert(
-                session_id.clone(),
-                StoredSession {
-                    session_id: session_id.clone(),
-                    user_id: USER_ID.to_owned(),
-                    auth_epoch: 0,
-                    token_hash: token_digest,
-                    token_digest,
-                    expires_at: suprnova::chrono::Utc::now() + suprnova::chrono::Duration::hours(1),
-                    revoked_at: None,
-                    metadata: SessionMetadata::default(),
-                },
-            );
-        Ok(MagnetarIssuedSession {
-            session_id: session_id.clone(),
-            web_binding: WebSessionBinding {
-                session_id,
-                token_digest,
-            },
-            session,
-        })
+        Ok(self.issue_session(&user))
     }
 
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
@@ -193,9 +292,40 @@ impl MagnetarFactorAuthEngine for FactorEngine {
     }
 
     async fn revoke_session(&self, session_id: &str) -> magnetar::Result<bool> {
-        OpaqueSessionProvider::new(Arc::new(self.clone()), OpaqueConfig::default())
+        self.revoke_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.hold_revocations.load(Ordering::SeqCst) {
+            self.revoke_started.notify_waiters();
+            self.revoke_release.notified().await;
+        }
+        let block = {
+            let mut state = self.state.lock().expect("factor engine state");
+            std::mem::take(&mut state.block_next_revoke)
+        };
+        if block {
+            self.revoke_started.notify_waiters();
+            self.revoke_release.notified().await;
+        }
+        {
+            let mut state = self.state.lock().expect("factor engine state");
+            if state.revoke_failures_remaining > 0 {
+                state.revoke_failures_remaining -= 1;
+                return Err(magnetar::Error::DependencyUnavailable {
+                    dependency: "fixture opaque session store".to_owned(),
+                    message: "injected transient revocation failure".to_owned(),
+                });
+            }
+        }
+        let revoked = OpaqueSessionProvider::new(Arc::new(self.clone()), OpaqueConfig::default())
             .revoke_session(session_id)
-            .await
+            .await?;
+        *self
+            .state
+            .lock()
+            .expect("factor engine state")
+            .revocations
+            .entry(session_id.to_owned())
+            .or_default() += 1;
+        Ok(revoked)
     }
 
     async fn revoke_all_sessions(&self, user_id: &str) -> magnetar::Result<u64> {
@@ -217,10 +347,19 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
         &self,
         _: magnetar::plugins::password::PasswordAttempt,
     ) -> magnetar::Result<(User, HostSignInDecision)> {
-        Ok((
-            FactorEngine::user(),
-            self.factors.require_factor("password"),
-        ))
+        let user = FactorEngine::user();
+        let decision = if self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .direct_allowed
+        {
+            HostSignInDecision::SessionAllowed(Box::new(self.factors.issue_session(&user)))
+        } else {
+            self.factors.require_factor("password")
+        };
+        Ok((user, decision))
     }
 
     async fn complete_challenge(
@@ -284,6 +423,23 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
         _: SessionMetadata,
         _: suprnova::chrono::Duration,
     ) -> magnetar::Result<MagnetarRememberSignInAttempt> {
+        if self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .remember_returns_malformed_replacement
+        {
+            let user = FactorEngine::user();
+            return Ok(MagnetarRememberSignInAttempt::Authenticated(
+                MagnetarRememberSignIn {
+                    session: Box::new(self.factors.issue_session(&user)),
+                    replacement: magnetar::sessions::RememberCredential::from_host(
+                        SecretString::from("malformed-replacement"),
+                    ),
+                },
+            ));
+        }
         FactorEngine::unsupported()
     }
 
@@ -303,7 +459,13 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
     }
 
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
-        Ok((user_id == USER_ID).then(FactorEngine::user))
+        let missing = self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .magic_lookup_missing;
+        Ok((!missing && user_id == USER_ID).then(FactorEngine::user))
     }
 
     async fn revoke_session(&self, _: &str) -> magnetar::Result<bool> {
@@ -347,7 +509,20 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
         _: &str,
         _: SessionMetadata,
     ) -> magnetar::Result<HostSignInDecision> {
-        Ok(self.factors.require_factor("magic-link"))
+        if self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .direct_allowed
+        {
+            let user = FactorEngine::user();
+            Ok(HostSignInDecision::SessionAllowed(Box::new(
+                self.factors.issue_session(&user),
+            )))
+        } else {
+            Ok(self.factors.require_factor("magic-link"))
+        }
     }
 }
 
@@ -478,10 +653,40 @@ impl MagnetarPasskeyAuthEngine for PasskeyEngine {
         _: &webauthn_rs::prelude::PublicKeyCredential,
         _: SessionMetadata,
     ) -> magnetar::Result<HostSignInDecision> {
-        Ok(self.factors.require_factor("passkey"))
+        if self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .direct_allowed
+        {
+            let user = FactorEngine::user();
+            Ok(HostSignInDecision::SessionAllowed(Box::new(
+                self.factors.issue_session(&user),
+            )))
+        } else {
+            Ok(self.factors.require_factor("passkey"))
+        }
     }
 
     async fn passkey_user_by_id(&self, _: &str) -> magnetar::Result<User> {
+        let (block, fails) = {
+            let mut state = self.factors.state.lock().expect("factor engine state");
+            (
+                std::mem::take(&mut state.block_passkey_lookup),
+                state.passkey_lookup_fails,
+            )
+        };
+        if block {
+            self.factors.passkey_lookup_started.notify_waiters();
+            self.factors.passkey_lookup_release.notified().await;
+        }
+        if fails {
+            return Err(magnetar::Error::DependencyUnavailable {
+                dependency: "fixture host user lookup".to_owned(),
+                message: "injected lookup failure".to_owned(),
+            });
+        }
         Ok(FactorEngine::user())
     }
 }
@@ -507,6 +712,19 @@ impl MagnetarOAuthAuthEngine for OAuthEngine {
         &self,
         _: MagnetarOAuthCallback,
     ) -> Result<MagnetarOAuthCompletion, HostOAuthError> {
+        if self
+            .factors
+            .state
+            .lock()
+            .expect("factor engine state")
+            .direct_allowed
+        {
+            let user = FactorEngine::user();
+            return Ok(MagnetarOAuthCompletion::SessionAllowed {
+                session: Box::new(self.factors.issue_session(&user)),
+                user,
+            });
+        }
         let HostSignInDecision::FactorRequired { challenge_selector } =
             self.factors.require_factor("oauth")
         else {
@@ -531,11 +749,31 @@ impl MagnetarOAuthAuthEngine for OAuthEngine {
 #[derive(Default)]
 struct MemoryStore {
     sessions: Mutex<HashMap<String, SessionData>>,
+    fail_next_read: AtomicBool,
+    fail_next_write: AtomicBool,
+    fail_next_destroy: AtomicBool,
+}
+
+impl MemoryStore {
+    fn fail_next_read(&self) {
+        self.fail_next_read.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_write(&self) {
+        self.fail_next_write.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_destroy(&self) {
+        self.fail_next_destroy.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
 impl SessionStore for MemoryStore {
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        if self.fail_next_read.swap(false, Ordering::SeqCst) {
+            return Err(FrameworkError::internal("injected session read failure"));
+        }
         Ok(self
             .sessions
             .lock()
@@ -545,6 +783,9 @@ impl SessionStore for MemoryStore {
     }
 
     async fn write(&self, session: &SessionData) -> Result<(), FrameworkError> {
+        if self.fail_next_write.swap(false, Ordering::SeqCst) {
+            return Err(FrameworkError::internal("injected session write failure"));
+        }
         self.sessions
             .lock()
             .expect("session store")
@@ -553,6 +794,9 @@ impl SessionStore for MemoryStore {
     }
 
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
+        if self.fail_next_destroy.swap(false, Ordering::SeqCst) {
+            return Err(FrameworkError::internal("injected session destroy failure"));
+        }
         self.sessions.lock().expect("session store").remove(id);
         Ok(())
     }
@@ -661,6 +905,312 @@ async fn request(cookie: Option<&str>, authorization: Option<&str>) -> suprnova:
     request_rx.await.expect("capture in-memory request")
 }
 
+fn response_cookie(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with(&prefix))
+        .and_then(|value| value.split(';').next())
+        .map(ToOwned::to_owned)
+}
+
+async fn seed_anonymous_session(middleware: &SessionMiddleware, cookie_name: &str) -> String {
+    let next: Next = Arc::new(|_| {
+        Box::pin(async move {
+            suprnova::session::session_mut(|session| session.put("seed", true));
+            Ok(suprnova::HttpResponse::text("seeded"))
+        })
+    });
+    let response = match middleware.handle(request(None, None).await, next).await {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("seed request succeeds"),
+    };
+    response_cookie(response.headers(), cookie_name).expect("seed request emits session cookie")
+}
+
+async fn assert_lookup_failure_does_not_bind(origin: Origin, factors: &FactorEngine) -> String {
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_name = format!("lookup_failure_{}", origin.name().replace('-', "_"));
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config.clone(), store);
+    let next: Next = Arc::new(move |_| {
+        Box::pin(async move {
+            let result = outcome_for(origin).await;
+            assert!(result.is_err(), "{} lookup must fail", origin.name());
+            assert_eq!(suprnova::Auth::id(), None);
+            assert!(
+                suprnova::session::session()
+                    .and_then(|session| session.magnetar_web_binding())
+                    .is_none(),
+                "{} lookup failure must not bind an opaque carrier",
+                origin.name()
+            );
+            Ok(suprnova::HttpResponse::text("lookup failed cleanly"))
+        })
+    });
+    let response = match middleware.handle(request(None, None).await, next).await {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("{} lookup failure should be handler-visible", origin.name()),
+    };
+    if let Some(cookie) = response_cookie(response.headers(), &config.cookie_name) {
+        let next: Next = Arc::new(|_| {
+            Box::pin(async {
+                assert_eq!(suprnova::Auth::id(), None);
+                Ok(suprnova::HttpResponse::text("anonymous"))
+            })
+        });
+        if middleware
+            .handle(request(Some(&cookie), None).await, next)
+            .await
+            .is_err()
+        {
+            panic!("lookup-failure cookie must remain anonymous and readable");
+        }
+    }
+    let issued_id = factors.last_issued_id();
+    assert!(
+        factors.active_session_ids().is_empty(),
+        "{} lookup failure must retire its opaque session",
+        origin.name()
+    );
+    assert_eq!(factors.revocation_count(&issued_id), 1);
+    issued_id
+}
+
+async fn assert_persistence_failure_retires(
+    origin: Origin,
+    failure: StoreFailure,
+    factors: &FactorEngine,
+) {
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_name = format!("handoff_failure_{}", origin.name().replace('-', "_"));
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+    let old_cookie = match failure {
+        StoreFailure::Read | StoreFailure::Destroy => {
+            Some(seed_anonymous_session(&middleware, &config.cookie_name).await)
+        }
+        StoreFailure::Write | StoreFailure::Cookie => None,
+    };
+    match failure {
+        StoreFailure::Read => store.fail_next_read(),
+        StoreFailure::Write => store.fail_next_write(),
+        StoreFailure::Destroy => store.fail_next_destroy(),
+        StoreFailure::Cookie => {
+            suprnova::session::middleware::fail_next_session_cookie_construction_for_test();
+        }
+    }
+
+    let next: Next = Arc::new(move |_| {
+        Box::pin(async move {
+            let outcome = outcome_for(origin)
+                .await
+                .expect("provider issues a fresh authenticated session");
+            assert!(matches!(outcome, SignInOutcome::Authenticated { .. }));
+            assert_eq!(suprnova::Auth::id().as_deref(), Some(USER_ID));
+            Ok(suprnova::HttpResponse::text("authenticated"))
+        })
+    });
+    let response = middleware
+        .handle(request(old_cookie.as_deref(), None).await, next)
+        .await;
+    let response = match response {
+        Err(response) if response.status_code() == 500 => response.into_hyper(),
+        _ => panic!("{} persistence failure must fail closed", origin.name()),
+    };
+    let returned_session_cookie = response_cookie(response.headers(), &config.cookie_name);
+    assert!(
+        returned_session_cookie
+            .as_ref()
+            .is_none_or(|cookie| cookie.ends_with('=')),
+        "{} failure must not attach a live replacement carrier",
+        origin.name()
+    );
+    let issued_id = factors.last_issued_id();
+    assert!(
+        factors.active_session_ids().is_empty(),
+        "{} persistence failure must retire its opaque session",
+        origin.name()
+    );
+    assert_eq!(
+        factors.revocation_count(&issued_id),
+        1,
+        "{} opaque session must be retired exactly once",
+        origin.name()
+    );
+
+    if let Some(old_cookie) = old_cookie {
+        let next: Next = Arc::new(|_| {
+            Box::pin(async {
+                assert_eq!(suprnova::Auth::id(), None);
+                Ok(suprnova::HttpResponse::text("anonymous"))
+            })
+        });
+        if middleware
+            .handle(request(Some(&old_cookie), None).await, next)
+            .await
+            .is_err()
+        {
+            panic!("failed handoff must leave the old anonymous session readable");
+        }
+    }
+}
+
+async fn assert_successful_handoff(origin: Origin, factors: &FactorEngine) {
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_name = format!("handoff_success_{}", origin.name().replace('-', "_"));
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config.clone(), store);
+    let next: Next = Arc::new(move |_| {
+        Box::pin(async move {
+            let outcome = outcome_for(origin)
+                .await
+                .expect("provider authenticates successfully");
+            assert!(matches!(outcome, SignInOutcome::Authenticated { .. }));
+            assert_eq!(suprnova::Auth::id().as_deref(), Some(USER_ID));
+            Ok(suprnova::HttpResponse::text("authenticated"))
+        })
+    });
+    let response = match middleware.handle(request(None, None).await, next).await {
+        Ok(response) => response.into_hyper(),
+        Err(_) => panic!("{} handoff must persist", origin.name()),
+    };
+    let cookie = response_cookie(response.headers(), &config.cookie_name)
+        .expect("successful handoff emits a framework session carrier");
+    let next: Next = Arc::new(|_| {
+        Box::pin(async {
+            assert_eq!(suprnova::Auth::id().as_deref(), Some(USER_ID));
+            Ok(suprnova::HttpResponse::text("authenticated again"))
+        })
+    });
+    if middleware
+        .handle(request(Some(&cookie), None).await, next)
+        .await
+        .is_err()
+    {
+        panic!(
+            "{} carrier must authenticate the next request",
+            origin.name()
+        );
+    }
+    let issued_id = factors.last_issued_id();
+    assert_eq!(factors.revocation_count(&issued_id), 0);
+    assert!(
+        suprnova::magnetar_integration::revoke_session(&issued_id)
+            .await
+            .expect("clean up successful fixture session")
+    );
+}
+
+async fn assert_commit_releases_only_current_handoff(factors: &FactorEngine) {
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_name = "selective_handoff_commit".to_owned();
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config, store);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_for_handler = observed.clone();
+    factors.fail_next_revocations(1);
+    let next: Next = Arc::new(move |_| {
+        let observed = observed_for_handler.clone();
+        Box::pin(async move {
+            for _ in 0..2 {
+                assert!(matches!(
+                    outcome_for(Origin::Password).await?,
+                    SignInOutcome::Authenticated { .. }
+                ));
+                let binding = suprnova::session::session()
+                    .and_then(|session| session.magnetar_web_binding())
+                    .expect("fresh framework binding");
+                observed
+                    .lock()
+                    .expect("handoff observations")
+                    .push(binding.session_id);
+            }
+            Ok(suprnova::HttpResponse::text("committed"))
+        })
+    });
+    assert!(
+        middleware
+            .handle(request(None, None).await, next)
+            .await
+            .is_ok(),
+        "the current handoff must commit"
+    );
+    let observed = observed.lock().expect("handoff observations").clone();
+    let [superseded, current] = observed.as_slice() else {
+        panic!("fixture must issue exactly two sessions")
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while factors.active_session_ids().contains(superseded) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("superseded handoff remains queued for Drop retry");
+    assert!(factors.active_session_ids().contains(current));
+    assert_eq!(factors.revocation_count(current), 0);
+    assert!(
+        suprnova::magnetar_integration::revoke_session(current)
+            .await
+            .expect("clean up current fixture session")
+    );
+}
+
+async fn assert_scoped_cancellation_has_one_cleanup_owner(factors: &FactorEngine) {
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_name = "cancelled_handoff".to_owned();
+    config.cookie_secure = false;
+    let middleware = SessionMiddleware::with_store(config, store);
+    factors.block_next_passkey_lookup();
+    factors.hold_revocations(true);
+    let attempts_before = factors.revoke_attempts();
+    let lookup_started = factors.passkey_lookup_started.notified();
+    let next: Next = Arc::new(|_| {
+        Box::pin(async move {
+            let _ = outcome_for(Origin::Passkey).await?;
+            Ok(suprnova::HttpResponse::text("unreachable"))
+        })
+    });
+    let mut request = Box::pin(middleware.handle(request(None, None).await, next));
+    tokio::pin!(lookup_started);
+    tokio::select! {
+        () = &mut lookup_started => {}
+        _ = &mut request => panic!("middleware completed before cancellation"),
+    }
+    let session_id = factors.last_issued_id();
+    drop(request);
+    let revoke_started = factors.revoke_started.notified();
+    tokio::pin!(revoke_started);
+    tokio::time::timeout(std::time::Duration::from_secs(1), &mut revoke_started)
+        .await
+        .expect("cancellation starts cleanup");
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        factors.revoke_attempts() - attempts_before,
+        1,
+        "SessionMiddleware must be the only cleanup owner for scoped handoffs"
+    );
+    factors.hold_revocations(false);
+    factors.revoke_release.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while factors.active_session_ids().contains(&session_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the single cleanup owner retires the session");
+    assert_eq!(factors.revocation_count(&session_id), 1);
+}
+
 async fn outcome_for(origin: Origin) -> Result<SignInOutcome, FrameworkError> {
     match origin {
         Origin::Password => {
@@ -669,10 +1219,9 @@ async fn outcome_for(origin: Origin) -> Result<SignInOutcome, FrameworkError> {
                 .await
         }
         Origin::MagicLink => {
-            let token = suprnova::Auth::magic_link()
-                .send("factor@example.test", "https://app.example/magic")
-                .await?;
-            suprnova::Auth::magic_link().consume_outcome(&token).await
+            suprnova::Auth::magic_link()
+                .consume_outcome("magic-token")
+                .await
         }
         Origin::Passkey => {
             suprnova::session::session_mut(|session| {
@@ -689,6 +1238,20 @@ async fn outcome_for(origin: Origin) -> Result<SignInOutcome, FrameworkError> {
                 .await
         }
     }
+}
+
+fn encrypted_remember_carrier(credential: &str) -> String {
+    let plaintext = format!(
+        "suprnova.remember.v1:{}",
+        serde_json::json!({
+            "guard": suprnova::Auth::default_guard_name(),
+            "credential": credential,
+        })
+    );
+    suprnova::Cookie::encrypted(suprnova::auth::remember::COOKIE_NAME, &plaintext)
+        .expect("encrypt remember fixture")
+        .value()
+        .to_owned()
 }
 
 #[tokio::test]
@@ -714,6 +1277,8 @@ async fn every_sign_in_origin_completes_through_the_installed_factor_facade() {
         factors: factors.clone(),
     }))
     .expect("install a distinct OAuth provider engine");
+
+    factors.set_direct_allowed(false);
 
     let HostSignInDecision::FactorRequired {
         challenge_selector: headless_selector,
@@ -929,4 +1494,158 @@ async fn every_sign_in_origin_completes_through_the_installed_factor_facade() {
             .expect("list after all-session revoke")
             .is_empty()
     );
+
+    factors.set_direct_allowed(true);
+
+    factors.set_malformed_remember_replacement(true);
+    let malformed_remember = encrypted_remember_carrier("incoming-selector.incoming-secret");
+    let malformed_cookie = format!("remember_me={malformed_remember}");
+    let store = Arc::new(MemoryStore::default());
+    let mut remember_config = SessionConfig::default();
+    remember_config.cookie_secure = false;
+    let remember_middleware = SessionMiddleware::with_store(remember_config, store);
+    let unexpected_next: Next = Arc::new(|_| {
+        Box::pin(async move { panic!("malformed rotated credential must fail before the handler") })
+    });
+    assert!(
+        remember_middleware
+            .handle(
+                request(Some(&malformed_cookie), None).await,
+                unexpected_next,
+            )
+            .await
+            .is_err(),
+        "malformed rotated remember credential must fail closed"
+    );
+    let remembered_session_id = factors.last_issued_id();
+    assert!(
+        !factors
+            .active_session_ids()
+            .contains(&remembered_session_id),
+        "the installed factor/session authority must retire an early-aborted remembered session"
+    );
+    assert_eq!(factors.revocation_count(&remembered_session_id), 1);
+    factors.set_malformed_remember_replacement(false);
+
+    for origin in [Origin::Password, Origin::MagicLink] {
+        let headless = outcome_for(origin).await.unwrap_or_else(|error| {
+            panic!(
+                "direct {} authentication remains supported without SessionMiddleware: {error}",
+                origin.name()
+            )
+        });
+        let SignInOutcome::Authenticated {
+            session: headless_session,
+            ..
+        } = headless
+        else {
+            panic!("headless direct authentication must return its opaque session")
+        };
+        assert!(headless_session.token.is_some());
+        let headless_id = factors.last_issued_id();
+        assert!(factors.active_session_ids().contains(&headless_id));
+        assert!(
+            suprnova::magnetar_integration::revoke_session(&headless_id)
+                .await
+                .expect("clean up headless fixture session")
+        );
+    }
+
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = true;
+    factors.fail_next_revocations(1);
+    assert!(
+        outcome_for(Origin::MagicLink).await.is_err(),
+        "headless lookup failure must remain an authentication error"
+    );
+    let failed_headless_id = factors.last_issued_id();
+    assert!(
+        !factors.active_session_ids().contains(&failed_headless_id),
+        "headless cleanup must survive one transient retirement failure"
+    );
+    assert_eq!(factors.revocation_count(&failed_headless_id), 1);
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = false;
+
+    assert_scoped_cancellation_has_one_cleanup_owner(factors.as_ref()).await;
+    assert_commit_releases_only_current_handoff(factors.as_ref()).await;
+
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = true;
+    factors.block_next_revoke();
+    let revoke_started = factors.revoke_started.notified();
+    let mut cancelled_handoff = Box::pin(outcome_for(Origin::MagicLink));
+    tokio::pin!(revoke_started);
+    tokio::select! {
+        () = &mut revoke_started => {}
+        result = &mut cancelled_handoff => panic!("handoff completed before cleanup cancellation: {result:?}"),
+    }
+    let cancelled_session_id = factors.last_issued_id();
+    drop(cancelled_handoff);
+    factors.revoke_release.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while factors.active_session_ids().contains(&cancelled_session_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached headless cleanup completes after caller cancellation");
+    assert_eq!(factors.revocation_count(&cancelled_session_id), 1);
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = false;
+
+    assert_persistence_failure_retires(Origin::Password, StoreFailure::Read, factors.as_ref())
+        .await;
+    assert_persistence_failure_retires(Origin::MagicLink, StoreFailure::Destroy, factors.as_ref())
+        .await;
+    assert_persistence_failure_retires(Origin::Passkey, StoreFailure::Cookie, factors.as_ref())
+        .await;
+    #[cfg(feature = "magnetar-oauth")]
+    assert_persistence_failure_retires(Origin::OAuth, StoreFailure::Write, factors.as_ref()).await;
+
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = true;
+    assert_lookup_failure_does_not_bind(Origin::MagicLink, factors.as_ref()).await;
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .magic_lookup_missing = false;
+
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .passkey_lookup_fails = true;
+    assert_lookup_failure_does_not_bind(Origin::Passkey, factors.as_ref()).await;
+    factors
+        .state
+        .lock()
+        .expect("factor engine state")
+        .passkey_lookup_fails = false;
+
+    for origin in [
+        Origin::Password,
+        Origin::MagicLink,
+        Origin::Passkey,
+        #[cfg(feature = "magnetar-oauth")]
+        Origin::OAuth,
+    ] {
+        assert_successful_handoff(origin, factors.as_ref()).await;
+    }
 }

@@ -1272,8 +1272,11 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
     .await
     .expect("public magic-link facade mints a Magnetar plaintext token");
     assert!(!magic_token.is_empty());
-    let (magic_user, magic_session) = suprnova::Auth::magic_link()
-        .consume(&magic_token)
+    let magic_success_slot = suprnova::session::new_session_slot_for_test();
+    let (magic_user, magic_session) =
+        suprnova::session::session_bind_scopes_for_test(magic_success_slot, async {
+            suprnova::Auth::magic_link().consume(&magic_token).await
+        })
         .await
         .expect("public magic-link facade consumes the Magnetar token once");
     assert_eq!(magic_user.email, "magic-link@example.test");
@@ -1298,16 +1301,20 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
         })
     ));
 
+    let password_success_slot = suprnova::session::new_session_slot_for_test();
     let (facade_user, facade_session) = TestContainer::scope(async {
         TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
-        suprnova::Auth::password()
-            .authenticate(
-                "host-engine@example.test",
-                "correct horse battery staple",
-                Some("framework-host-engine-test".to_owned()),
-                Some("127.0.0.1".to_owned()),
-            )
-            .await
+        suprnova::session::session_bind_scopes_for_test(password_success_slot, async {
+            suprnova::Auth::password()
+                .authenticate(
+                    "host-engine@example.test",
+                    "correct horse battery staple",
+                    Some("framework-host-engine-test".to_owned()),
+                    Some("127.0.0.1".to_owned()),
+                )
+                .await
+        })
+        .await
     })
     .await
     .expect("unchanged password facade converts a Magnetar SessionAllowed result");
@@ -1517,10 +1524,17 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
             .passkey_service(&PasskeyConfig::default())
             .expect("compose the real passkey adapter over the host engine"),
     );
-    suprnova::magnetar_integration::install_magnetar_passkey_engine_for_test(
+    if suprnova::magnetar_integration::install_magnetar_passkey_engine_with_factor_for_test(
         passkey_engine.clone(),
+        engine.clone(),
     )
-    .expect("install the only passkey dispatcher before the facade is used");
+    .is_err()
+    {
+        suprnova::magnetar_integration::install_magnetar_passkey_engine_for_test(
+            passkey_engine.clone(),
+        )
+        .expect("install the passkey dispatcher beside the prior test authority");
+    }
 
     let session_slot = suprnova::session::new_session_slot_for_test();
     let registration = suprnova::session::session_scope_for_test(session_slot.clone(), async {
@@ -1638,7 +1652,7 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
         .do_authentication(origin, successful_authentication.raw_options)
         .expect("software authenticator completes the public success assertion");
     let (successful_user, successful_session) =
-        suprnova::session::session_scope_for_test(success_slot, async {
+        suprnova::session::session_bind_scopes_for_test(success_slot, async {
             suprnova::Auth::passkey()
                 .finish_authentication(EMAIL, successful_response)
                 .await

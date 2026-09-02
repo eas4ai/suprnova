@@ -235,7 +235,7 @@ impl OAuthAuth {
         state: &str,
         form_post_user: Option<String>,
     ) -> Result<SignInOutcome, FrameworkError> {
-        let _session_authority = super::factor_engine()?;
+        let session_authority = super::factor_engine()?;
         super::factor_bind_scope_preflight()?;
         let engine = oauth_engine(&self.provider)?;
         match engine
@@ -251,11 +251,12 @@ impl OAuthAuth {
             .map_err(map_error)?
         {
             super::engine::MagnetarOAuthCompletion::SessionAllowed { user, session } => {
-                super::bind_issued_session(&session, false)?;
-                Ok(SignInOutcome::Authenticated {
-                    user,
-                    session: session.session,
-                })
+                let (user, session) =
+                    super::handoff_issued_session(session_authority, *session, false, async move {
+                        Ok(user)
+                    })
+                    .await?;
+                Ok(SignInOutcome::Authenticated { user, session })
             }
             super::engine::MagnetarOAuthCompletion::FactorRequired { challenge_selector } => {
                 Ok(SignInOutcome::FactorRequired { challenge_selector })
