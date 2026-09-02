@@ -550,7 +550,14 @@ async fn websocket_transport_authenticates_memberships_and_delivers_envelopes() 
         .expect("acknowledgment JSON");
     assert_eq!(ack["control_nonce"], "0000000000000002");
     ws.close(None).await.expect("client close");
-    assert!(ws_next_text(&mut ws).await.is_none());
+    // A heartbeat envelope may already be in flight when the client closes,
+    // so the barrier is the server's close frame (or the closed stream), not
+    // the absence of any further text.
+    let closed = ws_next_close(&mut ws).await;
+    assert!(
+        matches!(closed, None | Some((1000 | 1005, _))),
+        "the server acknowledges the client close: {closed:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
