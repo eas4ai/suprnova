@@ -1426,9 +1426,21 @@ class ShellAssetContractTests(unittest.TestCase):
             self.bin_dir / "cargo",
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >> \"$FAKE_CARGO_LOG\"\n"
-            "if [[ \"$*\" == *test_claim_reclaims_expired_running_row* ]]; then\n"
-            "    printf 'test workflow::tests::test_claim_reclaims_expired_running_row ... ok\\n'\n"
-            "fi\n",
+            "# A workflow selector names one exact test or a prefix shared by\n"
+            "# two; print the harness lines the helpers assert on for each.\n"
+            "for arg in \"$@\"; do\n"
+            "    case \"$arg\" in\n"
+            "        workflow::tests::test_mysql_)\n"
+            "            printf 'test workflow::tests::test_mysql_one ... ok\\n'\n"
+            "            printf 'test workflow::tests::test_mysql_two ... ok\\n'\n"
+            "            printf 'test result: ok. 2 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        workflow::tests::*)\n"
+            "            printf 'test %s ... ok\\n' \"$arg\"\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "    esac\n"
+            "done\n",
         )
         self._write_executable(
             self.repo / "crates/suprnova-magnetar/scripts/gate.sh",
@@ -1537,6 +1549,17 @@ class ShellAssetContractTests(unittest.TestCase):
                 "mysql:8.4",
             ],
         }
+        cargo_expectations = {
+            "scripts/check-postgres.sh": [
+                "--test eloquent_relations_pivot_filters_postgres --",
+                "workflow::tests::test_claim_reclaims_expired_running_row",
+            ],
+            "scripts/check-mysql.sh": [
+                "--test eloquent_mass_write_mysql --",
+                "workflow::tests::test_mysql_",
+            ],
+            "scripts/check-magnetar-live.sh": [],
+        }
         for relative, images in expectations.items():
             with self.subTest(relative=relative):
                 self.docker_log.write_text("", encoding="utf-8")
@@ -1558,6 +1581,9 @@ class ShellAssetContractTests(unittest.TestCase):
                 self.assertIn("rm -f", docker_calls)
                 for image in images:
                     self.assertIn(image, docker_calls)
+                cargo_calls = self.cargo_log.read_text(encoding="utf-8")
+                for invocation in cargo_expectations[relative]:
+                    self.assertIn(invocation, cargo_calls)
 
         magnetar_docker_calls = self.docker_log.read_text(
             encoding="utf-8"
