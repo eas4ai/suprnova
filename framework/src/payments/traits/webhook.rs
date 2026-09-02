@@ -82,6 +82,22 @@ pub trait WebhookHandler: Send + Sync {
         None
     }
 
+    /// Fallible form of [`Self::extract_payment_snapshot`] used by the
+    /// framework's mirror-table hydration path.
+    ///
+    /// Providers should override this method when a mapped payment event can
+    /// be distinguished from a malformed payload. Returning `Err` leaves the
+    /// webhook pending so the provider can retry it; returning `Ok(None)` is
+    /// reserved for events that cannot provide a complete transaction
+    /// snapshot. The default preserves compatibility with existing provider
+    /// drivers.
+    fn try_extract_payment_snapshot(
+        &self,
+        event: &WebhookEvent,
+    ) -> PaymentResult<Option<PaymentSnapshot>> {
+        Ok(self.extract_payment_snapshot(event))
+    }
+
     /// Build a [`CustomerSnapshot`] from a customer-type webhook payload.
     /// Providers override to surface the fields they expose (typically
     /// `email` plus a metadata blob).

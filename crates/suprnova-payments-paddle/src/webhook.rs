@@ -13,16 +13,195 @@ use suprnova::payments::{
 
 use crate::{PaddleProvider, event_map::paddle_event_to_neutral};
 
+fn paddle_snapshot_error(event: &WebhookEvent, field: &str, expectation: &str) -> PaymentError {
+    PaymentError::Provider(format!(
+        "malformed paddle {} snapshot: {field} {expectation}",
+        event.provider_event_type
+    ))
+}
+
+fn required_paddle_string(
+    event: &WebhookEvent,
+    data: &serde_json::Value,
+    field: &str,
+) -> PaymentResult<String> {
+    data.get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| paddle_snapshot_error(event, field, "must be a non-empty string"))
+}
+
+fn optional_paddle_string(
+    event: &WebhookEvent,
+    data: &serde_json::Value,
+    field: &str,
+) -> PaymentResult<Option<String>> {
+    match data.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(paddle_snapshot_error(
+            event,
+            field,
+            "must be a non-empty string when present",
+        )),
+    }
+}
+
 /// Parse a Paddle minor-unit amount field, accepting either the decimal-string
 /// form Paddle normally sends (`"1234"`) or a bare JSON number (`1234`).
-/// Returns `0` when the field is absent or unparseable so a malformed amount
-/// degrades to an auditable zero rather than dropping the mirror write.
-fn parse_minor(value: Option<&serde_json::Value>) -> i64 {
+fn parse_minor(
+    event: &WebhookEvent,
+    value: Option<&serde_json::Value>,
+    field: &str,
+    required: bool,
+) -> PaymentResult<i64> {
     match value {
-        Some(serde_json::Value::String(s)) => s.parse::<i64>().unwrap_or(0),
-        Some(v) => v.as_i64().unwrap_or(0),
-        None => 0,
+        None | Some(serde_json::Value::Null) if !required => Ok(0),
+        None | Some(serde_json::Value::Null) => {
+            Err(paddle_snapshot_error(event, field, "must be present"))
+        }
+        Some(serde_json::Value::String(value)) => value
+            .parse::<i64>()
+            .map_err(|_| paddle_snapshot_error(event, field, "must contain integer minor units")),
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| paddle_snapshot_error(event, field, "must contain integer minor units")),
     }
+}
+
+fn required_paddle_currency(
+    event: &WebhookEvent,
+    data: &serde_json::Value,
+) -> PaymentResult<String> {
+    let currency = required_paddle_string(event, data, "currency_code")?;
+    if currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        Ok(currency.to_uppercase())
+    } else {
+        Err(paddle_snapshot_error(
+            event,
+            "currency_code",
+            "must be a three-letter code",
+        ))
+    }
+}
+
+fn optional_paddle_timestamp(
+    event: &WebhookEvent,
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> PaymentResult<Option<chrono::DateTime<chrono::Utc>>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|timestamp| Some(timestamp.with_timezone(&chrono::Utc)))
+            .map_err(|_| {
+                paddle_snapshot_error(event, field, "must be an RFC 3339 timestamp when present")
+            }),
+        Some(_) => Err(paddle_snapshot_error(
+            event,
+            field,
+            "must be an RFC 3339 timestamp when present",
+        )),
+    }
+}
+
+fn checked_paddle_payment_snapshot(event: &WebhookEvent) -> PaymentResult<Option<PaymentSnapshot>> {
+    let Some(kind) = event.neutral else {
+        return Ok(None);
+    };
+    if !matches!(
+        kind,
+        NeutralEventKind::PaymentSucceeded
+            | NeutralEventKind::PaymentFailed
+            | NeutralEventKind::PaymentRefunded
+            | NeutralEventKind::PaymentDisputed
+            | NeutralEventKind::InvoicePaid
+            | NeutralEventKind::InvoiceFailed
+    ) {
+        return Ok(None);
+    }
+
+    let data = event
+        .raw_payload
+        .get("data")
+        .ok_or_else(|| paddle_snapshot_error(event, "data", "must be present"))?;
+    let provider_customer_id = optional_paddle_string(event, data, "customer_id")?;
+    let provider_subscription_id = optional_paddle_string(event, data, "subscription_id")?;
+    let currency = required_paddle_currency(event, data)?;
+
+    let snapshot = match kind {
+        NeutralEventKind::PaymentRefunded | NeutralEventKind::PaymentDisputed => {
+            let provider_transaction_id = required_paddle_string(event, data, "transaction_id")?;
+            let amount_total_minor =
+                parse_minor(event, data.pointer("/totals/total"), "totals.total", true)?;
+            let amount_tax_minor =
+                parse_minor(event, data.pointer("/totals/tax"), "totals.tax", false)?;
+            let provider_customer_id = provider_customer_id.ok_or_else(|| {
+                paddle_snapshot_error(event, "customer_id", "must be a non-empty string")
+            })?;
+            PaymentSnapshot {
+                provider_transaction_id,
+                provider_customer_id,
+                provider_subscription_id,
+                amount_total_minor,
+                amount_tax_minor,
+                currency,
+                status: if kind == NeutralEventKind::PaymentRefunded {
+                    "refunded".to_owned()
+                } else {
+                    "disputed".to_owned()
+                },
+                paid_at: None,
+                provider_metadata: data.clone(),
+            }
+        }
+        NeutralEventKind::PaymentSucceeded
+        | NeutralEventKind::PaymentFailed
+        | NeutralEventKind::InvoicePaid
+        | NeutralEventKind::InvoiceFailed => {
+            let provider_transaction_id = required_paddle_string(event, data, "id")?;
+            let amount_total_minor = parse_minor(
+                event,
+                data.pointer("/details/totals/total"),
+                "details.totals.total",
+                true,
+            )?;
+            let amount_tax_minor = parse_minor(
+                event,
+                data.pointer("/details/totals/tax"),
+                "details.totals.tax",
+                false,
+            )?;
+            let paid_at = optional_paddle_timestamp(event, data.get("billed_at"), "billed_at")?;
+            let Some(provider_customer_id) = provider_customer_id else {
+                return Ok(None);
+            };
+            PaymentSnapshot {
+                provider_transaction_id,
+                provider_customer_id,
+                provider_subscription_id,
+                amount_total_minor,
+                amount_tax_minor,
+                currency,
+                status: if matches!(
+                    kind,
+                    NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid
+                ) {
+                    "succeeded".to_owned()
+                } else {
+                    "failed".to_owned()
+                },
+                paid_at,
+                provider_metadata: data.clone(),
+            }
+        }
+        _ => unreachable!(),
+    };
+
+    Ok(Some(snapshot))
 }
 
 /// Reject a `paddle-signature` header whose digest is not well-formed hex
@@ -228,99 +407,14 @@ impl WebhookHandler for PaddleProvider {
     ///   transaction row instead of inserting a phantom `adj_…` row with a
     ///   zero amount.
     fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot> {
-        let data = event.raw_payload.get("data")?;
+        checked_paddle_payment_snapshot(event).ok().flatten()
+    }
 
-        match event.neutral? {
-            // Adjustment payload (refund / chargeback).
-            kind @ (NeutralEventKind::PaymentRefunded | NeutralEventKind::PaymentDisputed) => {
-                // Key off the referenced transaction, never the adjustment id.
-                let provider_transaction_id = data.get("transaction_id")?.as_str()?.to_string();
-                let provider_customer_id = data
-                    .get("customer_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let provider_subscription_id = data
-                    .get("subscription_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let amount_total_minor = parse_minor(data.pointer("/totals/total"));
-                let amount_tax_minor = parse_minor(data.pointer("/totals/tax"));
-                let currency = data
-                    .get("currency_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("USD")
-                    .to_uppercase();
-                let status = match kind {
-                    NeutralEventKind::PaymentRefunded => "refunded",
-                    NeutralEventKind::PaymentDisputed => "disputed",
-                    _ => unreachable!(),
-                }
-                .to_string();
-                Some(PaymentSnapshot {
-                    provider_transaction_id,
-                    provider_customer_id,
-                    provider_subscription_id,
-                    amount_total_minor,
-                    amount_tax_minor,
-                    currency,
-                    status,
-                    // An adjustment carries no settlement time; preserve the
-                    // original transaction's `paid_at` (the upsert path leaves
-                    // it untouched when the snapshot supplies `None`).
-                    paid_at: None,
-                    provider_metadata: data.clone(),
-                })
-            }
-            // Transaction payload (charge / invoice).
-            kind @ (NeutralEventKind::PaymentSucceeded
-            | NeutralEventKind::PaymentFailed
-            | NeutralEventKind::InvoicePaid
-            | NeutralEventKind::InvoiceFailed) => {
-                let provider_transaction_id = data.get("id")?.as_str()?.to_string();
-                let provider_customer_id = data
-                    .get("customer_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let provider_subscription_id = data
-                    .get("subscription_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let amount_total_minor = parse_minor(data.pointer("/details/totals/total"));
-                let amount_tax_minor = parse_minor(data.pointer("/details/totals/tax"));
-                let currency = data
-                    .get("currency_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("USD")
-                    .to_uppercase();
-                let status = match kind {
-                    NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid => {
-                        "succeeded"
-                    }
-                    NeutralEventKind::PaymentFailed | NeutralEventKind::InvoiceFailed => "failed",
-                    _ => unreachable!(),
-                }
-                .to_string();
-                let paid_at = data
-                    .get("billed_at")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&chrono::Utc));
-                Some(PaymentSnapshot {
-                    provider_transaction_id,
-                    provider_customer_id,
-                    provider_subscription_id,
-                    amount_total_minor,
-                    amount_tax_minor,
-                    currency,
-                    status,
-                    paid_at,
-                    provider_metadata: data.clone(),
-                })
-            }
-            _ => None,
-        }
+    fn try_extract_payment_snapshot(
+        &self,
+        event: &WebhookEvent,
+    ) -> PaymentResult<Option<PaymentSnapshot>> {
+        checked_paddle_payment_snapshot(event)
     }
 
     /// Build a [`CustomerSnapshot`] from Paddle `customer.created` /
@@ -508,6 +602,179 @@ mod tests {
         let snap = p.extract_payment_snapshot(&e).expect("snapshot present");
         assert_eq!(snap.amount_total_minor, 500);
         assert_eq!(snap.amount_tax_minor, 50);
+    }
+
+    #[test]
+    fn checked_payment_snapshot_rejects_malformed_fields() {
+        let p = provider();
+        let cases = [
+            (
+                "id",
+                serde_json::json!({ "data": {
+                    "id": 42,
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "details": { "totals": { "total": "4200" } }
+                } }),
+            ),
+            (
+                "customer_id",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": 42,
+                    "currency_code": "USD",
+                    "details": { "totals": { "total": "4200" } }
+                } }),
+            ),
+            (
+                "total",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "details": { "totals": { "total": "not-a-number" } }
+                } }),
+            ),
+            (
+                "tax",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "details": { "totals": { "total": "4200", "tax": false } }
+                } }),
+            ),
+            (
+                "currency_code",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": 840,
+                    "details": { "totals": { "total": "4200" } }
+                } }),
+            ),
+            (
+                "subscription_id",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "subscription_id": 42,
+                    "currency_code": "USD",
+                    "details": { "totals": { "total": "4200" } }
+                } }),
+            ),
+            (
+                "billed_at",
+                serde_json::json!({ "data": {
+                    "id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "billed_at": "yesterday",
+                    "details": { "totals": { "total": "4200" } }
+                } }),
+            ),
+        ];
+
+        for (field, payload) in cases {
+            let event = event(NeutralEventKind::PaymentSucceeded, payload);
+            let error = p
+                .try_extract_payment_snapshot(&event)
+                .expect_err("malformed mapped payment must fail extraction");
+            assert!(
+                matches!(error, PaymentError::Provider(ref message) if message.contains(field)),
+                "error for {field} did not identify the field: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_customer_is_an_intentional_partial_snapshot() {
+        let p = provider();
+        let nullable = event(
+            NeutralEventKind::PaymentSucceeded,
+            serde_json::json!({ "data": {
+                "id": "txn_guest",
+                "customer_id": null,
+                "currency_code": "USD",
+                "details": { "totals": { "total": "4200" } }
+            } }),
+        );
+        assert!(
+            p.try_extract_payment_snapshot(&nullable)
+                .expect("a nullable provider relationship is valid")
+                .is_none()
+        );
+
+        let malformed = event(
+            NeutralEventKind::PaymentSucceeded,
+            serde_json::json!({ "data": {
+                "id": "txn_guest_malformed",
+                "customer_id": null,
+                "currency_code": "USD",
+                "details": { "totals": { "total": false } }
+            } }),
+        );
+        let error = p
+            .try_extract_payment_snapshot(&malformed)
+            .expect_err("nullable customer must not hide a malformed amount");
+        assert!(matches!(
+            error,
+            PaymentError::Provider(ref message) if message.contains("total")
+        ));
+    }
+
+    #[test]
+    fn checked_adjustment_snapshot_requires_transaction_and_total() {
+        let p = provider();
+        for (field, payload) in [
+            (
+                "customer_id",
+                serde_json::json!({ "data": {
+                    "id": "adj_test",
+                    "transaction_id": "txn_test",
+                    "currency_code": "USD",
+                    "totals": { "total": "4200" }
+                } }),
+            ),
+            (
+                "customer_id",
+                serde_json::json!({ "data": {
+                    "id": "adj_test",
+                    "transaction_id": "txn_test",
+                    "customer_id": null,
+                    "currency_code": "USD",
+                    "totals": { "total": "4200" }
+                } }),
+            ),
+            (
+                "transaction_id",
+                serde_json::json!({ "data": {
+                    "id": "adj_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "totals": { "total": "4200" }
+                } }),
+            ),
+            (
+                "total",
+                serde_json::json!({ "data": {
+                    "id": "adj_test",
+                    "transaction_id": "txn_test",
+                    "customer_id": "ctm_test",
+                    "currency_code": "USD",
+                    "totals": {}
+                } }),
+            ),
+        ] {
+            let event = event(NeutralEventKind::PaymentRefunded, payload);
+            let error = p
+                .try_extract_payment_snapshot(&event)
+                .expect_err("malformed adjustment must fail extraction");
+            assert!(
+                matches!(error, PaymentError::Provider(ref message) if message.contains(field)),
+                "error for {field} did not identify the field: {error:?}"
+            );
+        }
     }
 
     /// A realistic `adjustment.created` (refund) body: `data.id` is the

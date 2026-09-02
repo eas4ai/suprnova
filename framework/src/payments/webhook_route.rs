@@ -395,10 +395,30 @@ where
         | NeutralEventKind::PaymentDisputed
         | NeutralEventKind::InvoicePaid
         | NeutralEventKind::InvoiceFailed => {
-            let Some(snapshot) = provider.extract_payment_snapshot(event) else {
-                // Providers may legitimately omit snapshots for events they
-                // can't translate (e.g., adjustment events with no charge id).
-                // Audit-only is correct here.
+            let Some(snapshot) = provider.try_extract_payment_snapshot(event)? else {
+                if matches!(
+                    neutral,
+                    NeutralEventKind::PaymentRefunded | NeutralEventKind::PaymentDisputed
+                ) {
+                    let transaction_id = ids.transaction_id.as_deref().ok_or_else(|| {
+                        PaymentError::Validation(format!(
+                            "partial payment webhook missing transaction_id \
+                             (provider_event_type={})",
+                            event.provider_event_type
+                        ))
+                    })?;
+                    let status = if neutral == NeutralEventKind::PaymentRefunded {
+                        "refunded"
+                    } else {
+                        "disputed"
+                    };
+                    update_existing_transaction_status(db, &event.provider, transaction_id, status)
+                        .await?;
+                    return Ok(());
+                }
+                // Providers may intentionally omit snapshots for events that
+                // cannot supply every field required by the transaction
+                // mirror. Audit-only is correct here.
                 tracing::debug!(
                     event_id = %event.provider_event_id,
                     provider_event_type = %event.provider_event_type,
@@ -406,7 +426,17 @@ where
                 );
                 return Ok(());
             };
-            upsert_transaction(db, &event.provider, &snapshot).await?;
+            let preserve_missing_subscription = matches!(
+                neutral,
+                NeutralEventKind::PaymentRefunded | NeutralEventKind::PaymentDisputed
+            );
+            upsert_transaction(
+                db,
+                &event.provider,
+                &snapshot,
+                preserve_missing_subscription,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -592,6 +622,7 @@ async fn upsert_transaction<C>(
     db: &C,
     provider: &str,
     snapshot: &PaymentSnapshot,
+    preserve_missing_subscription: bool,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -609,7 +640,9 @@ where
         Some(model) => {
             let mut am: transaction::ActiveModel = model.into();
             am.provider_customer_id = Set(snapshot.provider_customer_id.clone());
-            am.provider_subscription_id = Set(snapshot.provider_subscription_id.clone());
+            if !preserve_missing_subscription || snapshot.provider_subscription_id.is_some() {
+                am.provider_subscription_id = Set(snapshot.provider_subscription_id.clone());
+            }
             am.amount_total_minor = Set(snapshot.amount_total_minor);
             am.amount_tax_minor = Set(snapshot.amount_tax_minor);
             am.currency = Set(snapshot.currency.clone());
@@ -646,6 +679,38 @@ where
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
         }
     }
+    Ok(())
+}
+
+/// Apply the state carried by a provider-valid refund or dispute that cannot
+/// supply every field required to construct a new transaction mirror.
+async fn update_existing_transaction_status<C>(
+    db: &C,
+    provider: &str,
+    provider_transaction_id: &str,
+    status: &str,
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
+    let existing = transaction::Entity::find()
+        .filter(transaction::Column::Provider.eq(provider))
+        .filter(transaction::Column::ProviderTransactionId.eq(provider_transaction_id))
+        .one(db)
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?
+        .ok_or_else(|| {
+            PaymentError::Validation(
+                "partial payment webhook references an unknown transaction_id".into(),
+            )
+        })?;
+
+    let mut am: transaction::ActiveModel = existing.into();
+    am.status = Set(status.to_owned());
+    am.updated_at = Set(Utc::now().to_rfc3339());
+    am.update(db)
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
     Ok(())
 }
 

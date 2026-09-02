@@ -1099,3 +1099,286 @@ async fn unmapped_event_records_audit_row_only() {
         .expect("db ok");
     assert!(txns.is_empty());
 }
+
+#[tokio::test]
+async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mirror() {
+    let provider_name: &'static str = "mock-hydration-malformed-payment";
+    let _mock = register_mock(provider_name);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 6).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let initial = Bytes::from(
+        json!({
+            "id": "evt_snapshot_seed",
+            "type": "payment.succeeded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_original",
+                    "subscription": "sub_snapshot_original",
+                    "amount": 4200,
+                    "tax": 200,
+                    "currency": "EUR",
+                    "paid_at": "2026-05-22T12:00:00+00:00"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (initial_status, _) = send_webhook(addr, &path, initial).await;
+    assert_eq!(initial_status.as_u16(), 200);
+    let seeded = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+
+    let malformed = Bytes::from(
+        json!({
+            "id": "evt_snapshot_retry",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_changed",
+                    "amount": "not-a-number",
+                    "tax": 300,
+                    "currency": "USD"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (malformed_status, _) = send_webhook(addr, &path, malformed.clone()).await;
+    assert_eq!(malformed_status.as_u16(), 503);
+
+    let unchanged = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+    assert_eq!(
+        unchanged, seeded,
+        "failed extraction must leave the complete mirror row unchanged"
+    );
+
+    let failed_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(failed_audit.processed_at.is_none());
+    assert!(
+        failed_audit
+            .process_error
+            .as_deref()
+            .is_some_and(|error| error.contains("amount"))
+    );
+
+    let (same_body_retry_status, _) = send_webhook(addr, &path, malformed).await;
+    assert_eq!(same_body_retry_status.as_u16(), 503);
+    let failed_audits = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_retry"))
+        .all(&*conn)
+        .await
+        .expect("db ok");
+    assert_eq!(failed_audits.len(), 1, "retry must reuse the audit row");
+    assert!(failed_audits[0].processed_at.is_none());
+    assert!(failed_audits[0].process_error.is_some());
+    let still_unchanged = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("seeded transaction mirror");
+    assert_eq!(still_unchanged, seeded);
+
+    let valid_update = Bytes::from(
+        json!({
+            "id": "evt_snapshot_valid_update",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "customer": "cus_snapshot_original",
+                    "amount": 4200,
+                    "tax": 200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (valid_status, _) = send_webhook(addr, &path, valid_update).await;
+    assert_eq!(valid_status.as_u16(), 200);
+
+    let updated = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("updated transaction mirror");
+    assert_eq!(updated.status, "refunded");
+    assert_eq!(updated.amount_total_minor, 4200);
+    assert_eq!(
+        updated.provider_subscription_id.as_deref(),
+        Some("sub_snapshot_original"),
+        "a partial update must preserve the existing subscription link"
+    );
+
+    let processed_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_valid_update"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(processed_audit.processed_at.is_some());
+    assert!(processed_audit.process_error.is_none());
+
+    let partial_dispute = Bytes::from(
+        json!({
+            "id": "evt_snapshot_partial_dispute",
+            "type": "payment.disputed",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (dispute_status, _) = send_webhook(addr, &path, partial_dispute).await;
+    assert_eq!(dispute_status.as_u16(), 200);
+
+    let disputed = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("disputed transaction mirror");
+    assert_eq!(disputed.status, "disputed");
+    let mut normalized_disputed = disputed.clone();
+    normalized_disputed.status = updated.status.clone();
+    normalized_disputed.updated_at = updated.updated_at.clone();
+    assert_eq!(
+        normalized_disputed, updated,
+        "a customerless dispute must only change status and updated_at"
+    );
+
+    let dispute_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_partial_dispute"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("dispute audit row present");
+    assert!(dispute_audit.processed_at.is_some());
+    assert!(dispute_audit.process_error.is_none());
+
+    let partial_refund = Bytes::from(
+        json!({
+            "id": "evt_snapshot_partial_refund",
+            "type": "payment.refunded",
+            "data": {
+                "object": {
+                    "id": "txn_snapshot_retry",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+    let (refund_status, _) = send_webhook(addr, &path, partial_refund).await;
+    assert_eq!(refund_status.as_u16(), 200);
+
+    let refunded = transaction::Entity::find()
+        .filter(transaction::Column::ProviderTransactionId.eq("txn_snapshot_retry"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("refunded transaction mirror");
+    assert_eq!(refunded.status, "refunded");
+    let mut normalized_refunded = refunded;
+    normalized_refunded.status = disputed.status.clone();
+    normalized_refunded.updated_at = disputed.updated_at.clone();
+    assert_eq!(
+        normalized_refunded, disputed,
+        "a customerless refund must only change status and updated_at"
+    );
+
+    let refund_audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_snapshot_partial_refund"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("refund audit row present");
+    assert!(refund_audit.processed_at.is_some());
+    assert!(refund_audit.process_error.is_none());
+}
+
+#[tokio::test]
+async fn customerless_partial_payment_without_existing_mirror_is_retryable() {
+    let provider_name: &'static str = "mock-hydration-missing-partial-payment";
+    let _mock = register_mock(provider_name);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 1).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+    let partial_dispute = Bytes::from(
+        json!({
+            "id": "evt_missing_partial_payment",
+            "type": "payment.disputed",
+            "data": {
+                "object": {
+                    "id": "txn_missing_partial_payment",
+                    "amount": 4200,
+                    "currency": "EUR"
+                }
+            }
+        })
+        .to_string(),
+    );
+
+    let (status, _) = send_webhook(addr, &path, partial_dispute).await;
+    assert_eq!(status.as_u16(), 503);
+    assert!(
+        transaction::Entity::find()
+            .filter(transaction::Column::ProviderTransactionId.eq("txn_missing_partial_payment"))
+            .one(&*conn)
+            .await
+            .expect("db ok")
+            .is_none(),
+        "a partial event must not create an incomplete transaction mirror"
+    );
+
+    let audit = webhook_event::Entity::find()
+        .filter(webhook_event::Column::ProviderEventId.eq("evt_missing_partial_payment"))
+        .one(&*conn)
+        .await
+        .expect("db ok")
+        .expect("audit row present");
+    assert!(audit.processed_at.is_none());
+    assert!(
+        audit
+            .process_error
+            .as_deref()
+            .is_some_and(|error| error.contains("unknown transaction_id"))
+    );
+}

@@ -39,6 +39,123 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+fn malformed_mock_snapshot(event: &WebhookEvent, detail: &str) -> PaymentError {
+    PaymentError::Provider(format!(
+        "malformed mock {} snapshot: {detail}",
+        event.provider_event_type
+    ))
+}
+
+fn required_mock_string(
+    event: &WebhookEvent,
+    object: &serde_json::Value,
+    field: &str,
+) -> PaymentResult<String> {
+    object
+        .get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            malformed_mock_snapshot(event, &format!("{field} must be a non-empty string"))
+        })
+}
+
+fn optional_mock_string(
+    event: &WebhookEvent,
+    object: &serde_json::Value,
+    field: &str,
+) -> PaymentResult<Option<String>> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(malformed_mock_snapshot(
+            event,
+            &format!("{field} must be a non-empty string when present"),
+        )),
+    }
+}
+
+fn checked_mock_payment_snapshot(event: &WebhookEvent) -> PaymentResult<Option<PaymentSnapshot>> {
+    let status = match event.neutral {
+        Some(NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid) => "succeeded",
+        Some(NeutralEventKind::PaymentFailed | NeutralEventKind::InvoiceFailed) => "failed",
+        Some(NeutralEventKind::PaymentRefunded) => "refunded",
+        Some(NeutralEventKind::PaymentDisputed) => "disputed",
+        _ => return Ok(None),
+    };
+    let object = event
+        .raw_payload
+        .pointer("/data/object")
+        .ok_or_else(|| malformed_mock_snapshot(event, "data.object must be present"))?;
+    let provider_transaction_id = required_mock_string(event, object, "id")?;
+    let provider_customer_id = optional_mock_string(event, object, "customer")?;
+    let provider_subscription_id = optional_mock_string(event, object, "subscription")?;
+    let amount_total_minor = object
+        .get("amount")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| malformed_mock_snapshot(event, "amount must be an integer"))?;
+    let amount_tax_minor = match object.get("tax") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| malformed_mock_snapshot(event, "tax must be an integer when present"))?,
+    };
+    let currency = required_mock_string(event, object, "currency")?;
+    if currency.len() != 3 || !currency.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Err(malformed_mock_snapshot(
+            event,
+            "currency must be a three-letter code",
+        ));
+    }
+    let paid_at = match object.get("paid_at") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| {
+                    malformed_mock_snapshot(event, "paid_at must be an RFC 3339 timestamp")
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+        Some(_) => {
+            return Err(malformed_mock_snapshot(
+                event,
+                "paid_at must be an RFC 3339 timestamp when present",
+            ));
+        }
+    };
+    let provider_customer_id = match provider_customer_id {
+        Some(provider_customer_id) => provider_customer_id,
+        None if matches!(
+            event.neutral,
+            Some(NeutralEventKind::PaymentRefunded | NeutralEventKind::PaymentDisputed)
+        ) =>
+        {
+            return Ok(None);
+        }
+        None => {
+            return Err(malformed_mock_snapshot(
+                event,
+                "customer must be a non-empty string",
+            ));
+        }
+    };
+
+    Ok(Some(PaymentSnapshot {
+        provider_transaction_id,
+        provider_customer_id,
+        provider_subscription_id,
+        amount_total_minor,
+        amount_tax_minor,
+        currency: currency.to_uppercase(),
+        status: status.to_owned(),
+        paid_at,
+        provider_metadata: object.clone(),
+    }))
+}
+
 /// In-memory implementation of all four universal payment traits.
 ///
 /// Thread-safe: internal state is wrapped in `Arc<tokio::sync::RwLock<_>>`.
@@ -394,48 +511,14 @@ impl WebhookHandler for MockPaymentProvider {
     }
 
     fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot> {
-        let obj = event.raw_payload.pointer("/data/object")?;
-        let provider_transaction_id = obj.get("id")?.as_str()?.to_string();
-        let provider_customer_id = obj
-            .get("customer")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let provider_subscription_id = obj
-            .get("subscription")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let amount_total_minor = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
-        let amount_tax_minor = obj.get("tax").and_then(|v| v.as_i64()).unwrap_or(0);
-        let currency = obj
-            .get("currency")
-            .and_then(|v| v.as_str())
-            .unwrap_or("USD")
-            .to_uppercase();
-        let status = match event.neutral? {
-            NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid => "succeeded",
-            NeutralEventKind::PaymentFailed | NeutralEventKind::InvoiceFailed => "failed",
-            NeutralEventKind::PaymentRefunded => "refunded",
-            NeutralEventKind::PaymentDisputed => "disputed",
-            _ => return None,
-        }
-        .to_string();
-        let paid_at = obj
-            .get("paid_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-        Some(PaymentSnapshot {
-            provider_transaction_id,
-            provider_customer_id,
-            provider_subscription_id,
-            amount_total_minor,
-            amount_tax_minor,
-            currency,
-            status,
-            paid_at,
-            provider_metadata: obj.clone(),
-        })
+        checked_mock_payment_snapshot(event).ok().flatten()
+    }
+
+    fn try_extract_payment_snapshot(
+        &self,
+        event: &WebhookEvent,
+    ) -> PaymentResult<Option<PaymentSnapshot>> {
+        checked_mock_payment_snapshot(event)
     }
 
     fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot> {
