@@ -4,6 +4,61 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-02 -- Live CLI workflows and the application tooling protocol
+
+The Suprnova CLI gained `live:make`, `live:check`, `live:inspect`, and
+`live:assets`, closing plan Task 9. `live:make` scaffolds a component in
+`src/live/`, its view in `templates/live/`, and its registration in a
+`registry()` builder in `src/live/mod.rs`, declares `pub mod live;` in
+`src/lib.rs`, validates every target and refuses traversal and symlinks
+before writing, writes atomically, never overwrites, rolls back every file a
+failed run had written, and reports a dry run.
+The other three commands are thin clients of a new hidden framework console
+command, `__suprnova:live-tool`, registered at link time by
+`framework/src/live/tooling.rs`; the CLI starts it through the explicit
+console-binary Cargo wrapper and consumes the bounded, versioned JSON-lines
+protocol in `framework/src/live/tooling_protocol.rs`. The helper owns
+registry access, checked-template validation through the engine
+`TemplateChecker`, safe inspection (presence booleans and counts only), and
+asset export with lengths and digests; the CLI keeps no framework or engine
+dependency and re-verifies every digest, version, sequence, identity, cap,
+and marker on the transport, failing closed with no writes on anything
+unsupported, stale, truncated, oversized, or unexpected on stdout, and never
+echoing stdout content. `live:assets` stages `<out>/<identity>/` and renames it
+into place, treats an identical publication as up to date, and refuses drift
+unless `--replace` is given. The engine registry gained `ComponentRegistry::names`
+so the framework can enumerate registered components.
+
+Verification completed from the integration worktree:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_tooling_protocol
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --test live_cli --test live_scaffold --test live_assets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --lib live_
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test console --test console_typed --test console_db_seed --test command_macro --test live_boot --test live_assets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p app --test console_binary_e2e --test console_greet
+rtk cargo fmt --all -- --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo clippy -p suprnova-cli -p suprnova -p suprnova-live --all-targets --all-features
+rtk tests/documentation_contract.sh
+rtk node scripts/check-implementation-docs.mjs
+rtk node scripts/check-specs.mjs
+```
+
+Those commands passed eight framework tooling-protocol cases (a registered
+hidden helper, proved and failing components, bounded redacted inspection,
+byte-exact asset export, unsupported protocols and operations, template root
+and symlink refusals, and missing views instead of a vacuous pass), 26 CLI
+cases across the three new suites plus six unit cases (help, project and
+template-root preconditions, hostile stream matrix, caps, a fake application
+console replaying scripted streams for check, inspect, and assets, scaffold
+conflicts, dry run, idempotence, invalid names, symlink refusal, rollback of
+a failed run, exact idempotent publication, drift refusal and replacement,
+and digest mismatches), the existing console and Live suites, zero new Clippy findings,
+and the documentation contracts. The generated application's bootstrap does
+not yet bind the registry; plan Task 10 wires that so a fresh scaffold passes
+`live:check` out of the box.
+
 ## 2026-09-02 -- Framework artifact delivery and document bootstrap
 
 Suprnova now serves the exact reviewed browser artifacts and emits typed

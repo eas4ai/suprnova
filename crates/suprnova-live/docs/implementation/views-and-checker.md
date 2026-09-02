@@ -61,6 +61,44 @@ There is no `String` conversion or generic application-provided view renderer
 that bypasses this boundary. Debug output exposes provenance class only, never
 trusted markup bytes.
 
+## Suprnova tooling protocol
+
+The Suprnova CLI has no dependency on the framework or on this engine, so
+`suprnova live:check`, `live:inspect`, and `live:assets` run inside the
+application instead. The CLI starts the application's console binary through
+the explicit-binary Cargo wrapper as
+`__suprnova:live-tool --protocol 1 --operation <check|inspect|assets>`; the
+framework registers that hidden console command at link time in
+`framework/src/live/tooling.rs`, and the wire shape lives in
+`framework/src/live/tooling_protocol.rs`. The helper runs after the
+application's ordinary console bootstrap, like every console command, then
+writes one JSON envelope per stdout line while human and build output stays
+on stderr.
+
+Every envelope carries the protocol version, a contiguous sequence number, the
+operation, the framework version, the reviewed artifact identity, and one
+typed body: `begin`, `diagnostic`, `component`, `runtime`, `summary`, `asset`,
+or the `end` marker with the outcome and a closed failure kind
+(`live_tooling_*`). Only closed enumerations, bounded integers, validated
+identities, content digests, and base64 artifact bytes cross the boundary;
+state, key material, credentials, cookies, and request bodies never do. The
+protocol caps one run at 8192 envelopes, 1 MiB per line, 8 MiB in total, 2048
+diagnostics, 1024 components, 16 assets, and 4 MiB of decoded asset bytes;
+`check` additionally loads at most 512 template files of at most 1 MiB each
+from at most 8 symlink-free roots.
+
+For `check`, the helper builds a `TemplateCatalog` from every `.html` file
+under the given roots, keyed by its root-relative path, and runs
+`TemplateChecker::check_component` for every registered component with the
+default `CheckerLimits`. Diagnostics carry the component, view, closed code,
+severity, line, and column, never template text. A missing registry is a
+closed failure rather than a vacuous pass, and a component without a template
+reports `missing_view`. The CLI exits non-zero on any error diagnostic and,
+unless `--allow-unproved` is given, on any unproved dynamic structure. The
+CLI validates version, sequence, identity, shape, lengths, counts, and asset
+digests on its side and fails closed on anything unsupported, truncated,
+oversized, or unexpected, without echoing stdout content into its messages.
+
 ## Failure and recovery
 
 Askama syntax/data failures, HTML parse or branch-stack failures, raw `safe`,

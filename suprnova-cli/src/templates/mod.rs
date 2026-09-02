@@ -57,6 +57,27 @@ pub fn commands_mod_rs() -> &'static str {
     include_str!("files/backend/src/commands/mod.rs.tpl")
 }
 
+/// `src/live/<snake>.rs` scaffolded by `live:make`.
+pub fn live_component(snake: &str, pascal: &str, component_name: &str, view: &str) -> String {
+    include_str!("files/backend/live/component.rs.tpl")
+        .replace("{snake}", snake)
+        .replace("{pascal}", pascal)
+        .replace("{component_name}", component_name)
+        .replace("{view}", view)
+}
+
+/// `templates/live/<snake>.html` scaffolded by `live:make`.
+pub fn live_view() -> &'static str {
+    include_str!("files/backend/live/view.html.tpl")
+}
+
+/// `src/live/mod.rs` created by the first `live:make`.
+pub fn live_mod_rs(snake: &str, pascal: &str) -> String {
+    include_str!("files/backend/live/mod.rs.tpl")
+        .replace("{snake}", snake)
+        .replace("{pascal}", pascal)
+}
+
 pub fn lib_rs() -> &'static str {
     include_str!("files/backend/lib.rs.tpl")
 }

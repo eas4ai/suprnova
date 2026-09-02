@@ -98,6 +98,18 @@ component declares streams, and the Stimulus bridge only with
 `with_stimulus()`. Roles are a set, so repeated islands never duplicate a
 tag; a second `bootstrap()` call or a mount after bootstrap fails closed.
 
+### Publication through the CLI
+
+`suprnova live:assets --out <dir>` publishes the same reviewed bytes without a
+JavaScript toolchain: the application's hidden tooling helper exports the
+manifest, the eight artifacts, and the two boot scripts with their lengths and
+digests over the tooling protocol described in
+[views and checker](views-and-checker.md), the CLI verifies every digest on
+the transport, stages a complete `<dir>/<asset_identity>/` directory, and
+renames it into place. An existing identical publication is left untouched;
+one whose bytes differ is refused unless `--replace` is given, and a
+replacement retires the old directory only after the new one is complete.
+
 ## Dependency notices
 
 Idiomorph 0.7.4 is the only production browser dependency and is bundled

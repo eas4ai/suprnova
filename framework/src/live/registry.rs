@@ -77,6 +77,11 @@ impl LiveRegistry {
         self.inner.engine.is_empty()
     }
 
+    /// Returns every registered component name in sorted order.
+    pub(crate) fn component_names(&self) -> Vec<ComponentName> {
+        self.inner.engine.names().cloned().collect()
+    }
+
     pub(crate) fn engine(&self) -> &suprnova_live::registry::ComponentRegistry {
         &self.inner.engine
     }

@@ -23,6 +23,11 @@ impl ComponentRegistry {
         Self { components }
     }
 
+    /// Returns every registered component name in sorted order.
+    pub fn names(&self) -> impl Iterator<Item = &ComponentName> {
+        self.components.keys()
+    }
+
     /// Resolves only a component explicitly registered at startup.
     pub fn resolve(
         &self,

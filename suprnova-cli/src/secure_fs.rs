@@ -63,6 +63,51 @@ pub fn write_generated<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> 
     std::fs::write(path, contents)
 }
 
+/// Write `contents` to `path` atomically without following a symlink standing
+/// at `path`, after the same containment check as [`write_generated`].
+///
+/// The bytes go to a fresh `.<name>.<pid>.tmp` sibling opened with `O_EXCL`
+/// (which refuses to open through a link), then `rename(2)` moves it into
+/// place: the destination is either the previous file or the complete new
+/// one, never a partial write, and a link at the destination is replaced
+/// rather than written through.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
+    ensure_contained(Path::new("."), path)?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Refusing to write {}: it has no parent directory",
+            path.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Refusing to write {}: it has no file name", path.display()))?;
+    let tmp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    // Clear a temp file left by a crashed run, or `create_new` fails. Unlink
+    // acts on the link itself, so this cannot reach outside `parent`.
+    let _ = std::fs::remove_file(&tmp);
+    let mut handle = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("Failed to create temporary file {}: {e}", tmp.display()))?;
+    if let Err(e) = std::io::Write::write_all(&mut handle, contents) {
+        drop(handle);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to write {}: {e}", tmp.display()));
+    }
+    drop(handle);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!(
+            "Failed to move {} into place at {}: {e}",
+            tmp.display(),
+            path.display()
+        )
+    })
+}
+
 /// Reject a path that escapes `root`, or that traverses a symlink on the
 /// way there.
 ///

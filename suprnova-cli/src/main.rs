@@ -173,6 +173,53 @@ enum Commands {
         /// Name of the action (e.g., AddTodo, CreateUser)
         name: String,
     },
+    /// Scaffold a Live component with its view and registration
+    #[command(name = "live:make")]
+    LiveMake {
+        /// Name of the component (e.g., Counter, TodoList, todo-list)
+        name: String,
+        /// Report what would be written without touching the project
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Check every registered Live view with the integrated checker
+    #[command(name = "live:check")]
+    LiveCheck {
+        /// Template root to load (repeatable); defaults to askama.toml's
+        /// `dirs` or `templates/`
+        #[arg(long = "templates")]
+        templates: Vec<std::path::PathBuf>,
+        /// Succeed when the only diagnostics are unproved dynamic structures
+        #[arg(long)]
+        allow_unproved: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
+    /// Report safe Live runtime, registry, provider, and artifact state
+    #[command(name = "live:inspect")]
+    LiveInspect {
+        /// Print the report as one JSON document instead of the formatted view
+        #[arg(long)]
+        json: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
+    /// Publish the reviewed Live runtime artifacts into a directory
+    #[command(name = "live:assets")]
+    LiveAssets {
+        /// Directory inside the project that receives `<identity>/<file>`
+        /// (e.g., public/__live)
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Replace an existing publication whose bytes differ
+        #[arg(long)]
+        replace: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
     /// Generate a new console command
     #[command(name = "make:command")]
     MakeCommand {
@@ -374,6 +421,26 @@ fn main() {
         }
         Commands::MakeAction { name } => {
             commands::make_action::run(name);
+        }
+        Commands::LiveMake { name, dry_run } => {
+            commands::live_make::run(name, dry_run);
+        }
+        Commands::LiveCheck {
+            templates,
+            allow_unproved,
+            timeout_secs,
+        } => {
+            commands::live_check::run(templates, allow_unproved, timeout_secs);
+        }
+        Commands::LiveInspect { json, timeout_secs } => {
+            commands::live_inspect::run(json, timeout_secs);
+        }
+        Commands::LiveAssets {
+            out,
+            replace,
+            timeout_secs,
+        } => {
+            commands::live_assets::run(out, replace, timeout_secs);
         }
         Commands::MakeCommand { name } => {
             commands::make_command::run(name);

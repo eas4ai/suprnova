@@ -187,6 +187,16 @@ pub fn print_help() {
     help_line("make:task <name>", "Scaffold a scheduled task");
     br();
 
+    println!("  {}", style("LIVE").bold().underlined());
+    help_line("live:make <name>", "Scaffold a Live component and view");
+    help_line("live:check", "Check Live views with the integrated checker");
+    help_line("live:inspect", "Report safe Live runtime state");
+    help_line(
+        "live:assets --out <dir>",
+        "Publish the reviewed Live runtime artifacts",
+    );
+    br();
+
     println!("  {}", style("DATABASE").bold().underlined());
     help_line("migrate", "Run pending migrations");
     help_line("migrate:status", "Show migration status");

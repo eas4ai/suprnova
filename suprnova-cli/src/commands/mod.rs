@@ -6,6 +6,11 @@ pub mod docker_init;
 pub mod generate_routes;
 pub mod generate_types;
 pub mod key_generate;
+pub mod live_assets;
+pub mod live_check;
+pub mod live_inspect;
+pub mod live_make;
+pub mod live_tool;
 pub mod make_action;
 pub mod make_command;
 pub mod make_controller;
@@ -61,6 +66,19 @@ pub(crate) fn cargo_run(app_args: &[&str]) -> std::process::Command {
         command.args(["--bin", &name]);
     }
     command.arg("--");
+    command.args(app_args);
+    command
+}
+
+/// Build a `cargo run` invocation for the project's `console` binary and
+/// forward `app_args` to it.
+///
+/// Every scaffold declares the console binary under that fixed name (see
+/// `src/bin/console.rs.tpl`), and the Live tooling helper lives only in the
+/// console dispatch path, so this wrapper never guesses from the manifest.
+pub(crate) fn cargo_run_console(app_args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("cargo");
+    command.args(["run", "--quiet", "--bin", "console", "--"]);
     command.args(app_args);
     command
 }

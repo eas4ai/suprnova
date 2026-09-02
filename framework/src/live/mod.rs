@@ -28,6 +28,10 @@ mod upload_policy;
 
 /// Focused assertion helpers for application component tests.
 pub mod testing;
+/// Hidden console helper answering the CLI's Live tooling protocol.
+pub mod tooling;
+/// Bounded JSON-lines protocol between the CLI and the tooling helper.
+pub mod tooling_protocol;
 
 /// Hidden generated-code support. Application code must not use this module.
 #[doc(hidden)]

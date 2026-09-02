@@ -86,6 +86,21 @@ The same list `suprnova --help` prints, grouped the same way.
 See [Generators](cli-generators.md) for the full scaffold details and what
 each generated file looks like.
 
+### Live
+
+| Command | Description |
+|---|---|
+| `suprnova live:make <name>` | Scaffold a Live component in `src/live/`, its view in `templates/live/`, and its registration in `src/live/mod.rs`. Never overwrites; `--dry-run` reports the plan. |
+| `suprnova live:check` | Check every registered Live view with the integrated checker. Reads `askama.toml` `dirs` or `templates/`; `--templates <dir>` overrides, `--allow-unproved` accepts unproved dynamic structures. |
+| `suprnova live:inspect` | Report safe Live runtime, registry, provider, and artifact state (`--json` for one JSON document). |
+| `suprnova live:assets --out <dir>` | Publish the reviewed Live runtime artifacts to `<dir>/<identity>/`, atomically; `--replace` replaces a publication whose bytes differ. |
+
+`live:check`, `live:inspect`, and `live:assets` run inside your application:
+the CLI starts `cargo run --bin console` and reads a bounded, versioned
+JSON-lines report from the framework's hidden tooling helper, so it never
+needs a framework dependency of its own. Build output stays on stderr;
+anything unexpected on stdout fails the command closed.
+
 ### Database
 
 | Command | Description |

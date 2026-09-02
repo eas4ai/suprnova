@@ -223,6 +223,82 @@ console binary's role.
 
 ---
 
+## live:make
+
+Scaffold a Live component: a server-owned island whose typed actions
+arrive over the Live protocol and whose re-rendered view is morphed in
+place by the shipped browser runtime.
+
+```bash
+suprnova live:make Counter
+suprnova live:make todo-list
+suprnova live:make Counter --dry-run
+```
+
+Names must be plain ASCII identifiers in any of `Counter`, `TodoList`,
+`todo-list`, or `todo_list` form; the file and module are snake-cased,
+the struct is PascalCased, and the registered component name is
+`<package>.<kebab>` (for a package named `demo-app`: `demo-app.counter`).
+Rust keywords, separators, dots, and non-ASCII input are rejected before
+anything is written.
+
+### Generated file
+
+```rust
+// src/live/counter.rs
+use suprnova::live::{LiveComponent, live};
+
+/// A counter island rendered by `live/counter.html`.
+#[derive(LiveComponent)]
+#[live(name = "demo-app.counter", view = "live/counter.html")]
+pub struct Counter {
+    /// Current count, exposed to the view.
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl Counter {
+    /// Increments the counter in response to `live:click="increment"`.
+    #[action]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+```html
+<!-- templates/live/counter.html -->
+<div>
+<p>Count: {{ count }}</p>
+<button type="button" live:click="increment">Increment</button>
+</div>
+```
+
+### What it wires
+
+1. Validates every target path first and refuses traversal and
+   symlinks; if the component file or the view already exists, it
+   warns and writes nothing at all.
+2. Writes `src/live/<snake>.rs` and `templates/live/<snake>.html`
+   atomically; if any write fails, every file the run created or changed
+   is rolled back.
+3. Creates `src/live/mod.rs` with a `registry()` builder on first use,
+   or inserts `pub mod <snake>;` and `.register::<snake::Pascal>()?`
+   into the existing builder.
+4. Adds `pub mod live;` to `src/lib.rs` when it is missing.
+5. Prints the bootstrap line that binds the registry, then the check
+   command: `suprnova live:check`.
+
+The registry must be bound during bootstrap for the runtime, the routes,
+and `live:check` to see the component:
+
+```rust
+suprnova::App::singleton(crate::live::registry().expect("Live registry"));
+```
+
+---
+
 ## make:error
 
 Scaffold a domain error - a unit struct annotated with
