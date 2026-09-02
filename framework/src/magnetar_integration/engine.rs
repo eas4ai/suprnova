@@ -135,8 +135,9 @@ pub trait HostUserAdapter: Send + Sync + 'static {
 /// Host-supplied password lockout state around one primary-auth attempt.
 ///
 /// Implementations must fail closed when the state cannot be read or mutated.
-/// The engine invokes these operations in order: check before verification,
-/// record after verification failure, and reset after verification success.
+/// Primary password verification checks before proof and records afterward.
+/// Challenge completion instead reserves an attempt atomically before proof;
+/// both paths reset after successful verification.
 #[async_trait]
 pub trait HostPasswordLockout: Send + Sync + 'static {
     /// Return the current lockout state for this normalized identity.
@@ -149,11 +150,121 @@ pub trait HostPasswordLockout: Send + Sync + 'static {
         ip_address: Option<&str>,
     ) -> Result<LockoutStatus>;
 
-    /// Clear failures after successful authentication.
+    /// Atomically reserve capacity before evaluating one proof.
+    async fn admit_attempt(
+        &self,
+        identity: &str,
+        context: Option<&str>,
+    ) -> Result<LockoutAdmission> {
+        let _ = (identity, context);
+        Err(Error::DependencyUnavailable {
+            dependency: "host password lockout".to_owned(),
+            message: "atomic attempt admission is unavailable".to_owned(),
+        })
+    }
+
+    /// Cancel exactly one pending attempt when proof evaluation aborts.
+    async fn cancel_attempt(&self, identity: &str, admission: &LockoutAdmission) -> Result<()> {
+        let _ = (identity, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "host password lockout".to_owned(),
+            message: "attempt reservation cancellation is unavailable".to_owned(),
+        })
+    }
+
+    /// Finalize one pending reservation as a failed proof.
+    async fn finalize_failed_attempt(
+        &self,
+        identity: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<LockoutFinalization> {
+        let _ = (identity, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "host password lockout".to_owned(),
+            message: "attempt reservation finalization is unavailable".to_owned(),
+        })
+    }
+
+    /// Atomically clear the exact admitted reservation, prior finalized
+    /// failures, and the user lock stamp after a successful challenge proof.
+    /// Other in-flight reservations remain valid.
+    async fn reset_admitted_attempts(
+        &self,
+        identity: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<()> {
+        let _ = (identity, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "host password lockout".to_owned(),
+            message: "atomic admitted-attempt reset is unavailable".to_owned(),
+        })
+    }
+
+    /// Clear failures after successful legacy primary authentication.
     async fn reset_after_success(&self, identity: &str) -> Result<()>;
 
     /// Force-unlock an account and report whether it was locked.
     async fn unlock(&self, identity: &str) -> Result<bool>;
+}
+
+/// Host lockout result for one pre-verification attempt reservation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockoutAdmission {
+    /// Whether the caller may proceed to proof evaluation.
+    pub admitted: bool,
+    /// Finalized-failure state observed by the atomic reservation.
+    pub status: LockoutStatus,
+    /// Whether this rejected admission repaired a durable lock transition.
+    pub locked_event: bool,
+    reservation: Option<magnetar::password::AttemptReservationToken>,
+}
+
+impl LockoutAdmission {
+    /// Construct an admission result backed by an optional reservation token.
+    #[must_use]
+    pub fn new(
+        admitted: bool,
+        status: LockoutStatus,
+        reservation: Option<magnetar::password::AttemptReservationToken>,
+    ) -> Self {
+        Self {
+            admitted,
+            status,
+            locked_event: false,
+            reservation,
+        }
+    }
+
+    /// Construct an admission carrying a durable lock-transition signal.
+    #[must_use]
+    pub fn with_event(
+        admitted: bool,
+        status: LockoutStatus,
+        locked_event: bool,
+        reservation: Option<magnetar::password::AttemptReservationToken>,
+    ) -> Self {
+        Self {
+            admitted,
+            status,
+            locked_event,
+            reservation,
+        }
+    }
+
+    /// The opaque pending-reservation token, when admitted by a live store.
+    #[must_use]
+    pub fn reservation(&self) -> Option<&magnetar::password::AttemptReservationToken> {
+        self.reservation.as_ref()
+    }
+}
+
+/// Result of finalizing one admitted attempt as an invalid proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockoutFinalization {
+    /// Exact finalized-failure state.
+    pub status: LockoutStatus,
+    /// Whether finalization won the durable unlocked-to-locked transition.
+    pub locked_event: bool,
 }
 
 /// Session output converted from one successful Magnetar gate decision.
@@ -1112,6 +1223,49 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         email: &str,
         ip_address: Option<&str>,
     ) -> Result<LockoutStatus>;
+    /// Atomically reserve capacity before evaluating one proof.
+    ///
+    /// The default refuses admission so older custom engines remain source
+    /// compatible without silently falling back to a racy read/write pair.
+    async fn admit_attempt(&self, email: &str, context: Option<&str>) -> Result<LockoutAdmission> {
+        let _ = (email, context);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "atomic attempt admission is unavailable".to_owned(),
+        })
+    }
+    /// Cancel exactly one admitted attempt whose proof could not complete.
+    async fn cancel_attempt(&self, email: &str, admission: &LockoutAdmission) -> Result<()> {
+        let _ = (email, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "attempt reservation cancellation is unavailable".to_owned(),
+        })
+    }
+    /// Finalize exactly one admitted attempt as a failed proof.
+    async fn finalize_failed_attempt(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<LockoutFinalization> {
+        let _ = (email, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "attempt reservation finalization is unavailable".to_owned(),
+        })
+    }
+    /// Atomically reset the exact admitted challenge attempt after success.
+    async fn reset_admitted_attempts(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<()> {
+        let _ = (email, admission);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "atomic admitted-attempt reset is unavailable".to_owned(),
+        })
+    }
     /// Read the current lockout state.
     async fn lockout_status(&self, email: &str) -> Result<LockoutStatus>;
     /// Clear failed attempts after success.
@@ -1383,12 +1537,40 @@ where
             .await
     }
 
+    async fn admit_attempt(&self, email: &str, context: Option<&str>) -> Result<LockoutAdmission> {
+        self.password_lockout.admit_attempt(email, context).await
+    }
+
+    async fn cancel_attempt(&self, email: &str, admission: &LockoutAdmission) -> Result<()> {
+        self.password_lockout.cancel_attempt(email, admission).await
+    }
+
+    async fn finalize_failed_attempt(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<LockoutFinalization> {
+        self.password_lockout
+            .finalize_failed_attempt(email, admission)
+            .await
+    }
+
     async fn lockout_status(&self, email: &str) -> Result<LockoutStatus> {
         self.password_lockout.status(email).await
     }
 
     async fn reset_attempts(&self, email: &str) -> Result<()> {
         self.password_lockout.reset_after_success(email).await
+    }
+
+    async fn reset_admitted_attempts(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<()> {
+        self.password_lockout
+            .reset_admitted_attempts(email, admission)
+            .await
     }
 
     async fn unlock_account(&self, email: &str) -> Result<bool> {

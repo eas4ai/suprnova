@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,11 +8,17 @@ use async_trait::async_trait;
 use magnetar::sessions::{SessionSummary, WebSessionBinding};
 use secrecy::{ExposeSecret, SecretString};
 use suprnova::magnetar_integration::engine::{
-    HostSignInDecision, MagnetarIssuedSession, MagnetarPasswordAuthEngine,
+    HostSignInDecision, LockoutAdmission, LockoutFinalization, MagnetarIssuedSession,
+    MagnetarPasswordAuthEngine,
 };
 use suprnova::{LockoutStatus, Session, SessionToken, User, UserId};
+use tokio::sync::Barrier;
 
 static FAIL_NEXT_REMEMBER_ISSUE: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_ATTEMPT_WRITE: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_ATTEMPT_CANCEL: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_ATTEMPT_LOCK: AtomicBool = AtomicBool::new(false);
+static ATTEMPT_ADMISSION_BARRIER: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
 
 pub fn fail_next_remember_issue() {
     FAIL_NEXT_REMEMBER_ISSUE.store(true, Ordering::SeqCst);
@@ -18,6 +26,35 @@ pub fn fail_next_remember_issue() {
 
 pub fn take_unconsumed_remember_issue_failure() -> bool {
     FAIL_NEXT_REMEMBER_ISSUE.swap(false, Ordering::SeqCst)
+}
+
+pub fn fail_next_attempt_write() {
+    FAIL_NEXT_ATTEMPT_WRITE.store(true, Ordering::SeqCst);
+}
+
+pub fn fail_next_attempt_cancel() {
+    FAIL_NEXT_ATTEMPT_CANCEL.store(true, Ordering::SeqCst);
+}
+
+pub fn fail_next_attempt_lock() {
+    FAIL_NEXT_ATTEMPT_LOCK.store(true, Ordering::SeqCst);
+}
+
+pub struct AttemptAdmissionBarrierGuard;
+
+impl Drop for AttemptAdmissionBarrierGuard {
+    fn drop(&mut self) {
+        *ATTEMPT_ADMISSION_BARRIER
+            .lock()
+            .expect("attempt admission barrier") = None;
+    }
+}
+
+pub fn synchronize_attempt_admission(parties: usize) -> AttemptAdmissionBarrierGuard {
+    *ATTEMPT_ADMISSION_BARRIER
+        .lock()
+        .expect("attempt admission barrier") = Some(Arc::new(Barrier::new(parties)));
+    AttemptAdmissionBarrierGuard
 }
 
 struct AllowingLimiter;
@@ -49,6 +86,7 @@ struct State {
     sessions: HashMap<String, SessionSummary>,
     magic_links: HashMap<String, String>,
     failures: HashMap<String, u32>,
+    pending_attempts: Vec<(magnetar::password::AttemptReservationToken, String)>,
     locked_until: HashMap<String, suprnova::chrono::DateTime<suprnova::chrono::Utc>>,
 }
 
@@ -267,6 +305,11 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         email: &str,
         _: Option<&str>,
     ) -> magnetar::Result<LockoutStatus> {
+        if FAIL_NEXT_ATTEMPT_WRITE.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt persistence failure".to_owned(),
+            });
+        }
         let mut state = self.state.lock().expect("test engine state");
         let attempts = {
             let attempts = state.failures.entry(email.to_owned()).or_default();
@@ -289,20 +332,205 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         })
     }
 
-    async fn lockout_status(&self, email: &str) -> magnetar::Result<LockoutStatus> {
-        let state = self.state.lock().expect("test engine state");
-        let attempts = state.failures.get(email).copied().unwrap_or_default();
-        Ok(LockoutStatus {
-            email: email.to_owned(),
-            failed_attempts: attempts,
-            is_locked: attempts >= 5,
-            locked_until: state.locked_until.get(email).copied(),
+    async fn admit_attempt(
+        &self,
+        email: &str,
+        _: Option<&str>,
+    ) -> magnetar::Result<LockoutAdmission> {
+        if FAIL_NEXT_ATTEMPT_WRITE.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt persistence failure".to_owned(),
+            });
+        }
+        let admission = {
+            let mut state = self.state.lock().expect("test engine state");
+            let current = state.failures.get(email).copied().unwrap_or_default();
+            let pending = u32::try_from(
+                state
+                    .pending_attempts
+                    .iter()
+                    .filter(|(_, pending_email)| pending_email == email)
+                    .count(),
+            )
+            .expect("test pending count fits u32");
+            let admitted = current.saturating_add(pending) < 5;
+            let locked_event = !admitted && current >= 5 && !state.locked_until.contains_key(email);
+            if locked_event {
+                state.locked_until.insert(
+                    email.to_owned(),
+                    suprnova::chrono::Utc::now() + suprnova::chrono::Duration::minutes(15),
+                );
+            }
+            let reservation = if admitted {
+                let token = magnetar::password::AttemptReservationToken::new(
+                    format!("test-reservation-{}", uuid::Uuid::new_v4().simple()),
+                    Some("two-factor challenge".to_owned()),
+                );
+                state
+                    .pending_attempts
+                    .push((token.clone(), email.to_owned()));
+                Some(token)
+            } else {
+                None
+            };
+            LockoutAdmission::with_event(
+                admitted,
+                LockoutStatus {
+                    email: email.to_owned(),
+                    failed_attempts: current,
+                    is_locked: current >= 5,
+                    locked_until: state.locked_until.get(email).copied(),
+                },
+                locked_event,
+                reservation,
+            )
+        };
+        let barrier = ATTEMPT_ADMISSION_BARRIER
+            .lock()
+            .expect("attempt admission barrier")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        Ok(admission)
+    }
+
+    async fn cancel_attempt(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<()> {
+        if FAIL_NEXT_ATTEMPT_CANCEL.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::DependencyUnavailable {
+                dependency: "test attempt store".to_owned(),
+                message: "forced attempt cancellation failure".to_owned(),
+            });
+        }
+        let Some(token) = admission.reservation() else {
+            return Ok(());
+        };
+        let mut state = self.state.lock().expect("test engine state");
+        let before = state.pending_attempts.len();
+        state
+            .pending_attempts
+            .retain(|(pending, pending_email)| pending != token || pending_email != email);
+        if state.pending_attempts.len() + 1 == before {
+            Ok(())
+        } else {
+            Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "missing pending reservation".to_owned(),
+            })
+        }
+    }
+
+    async fn finalize_failed_attempt(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<LockoutFinalization> {
+        let Some(token) = admission.reservation() else {
+            return Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "admission has no reservation".to_owned(),
+            });
+        };
+        let mut state = self.state.lock().expect("test engine state");
+        let Some(index) = state
+            .pending_attempts
+            .iter()
+            .position(|(pending, pending_email)| pending == token && pending_email == email)
+        else {
+            return Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "missing pending reservation".to_owned(),
+            });
+        };
+        state.pending_attempts.swap_remove(index);
+        let attempts = {
+            let attempts = state.failures.entry(email.to_owned()).or_default();
+            *attempts += 1;
+            *attempts
+        };
+        let locked_event = attempts >= 5 && !state.locked_until.contains_key(email);
+        if locked_event && FAIL_NEXT_ATTEMPT_LOCK.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::DependencyUnavailable {
+                dependency: "test user lock store".to_owned(),
+                message: "forced finalized-attempt lock transition failure".to_owned(),
+            });
+        }
+        if locked_event {
+            state.locked_until.insert(
+                email.to_owned(),
+                suprnova::chrono::Utc::now() + suprnova::chrono::Duration::minutes(15),
+            );
+        }
+        Ok(LockoutFinalization {
+            status: LockoutStatus {
+                email: email.to_owned(),
+                failed_attempts: attempts,
+                is_locked: attempts >= 5,
+                locked_until: state.locked_until.get(email).copied(),
+            },
+            locked_event,
         })
+    }
+
+    async fn lockout_status(&self, email: &str) -> magnetar::Result<LockoutStatus> {
+        let status = {
+            let state = self.state.lock().expect("test engine state");
+            let attempts = state.failures.get(email).copied().unwrap_or_default();
+            LockoutStatus {
+                email: email.to_owned(),
+                failed_attempts: attempts,
+                is_locked: attempts >= 5,
+                locked_until: state.locked_until.get(email).copied(),
+            }
+        };
+        let barrier = ATTEMPT_ADMISSION_BARRIER
+            .lock()
+            .expect("attempt admission barrier")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        Ok(status)
+    }
+
+    async fn reset_admitted_attempts(
+        &self,
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<()> {
+        let Some(token) = admission.reservation() else {
+            return Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "admission has no reservation".to_owned(),
+            });
+        };
+        let mut state = self.state.lock().expect("test engine state");
+        let Some(index) = state
+            .pending_attempts
+            .iter()
+            .position(|(pending, pending_email)| pending == token && pending_email == email)
+        else {
+            return Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "missing pending reservation".to_owned(),
+            });
+        };
+        state.pending_attempts.swap_remove(index);
+        state.failures.remove(email);
+        state.locked_until.remove(email);
+        Ok(())
     }
 
     async fn reset_attempts(&self, email: &str) -> magnetar::Result<()> {
         let mut state = self.state.lock().expect("test engine state");
         state.failures.remove(email);
+        state
+            .pending_attempts
+            .retain(|(_, pending_email)| pending_email != email);
         state.locked_until.remove(email);
         Ok(())
     }
@@ -311,6 +539,9 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         let mut state = self.state.lock().expect("test engine state");
         let was_locked = state.locked_until.remove(email).is_some();
         state.failures.remove(email);
+        state
+            .pending_attempts
+            .retain(|(_, pending_email)| pending_email != email);
         Ok(was_locked)
     }
 

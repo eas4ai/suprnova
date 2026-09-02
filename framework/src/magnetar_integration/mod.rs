@@ -694,6 +694,58 @@ pub(crate) async fn record_failed_attempt(
     feature = "database-postgres",
     feature = "database-mysql"
 ))]
+pub(crate) async fn admit_attempt(
+    email: &str,
+    context: Option<&str>,
+) -> Result<engine::LockoutAdmission, FrameworkError> {
+    let engine = password_engine()?;
+    engine
+        .admit_attempt(email, context)
+        .await
+        .map_err(|error| FrameworkError::internal(format!("admit authentication attempt: {error}")))
+}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub(crate) async fn cancel_attempt(
+    email: &str,
+    admission: &engine::LockoutAdmission,
+) -> Result<(), FrameworkError> {
+    let engine = password_engine()?;
+    engine
+        .cancel_attempt(email, admission)
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!("cancel authentication attempt: {error}"))
+        })
+}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub(crate) async fn finalize_failed_attempt(
+    email: &str,
+    admission: &engine::LockoutAdmission,
+) -> Result<engine::LockoutFinalization, FrameworkError> {
+    let engine = password_engine()?;
+    engine
+        .finalize_failed_attempt(email, admission)
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!("finalize authentication attempt: {error}"))
+        })
+}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub(crate) async fn lockout_status(email: &str) -> Result<LockoutStatus, FrameworkError> {
     let engine = password_engine()?;
     engine
@@ -713,6 +765,24 @@ pub(crate) async fn reset_attempts(email: &str) -> Result<(), FrameworkError> {
         .reset_attempts(email)
         .await
         .map_err(|error| FrameworkError::internal(format!("reset failed attempts: {error}")))
+}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub(crate) async fn reset_admitted_attempts(
+    email: &str,
+    admission: &engine::LockoutAdmission,
+) -> Result<(), FrameworkError> {
+    let engine = password_engine()?;
+    engine
+        .reset_admitted_attempts(email, admission)
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!("reset admitted authentication attempt: {error}"))
+        })
 }
 
 #[cfg(any(

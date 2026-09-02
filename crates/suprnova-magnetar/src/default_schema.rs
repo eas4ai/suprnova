@@ -1556,7 +1556,17 @@ pub mod sql_two_factor {
     }
 }
 
-/// Create every default auth table and required uniqueness index.
+const LOCKOUT_IDENTITY_INDEX: &str = "auth_lockouts_identity";
+
+fn lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
+    sea_orm::sea_query::Index::create()
+        .name(LOCKOUT_IDENTITY_INDEX)
+        .table(lockouts::Entity)
+        .col(lockouts::Column::Identity)
+        .to_owned()
+}
+
+/// Create every default auth table and required index.
 ///
 /// # Errors
 ///
@@ -1755,6 +1765,13 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create lockout migration-source index: {error}"),
+            })?;
+    }
+    if !index_exists(db, "auth_lockouts", LOCKOUT_IDENTITY_INDEX).await? {
+        db.execute(&lockout_identity_index())
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("create lockout identity index: {error}"),
             })?;
     }
     if completed_marker.as_deref() != Some("1") {
@@ -2078,4 +2095,48 @@ pub async fn database() -> DatabaseConnection {
     .await
     .unwrap();
     db
+}
+
+#[cfg(all(test, feature = "seaorm-sqlite"))]
+mod tests {
+    use sea_orm::sea_query::{MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder};
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+
+    #[test]
+    fn lockout_identity_index_builds_for_every_supported_backend() {
+        for sql in [
+            super::lockout_identity_index().to_string(SqliteQueryBuilder),
+            super::lockout_identity_index().to_string(PostgresQueryBuilder),
+            super::lockout_identity_index().to_string(MysqlQueryBuilder),
+        ] {
+            assert!(sql.contains(super::LOCKOUT_IDENTITY_INDEX));
+            assert!(sql.contains("auth_lockouts"));
+            assert!(sql.contains("identity"));
+            assert!(!sql.contains("UNIQUE"));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_lockout_schema_installs_identity_index_replay_safely() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        super::migrate(&database).await.unwrap();
+        super::migrate(&database).await.unwrap();
+
+        let indexes = database
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA index_list('auth_lockouts')".to_owned(),
+            ))
+            .await
+            .unwrap();
+        let names = indexes
+            .iter()
+            .map(|row| row.try_get::<String>("", "name").unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(
+            names.iter().any(|name| name == "auth_lockouts_identity"),
+            "default lockout schema must index the identity serialization key; got {names:?}"
+        );
+    }
 }

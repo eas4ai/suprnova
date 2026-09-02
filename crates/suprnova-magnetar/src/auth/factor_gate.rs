@@ -101,9 +101,22 @@ pub trait FactorVerifier: Send + Sync {
 
     /// Conditionally consume prepared proof material.
     ///
-    /// Invalid prepared material is also routed here for failed-attempt
-    /// accounting, but the gate never approves its challenge.
+    /// Invalid prepared material is also routed here to complete the verifier
+    /// protocol, but the gate never approves its challenge. Implementations
+    /// reserve attempt capacity in [`Self::prepare_code`] before reading proof.
     async fn claim_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<bool>;
+
+    /// Cancel a prepared proof when the surrounding ceremony cannot commit.
+    ///
+    /// The default fails closed so legacy verifier implementations remain
+    /// source compatible without silently leaking reserved attempt capacity.
+    async fn cancel_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<()> {
+        let _ = (user_id, proof);
+        Err(Error::DependencyUnavailable {
+            dependency: "factor verifier".to_owned(),
+            message: "prepared-proof cancellation is unavailable".to_owned(),
+        })
+    }
 }
 
 /// The only shared sign-in and challenge-completion boundary.
@@ -279,16 +292,13 @@ where
             })?;
         let prepared = self.factors.prepare_code(&payload.user_id, code).await?;
         if !prepared.is_valid() {
-            if let Err(error) = self
-                .factors
+            self.factors
                 .claim_prepared(&payload.user_id, prepared.into_inner())
-                .await
-            {
-                tracing::warn!(%error, "invalid second-factor proof accounting failed");
-            }
+                .await?;
             return Err(invalid("code", "invalid or expired second-factor code"));
         }
-        if !self
+        let proof = prepared.into_inner();
+        let transition = self
             .ceremonies
             .transition(
                 selector,
@@ -296,22 +306,51 @@ where
                 CHALLENGE_PENDING,
                 CHALLENGE_APPROVED,
             )
-            .await?
-        {
+            .await;
+        let transitioned = match transition {
+            Ok(transitioned) => transitioned,
+            Err(transition_error) => {
+                if let Err(cancel_error) =
+                    self.factors.cancel_prepared(&payload.user_id, proof).await
+                {
+                    tracing::error!(
+                        error = %cancel_error,
+                        original_error = %transition_error,
+                        "failed to cancel second-factor proof after ceremony transition aborted"
+                    );
+                    return Err(cancel_error);
+                }
+                return Err(transition_error);
+            }
+        };
+        if !transitioned {
+            self.factors
+                .cancel_prepared(&payload.user_id, proof)
+                .await?;
             return Err(Error::Conflict {
                 resource: "two-factor challenge".to_owned(),
                 message: "challenge was already completed".to_owned(),
             });
         }
-        let proof_claimed = match self
-            .factors
-            .claim_prepared(&payload.user_id, prepared.into_inner())
-            .await
-        {
+        let proof_claimed = match self.factors.claim_prepared(&payload.user_id, proof).await {
             Ok(claimed) => claimed,
             Err(error) => {
-                tracing::warn!(%error, "prepared second-factor proof claim failed");
-                false
+                let restored = self
+                    .ceremonies
+                    .transition(
+                        selector,
+                        TWO_FACTOR_CHALLENGE_KIND,
+                        CHALLENGE_APPROVED,
+                        CHALLENGE_PENDING,
+                    )
+                    .await;
+                if !matches!(restored, Ok(true)) {
+                    tracing::error!(
+                        ?restored,
+                        "failed to restore challenge after proof claim error"
+                    );
+                }
+                return Err(error);
             }
         };
         if !proof_claimed {
