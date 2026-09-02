@@ -330,7 +330,9 @@ fn config() -> SessionConfig {
 /// Serializes this file's tests that touch the process-wide `Crypt`
 /// test hooks - `Cookie::encrypted` directly, or
 /// `crypto::_test_force_next_encrypt_failure` indirectly - against
-/// each other. `#[tokio::test]` functions in one binary run
+/// each other. Every test that drives `SessionMiddleware::handle` counts:
+/// building the session cookie encrypts, so it must hold this guard even
+/// when it never arms the hook itself. `#[tokio::test]` functions in one binary run
 /// concurrently by default, so without this, one test's genuine
 /// `Crypt::encrypt_string` call could spuriously consume another
 /// test's forced-failure flag (or vice versa: an unrelated test could
@@ -363,6 +365,7 @@ async fn run(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_is_attached_to_the_response_as_set_cookie() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let next: Next = Arc::new(|_req| {
         Box::pin(async {
             Cookie::queue(Cookie::new("promo", "10OFF"));
@@ -386,6 +389,7 @@ async fn queued_cookie_is_attached_to_the_response_as_set_cookie() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unqueue_removes_a_previously_queued_cookie() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let next: Next = Arc::new(|_req| {
         Box::pin(async {
             Cookie::queue(Cookie::new("promo", "10OFF"));
@@ -419,6 +423,7 @@ async fn unqueue_removes_a_previously_queued_cookie() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expire_queues_a_deletion_cookie_scoped_by_path_and_domain() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let next: Next = Arc::new(|_req| {
         Box::pin(async {
             Cookie::expire("promo", Some("/checkout"), Some("example.com"));
@@ -447,6 +452,7 @@ async fn expire_queues_a_deletion_cookie_scoped_by_path_and_domain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_attaches_even_to_a_redirect_response() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let next: Next = Arc::new(|_req| {
         Box::pin(async {
             Cookie::queue(Cookie::new("promo", "10OFF"));
@@ -470,6 +476,7 @@ async fn queued_cookie_attaches_even_to_a_redirect_response() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_does_not_leak_into_the_next_request() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let next_a: Next = Arc::new(|_req| {
         Box::pin(async {
             Cookie::queue(Cookie::new("promo", "10OFF"));
@@ -527,6 +534,7 @@ fn queue_outside_a_request_scope_is_a_silent_no_op() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queuing_the_same_name_twice_replaces_rather_than_duplicates() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     // Brief design note 3: `queue_cookie` retains-then-pushes, so a
     // second `Cookie::queue` under a name already queued this request
     // replaces the first rather than adding a second `Set-Cookie` line
@@ -568,6 +576,7 @@ async fn queuing_the_same_name_twice_replaces_rather_than_duplicates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_keeps_its_httponly_secure_and_samesite_attributes() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     // `expire`'s test already pins Max-Age/Path/Domain surviving the
     // queue-then-drain round trip. A queued cookie losing HttpOnly or
     // Secure is a vulnerability rather than a formatting bug, so those
@@ -660,6 +669,7 @@ async fn queued_cookie_survives_a_session_read_failure_500() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_survives_a_session_write_failure_500() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     // Fix round 1, IMPORTANT 1: `WriteFailsStore` fails every write, so
     // a handler that dirties the session (here, `set_auth_user`) drives
     // `SessionMiddleware::handle`'s fail-closed 500 for an unpersisted
