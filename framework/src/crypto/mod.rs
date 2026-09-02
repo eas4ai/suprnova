@@ -2,7 +2,7 @@
 //!
 //! [`Crypt`] is a Laravel-style static facade for AES-256-GCM encryption.
 //! The active key ring is held in a process-wide [`OnceLock`] populated
-//! during pre-runtime application boot from the `APP_KEY` and
+//! during application bootstrap from the `APP_KEY` and
 //! (optionally) `APP_KEY_PREVIOUS` environment variables.
 //!
 //! # Key rotation
@@ -819,21 +819,20 @@ pub(crate) fn initialize_from_environment(environment: &Environment) -> Result<(
     // ring above is intentionally unconditional so later boots still validate.
     if !Crypt::is_initialized() {
         if boot_ring.is_current_generated() {
-            tracing::warn!(
-                environment = %environment,
-                "APP_KEY is not set - generated a transient development key. \
-                 Sessions and cursors will reset on every restart. Set APP_KEY \
-                 in your environment to persist them. This path is gated to \
-                 local/development/testing; production fails closed."
+            eprintln!(
+                "suprnova: APP_KEY is not set - generated a transient development key. \
+                 Sessions and cursors will reset on every restart. Set APP_KEY in your \
+                 environment to persist them. This path is gated to \
+                 local/development/testing; production fails closed. \
+                 environment={environment}"
             );
         }
         if !boot_ring.previous.is_empty() {
-            tracing::info!(
-                previous_key_count = boot_ring.previous.len(),
-                "APP_KEY_PREVIOUS active - decrypt will fall back to {n} previous \
-                 key(s). Run a re-encrypt pass (load + save every encrypted \
-                 column) and then remove APP_KEY_PREVIOUS once complete.",
-                n = boot_ring.previous.len()
+            eprintln!(
+                "suprnova: APP_KEY_PREVIOUS active - decrypt will fall back to {n} previous \
+                 key(s). Run a re-encrypt pass (load + save every encrypted column) \
+                 and then remove APP_KEY_PREVIOUS once complete. previous_key_count={n}",
+                n = boot_ring.previous.len(),
             );
         }
         let (current, previous) = boot_ring.into_keys();

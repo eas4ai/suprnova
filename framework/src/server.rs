@@ -149,8 +149,8 @@ impl Server {
         App::boot_services()?;
 
         // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY server boot,
-        // even though `#[suprnova::main]` installs Crypt before the runtime
-        // so process-wide application bootstrap can use it. This repeated
+        // even though generated applications install Crypt at the start of
+        // their shared bootstrap hook so Magnetar can use it. This repeated
         // validation keeps production fail-closed for embedders and later
         // boots after the process-wide ring is already sealed.
         let environment = Config::get::<crate::config::AppConfig>()

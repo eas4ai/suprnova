@@ -127,6 +127,22 @@ fn api_cargo_template_has_no_hardcoded_tag() {
 }
 
 #[test]
+fn api_bootstrap_initializes_crypt_before_magnetar() {
+    let bootstrap = read("src/templates/files/api/src/bootstrap.rs.tpl");
+    let crypt = bootstrap
+        .find("initialize_crypt_or_exit()")
+        .expect("API bootstrap must initialize Crypt");
+    let magnetar = bootstrap
+        .find("init_magnetar(magnetar)")
+        .expect("API bootstrap must initialize Magnetar");
+
+    assert!(
+        crypt < magnetar,
+        "API bootstrap must initialize Crypt before Magnetar; template:\n{bootstrap}"
+    );
+}
+
+#[test]
 fn no_scaffold_template_pins_a_literal_version_tag() {
     // Catches the general case: any template that hardcodes `tag = "vX.Y.Z"`
     // will be stale the moment the next release ships.

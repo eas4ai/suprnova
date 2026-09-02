@@ -52,24 +52,38 @@ pub fn load_env() -> Result<Environment, FrameworkError> {
     Ok(env)
 }
 
-/// Complete pre-runtime configuration, or report the failure and exit.
+/// [`load_env`], but reports the failure to the operator and exits.
 ///
-/// This loads the environment, validates the configured encryption key ring,
-/// and installs [`crate::Crypt`] before application bootstrap runs. This is
-/// what [`crate::main`] expands to. A boot that cannot read its configuration
-/// has nothing useful to do next, and an operator reading stderr is better
-/// served by one clear line than by a panic backtrace through a proc-macro
-/// expansion.
+/// This is what [`crate::main`] expands to. A boot that cannot read its
+/// configuration has nothing useful to do next, and an operator reading
+/// stderr is better served by one clear line than by a panic backtrace
+/// through a proc-macro expansion.
 pub fn load_env_or_exit() -> Environment {
-    match load_env().and_then(|env| {
-        crate::crypto::initialize_from_environment(&env)?;
-        Ok(env)
-    }) {
+    match load_env() {
         Ok(env) => env,
         Err(e) => {
             eprintln!("framework configuration init failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Validate and install the process-wide encryption key ring.
+///
+/// Generated applications call this immediately before their real application
+/// bootstrap. Keeping it out of [`load_env_or_exit`] lets console help,
+/// version, and parse-error paths load enough configuration to render output
+/// without requiring an `APP_KEY` for bootstrap work they never perform.
+///
+/// This helper reports validation failures to stderr and exits because an
+/// application bootstrap cannot safely continue without Crypt.
+pub fn initialize_crypt_or_exit() {
+    let environment = Config::get::<crate::config::AppConfig>()
+        .map(|config| config.environment)
+        .unwrap_or_else(Environment::detect);
+    if let Err(error) = crate::crypto::initialize_from_environment(&environment) {
+        eprintln!("framework encryption init failed: {error}");
+        std::process::exit(1);
     }
 }
 
