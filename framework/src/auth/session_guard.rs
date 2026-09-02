@@ -247,32 +247,63 @@ impl StatefulGuard for SessionGuard {
             Auth::revoke_remember_selector(&self.name, &previous_user_id, &selector).await?;
         }
 
-        // Delegate session persistence (+ remember-me row/cookie) to the
-        // proven facade helpers: both regenerate the session id and CSRF
-        // token to defeat session fixation.
-        if remember {
-            Auth::login_guard_id(&self.name, user_id.clone())?;
-            Auth::issue_remember_cookie_for_guard(&self.name, &user_id, self.remember_ttl_minutes)
-                .await?;
+        // Committing the session identity is the login boundary. It rotates
+        // the session id and CSRF token before installing the authenticated
+        // principal. Everything below is post-commit observation or an
+        // optional remembered-login enhancement and therefore cannot turn the
+        // committed identity transition into a reported failure. Final store
+        // persistence remains SessionMiddleware's fail-closed responsibility.
+        Auth::login_guard_id(&self.name, user_id.clone())?;
+        let remembered = if remember {
+            match Auth::issue_remember_cookie_for_guard(
+                &self.name,
+                &user_id,
+                self.remember_ttl_minutes,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "suprnova::auth",
+                        "remember-me issuance failed; completing login without a remembered session"
+                    );
+                    false
+                }
+            }
         } else {
-            Auth::login_guard_id(&self.name, user_id.clone())?;
-        }
+            false
+        };
 
         // Cache the resolved user for the rest of the request.
         request_state::set_guard_user(&self.name, user);
         request_state::set_guard_via_remember(&self.name, false);
 
-        EventFacade::dispatch(events::Login {
+        if EventFacade::dispatch_best_effort(events::Login {
             guard: self.name.clone(),
             user_id: user_id.clone(),
-            remember,
+            remember: remembered,
         })
-        .await?;
-        EventFacade::dispatch(events::Authenticated {
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                target: "suprnova::auth",
+                "post-commit Login event delivery was incomplete"
+            );
+        }
+        if EventFacade::dispatch_best_effort(events::Authenticated {
             guard: self.name.clone(),
             user_id,
         })
-        .await?;
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                target: "suprnova::auth",
+                "post-commit Authenticated event delivery was incomplete"
+            );
+        }
         Ok(())
     }
 
