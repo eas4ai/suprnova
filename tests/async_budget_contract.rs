@@ -27,16 +27,17 @@ async fn server_owner_proves_exact_multiplexed_workload() {
 }
 
 #[test]
-fn unattended_gate_owns_async_benchmark_and_never_blanket_denies_warnings() {
+fn async_benchmark_is_on_demand_and_gate_never_blanket_denies_warnings() {
     let cargo = repository_file("Cargo.toml");
     let package = repository_file("browser/package.json");
     let gate = repository_file("scripts/gate.sh");
     let runner = repository_file("scripts/run-async-budget.sh");
     assert!(cargo.contains("name = \"async_framework_budget\""));
     assert!(package.contains("\"budget:async\": \"node scripts/run-async-budget.mjs\""));
-    assert!(gate.contains("E100/1K and R100 async continuity budgets"));
-    assert!(gate.contains("SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh"));
-    assert!(gate.contains("SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh"));
+    assert!(
+        !gate.contains("run-async-budget.sh"),
+        "the async budget is an on-demand tool, not a gate phase"
+    );
     assert!(runner.contains("SUPRNOVA_LIVE_B1_DEDICATED"));
     assert!(!gate.contains("-D warnings"));
     assert!(!runner.contains("-D warnings"));

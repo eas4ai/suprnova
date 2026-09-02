@@ -52,10 +52,10 @@ rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 The gate checks the implementation-document contract, specs and optional Fable
 archive, license inventory, Rust format/lints/tests/doctests/MSRV,
 cross-language fixtures, fuzz target builds, strict TypeScript checks,
-deterministic browser builds, Chromium/Firefox/WebKit Playwright suites,
-release-aware actual-browser evidence, browser byte/performance budgets,
-snapshot and action budgets, and macro expansion scaling. It reviews warnings
-without blanket warning denial.
+deterministic browser builds, Chromium/Firefox/WebKit Playwright suites, and
+release-aware actual-browser evidence. Benchmark and artifact budgets are
+on-demand tools outside the gate. It reviews warnings without blanket warning
+denial.
 
 ## Implementation contracts
 

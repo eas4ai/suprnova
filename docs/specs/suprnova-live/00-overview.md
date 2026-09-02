@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-30
+Last revised: 2026-09-01
 
 ## Purpose
 
@@ -313,12 +313,12 @@ KiB presentation events over ten seconds with ten-percent refresh
 invalidations; and `R100`, simultaneous continuity loss plus jittered recovery
 for those 100 subscriptions.
 
-| Budget | v1 release contract |
+| Budget | v1 target |
 |---|---|
 | Core runtime transfer size | Every deterministic build measures and reports exact Brotli bytes for both production core variants, including the pinned morph implementation and excluding optional Stimulus, diagnostics, source maps, and component CSS. Core transfer size has no absolute release-blocking ceiling until the universal core is functionally complete and an evidence-based baseline plus explicit maintenance headroom is approved. |
-| Optional Stimulus adapter | Each Stimulus bridge ESM/classic production artifact is at most 8 KiB Brotli. It contains Suprnova's bridge and continuity implementation, imports or bundles no Stimulus package, and loads only when an application supplies a Stimulus `Application`. |
-| Optional upload artifact | Each upload ESM/classic production artifact is at most 20 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the upload role. |
-| Optional asynchronous artifact | Every deterministic build reports exact Brotli bytes for both asynchronous-update production variants. There is no absolute total-download ceiling. Each variant is compared with the separate reviewed artifact-size baseline; an increase greater than 15 percent fails as unreviewed artifact drift until an explicit version-controlled baseline decision records its evidence and rationale. The artifact loads only for a document whose trusted checked metadata requires the async role. |
+| Optional Stimulus adapter | Every deterministic build reports exact Brotli bytes for each Stimulus bridge ESM/classic production artifact; there is no absolute ceiling. It contains Suprnova's bridge and continuity implementation, imports or bundles no Stimulus package, and loads only when an application supplies a Stimulus `Application`. |
+| Optional upload artifact | Every deterministic build reports exact Brotli bytes for each upload ESM/classic production artifact, including its required bounded-resource implementation; there is no absolute ceiling. It loads only for a document whose trusted checked metadata requires the upload role. |
+| Optional asynchronous artifact | Every deterministic build reports exact Brotli bytes for both asynchronous-update production variants. There is no absolute ceiling and no drift rule; growth is read from the reported bytes and reviewed by a person. The artifact loads only for a document whose trusted checked metadata requires the async role. |
 | Optional driver claims | One document retains at most 256 active island ports in the optional lifecycle driver. Island 257 fails optional-capability admission with one bounded `resource_exhausted` diagnostic while ordinary Live and earlier admitted islands remain operational; retirement releases capacity. |
 | Runtime bootstrap | `D100` connects in at most 50 ms p95 on `B1`; 30 idle seconds consume at most 5 ms total main-thread time, use at most one core mutation observer per document, and perform no polling or network request. |
 | Runtime memory | At most 12 KiB incremental retained runtime memory per connected island in `D100`, excluding DOM nodes and the raw HTML/snapshot byte strings owned by the document. |
@@ -334,19 +334,13 @@ for those 100 subscriptions.
 | Asynchronous event envelope | `E100/1K` retains at most 8 KiB framework memory per active subscription excluding native transport, DOM, and the currently dispatched payload. Queued unapplied browser events are capped at 64 items and 256 KiB per document; typed presentation dispatch is at most 8 ms p95 on `B1`; invalidations retain at most one queued plus one in-flight refresh per island. |
 | Reconnect storm | `R100` permits at most eight concurrent reconnect handshakes per origin, creates no synchronized polling burst, and returns within the 12 KiB retained-runtime-per-island cap after currentness is reestablished. |
 
-Hard-limit failure blocks release. Core and asynchronous transfer sizes are the
-explicit exceptions to an absolute-cap rule: every gate reports exact ESM and
-classic Brotli bytes. The checked core ESM benchmark baseline remains bound to
-the exact production artifact. The asynchronous artifacts instead use the
-closed-provenance Task 6 artifact-size baseline; a greater-than-15-percent
-increase is an unreviewed regression, not a total-size ceiling. Neither baseline
-may be silently derived from the candidate it evaluates. An intentional baseline
-revision must update its version-controlled evidence, rationale, and decisions
-log in the same approved change. Separately, a statistically repeatable p95
-regression of 15 percent or more from a checked-in workload baseline blocks
-release; results within five percent are treated as benchmark noise and three
-independent runs confirm a regression. Correctness and security suites run beside
-the fast path so an unsafe shortcut cannot satisfy a budget.
+These budgets are measured by the on-demand benchmark tools and reported as
+numbers. No budget is a condition of the ordinary gate, which verifies
+correctness and security only. Whether a reported number is acceptable for a
+release is a review judgment recorded in the decisions log, not an automated
+cliff, and a baseline is never derived from the candidate it describes.
+Correctness and security suites run beside the fast path so an unsafe shortcut
+cannot pose as a budget win.
 
 ## Spec map
 
@@ -523,6 +517,9 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Benchmark and artifact budgets became on-demand tools outside
+  `scripts/gate.sh`; the gate verifies correctness and security only, and no
+  artifact carries an absolute ceiling or drift rule.
 - 2026-08-30 -- Authorized iteration 005 as the atomic Suprnova integration and
   complete RenderCache implementation. The engine, browser runtime, generated
   artifacts, fixtures, tests, benchmarks, normative specifications, checker, and

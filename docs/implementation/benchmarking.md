@@ -2,7 +2,9 @@
 
 All checked results are versioned evidence, not marketing claims. The current
 repository results are `local_exploratory`; validated S1 evidence remains the
-qualification boundary for a release or public performance statement.
+qualification boundary for a release or public performance statement. None of
+these tools run in `scripts/gate.sh`: the gate verifies correctness and
+security, and budgets run on demand so a person can read the numbers.
 
 ## Snapshot-processing benchmark
 
@@ -63,7 +65,7 @@ rtk node scripts/check-expansion-budget.mjs
 
 The checked local evidence records 1,762/15,622/154,222 expanded tokens,
 10,174/92,884/919,984 expanded bytes, and 5,372/5,400/5,562 milliseconds of
-isolated check work for 1/10/100 components. The gate rejects fixture drift,
+isolated check work for 1/10/100 components. The tool rejects fixture drift,
 expansion size more than 10% above the checked baseline, and token or byte
 growth above twelve times between consecutive fixtures. Isolated check time is
 bounded only within one run: each larger fixture must finish within twice the
@@ -74,12 +76,12 @@ load, none of which a checked millisecond baseline can. The recorded
 milliseconds and job setting are exploratory context, are never compared
 against the checked baseline, and are never presented as release-grade
 toolchain performance. `tests/expansion_budget_rules.mjs` holds the rule
-contract.
+contract and runs on demand with `node tests/expansion_budget_rules.mjs`.
 
 ## Browser runtime benchmark
 
 The browser budget has two layers. `rtk npm --prefix browser run budget` is the
-unattended regression check: it rebuilds the exact production artifacts, reports
+on-demand artifact check: it rebuilds the exact production artifacts, reports
 both core variants' Brotli sizes, enforces response/snapshot and optional-artifact
 caps, requires the checked baseline to name the exact ESM artifact, and evaluates
 all applicable hard/regression limits. Core size has no absolute ceiling until a

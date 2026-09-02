@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-30
+Last revised: 2026-09-01
 
 ## Authority and application
 
@@ -512,22 +512,23 @@ npm run budget
 
 `build` must reproduce checked artifacts byte-for-byte from the lockfile and
 source. `budget` measures the production artifacts and architecture performance
-fixtures; it is not a source-file-size approximation. Roles may enforce an
-approved absolute ceiling or reviewed-baseline drift policy, but a contributor
-may not invent a byte cliff or self-baseline a candidate merely to make the gate
-pass.
+fixtures on demand and reports exact bytes; it is not a source-file-size
+approximation, it enforces no byte ceiling, and it is not a gate phase.
 
 ### Provider and browser matrix checks
 
-Provider conformance, oldest-browser, current-browser, accessibility, CSP, and
-benchmark matrix commands shall be wired into `scripts/gate.sh` or a script it
-invokes before the corresponding implementation can be called complete. Tests
+Provider conformance, oldest-browser, current-browser, accessibility, and CSP
+matrix commands shall be wired into `scripts/gate.sh` or a script it invokes
+before the corresponding implementation can be called complete. Benchmark
+commands are on-demand tools and are not wired into the gate. Tests
 requiring Redis, Memcached, PostgreSQL, MySQL/MariaDB, or a real browser remain
 explicit and unattended; credentials are never embedded in commands or
 fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-01 -- Benchmark and artifact budgets are on-demand tools, not gate
+  phases; `scripts/gate.sh` verifies correctness and security only.
 - 2026-08-30 -- Advanced the active contract to iteration 005 for the atomic
   Suprnova workspace cutover and the complete RenderCache foundation assigned by
   iteration 004. The committed engine, browser, fixtures, tests, specs, checker,

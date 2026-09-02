@@ -117,11 +117,12 @@ failure rather than disappearing from evidence.
 
 ## Benchmarks
 
-Ordinary gates run deterministic reduced proofs. Qualified release evidence must
-come from the pinned dedicated environments: S1 for Rust/server control paths and
-B1 for Chromium/browser paths. The checked upload and async baselines currently
-contain only `exploratoryReference`; `qualifiedBaseline` is `null`. Local results
-are therefore useful unqualified evidence, never release qualification. Release
+No budget runs in the gate; the reduced and qualified runners below are
+on-demand tools. Qualified release evidence must come from the pinned dedicated
+environments: S1 for Rust/server control paths and B1 for Chromium/browser
+paths. The checked upload and async baselines currently contain only
+`exploratoryReference`; `qualifiedBaseline` is `null`. Local results are
+therefore useful unqualified evidence, never release qualification. Release
 evaluation fails closed when the qualified baseline is absent, the candidate is
 unqualified, the environment/artifact binding differs, or a hard cap/regression
 fails.
@@ -184,9 +185,10 @@ The complete ordinary project gate is:
 rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 ```
 
-`SUPRNOVA_LIVE_RELEASE=1` selects release branches in the gate but does not
-create dedicated-runner attestations. A release runner must also provide the S1
-and B1 environment controls required by the invoked scripts. Fabricating those
+`SUPRNOVA_LIVE_RELEASE=1` makes the gate's compatibility check refuse
+unqualified evidence; it runs no budget and creates no dedicated-runner
+attestation. A release runner must also provide the S1 and B1 environment
+controls required by the budget scripts it runs on demand. Fabricating those
 flags on a shared workstation does not make the resulting evidence qualified.
 Clippy warnings are reviewed; the gate does not blanket-deny warnings.
 

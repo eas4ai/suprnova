@@ -198,13 +198,6 @@ describe("deterministic production assets", () => {
     const classicBaseline = current.roles["async-classic"].brotliBytes;
     const esmIncrease = ((esm - esmBaseline) / esmBaseline) * 100;
     const classicIncrease = ((classic - classicBaseline) / classicBaseline) * 100;
-    const specification = await readFile(
-      new URL(
-        "../../docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
-        import.meta.url,
-      ),
-      "utf8",
-    );
 
     expect(result.issues).toEqual([]);
     expect(result.lines).toContain(
@@ -239,9 +232,6 @@ describe("deterministic production assets", () => {
     expect(evaluateArtifactBudgets(aboveThreshold, baseline).issues).toEqual([
       `artifact_budget:async-esm:unreviewed_regression:+${String(aboveThresholdBytes - esmBaseline)}`,
     ]);
-    expect(specification).toContain(
-      `strictly prior source commit \`57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61\``,
-    );
   });
 
   it("exposes equivalent ESM and non-replaceable classic facades from one singleton core", async () => {

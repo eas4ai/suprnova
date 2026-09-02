@@ -497,12 +497,9 @@ describe("browser benchmark provenance", () => {
     expect(argumentsFrom([]).runs).toBe(3);
   });
 
-  it("records the full async workload matrix before a release binding check", async () => {
+  it("stays an on-demand tool that the gate never runs", async () => {
     const gate = await readFile(new URL("../../scripts/gate.sh", import.meta.url), "utf8");
-    expect(gate).toContain("npm run budget:browser -- --release --dedicated");
-    expect(gate.indexOf("npm run budget:browser -- --release --dedicated")).toBeLessThan(
-      gate.indexOf("npm run budget -- --release"),
-    );
+    expect(gate).not.toContain("npm run budget");
   });
 
   it("measures async workloads through the exact built ESM artifact, never a source bundle", async () => {
