@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use syn::{Attribute, Fields, GenericArgument, ItemStruct, PathArguments, Type};
 use walkdir::WalkDir;
@@ -296,6 +296,10 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
 /// Scan all Rust files in the src directory for InertiaProps/Data structs,
 /// with plain-struct definitions resolved transitively (see
 /// [`resolve_reachable`]).
+// Public through the library target; the binary also compiles this module
+// privately, where the checked file-generation path supersedes this legacy
+// best-effort entry point.
+#[allow(dead_code)]
 pub fn scan_inertia_props(project_path: &Path) -> Vec<InertiaPropsStruct> {
     let src_path = project_path.join("src");
     let mut derived = Vec::new();
@@ -311,27 +315,141 @@ fn visit_path_into(
     derived: &mut Vec<InertiaPropsStruct>,
     plain: &mut Vec<InertiaPropsStruct>,
 ) {
+    // These public best-effort scan paths predate fallible generation APIs.
+    // File generation uses `visit_path_into_checked` directly so it can
+    // refuse to overwrite an artifact after an incomplete scan.
+    drop(visit_path_into_checked(root, derived, plain));
+}
+
+#[derive(Debug)]
+struct ScanFailure {
+    path: PathBuf,
+    operation: &'static str,
+    detail: String,
+}
+
+impl ScanFailure {
+    fn new(root: &Path, path: &Path, operation: &'static str, detail: String) -> Self {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let path = match (root.file_name(), relative.as_os_str().is_empty()) {
+            (Some(root_name), true) => PathBuf::from(root_name),
+            (Some(root_name), false) if relative != path => PathBuf::from(root_name).join(relative),
+            _ => path.to_path_buf(),
+        };
+        Self {
+            path,
+            operation,
+            detail,
+        }
+    }
+}
+
+fn visit_path_into_checked(
+    root: &Path,
+    derived: &mut Vec<InertiaPropsStruct>,
+    plain: &mut Vec<InertiaPropsStruct>,
+) -> Vec<ScanFailure> {
     // `sort_by_file_name` is not cosmetic. The output file is checked in,
     // so the walk order becomes the declaration order in a tracked
     // artifact - and an unsorted `WalkDir` yields whatever order the
     // filesystem hands back, which differs between machines and after any
     // directory rewrite. Without it, two developers running the documented
     // command get two different files.
-    for entry in WalkDir::new(root)
+    let entries = WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
-    {
-        if let Ok(content) = fs::read_to_string(entry.path())
-            && let Ok(syntax) = syn::parse_file(&content)
+        .map(|entry| match entry {
+            Ok(entry) => Ok(entry.into_path()),
+            Err(error) => {
+                let path = error
+                    .path()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.to_path_buf());
+                Err(ScanFailure::new(root, &path, "scan", error.to_string()))
+            }
+        });
+    visit_entries_into_checked(root, entries, derived, plain)
+}
+
+fn visit_entries_into_checked<I>(
+    root: &Path,
+    entries: I,
+    derived: &mut Vec<InertiaPropsStruct>,
+    plain: &mut Vec<InertiaPropsStruct>,
+) -> Vec<ScanFailure>
+where
+    I: IntoIterator<Item = Result<PathBuf, ScanFailure>>,
+{
+    let mut failures = Vec::new();
+
+    for entry in entries {
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        if !path
+            .extension()
+            .map(|extension| extension == "rs")
+            .unwrap_or(false)
         {
-            let mut visitor = InertiaPropsVisitor::new();
-            visitor.visit_file(&syntax);
-            derived.extend(visitor.structs);
-            plain.extend(visitor.plain_structs);
+            continue;
         }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                failures.push(ScanFailure::new(root, &path, "read", error.to_string()));
+                continue;
+            }
+        };
+        let syntax = match syn::parse_file(&content) {
+            Ok(syntax) => syntax,
+            Err(error) => {
+                failures.push(ScanFailure::new(root, &path, "parse", error.to_string()));
+                continue;
+            }
+        };
+
+        let mut visitor = InertiaPropsVisitor::new();
+        visitor.visit_file(&syntax);
+        derived.extend(visitor.structs);
+        plain.extend(visitor.plain_structs);
     }
+
+    failures.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.operation.cmp(right.operation))
+            .then_with(|| left.detail.cmp(&right.detail))
+    });
+    failures
+}
+
+fn scan_inertia_props_checked(project_path: &Path) -> Result<Vec<InertiaPropsStruct>, String> {
+    let src_path = project_path.join("src");
+    let mut derived = Vec::new();
+    let mut plain = Vec::new();
+    let failures = visit_path_into_checked(&src_path, &mut derived, &mut plain);
+    if !failures.is_empty() {
+        let mut message = format!(
+            "Rust source scan failed with {} error(s); generated types were left unchanged:",
+            failures.len()
+        );
+        for failure in failures {
+            message.push_str(&format!(
+                "\n- {}: {} failed: {}",
+                failure.path.display(),
+                failure.operation,
+                failure.detail
+            ));
+        }
+        return Err(message);
+    }
+
+    Ok(resolve_reachable(derived, plain))
 }
 
 /// Promote plain (underived) structs reachable from the derived roots' fields
@@ -895,12 +1013,15 @@ impl GenerationOutcome {
     }
 }
 
-/// Generate types and write to the output file
+/// Generate types and write to the output file.
+///
+/// If any Rust source cannot be discovered, read, or parsed, generation fails
+/// before the existing output file or its parent directory is touched.
 pub fn generate_types_to_file(
     project_path: &Path,
     output_path: &Path,
 ) -> Result<GenerationOutcome, String> {
-    let structs = scan_inertia_props(project_path);
+    let structs = scan_inertia_props_checked(project_path)?;
 
     if structs.is_empty() {
         return Ok(GenerationOutcome {
@@ -1908,6 +2029,116 @@ mod write_if_changed_tests {
         );
         assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
         assert_eq!(fs::read_to_string(&out).expect("read output"), first);
+    }
+
+    #[test]
+    fn parse_failures_abort_generation_without_replacing_complete_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed valid props");
+        fs::write(src.join("z_broken.rs"), "pub struct Z {").expect("seed z parse error");
+        fs::write(src.join("a_broken.rs"), "pub struct A {").expect("seed a parse error");
+        let out = dir.path().join("inertia-props.ts");
+        fs::write(&out, "// last complete output\n").expect("seed output");
+        let before = set_old_mtime(&out);
+
+        let error = match generate_types_to_file(dir.path(), &out) {
+            Err(error) => error,
+            Ok(_) => panic!("an incomplete Rust parse must abort generation"),
+        };
+        assert!(error.contains("parse"), "{error}");
+        let a_position = error.find("a_broken.rs").expect("a error path");
+        let z_position = error.find("z_broken.rs").expect("z error path");
+        assert!(
+            a_position < z_position,
+            "scan diagnostics must be deterministically path-sorted: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&out).expect("read output"),
+            "// last complete output\n"
+        );
+        assert_eq!(mtime(&out), before, "a failed scan must not touch output");
+    }
+
+    #[test]
+    fn unreadable_rust_text_aborts_generation_without_replacing_complete_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed valid props");
+        fs::write(src.join("invalid_utf8.rs"), [0xff, 0xfe]).expect("seed invalid UTF-8");
+        let out = dir.path().join("inertia-props.ts");
+        fs::write(&out, "// last complete output\n").expect("seed output");
+
+        let error = match generate_types_to_file(dir.path(), &out) {
+            Err(error) => error,
+            Ok(_) => panic!("a Rust source read failure must abort generation"),
+        };
+        assert!(error.contains("read"), "{error}");
+        assert!(error.contains("invalid_utf8.rs"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&out).expect("read output"),
+            "// last complete output\n"
+        );
+    }
+
+    #[test]
+    fn missing_source_tree_is_a_scan_error_and_leaves_output_parent_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_parent = dir.path().join("frontend/src/types");
+        let out = output_parent.join("inertia-props.ts");
+
+        let error = match generate_types_to_file(dir.path(), &out) {
+            Err(error) => error,
+            Ok(_) => panic!("a missing src directory must not look like an empty project"),
+        };
+        assert!(error.contains("- src: scan failed:"), "{error}");
+        assert!(
+            !output_parent.try_exists().expect("check output parent"),
+            "a failed scan must not create the output parent"
+        );
+    }
+
+    #[test]
+    fn a_walk_error_after_a_valid_file_is_retained() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        let props = src.join("props.rs");
+        fs::write(
+            &props,
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed valid props");
+
+        let traversal_failure = ScanFailure::new(
+            &src,
+            &src.join("z_unreadable"),
+            "scan",
+            "fixture traversal failure".to_string(),
+        );
+        let mut derived = Vec::new();
+        let mut plain = Vec::new();
+        let failures = visit_entries_into_checked(
+            &src,
+            [Ok(props), Err(traversal_failure)],
+            &mut derived,
+            &mut plain,
+        );
+
+        assert_eq!(derived.len(), 1, "the valid file must be visited first");
+        assert_eq!(failures.len(), 1, "the later walk error must not be lost");
+        assert_eq!(failures[0].path, PathBuf::from("src/z_unreadable"));
+        assert_eq!(failures[0].operation, "scan");
     }
 
     #[test]
