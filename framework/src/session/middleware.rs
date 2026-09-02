@@ -1539,6 +1539,26 @@ impl Middleware for SessionMiddleware {
                 }
             }
 
+            // Build the only carrier for a fresh or rotated session before
+            // committing its row. If construction fails, no undeliverable
+            // session is left in the store.
+            let session_cookie = match self.create_session_cookie(&session.id, touched_at) {
+                Ok(cookie) => cookie,
+                Err(_) => {
+                    retire_unpersisted_opaque_session(
+                        magnetar_engine.as_ref(),
+                        &mut pending_remembered_opaque_session,
+                        "framework session cookie construction failed",
+                    )
+                    .await;
+                    let failure = Err(crate::http::HttpResponse::text(
+                        "Internal Server Error: session cookie encryption failed",
+                    )
+                    .status(500));
+                    return attach_pending_cookies(failure, pending_cookies);
+                }
+            };
+
             let write_succeeded = match self.store.write(&session).await {
                 Ok(()) => true,
                 Err(e) if !session.is_dirty() => {
@@ -1563,10 +1583,9 @@ impl Middleware for SessionMiddleware {
                     // a session cookie for state the store never recorded,
                     // so the next request loads an empty session and the
                     // mutation silently vanishes - e.g. a "successful"
-                    // login that didn't stick. Fail closed. We return
-                    // BEFORE create_session_cookie below, so no cookie is
-                    // attached: a cookie for an id the store never saw is
-                    // worse than none.
+                    // login that didn't stick. Fail closed without attaching
+                    // the prebuilt cookie: a cookie for an id the store never
+                    // saw is worse than none.
                     tracing::error!(
                         error = %e,
                         session_id = %session.id,
@@ -1581,29 +1600,9 @@ impl Middleware for SessionMiddleware {
             };
 
             if write_succeeded {
-                // Add session cookie to response. Encryption must succeed
-                // here - we already verified Crypt is initialized at the
-                // top of `handle`. If it doesn't, fail the request closed.
-                let cookie = match self.create_session_cookie(&session.id, touched_at) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        retire_unpersisted_opaque_session(
-                            magnetar_engine.as_ref(),
-                            &mut pending_remembered_opaque_session,
-                            "framework session cookie construction failed",
-                        )
-                        .await;
-                        let failure = Err(crate::http::HttpResponse::text(
-                            "Internal Server Error: session cookie encryption failed",
-                        )
-                        .status(500));
-                        return attach_pending_cookies(failure, pending_cookies);
-                    }
-                };
-
                 response = match response {
-                    Ok(res) => Ok(res.cookie(cookie)),
-                    Err(res) => Err(res.cookie(cookie)),
+                    Ok(res) => Ok(res.cookie(session_cookie)),
+                    Err(res) => Err(res.cookie(session_cookie)),
                 };
                 pending_remembered_opaque_session = None;
             }
