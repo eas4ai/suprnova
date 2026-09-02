@@ -62,6 +62,21 @@ coalescing assertion is checked only after envelopes were read, which is the
 state barrier proving the document drained. The full integrated gate was not
 rerun for this checkpoint.
 
+Before the branch was first pushed to `origin` on 2026-09-02, the Suprnova
+repository gate (`scripts/gate.sh`, default tier: formatting, published
+document references, dash policy, workspace Clippy, JSON rustdoc,
+`cargo test --workspace --no-fail-fast`, Magnetar all-feature tests, Postgres
+regressions, and scaffold compile tests) passed on commit `7c2a1123`. Reaching
+that took four follow-up commits: the gate's reference checker no longer reads
+ignored-name fragments as grep options; the crate's per-directory assistant
+guidance file and the two `docs/superpowers` plans left the published tree
+(they remain local, ignored files) and `conventions.md` states the authority
+rule inline; the spec checker spells its em-dash test as an escape; and every
+cookie-queue test that drives the session middleware now holds the crypt hook
+guard, which removed a one-in-six parallel failure that predated this branch.
+The Live crate's own gate under `crates/suprnova-live/scripts/gate.sh` was not
+run in this session.
+
 ## 2026-09-02 -- Standalone synchronization and budget removal
 
 The integrated crate merged the final standalone `main`, commit `59395ec`,
