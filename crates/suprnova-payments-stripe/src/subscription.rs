@@ -157,9 +157,10 @@ impl Subscription for StripeProvider {
             trial_period_days: req.trial_days,
         };
 
-        let sub: StripeSubscription = RequestBuilder::new(StripeMethod::Post, "/subscriptions")
+        let request = RequestBuilder::new(StripeMethod::Post, "/subscriptions")
             .form(&params)
-            .customize::<StripeSubscription>()
+            .customize::<StripeSubscription>();
+        let sub = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
             .send(self.client())
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.create: {e}")))?;
@@ -185,9 +186,10 @@ impl Subscription for StripeProvider {
         };
 
         let path = format!("/subscriptions/{}", req.provider_subscription_id);
-        let sub: StripeSubscription = RequestBuilder::new(StripeMethod::Post, &path)
+        let request = RequestBuilder::new(StripeMethod::Post, &path)
             .form(&params)
-            .customize::<StripeSubscription>()
+            .customize::<StripeSubscription>();
+        let sub = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
             .send(self.client())
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.update: {e}")))?;

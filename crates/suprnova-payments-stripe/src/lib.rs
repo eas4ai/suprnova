@@ -21,6 +21,9 @@ mod promotions;
 mod subscription;
 mod webhook;
 
+#[cfg(test)]
+mod idempotency_tests;
+
 // Trait impls (Checkout/Payment/Subscription/CustomerStore/WebhookHandler for
 // StripeProvider) live inside the submodules. event_map::stripe_event_to_neutral
 // is re-exported for callers that want to map Stripe event strings outside of
@@ -28,7 +31,9 @@ mod webhook;
 pub use event_map::stripe_event_to_neutral;
 
 use stripe::Client;
+use stripe_client_core::{CustomizableStripeRequest, IdempotencyKey, RequestStrategy};
 use suprnova::payments::traits::{Payment, PaymentProvider, Promotions};
+use suprnova::payments::{PaymentError, PaymentResult};
 
 /// Default tolerance for Stripe webhook signature timestamps, matching the
 /// 300-second window enforced by Stripe's official client libraries.
@@ -98,6 +103,23 @@ fn require_nonempty(name: &str, val: String) -> Result<String, String> {
     } else {
         Ok(val)
     }
+}
+
+pub(crate) fn apply_idempotency<T>(
+    request: CustomizableStripeRequest<T>,
+    key: Option<&str>,
+) -> PaymentResult<CustomizableStripeRequest<T>> {
+    let Some(key) = key else {
+        return Ok(request);
+    };
+    if key.trim().is_empty() {
+        return Err(PaymentError::Validation(
+            "idempotency_key cannot be blank".into(),
+        ));
+    }
+    let key = IdempotencyKey::new(key)
+        .map_err(|error| PaymentError::Validation(format!("invalid idempotency_key: {error}")))?;
+    Ok(request.request_strategy(RequestStrategy::Idempotent(key)))
 }
 
 impl StripeProvider {

@@ -31,8 +31,6 @@ struct CreatePaymentIntentParams<'a> {
     capture_method: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    idempotency_key: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -213,12 +211,12 @@ impl Payment for StripeProvider {
             confirm: true,
             capture_method: "manual",
             description: req.description.as_deref(),
-            idempotency_key: req.idempotency_key.as_deref(),
         };
 
-        let intent: PaymentIntent = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
+        let request = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
             .form(&params)
-            .customize::<PaymentIntent>()
+            .customize::<PaymentIntent>();
+        let intent = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
             .send(self.client())
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.create: {e}")))?;
@@ -247,9 +245,10 @@ impl Payment for StripeProvider {
             reason: req.reason.as_deref(),
         };
 
-        let refund: Refund = RequestBuilder::new(StripeMethod::Post, "/refunds")
+        let request = RequestBuilder::new(StripeMethod::Post, "/refunds")
             .form(&params)
-            .customize::<Refund>()
+            .customize::<Refund>();
+        let refund = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
             .send(self.client())
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe refunds.create: {e}")))?;

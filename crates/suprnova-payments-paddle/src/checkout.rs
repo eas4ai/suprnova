@@ -21,6 +21,10 @@ impl Checkout for PaddleProvider {
                 "start_session requires at least one price_ref".into(),
             ));
         }
+        crate::reject_unsupported_idempotency_key(
+            req.idempotency_key.as_deref(),
+            "transaction creation",
+        )?;
 
         let mut builder = self.client().transaction_create();
         for price_ref in &req.price_refs {
