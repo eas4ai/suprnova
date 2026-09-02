@@ -203,7 +203,7 @@ async fn distinct_jobs_each_settle_normally() {
 #[tokio::test]
 async fn cancel_and_finish_are_observable() {
     for (label, repo) in backends().await {
-        let b = fresh("X", 3);
+        let b = fresh("X", 1);
         let id = b.id.clone();
         repo.store(b).await.unwrap();
 
@@ -211,10 +211,57 @@ async fn cancel_and_finish_are_observable() {
         repo.cancel(&id).await.unwrap();
         assert!(repo.is_cancelled(&id).await.unwrap(), "{label}");
 
+        assert!(
+            repo.mark_finished(&id).await.is_err(),
+            "{label}: completion cannot be stamped while a job is pending"
+        );
+        repo.record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
         repo.mark_finished(&id).await.unwrap();
         let snap = repo.find(&id).await.unwrap().unwrap();
         assert!(snap.finished_at.is_some(), "{label}");
         assert!(snap.cancelled(), "{label}");
+        assert!(
+            repo.claim_terminal_callbacks(&id).await.unwrap().is_none(),
+            "{label}: an explicit finish consumes the callback election marker"
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_callback_claim_has_one_winner() {
+    for (label, repo) in backends().await {
+        let b = fresh("terminal-callback-claim", 1);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        let premature = repo
+            .claim_terminal_callbacks(&id)
+            .await
+            .expect_err("a batch with pending jobs is not terminal");
+        assert!(premature.to_string().contains("not terminal"), "{label}");
+
+        repo.record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
+        let claim = repo
+            .claim_terminal_callbacks(&id)
+            .await
+            .unwrap()
+            .expect("the first terminal caller owns the callback bundle");
+        assert!(
+            repo.claim_terminal_callbacks(&id).await.unwrap().is_none(),
+            "{label}: a replay observes that the bundle is already claimed"
+        );
+
+        let snap = repo.find(&id).await.unwrap().unwrap();
+        assert_eq!(
+            snap.finished_at,
+            Some(claim.finished_at),
+            "{label}: callbacks receive the same durable completion time"
+        );
+        assert_eq!(snap.cancelled_at, claim.cancelled_at, "{label}");
     }
 }
 
@@ -390,6 +437,34 @@ async fn the_settlement_guard_holds_across_repository_instances() {
     assert_eq!(
         counts.pending_jobs, 1,
         "one job settled twice by two processes still consumes one slot"
+    );
+}
+
+#[tokio::test]
+async fn terminal_callback_claim_is_shared_across_repository_instances() {
+    let db = fresh_db().await;
+    let first = DatabaseBatchRepository::new(db.clone());
+    let second = DatabaseBatchRepository::new(db);
+    let b = fresh("cross-process-callback-claim", 1);
+    let id = b.id.clone();
+    first.store(b).await.unwrap();
+    first
+        .record_successful_job(&id, Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let (left, right) = tokio::join!(
+        first.claim_terminal_callbacks(&id),
+        second.claim_terminal_callbacks(&id),
+    );
+    let winners = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+
+    assert_eq!(
+        winners, 1,
+        "two repository instances must elect exactly one callback owner"
     );
 }
 

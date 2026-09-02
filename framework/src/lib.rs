@@ -339,8 +339,8 @@ pub use queue::{
     ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore,
     MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue,
     QueueDriver, QueueFilterCapability, QueueRoute, RateLimited, RedisQueueDriver, Reservation,
-    ReservationToken, Settled, Skip, SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions,
-    TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
+    ReservationToken, Settled, Skip, SkipIfBatchCancelled, SyncQueueDriver, TerminalCallbackClaim,
+    ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,

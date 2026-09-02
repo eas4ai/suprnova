@@ -105,6 +105,19 @@ pub struct UpdatedBatchJobCounts {
     pub failed_jobs: u64,
 }
 
+/// Metadata captured while atomically claiming a batch's terminal callbacks.
+///
+/// Both fields come from the same repository critical section as the claim,
+/// so a worker cannot choose `then` from a cancellation snapshot that became
+/// stale before callback ownership was elected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalCallbackClaim {
+    /// Durable completion time stored by the winning claim.
+    pub finished_at: DateTime<Utc>,
+    /// Cancellation time visible when the claim was serialized, if any.
+    pub cancelled_at: Option<DateTime<Utc>>,
+}
+
 /// Persistence backend for queued-batch metadata. Drivers (memory,
 /// database) implement this so workers can update per-job progress
 /// atomically and decide when to fire callbacks.
@@ -163,7 +176,34 @@ pub trait BatchRepository: Send + Sync {
     /// `Ok(true)` if the batch has been cancelled.
     async fn is_cancelled(&self, id: &str) -> Result<bool, FrameworkError>;
     /// Stamp `finished_at` once `pending_jobs` reaches zero.
+    ///
+    /// Built-in repositories validate that the batch is terminal and treat
+    /// this as consuming the same completion marker used by
+    /// [`claim_terminal_callbacks`](Self::claim_terminal_callbacks). Workers
+    /// use the claim method directly so they can tell whether to run callbacks.
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError>;
+    /// Atomically claim the terminal callback bundle for a finished batch.
+    ///
+    /// The first caller to claim a batch whose `pending_jobs` is zero stores
+    /// its completion time and returns it. Later callers return `Ok(None)` and
+    /// must skip the callbacks. Implementations must make the test-and-set
+    /// durable and atomic and return cancellation metadata captured in the
+    /// same critical section. The provided implementation fails with an
+    /// actionable error: existing custom repositories keep compiling, but
+    /// cannot silently claim a guarantee they do not implement.
+    ///
+    /// This elects at most one callback *attempt*. It cannot make arbitrary
+    /// callback side effects atomic with repository state: a process crash
+    /// after the claim can omit or partially execute the bundle. Callbacks
+    /// that require retryable delivery should enqueue an idempotent outbox job.
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
+        Err(FrameworkError::internal(format!(
+            "batch repository must implement atomic terminal callback claims: {id}"
+        )))
+    }
     /// Permanently delete the batch row. Returns `Ok(true)` if a row was
     /// removed.
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError>;
@@ -314,14 +354,34 @@ impl BatchRepository for MemoryBatchRepository {
         Ok(self.find(id).await?.is_some_and(|b| b.cancelled()))
     }
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
+        self.claim_terminal_callbacks(id).await.map(|_| ())
+    }
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        if let Some(e) = g.get_mut(id) {
-            e.batch.finished_at = Some(Utc::now());
+        let entry = g
+            .get_mut(id)
+            .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
+        if entry.batch.pending_jobs != 0 {
+            return Err(FrameworkError::internal(format!(
+                "batch is not terminal: {id} has {} pending jobs",
+                entry.batch.pending_jobs
+            )));
         }
-        Ok(())
+        if entry.batch.finished_at.is_some() {
+            return Ok(None);
+        }
+        let claimed_at = Utc::now();
+        entry.batch.finished_at = Some(claimed_at);
+        Ok(Some(TerminalCallbackClaim {
+            finished_at: claimed_at,
+            cancelled_at: entry.batch.cancelled_at,
+        }))
     }
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
         let mut g = self
@@ -590,6 +650,36 @@ impl DatabaseBatchRepository {
             pending_jobs: total.saturating_sub(settled).max(0) as u64,
             failed_jobs: failed.max(0) as u64,
         }))
+    }
+
+    /// Read cancellation metadata while the caller holds the parent-row lock.
+    async fn locked_cancelled_at<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let row = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT cancelled_at FROM {} WHERE id = {}",
+                    self.batches,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled: {e}")))?
+            .ok_or_else(|| {
+                FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+            })?;
+        let cancelled_at: Option<i64> = row
+            .try_get_by_index(0)
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled col: {e}")))?;
+        cancelled_at
+            .map(|value| timestamp(value, "cancelled_at"))
+            .transpose()
     }
 
     /// Shared body of [`BatchRepository::record_successful_job`] and
@@ -869,7 +959,67 @@ impl BatchRepository for DatabaseBatchRepository {
     }
 
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
-        self.stamp(id, "finished_at").await
+        self.claim_terminal_callbacks(id).await.map(|_| ())
+    }
+
+    async fn claim_terminal_callbacks(
+        &self,
+        id: &str,
+    ) -> Result<Option<TerminalCallbackClaim>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+
+        let txn = self.begin_serialized_transaction().await?;
+        if self.lock_batch(&txn, id).await?.is_none() {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        }
+        let counts = self.counts(&txn, id).await?.ok_or_else(|| {
+            FrameworkError::internal(format!("batch disappeared while locked: {id}"))
+        })?;
+        if counts.pending_jobs != 0 {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!(
+                "batch is not terminal: {id} has {} pending jobs",
+                counts.pending_jobs
+            )));
+        }
+
+        let cancelled_at = self.locked_cancelled_at(&txn, id).await?;
+        let claimed_at_secs = Utc::now().timestamp();
+        let claimed_at = timestamp(claimed_at_secs, "finished_at")?;
+        let result = txn
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "UPDATE {} SET finished_at = {} WHERE id = {} AND finished_at IS NULL",
+                    self.batches,
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
+                ),
+                vec![
+                    sea_orm::Value::from(claimed_at_secs),
+                    sea_orm::Value::from(id.to_string()),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches callback claim: {e}")))?;
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches commit: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(TerminalCallbackClaim {
+                finished_at: claimed_at,
+                cancelled_at,
+            }))
+        }
     }
 
     /// Removes the settlement rows with the batch, in one transaction. Leaving
@@ -973,6 +1123,13 @@ pub trait BatchCallback: Send + Sync + 'static {
     /// Run the callback for `batch`. `error` is `Some` for `catch`/`finally`
     /// invocations after a failure; `None` for `then` and for successful
     /// `finally`.
+    ///
+    /// Built-in repositories durably claim the terminal callback bundle
+    /// before invoking it, so queue redelivery does not repeat a completed or
+    /// failed attempt. That also means a process crash after the claim, or an
+    /// error returned here, is not retried automatically. For retryable
+    /// external side effects, enqueue an idempotent outbox job from the
+    /// callback and use the batch id as part of its deduplication key.
     async fn handle(&self, batch: Batch, error: Option<String>) -> Result<(), FrameworkError>;
 }
 
@@ -1274,21 +1431,17 @@ async fn settle_undispatched(
     // fires the callbacks on the normal path. With none, this is the last
     // chance anything runs them.
     if nothing_was_pushed {
-        if let Err(e) = repo.mark_finished(id).await {
-            tracing::warn!(batch_id = %id, error = %e, "queue batch dispatch: mark_finished failed");
-        }
         match repo.find(id).await {
             Ok(Some(batch)) => {
-                crate::queue::worker::fire_batch_callbacks(
-                    &batch,
-                    crate::queue::worker::BatchPhase::Catch,
-                )
-                .await;
-                crate::queue::worker::fire_batch_callbacks(
-                    &batch,
-                    crate::queue::worker::BatchPhase::Finally,
-                )
-                .await;
+                if let Err(e) =
+                    crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
+                {
+                    tracing::warn!(
+                        batch_id = %id,
+                        error = %e,
+                        "queue batch dispatch: could not claim terminal callbacks"
+                    );
+                }
             }
             Ok(None) => tracing::warn!(
                 batch_id = %id,

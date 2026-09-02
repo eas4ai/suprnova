@@ -26,7 +26,7 @@ pub mod worker;
 pub use batch::{
     Batch, BatchCallback, BatchOptions, BatchRepository, DEFAULT_BATCH_SETTLEMENTS_TABLE,
     DEFAULT_BATCHES_TABLE, DatabaseBatchRepository, MemoryBatchRepository, PendingBatch,
-    UpdatedBatchJobCounts,
+    TerminalCallbackClaim, UpdatedBatchJobCounts,
 };
 pub use chain::{ChainLink, PendingChain};
 pub use database::DatabaseQueueDriver;
