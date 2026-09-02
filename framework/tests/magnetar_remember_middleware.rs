@@ -26,14 +26,30 @@ struct AllowingLimiter;
 static MAGNETAR_SETUP: OnceCell<sea_orm::DatabaseConnection> = OnceCell::const_new();
 static MAGNETAR_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+fn magnetar_db_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "magnetar-remember-middleware-{}.sqlite",
+        std::process::id()
+    ))
+}
+
 async fn magnetar_connection() -> sea_orm::DatabaseConnection {
     MAGNETAR_SETUP
         .get_or_init(|| async {
             Crypt::init(EncryptionKey::generate());
             suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
-            // Keep the in-memory schema on one physical connection while
-            // these tests run concurrently against the shared engine.
-            let mut options = ConnectOptions::new("sqlite::memory:");
+            // Each `#[tokio::test]` owns a runtime. If the runtime that opened
+            // an in-memory SQLite connection exits, sqlx may reopen the pool's
+            // sole connection against an empty database. A file-backed fixture
+            // keeps the schema intact across those per-test runtime boundaries.
+            let db_path = magnetar_db_path();
+            for suffix in ["", "-wal", "-shm"] {
+                let mut path = db_path.clone().into_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+            }
+            let mut options =
+                ConnectOptions::new(format!("sqlite://{}?mode=rwc", db_path.display()));
             options.max_connections(1).min_connections(1);
             let connection = Database::connect(options).await.expect("connect SQLite");
             init_magnetar(MagnetarConfig::from_sea_orm(connection.clone()))
