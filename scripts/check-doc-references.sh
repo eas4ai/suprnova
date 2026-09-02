@@ -31,8 +31,10 @@ failures=0
 
 # Basenames from .gitignore that are literal (no glob metacharacter), so
 # a reference to one is unambiguously a reference to an ignored file.
+# A glob such as `/*-review.md` leaves a fragment starting with `-`; it
+# names no file, and unguarded it would even be read by grep as options.
 mapfile -t ignored_docs < <(
-    grep -oE '[A-Za-z0-9_.-]+\.md' .gitignore | sort -u
+    grep -oE '[A-Za-z0-9_.-]+\.md' .gitignore | grep -v '^-' | sort -u
 )
 
 for doc in "${ignored_docs[@]}"; do
@@ -43,9 +45,9 @@ for doc in "${ignored_docs[@]}"; do
         [ "$offender" = ".gitignore" ] && continue
 
         echo "error: $offender references the gitignored $doc" >&2
-        grep -nF "$doc" "$offender" | sed 's/^/       /' >&2
+        grep -nF -- "$doc" "$offender" | sed 's/^/       /' >&2
         failures=$((failures + 1))
-    done < <(git ls-files -z | xargs -0 grep -lF "$doc" 2>/dev/null || true)
+    done < <(git ls-files -z | xargs -0 grep -lF -- "$doc" 2>/dev/null || true)
 done
 
 if [ "$failures" -gt 0 ]; then
