@@ -62,6 +62,7 @@ impl PasswordAuth {
         user_agent: Option<String>,
         ip_address: Option<String>,
     ) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = super::password_engine()?;
         let (user, decision) = engine
             .password_sign_in(magnetar::plugins::password::PasswordAttempt {
@@ -76,7 +77,7 @@ impl PasswordAuth {
             .map_err(map_magnetar_password_error)?;
         match decision {
             super::engine::HostSignInDecision::SessionAllowed(issued) => {
-                super::bind_issued_session(&issued, true);
+                super::bind_issued_session(&issued, true)?;
                 Ok(SignInOutcome::Authenticated {
                     user,
                     session: issued.session,

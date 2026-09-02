@@ -18,8 +18,9 @@ pub use jwt::{JwtConfig, JwtEpochStore, JwtSessionProvider};
 pub use opaque::{OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, StoredSession};
 pub use remember::{
     RememberAnomaly, RememberAnomalyHook, RememberAnomalyKind, RememberCredential, RememberFacade,
-    RememberRow, RememberService, RememberSignInOutcome, RememberSignInService, RememberStore,
-    RememberTokenService,
+    RememberPostRotationDisposition, RememberPostRotationFailure, RememberRotationAttempt,
+    RememberRow, RememberService, RememberSignInAttempt, RememberSignInOutcome,
+    RememberSignInService, RememberStore, RememberTokenService,
 };
 
 /// Metadata recorded when a session is established.

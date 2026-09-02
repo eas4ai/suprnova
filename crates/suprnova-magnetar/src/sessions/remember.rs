@@ -189,6 +189,31 @@ pub trait RememberTokenService: Send + Sync {
         now: DateTime<Utc>,
         replacement_lifetime: Duration,
     ) -> Result<(String, u64, RememberCredential)>;
+    /// Rotate with an explicit, commit-aware outcome.
+    ///
+    /// The compatibility default cannot prove that an external implementation's
+    /// error happened before commit, so it reports such errors as
+    /// [`RememberRotationAttempt::OutcomeUnknown`]. Implementations may return
+    /// [`RememberRotationAttempt::NotCommitted`] only when their storage boundary
+    /// guarantees that no replacement became durable.
+    async fn attempt_rotation_at_epoch(
+        &self,
+        credential: &RememberCredential,
+        now: DateTime<Utc>,
+        replacement_lifetime: Duration,
+    ) -> RememberRotationAttempt {
+        match self
+            .rotate_at_epoch(credential, now, replacement_lifetime)
+            .await
+        {
+            Ok((user_id, issued_epoch, replacement)) => RememberRotationAttempt::Committed {
+                user_id,
+                issued_epoch,
+                replacement,
+            },
+            Err(error) => RememberRotationAttempt::OutcomeUnknown { error },
+        }
+    }
     /// Revoke exactly one remember credential by owner and non-secret selector.
     ///
     /// Returns `false` without mutation when no owner/selector row matches,
@@ -384,6 +409,22 @@ impl<S: RememberStore + ?Sized> RememberTokenService for RememberService<S> {
         RememberService::rotate_at_epoch(self, credential, now, replacement_lifetime).await
     }
 
+    async fn attempt_rotation_at_epoch(
+        &self,
+        credential: &RememberCredential,
+        now: DateTime<Utc>,
+        replacement_lifetime: Duration,
+    ) -> RememberRotationAttempt {
+        match RememberService::rotate_at_epoch(self, credential, now, replacement_lifetime).await {
+            Ok((user_id, issued_epoch, replacement)) => RememberRotationAttempt::Committed {
+                user_id,
+                issued_epoch,
+                replacement,
+            },
+            Err(error) => RememberRotationAttempt::NotCommitted { error },
+        }
+    }
+
     async fn revoke_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
         RememberService::revoke_selector(self, user_id, selector).await
     }
@@ -400,6 +441,73 @@ pub struct RememberSignInOutcome {
     pub session: super::SessionGrant,
     /// Sole live replacement for the consumed remember credential.
     pub replacement: RememberCredential,
+}
+
+/// Commit-aware result of attempting one remember-credential rotation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RememberRotationAttempt {
+    /// The old credential was replaced durably.
+    Committed {
+        /// Owner of the live replacement credential.
+        user_id: String,
+        /// Authentication epoch copied from the consumed credential.
+        issued_epoch: u64,
+        /// Sole live replacement for the consumed credential.
+        replacement: RememberCredential,
+    },
+    /// Rotation failed before any replacement became durable.
+    NotCommitted {
+        /// Rotation failure.
+        error: crate::Error,
+    },
+    /// A compatibility implementation returned an error without a commit guarantee.
+    OutcomeUnknown {
+        /// Rotation failure whose commit state is unknown.
+        error: crate::Error,
+    },
+}
+
+/// Host action appropriate after a sign-in failure that followed a committed rotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RememberPostRotationDisposition {
+    /// Preserve and return the replacement so a later request can retry.
+    Retryable,
+    /// Retire the replacement because retrying cannot make the proof valid.
+    Reject,
+}
+
+/// Failure observed after the presented credential was replaced durably.
+#[derive(Debug)]
+pub struct RememberPostRotationFailure {
+    /// Original failure returned by the user or factor boundary.
+    pub error: crate::Error,
+    /// Whether the live replacement should be retried or retired.
+    pub disposition: RememberPostRotationDisposition,
+}
+
+/// Commit-aware result of a remembered sign-in attempt.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RememberSignInAttempt {
+    /// Rotation and session issuance both completed.
+    Authenticated(RememberSignInOutcome),
+    /// Rotation completed, but a later sign-in step failed.
+    RotationCommitted {
+        /// Owner of the live replacement credential.
+        user_id: String,
+        /// Authentication epoch copied from the consumed credential.
+        issued_epoch: u64,
+        /// Sole live replacement for the consumed credential.
+        replacement: RememberCredential,
+        /// Failure and the appropriate host disposition.
+        failure: RememberPostRotationFailure,
+    },
+    /// Rotation returned an error without proving whether a successor committed.
+    RotationOutcomeUnknown {
+        /// Rotation failure whose commit state is unknown.
+        error: crate::Error,
+    },
 }
 
 /// Policy-aware remembered primary-authentication service.
@@ -471,32 +579,150 @@ impl<U: UserStore> RememberSignInService<U> {
         now: DateTime<Utc>,
         replacement_lifetime: Duration,
     ) -> Result<RememberSignInOutcome> {
-        let (user_id, issued_epoch, replacement) = self
+        match self
+            .attempt_sign_in_with_lifetime(credential, metadata, now, replacement_lifetime)
+            .await?
+        {
+            RememberSignInAttempt::Authenticated(outcome) => Ok(outcome),
+            RememberSignInAttempt::RotationCommitted {
+                user_id,
+                replacement,
+                failure,
+                ..
+            } => {
+                // This lossy compatibility path cannot return the successor. Prefer
+                // exact cleanup, then deliberately broaden to the owner only when an
+                // external token service lacks or fails exact revocation.
+                let exact_cleanup_succeeded = match parse(replacement.0.expose_secret()) {
+                    Ok((selector, _)) => matches!(
+                        self.remember.revoke_selector(&user_id, &selector).await,
+                        Ok(true)
+                    ),
+                    Err(_) => false,
+                };
+                if !exact_cleanup_succeeded {
+                    let _ = self.remember.revoke_all_for_user(&user_id).await;
+                }
+                Err(failure.error)
+            }
+            RememberSignInAttempt::RotationOutcomeUnknown { error } => Err(error),
+        }
+    }
+
+    /// Attempt remembered sign-in while preserving the outcome of a committed rotation.
+    ///
+    /// An outer error means rotation did not commit. After a successful rotation,
+    /// every later failure is returned as [`RememberSignInAttempt::RotationCommitted`]
+    /// together with the sole live replacement credential.
+    pub async fn attempt_sign_in_with_lifetime(
+        &self,
+        credential: RememberCredential,
+        metadata: super::SessionMetadata,
+        now: DateTime<Utc>,
+        replacement_lifetime: Duration,
+    ) -> Result<RememberSignInAttempt> {
+        let (user_id, issued_epoch, replacement) = match self
             .remember
-            .rotate_at_epoch(&credential, now, replacement_lifetime)
-            .await?;
-        let user = self.current_user(&user_id).await?;
+            .attempt_rotation_at_epoch(&credential, now, replacement_lifetime)
+            .await
+        {
+            RememberRotationAttempt::Committed {
+                user_id,
+                issued_epoch,
+                replacement,
+            } => (user_id, issued_epoch, replacement),
+            RememberRotationAttempt::NotCommitted { error } => return Err(error),
+            RememberRotationAttempt::OutcomeUnknown { error } => {
+                return Ok(RememberSignInAttempt::RotationOutcomeUnknown { error });
+            }
+        };
+        let user = match self.current_user(&user_id).await {
+            Ok(user) => user,
+            Err(error) => {
+                return Ok(Self::committed_failure(
+                    user_id,
+                    issued_epoch,
+                    replacement,
+                    error,
+                ));
+            }
+        };
         if user.auth_epoch != issued_epoch {
-            return Err(invalid(
-                "credential",
-                "invalid or stale remember credential",
-            ));
+            return Ok(RememberSignInAttempt::RotationCommitted {
+                user_id,
+                issued_epoch,
+                replacement,
+                failure: RememberPostRotationFailure {
+                    error: invalid("credential", "invalid or stale remember credential"),
+                    disposition: RememberPostRotationDisposition::Reject,
+                },
+            });
         }
         let context = AuthenticationContext::new(metadata, user.auth_epoch, now);
         let principal =
-            VerifiedPrincipal::new(user.user_id, SignInMethod::Remembered, context.clone())?;
-        match self
-            .factor_gate
-            .complete_sign_in(principal, context)
-            .await?
-        {
-            SignInDecision::SessionAllowed(session) => Ok(RememberSignInOutcome {
-                session,
+            match VerifiedPrincipal::new(user.user_id, SignInMethod::Remembered, context.clone()) {
+                Ok(principal) => principal,
+                Err(error) => {
+                    return Ok(Self::committed_failure(
+                        user_id,
+                        issued_epoch,
+                        replacement,
+                        error,
+                    ));
+                }
+            };
+        let decision = match self.factor_gate.complete_sign_in(principal, context).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                return Ok(Self::committed_failure(
+                    user_id,
+                    issued_epoch,
+                    replacement,
+                    error,
+                ));
+            }
+        };
+        match decision {
+            SignInDecision::SessionAllowed(session) => Ok(RememberSignInAttempt::Authenticated(
+                RememberSignInOutcome {
+                    session,
+                    replacement,
+                },
+            )),
+            SignInDecision::FactorRequired { .. } => Ok(RememberSignInAttempt::RotationCommitted {
+                user_id,
+                issued_epoch,
                 replacement,
+                failure: RememberPostRotationFailure {
+                    error: crate::Error::Internal {
+                        message: "remembered proof unexpectedly required a second factor"
+                            .to_owned(),
+                    },
+                    disposition: RememberPostRotationDisposition::Reject,
+                },
             }),
-            SignInDecision::FactorRequired { .. } => Err(crate::Error::Internal {
-                message: "remembered proof unexpectedly required a second factor".to_owned(),
-            }),
+        }
+    }
+
+    fn committed_failure(
+        user_id: String,
+        issued_epoch: u64,
+        replacement: RememberCredential,
+        error: crate::Error,
+    ) -> RememberSignInAttempt {
+        let disposition = match &error {
+            crate::Error::DependencyUnavailable { .. } | crate::Error::Internal { .. } => {
+                RememberPostRotationDisposition::Retryable
+            }
+            crate::Error::InvalidInput { .. }
+            | crate::Error::NotFound { .. }
+            | crate::Error::Conflict { .. } => RememberPostRotationDisposition::Reject,
+        };
+        RememberSignInAttempt::RotationCommitted {
+            user_id,
+            issued_epoch,
+            replacement,
+            failure: RememberPostRotationFailure { error, disposition },
         }
     }
 

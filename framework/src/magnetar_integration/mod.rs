@@ -35,20 +35,52 @@ pub use default_engine::{MagnetarConfig, init_magnetar};
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 pub use sign_in::SignInOutcome;
 
+pub(crate) fn bind_scope_preflight() -> Result<(), FrameworkError> {
+    let default_guard = crate::auth::Auth::default_guard_name();
+    let replaces_remember =
+        crate::auth::request_state::active_remember_selector_for_guard(&default_guard).is_some();
+    if replaces_remember
+        && (!crate::session::middleware::session_scope_installed()
+            || !crate::session::middleware::pending_cookies_scope_installed()
+            || !crate::session::middleware::pending_remember_revocations_scope_installed())
+    {
+        return Err(FrameworkError::internal(
+            "Magnetar session binding requires active session, cookie, and remember-cleanup scopes",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_issued_session(
     issued: &engine::MagnetarIssuedSession,
     password_confirmed: bool,
-) {
+) -> Result<(), FrameworkError> {
+    bind_scope_preflight()?;
     let default_guard = crate::auth::Auth::default_guard_name();
     let verified_remember =
         crate::auth::Auth::prepare_guard_remember_identity_replacement(&default_guard);
     // Binding is deliberately synchronous: the fresh Magnetar session has
     // already been issued, so awaiting A's selector revocation here would make
     // a revoke failure strand durable B state behind a failed framework bind.
-    // The preparation step still replaces A's queued carrier with a forget
-    // directive and clears its request provenance, making the browser path fail
-    // closed; the now-unreachable row expires through normal retention.
-    let _ = verified_remember;
+    // Retain exact cleanup in SessionMiddleware's request-local queue instead.
+    // The preparation step also replaces A's queued carrier with a forget
+    // directive and clears its request provenance.
+    if let Some((owner, selector)) = verified_remember
+        && !crate::session::middleware::push_pending_remember_revocation(
+            &default_guard,
+            owner.clone(),
+            selector.clone(),
+        )
+    {
+        crate::auth::request_state::set_verified_active_remember_carrier(
+            &default_guard,
+            &owner,
+            &selector,
+        );
+        return Err(FrameworkError::internal(
+            "fresh Magnetar session bind could not retain remember cleanup",
+        ));
+    }
     let user_id = issued.session.user_id.to_string();
     crate::session::session_mut(|session| {
         session.rotate_id(crate::session::generate_session_id());
@@ -66,6 +98,105 @@ pub(crate) fn bind_issued_session(
     crate::auth::request_state::set_guard_user_id(&default_guard, user_id);
     crate::auth::request_state::set_guard_via_remember(&default_guard, false);
     crate::auth::request_state::clear_active_remember_carrier_for_guard(&default_guard);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issued_session() -> engine::MagnetarIssuedSession {
+        engine::MagnetarIssuedSession {
+            session_id: "fresh-magnetar-session".to_owned(),
+            web_binding: magnetar::sessions::WebSessionBinding {
+                session_id: "fresh-magnetar-session".to_owned(),
+                token_digest: [7; 32],
+            },
+            session: Session::builder()
+                .token(SessionToken::new("fresh-bearer"))
+                .user_id(UserId::new("new-user"))
+                .build()
+                .expect("build issued framework session"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_session_bind_queues_verified_retry_carrier_retirement() {
+        let session_slot = crate::session::new_session_slot_for_test();
+        let pending_cookies = crate::session::new_pending_cookies_slot_for_test();
+        let pending_revocations = Arc::new(Mutex::new(Vec::new()));
+        let issued = issued_session();
+
+        crate::session::session_scope_for_test(
+            session_slot,
+            crate::session::pending_cookies_scope_for_test(
+                pending_cookies,
+                crate::auth::request_state::request_state_scope_for_test(
+                    crate::session::middleware::PENDING_REMEMBER_REVOCATIONS.scope(
+                        pending_revocations.clone(),
+                        async {
+                            crate::auth::request_state::set_verified_active_remember_carrier(
+                                "web",
+                                "remembered-user",
+                                "rotated-selector",
+                            );
+
+                            bind_issued_session(&issued, true)
+                                .expect("scoped fresh session bind succeeds");
+                        },
+                    ),
+                ),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            *pending_revocations.lock().unwrap(),
+            vec![(
+                "web".to_owned(),
+                "remembered-user".to_owned(),
+                "rotated-selector".to_owned(),
+            )],
+            "a fresh identity bind must retain exact cleanup for the replaced retry carrier",
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_bind_scopes_preserve_retry_provenance_and_request_identity() {
+        let issued = issued_session();
+        crate::auth::request_state::request_state_scope_for_test(async {
+            crate::auth::request_state::set_verified_active_remember_carrier(
+                "web",
+                "remembered-user",
+                "rotated-selector",
+            );
+
+            assert!(
+                bind_issued_session(&issued, true).is_err(),
+                "missing bind scopes must fail before publishing identity",
+            );
+
+            assert_eq!(
+                crate::auth::request_state::verified_active_remember_carrier_for_guard("web"),
+                Some(("remembered-user".to_owned(), "rotated-selector".to_owned(),)),
+                "missing bind scopes must not discard retry provenance",
+            );
+            assert_eq!(
+                crate::auth::Auth::id(),
+                None,
+                "missing bind scopes must not publish the newly issued identity",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn headless_preflight_succeeds_without_an_active_remember_carrier() {
+        assert!(
+            bind_scope_preflight().is_ok(),
+            "headless flows without a remember carrier do not need request scopes",
+        );
+    }
 }
 pub use magnetar::passkey::PasskeyConfig;
 

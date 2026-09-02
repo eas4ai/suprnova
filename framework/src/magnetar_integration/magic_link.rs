@@ -51,6 +51,7 @@ impl MagicLinkAuth {
     /// Returns an error when the token is invalid or used, the engine is not
     /// installed, user lookup fails, or session issuance fails.
     pub async fn consume_outcome(&self, token: &str) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = super::password_engine()?;
         let decision = engine
             .magic_link_consume(token, magnetar::sessions::SessionMetadata::default())
@@ -62,7 +63,7 @@ impl MagicLinkAuth {
                 return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
-        super::bind_issued_session(&issued, false);
+        super::bind_issued_session(&issued, false)?;
         let user = engine
             .user_by_id(issued.session.user_id.as_str())
             .await

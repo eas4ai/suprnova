@@ -215,6 +215,7 @@ impl PasskeyAuth {
         email: &str,
         response: PublicKeyCredential,
     ) -> Result<SignInOutcome, FrameworkError> {
+        super::bind_scope_preflight()?;
         let engine = super::passkey_engine()?;
         let selector = take_selector(
             SESSION_KEY_AUTH,
@@ -235,7 +236,7 @@ impl PasskeyAuth {
                 return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
-        super::bind_issued_session(&issued, false);
+        super::bind_issued_session(&issued, false)?;
         let user = engine
             .passkey_user_by_id(issued.session.user_id.as_str())
             .await

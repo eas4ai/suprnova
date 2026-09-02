@@ -337,15 +337,19 @@ impl Auth {
         guard_name: &str,
     ) -> Option<(String, String)> {
         let active_selector = request_state::active_remember_selector_for_guard(guard_name);
+        let retryable_owner_selector =
+            request_state::verified_active_remember_carrier_for_guard(guard_name);
         let retained_selector =
             session().and_then(|session| session.auth_guard_remember_selector(guard_name));
-        let verified_owner_selector = active_selector
-            .as_ref()
-            .filter(|active| retained_selector.as_ref() == Some(active))
-            .and_then(|selector| {
-                crate::session::middleware::persisted_guard_auth_user_id(guard_name)
-                    .map(|owner| (owner, selector.clone()))
-            });
+        let verified_owner_selector = retryable_owner_selector.or_else(|| {
+            active_selector
+                .as_ref()
+                .filter(|active| retained_selector.as_ref() == Some(active))
+                .and_then(|selector| {
+                    crate::session::middleware::persisted_guard_auth_user_id(guard_name)
+                        .map(|owner| (owner, selector.clone()))
+                })
+        });
         if active_selector.is_some() {
             request_state::clear_active_remember_carrier_for_guard(guard_name);
             Self::queue_remember_clear_cookie();

@@ -593,7 +593,18 @@ mod tests {
                     .unwrap(),
             };
 
-            crate::magnetar_integration::bind_issued_session(&issued, true);
+              let pending_cookies = crate::session::new_pending_cookies_slot_for_test();
+              let pending_revocations = Arc::new(std::sync::Mutex::new(Vec::new()));
+              crate::session::pending_cookies_scope_for_test(
+                  pending_cookies,
+                  crate::session::middleware::PENDING_REMEMBER_REVOCATIONS.scope(
+                      pending_revocations,
+                      async {
+                          crate::magnetar_integration::bind_issued_session(&issued, true).unwrap();
+                      },
+                  ),
+              )
+              .await;
 
             assert_eq!(Auth::id().as_deref(), Some("9"));
             let web = SessionGuard::named("web", Arc::new(FixedProvider { id: "9" }));

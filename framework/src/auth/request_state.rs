@@ -42,6 +42,7 @@ use super::authenticatable::Authenticatable;
 struct ActiveRememberCarrier {
     guard: String,
     selector: String,
+    verified_owner: Option<String>,
 }
 
 /// The per-request authentication slot. See the module docs.
@@ -278,8 +279,49 @@ pub(crate) fn set_active_remember_carrier(guard_name: &str, selector: &str) {
             .active_remember_carrier = Some(ActiveRememberCarrier {
             guard: guard_name.to_owned(),
             selector: selector.to_owned(),
+            verified_owner: None,
         });
     });
+}
+
+/// Record a rotated carrier whose owner was verified before a retryable failure.
+pub(crate) fn set_verified_active_remember_carrier(
+    guard_name: &str,
+    user_id: &str,
+    selector: &str,
+) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_remember_carrier = Some(ActiveRememberCarrier {
+            guard: guard_name.to_owned(),
+            selector: selector.to_owned(),
+            verified_owner: Some(user_id.to_owned()),
+        });
+    });
+}
+
+/// Return the verified owner and selector for one retryable rotated carrier.
+pub(crate) fn verified_active_remember_carrier_for_guard(
+    guard_name: &str,
+) -> Option<(String, String)> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .active_remember_carrier
+                .as_ref()
+                .filter(|carrier| carrier.guard == guard_name)
+                .and_then(|carrier| {
+                    carrier
+                        .verified_owner
+                        .as_ref()
+                        .map(|owner| (owner.clone(), carrier.selector.clone()))
+                })
+        })
+        .ok()
+        .flatten()
 }
 
 /// Return the active carrier's guard and non-secret selector.
