@@ -33,6 +33,7 @@ pub use crate::auth::{LockoutStatus, Session, SessionToken, User, UserId};
 pub use default_engine::{MagnetarConfig, init_magnetar};
 #[cfg(feature = "magnetar-oauth")]
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
+pub use engine::MagnetarFactorAuthEngine;
 pub use sign_in::SignInOutcome;
 
 /// Completion facade for factor challenges returned by Magnetar sign-in providers.
@@ -55,8 +56,8 @@ impl FactorAuth {
         selector: &str,
         code: &str,
     ) -> Result<(User, Session), FrameworkError> {
-        bind_scope_preflight()?;
-        let engine = password_engine()?;
+        factor_bind_scope_preflight()?;
+        let engine = factor_engine()?;
         let issued = engine
             .complete_challenge(selector, code)
             .await
@@ -71,6 +72,18 @@ impl FactorAuth {
         bind_issued_session(&issued, false)?;
         Ok((user, issued.session))
     }
+}
+
+fn factor_bind_scope_preflight() -> Result<(), FrameworkError> {
+    if !crate::session::middleware::session_scope_installed()
+        || !crate::session::middleware::pending_cookies_scope_installed()
+        || !crate::session::middleware::pending_remember_revocations_scope_installed()
+    {
+        return Err(FrameworkError::internal(
+            "factor challenge completion requires active SessionMiddleware scopes",
+        ));
+    }
+    bind_scope_preflight()
 }
 
 pub(crate) fn bind_scope_preflight() -> Result<(), FrameworkError> {
@@ -250,6 +263,33 @@ static ENGINE_INSTALL_GUARD: Mutex<EngineInstallState> =
     Mutex::new(EngineInstallState { reserved: false });
 static MAGNETAR_PASSWORD_ENGINE: OnceLock<Arc<dyn engine::MagnetarPasswordAuthEngine>> =
     OnceLock::new();
+static MAGNETAR_FACTOR_ENGINE: OnceLock<Arc<dyn engine::MagnetarFactorAuthEngine>> =
+    OnceLock::new();
+
+struct PasswordFactorEngine {
+    password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
+}
+
+#[async_trait::async_trait]
+impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
+    async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> magnetar::Result<engine::MagnetarIssuedSession> {
+        self.password.complete_challenge(selector, code).await
+    }
+
+    async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
+        self.password.user_by_id(user_id).await
+    }
+}
+
+pub(crate) fn password_factor_engine(
+    password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
+) -> Arc<dyn engine::MagnetarFactorAuthEngine> {
+    Arc::new(PasswordFactorEngine { password })
+}
 
 /// Initialized Magnetar passkey engine.
 ///
@@ -282,12 +322,31 @@ fn oauth_engine_is_installed() -> bool {
 }
 
 /// Atomically install password/session and passkey adapters from one host
-/// engine bundle. Neither adapter is visible until both are ready.
+/// engine bundle. Factor completion delegates to the password adapter for
+/// compatibility with existing custom bundles.
 pub fn install_magnetar_engines(
     password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
     passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
 ) -> Result<(), FrameworkError> {
-    reserve_magnetar_engines()?.install(password, passkey, no_oauth_engine())
+    let factor = password_factor_engine(password.clone());
+    reserve_magnetar_engines()?.install(password, passkey, factor, no_oauth_engine())
+}
+
+/// Atomically install distinct password, passkey, and factor-completion owners.
+///
+/// Use this form when provider adapters are separate objects. Every adapter
+/// that can return [`SignInOutcome::FactorRequired`] must issue selectors into
+/// the supplied factor owner's store.
+///
+/// # Errors
+///
+/// Returns an error when another installation is reserved or already visible.
+pub fn install_magnetar_engines_with_factor(
+    password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
+    passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
+    factor: Arc<dyn engine::MagnetarFactorAuthEngine>,
+) -> Result<(), FrameworkError> {
+    reserve_magnetar_engines()?.install(password, passkey, factor, no_oauth_engine())
 }
 
 /// Test-only password adapter installation for isolated facade harnesses.
@@ -333,6 +392,7 @@ impl EngineInstallReservation {
         mut self,
         password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
         passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
+        factor: Arc<dyn engine::MagnetarFactorAuthEngine>,
         oauth: OptionalMagnetarOAuthEngine,
     ) -> Result<(), FrameworkError> {
         let mut guard = engine_install_guard()?;
@@ -343,6 +403,7 @@ impl EngineInstallReservation {
         }
         if MAGNETAR_PASSWORD_ENGINE.get().is_some()
             || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+            || MAGNETAR_FACTOR_ENGINE.get().is_some()
             || oauth_engine_is_installed()
         {
             return Err(FrameworkError::internal(
@@ -355,6 +416,9 @@ impl EngineInstallReservation {
         MAGNETAR_PASSKEY_ENGINE
             .set(passkey)
             .map_err(|_| FrameworkError::internal("Magnetar passkey engine installation raced"))?;
+        MAGNETAR_FACTOR_ENGINE
+            .set(factor)
+            .map_err(|_| FrameworkError::internal("Magnetar factor engine installation raced"))?;
         #[cfg(feature = "magnetar-oauth")]
         if let Some(oauth) = oauth {
             MAGNETAR_OAUTH_ENGINE.set(oauth).map_err(|_| {
@@ -372,6 +436,7 @@ impl EngineInstallReservation {
     pub(crate) fn install_oauth_only(
         mut self,
         oauth: Arc<dyn engine::MagnetarOAuthAuthEngine>,
+        factor: Arc<dyn engine::MagnetarFactorAuthEngine>,
     ) -> Result<(), FrameworkError> {
         let mut guard = engine_install_guard()?;
         if !self.active || !guard.reserved {
@@ -381,12 +446,16 @@ impl EngineInstallReservation {
         }
         if MAGNETAR_PASSWORD_ENGINE.get().is_some()
             || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+            || MAGNETAR_FACTOR_ENGINE.get().is_some()
             || MAGNETAR_OAUTH_ENGINE.get().is_some()
         {
             return Err(FrameworkError::internal(
                 "Magnetar authentication engines are already installed",
             ));
         }
+        MAGNETAR_FACTOR_ENGINE
+            .set(factor)
+            .map_err(|_| FrameworkError::internal("Magnetar factor engine installation raced"))?;
         MAGNETAR_OAUTH_ENGINE
             .set(oauth)
             .map_err(|_| FrameworkError::internal("Magnetar OAuth engine installation raced"))?;
@@ -412,6 +481,7 @@ pub(crate) fn reserve_magnetar_engines() -> Result<EngineInstallReservation, Fra
     if guard.reserved
         || MAGNETAR_PASSWORD_ENGINE.get().is_some()
         || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+        || MAGNETAR_FACTOR_ENGINE.get().is_some()
         || oauth_engine_is_installed()
     {
         return Err(FrameworkError::internal(
@@ -420,6 +490,19 @@ pub(crate) fn reserve_magnetar_engines() -> Result<EngineInstallReservation, Fra
     }
     guard.reserved = true;
     Ok(EngineInstallReservation { active: true })
+}
+
+fn factor_engine() -> Result<Arc<dyn engine::MagnetarFactorAuthEngine>, FrameworkError> {
+    let guard = engine_install_guard()?;
+    if guard.reserved {
+        return Err(FrameworkError::internal(
+            "Magnetar engine installation is still in progress",
+        ));
+    }
+    MAGNETAR_FACTOR_ENGINE
+        .get()
+        .cloned()
+        .ok_or_else(|| FrameworkError::internal("Magnetar factor engine is not installed"))
 }
 
 pub(crate) fn password_engine()

@@ -15,8 +15,9 @@ use suprnova::magnetar_integration::engine::{
     MagnetarOAuthCompletion, MagnetarOAuthKickoff,
 };
 use suprnova::magnetar_integration::engine::{
-    HostPasswordResetIssued, HostSignInDecision, MagnetarIssuedSession, MagnetarPasskeyAuthEngine,
-    MagnetarPasswordAuthEngine, MagnetarRememberSignIn, MagnetarRememberSignInAttempt,
+    HostPasswordResetIssued, HostSignInDecision, MagnetarFactorAuthEngine, MagnetarIssuedSession,
+    MagnetarPasskeyAuthEngine, MagnetarPasswordAuthEngine, MagnetarRememberSignIn,
+    MagnetarRememberSignInAttempt,
 };
 use suprnova::middleware::{Middleware, Next};
 use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
@@ -50,11 +51,25 @@ impl Origin {
 struct EngineState {
     pending: HashMap<String, User>,
     sessions: HashMap<String, StoredSession>,
+    completion_calls: usize,
 }
 
 #[derive(Clone, Default)]
 struct FactorEngine {
     state: Arc<Mutex<EngineState>>,
+}
+
+struct PasswordEngine {
+    factors: Arc<FactorEngine>,
+}
+
+struct PasskeyEngine {
+    factors: Arc<FactorEngine>,
+}
+
+#[cfg(feature = "magnetar-oauth")]
+struct OAuthEngine {
+    factors: Arc<FactorEngine>,
 }
 
 impl FactorEngine {
@@ -87,19 +102,16 @@ impl FactorEngine {
 }
 
 #[async_trait]
-impl MagnetarPasswordAuthEngine for FactorEngine {
-    async fn password_sign_in(
-        &self,
-        _: magnetar::plugins::password::PasswordAttempt,
-    ) -> magnetar::Result<(User, HostSignInDecision)> {
-        Ok((Self::user(), self.require_factor("password")))
-    }
-
+impl MagnetarFactorAuthEngine for FactorEngine {
     async fn complete_challenge(
         &self,
         selector: &str,
         code: &str,
     ) -> magnetar::Result<MagnetarIssuedSession> {
+        self.state
+            .lock()
+            .expect("factor engine state")
+            .completion_calls += 1;
         if code != FACTOR_CODE {
             return Err(magnetar::Error::InvalidInput {
                 field: "code".to_owned(),
@@ -150,15 +162,40 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         })
     }
 
+    async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
+        Ok((user_id == USER_ID).then(FactorEngine::user))
+    }
+}
+
+#[async_trait]
+impl MagnetarPasswordAuthEngine for PasswordEngine {
+    async fn password_sign_in(
+        &self,
+        _: magnetar::plugins::password::PasswordAttempt,
+    ) -> magnetar::Result<(User, HostSignInDecision)> {
+        Ok((
+            FactorEngine::user(),
+            self.factors.require_factor("password"),
+        ))
+    }
+
+    async fn complete_challenge(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> magnetar::Result<MagnetarIssuedSession> {
+        FactorEngine::unsupported()
+    }
+
     async fn issue_password_reset(
         &self,
         _: &str,
     ) -> magnetar::Result<Option<HostPasswordResetIssued>> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn check_password_reset(&self, _: SecretString) -> magnetar::Result<bool> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn complete_password_reset(
@@ -166,18 +203,18 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: SecretString,
         _: SecretString,
     ) -> magnetar::Result<magnetar::plugins::password_management::PasswordResetFlowOutcome> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn password_register(
         &self,
         _: magnetar::plugins::password::RegisterInput,
     ) -> magnetar::Result<User> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn bearer_user_id(&self, _: &str) -> magnetar::Result<Option<String>> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn issue_remember(
@@ -185,7 +222,7 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: &str,
         _: suprnova::chrono::Duration,
     ) -> magnetar::Result<magnetar::sessions::RememberCredential> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn remember_sign_in(
@@ -194,7 +231,7 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: SessionMetadata,
         _: suprnova::chrono::Duration,
     ) -> magnetar::Result<MagnetarRememberSignIn> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn remember_sign_in_attempt(
@@ -203,36 +240,36 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: SessionMetadata,
         _: suprnova::chrono::Duration,
     ) -> magnetar::Result<MagnetarRememberSignInAttempt> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn resolve_web_binding(
         &self,
         binding: &WebSessionBinding,
     ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
-        OpaqueSessionProvider::new(Arc::new(self.clone()), OpaqueConfig::default())
+        OpaqueSessionProvider::new(self.factors.clone(), OpaqueConfig::default())
             .resolve_web_binding(binding, &HostSessionApproval::authenticated())
             .await
     }
 
     async fn revoke_remember(&self, _: &str) -> magnetar::Result<u64> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
-        Ok((user_id == USER_ID).then(Self::user))
+        Ok((user_id == USER_ID).then(FactorEngine::user))
     }
 
     async fn revoke_session(&self, _: &str) -> magnetar::Result<bool> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn revoke_all_sessions(&self, _: &str) -> magnetar::Result<u64> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn list_sessions(&self, _: &str) -> magnetar::Result<Vec<SessionSummary>> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn record_failed_attempt(
@@ -240,19 +277,19 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: &str,
         _: Option<&str>,
     ) -> magnetar::Result<LockoutStatus> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn lockout_status(&self, _: &str) -> magnetar::Result<LockoutStatus> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn reset_attempts(&self, _: &str) -> magnetar::Result<()> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn unlock_account(&self, _: &str) -> magnetar::Result<bool> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn magic_link_send(&self, _: &str) -> magnetar::Result<String> {
@@ -264,7 +301,7 @@ impl MagnetarPasswordAuthEngine for FactorEngine {
         _: &str,
         _: SessionMetadata,
     ) -> magnetar::Result<HostSignInDecision> {
-        Ok(self.require_factor("magic-link"))
+        Ok(self.factors.require_factor("magic-link"))
     }
 }
 
@@ -364,12 +401,12 @@ impl OpaqueSessionStore for FactorEngine {
 }
 
 #[async_trait]
-impl MagnetarPasskeyAuthEngine for FactorEngine {
+impl MagnetarPasskeyAuthEngine for PasskeyEngine {
     async fn passkey_begin_registration(
         &self,
         _: magnetar::passkey::RegistrationIntent,
     ) -> magnetar::Result<magnetar::passkey::BegunRegistration> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn passkey_finish_registration(
@@ -378,14 +415,14 @@ impl MagnetarPasskeyAuthEngine for FactorEngine {
         _: &str,
         _: &webauthn_rs::prelude::RegisterPublicKeyCredential,
     ) -> magnetar::Result<User> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn passkey_begin_authentication(
         &self,
         _: &str,
     ) -> magnetar::Result<magnetar::passkey::BegunAuthentication> {
-        Self::unsupported()
+        FactorEngine::unsupported()
     }
 
     async fn passkey_finish_authentication(
@@ -395,17 +432,17 @@ impl MagnetarPasskeyAuthEngine for FactorEngine {
         _: &webauthn_rs::prelude::PublicKeyCredential,
         _: SessionMetadata,
     ) -> magnetar::Result<HostSignInDecision> {
-        Ok(self.require_factor("passkey"))
+        Ok(self.factors.require_factor("passkey"))
     }
 
     async fn passkey_user_by_id(&self, _: &str) -> magnetar::Result<User> {
-        Ok(Self::user())
+        Ok(FactorEngine::user())
     }
 }
 
 #[cfg(feature = "magnetar-oauth")]
 #[async_trait]
-impl MagnetarOAuthAuthEngine for FactorEngine {
+impl MagnetarOAuthAuthEngine for OAuthEngine {
     fn oauth_supports_provider(&self, provider: &str) -> bool {
         provider == "fixture"
     }
@@ -425,7 +462,7 @@ impl MagnetarOAuthAuthEngine for FactorEngine {
         _: MagnetarOAuthCallback,
     ) -> Result<MagnetarOAuthCompletion, HostOAuthError> {
         let HostSignInDecision::FactorRequired { challenge_selector } =
-            self.require_factor("oauth")
+            self.factors.require_factor("oauth")
         else {
             unreachable!("fixture always requires a factor")
         };
@@ -607,12 +644,49 @@ async fn outcome_for(origin: Origin) -> Result<SignInOutcome, FrameworkError> {
 #[tokio::test]
 async fn every_sign_in_origin_completes_through_the_installed_factor_facade() {
     suprnova::testing::install_test_encryption_key();
-    let engine = Arc::new(FactorEngine::default());
-    suprnova::magnetar_integration::install_magnetar_engines(engine.clone(), engine.clone())
-        .expect("install one shared password, factor, and passkey engine");
+    let factors = Arc::new(FactorEngine::default());
+    let password = Arc::new(PasswordEngine {
+        factors: factors.clone(),
+    });
+    let passkey = Arc::new(PasskeyEngine {
+        factors: factors.clone(),
+    });
+    suprnova::magnetar_integration::install_magnetar_engines_with_factor(
+        password,
+        passkey,
+        factors.clone(),
+    )
+    .expect("install distinct provider engines with one factor owner");
     #[cfg(feature = "magnetar-oauth")]
-    suprnova::magnetar_integration::install_magnetar_oauth_engine(engine)
-        .expect("install the same engine for OAuth");
+    suprnova::magnetar_integration::install_magnetar_oauth_engine(Arc::new(OAuthEngine {
+        factors: factors.clone(),
+    }))
+    .expect("install a distinct OAuth provider engine");
+
+    let HostSignInDecision::FactorRequired {
+        challenge_selector: headless_selector,
+    } = factors.require_factor("headless")
+    else {
+        unreachable!("fixture always requires a factor")
+    };
+    let headless = suprnova::Auth::factor()
+        .complete_challenge(&headless_selector, FACTOR_CODE)
+        .await;
+    assert!(
+        headless.is_err(),
+        "factor completion must require active SessionMiddleware scopes"
+    );
+    {
+        let state = factors.state.lock().expect("factor engine state");
+        assert_eq!(
+            state.completion_calls, 0,
+            "scope rejection must happen before the factor proof is consumed"
+        );
+        assert!(
+            state.pending.contains_key(&headless_selector),
+            "scope rejection must leave the factor selector available"
+        );
+    }
 
     let origins = [
         Origin::Password,

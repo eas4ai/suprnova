@@ -1129,6 +1129,48 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     ) -> Result<HostSignInDecision>;
 }
 
+/// Factor challenge completion shared by every installed sign-in provider.
+#[async_trait]
+pub trait MagnetarFactorAuthEngine: Send + Sync {
+    /// Consume one selector and proof, then issue its authenticated session.
+    async fn complete_challenge(&self, selector: &str, code: &str)
+    -> Result<MagnetarIssuedSession>;
+
+    /// Load the host-mapped user referenced by a completed session.
+    async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
+}
+
+#[async_trait]
+impl<S, O, C, F, P, A, L> MagnetarFactorAuthEngine for MagnetarHostEngine<S, O, C, F, P, A, L>
+where
+    S::User: UserBinding + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
+    S::Token: TokenFields,
+    S: AuthSchema,
+    O: OpaqueSessionStore + 'static,
+    C: CeremonyStore + 'static,
+    F: FactorVerifier + 'static,
+    P: PasswordAuthProvider,
+    A: HostUserAdapter<User = User>,
+    L: HostLifecycleDeduplication,
+{
+    async fn complete_challenge(
+        &self,
+        selector: &str,
+        code: &str,
+    ) -> Result<MagnetarIssuedSession> {
+        MagnetarHostEngine::complete_challenge(self, selector, code).await
+    }
+
+    async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+        match self.users.user_for_id(user_id).await {
+            Ok(user) => Ok(Some(user)),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 #[async_trait]
 impl<S, O, C, F, P, A, L> MagnetarPasswordAuthEngine for MagnetarHostEngine<S, O, C, F, P, A, L>
 where

@@ -400,7 +400,8 @@ struct DefaultEngineBundle {
 pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError> {
     let reservation = super::reserve_magnetar_engines()?;
     let bundle = build_default_engines(config).await?;
-    reservation.install(bundle.password, bundle.passkey, bundle.oauth)
+    let factor = super::password_factor_engine(bundle.password.clone());
+    reservation.install(bundle.password, bundle.passkey, factor, bundle.oauth)
 }
 
 /// Install only the default OAuth engine and leave framework session authority
@@ -433,7 +434,8 @@ pub async fn init_magnetar_oauth_only(
         .oauth
         .take()
         .ok_or_else(|| FrameworkError::internal("OAuth-only configuration omitted OAuth"))?;
-    reservation.install_oauth_only(oauth)
+    let factor = super::password_factor_engine(bundle.password);
+    reservation.install_oauth_only(oauth, factor)
 }
 
 async fn build_default_engines(
