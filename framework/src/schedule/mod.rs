@@ -320,7 +320,7 @@ impl Schedule {
         TaskBuilder::from_async(f)
     }
 
-    /// Add a configured task builder to the schedule
+    /// Add a configured task builder to the schedule.
     ///
     /// This method is typically called after configuring a task with `call()`.
     ///
@@ -333,9 +333,39 @@ impl Schedule {
     /// schedule.add(builder);
     /// # }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if another task already has the same name. Use
+    /// [`try_add`](Self::try_add) when registration errors should be handled
+    /// explicitly.
     pub fn add(&mut self, builder: TaskBuilder) -> &mut Self {
+        self.try_add(builder)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible sibling of [`add`](Self::add).
+    ///
+    /// Task names are exact and case-sensitive. A name identifies the task in
+    /// direct lookup and in the distributed keys used by
+    /// [`TaskBuilder::on_one_server`] and
+    /// [`TaskBuilder::without_overlapping`], so one name cannot identify two
+    /// registered entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Internal`] when `builder` resolves to a name
+    /// already present in this schedule. The existing task is retained and the
+    /// new task is not inserted.
+    pub fn try_add(&mut self, builder: TaskBuilder) -> Result<&mut Self, FrameworkError> {
         let task_index = self.tasks.len();
         let mut entry = builder.build(task_index);
+        if self.tasks.iter().any(|task| task.name == entry.name) {
+            return Err(FrameworkError::internal(format!(
+                "Scheduled task name '{}' is already registered; task names must be unique",
+                entry.name
+            )));
+        }
         // The schedule-wide default only fills a gap; a task that named its
         // own zone always wins, the same way Laravel's per-event
         // `timezone()` outranks `app.schedule_timezone`.
@@ -343,7 +373,7 @@ impl Schedule {
             entry.timezone = self.default_timezone;
         }
         self.tasks.push(entry);
-        self
+        Ok(self)
     }
 
     /// Get all registered tasks
@@ -607,6 +637,117 @@ mod tests {
         schedule.add(builder);
 
         assert_eq!(schedule.len(), 1);
+    }
+
+    #[test]
+    fn add_rejects_duplicate_name() {
+        let mut schedule = Schedule::new();
+        schedule.add(
+            schedule
+                .task(TestTask)
+                .every_minute()
+                .name("daily-report")
+                .description("original"),
+        );
+
+        let duplicate = schedule
+            .task(TestTask)
+            .hourly()
+            .name("daily-report")
+            .description("duplicate");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            schedule.add(duplicate);
+        }));
+
+        assert!(
+            result.is_err(),
+            "duplicate task names must fail immediately"
+        );
+        assert_eq!(schedule.len(), 1, "a rejected task must not be inserted");
+        assert_eq!(schedule.tasks()[0].name, "daily-report");
+        assert_eq!(schedule.tasks()[0].description.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn try_add_reports_duplicate_name_without_mutating_schedule() {
+        let mut schedule = Schedule::new();
+        schedule
+            .try_add(
+                schedule
+                    .task(TestTask)
+                    .every_minute()
+                    .name("daily-report")
+                    .description("original"),
+            )
+            .expect("first name is unique");
+
+        let duplicate = schedule
+            .task(TestTask)
+            .hourly()
+            .name("daily-report")
+            .description("duplicate");
+        let error = match schedule.try_add(duplicate) {
+            Ok(_) => panic!("a duplicate name must be rejected"),
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("daily-report"), "{message}");
+        assert!(message.contains("unique"), "{message}");
+        assert_eq!(schedule.len(), 1);
+        assert_eq!(schedule.tasks()[0].description.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn explicit_name_cannot_collide_with_generated_name() {
+        let mut schedule = Schedule::new();
+        schedule
+            .try_add(
+                schedule
+                    .task(TestTask)
+                    .every_minute()
+                    .name("closure-task-1"),
+            )
+            .expect("first name is unique");
+
+        let unnamed = schedule.task(TestTask).hourly();
+        let error = match schedule.try_add(unnamed) {
+            Ok(_) => panic!("generated name collision must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("closure-task-1"));
+        assert_eq!(schedule.len(), 1);
+    }
+
+    #[test]
+    fn distinct_explicit_and_generated_names_keep_registration_order() {
+        let mut schedule = Schedule::new();
+        let first = schedule.task(TestTask).every_minute();
+        schedule.try_add(first).expect("first generated name");
+        let named = schedule.task(TestTask).hourly().name("daily-report");
+        schedule.try_add(named).expect("distinct explicit name");
+        let case_variant = schedule.task(TestTask).daily().name("Daily-Report");
+        schedule
+            .try_add(case_variant)
+            .expect("names remain case-sensitive");
+        let third = schedule.task(TestTask).daily();
+        schedule.try_add(third).expect("second generated name");
+
+        let names: Vec<_> = schedule
+            .tasks()
+            .iter()
+            .map(|task| task.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "closure-task-0",
+                "daily-report",
+                "Daily-Report",
+                "closure-task-3"
+            ]
+        );
     }
 
     #[test]
