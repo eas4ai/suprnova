@@ -57,5 +57,4 @@ rustc-ice-*.txt
 /.claude/
 /.codex/
 /.remember/
-/CLAUDE.md
 /skills-lock.json

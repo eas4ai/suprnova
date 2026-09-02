@@ -7,10 +7,9 @@ Last revised: 2026-09-01
 
 These conventions govern Suprnova Live design, implementation, generated code,
 browser assets, component-library artifacts, tests, references, and
-documentation. The repository-level `AGENTS.md`, the machine production coding
-standard it imports, and any future repository-local `BEST_PRACTICES.md` remain
-authoritative. A repository-local `BEST_PRACTICES.md` overrides the machine
-copy.
+documentation. The machine production coding standard and any future
+repository-local `BEST_PRACTICES.md` remain authoritative. A repository-local
+`BEST_PRACTICES.md` overrides the machine copy.
 
 `crates/suprnova-live/` is the internal Suprnova Live engine subtree, not a
 specification-only repository or a third-party crate. It keeps implementation
