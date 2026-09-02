@@ -26,6 +26,39 @@ struct CacheEntry {
     tags: HashSet<String>,
 }
 
+#[derive(Clone, Copy)]
+enum CounterOperation {
+    Increment,
+    Decrement,
+}
+
+impl CounterOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Increment => "increment",
+            Self::Decrement => "decrement",
+        }
+    }
+
+    fn apply(self, current: i64, amount: i64) -> Option<i64> {
+        match self {
+            Self::Increment => current.checked_add(amount),
+            Self::Decrement => current.checked_sub(amount),
+        }
+    }
+}
+
+fn is_canonical_counter_value(value: &str) -> bool {
+    match value.as_bytes() {
+        [b'0'] => true,
+        [b'-', first, rest @ ..] => {
+            (b'1'..=b'9').contains(first) && rest.iter().all(u8::is_ascii_digit)
+        }
+        [first, rest @ ..] => (b'1'..=b'9').contains(first) && rest.iter().all(u8::is_ascii_digit),
+        [] => false,
+    }
+}
+
 impl CacheEntry {
     fn is_expired(&self) -> bool {
         self.expires_at.map(|t| Instant::now() > t).unwrap_or(false)
@@ -122,6 +155,59 @@ impl InMemoryCache {
     /// `put` from releasing or overwriting a held distributed lock.
     fn locked_key(&self, key: &str) -> String {
         format!("{}\0lock:{}", self.prefix, key)
+    }
+
+    fn update_counter(
+        &self,
+        key: &str,
+        amount: i64,
+        operation: CounterOperation,
+    ) -> Result<i64, FrameworkError> {
+        let key = self.prefixed_key(key);
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+
+        // Redis INCRBY/DECRBY reject a live non-integer and preserve its
+        // value and TTL. Parse before insertion so the memory driver has the
+        // same observable behavior and leaves the entry untouched on error.
+        let (current, expires_at, tags): (i64, Option<Instant>, HashSet<String>) =
+            match store.get(&key).filter(|entry| !entry.is_expired()) {
+                Some(entry) => {
+                    let current = if is_canonical_counter_value(&entry.value) {
+                        entry.value.parse::<i64>().ok()
+                    } else {
+                        None
+                    }
+                    .ok_or_else(|| {
+                        FrameworkError::internal(format!(
+                            "Cache {} error: stored value is not a signed 64-bit integer",
+                            operation.name()
+                        ))
+                    })?;
+                    (current, entry.expires_at, entry.tags.clone())
+                }
+                None => (0, None, HashSet::new()),
+            };
+
+        let new_value = operation.apply(current, amount).ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "Cache {} error: signed 64-bit integer overflow",
+                operation.name()
+            ))
+        })?;
+
+        store.insert(
+            key,
+            CacheEntry {
+                value: new_value.to_string(),
+                expires_at,
+                tags,
+            },
+        );
+
+        Ok(new_value)
     }
 
     /// Walk the value store and drop every entry whose TTL has elapsed.
@@ -406,40 +492,11 @@ impl CacheStore for InMemoryCache {
     }
 
     async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-        let key = self.prefixed_key(key);
-
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
-
-        // Preserve the existing entry's TTL on increment - matches Redis
-        // `INCR` semantics, which never resets the key's expiration. The
-        // rate-limit fixed-window counter relies on this: the counter
-        // shares its TTL with the `:timer` deadline so both ages out
-        // together when the window ends.
-        let (current, expires_at, tags): (i64, Option<Instant>, HashSet<String>) = store
-            .get(&key)
-            .filter(|e| !e.is_expired())
-            .map(|e| (e.value.parse().unwrap_or(0), e.expires_at, e.tags.clone()))
-            .unwrap_or((0, None, HashSet::new()));
-
-        let new_value = current + amount;
-
-        store.insert(
-            key,
-            CacheEntry {
-                value: new_value.to_string(),
-                expires_at,
-                tags,
-            },
-        );
-
-        Ok(new_value)
+        self.update_counter(key, amount, CounterOperation::Increment)
     }
 
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-        self.increment(key, -amount).await
+        self.update_counter(key, amount, CounterOperation::Decrement)
     }
 
     async fn tagged_put_raw(
@@ -632,6 +689,168 @@ impl InMemoryCache {
 mod tests {
     use super::*;
     use crate::cache::CacheStore;
+
+    fn entry_snapshot(cache: &InMemoryCache, key: &str) -> CacheEntry {
+        let key = cache.prefixed_key(key);
+        cache
+            .store
+            .read()
+            .expect("cache lock")
+            .get(&key)
+            .expect("cache entry")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn increment_rejects_non_integer_without_mutating_entry() {
+        for invalid in ["not-an-integer", "+1", "01", "-0", "-01"] {
+            let cache = InMemoryCache::with_prefix("t:");
+            cache
+                .tagged_put_raw(
+                    &["counters"],
+                    "count",
+                    invalid,
+                    Some(Duration::from_secs(60)),
+                )
+                .await
+                .expect("seed tagged counter");
+            let before = entry_snapshot(&cache, "count");
+
+            let error = match cache.increment("count", 1).await {
+                Ok(value) => panic!("counter {invalid:?} unexpectedly became {value}"),
+                Err(error) => error,
+            };
+
+            assert!(error.to_string().contains("increment"));
+            let after = entry_snapshot(&cache, "count");
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.expires_at, before.expires_at);
+            assert_eq!(after.tags, before.tags);
+
+            let error = cache
+                .decrement("count", 1)
+                .await
+                .expect_err("decrement must also reject a non-integer");
+            assert!(error.to_string().contains("decrement"));
+            let after_decrement = entry_snapshot(&cache, "count");
+            assert_eq!(after_decrement.value, before.value);
+            assert_eq!(after_decrement.expires_at, before.expires_at);
+            assert_eq!(after_decrement.tags, before.tags);
+        }
+    }
+
+    #[tokio::test]
+    async fn increment_overflow_fails_without_mutation_or_lock_poisoning() {
+        let cache = InMemoryCache::with_prefix("t:");
+        for (key, value, amount) in [("upper", i64::MAX, 1), ("lower", i64::MIN, -1)] {
+            cache
+                .put_raw(key, &value.to_string(), Some(Duration::from_secs(60)))
+                .await
+                .expect("seed boundary counter");
+            let before = entry_snapshot(&cache, key);
+
+            let error = cache
+                .increment(key, amount)
+                .await
+                .expect_err("unrepresentable increment must fail");
+
+            assert!(error.to_string().contains("overflow"));
+            let after = entry_snapshot(&cache, key);
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.expires_at, before.expires_at);
+            assert_eq!(after.tags, before.tags);
+        }
+
+        let token = cache
+            .acquire_lock("after-increment-error", Duration::from_secs(30))
+            .await
+            .expect("store lock remains healthy")
+            .expect("unrelated lock is available");
+        assert!(
+            cache
+                .release_lock("after-increment-error", &token)
+                .await
+                .expect("release unrelated lock")
+        );
+    }
+
+    #[tokio::test]
+    async fn decrement_uses_checked_subtraction_for_i64_min() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .put_raw("representable", "-1", None)
+            .await
+            .expect("seed representable counter");
+        assert_eq!(
+            cache
+                .decrement("representable", i64::MIN)
+                .await
+                .expect("-1 - MIN is representable"),
+            i64::MAX
+        );
+
+        cache
+            .put_raw("overflow", "0", Some(Duration::from_secs(60)))
+            .await
+            .expect("seed overflowing counter");
+        let before = entry_snapshot(&cache, "overflow");
+        let error = cache
+            .decrement("overflow", i64::MIN)
+            .await
+            .expect_err("0 - MIN is not representable");
+        assert!(error.to_string().contains("overflow"));
+        let after = entry_snapshot(&cache, "overflow");
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.tags, before.tags);
+
+        let token = cache
+            .acquire_lock("after-decrement-error", Duration::from_secs(30))
+            .await
+            .expect("store lock remains healthy")
+            .expect("unrelated lock is available");
+        assert!(
+            cache
+                .release_lock("after-decrement-error", &token)
+                .await
+                .expect("release unrelated lock")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_counter_updates_preserve_exact_ttl_and_tags() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .tagged_put_raw(
+                &["counters", "billing"],
+                "count",
+                "10",
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .expect("seed tagged counter");
+        let before = entry_snapshot(&cache, "count");
+
+        assert_eq!(cache.increment("count", 5).await.expect("increment"), 15);
+        assert_eq!(cache.decrement("count", 3).await.expect("decrement"), 12);
+
+        let after = entry_snapshot(&cache, "count");
+        assert_eq!(after.value, "12");
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.tags, before.tags);
+
+        cache
+            .flush_tags(&["billing"])
+            .await
+            .expect("flush retained tag");
+        assert!(
+            cache
+                .get_raw("count")
+                .await
+                .expect("read counter")
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn get_raw_purges_expired_entry_on_read() {
