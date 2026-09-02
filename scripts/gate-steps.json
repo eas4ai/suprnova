@@ -72,6 +72,33 @@
       "capabilities": ["cargo", "env"]
     },
     {
+      "id": "json-rustdoc-live",
+      "name": "JSON rustdoc links (suprnova-live)",
+      "tiers": ["default", "full"],
+      "argv": ["env", "RUSTC_BOOTSTRAP=1", "cargo", "rustdoc", "-p", "suprnova-live", "--lib", "--", "-Z", "unstable-options", "--output-format", "json"],
+      "timeout_seconds": 900,
+      "category": "code",
+      "capabilities": ["cargo", "env"]
+    },
+    {
+      "id": "json-rustdoc-macros",
+      "name": "JSON rustdoc links (suprnova-macros)",
+      "tiers": ["default", "full"],
+      "argv": ["env", "RUSTC_BOOTSTRAP=1", "cargo", "rustdoc", "-p", "suprnova-macros", "--lib", "--", "-Z", "unstable-options", "--output-format", "json"],
+      "timeout_seconds": 900,
+      "category": "code",
+      "capabilities": ["cargo", "env"]
+    },
+    {
+      "id": "json-rustdoc-test-support",
+      "name": "JSON rustdoc links (suprnova-live-test-support)",
+      "tiers": ["default", "full"],
+      "argv": ["env", "RUSTC_BOOTSTRAP=1", "cargo", "rustdoc", "-p", "suprnova-live-test-support", "--lib", "--", "-Z", "unstable-options", "--output-format", "json"],
+      "timeout_seconds": 900,
+      "category": "code",
+      "capabilities": ["cargo", "env"]
+    },
+    {
       "id": "workspace-tests",
       "name": "workspace tests",
       "tiers": ["default", "full"],
