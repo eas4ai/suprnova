@@ -432,6 +432,14 @@ impl WebhookHandler for MockPaymentProvider {
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
         let raw: serde_json::Value = serde_json::from_slice(body)
             .map_err(|e| PaymentError::Validation(format!("invalid mock webhook body: {e}")))?;
+        let provider_event_id = raw
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                PaymentError::Validation("mock webhook id must be a non-empty string".to_owned())
+            })?
+            .to_owned();
         let provider_event_type = raw
             .get("type")
             .and_then(|v| v.as_str())
@@ -453,11 +461,7 @@ impl WebhookHandler for MockPaymentProvider {
         };
         Ok(WebhookEvent {
             provider: "mock".into(),
-            provider_event_id: raw
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("evt_mock")
-                .to_string(),
+            provider_event_id,
             provider_event_type,
             neutral,
             raw_payload: raw,
@@ -573,6 +577,32 @@ mod tests {
             headers,
             remote_addr: None,
         }
+    }
+
+    #[test]
+    fn parse_event_rejects_invalid_ids_and_preserves_nonblank_ids() {
+        let provider = MockPaymentProvider::new();
+        for payload in [
+            serde_json::json!({ "type": "mock.event" }),
+            serde_json::json!({ "id": null, "type": "mock.event" }),
+            serde_json::json!({ "id": 42, "type": "mock.event" }),
+            serde_json::json!({ "id": "", "type": "mock.event" }),
+            serde_json::json!({ "id": " \t\r\n", "type": "mock.event" }),
+        ] {
+            let body = serde_json::to_vec(&payload).expect("serialize payload");
+            let error = provider
+                .parse_event(&body)
+                .expect_err("an invalid mock event id must be rejected");
+            assert!(matches!(
+                error,
+                PaymentError::Validation(ref message) if message.contains("id")
+            ));
+        }
+
+        let event = provider
+            .parse_event(br#"{"id":" evt_preserved ","type":"mock.event"}"#)
+            .expect("a nonblank mock event id is valid");
+        assert_eq!(event.provider_event_id, " evt_preserved ");
     }
 
     #[test]

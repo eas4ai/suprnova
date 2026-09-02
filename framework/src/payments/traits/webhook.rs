@@ -60,7 +60,8 @@ pub trait WebhookHandler: Send + Sync {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()>;
     /// Parse the raw body into a [`WebhookEvent`] with the provider's
     /// event identifier, type string, and (when recognised) a neutral
-    /// classification.
+    /// classification. Implementations must reject missing, non-string, or
+    /// whitespace-only provider event identifiers.
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent>;
 
     /// Extract well-known entity IDs from the webhook's `raw_payload` so the

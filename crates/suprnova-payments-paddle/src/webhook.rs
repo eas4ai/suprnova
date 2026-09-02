@@ -296,9 +296,14 @@ impl WebhookHandler for PaddleProvider {
 
         let provider_event_id = raw
             .get("event_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                PaymentError::Validation(
+                    "paddle webhook event_id must be a non-empty string".to_owned(),
+                )
+            })?
+            .to_owned();
         let provider_event_type = raw
             .get("event_type")
             .and_then(|v| v.as_str())
@@ -458,6 +463,32 @@ mod tests {
             PaddleEnvironment::Sandbox,
         )
         .expect("paddle provider construction")
+    }
+
+    #[test]
+    fn parse_event_rejects_invalid_ids_and_preserves_nonblank_ids() {
+        let provider = provider();
+        for payload in [
+            serde_json::json!({ "event_type": "transaction.completed" }),
+            serde_json::json!({ "event_id": null, "event_type": "transaction.completed" }),
+            serde_json::json!({ "event_id": 42, "event_type": "transaction.completed" }),
+            serde_json::json!({ "event_id": "", "event_type": "transaction.completed" }),
+            serde_json::json!({ "event_id": " \t\r\n", "event_type": "transaction.completed" }),
+        ] {
+            let body = serde_json::to_vec(&payload).expect("serialize payload");
+            let error = provider
+                .parse_event(&body)
+                .expect_err("an invalid Paddle event id must be rejected");
+            assert!(matches!(
+                error,
+                PaymentError::Validation(ref message) if message.contains("event_id")
+            ));
+        }
+
+        let event = provider
+            .parse_event(br#"{"event_id":" evt_preserved ","event_type":"transaction.completed"}"#)
+            .expect("a nonblank Paddle event id is valid");
+        assert_eq!(event.provider_event_id, " evt_preserved ");
     }
 
     fn event(neutral: NeutralEventKind, payload: serde_json::Value) -> WebhookEvent {

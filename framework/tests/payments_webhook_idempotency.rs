@@ -5,6 +5,8 @@
 //!      twice persists exactly one row and both calls return 200.
 //!   2. `webhook_for_unknown_provider_returns_404` - a request for an
 //!      unregistered provider name returns 404.
+//!   3. `blank_event_ids_are_rejected_without_persisting_state` - malformed
+//!      identifiers never enter the shared idempotency namespace.
 //!
 //! These tests use a real TCP server (`spawn_server`) and a raw hyper HTTP
 //! client (`send_webhook`) to drive the handler end-to-end.  No tower or
@@ -25,8 +27,12 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use suprnova::handle_request;
 use suprnova::payments::{
-    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
-    entities::webhook_event, webhook_routes,
+    Checkout, CreateCustomerRequest, CustomerRef, CustomerStore, MockPaymentProvider, PaymentError,
+    PaymentProvider, PaymentProviderRegistry, PaymentResult, SessionPayload, StartSessionRequest,
+    SubscribeRequest, Subscription, SubscriptionResult, UpdateCustomerRequest,
+    UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler,
+    entities::{transaction, webhook_event},
+    webhook_routes,
 };
 use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router};
@@ -127,6 +133,78 @@ fn register_mock(name: &'static str) -> Arc<MockPaymentProvider> {
     mock
 }
 
+struct BlankEventIdProvider;
+
+impl PaymentProvider for BlankEventIdProvider {
+    fn name(&self) -> &'static str {
+        "blank-event-id-probe"
+    }
+}
+
+#[async_trait::async_trait]
+impl WebhookHandler for BlankEventIdProvider {
+    fn verify(&self, _ctx: &WebhookContext<'_>) -> PaymentResult<()> {
+        Ok(())
+    }
+
+    fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
+        let raw_payload: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|error| PaymentError::Validation(format!("invalid probe body: {error}")))?;
+        Ok(WebhookEvent {
+            provider: self.name().into(),
+            provider_event_id: String::new(),
+            provider_event_type: "probe.event".into(),
+            neutral: None,
+            raw_payload,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Checkout for BlankEventIdProvider {
+    async fn start_session(&self, _req: StartSessionRequest) -> PaymentResult<SessionPayload> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Subscription for BlankEventIdProvider {
+    async fn subscribe(&self, _req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+
+    async fn update(&self, _req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+
+    async fn cancel(&self, _id: &str, _at_period_end: bool) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+
+    async fn get(&self, _id: &str) -> PaymentResult<SubscriptionResult> {
+        Err(PaymentError::NotFound("probe".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomerStore for BlankEventIdProvider {
+    async fn create_customer(&self, _req: CreateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+
+    async fn update_customer(&self, _req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotSupported("probe".into()))
+    }
+
+    async fn get_customer(&self, _id: &str) -> PaymentResult<CustomerRef> {
+        Err(PaymentError::NotFound("probe".into()))
+    }
+
+    async fn delete_customer(&self, _id: &str) -> PaymentResult<()> {
+        Err(PaymentError::NotFound("probe".into()))
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// Posting the same webhook payload twice:
@@ -216,6 +294,69 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
     assert!(
         rows[0].processed_at.is_some(),
         "processed_at must be set after successful processing"
+    );
+}
+
+#[tokio::test]
+async fn blank_event_ids_are_rejected_without_persisting_state() {
+    let provider_name: &'static str = "mock-idem-blank-event-id";
+    let provider: Arc<dyn PaymentProvider> = Arc::new(BlankEventIdProvider);
+    PaymentProviderRegistry::bind(provider_name, provider);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 2).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let first = Bytes::from(
+        json!({
+            "id": "",
+            "type": "payment.succeeded",
+            "data": { "object": {
+                "id": "txn_blank_event_a",
+                "customer": "cus_blank_event_a",
+                "amount": 100,
+                "currency": "USD"
+            }}
+        })
+        .to_string(),
+    );
+    let second = Bytes::from(
+        json!({
+            "id": "",
+            "type": "payment.succeeded",
+            "data": { "object": {
+                "id": "txn_blank_event_b",
+                "customer": "cus_blank_event_b",
+                "amount": 200,
+                "currency": "EUR"
+            }}
+        })
+        .to_string(),
+    );
+
+    let (first_status, _) = send_webhook(addr, &path, first).await;
+    let (second_status, _) = send_webhook(addr, &path, second).await;
+    assert_eq!(first_status.as_u16(), 400);
+    assert_eq!(second_status.as_u16(), 400);
+    assert!(
+        webhook_event::Entity::find()
+            .all(&*conn)
+            .await
+            .expect("audit query")
+            .is_empty(),
+        "invalid event identifiers must not enter the audit table"
+    );
+    assert!(
+        transaction::Entity::find()
+            .all(&*conn)
+            .await
+            .expect("transaction query")
+            .is_empty(),
+        "invalid event identifiers must not hydrate transaction mirrors"
     );
 }
 

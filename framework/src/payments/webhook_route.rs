@@ -59,6 +59,15 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
     )
 }
 
+fn validate_provider_event_id(event: &WebhookEvent) -> Result<(), PaymentError> {
+    if event.provider_event_id.trim().is_empty() {
+        return Err(PaymentError::Validation(
+            "webhook event id must be a non-empty string".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn handle_webhook_inner(
     db: &DatabaseConnection,
     provider_name: &str,
@@ -100,6 +109,10 @@ async fn handle_webhook_inner(
             return err_response(400, "malformed");
         }
     };
+    if let Err(e) = validate_provider_event_id(&event) {
+        tracing::error!(provider = %provider_name, error = %e, "webhook event id validation failed");
+        return err_response(400, "malformed");
+    }
 
     // 5. Idempotency, retry-aware. Successfully-processed events short-circuit
     //    here; previously-failed events fall through to retry hydration.
@@ -894,6 +907,35 @@ mod tests {
         match resp {
             Ok(r) | Err(r) => r.status_code(),
         }
+    }
+
+    #[test]
+    fn provider_event_id_validation_rejects_blank_values_without_normalizing_valid_ids() {
+        for provider_event_id in ["", " ", "\t\r\n"] {
+            let event = WebhookEvent {
+                provider: "custom".into(),
+                provider_event_id: provider_event_id.into(),
+                provider_event_type: "custom.event".into(),
+                neutral: None,
+                raw_payload: serde_json::json!({}),
+            };
+            let error = validate_provider_event_id(&event)
+                .expect_err("blank event identifiers must be rejected");
+            assert!(matches!(
+                error,
+                PaymentError::Validation(ref message) if message.contains("event id")
+            ));
+        }
+
+        let event = WebhookEvent {
+            provider: "custom".into(),
+            provider_event_id: " evt_preserved ".into(),
+            provider_event_type: "custom.event".into(),
+            neutral: None,
+            raw_payload: serde_json::json!({}),
+        };
+        validate_provider_event_id(&event).expect("a nonblank event identifier is valid");
+        assert_eq!(event.provider_event_id, " evt_preserved ");
     }
 
     fn payment_succeeded_body(event_id: &str, txn_id: &str) -> bytes::Bytes {

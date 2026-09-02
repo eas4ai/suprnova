@@ -449,9 +449,12 @@ impl WebhookHandler for StripeProvider {
 
         let provider_event_id = raw
             .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                PaymentError::Validation("stripe webhook id must be a non-empty string".to_owned())
+            })?
+            .to_owned();
 
         let provider_event_type = raw
             .get("type")
@@ -605,6 +608,32 @@ mod tests {
     fn provider() -> StripeProvider {
         install_crypto_provider();
         StripeProvider::new("sk_test_dummy", "pk_test_dummy", "whsec_dummy")
+    }
+
+    #[test]
+    fn parse_event_rejects_invalid_ids_and_preserves_nonblank_ids() {
+        let provider = provider();
+        for payload in [
+            serde_json::json!({ "type": "payment_intent.succeeded" }),
+            serde_json::json!({ "id": null, "type": "payment_intent.succeeded" }),
+            serde_json::json!({ "id": 42, "type": "payment_intent.succeeded" }),
+            serde_json::json!({ "id": "", "type": "payment_intent.succeeded" }),
+            serde_json::json!({ "id": " \t\r\n", "type": "payment_intent.succeeded" }),
+        ] {
+            let body = serde_json::to_vec(&payload).expect("serialize payload");
+            let error = provider
+                .parse_event(&body)
+                .expect_err("an invalid Stripe event id must be rejected");
+            assert!(matches!(
+                error,
+                PaymentError::Validation(ref message) if message.contains("id")
+            ));
+        }
+
+        let event = provider
+            .parse_event(br#"{"id":" evt_preserved ","type":"payment_intent.succeeded"}"#)
+            .expect("a nonblank Stripe event id is valid");
+        assert_eq!(event.provider_event_id, " evt_preserved ");
     }
 
     #[test]
