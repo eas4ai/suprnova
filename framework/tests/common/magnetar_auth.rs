@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,6 +9,16 @@ use suprnova::magnetar_integration::engine::{
     HostSignInDecision, MagnetarIssuedSession, MagnetarPasswordAuthEngine,
 };
 use suprnova::{LockoutStatus, Session, SessionToken, User, UserId};
+
+static FAIL_NEXT_REMEMBER_ISSUE: AtomicBool = AtomicBool::new(false);
+
+pub fn fail_next_remember_issue() {
+    FAIL_NEXT_REMEMBER_ISSUE.store(true, Ordering::SeqCst);
+}
+
+pub fn take_unconsumed_remember_issue_failure() -> bool {
+    FAIL_NEXT_REMEMBER_ISSUE.swap(false, Ordering::SeqCst)
+}
 
 struct AllowingLimiter;
 
@@ -175,6 +186,11 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         user_id: &str,
         _lifetime: chrono::Duration,
     ) -> magnetar::Result<magnetar::sessions::RememberCredential> {
+        if FAIL_NEXT_REMEMBER_ISSUE.swap(false, Ordering::SeqCst) {
+            return Err(magnetar::Error::Internal {
+                message: "scripted remember issuance failure".to_owned(),
+            });
+        }
         Ok(magnetar::sessions::RememberCredential::from_host(
             SecretString::from(format!("test-selector-{user_id}.test-verifier")),
         ))

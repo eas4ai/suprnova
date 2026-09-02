@@ -398,6 +398,78 @@ fn complete_challenge_with_remember_true_reissues_remember_me_cookie() {
 }
 
 #[test]
+fn complete_challenge_survives_remember_issue_failure_without_claiming_remembered_login() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let (user_id, _email, otpauth_url) = register_and_enroll("remember-failure").await;
+        let captured_user_id = user_id.clone();
+        let pending_slot = suprnova::session::new_pending_cookies_slot_for_test();
+        let inspector = pending_slot.clone();
+
+        let (
+            outcome,
+            session_id_before,
+            session_id_after,
+            csrf_before,
+            csrf_after,
+            pending_user,
+            pending_remember,
+            auth_user,
+            queued_cookies,
+            failure_hook_unconsumed,
+        ) = run_in_request_with_slot(pending_slot, async move {
+            TwoFactor::start_challenge(&user_id, true)
+                .await
+                .expect("start_challenge");
+            let session_id_before = current_session_id();
+            let csrf_before = current_csrf();
+            let totp = totp_code_for(&otpauth_url);
+
+            magnetar_auth::fail_next_remember_issue();
+            let outcome = TwoFactor::complete_challenge(&totp).await;
+            let failure_hook_unconsumed = magnetar_auth::take_unconsumed_remember_issue_failure();
+
+            (
+                outcome,
+                session_id_before,
+                current_session_id(),
+                csrf_before,
+                current_csrf(),
+                TwoFactor::pending_user_id(),
+                suprnova::session::two_factor_pending_remember(),
+                suprnova::session::auth_user_id(),
+                inspector.lock().unwrap().clone(),
+                failure_hook_unconsumed,
+            )
+        })
+        .await;
+
+        let user = outcome.expect("remember failure must not undo accepted challenge proof");
+        assert!(
+            !failure_hook_unconsumed,
+            "complete_challenge must attempt remember issuance when it was requested"
+        );
+        assert_eq!(user.id.to_string(), captured_user_id);
+        assert_ne!(session_id_after, session_id_before);
+        assert_ne!(csrf_after, csrf_before);
+        assert_eq!(pending_user, None);
+        assert!(!pending_remember);
+        assert_eq!(auth_user.as_deref(), Some(captured_user_id.as_str()));
+        assert_eq!(queued_cookies.len(), 1);
+        assert_eq!(queued_cookies[0].name(), "remember_me");
+        assert!(queued_cookies[0].value().is_empty());
+        assert_dispatched::<Login>(|e| e.user_id == captured_user_id && !e.remember);
+        assert_not_dispatched::<Login>(|e| e.user_id == captured_user_id && e.remember);
+        assert_dispatched::<Authenticated>(|e| e.user_id == captured_user_id);
+        assert_dispatched::<TwoFactorChallenged>(|e| e.user_id == captured_user_id);
+        assert_not_dispatched::<TwoFactorChallengeFailed>(|e| e.user_id == captured_user_id);
+    });
+}
+
+#[test]
 fn complete_challenge_with_remember_false_does_not_issue_remember_me_cookie() {
     Lazy::force(&SETUP);
     RT.block_on(async {

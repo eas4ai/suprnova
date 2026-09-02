@@ -703,8 +703,8 @@ impl TwoFactor {
     /// Complete the 2FA challenge by verifying `code` against the
     /// session's pending user. On success, promotes the pending user
     /// to fully authenticated, rotates the session id and CSRF token
-    /// to defeat session fixation, re-issues the remember-me cookie
-    /// when the original login form requested it, and dispatches the
+    /// to defeat session fixation, attempts to re-issue the remember-me
+    /// cookie when the original login form requested it, and dispatches the
     /// standard [`crate::auth::events::Login`] +
     /// [`crate::auth::events::Authenticated`] pair followed by the
     /// 2FA-specific [`crate::auth_flows::events::TwoFactorChallenged`].
@@ -750,6 +750,11 @@ impl TwoFactor {
     /// guard-attribution as a no-2FA password login, so listeners
     /// that hook those events (last-login timestamps, audit logs,
     /// post-login redirects, …) fire here too.
+    ///
+    /// Remember-me issuance is best-effort after an accepted factor proof:
+    /// a failure cannot make a single-use TOTP timestep or recovery code
+    /// retryable. The login still completes, the prior clear-cookie directive
+    /// remains, and [`crate::auth::events::Login::remember`] is `false`.
     ///
     /// # Errors
     ///
@@ -859,7 +864,7 @@ impl TwoFactor {
         // Read the remember-me preference the user supplied at
         // password-login time BEFORE clearing the pending bag - the
         // bag is about to be torn down as part of the promotion.
-        let remember = crate::session::middleware::two_factor_pending_remember();
+        let remember_requested = crate::session::middleware::two_factor_pending_remember();
 
         // Promote: pending → authed. Mirrors `Auth::login_id`'s
         // contract - rotate the session id to defeat session
@@ -874,19 +879,28 @@ impl TwoFactor {
             session.csrf_token = crate::session::generate_csrf_token();
         });
 
-        // Re-issue remember-me if the user opted in pre-challenge.
-        // The pre-challenge cookie was revoked by `start_challenge`;
-        // this is a fresh row + cookie tied to the now-authenticated
-        // user-id, with the configured default TTL. Without this,
-        // remember-me-with-2FA would silently fail open relative to
-        // remember-me-without-2FA.
-        if remember {
+        // The accepted TOTP timestep or recovery code is already consumed, so
+        // remember-me issuance cannot turn the completed challenge back into a
+        // retryable one. Treat it as an optional post-login enhancement and let
+        // the Login event report whether issuance actually succeeded.
+        let remember = if remember_requested {
             let ttl_minutes = (crate::session::SessionConfig::from_env()
                 .remember_lifetime
                 .as_secs()
                 / 60) as i64;
-            crate::auth::Auth::issue_remember_cookie(&pending_id, ttl_minutes).await?;
-        }
+            match crate::auth::Auth::issue_remember_cookie(&pending_id, ttl_minutes).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "remember-me issuance failed; completing login without a remembered session"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
 
         // Standard login lifecycle events first so listeners that
         // hook `Login` / `Authenticated` (last-login timestamps,
