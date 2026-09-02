@@ -7,8 +7,8 @@ use syn::spanned::Spanned as _;
 use syn::{Data, DeriveInput, Fields, ItemStruct, Type, Visibility};
 
 use super::attrs::{
-    ComponentArgs, FieldKind, ModelTimingArgs, UrlModeArgs, contains_reference,
-    parse_component_args, parse_field_args,
+    ComponentArgs, FieldKind, ModelTimingArgs, StreamModeArgs, StreamReconnectArgs,
+    StreamTargetArgs, UrlModeArgs, contains_reference, parse_component_args, parse_field_args,
 };
 use super::expand::enforce_runtime_path_contract;
 
@@ -171,6 +171,7 @@ fn expand_definition(
     let effects = args.effects.iter().map(|path| {
         quote!(::suprnova::live::__private::metadata::EffectMetadata::from_payload::<#path>()?)
     });
+    let stream_blocks = args.streams.iter().map(stream_block_tokens);
     let visible_view_fields = runtime_fields
         .iter()
         .filter(|field| field.kind != FieldKind::Secret)
@@ -298,7 +299,22 @@ fn expand_definition(
                     #checker_contract_version,
                     #minimum_protocol_version,
                 )?;
-                ::suprnova::live::__private::metadata::ComponentMetadata::new_with_browser_contracts(
+                #[allow(
+                    unused_mut,
+                    reason = "components without streams leave the contract vectors untouched"
+                )]
+                let mut events: ::std::vec::Vec<
+                    ::suprnova::live::__private::metadata::EventMetadata,
+                > = ::std::vec![#(#events),*];
+                #[allow(
+                    unused_mut,
+                    reason = "components without streams leave the contract vectors untouched"
+                )]
+                let mut subscriptions: ::std::vec::Vec<
+                    ::suprnova::live::__private::async_updates::SubscriptionMetadata,
+                > = ::std::vec::Vec::new();
+                #(#stream_blocks)*
+                ::suprnova::live::__private::metadata::ComponentMetadata::new_with_async_contracts(
                     ::suprnova::live::__private::identity::ComponentName::parse(#name)
                         .expect("macro-validated Live component identity"),
                     ::suprnova::live::__private::identity::ViewName::parse(#view)
@@ -306,8 +322,9 @@ fn expand_definition(
                     versions,
                     ::std::vec![#(#fields),*],
                     actions,
-                    ::std::vec![#(#events),*],
+                    events,
                     ::std::vec![#(#effects),*],
+                    subscriptions,
                     #refresh_on_promote,
                 )
             }
@@ -551,5 +568,91 @@ fn timing_tokens(timing: ModelTimingArgs) -> TokenStream2 {
             ::suprnova::live::__private::state::BindingTiming::debounce(#milliseconds)
                 .expect("macro-validated Live debounce")
         },
+    }
+}
+
+fn stream_block_tokens(stream: &super::attrs::StreamArgs) -> TokenStream2 {
+    let stream_name = &stream.name;
+    let topics = stream
+        .topics
+        .iter()
+        .map(|topic| quote!(::suprnova::live::__private::async_updates::TopicName::parse(#topic)?));
+    let targets = stream
+        .targets
+        .iter()
+        .map(|target| match target {
+            StreamTargetArgs::SelfIsland => {
+                quote!(::suprnova::live::__private::async_updates::EventTarget::SelfIsland)
+            }
+            StreamTargetArgs::Parent => {
+                quote!(::suprnova::live::__private::async_updates::EventTarget::Parent)
+            }
+            StreamTargetArgs::Child => {
+                quote!(::suprnova::live::__private::async_updates::EventTarget::Child)
+            }
+            StreamTargetArgs::Document => {
+                quote!(::suprnova::live::__private::async_updates::EventTarget::Document)
+            }
+        })
+        .collect::<Vec<_>>();
+    let fanout = stream.fanout;
+    let stream_events = stream.events.iter().map(|path| {
+        let targets = targets.iter();
+        quote! {
+            ::suprnova::live::__private::metadata::EventMetadata::from_payload_with_contract::<#path>(
+                ::suprnova::live::__private::async_updates::EventSource::Stream,
+                ::suprnova::live::__private::async_updates::BoundedTargets::new(
+                    ::std::vec![#(#targets),*],
+                )?,
+                ::suprnova::live::__private::async_updates::EventOrder::PerSourceSequence,
+                ::suprnova::live::__private::async_updates::EventCyclePolicy::ForbidRepeatedIsland,
+                #fanout,
+            )?
+        }
+    });
+    let modes = stream.modes.iter().map(|mode| match mode {
+        StreamModeArgs::ServerSentEvents => {
+            quote!(::suprnova::live::__private::async_updates::SubscriptionMode::ServerSentEvents)
+        }
+        StreamModeArgs::WebSocket => {
+            quote!(::suprnova::live::__private::async_updates::SubscriptionMode::WebSocket)
+        }
+    });
+    let reconnect = match stream.reconnect {
+        StreamReconnectArgs::RefreshOnReconnect => {
+            quote!(::suprnova::live::__private::async_updates::ReconnectPolicy::RefreshOnReconnect)
+        }
+        StreamReconnectArgs::ResumeOrRefresh { maximum_attempts } => quote! {
+            ::suprnova::live::__private::async_updates::ReconnectPolicy::ResumeOrRefresh {
+                maximum_attempts: ::core::num::NonZeroU8::new(#maximum_attempts)
+                    .expect("macro-validated stream resume attempts"),
+            }
+        },
+    };
+    quote! {
+        {
+            let stream_events: ::std::vec::Vec<
+                ::suprnova::live::__private::metadata::EventMetadata,
+            > = ::std::vec![#(#stream_events),*];
+            subscriptions.push(
+                ::suprnova::live::__private::async_updates::SubscriptionMetadata::new(
+                    ::suprnova::live::__private::async_updates::StreamName::parse(#stream_name)?,
+                    ::suprnova::live::__private::async_updates::BoundedTopics::new(
+                        ::std::vec![#(#topics),*],
+                    )?,
+                    ::suprnova::live::__private::async_updates::BoundedEventNames::new(
+                        stream_events
+                            .iter()
+                            .map(|event| event.name().clone())
+                            .collect(),
+                    )?,
+                    ::suprnova::live::__private::async_updates::SubscriptionModes::new(
+                        ::std::vec![#(#modes),*],
+                    )?,
+                    #reconnect,
+                ),
+            );
+            events.extend(stream_events);
+        }
     }
 }

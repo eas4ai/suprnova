@@ -93,6 +93,23 @@ pub mod canonical {
 }
 
 #[doc(hidden)]
+pub mod async_updates {
+    pub use suprnova_live::async_updates::BoundedEventNames;
+    pub use suprnova_live::async_updates::BoundedTargets;
+    pub use suprnova_live::async_updates::BoundedTopics;
+    pub use suprnova_live::async_updates::EventCyclePolicy;
+    pub use suprnova_live::async_updates::EventOrder;
+    pub use suprnova_live::async_updates::EventSource;
+    pub use suprnova_live::async_updates::EventTarget;
+    pub use suprnova_live::async_updates::ReconnectPolicy;
+    pub use suprnova_live::async_updates::StreamName;
+    pub use suprnova_live::async_updates::SubscriptionMetadata;
+    pub use suprnova_live::async_updates::SubscriptionMode;
+    pub use suprnova_live::async_updates::SubscriptionModes;
+    pub use suprnova_live::async_updates::TopicName;
+}
+
+#[doc(hidden)]
 pub mod identity {
     pub use suprnova_live::identity::ActionName;
     pub use suprnova_live::identity::ComponentName;

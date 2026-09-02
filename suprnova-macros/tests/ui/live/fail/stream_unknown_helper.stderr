@@ -1,0 +1,5 @@
+error: unknown stream helper
+  --> tests/ui/live/fail/stream_unknown_helper.rs:15:78
+   |
+15 |     streams(stream(name = "orders", topics("orders"), events(OrdersUpdated), channel = "orders"))
+   |                                                                              ^^^^^^^
