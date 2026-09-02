@@ -208,7 +208,11 @@ async fn uncompromised_non_2xx_status_fails_open() {
     .expect("fake scope");
 }
 
+// `FailOnRealCallsGuard` flips one process-global flag, so tests that
+// install it must not overlap: a sibling's drop would relax the guard and
+// let this test reach the real network instead of failing open.
 #[tokio::test]
+#[serial_test::serial]
 async fn uncompromised_fails_open_when_hibp_is_unreachable() {
     Http::fake(|| async {
         // No fake entry matches + FailOnRealCallsGuard => the client call errs,
@@ -229,6 +233,7 @@ async fn uncompromised_fails_open_when_hibp_is_unreachable() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 #[traced_test]
 async fn uncompromised_fail_open_log_never_leaks_the_prefix() {
     Http::fake(|| async {
@@ -265,6 +270,7 @@ async fn uncompromised_fail_open_log_never_leaks_the_prefix() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn empty_value_is_compromised_without_a_network_call() {
     Http::fake(|| async {
         let _guard = suprnova::http_client::FailOnRealCallsGuard::install();
@@ -286,6 +292,7 @@ fn sync_use_of_uncompromised_is_a_loud_error() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn custom_verifier_overrides_hibp() {
     struct AlwaysLeaked;
     #[async_trait::async_trait]
@@ -312,6 +319,7 @@ async fn custom_verifier_overrides_hibp() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 #[traced_test]
 async fn a_broken_custom_verifier_never_leaks_its_error_into_the_422_body() {
     // `Err` from a verifier is an implementation bug, not a user problem.
