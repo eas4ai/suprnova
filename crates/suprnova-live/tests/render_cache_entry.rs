@@ -222,8 +222,10 @@ fn a_declared_application_dimension_round_trips_through_encode_and_decode() {
 fn a_populated_observed_generation_set_round_trips_through_encode_and_decode() {
     let keys = keys();
     let mut observed = GenerationSet::default();
-    observed.insert([0x11; 32], 7);
-    observed.insert([0x22; 32], 42);
+    observed.insert_digest([0x11; 32], 7).expect("within bound");
+    observed
+        .insert_digest([0x22; 32], 42)
+        .expect("within bound");
     let original = entry_with_observed(&keys, observed);
     let encoded = encode(&original, &keys).expect("encode");
     let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");

@@ -1,0 +1,106 @@
+//! Typed dependency identities, bounded observation, and coherence checks.
+
+use suprnova_live::render_cache::generation::{
+    CoherenceCheck, DependencyIdentity, GenerationLedger, MemoryGenerationLedger, ObservationWindow,
+};
+
+fn users_table() -> DependencyIdentity {
+    DependencyIdentity::table("users")
+}
+fn user_7() -> DependencyIdentity {
+    DependencyIdentity::record("users", b"7")
+}
+
+#[tokio::test]
+async fn identities_are_typed_versioned_and_digest_stably() {
+    assert_eq!(
+        DependencyIdentity::table("users").digest(),
+        users_table().digest()
+    );
+    assert_ne!(users_table().digest(), user_7().digest());
+    assert_ne!(
+        user_7().digest(),
+        DependencyIdentity::record("users", b"8").digest()
+    );
+    assert_ne!(
+        DependencyIdentity::query_class("users", "active").digest(),
+        DependencyIdentity::query_class("users", "all").digest()
+    );
+    assert_eq!(
+        DependencyIdentity::broad().digest(),
+        DependencyIdentity::broad().digest()
+    );
+    assert!(
+        DependencyIdentity::try_table("").is_err(),
+        "names are bounded and non-empty"
+    );
+    assert!(DependencyIdentity::try_table(&"t".repeat(129)).is_err());
+}
+
+#[tokio::test]
+async fn a_memory_ledger_advances_only_committed_identities_and_the_broad_authority() {
+    let ledger = MemoryGenerationLedger::new();
+    let before = ledger
+        .current(&[users_table().digest(), user_7().digest()])
+        .await
+        .expect("current");
+    assert_eq!(before.get(&users_table()), Some(0));
+    ledger.advance(&[user_7()]).await.expect("advance");
+    let after = ledger
+        .current(&[users_table().digest(), user_7().digest()])
+        .await
+        .expect("current");
+    assert_eq!(after.get(&user_7()), Some(1));
+    assert_eq!(
+        after.get(&users_table()),
+        Some(0),
+        "advancing a record does not advance its table"
+    );
+    ledger
+        .advance(&[DependencyIdentity::broad()])
+        .await
+        .expect("broad");
+    assert_eq!(
+        ledger
+            .current(&[DependencyIdentity::broad().digest()])
+            .await
+            .expect("c")
+            .get(&DependencyIdentity::broad()),
+        Some(1)
+    );
+    assert_eq!(ledger.epoch().await.expect("epoch"), 1);
+}
+
+#[tokio::test]
+async fn an_observation_window_detects_any_moved_generation() {
+    let ledger = MemoryGenerationLedger::new();
+    let mut window = ObservationWindow::open(1);
+    window.observe(users_table()).expect("observe");
+    window.observe(user_7()).expect("observe");
+    window
+        .observe(user_7())
+        .expect("duplicate observation is idempotent");
+    let window_epoch = window.epoch();
+    let observed = window.close(&ledger).await.expect("close");
+    assert_eq!(observed.len(), 3, "the broad authority is always observed");
+    ledger.advance(&[user_7()]).await.expect("advance");
+    let current = ledger.current(&observed.digests()).await.expect("current");
+    let current_epoch = ledger.epoch().await.expect("epoch");
+    match CoherenceCheck::compare(&observed, &current, current_epoch, window_epoch) {
+        CoherenceCheck::Moved(moved) => assert_eq!(moved, vec![user_7().digest()]),
+        CoherenceCheck::Coherent => panic!("a moved generation must be visible"),
+    }
+    let mut full = ObservationWindow::open(1);
+    for index in 0..4_096 {
+        full.observe(DependencyIdentity::record(
+            "t",
+            index.to_string().as_bytes(),
+        ))
+        .expect("within bound");
+    }
+    assert!(
+        full.observe(DependencyIdentity::record("t", b"overflow"))
+            .is_err(),
+        "observations are bounded"
+    );
+}

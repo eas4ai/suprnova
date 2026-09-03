@@ -15,7 +15,8 @@ pub mod variance;
 /// identity.
 pub mod key;
 
-/// Dependency generation counters observed while rendering.
+/// Typed dependency identities, observed generation sets, the ledger
+/// contract, and the observation window that closes into a coherence check.
 pub mod generation;
 
 /// Versioned Complete entry codec with structural integrity and body-free
@@ -29,7 +30,10 @@ pub use entry::{
     CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
     decode, encode, inspect,
 };
-pub use generation::GenerationSet;
+pub use generation::{
+    CoherenceCheck, DependencyIdentity, Generation, GenerationLedger, GenerationSet,
+    IDENTITY_VERSION, MAX_OBSERVATIONS, MemoryGenerationLedger, ObservationWindow,
+};
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
