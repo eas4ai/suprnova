@@ -22,6 +22,9 @@ pub mod generation;
 /// inspection.
 pub mod entry;
 
+/// The RenderStore provider contract and the immutable in-process L0 store.
+pub mod store;
+
 pub use entry::{
     CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
     decode, encode, inspect,
@@ -32,6 +35,10 @@ pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
     QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
     ResponseSignals, SharedCachePolicy, StorageLayers,
+};
+pub use store::{
+    MemoryRenderStore, MemoryStoreLimits, PublicationFence, PublishOutcome, RenderStore,
+    StoreInspection, StoredEntry,
 };
 pub use variance::{
     ClassificationOutcome, ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial,
