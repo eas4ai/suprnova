@@ -1,20 +1,29 @@
 //! Variance is explicit, private material is opaque, and classification only
 //! preserves or reduces sharing.
 
-use suprnova_live::crypto::SnapshotKeyRing;
+use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+use suprnova_live::identity::{KeyId, UnixMillis};
 use suprnova_live::render_cache::variance::{
     ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial, VarianceDescriptor,
     classify,
 };
 use suprnova_live::render_cache::{RepresentationClass, VarianceDimension};
 
-fn keys() -> SnapshotKeyRing {
-    SnapshotKeyRing::from_root_for_test([7_u8; 32])
+fn keys_from(root: u8) -> SnapshotKeyRing {
+    let active = KeyRecord::new(
+        KeyId::parse("render-cache-test").expect("key id"),
+        RootKey::new(vec![root; 32]).expect("root key"),
+        UnixMillis::new(0),
+        UnixMillis::new(u64::MAX / 2),
+        UnixMillis::new(u64::MAX),
+    )
+    .expect("key record");
+    SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
 }
 
 #[test]
 fn private_material_is_an_opaque_digest_that_changes_with_permission_version() {
-    let keys = keys();
+    let keys = keys_from(7);
     let alice_v1 = PrivateMaterial::principal(&keys, "user-7", 1);
     let alice_v2 = PrivateMaterial::principal(&keys, "user-7", 2);
     let bob_v1 = PrivateMaterial::principal(&keys, "user-8", 1);
@@ -29,6 +38,10 @@ fn private_material_is_an_opaque_digest_that_changes_with_permission_version() {
     assert!(
         !shown.contains("user-7"),
         "debug output never shows the identifier: {shown}"
+    );
+    assert_eq!(
+        shown, "<private-material>",
+        "debug output never shows digest bytes either: {shown}"
     );
     assert_ne!(
         PrivateMaterial::tenant(&keys, "user-7"),
@@ -87,8 +100,30 @@ fn a_descriptor_orders_dimensions_and_bounds_values() {
 }
 
 #[test]
+fn a_rejected_duplicate_declaration_leaves_the_descriptor_unchanged() {
+    let mut descriptor = VarianceDescriptor::new();
+    descriptor
+        .declare(
+            VarianceDimension::Locale,
+            DimensionValue::Public("de-DE".to_owned()),
+        )
+        .expect("first declaration");
+    let after_first = descriptor.canonical_bytes();
+    let result = descriptor.declare(
+        VarianceDimension::Locale,
+        DimensionValue::Public("fr-FR".to_owned()),
+    );
+    assert!(result.is_err(), "a duplicate dimension is rejected");
+    assert_eq!(
+        descriptor.canonical_bytes(),
+        after_first,
+        "a rejected declaration must not overwrite the stored value"
+    );
+}
+
+#[test]
 fn classification_only_preserves_or_reduces_sharing() {
-    let keys = keys();
+    let keys = keys_from(7);
     let anonymous = ObservedContext::default();
     let outcome = classify(RepresentationClass::PublicShared, &anonymous);
     assert_eq!(outcome.class, RepresentationClass::PublicShared);
@@ -144,7 +179,7 @@ fn classification_only_preserves_or_reduces_sharing() {
 
 #[test]
 fn anonymous_and_authenticated_variants_cannot_collide() {
-    let keys = keys();
+    let keys = keys_from(7);
     let mut descriptor = VarianceDescriptor::new();
     descriptor
         .declare(VarianceDimension::Principal, DimensionValue::Anonymous)
@@ -159,5 +194,25 @@ fn anonymous_and_authenticated_variants_cannot_collide() {
     assert_ne!(
         descriptor.canonical_bytes(),
         authenticated.canonical_bytes()
+    );
+}
+
+#[test]
+fn tenant_and_authorization_observations_both_accumulate() {
+    let keys = keys_from(7);
+    let observed = ObservedContext {
+        tenant: Some(PrivateMaterial::tenant(&keys, "tenant-1")),
+        authorization_read: true,
+        ..ObservedContext::default()
+    };
+    let outcome = classify(RepresentationClass::PublicShared, &observed);
+    assert_eq!(outcome.class, RepresentationClass::PrivateCached);
+    assert_eq!(
+        outcome.reasons,
+        vec![
+            ClassificationReason::TenantObserved,
+            ClassificationReason::AuthorizationRead,
+        ],
+        "both reasons are recorded, in evaluation order"
     );
 }

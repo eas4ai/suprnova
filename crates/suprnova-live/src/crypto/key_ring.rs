@@ -5,9 +5,7 @@ use std::fmt;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-use super::{
-    KeyError, KeyErrorKind, KeyRecord, RootKey, SignedMac, SnapshotPurpose, SnapshotSignature,
-};
+use super::{KeyError, KeyErrorKind, KeyRecord, SignedMac, SnapshotPurpose, SnapshotSignature};
 use crate::identity::{KeyId, UnixMillis};
 
 const MAXIMUM_KEY_RECORDS: usize = 8;
@@ -121,23 +119,6 @@ impl SnapshotKeyRing {
         self.verification
             .iter()
             .find(|record| record.key_id() == key_id)
-    }
-}
-
-impl SnapshotKeyRing {
-    /// Test-only ring with one active record derived from fixed root bytes.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn from_root_for_test(root: [u8; 32]) -> Self {
-        let active = KeyRecord::new(
-            KeyId::parse("render-cache-test").expect("key id"),
-            RootKey::new(root.to_vec()).expect("root key"),
-            UnixMillis::new(0),
-            UnixMillis::new(u64::MAX / 2),
-            UnixMillis::new(u64::MAX),
-        )
-        .expect("key record");
-        Self::new(active, Vec::new()).expect("key ring")
     }
 }
 

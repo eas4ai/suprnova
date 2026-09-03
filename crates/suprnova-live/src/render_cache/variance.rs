@@ -106,11 +106,7 @@ impl PrivateMaterial {
 
 impl std::fmt::Debug for PrivateMaterial {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "<private:{:02x}{:02x}{:02x}{:02x}>",
-            self.0[0], self.0[1], self.0[2], self.0[3]
-        )
+        formatter.write_str("<private-material>")
     }
 }
 
@@ -162,9 +158,10 @@ impl VarianceDescriptor {
         {
             return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
         }
-        if self.dimensions.insert(dimension, value).is_some() {
+        if self.dimensions.contains_key(&dimension) {
             return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
         }
+        self.dimensions.insert(dimension, value);
         Ok(())
     }
 
