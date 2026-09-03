@@ -178,6 +178,7 @@ impl Gate {
     /// [`Self::denies`](Self::denies), and [`Self::authorize`](Self::authorize) all route
     /// through it, so `before`/`after` hooks apply uniformly.
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
+        crate::render_cache::collector::observe_authorization_read();
         global()
             .raw::<U, R>(action, user, resource)
             .unwrap_or_else(registry::default_denial)
@@ -189,6 +190,7 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Response {
+        crate::render_cache::collector::observe_authorization_read();
         global()
             .raw_async::<U, R>(action, user, resource)
             .await

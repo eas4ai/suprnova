@@ -56,11 +56,13 @@ impl Auth {
     ///
     /// Returns None if not authenticated.
     pub fn id() -> Option<String> {
+        crate::render_cache::collector::observe_principal_read();
         auth_user_id()
     }
 
     /// Check if a user is currently authenticated
     pub fn check() -> bool {
+        crate::render_cache::collector::observe_principal_read();
         Self::id().is_some()
     }
 
@@ -725,6 +727,7 @@ impl Auth {
     /// bind!(dyn UserProvider, DatabaseUserProvider::new("users"));
     /// ```
     pub async fn user() -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        crate::render_cache::collector::observe_principal_read();
         // Named-guard system when configured: the default guard checks the
         // request-scoped cache, resolves through the AuthManager's provider, and
         // caches the result - so this stays consistent with `Auth::attempt` /

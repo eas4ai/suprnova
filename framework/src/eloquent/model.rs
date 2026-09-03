@@ -217,6 +217,7 @@ where
     where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
+        crate::render_cache::collector::observe_table_read(Self::TABLE);
         Self::__dispatch_retrieving().await?;
         // T11/T12: route through resolve_read so the read honours any
         // ambient `DB::transaction` closure scope, per-model
@@ -235,6 +236,10 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let hydrated = row.map(Self::try_from_storage).transpose()?;
         if let Some(ref m) = hydrated {
+            crate::render_cache::collector::observe_record_read_json(
+                Self::TABLE,
+                &m.primary_key_value_json(),
+            );
             Self::__dispatch_retrieved(m).await?;
         }
         Ok(hydrated)
@@ -280,6 +285,7 @@ where
         if id_vec.is_empty() {
             return Ok(Vec::new());
         }
+        crate::render_cache::collector::observe_table_read(Self::TABLE);
         Self::__dispatch_retrieving().await?;
         let pk = <Self::Entity as EntityTrait>::PrimaryKey::iter()
             .next()
@@ -326,6 +332,7 @@ where
     /// `.len()`, indexing, `for row in &collection`) works directly
     /// via `Deref<Target = [Self]>`.
     async fn all() -> Result<Collection<Self>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(Self::TABLE);
         Self::__dispatch_retrieving().await?;
         // T11/T12: route through resolve_read.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(

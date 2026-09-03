@@ -3680,6 +3680,7 @@ where
     /// `group_by("col")`, `sort_by("col")`, `sum::<T>("col")`, ...)
     /// composes on top.
     pub async fn get(mut self) -> Result<Collection<M>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // Phase 10C T1 - Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
         // `retrieving` hook, which fires "just before a model is
@@ -3957,6 +3958,7 @@ where
         page_param: &str,
         per_page: u64,
     ) -> Result<crate::pagination::LengthAwarePaginator<M>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         if per_page == 0 {
             return Err(FrameworkError::param("per_page"));
         }
@@ -4666,6 +4668,7 @@ where
     }
 
     async fn aggregate_value<T: TryGetable>(self, expr: &str) -> Result<T, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;

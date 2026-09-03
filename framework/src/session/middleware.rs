@@ -408,6 +408,7 @@ pub(crate) fn session_scope_installed() -> bool {
 /// }
 /// ```
 pub fn session() -> Option<SessionData> {
+    crate::render_cache::collector::observe_session_read();
     SESSION_CONTEXT
         .try_with(|slot| slot.lock().unwrap().clone())
         .ok()

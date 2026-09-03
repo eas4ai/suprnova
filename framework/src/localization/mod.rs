@@ -210,6 +210,9 @@ impl Lang {
     /// then the configured default locale. Never panics - a malformed
     /// env default falls back to the hard-coded `en`.
     pub fn locale() -> Locale {
+        crate::render_cache::collector::observe(
+            suprnova_live::render_cache::generation::DependencyIdentity::Locale,
+        );
         if let Ok(l) =
             CURRENT_LOCALE.try_with(|lock| lock.read().unwrap_or_else(|e| e.into_inner()).clone())
         {
