@@ -19,6 +19,9 @@ const CHILD_PARAMETERS_INFO_V1: &[u8] = b"suprnova-live/child-params-signature/v
 const CHILD_PARAMETERS_INFO_V2: &[u8] = b"suprnova-live/child-params-signature/v2";
 const UPLOAD_GRANT_INFO_V1: &[u8] = b"suprnova-live/upload-grant/v1";
 const ASYNC_SUBSCRIPTION_INFO_V1: &[u8] = b"suprnova-live/async-subscription/v1";
+const RENDER_VARIANCE_INFO_V1: &[u8] = b"suprnova-live/render-variance/v1";
+const RENDER_KEY_INFO_V1: &[u8] = b"suprnova-live/render-key/v1";
+const RENDER_ENTRY_INFO_V1: &[u8] = b"suprnova-live/render-entry/v1";
 
 /// Versioned purpose used to derive a capability MAC key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +38,12 @@ pub enum SnapshotPurpose {
     UploadGrantV1,
     /// Authorized asynchronous subscription descriptor schema version 1.
     AsyncSubscriptionV1,
+    /// Render-cache variance material schema version 1.
+    RenderVarianceV1,
+    /// Render-cache lookup key schema version 1.
+    RenderKeyV1,
+    /// Render-cache stored entry integrity schema version 1.
+    RenderEntryV1,
 }
 
 impl SnapshotPurpose {
@@ -46,6 +55,9 @@ impl SnapshotPurpose {
             Self::ChildParametersV2 => CHILD_PARAMETERS_INFO_V2,
             Self::UploadGrantV1 => UPLOAD_GRANT_INFO_V1,
             Self::AsyncSubscriptionV1 => ASYNC_SUBSCRIPTION_INFO_V1,
+            Self::RenderVarianceV1 => RENDER_VARIANCE_INFO_V1,
+            Self::RenderKeyV1 => RENDER_KEY_INFO_V1,
+            Self::RenderEntryV1 => RENDER_ENTRY_INFO_V1,
         }
     }
 }

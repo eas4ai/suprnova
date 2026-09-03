@@ -5,7 +5,9 @@ use std::fmt;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-use super::{KeyError, KeyErrorKind, KeyRecord, SignedMac, SnapshotPurpose, SnapshotSignature};
+use super::{
+    KeyError, KeyErrorKind, KeyRecord, RootKey, SignedMac, SnapshotPurpose, SnapshotSignature,
+};
 use crate::identity::{KeyId, UnixMillis};
 
 const MAXIMUM_KEY_RECORDS: usize = 8;
@@ -91,6 +93,27 @@ impl SnapshotKeyRing {
             .map_err(|_| KeyError::new(KeyErrorKind::SignatureMismatch))
     }
 
+    /// Purpose-separated MAC over length-prefixed parts, for digests that
+    /// carry no validity window (render-cache keys, variance material, and
+    /// stored-entry integrity). Signatures keep using `sign` and `verify`.
+    pub(crate) fn mac(
+        &self,
+        purpose: SnapshotPurpose,
+        parts: &[&[u8]],
+    ) -> Result<[u8; 32], KeyError> {
+        let derived = self.active.derive(purpose)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(derived.as_ref())
+            .map_err(|_| KeyError::new(KeyErrorKind::DerivationFailure))?;
+        for part in parts {
+            mac.update(&(part.len() as u64).to_be_bytes());
+            mac.update(part);
+        }
+        let tag = mac.finalize().into_bytes();
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(&tag);
+        Ok(out)
+    }
+
     fn find(&self, key_id: &KeyId) -> Option<&KeyRecord> {
         if self.active.key_id() == key_id {
             return Some(&self.active);
@@ -98,6 +121,23 @@ impl SnapshotKeyRing {
         self.verification
             .iter()
             .find(|record| record.key_id() == key_id)
+    }
+}
+
+impl SnapshotKeyRing {
+    /// Test-only ring with one active record derived from fixed root bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_root_for_test(root: [u8; 32]) -> Self {
+        let active = KeyRecord::new(
+            KeyId::parse("render-cache-test").expect("key id"),
+            RootKey::new(root.to_vec()).expect("root key"),
+            UnixMillis::new(0),
+            UnixMillis::new(u64::MAX / 2),
+            UnixMillis::new(u64::MAX),
+        )
+        .expect("key record");
+        Self::new(active, Vec::new()).expect("key ring")
     }
 }
 

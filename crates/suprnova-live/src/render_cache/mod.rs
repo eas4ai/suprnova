@@ -7,10 +7,18 @@
 /// eligibility.
 pub mod policy;
 
+/// Variance dimensions, opaque private key material, and the classification
+/// that only preserves or reduces sharing.
+pub mod variance;
+
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
     QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
-    ResponseSignals, SharedCachePolicy, StorageLayers, VarianceDimension,
+    ResponseSignals, SharedCachePolicy, StorageLayers,
+};
+pub use variance::{
+    ClassificationOutcome, ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial,
+    VarianceDescriptor, VarianceDimension, classify,
 };
 
 /// Closed failure categories for RenderCache contracts; messages never carry

@@ -3,24 +3,13 @@
 
 use std::collections::BTreeSet;
 
+use super::variance::VarianceDimension;
 use super::{RenderCacheError, RenderCacheErrorKind};
 
 /// Upper bound on any freshness interval: 31 days in milliseconds.
 pub const MAX_INTERVAL_MS: u64 = 31 * 24 * 60 * 60 * 1000;
 /// Upper bound on declared query parameter names per route.
 pub const MAX_DECLARED_QUERY: usize = 32;
-
-/// A dimension along which a representation varies beyond route, query,
-/// media type, and build. A route declares the dimensions it needs; each
-/// declared dimension joins the cache key.
-///
-/// This is a minimal placeholder pending the full variance contract added in
-/// a later task; it carries only the dimension this task's policy exercises.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum VarianceDimension {
-    /// The negotiated locale.
-    Locale,
-}
 
 /// How a representation may be shared. Order is widest to narrowest sharing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
