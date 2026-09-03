@@ -236,6 +236,37 @@ fn a_populated_observed_generation_set_round_trips_through_encode_and_decode() {
 }
 
 #[test]
+fn a_generation_key_shorter_than_64_characters_fails_to_deserialize() {
+    let key = &"1a".repeat(32)[..63];
+    let json = format!("{{\"{key}\":7}}");
+    assert!(
+        serde_json::from_str::<GenerationSet>(&json).is_err(),
+        "a 63-character key must never decode"
+    );
+}
+
+#[test]
+fn a_generation_key_longer_than_64_characters_fails_to_deserialize() {
+    let key = format!("{}0", "1a".repeat(32));
+    let json = format!("{{\"{key}\":7}}");
+    assert!(
+        serde_json::from_str::<GenerationSet>(&json).is_err(),
+        "a 65-character key must never decode"
+    );
+}
+
+#[test]
+fn a_non_hex_character_in_a_generation_key_fails_to_deserialize() {
+    let mut key = "1a".repeat(32);
+    key.replace_range(0..1, "z");
+    let json = format!("{{\"{key}\":7}}");
+    assert!(
+        serde_json::from_str::<GenerationSet>(&json).is_err(),
+        "a non-hex character anywhere in an otherwise 64-character key must never decode"
+    );
+}
+
+#[test]
 fn an_uppercase_spelling_of_a_generation_key_fails_to_deserialize() {
     let key = "1a".repeat(32).to_ascii_uppercase();
     let json = format!("{{\"{key}\":7}}");
