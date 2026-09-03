@@ -34,6 +34,12 @@ impl RebuildLease {
 /// Shared completion state for one rebuild slot. Executor-neutral: the
 /// engine never depends on a runtime, so this is a hand-written one-shot
 /// notification over the standard library rather than a channel.
+///
+/// A waiter that is polled and then dropped without resolving leaves its
+/// last-registered waker in `wakers` until the next `complete` call (from
+/// this slot's leader publishing, releasing, or being superseded). That is
+/// bounded by the coordinator's waiter cap, and waking a waker whose future
+/// is already gone is a harmless no-op, so this is not a leak.
 #[derive(Debug, Default)]
 struct Completion {
     done: bool,
@@ -104,19 +110,19 @@ impl Future for RebuildWait {
 }
 
 /// The admission decision for a rebuild attempt.
+///
+/// `Lead` is boxed: this value is returned from an async trait method and
+/// can sit inside a caller's future across an await point, so keeping the
+/// much smaller `Wait`/`Bypass` cases from paying `RebuildLease`'s size is
+/// worth the one allocation a leader already incurs per rebuild.
 #[derive(Debug)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "boxing Lead would force release() to take Box<RebuildLease>, widening the \
-              trait's owned-lease contract; the leader path already pays one allocation \
-              per rebuild, so the extra stack bytes here are the cheaper trade"
-)]
 pub enum RebuildAdmission {
     /// This request rebuilds.
-    Lead(RebuildLease),
+    Lead(Box<RebuildLease>),
     /// Another request rebuilds; wait for it within bounds.
     Wait(RebuildWait),
-    /// Waiters are exhausted; render without publishing.
+    /// Waiters are exhausted for this lease's tenure; render without
+    /// publishing.
     Bypass,
 }
 
@@ -145,7 +151,13 @@ pub trait RebuildCoordinator: Send + Sync {
 pub struct LocalCoordinatorLimits {
     /// Lease lifetime in milliseconds.
     pub lease_ms: u64,
-    /// Most waiters admitted per key.
+    /// Most waiters admitted per key during one lease's tenure. This counter
+    /// is never decremented as waiters resolve, so it bounds the number of
+    /// requests ever admitted to wait while the current leader holds the
+    /// key, not the number presently parked; once reached, further requests
+    /// bypass until the leader changes. Bypass renders without publishing,
+    /// so this fails safe even though the name reads like an instantaneous
+    /// concurrency limit.
     pub max_waiters: usize,
 }
 
@@ -230,12 +242,12 @@ impl RebuildCoordinator for LocalRebuildCoordinator {
                 completion: CompletionHandle::default(),
             },
         );
-        Ok(RebuildAdmission::Lead(RebuildLease {
+        Ok(RebuildAdmission::Lead(Box::new(RebuildLease {
             key: key.clone(),
             epoch,
             lease_id,
             expires_at_ms,
-        }))
+        })))
     }
 
     async fn publish_token(
