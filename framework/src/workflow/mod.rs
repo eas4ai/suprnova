@@ -1747,6 +1747,15 @@ mod tests {
             "wait_with_timeout must respect the deadline; elapsed = {:?}",
             elapsed
         );
+        // The floor is the other half: an implementation that returns
+        // an instant timeout error without waiting out the deadline
+        // must fail too. 200 ms against the 250 ms deadline leaves
+        // room for timer granularity; CI jitter only fires late.
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "wait_with_timeout must wait out the deadline; elapsed = {:?}",
+            elapsed
+        );
     }
 
     // Once the workflow reaches Succeeded, wait_with_timeout returns

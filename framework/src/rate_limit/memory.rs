@@ -259,7 +259,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        // Verify drop cleanly aborts the task - no panic, no leak.
+        // Prove the task self-terminates instead of leaking. Take the
+        // handle out first so `Drop` cannot abort it: the only way the
+        // await below completes is the `Weak` upgrade failing after the
+        // last `Arc` drops. A task holding a strong `Arc`, or otherwise
+        // outliving the driver, trips the timeout instead of passing
+        // silently.
+        let sweep = limiter
+            .sweep_handle
+            .lock()
+            .expect("sweep handle is installed")
+            .take()
+            .expect("sweep task is running");
         drop(limiter);
+        tokio::time::timeout(Duration::from_secs(1), sweep)
+            .await
+            .expect("the sweep task must self-terminate once the driver drops")
+            .expect("the sweep task must not panic");
     }
 }

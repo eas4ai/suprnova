@@ -853,18 +853,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_guard_clears_on_panic_simulation() {
-        // Drop runs even when the body unwinds. Simulate by spawning a
-        // task that panics inside the guard's scope, then verify the
-        // override didn't leak into the current thread (we can't observe
-        // the spawned thread's overrides anyway, so this also serves as
-        // a thread-isolation sanity check).
+    async fn test_query_guard_clears_on_scope_exit() {
+        // The guard's Drop runs when its scope ends, on another thread
+        // as well as this one. Verify the override didn't leak into the
+        // current thread (we can't observe the spawned thread's
+        // overrides anyway, so this also serves as a thread-isolation
+        // sanity check).
         Context::test_clear_query();
         let handle = tokio::task::spawn_blocking(|| {
             let _g = Context::test_query_guard("page", "13");
-            // The guard runs Drop on unwind; we don't actually panic to
-            // keep the test deterministic, but the contract is the same -
-            // Drop is unconditional.
+            // Drop runs when the closure returns and the guard's scope
+            // ends - no panic needed, Drop is unconditional.
             assert_eq!(Context::query_param("page"), Some("13".to_string()));
         });
         handle.await.expect("spawned blocking task completes");
