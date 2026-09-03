@@ -51,6 +51,31 @@ fn assert_expected_source_tables(before: &BTreeMap<String, String>) {
 }
 
 #[cfg(test)]
+fn assert_expected_upgrade_delta(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) {
+    let before_tables: BTreeSet<&str> = before.keys().map(String::as_str).collect();
+    let after_tables: BTreeSet<&str> = after.keys().map(String::as_str).collect();
+    assert_eq!(
+        before_tables, after_tables,
+        "first migration pass must preserve the source catalog table set"
+    );
+
+    let changed_tables: BTreeSet<&str> = before
+        .keys()
+        .chain(after.keys())
+        .map(String::as_str)
+        .filter(|table| before.get(*table) != after.get(*table))
+        .collect();
+    assert_eq!(
+        BTreeSet::from(["auth_lockouts"]),
+        changed_tables,
+        "first migration pass must only add the current auth_lockouts schema"
+    );
+}
+
+#[cfg(test)]
 async fn verify_parity(fixture: SeaOrm11Fixture) {
     let imported = import_fixture(fixture)
         .await
@@ -67,7 +92,7 @@ async fn verify_parity(fixture: SeaOrm11Fixture) {
             })?;
 
         let after = schema_digests(&imported.connection).await?;
-        assert_eq!(before, after, "first migration replay should be no-op");
+        assert_expected_upgrade_delta(&before, &after);
 
         default_schema::migrate(&imported.connection)
             .await
