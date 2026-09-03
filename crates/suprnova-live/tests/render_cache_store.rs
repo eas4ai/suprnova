@@ -143,3 +143,67 @@ async fn bounds_evict_the_least_recently_used_entry_and_reject_oversized_entries
     assert_eq!(inspection.entries, 2);
     assert!(inspection.bytes <= 300);
 }
+
+#[tokio::test]
+async fn a_store_bounded_to_zero_entries_admits_nothing() {
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 0,
+        max_bytes: 1024,
+    });
+    let key = RenderKey::for_test(&keys(), "/a");
+    assert_eq!(
+        store
+            .publish(&key, Bytes::from(vec![7_u8; 32]), fence(1), 1_000)
+            .await
+            .expect("publish"),
+        PublishOutcome::Rejected,
+        "a store bounded to zero entries stores nothing"
+    );
+    assert!(store.get(&key).await.expect("get").is_none());
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+    assert_eq!(inspection.bytes, 0);
+}
+
+#[tokio::test]
+async fn a_store_bounded_to_zero_bytes_admits_nothing() {
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 4,
+        max_bytes: 0,
+    });
+    let key = RenderKey::for_test(&keys(), "/a");
+    assert_eq!(
+        store
+            .publish(&key, Bytes::from(vec![7_u8; 32]), fence(1), 1_000)
+            .await
+            .expect("publish"),
+        PublishOutcome::Rejected,
+        "a store bounded to zero bytes stores nothing"
+    );
+    assert!(store.get(&key).await.expect("get").is_none());
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+    assert_eq!(inspection.bytes, 0);
+}
+
+#[tokio::test]
+async fn an_entry_exactly_at_the_byte_bound_is_stored() {
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 4,
+        max_bytes: 64,
+    });
+    let key = RenderKey::for_test(&keys(), "/a");
+    assert_eq!(
+        store
+            .publish(&key, Bytes::from(vec![9_u8; 64]), fence(1), 1_000)
+            .await
+            .expect("publish"),
+        PublishOutcome::Published,
+        "an entry exactly at the byte bound is admitted"
+    );
+    let hit = store.get(&key).await.expect("get").expect("hit");
+    assert_eq!(hit.bytes.len(), 64);
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 1);
+    assert_eq!(inspection.bytes, 64);
+}

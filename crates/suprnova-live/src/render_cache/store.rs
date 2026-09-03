@@ -1,7 +1,7 @@
 //! The RenderStore contract and the immutable in-process L0 store.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,7 +15,9 @@ use super::key::RenderKey;
 pub struct PublicationFence {
     /// Authority epoch.
     pub epoch: u64,
-    /// Digest of the observed generation set.
+    /// Digest of the observed generation set. Carried for inspection and for
+    /// later coordination tiers; [`Self::supersedes`] compares only `epoch`
+    /// and `token`, never this field.
     pub generation_digest: [u8; 32],
     /// Monotonic publication token from the rebuild coordinator.
     pub token: u64,
@@ -121,15 +123,20 @@ impl MemoryRenderStore {
         }
         order.push_back(key.clone());
     }
+
+    /// Locks the state, recovering it from poison rather than propagating a
+    /// panic across this store's operations.
+    fn lock_state(&self) -> MutexGuard<'_, MemoryState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 #[async_trait]
 impl RenderStore for MemoryRenderStore {
     async fn get(&self, key: &RenderKey) -> Result<Option<StoredEntry>, RenderCacheError> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.lock_state();
         let Some(entry) = state.entries.get(key).cloned() else {
             return Ok(None);
         };
@@ -144,13 +151,13 @@ impl RenderStore for MemoryRenderStore {
         fence: PublicationFence,
         now_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
-        if bytes.len() > self.limits.max_bytes {
+        if self.limits.max_entries == 0
+            || self.limits.max_bytes == 0
+            || bytes.len() > self.limits.max_bytes
+        {
             return Ok(PublishOutcome::Rejected);
         }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.lock_state();
         if let Some(current) = state.entries.get(key)
             && !fence.supersedes(&current.fence)
         {
@@ -183,10 +190,7 @@ impl RenderStore for MemoryRenderStore {
     }
 
     async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.lock_state();
         if let Some(previous) = state.entries.remove(key) {
             state.bytes -= previous.bytes.len();
         }
@@ -195,10 +199,7 @@ impl RenderStore for MemoryRenderStore {
     }
 
     async fn inspect(&self) -> Result<StoreInspection, RenderCacheError> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self.lock_state();
         Ok(StoreInspection {
             entries: state.entries.len(),
             bytes: state.bytes,
