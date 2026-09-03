@@ -358,7 +358,7 @@ async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
         .expect_err("OAuth-only initialization must not install password authority");
     assert_eq!(
         password_error.to_string(),
-        "Internal server error: Magnetar password engine is not installed",
+        "Internal server error: Magnetar password authentication subsystem was not initialized during application bootstrap; call init_magnetar(...) or install_magnetar_engines(...)/install_magnetar_engines_with_factor(...) during bootstrap",
     );
 
     #[cfg(feature = "testing")]

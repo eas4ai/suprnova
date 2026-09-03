@@ -106,7 +106,7 @@ async fn oauth_conflict_publishes_no_default_engine_or_schema() {
     );
     assert_eq!(
         sign_in.to_string(),
-        "Internal server error: Magnetar factor/session engine is not installed",
+        "Internal server error: Magnetar factor/session authentication subsystem was not initialized during application bootstrap; call init_magnetar(...), install_magnetar_engines(...), install_magnetar_engines_with_factor(...), or install_magnetar_oauth_engine_with_factor(...) during bootstrap",
     );
     let database = Database::connect("sqlite::memory:")
         .await
@@ -133,8 +133,8 @@ async fn oauth_conflict_publishes_no_default_engine_or_schema() {
         .register("not-installed@example.test", "correct-password")
         .await
         .expect_err("password engine must remain unpublished");
-    assert!(
-        password_error.to_string().contains("not installed"),
-        "unexpected password error: {password_error}"
+    assert_eq!(
+        password_error.to_string(),
+        "Internal server error: Magnetar password authentication subsystem was not initialized during application bootstrap; call init_magnetar(...) or install_magnetar_engines(...)/install_magnetar_engines_with_factor(...) during bootstrap",
     );
 }

@@ -601,6 +601,18 @@ mod tests {
         .expect("cleanup task completes");
         assert!(matches!(result, HandoffCleanupOutcome::TimedOut));
     }
+
+    #[test]
+    fn reserved_engine_lookup_diagnostic_names_only_async_initializers() {
+        assert!(ensure_engine_installation_ready(false).is_ok());
+
+        let error = ensure_engine_installation_ready(true)
+            .expect_err("a reserved installation must reject request handling");
+        assert_eq!(
+            error.to_string(),
+            "Internal server error: Magnetar authentication subsystem initialization is in progress; finish application bootstrap before serving requests by awaiting init_magnetar(...) or init_magnetar_oauth_only(...), whichever was started",
+        );
+    }
 }
 pub use magnetar::passkey::PasskeyConfig;
 
@@ -905,17 +917,26 @@ pub(crate) fn reserve_magnetar_engines() -> Result<EngineInstallReservation, Fra
     Ok(EngineInstallReservation { active: true })
 }
 
-fn factor_engine() -> Result<Arc<dyn engine::MagnetarFactorAuthEngine>, FrameworkError> {
-    let guard = engine_install_guard()?;
-    if guard.reserved {
+fn ensure_engine_installation_ready(reserved: bool) -> Result<(), FrameworkError> {
+    if reserved {
         return Err(FrameworkError::internal(
-            "Magnetar engine installation is still in progress",
+            "Magnetar authentication subsystem initialization is in progress; finish application bootstrap before serving requests by awaiting init_magnetar(...) or init_magnetar_oauth_only(...), whichever was started",
         ));
     }
+    Ok(())
+}
+
+fn factor_engine() -> Result<Arc<dyn engine::MagnetarFactorAuthEngine>, FrameworkError> {
+    let guard = engine_install_guard()?;
+    ensure_engine_installation_ready(guard.reserved)?;
     MAGNETAR_FACTOR_ENGINE
         .get()
         .cloned()
-        .ok_or_else(|| FrameworkError::internal("Magnetar factor/session engine is not installed"))
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "Magnetar factor/session authentication subsystem was not initialized during application bootstrap; call init_magnetar(...), install_magnetar_engines(...), install_magnetar_engines_with_factor(...), or install_magnetar_oauth_engine_with_factor(...) during bootstrap",
+            )
+        })
 }
 
 pub(crate) fn optional_factor_engine() -> Option<Arc<dyn engine::MagnetarFactorAuthEngine>> {
@@ -929,25 +950,21 @@ pub(crate) fn optional_factor_engine() -> Option<Arc<dyn engine::MagnetarFactorA
 pub(crate) fn password_engine()
 -> Result<Arc<dyn engine::MagnetarPasswordAuthEngine>, FrameworkError> {
     let guard = engine_install_guard()?;
-    if guard.reserved {
-        return Err(FrameworkError::internal(
-            "Magnetar engine installation is still in progress",
-        ));
-    }
+    ensure_engine_installation_ready(guard.reserved)?;
     MAGNETAR_PASSWORD_ENGINE
         .get()
         .cloned()
-        .ok_or_else(|| FrameworkError::internal("Magnetar password engine is not installed"))
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "Magnetar password authentication subsystem was not initialized during application bootstrap; call init_magnetar(...) or install_magnetar_engines(...)/install_magnetar_engines_with_factor(...) during bootstrap",
+            )
+        })
 }
 
 pub(crate) fn password_engine_if_installed()
 -> Result<Option<Arc<dyn engine::MagnetarPasswordAuthEngine>>, FrameworkError> {
     let guard = engine_install_guard()?;
-    if guard.reserved {
-        return Err(FrameworkError::internal(
-            "Magnetar engine installation is still in progress",
-        ));
-    }
+    ensure_engine_installation_ready(guard.reserved)?;
     Ok(MAGNETAR_PASSWORD_ENGINE.get().cloned())
 }
 
@@ -962,15 +979,15 @@ pub(crate) fn optional_password_engine() -> Option<Arc<dyn engine::MagnetarPassw
 pub(crate) fn passkey_engine() -> Result<Arc<dyn engine::MagnetarPasskeyAuthEngine>, FrameworkError>
 {
     let guard = engine_install_guard()?;
-    if guard.reserved {
-        return Err(FrameworkError::internal(
-            "Magnetar engine installation is still in progress",
-        ));
-    }
+    ensure_engine_installation_ready(guard.reserved)?;
     MAGNETAR_PASSKEY_ENGINE
         .get()
         .cloned()
-        .ok_or_else(|| FrameworkError::internal("Magnetar passkey engine is not installed"))
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "Magnetar passkey authentication subsystem was not initialized during application bootstrap; call init_magnetar(...) or install_magnetar_engines(...)/install_magnetar_engines_with_factor(...) during bootstrap",
+            )
+        })
 }
 
 fn engine_install_guard()
