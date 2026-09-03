@@ -2414,17 +2414,21 @@ mod tests {
         let authority: Arc<dyn crate::magnetar_integration::engine::MagnetarFactorAuthEngine> =
             authority_impl.clone();
         let pending = Arc::new(Mutex::new(vec![pending_opaque("blocked")]));
-        let started = authority_impl.started.notified();
-        let cleanup =
-            retire_unpersisted_opaque_session(Some(&authority), &pending, "cancelled test cleanup");
-        tokio::pin!(cleanup);
-        tokio::pin!(started);
+        {
+            let started = authority_impl.started.notified();
+            let cleanup = retire_unpersisted_opaque_session(
+                Some(&authority),
+                &pending,
+                "cancelled test cleanup",
+            );
+            tokio::pin!(cleanup);
+            tokio::pin!(started);
 
-        tokio::select! {
-            () = &mut started => {}
-            () = &mut cleanup => panic!("cleanup unexpectedly completed before cancellation"),
+            tokio::select! {
+                () = &mut started => {}
+                () = &mut cleanup => panic!("cleanup unexpectedly completed before cancellation"),
+            }
         }
-        drop(cleanup);
 
         assert_eq!(pending.lock().unwrap().len(), 1);
     }

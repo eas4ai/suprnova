@@ -1643,7 +1643,7 @@ mod tests {
         let values_after: String = values_row
             .try_get("", "values_after")
             .expect("decode migrated workflow and step values");
-        assert_eq!(values_after, vec!["2026-09-01 12:34:56"; 10].join("|"));
+        assert_eq!(values_after, ["2026-09-01 12:34:56"; 10].join("|"));
 
         TestContainer::singleton(conn.clone());
         store::get_workflow_record(1)

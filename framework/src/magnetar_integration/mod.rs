@@ -433,187 +433,6 @@ where
     Ok((user, issued.session))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-
-    struct PendingCleanupAuthority;
-
-    #[async_trait]
-    impl engine::MagnetarFactorAuthEngine for PendingCleanupAuthority {
-        async fn complete_challenge(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> magnetar::Result<engine::MagnetarIssuedSession> {
-            std::future::pending().await
-        }
-
-        async fn user_by_id(&self, _: &str) -> magnetar::Result<Option<User>> {
-            Ok(None)
-        }
-
-        async fn resolve_web_binding(
-            &self,
-            _: &magnetar::sessions::WebSessionBinding,
-        ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
-            std::future::pending().await
-        }
-
-        async fn bearer_user_id(&self, _: &str) -> magnetar::Result<Option<String>> {
-            Ok(None)
-        }
-
-        async fn revoke_session(&self, _: &str) -> magnetar::Result<bool> {
-            std::future::pending().await
-        }
-
-        async fn revoke_all_sessions(&self, _: &str) -> magnetar::Result<u64> {
-            Ok(0)
-        }
-
-        async fn list_sessions(
-            &self,
-            _: &str,
-        ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
-            Ok(Vec::new())
-        }
-    }
-
-    fn issued_session() -> engine::MagnetarIssuedSession {
-        engine::MagnetarIssuedSession {
-            session_id: "fresh-magnetar-session".to_owned(),
-            web_binding: magnetar::sessions::WebSessionBinding {
-                session_id: "fresh-magnetar-session".to_owned(),
-                token_digest: [7; 32],
-            },
-            session: Session::builder()
-                .token(SessionToken::new("fresh-bearer"))
-                .user_id(UserId::new("new-user"))
-                .build()
-                .expect("build issued framework session"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fresh_session_bind_queues_verified_retry_carrier_retirement() {
-        let session_slot = crate::session::new_session_slot_for_test();
-        let pending_cookies = crate::session::new_pending_cookies_slot_for_test();
-        let pending_revocations = Arc::new(Mutex::new(Vec::new()));
-        let issued = issued_session();
-
-        crate::session::session_scope_for_test(
-            session_slot,
-            crate::session::pending_cookies_scope_for_test(
-                pending_cookies,
-                crate::auth::request_state::request_state_scope_for_test(
-                    crate::session::middleware::PENDING_REMEMBER_REVOCATIONS.scope(
-                        pending_revocations.clone(),
-                        async {
-                            crate::auth::request_state::set_verified_active_remember_carrier(
-                                "web",
-                                "remembered-user",
-                                "rotated-selector",
-                            );
-
-                            bind_issued_session(&issued, true)
-                                .expect("scoped fresh session bind succeeds");
-                        },
-                    ),
-                ),
-            ),
-        )
-        .await;
-
-        assert_eq!(
-            *pending_revocations.lock().unwrap(),
-            vec![(
-                "web".to_owned(),
-                "remembered-user".to_owned(),
-                "rotated-selector".to_owned(),
-            )],
-            "a fresh identity bind must retain exact cleanup for the replaced retry carrier",
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_bind_scopes_preserve_retry_provenance_and_request_identity() {
-        let issued = issued_session();
-        crate::auth::request_state::request_state_scope_for_test(async {
-            crate::auth::request_state::set_verified_active_remember_carrier(
-                "web",
-                "remembered-user",
-                "rotated-selector",
-            );
-
-            assert!(
-                bind_issued_session(&issued, true).is_err(),
-                "missing bind scopes must fail before publishing identity",
-            );
-
-            assert_eq!(
-                crate::auth::request_state::verified_active_remember_carrier_for_guard("web"),
-                Some(("remembered-user".to_owned(), "rotated-selector".to_owned(),)),
-                "missing bind scopes must not discard retry provenance",
-            );
-            assert_eq!(
-                crate::auth::Auth::id(),
-                None,
-                "missing bind scopes must not publish the newly issued identity",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn headless_preflight_succeeds_without_an_active_remember_carrier() {
-        assert!(
-            bind_scope_preflight().is_ok(),
-            "headless flows without a remember carrier do not need request scopes",
-        );
-    }
-
-    #[test]
-    fn dropping_handoff_owner_without_a_runtime_does_not_panic() {
-        let authority: Arc<dyn engine::MagnetarFactorAuthEngine> =
-            Arc::new(PendingCleanupAuthority);
-        drop(IssuedSessionHandoffOwner::new(
-            authority,
-            "headless-session".to_owned(),
-            None,
-        ));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn issued_session_cleanup_timeout_is_bounded() {
-        let authority: Arc<dyn engine::MagnetarFactorAuthEngine> =
-            Arc::new(PendingCleanupAuthority);
-        let result = spawn_issued_session_batch_cleanup(
-            authority,
-            None,
-            vec!["headless-session".to_owned()],
-            1,
-            "test timeout",
-        )
-        .expect("test runtime is installed")
-        .await
-        .expect("cleanup task completes");
-        assert!(matches!(result, HandoffCleanupOutcome::TimedOut));
-    }
-
-    #[test]
-    fn reserved_engine_lookup_diagnostic_names_only_async_initializers() {
-        assert!(ensure_engine_installation_ready(false).is_ok());
-
-        let error = ensure_engine_installation_ready(true)
-            .expect_err("a reserved installation must reject request handling");
-        assert_eq!(
-            error.to_string(),
-            "Internal server error: Magnetar authentication subsystem initialization is in progress; finish application bootstrap before serving requests by awaiting init_magnetar(...) or init_magnetar_oauth_only(...), whichever was started",
-        );
-    }
-}
 pub use magnetar::passkey::PasskeyConfig;
 
 /// Initialized Magnetar authentication engine.
@@ -1204,4 +1023,186 @@ pub async fn find_user_by_id(user_id: &str) -> Result<Option<User>, FrameworkErr
         .user_by_id(user_id)
         .await
         .map_err(|error| FrameworkError::internal(format!("Magnetar user lookup: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct PendingCleanupAuthority;
+
+    #[async_trait]
+    impl engine::MagnetarFactorAuthEngine for PendingCleanupAuthority {
+        async fn complete_challenge(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> magnetar::Result<engine::MagnetarIssuedSession> {
+            std::future::pending().await
+        }
+
+        async fn user_by_id(&self, _: &str) -> magnetar::Result<Option<User>> {
+            Ok(None)
+        }
+
+        async fn resolve_web_binding(
+            &self,
+            _: &magnetar::sessions::WebSessionBinding,
+        ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
+            std::future::pending().await
+        }
+
+        async fn bearer_user_id(&self, _: &str) -> magnetar::Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn revoke_session(&self, _: &str) -> magnetar::Result<bool> {
+            std::future::pending().await
+        }
+
+        async fn revoke_all_sessions(&self, _: &str) -> magnetar::Result<u64> {
+            Ok(0)
+        }
+
+        async fn list_sessions(
+            &self,
+            _: &str,
+        ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn issued_session() -> engine::MagnetarIssuedSession {
+        engine::MagnetarIssuedSession {
+            session_id: "fresh-magnetar-session".to_owned(),
+            web_binding: magnetar::sessions::WebSessionBinding {
+                session_id: "fresh-magnetar-session".to_owned(),
+                token_digest: [7; 32],
+            },
+            session: Session::builder()
+                .token(SessionToken::new("fresh-bearer"))
+                .user_id(UserId::new("new-user"))
+                .build()
+                .expect("build issued framework session"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_session_bind_queues_verified_retry_carrier_retirement() {
+        let session_slot = crate::session::new_session_slot_for_test();
+        let pending_cookies = crate::session::new_pending_cookies_slot_for_test();
+        let pending_revocations = Arc::new(Mutex::new(Vec::new()));
+        let issued = issued_session();
+
+        crate::session::session_scope_for_test(
+            session_slot,
+            crate::session::pending_cookies_scope_for_test(
+                pending_cookies,
+                crate::auth::request_state::request_state_scope_for_test(
+                    crate::session::middleware::PENDING_REMEMBER_REVOCATIONS.scope(
+                        pending_revocations.clone(),
+                        async {
+                            crate::auth::request_state::set_verified_active_remember_carrier(
+                                "web",
+                                "remembered-user",
+                                "rotated-selector",
+                            );
+
+                            bind_issued_session(&issued, true)
+                                .expect("scoped fresh session bind succeeds");
+                        },
+                    ),
+                ),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            *pending_revocations.lock().unwrap(),
+            vec![(
+                "web".to_owned(),
+                "remembered-user".to_owned(),
+                "rotated-selector".to_owned(),
+            )],
+            "a fresh identity bind must retain exact cleanup for the replaced retry carrier",
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_bind_scopes_preserve_retry_provenance_and_request_identity() {
+        let issued = issued_session();
+        crate::auth::request_state::request_state_scope_for_test(async {
+            crate::auth::request_state::set_verified_active_remember_carrier(
+                "web",
+                "remembered-user",
+                "rotated-selector",
+            );
+
+            assert!(
+                bind_issued_session(&issued, true).is_err(),
+                "missing bind scopes must fail before publishing identity",
+            );
+
+            assert_eq!(
+                crate::auth::request_state::verified_active_remember_carrier_for_guard("web"),
+                Some(("remembered-user".to_owned(), "rotated-selector".to_owned(),)),
+                "missing bind scopes must not discard retry provenance",
+            );
+            assert_eq!(
+                crate::auth::Auth::id(),
+                None,
+                "missing bind scopes must not publish the newly issued identity",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn headless_preflight_succeeds_without_an_active_remember_carrier() {
+        assert!(
+            bind_scope_preflight().is_ok(),
+            "headless flows without a remember carrier do not need request scopes",
+        );
+    }
+
+    #[test]
+    fn dropping_handoff_owner_without_a_runtime_does_not_panic() {
+        let authority: Arc<dyn engine::MagnetarFactorAuthEngine> =
+            Arc::new(PendingCleanupAuthority);
+        drop(IssuedSessionHandoffOwner::new(
+            authority,
+            "headless-session".to_owned(),
+            None,
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn issued_session_cleanup_timeout_is_bounded() {
+        let authority: Arc<dyn engine::MagnetarFactorAuthEngine> =
+            Arc::new(PendingCleanupAuthority);
+        let result = spawn_issued_session_batch_cleanup(
+            authority,
+            None,
+            vec!["headless-session".to_owned()],
+            1,
+            "test timeout",
+        )
+        .expect("test runtime is installed")
+        .await
+        .expect("cleanup task completes");
+        assert!(matches!(result, HandoffCleanupOutcome::TimedOut));
+    }
+
+    #[test]
+    fn reserved_engine_lookup_diagnostic_names_only_async_initializers() {
+        assert!(ensure_engine_installation_ready(false).is_ok());
+
+        let error = ensure_engine_installation_ready(true)
+            .expect_err("a reserved installation must reject request handling");
+        assert_eq!(
+            error.to_string(),
+            "Internal server error: Magnetar authentication subsystem initialization is in progress; finish application bootstrap before serving requests by awaiting init_magnetar(...) or init_magnetar_oauth_only(...), whichever was started",
+        );
+    }
 }
