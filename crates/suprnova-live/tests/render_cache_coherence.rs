@@ -56,6 +56,36 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
     assert_eq!(
         evaluate_freshness(
             &policy,
+            RepresentationClass::PublicShared,
+            published,
+            published + policy.fresh_ms()
+        ),
+        FreshnessState::StaleServable,
+        "the exact millisecond the fresh window ends is already stale-servable"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
+            RepresentationClass::PublicShared,
+            published,
+            published + policy.fresh_ms() + policy.stale_servable_ms()
+        ),
+        FreshnessState::StaleOnError,
+        "the exact millisecond the stale-servable window ends is already stale-on-error"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
+            RepresentationClass::PublicShared,
+            published,
+            published + policy.fresh_ms() + policy.stale_on_error_ms()
+        ),
+        FreshnessState::Dead,
+        "the exact millisecond the stale-on-error window ends is already dead"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
             RepresentationClass::PrivateCached,
             published,
             70_000

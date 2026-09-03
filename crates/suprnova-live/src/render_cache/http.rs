@@ -39,6 +39,9 @@ pub fn evaluate_conditional(
 
 /// `Cache-Control` for a class, shared policy, freshness, and optional seed
 /// deadline (milliseconds remaining); private classes are never public.
+/// Shell-stitched responses take the private treatment until the stitching
+/// work defines their shared-cache behavior, so the default is conservative
+/// rather than accidental.
 #[must_use]
 pub fn cache_control_value(
     class: RepresentationClass,
