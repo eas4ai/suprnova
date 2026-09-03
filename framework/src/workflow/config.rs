@@ -8,6 +8,10 @@ use crate::error::FrameworkError;
 /// would never process anything.
 pub const MIN_CONCURRENCY: usize = 1;
 
+/// Minimum allowed workflow lease duration in seconds. Zero expires at the
+/// claim timestamp, allowing another worker to reclaim the same workflow.
+pub const MIN_LOCK_TIMEOUT_SECS: u64 = 1;
+
 /// Minimum allowed `max_attempts`. A value below 1 prevents any attempt
 /// from running (`attempts < max_attempts` is never true after the
 /// first claim increments `attempts` to 1).
@@ -19,7 +23,7 @@ pub const MIN_MAX_ATTEMPTS: i32 = 1;
 ///
 /// - `WORKFLOW_POLL_INTERVAL_MS` - Worker poll interval in milliseconds (default: 1000)
 /// - `WORKFLOW_CONCURRENCY` - Number of workflows to process concurrently (default: 4, min: 1)
-/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30)
+/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30, min: 1)
 /// - `WORKFLOW_MAX_ATTEMPTS` - Max workflow attempts (default: 3, min: 1)
 /// - `WORKFLOW_RETRY_BACKOFF_SECS` - Linear backoff seconds (default: 5, min: 0)
 ///
@@ -35,7 +39,7 @@ pub struct WorkflowConfig {
     pub poll_interval_ms: u64,
     /// Max concurrent workflows processed by a worker
     pub concurrency: usize,
-    /// Lease duration in seconds
+    /// Lease duration in seconds (minimum: 1)
     pub lock_timeout_secs: u64,
     /// Max attempts per workflow
     pub max_attempts: i32,
@@ -91,10 +95,23 @@ impl WorkflowConfig {
             raw_backoff
         };
 
+        let raw_lock_timeout = env("WORKFLOW_LOCK_TIMEOUT_SECS", 30u64);
+        let lock_timeout_secs = if raw_lock_timeout < MIN_LOCK_TIMEOUT_SECS {
+            tracing::warn!(
+                env = "WORKFLOW_LOCK_TIMEOUT_SECS",
+                value = raw_lock_timeout,
+                clamped_to = MIN_LOCK_TIMEOUT_SECS,
+                "WORKFLOW_LOCK_TIMEOUT_SECS below minimum; clamping (a zero-second lease is immediately reclaimable)"
+            );
+            MIN_LOCK_TIMEOUT_SECS
+        } else {
+            raw_lock_timeout
+        };
+
         Self {
             poll_interval_ms: env("WORKFLOW_POLL_INTERVAL_MS", 1000u64),
             concurrency,
-            lock_timeout_secs: env("WORKFLOW_LOCK_TIMEOUT_SECS", 30u64),
+            lock_timeout_secs,
             max_attempts,
             retry_backoff_secs,
         }
@@ -128,6 +145,14 @@ impl WorkflowConfig {
                 self.retry_backoff_secs
             )));
         }
+        if self.lock_timeout_secs < MIN_LOCK_TIMEOUT_SECS {
+            return Err(FrameworkError::internal(format!(
+                "WorkflowConfig.lock_timeout_secs must be >= {MIN_LOCK_TIMEOUT_SECS}; got {}. \
+                 A zero-second lease expires at claim time, allowing concurrent workers \
+                 to reclaim the same workflow.",
+                self.lock_timeout_secs
+            )));
+        }
         if self.lock_timeout_secs > i64::MAX as u64 {
             return Err(FrameworkError::internal(format!(
                 "WorkflowConfig.lock_timeout_secs must be <= {} (i64::MAX); got {}. \
@@ -150,104 +175,88 @@ impl Default for WorkflowConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+    use std::process::Command;
 
-    /// Helper that restores env vars after the test. Necessary because
-    /// `from_env` is process-wide and these tests mutate the same vars.
-    struct EnvGuard {
-        keys: Vec<(&'static str, Option<String>)>,
+    const ENV_PROBE: &str = "SUPRNOVA_WORKFLOW_CONFIG_TEST_PROBE";
+    const ENV_PROBE_TEST: &str = "workflow::config::tests::from_env_child_probe";
+
+    fn run_from_env_probe(scenario: &str, key: &str, value: &str) {
+        let output = Command::new(std::env::current_exe().expect("resolve current test binary"))
+            .args(["--exact", ENV_PROBE_TEST, "--nocapture"])
+            .env(ENV_PROBE, scenario)
+            .env("WORKFLOW_POLL_INTERVAL_MS", "1000")
+            .env("WORKFLOW_CONCURRENCY", "4")
+            .env("WORKFLOW_LOCK_TIMEOUT_SECS", "30")
+            .env("WORKFLOW_MAX_ATTEMPTS", "3")
+            .env("WORKFLOW_RETRY_BACKOFF_SECS", "5")
+            .env(key, value)
+            .output()
+            .expect("run isolated workflow config probe");
+
+        assert!(
+            output.status.success(),
+            "isolated workflow config probe {scenario:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
-    impl EnvGuard {
-        fn new(keys: &[&'static str]) -> Self {
-            let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-            // Clear all keys up front so the test starts from a clean slate.
-            for k in keys {
-                // SAFETY: tests are gated with #[serial] so no other test
-                // concurrently reads or mutates these env vars.
-                unsafe {
-                    std::env::remove_var(k);
-                }
-            }
-            Self { keys: saved }
-        }
-    }
+    #[test]
+    fn from_env_child_probe() {
+        let Ok(scenario) = std::env::var(ENV_PROBE) else {
+            return;
+        };
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.keys {
-                // SAFETY: same as above - serial test, single-threaded env mutation.
-                unsafe {
-                    match v {
-                        Some(value) => std::env::set_var(k, value),
-                        None => std::env::remove_var(k),
-                    }
-                }
-            }
+        let cfg = WorkflowConfig::from_env();
+        match scenario.as_str() {
+            "zero-concurrency" => assert!(
+                cfg.concurrency >= MIN_CONCURRENCY,
+                "concurrency=0 must be clamped to >= {MIN_CONCURRENCY}, got {}",
+                cfg.concurrency,
+            ),
+            "negative-max-attempts" => assert!(
+                cfg.max_attempts >= MIN_MAX_ATTEMPTS,
+                "max_attempts=-3 must be clamped to >= {MIN_MAX_ATTEMPTS}, got {}",
+                cfg.max_attempts,
+            ),
+            "negative-backoff" => assert!(
+                cfg.retry_backoff_secs >= 0,
+                "retry_backoff_secs=-7 must be clamped to >= 0, got {}",
+                cfg.retry_backoff_secs,
+            ),
+            "zero-lock-timeout" => assert!(
+                cfg.lock_timeout_secs >= MIN_LOCK_TIMEOUT_SECS,
+                "lock_timeout_secs=0 must be clamped to >= {MIN_LOCK_TIMEOUT_SECS}, got {}",
+                cfg.lock_timeout_secs,
+            ),
+            "positive-lock-timeout" => assert_eq!(cfg.lock_timeout_secs, 7),
+            other => panic!("unknown workflow config probe scenario: {other}"),
         }
     }
 
     #[test]
-    #[serial]
     fn from_env_clamps_zero_concurrency_to_min() {
-        let _guard = EnvGuard::new(&[
-            "WORKFLOW_CONCURRENCY",
-            "WORKFLOW_MAX_ATTEMPTS",
-            "WORKFLOW_RETRY_BACKOFF_SECS",
-        ]);
-        // SAFETY: serial test guarantees no concurrent env mutation.
-        unsafe {
-            std::env::set_var("WORKFLOW_CONCURRENCY", "0");
-        }
-
-        let cfg = WorkflowConfig::from_env();
-        assert!(
-            cfg.concurrency >= MIN_CONCURRENCY,
-            "concurrency=0 must be clamped to >= {MIN_CONCURRENCY}, got {}",
-            cfg.concurrency
-        );
+        run_from_env_probe("zero-concurrency", "WORKFLOW_CONCURRENCY", "0");
     }
 
     #[test]
-    #[serial]
     fn from_env_clamps_negative_max_attempts_to_min() {
-        let _guard = EnvGuard::new(&[
-            "WORKFLOW_CONCURRENCY",
-            "WORKFLOW_MAX_ATTEMPTS",
-            "WORKFLOW_RETRY_BACKOFF_SECS",
-        ]);
-        // SAFETY: serial test.
-        unsafe {
-            std::env::set_var("WORKFLOW_MAX_ATTEMPTS", "-3");
-        }
-
-        let cfg = WorkflowConfig::from_env();
-        assert!(
-            cfg.max_attempts >= MIN_MAX_ATTEMPTS,
-            "max_attempts=-3 must be clamped to >= {MIN_MAX_ATTEMPTS}, got {}",
-            cfg.max_attempts
-        );
+        run_from_env_probe("negative-max-attempts", "WORKFLOW_MAX_ATTEMPTS", "-3");
     }
 
     #[test]
-    #[serial]
     fn from_env_clamps_negative_backoff_to_zero() {
-        let _guard = EnvGuard::new(&[
-            "WORKFLOW_CONCURRENCY",
-            "WORKFLOW_MAX_ATTEMPTS",
-            "WORKFLOW_RETRY_BACKOFF_SECS",
-        ]);
-        // SAFETY: serial test.
-        unsafe {
-            std::env::set_var("WORKFLOW_RETRY_BACKOFF_SECS", "-7");
-        }
+        run_from_env_probe("negative-backoff", "WORKFLOW_RETRY_BACKOFF_SECS", "-7");
+    }
 
-        let cfg = WorkflowConfig::from_env();
-        assert!(
-            cfg.retry_backoff_secs >= 0,
-            "retry_backoff_secs=-7 must be clamped to >= 0, got {}",
-            cfg.retry_backoff_secs
-        );
+    #[test]
+    fn from_env_clamps_zero_lock_timeout_to_positive_minimum() {
+        run_from_env_probe("zero-lock-timeout", "WORKFLOW_LOCK_TIMEOUT_SECS", "0");
+    }
+
+    #[test]
+    fn from_env_preserves_positive_lock_timeout() {
+        run_from_env_probe("positive-lock-timeout", "WORKFLOW_LOCK_TIMEOUT_SECS", "7");
     }
 
     #[test]
@@ -295,6 +304,22 @@ mod tests {
         assert!(
             err.to_string().contains("max_attempts"),
             "error must mention max_attempts, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_lock_timeout() {
+        let cfg = WorkflowConfig {
+            poll_interval_ms: 1000,
+            concurrency: 4,
+            lock_timeout_secs: 0,
+            max_attempts: 3,
+            retry_backoff_secs: 5,
+        };
+        let err = cfg.validate().expect_err("zero lock timeout must error");
+        assert!(
+            err.to_string().contains("lock_timeout_secs"),
+            "error must name lock_timeout_secs, got: {err}",
         );
     }
 
