@@ -236,6 +236,27 @@ fn a_populated_observed_generation_set_round_trips_through_encode_and_decode() {
 }
 
 #[test]
+fn an_uppercase_spelling_of_a_generation_key_fails_to_deserialize() {
+    let key = "1a".repeat(32).to_ascii_uppercase();
+    let json = format!("{{\"{key}\":7}}");
+    assert!(
+        serde_json::from_str::<GenerationSet>(&json).is_err(),
+        "an uppercase 64-character key must not denote the same digest a lowercase key would"
+    );
+}
+
+#[test]
+fn a_mixed_case_spelling_of_a_generation_key_fails_to_deserialize() {
+    let mut key = "1a".repeat(32);
+    key.replace_range(2..3, "A");
+    let json = format!("{{\"{key}\":7}}");
+    assert!(
+        serde_json::from_str::<GenerationSet>(&json).is_err(),
+        "a mixed-case key must not denote the same digest its all-lowercase spelling would"
+    );
+}
+
+#[test]
 fn a_forbidden_response_header_with_a_valid_integrity_tag_still_fails_to_decode() {
     let keys = keys();
     let mut header = base_header_json(&keys);
