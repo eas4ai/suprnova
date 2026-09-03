@@ -26,6 +26,16 @@ pub mod entry;
 /// The RenderStore provider contract and the immutable in-process L0 store.
 pub mod store;
 
+/// Fresh, stale-servable, stale-on-error, and dead intervals; bounded
+/// validation leases; age and warning metadata.
+pub mod coherence;
+
+/// Conditional evaluation and cache metadata for represented variants.
+pub mod http;
+
+pub use coherence::{
+    FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
+};
 pub use entry::{
     CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
     decode, encode, inspect,
@@ -34,6 +44,7 @@ pub use generation::{
     CoherenceCheck, DependencyIdentity, Generation, GenerationLedger, GenerationSet,
     IDENTITY_VERSION, MAX_OBSERVATIONS, MemoryGenerationLedger, ObservationWindow,
 };
+pub use http::{ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value};
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
