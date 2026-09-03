@@ -28,7 +28,11 @@ pub struct RenderKeyInput {
     /// Canonical route identity from the router.
     pub route: RouteIdentity,
     /// Human-readable route pattern, shown only in inspection; the digest
-    /// in `route` is what participates in the key.
+    /// in `route` is what participates in the key. Must be the router's
+    /// registered route pattern (for example `/catalog/{category}`), never
+    /// the resolved request path (`/catalog/shoes`): a concrete path can
+    /// carry request material into inspection output, which this type
+    /// exists to prevent.
     pub route_pattern: String,
     /// Normalized route parameters.
     pub params: BTreeMap<String, String>,
@@ -49,10 +53,44 @@ pub struct RenderKeyInput {
 }
 
 /// A purpose-separated digest of one representation identity.
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+///
+/// Equality, ordering, and hashing compare `digest` alone: `dimensions` is
+/// inspection metadata, not part of the key's identity. Two keys with the
+/// same digest must be the same key regardless of how they were built, since
+/// [`Self::from_base64url`] recovers only the digest and deliberately
+/// carries [`RenderKeyDimensions::opaque`] instead of the original
+/// dimensions; a lookup by a key parsed back from storage must land on the
+/// same map slot as the key it was published under.
+#[derive(Clone)]
 pub struct RenderKey {
     digest: [u8; 32],
     dimensions: RenderKeyDimensions,
+}
+
+impl PartialEq for RenderKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for RenderKey {}
+
+impl std::hash::Hash for RenderKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.digest.hash(state);
+    }
+}
+
+impl PartialOrd for RenderKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RenderKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.digest.cmp(&other.digest)
+    }
 }
 
 impl RenderKey {
