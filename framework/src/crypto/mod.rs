@@ -2,8 +2,8 @@
 //!
 //! [`Crypt`] is a Laravel-style static facade for AES-256-GCM encryption.
 //! The active key ring is held in a process-wide [`OnceLock`] populated
-//! by `Server::from_config()` from the `APP_KEY` and (optionally)
-//! `APP_KEY_PREVIOUS` environment variables.
+//! during application bootstrap from the `APP_KEY` and
+//! (optionally) `APP_KEY_PREVIOUS` environment variables.
 //!
 //! # Key rotation
 //!
@@ -781,6 +781,65 @@ pub fn resolve_boot_keyring(
     let current = resolve_boot_key(environment, app_key)?;
     let previous = parse_previous_keys(app_key_previous)?;
     Ok(BootKeyRing { current, previous })
+}
+
+/// Validate the configured key ring and install it on the first boot.
+///
+/// Validation deliberately runs on every call even after [`Crypt`] is
+/// initialized. This keeps repeated production boots fail-closed when
+/// `APP_KEY` is missing or malformed while preserving process-wide key
+/// immutability.
+pub(crate) fn initialize_from_environment(environment: &Environment) -> Result<(), FrameworkError> {
+    let app_key = std::env::var("APP_KEY").ok();
+    // Suprnova canonical name is `APP_KEY_PREVIOUS`; Laravel uses
+    // `APP_PREVIOUS_KEYS`. The canonical name wins when both are set.
+    let (app_key_previous, previous_keys_conflict) = match (
+        std::env::var("APP_KEY_PREVIOUS").ok(),
+        std::env::var("APP_PREVIOUS_KEYS").ok(),
+    ) {
+        (Some(canonical), Some(laravel)) => {
+            let conflict = canonical.trim() != laravel.trim();
+            (Some(canonical), conflict)
+        }
+        (Some(canonical), None) => (Some(canonical), false),
+        (None, Some(laravel)) => (Some(laravel), false),
+        (None, None) => (None, false),
+    };
+    let boot_ring =
+        resolve_boot_keyring(environment, app_key.as_deref(), app_key_previous.as_deref())?;
+
+    // Only emit operator hints and install on the first boot. Resolving the
+    // ring above is intentionally unconditional so later boots still validate.
+    if !Crypt::is_initialized() {
+        if previous_keys_conflict {
+            eprintln!(
+                "suprnova: APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
+                 different values. Using APP_KEY_PREVIOUS (Suprnova canonical name); \
+                 APP_PREVIOUS_KEYS is ignored. Drop the duplicate from your environment."
+            );
+        }
+        if boot_ring.is_current_generated() {
+            eprintln!(
+                "suprnova: APP_KEY is not set - generated a transient development key. \
+                 Sessions and cursors will reset on every restart. Set APP_KEY in your \
+                 environment to persist them. This path is gated to \
+                 local/development/testing; production fails closed. \
+                 environment={environment}"
+            );
+        }
+        if !boot_ring.previous.is_empty() {
+            eprintln!(
+                "suprnova: APP_KEY_PREVIOUS active - decrypt will fall back to {n} previous \
+                 key(s). Run a re-encrypt pass (load + save every encrypted column) \
+                 and then remove APP_KEY_PREVIOUS once complete. previous_key_count={n}",
+                n = boot_ring.previous.len(),
+            );
+        }
+        let (current, previous) = boot_ring.into_keys();
+        Crypt::init_with_keyring(current, previous);
+    }
+
+    Ok(())
 }
 
 /// Maximum number of keys accepted in `APP_KEY_PREVIOUS`.

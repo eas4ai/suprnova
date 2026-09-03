@@ -65,12 +65,7 @@ impl OAuthAuth {
             .map(|session| session.id)
             .filter(|session_id| !session_id.is_empty())
             .ok_or_else(|| FrameworkError::internal("OAuth begin requires SessionMiddleware"))?;
-        let engine = super::MAGNETAR_OAUTH_ENGINE
-            .get()
-            .ok_or_else(|| FrameworkError::internal("Magnetar OAuth engine is not installed"))?;
-        if !engine.oauth_supports_provider(&self.provider) {
-            return Err(provider_not_configured(&self.provider));
-        }
+        let engine = oauth_engine(&self.provider)?;
         let digest: [u8; 32] = Sha256::digest(session_id.as_bytes()).into();
         let begun = engine
             .oauth_begin(super::engine::MagnetarOAuthBegin {
@@ -235,7 +230,8 @@ impl OAuthAuth {
         state: &str,
         form_post_user: Option<String>,
     ) -> Result<SignInOutcome, FrameworkError> {
-        super::bind_scope_preflight()?;
+        let session_authority = super::factor_engine()?;
+        super::factor_bind_scope_preflight()?;
         let engine = oauth_engine(&self.provider)?;
         match engine
             .oauth_complete(super::engine::MagnetarOAuthCallback {
@@ -250,11 +246,12 @@ impl OAuthAuth {
             .map_err(map_error)?
         {
             super::engine::MagnetarOAuthCompletion::SessionAllowed { user, session } => {
-                super::bind_issued_session(&session, false)?;
-                Ok(SignInOutcome::Authenticated {
-                    user,
-                    session: session.session,
-                })
+                let (user, session) =
+                    super::handoff_issued_session(session_authority, *session, false, async move {
+                        Ok(user)
+                    })
+                    .await?;
+                Ok(SignInOutcome::Authenticated { user, session })
             }
             super::engine::MagnetarOAuthCompletion::FactorRequired { challenge_selector } => {
                 Ok(SignInOutcome::FactorRequired { challenge_selector })
@@ -283,14 +280,14 @@ fn oauth_engine(
     provider: &str,
 ) -> Result<&'static std::sync::Arc<dyn super::engine::MagnetarOAuthAuthEngine>, FrameworkError> {
     let guard = super::engine_install_guard()?;
-    if guard.reserved {
-        return Err(FrameworkError::internal(
-            "Magnetar engine installation is still in progress",
-        ));
-    }
+    super::ensure_engine_installation_ready(guard.reserved)?;
     let engine = super::MAGNETAR_OAUTH_ENGINE
         .get()
-        .ok_or_else(|| FrameworkError::internal("Magnetar OAuth engine is not installed"))?;
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "Magnetar OAuth authentication subsystem was not initialized during application bootstrap; configure MagnetarConfig::oauth(...) before init_magnetar(...), or use init_magnetar_oauth_only(...), install_magnetar_oauth_engine(...), or install_magnetar_oauth_engine_with_factor(...)",
+            )
+        })?;
     if !engine.oauth_supports_provider(provider) {
         return Err(provider_not_configured(provider));
     }

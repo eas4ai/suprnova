@@ -13,7 +13,8 @@ pub use hash::{
     StandardPasswordHashDriver, VerificationCall,
 };
 pub use lockout::{
-    BackendErrorPolicy, FailedAttempt, LockoutConfig, LockoutService, LockoutStatus,
+    AttemptAdmission, AttemptReservationToken, BackendErrorPolicy, FailedAttempt, LockoutConfig,
+    LockoutService, LockoutStatus,
 };
 
 /// Normalize an email address for lookups, lockout keys, and abuse keys.

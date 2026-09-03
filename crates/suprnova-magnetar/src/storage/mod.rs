@@ -36,7 +36,7 @@ pub use accounts::{
 pub use ceremonies::{CeremonyRecord, CeremonyStore, NewCeremony};
 pub use credential_writes::{CredentialActor, fenced_credential_write};
 pub use device::{DeviceRecord, DeviceStore};
-pub use lockout::{AttemptStats, LockoutStore};
+pub use lockout::{AttemptFinalization, AttemptReservation, AttemptStats, LockoutStore};
 pub use methods::MethodStore;
 pub use passkeys::{PasskeyRow, PasskeyStore};
 pub use provider_tokens::{

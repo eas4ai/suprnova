@@ -1077,6 +1077,19 @@ impl Auth {
         feature = "database-postgres",
         feature = "database-mysql"
     ))]
+    /// Complete a factor challenge returned by any installed Magnetar sign-in provider.
+    ///
+    /// Call this inside [`SessionMiddleware`](crate::SessionMiddleware) with
+    /// the selector from [`SignInOutcome::FactorRequired`](crate::SignInOutcome).
+    pub fn factor() -> crate::magnetar_integration::FactorAuth {
+        crate::magnetar_integration::FactorAuth
+    }
+
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Access password-based authentication through the installed Magnetar engine.
     ///
     /// # Example

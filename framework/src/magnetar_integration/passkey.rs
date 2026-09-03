@@ -216,6 +216,7 @@ impl PasskeyAuth {
         response: PublicKeyCredential,
     ) -> Result<SignInOutcome, FrameworkError> {
         super::bind_scope_preflight()?;
+        let session_authority = super::factor_engine()?;
         let engine = super::passkey_engine()?;
         let selector = take_selector(
             SESSION_KEY_AUTH,
@@ -236,15 +237,13 @@ impl PasskeyAuth {
                 return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
-        super::bind_issued_session(&issued, false)?;
-        let user = engine
-            .passkey_user_by_id(issued.session.user_id.as_str())
-            .await
-            .map_err(map_error)?;
-        Ok(SignInOutcome::Authenticated {
-            user,
-            session: issued.session,
-        })
+        let user_id = issued.session.user_id.to_string();
+        let (user, session) =
+            super::handoff_issued_session(session_authority, *issued, false, async move {
+                engine.passkey_user_by_id(&user_id).await.map_err(map_error)
+            })
+            .await?;
+        Ok(SignInOutcome::Authenticated { user, session })
     }
 }
 

@@ -92,6 +92,7 @@ mod concurrent_completion {
     struct ProofState {
         available: HashSet<String>,
         claimed: HashSet<String>,
+        cancelled: HashSet<String>,
     }
 
     struct BarrierFactorVerifier {
@@ -106,6 +107,7 @@ mod concurrent_completion {
                 proofs: Mutex::new(ProofState {
                     available: HashSet::from([TOTP_PROOF.to_owned(), RECOVERY_PROOF.to_owned()]),
                     claimed: HashSet::new(),
+                    cancelled: HashSet::new(),
                 }),
             }
         }
@@ -116,6 +118,10 @@ mod concurrent_completion {
 
         fn is_available(&self, code: &str) -> bool {
             self.proofs.lock().available.contains(code)
+        }
+
+        fn cancelled(&self) -> HashSet<String> {
+            self.proofs.lock().cancelled.clone()
         }
     }
 
@@ -153,6 +159,17 @@ mod concurrent_completion {
             }
             proofs.claimed.insert(proof);
             Ok(true)
+        }
+
+        async fn cancel_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<()> {
+            if user_id != USER_ID {
+                return Err(Error::Conflict {
+                    resource: "prepared proof".to_owned(),
+                    message: "proof owner changed".to_owned(),
+                });
+            }
+            self.proofs.lock().cancelled.insert(proof);
+            Ok(())
         }
     }
 
@@ -268,6 +285,11 @@ mod concurrent_completion {
         assert!(
             factors.is_available(loser),
             "the losing conflict must leave its TOTP timestep or recovery code unconsumed"
+        );
+        assert_eq!(
+            factors.cancelled(),
+            HashSet::from([loser.to_owned()]),
+            "the losing ceremony transition must cancel exactly its prepared reservation"
         );
     }
 }

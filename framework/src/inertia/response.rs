@@ -132,6 +132,137 @@ pub struct InertiaResponse {
     lazy_owned: IndexMap<String, (&'static str, &'static str)>,
 }
 
+/// Request-scoped snapshot of session values that an Inertia response delivers once.
+///
+/// `SessionMiddleware` ages `_flash.new.*` into `_flash.old.*` before the
+/// handler runs. Merely peeking at those old values is therefore insufficient:
+/// when response construction fails, the next request's aging pass would
+/// delete them. This guard selectively reflashes the values on every
+/// uncommitted exit, including cancellation, and removes them only after the
+/// complete response has been built.
+struct StagedInertiaSessionValues {
+    entries: Vec<(String, Value)>,
+    committed: bool,
+}
+
+impl StagedInertiaSessionValues {
+    const OLD_PREFIX: &'static str = "_flash.old.";
+    const NEW_PREFIX: &'static str = "_flash.new.";
+    const PRESERVE_FRAGMENT: &'static str = "_inertia.preserve_fragment";
+    const CLEAR_HISTORY: &'static str = "_inertia.clear_history";
+
+    fn stage() -> Self {
+        let entries = crate::session::session()
+            .map(|session| {
+                session
+                    .data
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let name = key.strip_prefix(Self::OLD_PREFIX)?;
+                        Self::is_inertia_value(name).then(|| (key.clone(), value.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            entries,
+            committed: false,
+        }
+    }
+
+    fn is_inertia_value(name: &str) -> bool {
+        !name.starts_with('_') || name == Self::PRESERVE_FRAGMENT || name == Self::CLEAR_HISTORY
+    }
+
+    fn value(&self, name: &str) -> Option<&Value> {
+        let full_key = format!("{}{name}", Self::OLD_PREFIX);
+        self.entries
+            .iter()
+            .find_map(|(key, value)| (key == &full_key).then_some(value))
+    }
+
+    fn bool_value(&self, name: &str) -> bool {
+        self.value(name).and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    fn error_bags(&self) -> serde_json::Map<String, Value> {
+        let prefix = format!("{}errors.", Self::OLD_PREFIX);
+        self.entries
+            .iter()
+            .filter_map(|(key, value)| {
+                key.strip_prefix(&prefix)
+                    .map(|bag| (bag.to_string(), value.clone()))
+            })
+            .collect()
+    }
+
+    fn page_flash(&self) -> serde_json::Map<String, Value> {
+        let visible = flash::drain_session_flash_for_page();
+        self.entries
+            .iter()
+            .filter_map(|(key, value)| {
+                let name = key.strip_prefix(Self::OLD_PREFIX)?;
+                (!name.starts_with('_')
+                    && !name.starts_with("errors.")
+                    && visible.get(name) == Some(value))
+                .then(|| (name.to_string(), value.clone()))
+            })
+            .collect()
+    }
+
+    fn commit(mut self) {
+        crate::session::session_mut(|session| {
+            for (key, staged_value) in &self.entries {
+                if session.data.get(key) == Some(staged_value) {
+                    session.data.remove(key);
+                    session.dirty = true;
+                }
+            }
+        });
+        self.committed = true;
+    }
+
+    fn rollback(mut self) {
+        self.reflash();
+        self.committed = true;
+    }
+
+    fn reflash(&self) {
+        crate::session::session_mut(|session| {
+            for (old_key, staged_value) in &self.entries {
+                if session.data.get(old_key) != Some(staged_value) {
+                    continue;
+                }
+                let Some(name) = old_key.strip_prefix(Self::OLD_PREFIX) else {
+                    continue;
+                };
+                session.data.remove(old_key);
+                let new_key = format!("{}{name}", Self::NEW_PREFIX);
+                session
+                    .data
+                    .entry(new_key)
+                    .or_insert_with(|| staged_value.clone());
+                session.dirty = true;
+            }
+        });
+    }
+}
+
+impl Drop for StagedInertiaSessionValues {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.reflash();
+        }
+    }
+}
+
+/// Preserve aged Inertia session values when eager response construction
+/// fails before [`InertiaResponse::resolve`] establishes its staging guard.
+pub(super) fn reflash_session_values_after_eager_error(error: FrameworkError) -> FrameworkError {
+    StagedInertiaSessionValues::stage().rollback();
+    error
+}
+
 impl InertiaResponse {
     /// Begin a new Inertia response for the given page component.
     ///
@@ -883,6 +1014,7 @@ impl InertiaResponse {
         self,
         req: &R,
     ) -> Result<HttpResponse, FrameworkError> {
+        let staged_session = StagedInertiaSessionValues::stage();
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
         // Laravel gates the whole once-skip on `isInertia && !isPartial`
@@ -959,25 +1091,24 @@ impl InertiaResponse {
         // preserve-fragment precedence: per-response override > session
         // flash (set by `Redirect::preserve_fragment()`) > false. The
         // session lookup is a no-op outside a `SessionMiddleware` scope.
-        // `get_flash` removes the entry, so the flag is one-shot.
+        // The staged session guard commits its removal only after the
+        // complete response has been constructed, so the flag is one-shot
+        // without being lost on a later response error.
         let flashed_preserve_fragment =
-            crate::session::session_mut(|s| s.get_flash::<bool>("_inertia.preserve_fragment"))
-                .flatten()
-                .unwrap_or(false);
+            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT);
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
 
         // clear-history precedence: per-response override OR the session
         // flash set by `App::clear_history()`. Either alone is enough -
         // unlike `preserve_fragment` there is no "force off" case, because
         // the only reason to ask for a history clear is that the previous
-        // session must stop being readable. `get_flash` removes the entry,
-        // so the flag survives exactly one hop; a flag that stuck around
-        // would rotate the key on every navigation and defeat encrypted
-        // history entirely. No-op outside a `SessionMiddleware` scope.
+        // session must stop being readable. The staged session guard makes
+        // the flag survive exactly one successful hop; a flag that stuck
+        // around would rotate the key on every navigation and defeat
+        // encrypted history entirely. No-op outside a
+        // `SessionMiddleware` scope.
         let flashed_clear_history =
-            crate::session::session_mut(|s| s.get_flash::<bool>("_inertia.clear_history"))
-                .flatten()
-                .unwrap_or(false);
+            staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
         let resolved_clear_history = clear_history || flashed_clear_history;
 
         // Layer props in precedence order (later writes override earlier):
@@ -1041,6 +1172,7 @@ impl InertiaResponse {
             &lazy_owned,
             config.max_concurrent_resolvers,
             config.with_all_errors,
+            staged_session.error_bags(),
         )
         .await?;
 
@@ -1052,7 +1184,7 @@ impl InertiaResponse {
         //      `SessionMiddleware`.
         //   2. Task-local flash bag - same-request `App::flash`.
         //   3. Builder flash - same-request `InertiaResponse::flash`.
-        let mut flash = flash::drain_session_flash_for_page();
+        let mut flash = staged_session.page_flash();
         for (k, v) in flash::drain() {
             flash.insert(k, v);
         }
@@ -1073,19 +1205,16 @@ impl InertiaResponse {
             shared_keys,
         );
 
-        if is_inertia_request {
-            Ok(build_json_response(&page))
+        let response = if is_inertia_request {
+            build_json_response(&page)
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
             let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
-            Ok(build_html_response(
-                &page,
-                &config,
-                title.as_deref(),
-                ssr_result.as_ref(),
-            ))
-        }
+            build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
+        };
+        staged_session.commit();
+        Ok(response)
     }
 
     /// Build the page object without producing an HTTP response - used by
@@ -1096,6 +1225,7 @@ impl InertiaResponse {
         url: String,
         filter: &PartialFilter,
     ) -> Value {
+        let staged_session = StagedInertiaSessionValues::stage();
         let Self {
             component,
             props,
@@ -1117,6 +1247,7 @@ impl InertiaResponse {
             &lazy_owned,
             usize::MAX,
             config.with_all_errors,
+            staged_session.error_bags(),
         )
         .await
         .expect("test resolver should not fail");
@@ -1126,14 +1257,18 @@ impl InertiaResponse {
         // override. Tests that DO drive a session scope via
         // `session_scope_for_test` pick up `_flash.old.*` via the
         // shared session-flash merge below.
-        let resolved_preserve_fragment = preserve_fragment.unwrap_or(false);
+        let resolved_preserve_fragment = preserve_fragment.unwrap_or_else(|| {
+            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT)
+        });
+        let resolved_clear_history =
+            clear_history || staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
         // The test helper does not exercise the shared-data registry.
         let shared_keys: Vec<String> = Vec::new();
 
         // Mirror the same three-tier flash precedence as `resolve`:
         // session-old < task-local < builder. Keeps the test helper
         // honest about the production drain path.
-        let mut flash = flash::drain_session_flash_for_page();
+        let mut flash = staged_session.page_flash();
         for (k, v) in flash::drain() {
             flash.insert(k, v);
         }
@@ -1141,7 +1276,7 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
-        build_page_object(
+        let page = build_page_object(
             &component,
             materialized,
             &config,
@@ -1149,10 +1284,12 @@ impl InertiaResponse {
             &metadata,
             flash,
             resolved_encrypt_history,
-            clear_history,
+            resolved_clear_history,
             resolved_preserve_fragment,
             shared_keys,
-        )
+        );
+        staged_session.commit();
+        page
     }
 
     /// Build a `409 Conflict` response indicating an asset version mismatch.
@@ -1307,6 +1444,7 @@ async fn resolve_props(
     lazy_owned: &IndexMap<String, (&'static str, &'static str)>,
     max_concurrency: usize,
     with_all_errors: bool,
+    session_errors: serde_json::Map<String, Value>,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -1319,10 +1457,9 @@ async fn resolve_props(
     // function. Doing it post-resolution means a handler that injects
     // errors via `.with("errors", {...})` still gets correctly scoped.
     //
-    // The session lookup is bounded to a single bag prefix scan and is
-    // a no-op outside a `SessionMiddleware` scope (silently produces
-    // the empty object).
-    // `pull_errors_flash` returns the raw `{bag: {field: [...]}}` map.
+    // The caller supplies a single staged bag-prefix snapshot. It is empty
+    // outside a `SessionMiddleware` scope and is committed only after the
+    // complete response succeeds.
     // Resolve it to the Inertia shape, mirroring Laravel's
     // `resolveValidationErrors`:
     //  - `X-Inertia-Error-Bag` header → that bag's errors, flat; the
@@ -1332,8 +1469,6 @@ async fn resolve_props(
     //    (`{field: [...]}`) - what the Inertia client binds to directly
     //    (`page.props.errors.field`), not nested under `"default"`.
     //  - no header, no default bag → every bag, keyed by name.
-    let session_errors: serde_json::Map<String, Value> =
-        crate::session::session_mut(|s| s.pull_errors_flash()).unwrap_or_default();
     let session_errors = collapse_error_bags(session_errors, with_all_errors);
     let seeded_errors = match error_bag {
         Some(bag) => session_errors
@@ -2039,10 +2174,10 @@ fn to_value_or_die<V: Serialize>(value: &V) -> Value {
 /// methods ([`InertiaResponse::try_with`] and siblings).
 fn to_value_or_err<V: Serialize>(key: &str, value: &V) -> Result<Value, FrameworkError> {
     serde_json::to_value(value).map_err(|e| {
-        FrameworkError::internal(format!(
+        reflash_session_values_after_eager_error(FrameworkError::internal(format!(
             "InertiaResponse prop `{key}` failed to serialize: {e} \
              (the value's Serialize impl returned Err)"
-        ))
+        )))
     })
 }
 

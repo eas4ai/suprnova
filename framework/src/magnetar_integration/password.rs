@@ -63,6 +63,7 @@ impl PasswordAuth {
         ip_address: Option<String>,
     ) -> Result<SignInOutcome, FrameworkError> {
         super::bind_scope_preflight()?;
+        let session_authority = super::factor_engine()?;
         let engine = super::password_engine()?;
         let (user, decision) = engine
             .password_sign_in(magnetar::plugins::password::PasswordAttempt {
@@ -77,11 +78,12 @@ impl PasswordAuth {
             .map_err(map_magnetar_password_error)?;
         match decision {
             super::engine::HostSignInDecision::SessionAllowed(issued) => {
-                super::bind_issued_session(&issued, true)?;
-                Ok(SignInOutcome::Authenticated {
-                    user,
-                    session: issued.session,
-                })
+                let (user, session) =
+                    super::handoff_issued_session(session_authority, *issued, true, async move {
+                        Ok(user)
+                    })
+                    .await?;
+                Ok(SignInOutcome::Authenticated { user, session })
             }
             super::engine::HostSignInDecision::FactorRequired { challenge_selector } => {
                 Ok(SignInOutcome::FactorRequired { challenge_selector })
@@ -90,7 +92,7 @@ impl PasswordAuth {
     }
 }
 
-fn map_magnetar_password_error(error: magnetar::Error) -> FrameworkError {
+pub(super) fn map_magnetar_password_error(error: magnetar::Error) -> FrameworkError {
     match error {
         magnetar::Error::Conflict { message, .. }
         | magnetar::Error::NotFound {

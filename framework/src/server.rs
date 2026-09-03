@@ -185,97 +185,15 @@ impl Server {
         // dependency graph is unresolvable (missing #[injectable] or cycle).
         App::boot_services()?;
 
-        // Install the process-wide encryption key ring.
-        //
-        // Production / staging / custom envs fail closed when APP_KEY
-        // is missing - `resolve_boot_keyring` returns Err with an
-        // actionable message that we propagate as the boot error.
-        //
-        // Local / development / testing fall through to a generated
-        // transient current key. We log a loud warn so the operator
-        // notices.
-        //
-        // `APP_KEY_PREVIOUS` is parsed alongside `APP_KEY` so a single
-        // boot decision covers the whole ring; malformed previous-key
-        // entries fail boot the same way a malformed `APP_KEY` does.
-        //
-        // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY boot, not just
-        // when `Crypt` is uninitialized.
-        //
-        // The previous `if !Crypt::is_initialized()` gate meant that any
-        // earlier key install (test hooks, embedders that boot the server
-        // more than once, etc.) skipped the validation entirely on
-        // subsequent boots - a missing/malformed APP_KEY in production
-        // would slip through if any code path had pre-installed a transient
-        // or test key. We now resolve the boot ring on every call, so a
-        // production boot fails closed regardless of what may have been
-        // installed earlier in the process.
-        //
-        // `init_with_keyring` is itself idempotent (no-op + `warn!` on
-        // second call) so installing again after validation is safe; what
-        // we get back is the freshly-validated key, even though the
-        // installed ring still wins (sealed for the process lifetime).
+        // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY server boot,
+        // even though generated applications install Crypt at the start of
+        // their shared bootstrap hook so Magnetar can use it. This repeated
+        // validation keeps production fail-closed for embedders and later
+        // boots after the process-wide ring is already sealed.
         let environment = Config::get::<crate::config::AppConfig>()
             .map(|c| c.environment)
             .unwrap_or_else(crate::config::Environment::detect);
-        let app_key = std::env::var("APP_KEY").ok();
-        // Suprnova canonical name is `APP_KEY_PREVIOUS`; Laravel uses
-        // `APP_PREVIOUS_KEYS`. Accept either so a Laravel app's `.env`
-        // dropped into a Suprnova deploy continues to graceful-decrypt
-        // legacy data without an operator-side rename. The canonical
-        // name wins if BOTH are set, with a `tracing::warn!` to surface
-        // the misconfiguration - silently preferring one over the other
-        // would mask a half-rotated secret.
-        let app_key_previous = match (
-            std::env::var("APP_KEY_PREVIOUS").ok(),
-            std::env::var("APP_PREVIOUS_KEYS").ok(),
-        ) {
-            (Some(canonical), Some(laravel)) => {
-                if canonical.trim() != laravel.trim() {
-                    tracing::warn!(
-                        "APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
-                         different values. Using APP_KEY_PREVIOUS (Suprnova \
-                         canonical name); APP_PREVIOUS_KEYS is ignored. Drop the \
-                         duplicate from your environment."
-                    );
-                }
-                Some(canonical)
-            }
-            (Some(canonical), None) => Some(canonical),
-            (None, Some(laravel)) => Some(laravel),
-            (None, None) => None,
-        };
-        let boot_ring = crate::crypto::resolve_boot_keyring(
-            &environment,
-            app_key.as_deref(),
-            app_key_previous.as_deref(),
-        )?;
-
-        // Only emit the dev-key / rotation-active operator hints on the
-        // FIRST boot - repeated emissions on idempotent re-boot are noise.
-        let first_boot = !crate::crypto::Crypt::is_initialized();
-        if first_boot {
-            if boot_ring.is_current_generated() {
-                tracing::warn!(
-                    environment = %environment,
-                    "APP_KEY is not set - generated a transient development key. \
-                     Sessions and cursors will reset on every restart. Set APP_KEY \
-                     in your environment to persist them. This path is gated to \
-                     local/development/testing; production fails closed."
-                );
-            }
-            if !boot_ring.previous.is_empty() {
-                tracing::info!(
-                    previous_key_count = boot_ring.previous.len(),
-                    "APP_KEY_PREVIOUS active - decrypt will fall back to {n} previous \
-                     key(s). Run a re-encrypt pass (load + save every encrypted \
-                     column) and then remove APP_KEY_PREVIOUS once complete.",
-                    n = boot_ring.previous.len()
-                );
-            }
-            let (current, previous) = boot_ring.into_keys();
-            crate::crypto::Crypt::init_with_keyring(current, previous);
-        }
+        crate::crypto::initialize_from_environment(&environment)?;
 
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
 

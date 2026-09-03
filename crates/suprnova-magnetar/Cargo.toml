@@ -71,6 +71,7 @@ p256 = { version = "0.13", optional = true, features = ["pem"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"
 parking_lot = "0.12"
+sea-orm = { version = "2.0", default-features = false, features = ["mock"] }
 # Software authenticator so passkey suites complete real WebAuthn
 # ceremonies instead of only asserting rejections (the deployed test
 # harness's approach). Pulls openssl + ctap2, no hardware transports.

@@ -26,11 +26,17 @@ use chrono::{DateTime, Utc};
 use magnetar::crypto::{AeadEncryptor, CryptoPurpose, Encryptor};
 use magnetar::password::{LockoutConfig, LockoutService};
 use magnetar::sessions::JwtEpochStore;
-use magnetar::storage::{AttemptStats, LockoutStore, UserStore};
-use magnetar::two_factor::{
-    TwoFactorConfig, TwoFactorService, TwoFactorStore, totp, totp::STEP_SECONDS,
+use magnetar::storage::{
+    AttemptFinalization, AttemptReservation, AttemptStats, CredentialActor, LockoutStore, UserStore,
 };
+use magnetar::two_factor::{
+    TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService, TwoFactorStore, totp,
+    totp::STEP_SECONDS,
+};
+use parking_lot::Mutex;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait, IntoActiveModel};
 use serde_json::json;
+use tokio::sync::Barrier;
 
 use factor::{FactorWorld, credential_actor, factor_world, send, totp_code_at, totp_code_now};
 use harness::{login_request, post_json, register_request};
@@ -38,8 +44,274 @@ use harness::{login_request, post_json, register_request};
 const EMAIL: &str = "rowan@example.test";
 const PASSWORD: &str = "orange tabby cat";
 
+struct CoordinatedAttemptStore {
+    attempts: Mutex<Vec<CoordinatedAttempt>>,
+    preflight: Option<Barrier>,
+    fail_records: bool,
+}
+
+struct CoordinatedAttempt {
+    id: String,
+    attempted_at: DateTime<Utc>,
+    pending: bool,
+}
+
+impl CoordinatedAttemptStore {
+    fn racing(parties: usize) -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            preflight: Some(Barrier::new(parties)),
+            fail_records: false,
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            preflight: None,
+            fail_records: true,
+        }
+    }
+
+    fn stats(&self, window_start: DateTime<Utc>) -> AttemptStats {
+        let attempts = self.attempts.lock();
+        let mut in_window = attempts
+            .iter()
+            .filter(|attempt| !attempt.pending && attempt.attempted_at >= window_start)
+            .map(|attempt| attempt.attempted_at)
+            .collect::<Vec<_>>();
+        in_window.sort_unstable();
+        AttemptStats {
+            count: u32::try_from(in_window.len()).unwrap(),
+            latest_at: in_window.last().copied(),
+        }
+    }
+}
+
+#[async_trait]
+impl LockoutStore for CoordinatedAttemptStore {
+    async fn record_attempt_and_stats(
+        &self,
+        _identity: &str,
+        at: DateTime<Utc>,
+        _context: Option<&str>,
+        window_start: DateTime<Utc>,
+    ) -> magnetar::Result<AttemptStats> {
+        if self.fail_records {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt persistence failure".to_owned(),
+            });
+        }
+        let mut attempts = self.attempts.lock();
+        let id = format!("ordinary-{}", attempts.len());
+        attempts.push(CoordinatedAttempt {
+            id,
+            attempted_at: at,
+            pending: false,
+        });
+        drop(attempts);
+        Ok(self.stats(window_start))
+    }
+
+    async fn admit_attempt_and_stats(
+        &self,
+        _identity: &str,
+        at: DateTime<Utc>,
+        _context: Option<&str>,
+        window_start: DateTime<Utc>,
+        max_attempts: u32,
+    ) -> magnetar::Result<AttemptReservation> {
+        if self.fail_records {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt persistence failure".to_owned(),
+            });
+        }
+        let reservation = {
+            let mut attempts = self.attempts.lock();
+            let current = u32::try_from(
+                attempts
+                    .iter()
+                    .filter(|attempt| attempt.attempted_at >= window_start)
+                    .count(),
+            )
+            .unwrap();
+            let admitted = current < max_attempts;
+            let reservation_id = format!("reservation-{}", attempts.len());
+            if admitted {
+                attempts.push(CoordinatedAttempt {
+                    id: reservation_id.clone(),
+                    attempted_at: at,
+                    pending: true,
+                });
+            }
+            let latest_at = attempts
+                .iter()
+                .filter(|attempt| !attempt.pending && attempt.attempted_at >= window_start)
+                .map(|attempt| attempt.attempted_at)
+                .max();
+            AttemptReservation {
+                admitted,
+                stats: AttemptStats {
+                    count: u32::try_from(
+                        attempts
+                            .iter()
+                            .filter(|attempt| {
+                                !attempt.pending && attempt.attempted_at >= window_start
+                            })
+                            .count(),
+                    )
+                    .unwrap(),
+                    latest_at,
+                },
+                reservation_id: admitted.then_some(reservation_id),
+                locked_event: false,
+            }
+        };
+        if let Some(preflight) = &self.preflight {
+            preflight.wait().await;
+        }
+        Ok(reservation)
+    }
+
+    async fn cancel_attempt_reservation(
+        &self,
+        _identity: &str,
+        reservation_id: &str,
+    ) -> magnetar::Result<bool> {
+        let mut attempts = self.attempts.lock();
+        let before = attempts.len();
+        attempts.retain(|attempt| !(attempt.id == reservation_id && attempt.pending));
+        Ok(attempts.len() + 1 == before)
+    }
+
+    async fn finalize_attempt_reservation(
+        &self,
+        _identity: &str,
+        reservation_id: &str,
+        _finalized_at: DateTime<Utc>,
+        _context: Option<&str>,
+        window_start: DateTime<Utc>,
+        _max_attempts: u32,
+    ) -> magnetar::Result<AttemptFinalization> {
+        let mut attempts = self.attempts.lock();
+        let Some(attempt) = attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == reservation_id && attempt.pending)
+        else {
+            return Err(magnetar::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "missing pending reservation".to_owned(),
+            });
+        };
+        attempt.pending = false;
+        drop(attempts);
+        Ok(AttemptFinalization {
+            stats: self.stats(window_start),
+            locked_event: false,
+        })
+    }
+
+    async fn attempt_stats(
+        &self,
+        _identity: &str,
+        window_start: DateTime<Utc>,
+    ) -> magnetar::Result<AttemptStats> {
+        let stats = self.stats(window_start);
+        if let Some(preflight) = &self.preflight {
+            preflight.wait().await;
+        }
+        Ok(stats)
+    }
+
+    async fn clear_attempts(&self, _identity: &str) -> magnetar::Result<u64> {
+        let removed = self.attempts.lock().drain(..).count();
+        Ok(u64::try_from(removed).unwrap())
+    }
+
+    async fn cleanup_attempts_before(&self, before: DateTime<Utc>) -> magnetar::Result<u64> {
+        let mut attempts = self.attempts.lock();
+        let before_count = attempts.len();
+        attempts.retain(|attempt| attempt.attempted_at >= before);
+        Ok(u64::try_from(before_count - attempts.len()).unwrap())
+    }
+}
+
 struct FailingResetLockout {
     inner: Arc<dyn LockoutStore>,
+}
+
+struct ClaimFailingTwoFactorStore {
+    inner: Arc<dyn TwoFactorStore>,
+}
+
+#[async_trait]
+impl TwoFactorStore for ClaimFailingTwoFactorStore {
+    async fn find_enrollment(&self, user_id: &str) -> magnetar::Result<Option<TwoFactorRow>> {
+        self.inner.find_enrollment(user_id).await
+    }
+
+    async fn begin_enrollment(
+        &self,
+        actor: &CredentialActor,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .begin_enrollment(actor, secret, recovery_codes)
+            .await
+    }
+
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner.set_confirmed(actor, at).await
+    }
+
+    async fn claim_timestep(&self, _user_id: &str, _matched_step: i64) -> magnetar::Result<bool> {
+        Err(magnetar::Error::Internal {
+            message: "forced two-factor claim failure".to_owned(),
+        })
+    }
+
+    async fn swap_recovery_codes(
+        &self,
+        user_id: &str,
+        expected: &[u8],
+        next: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .swap_recovery_codes(user_id, expected, next)
+            .await
+    }
+
+    async fn rotate_enrollment(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .rotate_enrollment(actor, claim, secret, recovery_codes)
+            .await
+    }
+
+    async fn regenerate_recovery_codes(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        next: &[u8],
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .regenerate_recovery_codes(actor, claim, next)
+            .await
+    }
+
+    async fn delete_enrollment(&self, actor: &CredentialActor) -> magnetar::Result<bool> {
+        self.inner.delete_enrollment(actor).await
+    }
 }
 
 #[async_trait]
@@ -53,6 +325,61 @@ impl LockoutStore for FailingResetLockout {
     ) -> magnetar::Result<AttemptStats> {
         self.inner
             .record_attempt_and_stats(identity, at, context, window_start)
+            .await
+    }
+
+    async fn admit_attempt_and_stats(
+        &self,
+        identity: &str,
+        at: DateTime<Utc>,
+        context: Option<&str>,
+        window_start: DateTime<Utc>,
+        max_attempts: u32,
+    ) -> magnetar::Result<AttemptReservation> {
+        self.inner
+            .admit_attempt_and_stats(identity, at, context, window_start, max_attempts)
+            .await
+    }
+
+    async fn cancel_attempt_reservation(
+        &self,
+        identity: &str,
+        reservation_id: &str,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .cancel_attempt_reservation(identity, reservation_id)
+            .await
+    }
+
+    async fn finalize_attempt_reservation(
+        &self,
+        identity: &str,
+        reservation_id: &str,
+        finalized_at: DateTime<Utc>,
+        context: Option<&str>,
+        window_start: DateTime<Utc>,
+        max_attempts: u32,
+    ) -> magnetar::Result<AttemptFinalization> {
+        self.inner
+            .finalize_attempt_reservation(
+                identity,
+                reservation_id,
+                finalized_at,
+                context,
+                window_start,
+                max_attempts,
+            )
+            .await
+    }
+
+    async fn reset_admitted_attempts(
+        &self,
+        identity: &str,
+        reservation_id: &str,
+        context: Option<&str>,
+    ) -> magnetar::Result<u64> {
+        self.inner
+            .reset_admitted_attempts(identity, reservation_id, context)
             .await
     }
 
@@ -130,6 +457,753 @@ async fn confirmed_enrollment(
         .await
         .unwrap();
     enrollment
+}
+
+fn service_with_attempt_store(
+    world: &FactorWorld,
+    attempts: Arc<dyn LockoutStore>,
+    max_failed_attempts: u32,
+) -> Arc<TwoFactorService> {
+    let lockout = Arc::new(LockoutService::new(
+        attempts,
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts,
+            ..LockoutConfig::default()
+        },
+    ));
+    Arc::new(TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        lockout,
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn challenge_attempt_admission_caps_concurrent_proof_checks() {
+    use magnetar::auth::{
+        AuthenticationContext, FactorGate, OpaqueFactorGate, TWO_FACTOR_CHALLENGE_KIND,
+    };
+    use magnetar::sessions::SessionMetadata;
+    use magnetar::storage::{CeremonyStore, NewCeremony};
+    use serde::Serialize;
+
+    const ATTEMPT_LIMIT: usize = 2;
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let attempts = Arc::new(CoordinatedAttemptStore::racing(4));
+    let service = service_with_attempt_store(&world, attempts, ATTEMPT_LIMIT as u32);
+    let encryptor = Arc::new(AeadEncryptor::new([21; 32]));
+    let gate = Arc::new(OpaqueFactorGate::new(
+        world.storage.clone(),
+        service,
+        encryptor.clone(),
+        world.sessions.clone(),
+    ));
+    let valid_code = totp_code_at(
+        &enrollment.otpauth_url,
+        Utc::now().timestamp() + STEP_SECONDS,
+    );
+    let codes = [
+        "invalid-one".to_owned(),
+        "invalid-two".to_owned(),
+        "invalid-three".to_owned(),
+        valid_code,
+    ];
+
+    #[derive(Serialize)]
+    struct ChallengePayload {
+        user_id: String,
+        context: AuthenticationContext,
+    }
+
+    let mut challenges = Vec::new();
+    for index in 0..codes.len() {
+        let selector = format!("attempt-admission-{index}");
+        let plaintext = serde_json::to_vec(&ChallengePayload {
+            user_id: user_id.clone(),
+            context: AuthenticationContext::new(SessionMetadata::default(), 0, Utc::now()),
+        })
+        .unwrap();
+        let payload = encryptor
+            .encrypt(CryptoPurpose::CeremonyState, &plaintext)
+            .unwrap();
+        world
+            .storage
+            .create(NewCeremony {
+                selector: selector.clone(),
+                kind: TWO_FACTOR_CHALLENGE_KIND.to_owned(),
+                state: "pending".to_owned(),
+                payload,
+                expires_at: Utc::now() + chrono::Duration::minutes(10),
+            })
+            .await
+            .unwrap();
+        challenges.push(selector);
+    }
+
+    let mut tasks = Vec::new();
+    for (selector, code) in challenges.into_iter().zip(codes) {
+        let gate = gate.clone();
+        tasks.push(tokio::spawn(async move {
+            let result = gate.complete_challenge(&selector, &code).await;
+            (code, result)
+        }));
+    }
+
+    let mut outcomes = Vec::new();
+    for task in tasks {
+        outcomes.push(task.await.expect("challenge attempt task joins"));
+    }
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, Err(magnetar::Error::Conflict { resource, .. }) if resource == "account lockout"))
+            .count(),
+        2,
+        "every request beyond the atomic admission budget must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn challenge_attempt_admission_fails_when_its_write_fails() {
+    use magnetar::auth::FactorVerifier;
+
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    confirmed_enrollment(&world, &user_id).await;
+    let service =
+        service_with_attempt_store(&world, Arc::new(CoordinatedAttemptStore::failing()), 5);
+
+    let error = service
+        .prepare_code(&user_id, "invalid-code")
+        .await
+        .expect_err("proof evaluation must not start when admission persistence fails");
+
+    assert!(
+        matches!(error, magnetar::Error::Internal { message } if message == "forced attempt persistence failure")
+    );
+}
+
+#[tokio::test]
+async fn challenge_prepare_error_cancels_attempt_without_locking_user() {
+    use magnetar::auth::FactorVerifier;
+
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    confirmed_enrollment(&world, &user_id).await;
+    let row = storage_schema::two_factor::Entity::find_by_id(user_id.clone())
+        .one(&world.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut row = row.into_active_model();
+    row.secret = Set(vec![0_u8; 3]);
+    row.update(&world.db).await.unwrap();
+    let lockout = Arc::new(LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 1,
+            ..LockoutConfig::default()
+        },
+    ));
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    );
+
+    service
+        .prepare_code(&user_id, "123456")
+        .await
+        .expect_err("corrupt stored proof material must fail preparation");
+
+    assert_eq!(lockout.status(EMAIL).await.unwrap().failed_attempts, 0);
+    assert!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn challenge_claim_error_cancels_attempt_without_locking_user() {
+    use magnetar::auth::{
+        AuthenticationContext, FactorGate, OpaqueFactorGate, TWO_FACTOR_CHALLENGE_KIND,
+    };
+    use magnetar::sessions::SessionMetadata;
+    use magnetar::storage::{CeremonyStore, NewCeremony};
+    use serde::Serialize;
+
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let lockout = Arc::new(LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 1,
+            ..LockoutConfig::default()
+        },
+    ));
+    let factor_store = Arc::new(ClaimFailingTwoFactorStore {
+        inner: Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+    });
+    let service = Arc::new(TwoFactorService::new(
+        factor_store,
+        world.storage.clone(),
+        lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    ));
+    let encryptor = Arc::new(AeadEncryptor::new([21; 32]));
+    let gate = OpaqueFactorGate::new(
+        world.storage.clone(),
+        service,
+        encryptor.clone(),
+        world.sessions.clone(),
+    );
+
+    #[derive(Serialize)]
+    struct ChallengePayload {
+        user_id: String,
+        context: AuthenticationContext,
+    }
+
+    let selector = "claim-failure-cancellation";
+    let plaintext = serde_json::to_vec(&ChallengePayload {
+        user_id: user_id.clone(),
+        context: AuthenticationContext::new(SessionMetadata::default(), 0, Utc::now()),
+    })
+    .unwrap();
+    let payload = encryptor
+        .encrypt(CryptoPurpose::CeremonyState, &plaintext)
+        .unwrap();
+    world
+        .storage
+        .create(NewCeremony {
+            selector: selector.to_owned(),
+            kind: TWO_FACTOR_CHALLENGE_KIND.to_owned(),
+            state: "pending".to_owned(),
+            payload,
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+        })
+        .await
+        .unwrap();
+
+    let error = gate
+        .complete_challenge(
+            selector,
+            &totp_code_at(
+                &enrollment.otpauth_url,
+                Utc::now().timestamp() + STEP_SECONDS,
+            ),
+        )
+        .await
+        .expect_err("claim failure must propagate after cancellation");
+
+    assert_eq!(lockout.status(EMAIL).await.unwrap().failed_attempts, 0);
+    assert!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at
+            .is_none()
+    );
+    assert!(matches!(
+        error,
+        magnetar::Error::Internal { message }
+            if message == "forced two-factor claim failure"
+    ));
+}
+
+#[tokio::test]
+async fn finalized_attempt_retries_user_lock_transition_exactly_once() {
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let lockout = LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 1,
+            ..LockoutConfig::default()
+        },
+    );
+    let admission = lockout
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("reserve threshold attempt");
+    world
+        .db
+        .execute_unprepared(
+            "CREATE TRIGGER fail_lockout_user_stamp BEFORE UPDATE OF locked_at ON storage_users WHEN NEW.locked_at IS NOT NULL BEGIN SELECT RAISE(FAIL, 'forced user lock persistence failure'); END",
+        )
+        .await
+        .unwrap();
+
+    let error = lockout
+        .finalize_failed_attempt(EMAIL, &admission)
+        .await
+        .expect_err("first user lock write is injected to fail");
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable { .. } | magnetar::Error::Internal { .. }
+    ));
+    assert_eq!(lockout.status(EMAIL).await.unwrap().failed_attempts, 0);
+    assert!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at
+            .is_none()
+    );
+    world
+        .db
+        .execute_unprepared("DROP TRIGGER fail_lockout_user_stamp")
+        .await
+        .unwrap();
+
+    let repaired = lockout
+        .finalize_failed_attempt(EMAIL, &admission)
+        .await
+        .expect("same exact reservation must repair its user lock transition");
+    assert!(repaired.locked_event);
+    assert_eq!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at,
+        repaired
+            .status
+            .locked_until
+            .map(|locked_until| locked_until - LockoutConfig::default().lockout_period),
+        "a delayed same-token repair must preserve the original lock cycle timestamp"
+    );
+
+    let repeated = lockout
+        .finalize_failed_attempt(EMAIL, &admission)
+        .await
+        .expect("idempotent retry after repair remains valid");
+    assert!(!repeated.locked_event);
+}
+
+#[tokio::test]
+async fn rejected_admission_repairs_a_finalized_user_lock_transition() {
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let lockout = LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 1,
+            ..LockoutConfig::default()
+        },
+    );
+    let cycle_at = Utc::now();
+    world
+        .storage
+        .record_attempt_and_stats(
+            EMAIL,
+            cycle_at,
+            Some("legacy finalized attempt"),
+            cycle_at - LockoutConfig::default().lockout_period,
+        )
+        .await
+        .expect("seed finalized attempt without a user lock stamp");
+
+    let repair = lockout
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("later admission repairs committed failure state");
+    assert!(!repair.admitted);
+    assert!(repair.locked_event);
+    assert_eq!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at,
+        repair
+            .status
+            .locked_until
+            .map(|locked_until| locked_until - LockoutConfig::default().lockout_period),
+        "rejected-admission repair must preserve the finalized cycle timestamp"
+    );
+
+    let repeated = lockout
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("repeated rejected admission is idempotent");
+    assert!(!repeated.admitted);
+    assert!(!repeated.locked_event);
+}
+
+#[tokio::test]
+async fn delayed_repair_does_not_suppress_the_next_lock_cycle_transition() {
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let period = chrono::Duration::seconds(1);
+    let lockout = LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 1,
+            lockout_period: period,
+            ..LockoutConfig::default()
+        },
+    );
+    let first_cycle_at = Utc::now() - chrono::Duration::milliseconds(750);
+    world
+        .storage
+        .record_attempt_and_stats(
+            EMAIL,
+            first_cycle_at,
+            Some("legacy finalized attempt"),
+            first_cycle_at - period,
+        )
+        .await
+        .unwrap();
+
+    let repair = lockout
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .unwrap();
+    assert!(!repair.admitted);
+    assert!(repair.locked_event);
+    assert_eq!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at,
+        Some(first_cycle_at)
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    let next_admission = lockout
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("the expired first-cycle attempt must free admission capacity");
+    assert!(next_admission.admitted);
+    let next_failure = lockout
+        .finalize_failed_attempt(EMAIL, &next_admission)
+        .await
+        .expect("the next cycle must finalize normally");
+    assert!(next_failure.locked_event);
+}
+
+#[tokio::test]
+async fn seaorm_success_reset_preserves_other_pending_reservations() {
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let service = LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 5,
+            ..LockoutConfig::default()
+        },
+    );
+    let prior_failure_at = Utc::now();
+    world
+        .storage
+        .record_attempt_and_stats(
+            EMAIL,
+            prior_failure_at,
+            Some("prior finalized failure"),
+            prior_failure_at - chrono::Duration::minutes(15),
+        )
+        .await
+        .unwrap();
+    world
+        .storage
+        .set_locked_at_by_email(EMAIL, Some(prior_failure_at))
+        .await
+        .unwrap();
+    let successful = service
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .unwrap();
+    let later_failure = service
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .unwrap();
+    let later_abort = service
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .unwrap();
+
+    service
+        .reset_admitted_attempts(EMAIL, &successful)
+        .await
+        .expect("successful proof resets its own reservation");
+    assert_eq!(service.status(EMAIL).await.unwrap().failed_attempts, 0);
+    assert!(
+        world
+            .storage
+            .find_by_email(EMAIL)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_at
+            .is_none()
+    );
+
+    let finalized = service
+        .finalize_failed_attempt(EMAIL, &later_failure)
+        .await
+        .expect("another admitted request keeps its exact reservation");
+    assert_eq!(finalized.status.failed_attempts, 1);
+    service
+        .cancel_attempt(EMAIL, &later_abort)
+        .await
+        .expect("another admitted request may still cancel its reservation");
+    assert_eq!(service.status(EMAIL).await.unwrap().failed_attempts, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seaorm_attempt_admission_never_exceeds_its_concurrent_budget() {
+    const ATTEMPT_LIMIT: usize = 2;
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let service = Arc::new(LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: ATTEMPT_LIMIT as u32,
+            ..LockoutConfig::default()
+        },
+    ));
+    let start = Arc::new(Barrier::new(5));
+
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let service = service.clone();
+        let start = start.clone();
+        tasks.push(tokio::spawn(async move {
+            start.wait().await;
+            service
+                .admit_attempt(EMAIL, Some("two-factor challenge"))
+                .await
+        }));
+    }
+    start.wait().await;
+
+    let mut outcomes = Vec::new();
+    for task in tasks {
+        outcomes.push(
+            task.await
+                .expect("SeaORM admission task joins")
+                .expect("SeaORM admission succeeds"),
+        );
+    }
+
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.admitted).count(),
+        ATTEMPT_LIMIT
+    );
+    assert_eq!(
+        service.status(EMAIL).await.unwrap().failed_attempts,
+        0,
+        "pending reservations consume admission capacity but are not public failures"
+    );
+    assert!(
+        !service
+            .admit_attempt(EMAIL, Some("two-factor challenge"))
+            .await
+            .unwrap()
+            .admitted,
+        "pending reservations must continue to consume the bounded admission budget"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seaorm_finalize_and_distinct_admitted_reset_serialize_consistently() {
+    let world = factor_world().await;
+    registered_user(&world).await;
+    let service = Arc::new(LockoutService::new(
+        world.storage.clone(),
+        world.storage.clone(),
+        LockoutConfig {
+            max_failed_attempts: 5,
+            ..LockoutConfig::default()
+        },
+    ));
+    let seeded_at = Utc::now();
+    for offset in 1..=3 {
+        world
+            .storage
+            .record_attempt_and_stats(
+                EMAIL,
+                seeded_at - chrono::Duration::milliseconds(offset),
+                Some("earlier finalized failure"),
+                seeded_at - chrono::Duration::minutes(15),
+            )
+            .await
+            .unwrap();
+    }
+    let invalid_admission = service
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("reserve the invalid real SeaORM attempt");
+    let valid_admission = service
+        .admit_attempt(EMAIL, Some("two-factor challenge"))
+        .await
+        .expect("reserve the valid real SeaORM attempt");
+    assert!(invalid_admission.admitted && valid_admission.admitted);
+    world
+        .storage
+        .record_attempt_and_stats(
+            EMAIL,
+            Utc::now(),
+            Some("concurrent primary-auth failure"),
+            Utc::now() - chrono::Duration::minutes(15),
+        )
+        .await
+        .unwrap();
+    assert_eq!(service.status(EMAIL).await.unwrap().failed_attempts, 4);
+    let start = Arc::new(Barrier::new(3));
+
+    let invalid_service = service.clone();
+    let invalid_start = start.clone();
+    let invalid = tokio::spawn(async move {
+        invalid_start.wait().await;
+        invalid_service
+            .finalize_failed_attempt(EMAIL, &invalid_admission)
+            .await
+    });
+    let valid_service = service.clone();
+    let valid_start = start.clone();
+    let valid = tokio::spawn(async move {
+        valid_start.wait().await;
+        valid_service
+            .reset_admitted_attempts(EMAIL, &valid_admission)
+            .await
+    });
+    start.wait().await;
+
+    let invalid = invalid.await.unwrap();
+    let valid = valid.await.unwrap();
+    valid.expect("the valid admitted reset must serialize and clear finalized history");
+    let failure = invalid.expect("the other admitted request keeps its reservation");
+    let status = service.status(EMAIL).await.unwrap();
+    let locked_at = world
+        .storage
+        .find_by_email(EMAIL)
+        .await
+        .unwrap()
+        .unwrap()
+        .locked_at;
+    assert_eq!(
+        status.failed_attempts,
+        u32::from(!failure.locked_event),
+        "invalid-first is cleared by success; success-first leaves the later invalid failure"
+    );
+    assert!(!status.is_locked);
+    assert!(locked_at.is_none());
+}
+
+#[tokio::test]
+async fn legacy_null_locked_at_attempt_remains_a_finalized_public_failure() {
+    let world = factor_world().await;
+    let attempted_at = Utc::now();
+    storage_schema::lockouts::ActiveModel {
+        id: Set(42),
+        identity: Set("legacy-null@example.test".to_owned()),
+        attempted_at: Set(attempted_at),
+        locked_at: Set(None),
+        reason: Set(None),
+    }
+    .insert(&world.db)
+    .await
+    .expect("seed legacy lockout row");
+
+    let stats = world
+        .storage
+        .attempt_stats(
+            "legacy-null@example.test",
+            attempted_at - chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("legacy lockout stats");
+
+    assert_eq!(stats.count, 1);
+    assert_eq!(stats.latest_at, Some(attempted_at));
+}
+
+#[tokio::test]
+async fn abandoned_pending_reservation_releases_capacity_after_its_window() {
+    let world = factor_world().await;
+    let identity = "abandoned-pending@example.test";
+    let fresh_at = Utc::now();
+    let stale_at = fresh_at - chrono::Duration::hours(1);
+    let stale = world
+        .storage
+        .admit_attempt_and_stats(
+            identity,
+            stale_at,
+            Some("two-factor challenge"),
+            stale_at - chrono::Duration::minutes(15),
+            1,
+        )
+        .await
+        .expect("seed abandoned pending reservation");
+    assert!(stale.admitted);
+
+    let fresh = world
+        .storage
+        .admit_attempt_and_stats(
+            identity,
+            fresh_at,
+            Some("two-factor challenge"),
+            fresh_at - chrono::Duration::minutes(15),
+            1,
+        )
+        .await
+        .expect("fresh reservation after stale window");
+
+    assert!(fresh.admitted);
+    assert_eq!(
+        world
+            .storage
+            .attempt_stats(identity, fresh_at - chrono::Duration::minutes(15))
+            .await
+            .unwrap()
+            .count,
+        0,
+        "neither abandoned nor fresh pending reservations are public failures"
+    );
 }
 
 #[tokio::test]

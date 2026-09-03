@@ -5,7 +5,7 @@ use crate::FrameworkError;
 use crate::pagination::IntoInertiaScroll;
 
 use super::config::InertiaConfig;
-use super::response::IntoInertiaData;
+use super::response::{IntoInertiaData, reflash_session_values_after_eager_error};
 use super::{
     Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaResponse,
     InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
@@ -64,10 +64,10 @@ impl Inertia {
     where
         T: IntoInertiaData,
     {
-        Ok(InertiaResponse::from_data_props(
-            component,
-            dto.__try_into_inertia_props()?,
-        ))
+        let props = dto
+            .__try_into_inertia_props()
+            .map_err(reflash_session_values_after_eager_error)?;
+        Ok(InertiaResponse::from_data_props(component, props))
     }
 
     /// Install the standard Inertia protocol middleware globally.

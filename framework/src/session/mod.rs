@@ -55,7 +55,7 @@ pub use middleware::{
     set_auth_user, set_two_factor_pending, set_two_factor_pending_remember,
     two_factor_pending_remember, two_factor_pending_user_id,
 };
-pub use store::{SessionData, SessionStore, is_valid_session_id};
+pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_session_id};
 
 /// Destroy every session belonging to `user_id`. Returns the number of
 /// session rows deleted.
@@ -108,6 +108,16 @@ pub async fn session_scope_for_test<F: std::future::Future>(
     fut: F,
 ) -> F::Output {
     middleware::SESSION_CONTEXT.scope(slot, fut).await
+}
+
+/// Test-only: install every request scope required for session binding.
+#[doc(hidden)]
+#[cfg(feature = "testing")]
+pub async fn session_bind_scopes_for_test<F: std::future::Future>(
+    slot: std::sync::Arc<std::sync::Mutex<Option<SessionData>>>,
+    future: F,
+) -> F::Output {
+    middleware::session_bind_scopes_for_test(slot, future).await
 }
 
 /// Test-only: a fresh pending-cookies slot. Use with

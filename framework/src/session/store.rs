@@ -338,6 +338,16 @@ impl SessionData {
         self.get(MAGNETAR_WEB_BINDING_KEY)
     }
 
+    pub(crate) fn checked_magnetar_web_binding(
+        &self,
+    ) -> Result<Option<magnetar::sessions::WebSessionBinding>, serde_json::Error> {
+        self.data
+            .get(MAGNETAR_WEB_BINDING_KEY)
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+    }
+
     /// Remove the Magnetar web-session binding from this framework session.
     pub fn clear_magnetar_web_binding(&mut self) {
         self.forget(MAGNETAR_WEB_BINDING_KEY);
@@ -720,6 +730,33 @@ pub fn is_valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
+/// Failure from an atomic pending-2FA session promotion.
+///
+/// The variant is the storage acknowledgement boundary. Callers may preserve
+/// the pending browser credential only for [`Self::RolledBack`].
+#[derive(Debug)]
+pub enum SessionMigrationError {
+    /// Storage confirmed that neither the old-row deletion nor replacement
+    /// insert committed.
+    RolledBack(FrameworkError),
+    /// Storage could not prove whether the transaction committed. Callers must
+    /// treat both the old and replacement browser credentials as unusable.
+    OutcomeUnknown(FrameworkError),
+}
+
+impl std::fmt::Display for SessionMigrationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RolledBack(error) => write!(formatter, "session migration rolled back: {error}"),
+            Self::OutcomeUnknown(error) => {
+                write!(formatter, "session migration outcome is unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionMigrationError {}
+
 /// Session store trait for different backends
 ///
 /// Implement this trait to create custom session storage backends.
@@ -734,6 +771,32 @@ pub trait SessionStore: Send + Sync {
     ///
     /// Creates a new session if it doesn't exist, updates if it does.
     async fn write(&self, session: &SessionData) -> Result<(), FrameworkError>;
+
+    /// Atomically replace `old_id` with `session` during a pending-2FA
+    /// promotion.
+    ///
+    /// Implementations must remove exactly the row named by `old_id` and
+    /// create the replacement row in one backend transaction. If either step
+    /// fails before commit, implementations return
+    /// [`SessionMigrationError::RolledBack`] only after confirming rollback;
+    /// the old row then remains and the replacement does not exist. A commit
+    /// acknowledgement failure or failed rollback returns
+    /// [`SessionMigrationError::OutcomeUnknown`] because either durable state
+    /// may exist. A missing old row is an error rather than permission to
+    /// create a new authenticated session.
+    ///
+    /// The default deliberately fails before changing storage. This keeps
+    /// existing custom `SessionStore` implementations source-compatible while
+    /// ensuring they cannot silently perform a non-atomic 2FA promotion.
+    async fn migrate_two_factor_session(
+        &self,
+        _old_id: &str,
+        _session: &SessionData,
+    ) -> Result<(), SessionMigrationError> {
+        Err(SessionMigrationError::RolledBack(FrameworkError::internal(
+            "session store does not support atomic 2FA session migration",
+        )))
+    }
 
     /// Destroy a session by its ID
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError>;

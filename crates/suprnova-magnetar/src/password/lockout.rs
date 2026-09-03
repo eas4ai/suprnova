@@ -109,6 +109,79 @@ pub struct FailedAttempt {
     pub locked_event: bool,
 }
 
+/// One atomic verification-attempt admission decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptAdmission {
+    /// Whether this caller reserved capacity and may evaluate its proof.
+    pub admitted: bool,
+    /// Finalized-failure status observed in the same serialized store operation.
+    pub status: LockoutStatus,
+    /// True when this rejected admission repaired a previously finalized
+    /// unlocked-to-locked transition. Hosts publish their lock event from it.
+    pub locked_event: bool,
+    reservation: Option<AttemptReservationToken>,
+}
+
+/// Opaque handle for one pending verification-attempt reservation.
+///
+/// Hosts must return this handle to [`LockoutService`] to either finalize an
+/// invalid proof or cancel an attempt whose verification could not complete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptReservationToken {
+    id: String,
+    context: Option<String>,
+}
+
+impl AttemptReservationToken {
+    /// Construct a token for a store reservation.
+    #[must_use]
+    pub fn new(id: impl Into<String>, context: Option<String>) -> Self {
+        Self {
+            id: id.into(),
+            context,
+        }
+    }
+}
+
+impl AttemptAdmission {
+    /// Reconstruct an admission while adapting it across a host boundary.
+    #[must_use]
+    pub fn from_parts(
+        admitted: bool,
+        status: LockoutStatus,
+        reservation: Option<AttemptReservationToken>,
+    ) -> Self {
+        Self {
+            admitted,
+            status,
+            locked_event: false,
+            reservation,
+        }
+    }
+
+    /// Reconstruct an admission including a durable lock-transition signal.
+    #[must_use]
+    pub fn from_parts_with_event(
+        admitted: bool,
+        status: LockoutStatus,
+        locked_event: bool,
+        reservation: Option<AttemptReservationToken>,
+    ) -> Self {
+        Self {
+            admitted,
+            status,
+            locked_event,
+            reservation,
+        }
+    }
+
+    /// The reservation token when this attempt was admitted.
+    #[must_use]
+    pub const fn reservation(&self) -> Option<&AttemptReservationToken> {
+        self.reservation.as_ref()
+    }
+}
+
 /// Lockout policy service.
 pub struct LockoutService {
     store: Arc<dyn LockoutStore>,
@@ -200,6 +273,128 @@ impl LockoutService {
             status,
             locked_event,
         })
+    }
+
+    /// Atomically reserve capacity before evaluating an authentication proof.
+    ///
+    /// The admitted reservation is pending until a failed proof finalizes it,
+    /// a successful proof removes it with prior finalized failures, or an
+    /// aborted verification cancels it. Other in-flight reservations retain
+    /// their own lifecycle. Calls beyond the configured threshold insert no row.
+    pub async fn admit_attempt(
+        &self,
+        identity: &str,
+        context: Option<&str>,
+    ) -> Result<AttemptAdmission> {
+        if !self.config.enabled {
+            return Ok(AttemptAdmission {
+                admitted: true,
+                status: LockoutStatus::unlocked(identity),
+                locked_event: false,
+                reservation: None,
+            });
+        }
+        let at = Utc::now();
+        let window_start = at - self.config.lockout_period;
+        let reservation = self
+            .store
+            .admit_attempt_and_stats(
+                identity,
+                at,
+                context,
+                window_start,
+                self.config.max_failed_attempts,
+            )
+            .await?;
+        let status = self.compute(
+            identity,
+            reservation.stats.count,
+            reservation.stats.latest_at,
+        );
+        let locked_event = reservation.locked_event;
+        let token = reservation
+            .reservation_id
+            .map(|id| AttemptReservationToken::new(id, context.map(ToOwned::to_owned)));
+        Ok(AttemptAdmission {
+            admitted: reservation.admitted,
+            status,
+            locked_event,
+            reservation: token,
+        })
+    }
+
+    /// Cancel exactly one pending reservation after verification aborts.
+    ///
+    /// Missing or already-finalized reservations are reported as conflicts so
+    /// callers fail closed when the attempt state is uncertain.
+    pub async fn cancel_attempt(&self, identity: &str, admission: &AttemptAdmission) -> Result<()> {
+        let Some(token) = admission.reservation() else {
+            return Ok(());
+        };
+        if self
+            .store
+            .cancel_attempt_reservation(identity, &token.id)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(crate::Error::Conflict {
+                resource: "attempt reservation".to_owned(),
+                message: "reservation is missing or no longer pending".to_owned(),
+            })
+        }
+    }
+
+    /// Finalize one pending reservation as a failed proof and apply the
+    /// durable unlocked-to-locked transition when it reaches the threshold.
+    pub async fn finalize_failed_attempt(
+        &self,
+        identity: &str,
+        admission: &AttemptAdmission,
+    ) -> Result<FailedAttempt> {
+        let Some(token) = admission.reservation() else {
+            return Ok(FailedAttempt {
+                status: LockoutStatus::unlocked(identity),
+                locked_event: false,
+            });
+        };
+        let at = Utc::now();
+        let window_start = at - self.config.lockout_period;
+        let finalized = self
+            .store
+            .finalize_attempt_reservation(
+                identity,
+                &token.id,
+                at,
+                token.context.as_deref(),
+                window_start,
+                self.config.max_failed_attempts,
+            )
+            .await?;
+        let status = self.compute(identity, finalized.stats.count, finalized.stats.latest_at);
+        Ok(FailedAttempt {
+            status,
+            locked_event: finalized.locked_event,
+        })
+    }
+
+    /// Success-path bookkeeping for a proof admitted through
+    /// [`Self::admit_attempt`]. The exact pending reservation, prior finalized
+    /// failures, and the user lock stamp transition in one storage operation.
+    /// Other in-flight pending reservations are preserved. Stores without that
+    /// atomic lifecycle fail closed.
+    pub async fn reset_admitted_attempts(
+        &self,
+        identity: &str,
+        admission: &AttemptAdmission,
+    ) -> Result<()> {
+        let Some(token) = admission.reservation() else {
+            return Ok(());
+        };
+        self.store
+            .reset_admitted_attempts(identity, &token.id, token.context.as_deref())
+            .await?;
+        Ok(())
     }
 
     /// Success-path bookkeeping: clear the counter and the user lock stamp.

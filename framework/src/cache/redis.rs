@@ -63,6 +63,31 @@ end
 return flushed
 "#;
 
+/// Atomically install a missing untagged value and clear stale tag metadata.
+///
+/// `KEYS[1]` is the value key, `KEYS[2]` is its auxiliary tag-membership set,
+/// `ARGV[1]` is the value, and optional `ARGV[2]` is the TTL in milliseconds.
+/// The aux key is removed only when this invocation wins `SET NX`, so a newer
+/// tagged overwrite can never land between the conditional write and cleanup.
+///
+/// RedisCache uses redis-rs' single-node `ConnectionManager`, not its cluster
+/// client. The two-key script therefore does not add a cross-slot limitation
+/// to the supported driver surface.
+const ADD_RAW_LUA: &str = r#"
+-- suprnova_cache_add_raw_v1
+local result
+if ARGV[2] then
+    result = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
+else
+    result = redis.call('SET', KEYS[1], ARGV[1], 'NX')
+end
+if result then
+    redis.call('DEL', KEYS[2])
+    return 1
+end
+return 0
+"#;
+
 /// Convert a `Duration` into a Redis-millisecond TTL argument.
 ///
 /// Redis sub-second TTLs are expressed via `PX` (set) and `PEXPIRE`
@@ -245,42 +270,22 @@ impl CacheStore for RedisCache {
     ) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
-
-        // Atomic via SET NX [PX ttl] - Redis writes the value only when
-        // the key does not exist. Returns the string "OK" on success and
-        // nil (Option::None) on contention.
-        let res: Option<String> = if let Some(d) = ttl {
-            redis::cmd("SET")
-                .arg(&pkey)
-                .arg(value)
-                .arg("NX")
-                .arg("PX")
-                .arg(redis_ttl_ms(d))
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
-        } else {
-            redis::cmd("SET")
-                .arg(&pkey)
-                .arg(value)
-                .arg("NX")
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
-        };
-
-        // If we wrote a fresh untagged value, drop any leftover tag aux
-        // set so a stale flush_tags cannot delete it.
-        if res.is_some() {
-            let aux = self.key_tags_set(&pkey);
-            redis::cmd("DEL")
-                .arg(&aux)
-                .query_async::<()>(&mut conn)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache aux drop: {e}")))?;
+        let aux = self.key_tags_set(&pkey);
+        let mut script = redis::cmd("EVAL");
+        script
+            .arg(ADD_RAW_LUA)
+            .arg(2)
+            .arg(&pkey)
+            .arg(&aux)
+            .arg(value);
+        if let Some(duration) = ttl {
+            script.arg(redis_ttl_ms(duration));
         }
-
-        Ok(res.is_some())
+        let added: i64 = script
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?;
+        Ok(added == 1)
     }
 
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {

@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use magnetar::password::{LockoutConfig, LockoutService};
+use magnetar::password::{
+    AttemptAdmission, AttemptReservationToken, LockoutConfig, LockoutService, LockoutStatus,
+};
 use magnetar::storage::{
-    AttemptStats, CredentialActor, LockoutStore, NewUser, UserRecord, UserStore,
+    AttemptReservation, AttemptStats, CredentialActor, LockoutStore, NewUser, UserRecord, UserStore,
 };
 use parking_lot::Mutex;
 use tokio::sync::Barrier;
@@ -20,6 +22,38 @@ use tokio::sync::Barrier;
 struct BarrierAttemptStore {
     recorded: Mutex<Vec<DateTime<Utc>>>,
     both_recorded: Barrier,
+}
+
+#[derive(Default)]
+struct LegacyAttemptStore;
+
+#[async_trait]
+impl LockoutStore for LegacyAttemptStore {
+    async fn record_attempt_and_stats(
+        &self,
+        _identity: &str,
+        _at: DateTime<Utc>,
+        _context: Option<&str>,
+        _window_start: DateTime<Utc>,
+    ) -> magnetar::Result<AttemptStats> {
+        Ok(AttemptStats::default())
+    }
+
+    async fn attempt_stats(
+        &self,
+        _identity: &str,
+        _window_start: DateTime<Utc>,
+    ) -> magnetar::Result<AttemptStats> {
+        Ok(AttemptStats::default())
+    }
+
+    async fn clear_attempts(&self, _identity: &str) -> magnetar::Result<u64> {
+        Ok(0)
+    }
+
+    async fn cleanup_attempts_before(&self, _before: DateTime<Utc>) -> magnetar::Result<u64> {
+        Ok(0)
+    }
 }
 
 impl BarrierAttemptStore {
@@ -73,6 +107,41 @@ impl LockoutStore for BarrierAttemptStore {
         };
         self.both_recorded.wait().await;
         Ok(stats)
+    }
+    async fn admit_attempt_and_stats(
+        &self,
+        _identity: &str,
+        at: DateTime<Utc>,
+        _context: Option<&str>,
+        window_start: DateTime<Utc>,
+        max_attempts: u32,
+    ) -> magnetar::Result<AttemptReservation> {
+        let mut recorded = self.recorded.lock();
+        let current = u32::try_from(
+            recorded
+                .iter()
+                .filter(|attempted_at| **attempted_at >= window_start)
+                .count(),
+        )
+        .unwrap();
+        let admitted = current < max_attempts;
+        if admitted {
+            recorded.push(at);
+        }
+        let latest_at = recorded
+            .iter()
+            .filter(|attempted_at| **attempted_at >= window_start)
+            .max()
+            .copied();
+        Ok(AttemptReservation {
+            admitted,
+            stats: AttemptStats {
+                count: current + u32::from(admitted),
+                latest_at,
+            },
+            reservation_id: admitted.then(|| format!("reservation-{}", recorded.len())),
+            locked_event: false,
+        })
     }
     async fn attempt_stats(
         &self,
@@ -190,6 +259,69 @@ impl UserStore for TransitionUserStore {
             lock_timestamps.clear();
         }
         Ok(())
+    }
+}
+
+#[tokio::test]
+async fn legacy_store_without_atomic_admission_fails_closed() {
+    let service = LockoutService::new(
+        Arc::new(LegacyAttemptStore),
+        Arc::new(TransitionUserStore::default()),
+        LockoutConfig::default(),
+    );
+
+    let error = service
+        .admit_attempt("legacy@example.test", Some("two-factor challenge"))
+        .await
+        .expect_err("a legacy store must never fall back to split attempt admission");
+
+    assert!(matches!(
+        error,
+        magnetar::Error::DependencyUnavailable { dependency, .. }
+            if dependency == "lockout store"
+    ));
+}
+
+#[tokio::test]
+async fn legacy_store_without_reservation_lifecycle_fails_closed() {
+    let service = LockoutService::new(
+        Arc::new(LegacyAttemptStore),
+        Arc::new(TransitionUserStore::default()),
+        LockoutConfig::default(),
+    );
+    let admission = AttemptAdmission::from_parts(
+        true,
+        LockoutStatus {
+            identity: "legacy@example.test".to_owned(),
+            failed_attempts: 0,
+            is_locked: false,
+            locked_until: None,
+        },
+        Some(AttemptReservationToken::new(
+            "legacy-reservation",
+            Some("two-factor challenge".to_owned()),
+        )),
+    );
+
+    for error in [
+        service
+            .cancel_attempt("legacy@example.test", &admission)
+            .await
+            .expect_err("legacy cancellation must fail closed"),
+        service
+            .finalize_failed_attempt("legacy@example.test", &admission)
+            .await
+            .expect_err("legacy finalization must fail closed"),
+        service
+            .reset_admitted_attempts("legacy@example.test", &admission)
+            .await
+            .expect_err("legacy admitted reset must fail closed"),
+    ] {
+        assert!(matches!(
+            error,
+            magnetar::Error::DependencyUnavailable { dependency, .. }
+                if dependency == "lockout store"
+        ));
     }
 }
 

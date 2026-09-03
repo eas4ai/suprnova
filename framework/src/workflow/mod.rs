@@ -240,9 +240,10 @@ impl WorkflowWorker {
 
     /// Create a worker with a custom config.
     ///
-    /// Does **not** validate the config or check the registry - callers
-    /// that need those invariants should run [`WorkflowConfig::validate`]
-    /// and [`registry::assert_no_duplicates`] themselves.
+    /// Construction does not validate the config or check the registry.
+    /// The worker validates config before its run loop starts; callers that
+    /// need construction-time validation can call [`WorkflowConfig::validate`].
+    /// Call [`registry::assert_no_duplicates`] separately when needed.
     pub fn with_config(config: WorkflowConfig) -> Self {
         let random: u64 = rand::rng().random();
         let worker_id = format!("{}-{}", std::process::id(), random);
@@ -278,6 +279,8 @@ impl WorkflowWorker {
     }
 
     async fn run(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
+        self.config.validate()?;
+
         let poll = Duration::from_millis(self.config.poll_interval_ms);
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
         let mut in_flight: JoinSet<()> = JoinSet::new();
@@ -1679,6 +1682,29 @@ mod tests {
             .expect("worker task panicked");
 
         result.expect("run_with_cancel must return Ok on graceful drain");
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_zero_lock_timeout_before_starting() {
+        let config = WorkflowConfig {
+            poll_interval_ms: 20,
+            concurrency: 1,
+            lock_timeout_secs: 0,
+            max_attempts: 3,
+            retry_backoff_secs: 5,
+        };
+        let worker = WorkflowWorker::with_config(config);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = worker
+            .run_with_cancel(cancel)
+            .await
+            .expect_err("zero lock timeout must fail before worker startup");
+        assert!(
+            err.to_string().contains("lock_timeout_secs"),
+            "error must name lock_timeout_secs, got: {err}",
+        );
     }
 
     // wait_with_timeout must return a timeout error when the workflow

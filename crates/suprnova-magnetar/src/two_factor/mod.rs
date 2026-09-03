@@ -24,7 +24,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::auth::{FactorVerifier, PreparedFactorProof};
 use crate::crypto::{CryptoPurpose, Encryptor};
-use crate::password::{LockoutService, normalize_email};
+use crate::password::{AttemptAdmission, LockoutService, normalize_email};
 use crate::storage::{CredentialActor, UserStore};
 use crate::{Error, Result};
 
@@ -105,6 +105,7 @@ enum PreparedTwoFactorClaim {
 pub struct PreparedTwoFactorProof {
     user_id: String,
     lockout_identity: String,
+    admission: AttemptAdmission,
     claim: PreparedTwoFactorClaim,
 }
 
@@ -114,6 +115,7 @@ impl std::fmt::Debug for PreparedTwoFactorProof {
             .debug_struct("PreparedTwoFactorProof")
             .field("user_id", &"[REDACTED]")
             .field("lockout_identity", &"[REDACTED]")
+            .field("admission", &"[REDACTED]")
             .field("claim", &"[REDACTED]")
             .finish()
     }
@@ -453,6 +455,7 @@ impl TwoFactorService {
         user_id: &str,
         code: &str,
         lockout_identity: String,
+        admission: AttemptAdmission,
     ) -> Result<PreparedFactorProof<PreparedTwoFactorProof>> {
         let (valid, claim) = match self.inspect_proof(user_id, code).await? {
             ProofMaterial::Invalid => (false, PreparedTwoFactorClaim::Invalid),
@@ -483,6 +486,7 @@ impl TwoFactorService {
         let prepared = PreparedTwoFactorProof {
             user_id: user_id.to_owned(),
             lockout_identity,
+            admission,
             claim,
         };
         Ok(if valid {
@@ -532,8 +536,8 @@ impl TwoFactorService {
 }
 
 /// The gate wiring: a confirmed enrollment interrupts every primary
-/// sign-in, and challenge proof accepts a TOTP code or a recovery code
-/// with one canonical lockout record per failure.
+/// sign-in, and challenge proof accepts a TOTP code or a recovery code after
+/// one canonical pre-verification attempt reservation.
 #[async_trait]
 impl FactorVerifier for TwoFactorService {
     type PreparedProof = PreparedTwoFactorProof;
@@ -548,18 +552,55 @@ impl FactorVerifier for TwoFactorService {
         code: &str,
     ) -> Result<PreparedFactorProof<Self::PreparedProof>> {
         let identity = self.lockout_identity(user_id).await?;
-        self.require_unlocked(&identity).await?;
-        self.prepare_factor_proof(user_id, code, identity).await
+        let admission = self
+            .lockout
+            .admit_attempt(&identity, Some("two-factor challenge"))
+            .await?;
+        if !admission.admitted {
+            return Err(Error::Conflict {
+                resource: "account lockout".to_owned(),
+                message: format!(
+                    "account is locked due to too many failed attempts; retry in {} seconds",
+                    admission.status.retry_after_seconds().unwrap_or(0)
+                ),
+            });
+        }
+        match self
+            .prepare_factor_proof(user_id, code, identity.clone(), admission.clone())
+            .await
+        {
+            Ok(proof) => Ok(proof),
+            Err(proof_error) => {
+                if let Err(cancel_error) = self.lockout.cancel_attempt(&identity, &admission).await
+                {
+                    tracing::error!(
+                        error = %cancel_error,
+                        original_error = %proof_error,
+                        "failed to cancel two-factor attempt after proof preparation aborted"
+                    );
+                    return Err(cancel_error);
+                }
+                Err(proof_error)
+            }
+        }
     }
 
     async fn claim_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<bool> {
         if proof.user_id != user_id {
+            self.lockout
+                .cancel_attempt(&proof.lockout_identity, &proof.admission)
+                .await?;
             return Ok(false);
         }
         let claimed = match proof.claim {
-            PreparedTwoFactorClaim::Invalid => false,
+            PreparedTwoFactorClaim::Invalid => {
+                self.lockout
+                    .finalize_failed_attempt(&proof.lockout_identity, &proof.admission)
+                    .await?;
+                return Ok(false);
+            }
             PreparedTwoFactorClaim::Totp { matched_step } => {
-                self.store.claim_timestep(user_id, matched_step).await?
+                self.store.claim_timestep(user_id, matched_step).await
             }
             PreparedTwoFactorClaim::Recovery {
                 expected_ciphertext,
@@ -567,25 +608,51 @@ impl FactorVerifier for TwoFactorService {
             } => {
                 self.store
                     .swap_recovery_codes(user_id, &expected_ciphertext, next_ciphertext.as_deref())
-                    .await?
+                    .await
             }
         };
-        if claimed {
-            if self
-                .lockout
-                .reset_attempts(&proof.lockout_identity)
-                .await
-                .is_err()
-            {
-                tracing::warn!("lockout reset failed after committed two-factor proof claim");
+        let claimed = match claimed {
+            Ok(claimed) => claimed,
+            Err(claim_error) => {
+                if let Err(cancel_error) = self
+                    .lockout
+                    .cancel_attempt(&proof.lockout_identity, &proof.admission)
+                    .await
+                {
+                    tracing::error!(
+                        error = %cancel_error,
+                        original_error = %claim_error,
+                        "failed to cancel two-factor attempt after proof claim aborted"
+                    );
+                    return Err(cancel_error);
+                }
+                return Err(claim_error);
             }
-        } else {
-            let _ = self
-                .lockout
-                .record_failed_attempt(&proof.lockout_identity, Some("two-factor challenge"))
-                .await;
+        };
+        if !claimed {
+            self.lockout
+                .cancel_attempt(&proof.lockout_identity, &proof.admission)
+                .await?;
+            return Ok(false);
+        }
+        if claimed {
+            self.lockout
+                .reset_admitted_attempts(&proof.lockout_identity, &proof.admission)
+                .await?;
         }
         Ok(claimed)
+    }
+
+    async fn cancel_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<()> {
+        if proof.user_id != user_id {
+            return Err(Error::Conflict {
+                resource: "two-factor proof".to_owned(),
+                message: "prepared proof belongs to another user".to_owned(),
+            });
+        }
+        self.lockout
+            .cancel_attempt(&proof.lockout_identity, &proof.admission)
+            .await
     }
 }
 

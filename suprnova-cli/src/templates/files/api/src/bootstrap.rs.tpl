@@ -24,13 +24,19 @@
 
 use suprnova::{
     BearerTokenMiddleware, DB, IncludeMiddleware, MagnetarConfig, PasskeyConfig,
-    global_middleware, init_magnetar,
+    boot::initialize_crypt_or_exit, global_middleware, init_magnetar,
 };
 
 /// Register global middleware and services.
 ///
 /// Called from `main()` before the server starts.
 pub async fn register() {
+    // Magnetar's encryptor is constructed during this hook, before the HTTP
+    // server exists. Worker and console processes call the same hook, so this
+    // is the shared boundary where Crypt must be ready for every real process
+    // bootstrap. Console help/version skip the hook and need no APP_KEY.
+    initialize_crypt_or_exit();
+
     // Initialise the database connection pool.
     DB::init().await.expect("Failed to connect to database");
 

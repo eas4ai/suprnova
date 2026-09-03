@@ -3,13 +3,13 @@
 use async_trait::async_trait;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{QueryFilter, Set};
+use sea_orm::{QueryFilter, Set, TransactionTrait};
 use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::database::DB;
 use crate::error::FrameworkError;
-use crate::session::store::{SessionData, SessionStore};
+use crate::session::store::{SessionData, SessionMigrationError, SessionStore};
 
 /// Database session driver using SeaORM
 ///
@@ -161,6 +161,69 @@ impl SessionStore for DatabaseSessionDriver {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         Ok(())
+    }
+
+    async fn migrate_two_factor_session(
+        &self,
+        old_id: &str,
+        session: &SessionData,
+    ) -> Result<(), SessionMigrationError> {
+        let db = DB::connection().map_err(SessionMigrationError::RolledBack)?;
+        let payload = serde_json::to_string(&session.data).map_err(|e| {
+            SessionMigrationError::RolledBack(FrameworkError::internal(format!(
+                "Session serialize error: {e}"
+            )))
+        })?;
+        let model = sessions::ActiveModel {
+            id: Set(session.id.clone()),
+            user_id: Set(session.user_id.clone()),
+            payload: Set(payload),
+            csrf_token: Set(session.csrf_token.clone()),
+            last_activity: Set(chrono::Utc::now().naive_utc()),
+        };
+
+        let transaction = db.inner().begin().await.map_err(|e| {
+            SessionMigrationError::RolledBack(FrameworkError::database(e.to_string()))
+        })?;
+        let migration = async {
+            let deleted = sessions::Entity::delete_by_id(old_id)
+                .exec(&transaction)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            if deleted.rows_affected != 1 {
+                return Err(FrameworkError::internal(
+                    "atomic 2FA session migration requires an existing old session",
+                ));
+            }
+
+            sessions::Entity::insert(model)
+                .exec(&transaction)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            Ok(())
+        }
+        .await;
+
+        match migration {
+            Ok(()) => transaction.commit().await.map_err(|e| {
+                SessionMigrationError::OutcomeUnknown(FrameworkError::database(e.to_string()))
+            }),
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    tracing::error!(
+                        operation = "two_factor_session_migration_rollback",
+                        classification = "backend_failure",
+                        "atomic session migration rollback failed"
+                    );
+                    return Err(SessionMigrationError::OutcomeUnknown(
+                        FrameworkError::database(format!(
+                            "session migration failed and rollback was not confirmed: {rollback_error}"
+                        )),
+                    ));
+                }
+                Err(SessionMigrationError::RolledBack(error))
+            }
+        }
     }
 
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {

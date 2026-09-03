@@ -191,14 +191,16 @@ pub use magnetar_integration::SignInOutcome;
     feature = "database-mysql"
 ))]
 pub use magnetar_integration::{
-    MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
+    FactorAuth, MagnetarConfig, MagnetarFactorAuthEngine, PasskeyConfig, init_magnetar,
+    middleware::BearerTokenMiddleware,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar_integration::{
     MagnetarOAuthOnlyConfig,
     abuse_limiter::FrameworkAbuseLimiter,
     engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig},
-    init_magnetar_oauth_only,
+    init_magnetar_oauth_only, install_magnetar_oauth_engine,
+    install_magnetar_oauth_engine_with_factor,
     oauth_transport::ReqwestOAuthTransport,
 };
 #[cfg(feature = "magnetar-oauth")]
@@ -410,9 +412,10 @@ pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
     DatabaseSessionDriver, SessionConfig, SessionData, SessionGcSupervisor, SessionMiddleware,
-    SessionStore, auth_user_id, clear_auth_user, destroy_all_for_user, generate_csrf_token,
-    generate_session_id, get_csrf_token, invalidate_session, is_authenticated, is_valid_session_id,
-    regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
+    SessionMigrationError, SessionStore, auth_user_id, clear_auth_user, destroy_all_for_user,
+    generate_csrf_token, generate_session_id, get_csrf_token, invalidate_session, is_authenticated,
+    is_valid_session_id, regenerate_csrf_token, regenerate_session_id, session, session_mut,
+    set_auth_user,
 };
 pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;

@@ -24,8 +24,8 @@ use sea_orm::{
 
 use super::engine::{
     HostLifecycleDeduplication, HostPasswordLockout, HostUserAdapter, LifecycleDeliveryClaim,
-    MagnetarBinding, MagnetarHostEngine, MagnetarHostEngineParts, MagnetarPasskeyAuthEngine,
-    MagnetarPasswordAuthEngine,
+    LockoutAdmission, MagnetarBinding, MagnetarHostEngine, MagnetarHostEngineParts,
+    MagnetarPasskeyAuthEngine, MagnetarPasswordAuthEngine,
 };
 #[cfg(feature = "magnetar-oauth")]
 use super::engine::{HostOAuthError, MagnetarOAuthAuthEngine, MagnetarOAuthHostConfig};
@@ -232,6 +232,15 @@ fn framework_lockout(status: magnetar::password::lockout::LockoutStatus) -> Lock
     }
 }
 
+fn magnetar_lockout(status: &LockoutStatus) -> magnetar::password::LockoutStatus {
+    magnetar::password::LockoutStatus {
+        identity: status.email.clone(),
+        failed_attempts: status.failed_attempts,
+        is_locked: status.is_locked,
+        locked_until: status.locked_until,
+    }
+}
+
 #[async_trait]
 impl HostPasswordLockout for DefaultLockout {
     async fn status(&self, identity: &str) -> magnetar::Result<LockoutStatus> {
@@ -249,8 +258,76 @@ impl HostPasswordLockout for DefaultLockout {
         self.service.status(identity).await.map(framework_lockout)
     }
 
+    async fn admit_attempt(
+        &self,
+        identity: &str,
+        context: Option<&str>,
+    ) -> magnetar::Result<LockoutAdmission> {
+        let admission = self.service.admit_attempt(identity, context).await?;
+        let reservation = admission.reservation().cloned();
+        Ok(LockoutAdmission::with_event(
+            admission.admitted,
+            framework_lockout(admission.status),
+            admission.locked_event,
+            reservation,
+        ))
+    }
+
+    async fn cancel_attempt(
+        &self,
+        identity: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<()> {
+        let magnetar_admission = magnetar::password::AttemptAdmission::from_parts_with_event(
+            admission.admitted,
+            magnetar_lockout(&admission.status),
+            admission.locked_event,
+            admission.reservation().cloned(),
+        );
+        self.service
+            .cancel_attempt(identity, &magnetar_admission)
+            .await
+    }
+
+    async fn finalize_failed_attempt(
+        &self,
+        identity: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<super::engine::LockoutFinalization> {
+        let magnetar_admission = magnetar::password::AttemptAdmission::from_parts_with_event(
+            admission.admitted,
+            magnetar_lockout(&admission.status),
+            admission.locked_event,
+            admission.reservation().cloned(),
+        );
+        let finalized = self
+            .service
+            .finalize_failed_attempt(identity, &magnetar_admission)
+            .await?;
+        Ok(super::engine::LockoutFinalization {
+            status: framework_lockout(finalized.status),
+            locked_event: finalized.locked_event,
+        })
+    }
+
     async fn reset_after_success(&self, identity: &str) -> magnetar::Result<()> {
         self.service.reset_attempts(identity).await
+    }
+
+    async fn reset_admitted_attempts(
+        &self,
+        identity: &str,
+        admission: &LockoutAdmission,
+    ) -> magnetar::Result<()> {
+        let magnetar_admission = magnetar::password::AttemptAdmission::from_parts_with_event(
+            admission.admitted,
+            magnetar_lockout(&admission.status),
+            admission.locked_event,
+            admission.reservation().cloned(),
+        );
+        self.service
+            .reset_admitted_attempts(identity, &magnetar_admission)
+            .await
     }
 
     async fn unlock(&self, identity: &str) -> magnetar::Result<bool> {
@@ -400,7 +477,8 @@ struct DefaultEngineBundle {
 pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError> {
     let reservation = super::reserve_magnetar_engines()?;
     let bundle = build_default_engines(config).await?;
-    reservation.install(bundle.password, bundle.passkey, bundle.oauth)
+    let factor = super::password_factor_engine(bundle.password.clone());
+    reservation.install(bundle.password, bundle.passkey, factor, bundle.oauth)
 }
 
 /// Install only the default OAuth engine and leave framework session authority
@@ -433,7 +511,8 @@ pub async fn init_magnetar_oauth_only(
         .oauth
         .take()
         .ok_or_else(|| FrameworkError::internal("OAuth-only configuration omitted OAuth"))?;
-    reservation.install_oauth_only(oauth)
+    let factor = super::password_factor_engine(bundle.password);
+    reservation.install_oauth_only(oauth, factor)
 }
 
 async fn build_default_engines(

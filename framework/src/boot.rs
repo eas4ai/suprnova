@@ -68,6 +68,25 @@ pub fn load_env_or_exit() -> Environment {
     }
 }
 
+/// Validate and install the process-wide encryption key ring.
+///
+/// Generated applications call this immediately before their real application
+/// bootstrap. Keeping it out of [`load_env_or_exit`] lets console help,
+/// version, and parse-error paths load enough configuration to render output
+/// without requiring an `APP_KEY` for bootstrap work they never perform.
+///
+/// This helper reports validation failures to stderr and exits because an
+/// application bootstrap cannot safely continue without Crypt.
+pub fn initialize_crypt_or_exit() {
+    let environment = Config::get::<crate::config::AppConfig>()
+        .map(|config| config.environment)
+        .unwrap_or_else(Environment::detect);
+    if let Err(error) = crate::crypto::initialize_from_environment(&environment) {
+        eprintln!("framework encryption init failed: {error}");
+        std::process::exit(1);
+    }
+}
+
 /// Whether [`load_env`] has run from a single-threaded context.
 pub fn env_loaded_pre_runtime() -> bool {
     ENV_LOADED_PRE_RUNTIME.load(Ordering::Acquire)

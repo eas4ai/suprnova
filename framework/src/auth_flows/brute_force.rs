@@ -6,8 +6,10 @@
 use crate::LockoutStatus;
 use crate::auth_flows::events::{AccountLocked, AccountUnlocked};
 use crate::error::FrameworkError;
+use crate::magnetar_integration::engine::LockoutAdmission;
 use crate::magnetar_integration::{
-    lockout_status, record_failed_attempt, reset_attempts, unlock_account,
+    admit_attempt, cancel_attempt, finalize_failed_attempt, lockout_status, record_failed_attempt,
+    reset_attempts, unlock_account,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -103,6 +105,59 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 pub struct BruteForce;
 
 impl BruteForce {
+    /// Reserve one attempt before proof evaluation without exceeding the
+    /// configured per-account budget.
+    pub(crate) async fn admit_attempt(
+        email: &str,
+        context: Option<&str>,
+    ) -> Result<LockoutAdmission, FrameworkError> {
+        let admission = admit_attempt(email, context).await.map_err(|error| {
+            tracing::error!(%error, "authentication attempt admission failed");
+            FrameworkError::domain("authentication attempt admission unavailable", 503)
+        })?;
+        if admission.locked_event && should_fire_locked_once(email, admission.status.locked_until) {
+            let _ = crate::events::EventFacade::dispatch(AccountLocked {
+                email: email.to_owned(),
+                failed_attempts: admission.status.failed_attempts,
+            })
+            .await;
+        }
+        Ok(admission)
+    }
+
+    /// Publish the lock transition won by an admitted attempt after its proof
+    /// has failed. Successful proofs reset the reservation without firing.
+    pub(crate) async fn finish_admitted_failure(
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<LockoutStatus, FrameworkError> {
+        let finalized = finalize_failed_attempt(email, admission)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "authentication attempt finalization failed");
+                FrameworkError::domain("authentication attempt finalization unavailable", 503)
+            })?;
+        if finalized.locked_event && should_fire_locked_once(email, finalized.status.locked_until) {
+            let _ = crate::events::EventFacade::dispatch(AccountLocked {
+                email: email.to_owned(),
+                failed_attempts: finalized.status.failed_attempts,
+            })
+            .await;
+        }
+        Ok(finalized.status)
+    }
+
+    /// Cancel one admitted attempt when proof evaluation cannot complete.
+    pub(crate) async fn cancel_admitted_attempt(
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<(), FrameworkError> {
+        cancel_attempt(email, admission).await.map_err(|error| {
+            tracing::error!(%error, "authentication attempt cancellation failed; state uncertain");
+            FrameworkError::domain("authentication attempt state is uncertain", 503)
+        })
+    }
+
     /// Record a failed authentication attempt for `email`. Optionally
     /// stamp the client IP for audit logs.
     ///
@@ -160,6 +215,15 @@ impl BruteForce {
     /// audit-event-firing variant.
     pub async fn reset_attempts(email: &str) -> Result<(), FrameworkError> {
         reset_attempts(email).await
+    }
+
+    /// Atomically clear an exact admitted challenge attempt after its proof
+    /// succeeds. Legacy engines without the reservation lifecycle fail closed.
+    pub async fn reset_admitted_attempt(
+        email: &str,
+        admission: &LockoutAdmission,
+    ) -> Result<(), FrameworkError> {
+        crate::magnetar_integration::reset_admitted_attempts(email, admission).await
     }
 
     /// Admin / forced unlock. Clears the attempt counter and the

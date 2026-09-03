@@ -794,16 +794,13 @@ impl TwoFactor {
             ));
         }
 
-        // Reject early if the account is locked by brute-force
-        // throttling. Without this gate, an attacker who tripped
-        // lockout via wrong codes could still get in by submitting
-        // the right code - the BF counter is keyed on the user's
-        // email but `verify_internal` itself doesn't consult it, so
-        // the lockout would be advisory. The password path's
-        // `LoginThrottleMiddleware` enforces this at the route layer;
-        // we enforce it in-method so the challenge endpoint is closed
-        // regardless of which middleware the consumer composes.
-        if crate::auth_flows::BruteForce::is_locked(&user.email).await? {
+        // Reserve the attempt before touching proof material. The lockout
+        // store serializes reservations for this identity, so concurrent
+        // requests cannot all pass a separate status read and then verify.
+        let admission =
+            crate::auth_flows::BruteForce::admit_attempt(&user.email, Some("two-factor challenge"))
+                .await?;
+        if !admission.admitted {
             let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
                 user_id: pending_id.clone(),
             })
@@ -838,18 +835,51 @@ impl TwoFactor {
 
         // TOTP first (fast path); fall back to recovery-code consume
         // so the user isn't locked out when they've lost their
-        // authenticator app. The `_internal` variants skip the BF
-        // counter; we record exactly once at the outer layer below
-        // so a single bad submission counts as ONE failed attempt
-        // even though both paths were tried.
-        let totp_accepted = Self::verify_internal(&adapter, code).await?;
+        // authenticator app. The admission reservation above is the one
+        // canonical attempt record even though both proof paths are tried.
+        let totp_accepted = match Self::verify_internal(&adapter, code).await {
+            Ok(accepted) => accepted,
+            Err(proof_error) => {
+                if let Err(cancel_error) =
+                    crate::auth_flows::BruteForce::cancel_admitted_attempt(&user.email, &admission)
+                        .await
+                {
+                    tracing::error!(
+                        original_error = %proof_error,
+                        cancellation_error = %cancel_error,
+                        "two-factor proof failed and attempt cancellation left state uncertain"
+                    );
+                    return Err(cancel_error);
+                }
+                return Err(proof_error);
+            }
+        };
         let accepted = if totp_accepted {
             true
         } else {
-            Self::consume_recovery_internal(&adapter, code).await?
+            match Self::consume_recovery_internal(&adapter, code).await {
+                Ok(accepted) => accepted,
+                Err(proof_error) => {
+                    if let Err(cancel_error) =
+                        crate::auth_flows::BruteForce::cancel_admitted_attempt(
+                            &user.email,
+                            &admission,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            original_error = %proof_error,
+                            cancellation_error = %cancel_error,
+                            "two-factor recovery proof failed and attempt cancellation left state uncertain"
+                        );
+                        return Err(cancel_error);
+                    }
+                    return Err(proof_error);
+                }
+            }
         };
         if !accepted {
-            record_2fa_failure(&user.email).await;
+            crate::auth_flows::BruteForce::finish_admitted_failure(&user.email, &admission).await?;
             let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
                 user_id: pending_id.clone(),
             })
@@ -859,7 +889,7 @@ impl TwoFactor {
         // Reset the failed-attempt counter so a user who finally gets
         // the code right after a typo or two isn't carrying a stale
         // count into their next session.
-        reset_2fa_failures(&user.email).await;
+        reset_admitted_2fa_failure(&user.email, &admission).await?;
 
         // Read the remember-me preference the user supplied at
         // password-login time BEFORE clearing the pending bag - the
@@ -1198,6 +1228,30 @@ async fn reset_2fa_failures(email: &str) {
     feature = "database-mysql"
 )))]
 async fn reset_2fa_failures(_email: &str) {}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+async fn reset_admitted_2fa_failure(
+    email: &str,
+    admission: &crate::magnetar_integration::engine::LockoutAdmission,
+) -> Result<(), FrameworkError> {
+    crate::auth_flows::BruteForce::reset_admitted_attempt(email, admission).await
+}
+
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+async fn reset_admitted_2fa_failure(
+    _email: &str,
+    _admission: &crate::magnetar_integration::engine::LockoutAdmission,
+) -> Result<(), FrameworkError> {
+    Ok(())
+}
 
 /// Best-effort lockout check. Returns `false` (= not locked) if Magnetar
 /// isn't initialised - same posture as [`record_2fa_failure`]: the

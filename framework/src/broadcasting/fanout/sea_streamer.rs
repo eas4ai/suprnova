@@ -120,6 +120,46 @@ const PRESENCE_META_CHANNEL: &str = "__presence__";
 /// [`SeaStreamerBroadcastHub::new_with_presence_ttl`] to override for tests.
 const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Maximum time a caller-visible send waits for the backend delivery receipt.
+///
+/// `SeaProducer::send` only enqueues work; the returned future reports the
+/// actual backend write. Bounding that future prevents an unavailable broker
+/// from holding an application request indefinitely.
+const SEND_RECEIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn await_send_receipt<F, T, E>(
+    receipt: F,
+    operation: &'static str,
+) -> Result<(), FrameworkError>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(SEND_RECEIPT_TIMEOUT, receipt).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                operation,
+                "SeaStreamerBroadcastHub: backend delivery receipt failed"
+            );
+            Err(FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: {operation} delivery receipt failed"
+            )))
+        }
+        Err(_) => {
+            tracing::error!(
+                operation,
+                timeout_ms = SEND_RECEIPT_TIMEOUT.as_millis(),
+                "SeaStreamerBroadcastHub: backend delivery receipt timed out"
+            );
+            Err(FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: {operation} delivery receipt timed out"
+            )))
+        }
+    }
+}
+
 // ── internal wire format ─────────────────────────────────────────────────────
 
 /// Wire format written to / read from the sea-streamer stream.
@@ -437,7 +477,7 @@ impl SeaStreamerBroadcastHub {
     /// state to the WS handler. The handler can then refuse the
     /// presence join cleanly rather than leaving peer views divergent
     /// for the entire heartbeat-reconciliation window.
-    fn send_presence_event(&self, event: &PresenceEvent) -> Result<(), FrameworkError> {
+    async fn send_presence_event(&self, event: &PresenceEvent) -> Result<(), FrameworkError> {
         let (event_name, channel, member_id) = match event {
             PresenceEvent::MemberAdded {
                 channel, member_id, ..
@@ -481,7 +521,7 @@ impl SeaStreamerBroadcastHub {
                 "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope: {e}"
             ))
         })?;
-        self.producer.send(bytes.as_slice()).map_err(|e| {
+        let receipt = self.producer.send(bytes.as_slice()).map_err(|e| {
             tracing::error!(
                 error = %e,
                 event = event_name,
@@ -493,7 +533,7 @@ impl SeaStreamerBroadcastHub {
                 "SeaStreamerBroadcastHub: presence producer send error ({event_name} on {channel}/{member_id}): {e}"
             ))
         })?;
-        Ok(())
+        await_send_receipt(receipt, "presence update").await
     }
 }
 
@@ -691,22 +731,81 @@ async fn heartbeat_task(
         // borrowed by reference and stay owned by the outer loop frame, so a
         // panic here cannot kill the task or leak resources.
         let _ = run_iteration_guarded("heartbeat", async {
-            let snapshot = {
-                let guard = local_members.read().await;
-                guard.clone()
-            };
-            for ((channel, member_id), info) in snapshot {
-                let event = PresenceEvent::Heartbeat {
-                    instance_id: instance_id.clone(),
-                    channel,
-                    member_id,
-                    info,
-                    timestamp_ms: now_ms(),
-                };
-                send_presence_via_producer(&producer, &event, &instance_id);
-            }
+            // Hold the read guard until every snapshot heartbeat is enqueued.
+            // A concurrent untrack needs the write guard, so its removal can
+            // never be overtaken by a stale heartbeat from this snapshot.
+            let receipts = enqueue_heartbeat_snapshot(&local_members, &instance_id, |event| {
+                send_presence_via_producer(&producer, event, &instance_id)
+            })
+            .await;
+            await_heartbeat_receipts(receipts).await;
         })
         .await;
+    }
+}
+
+async fn enqueue_heartbeat_snapshot<R, E>(
+    local_members: &Arc<AsyncRwLock<HashMap<(String, String), Value>>>,
+    instance_id: &str,
+    mut enqueue: E,
+) -> Vec<R>
+where
+    E: FnMut(&PresenceEvent) -> Result<R, FrameworkError>,
+{
+    let guard = local_members.read().await;
+    let mut receipts = Vec::with_capacity(guard.len());
+    for ((channel, member_id), info) in guard.iter() {
+        let event = PresenceEvent::Heartbeat {
+            instance_id: instance_id.to_string(),
+            channel: channel.clone(),
+            member_id: member_id.clone(),
+            info: info.clone(),
+            timestamp_ms: now_ms(),
+        };
+        match enqueue(&event) {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    operation = "presence heartbeat",
+                    "SeaStreamerBroadcastHub: background heartbeat enqueue failed; retrying next interval"
+                );
+            }
+        }
+    }
+    receipts
+}
+
+async fn await_heartbeat_receipts<I, F, T, E>(receipts: I)
+where
+    I: IntoIterator<Item = F>,
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    // All sends were already enqueued under the membership read lock. Poll
+    // their receipt handles together so the whole pass has one deadline.
+    // This adds no per-member tasks; memory remains O(N), matching the
+    // already-resident local member set.
+    let receipts = receipts.into_iter().collect::<Vec<_>>();
+    match tokio::time::timeout(SEND_RECEIPT_TIMEOUT, futures::future::join_all(receipts)).await {
+        Ok(results) => {
+            for result in results {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        error = %error,
+                        operation = "presence heartbeat",
+                        "SeaStreamerBroadcastHub: background heartbeat delivery receipt failed; retrying next interval"
+                    );
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                operation = "presence heartbeat",
+                timeout_ms = SEND_RECEIPT_TIMEOUT.as_millis(),
+                "SeaStreamerBroadcastHub: heartbeat receipt batch timed out; retrying next interval"
+            );
+        }
     }
 }
 
@@ -740,39 +839,23 @@ async fn prune_task(
     }
 }
 
-/// Helper used by the heartbeat task to serialize and send a PresenceEvent.
+/// Helper used by the heartbeat task to serialize and enqueue a PresenceEvent.
 /// Mirrors `SeaStreamerBroadcastHub::send_presence_event` but is a free
 /// function so it can be called from the spawned task without capturing
-/// `self`.
+/// `self`. The returned receipt is observed with the rest of the snapshot.
 fn send_presence_via_producer(
     producer: &SeaProducer,
     event: &PresenceEvent,
     instance_id_str: &str,
-) {
-    let (event_name, channel, member_id) = match event {
-        PresenceEvent::MemberAdded {
-            channel, member_id, ..
-        } => ("member_added", channel.as_str(), member_id.as_str()),
-        PresenceEvent::MemberRemoved {
-            channel, member_id, ..
-        } => ("member_removed", channel.as_str(), member_id.as_str()),
-        PresenceEvent::Heartbeat {
-            channel, member_id, ..
-        } => ("heartbeat", channel.as_str(), member_id.as_str()),
+) -> Result<<SeaProducer as Producer>::SendFuture, FrameworkError> {
+    let event_name = match event {
+        PresenceEvent::MemberAdded { .. } => "member_added",
+        PresenceEvent::MemberRemoved { .. } => "member_removed",
+        PresenceEvent::Heartbeat { .. } => "heartbeat",
     };
-    let data = match serde_json::to_value(event) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                event = event_name,
-                channel,
-                member_id,
-                "heartbeat task: failed to serialize PresenceEvent"
-            );
-            return;
-        }
-    };
+    let data = serde_json::to_value(event).map_err(|_| {
+        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat serialization failed")
+    })?;
     // Build a dummy Uuid from the string for the TaggedEnvelope.
     let uuid = Uuid::parse_str(instance_id_str).unwrap_or_else(|_| Uuid::nil());
     let tagged = TaggedEnvelope {
@@ -783,28 +866,12 @@ fn send_presence_via_producer(
             data,
         ),
     };
-    match serde_json::to_vec(&tagged) {
-        Ok(bytes) => {
-            if let Err(e) = producer.send(bytes.as_slice()) {
-                tracing::error!(
-                    error = %e,
-                    event = event_name,
-                    channel,
-                    member_id,
-                    "heartbeat task: producer send error"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                event = event_name,
-                channel,
-                member_id,
-                "heartbeat task: failed to serialize TaggedEnvelope"
-            );
-        }
-    }
+    let bytes = serde_json::to_vec(&tagged).map_err(|_| {
+        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat serialization failed")
+    })?;
+    producer.send(bytes.as_slice()).map_err(|_| {
+        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat enqueue failed")
+    })
 }
 
 // ── BroadcastHub impl ────────────────────────────────────────────────────────
@@ -846,14 +913,13 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
                 "SeaStreamerBroadcastHub: failed to serialize envelope: {e}"
             ))
         })?;
-        // send() is non-blocking; the future carries the delivery receipt
-        // but we don't need it (fire-and-forget at the broker boundary).
-        // Producer-side failures (broker disconnected, channel closed) are
-        // returned to the caller.
-        self.producer.send(bytes.as_slice()).map_err(|e| {
+        // `send()` only enqueues work. Await its bounded receipt so a backend
+        // write failure cannot be reported as a successful cross-process
+        // publish.
+        let receipt = self.producer.send(bytes.as_slice()).map_err(|e| {
             FrameworkError::internal(format!("SeaStreamerBroadcastHub: producer send error: {e}"))
         })?;
-        Ok(())
+        await_send_receipt(receipt, "broadcast publish").await
     }
 
     fn subscriber_count(&self, channel: &str) -> usize {
@@ -902,6 +968,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
             info,
             timestamp_ms: now_ms(),
         })
+        .await
     }
 
     async fn untrack_member(&self, channel: &str, member_id: &str) -> Result<(), FrameworkError> {
@@ -929,6 +996,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
             member_id: member_id.to_string(),
             timestamp_ms: now_ms(),
         })
+        .await
     }
 
     async fn list_members(&self, channel: &str) -> Vec<Value> {
@@ -986,5 +1054,117 @@ mod tests {
         }
         let outcome = run_iteration_guarded("test", async { /* finally normal */ }).await;
         assert!(outcome.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_receipt_wait_is_bounded() {
+        let wait = tokio::spawn(await_send_receipt(
+            std::future::pending::<Result<(), &'static str>>(),
+            "test send",
+        ));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(SEND_RECEIPT_TIMEOUT).await;
+
+        let error = wait
+            .await
+            .expect("receipt waiter task")
+            .expect_err("a receipt that never resolves must time out");
+        assert!(
+            error
+                .to_string()
+                .contains("test send delivery receipt timed out"),
+            "timeout should identify the operation without message contents: {error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_batch_timeout_does_not_scale_with_member_count() {
+        let stalled = (0..12).map(|_| std::future::pending::<Result<(), &'static str>>());
+        let batch = tokio::spawn(await_heartbeat_receipts(stalled));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(SEND_RECEIPT_TIMEOUT).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            batch.is_finished(),
+            "one heartbeat pass must have a single receipt deadline, not one deadline per member"
+        );
+        batch.await.expect("heartbeat batch task");
+
+        let next_batch = tokio::spawn(await_heartbeat_receipts([async {
+            Ok::<(), &'static str>(())
+        }]));
+        tokio::task::yield_now().await;
+        assert!(
+            next_batch.is_finished(),
+            "the supervisor must be able to start its next heartbeat pass after the batch deadline"
+        );
+        next_batch.await.expect("next heartbeat batch task");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn heartbeat_enqueue_orders_before_concurrent_member_removal() {
+        let members = Arc::new(AsyncRwLock::new(HashMap::from([
+            (
+                ("presence.room".to_string(), "member-a".to_string()),
+                serde_json::json!({}),
+            ),
+            (
+                ("presence.room".to_string(), "member-b".to_string()),
+                serde_json::json!({}),
+            ),
+        ])));
+        let enqueue_members = Arc::clone(&members);
+        let remove_members = Arc::clone(&members);
+        let (first_enqueue_tx, first_enqueue_rx) = std::sync::mpsc::channel();
+        let (continue_enqueue_tx, continue_enqueue_rx) = std::sync::mpsc::channel();
+
+        let enqueue_task = tokio::spawn(async move {
+            let mut first_enqueue_tx = Some(first_enqueue_tx);
+            enqueue_heartbeat_snapshot(&enqueue_members, &Uuid::new_v4().to_string(), move |_| {
+                if let Some(tx) = first_enqueue_tx.take() {
+                    tx.send(()).expect("signal first enqueue");
+                    continue_enqueue_rx
+                        .recv()
+                        .expect("allow remaining enqueues");
+                }
+                Ok::<(), FrameworkError>(())
+            })
+            .await
+        });
+        tokio::task::spawn_blocking(move || first_enqueue_rx.recv())
+            .await
+            .expect("first-enqueue waiter task")
+            .expect("first enqueue signal");
+
+        let (remove_started_tx, remove_started_rx) = tokio::sync::oneshot::channel();
+        let (write_acquired_tx, mut write_acquired_rx) = tokio::sync::oneshot::channel();
+        let remove_task = tokio::spawn(async move {
+            remove_started_tx.send(()).ok();
+            let mut guard = remove_members.write().await;
+            write_acquired_tx.send(()).ok();
+            guard.remove(&("presence.room".to_string(), "member-b".to_string()));
+        });
+        remove_started_rx.await.expect("removal task started");
+
+        let removal_overtook_snapshot = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            &mut write_acquired_rx,
+        )
+        .await
+        .is_ok();
+        continue_enqueue_tx
+            .send(())
+            .expect("release heartbeat enqueue");
+        let receipts = enqueue_task.await.expect("heartbeat enqueue task");
+        remove_task.await.expect("member removal task");
+
+        assert!(
+            !removal_overtook_snapshot,
+            "member removal must not acquire the write lock before every snapshot heartbeat is enqueued"
+        );
+        assert_eq!(receipts.len(), 2);
     }
 }

@@ -53,6 +53,71 @@ impl DatabaseQueueDriver {
     }
 }
 
+fn visibility_deadline_seconds(now: chrono::DateTime<Utc>, timeout: Duration) -> i64 {
+    if timeout.is_zero() {
+        return now.timestamp();
+    }
+
+    // `reserved_until` stores whole seconds and readers compare it with
+    // `floor(now)`. Ceil the absolute expiry instant so neither the current
+    // fractional second nor a subsecond timeout shortens the requested lease.
+    let fractional_nanos =
+        u64::from(now.timestamp_subsec_nanos()) + u64::from(timeout.subsec_nanos());
+    let ceiling_seconds = fractional_nanos.div_ceil(1_000_000_000);
+    let deadline =
+        i128::from(now.timestamp()) + i128::from(timeout.as_secs()) + i128::from(ceiling_seconds);
+
+    deadline.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_second_visibility_near_a_second_boundary_never_rounds_down() {
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 900_000_000)
+            .expect("valid timestamp");
+
+        assert_eq!(
+            visibility_deadline_seconds(now, Duration::from_secs(1)),
+            1_700_000_002,
+            "a claim made 900ms into a second needs the following whole-second boundary",
+        );
+    }
+
+    #[test]
+    fn positive_subsecond_visibility_ceil_preserves_the_requested_interval() {
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 100_000_000)
+            .expect("valid timestamp");
+
+        assert_eq!(
+            visibility_deadline_seconds(now, Duration::from_millis(150)),
+            1_700_000_001,
+            "a positive subsecond lease must reach the next stored second",
+        );
+    }
+
+    #[test]
+    fn pre_epoch_large_duration_stays_finite_when_the_final_sum_fits() {
+        let now = chrono::DateTime::<Utc>::from_timestamp(-10, 900_000_000)
+            .expect("valid pre-epoch timestamp");
+
+        assert_eq!(
+            visibility_deadline_seconds(now, Duration::from_secs(i64::MAX as u64)),
+            i64::MAX - 9,
+        );
+    }
+
+    #[test]
+    fn duration_max_from_pre_epoch_saturates_only_the_final_sum() {
+        let now = chrono::DateTime::<Utc>::from_timestamp(-10, 900_000_000)
+            .expect("valid pre-epoch timestamp");
+
+        assert_eq!(visibility_deadline_seconds(now, Duration::MAX), i64::MAX);
+    }
+}
+
 #[async_trait]
 impl QueueDriver for DatabaseQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
@@ -598,9 +663,10 @@ impl DatabaseQueueDriver {
         visibility_timeout: Duration,
         queues: &[String],
     ) -> Result<Option<Reservation>, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let claim_time = Utc::now();
+        let now = claim_time.timestamp();
         let token = Uuid::new_v4().to_string();
-        let reserved_until = now + visibility_timeout.as_secs().min(i64::MAX as u64) as i64;
+        let reserved_until = visibility_deadline_seconds(claim_time, visibility_timeout);
 
         let lock_clause = match self.backend() {
             DatabaseBackend::Postgres | DatabaseBackend::MySql => "FOR UPDATE SKIP LOCKED",

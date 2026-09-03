@@ -52,6 +52,7 @@ impl MagicLinkAuth {
     /// installed, user lookup fails, or session issuance fails.
     pub async fn consume_outcome(&self, token: &str) -> Result<SignInOutcome, FrameworkError> {
         super::bind_scope_preflight()?;
+        let session_authority = super::factor_engine()?;
         let engine = super::password_engine()?;
         let decision = engine
             .magic_link_consume(token, magnetar::sessions::SessionMetadata::default())
@@ -63,16 +64,19 @@ impl MagicLinkAuth {
                 return Ok(SignInOutcome::FactorRequired { challenge_selector });
             }
         };
-        super::bind_issued_session(&issued, false)?;
-        let user = engine
-            .user_by_id(issued.session.user_id.as_str())
-            .await
-            .map_err(map_magnetar_magic_link_error)?
-            .ok_or_else(|| FrameworkError::internal("magic-link session user was not found"))?;
-        Ok(SignInOutcome::Authenticated {
-            user,
-            session: issued.session,
-        })
+        let user_id = issued.session.user_id.to_string();
+        let (user, session) =
+            super::handoff_issued_session(session_authority, *issued, false, async move {
+                engine
+                    .user_by_id(&user_id)
+                    .await
+                    .map_err(map_magnetar_magic_link_error)?
+                    .ok_or_else(|| {
+                        FrameworkError::internal("magic-link session user was not found")
+                    })
+            })
+            .await?;
+        Ok(SignInOutcome::Authenticated { user, session })
     }
 }
 
