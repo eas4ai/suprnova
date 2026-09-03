@@ -1498,6 +1498,16 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test %s ... ok\\n' \"$arg\"\n"
             "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
+            "        live_postgres)\n"
+            "            printf 'test live_postgres_generation_ledger_advances_and_reads ... ok\\n'\n"
+            "            printf 'test live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
+            "            printf 'test result: ok. 2 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        live_mysql)\n"
+            "            printf 'test live_mysql_generation_ledger_advances_and_reads ... ok\\n'\n"
+            "            printf 'test live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
+            "            printf 'test result: ok. 2 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
             "    esac\n"
             "done\n",
         )

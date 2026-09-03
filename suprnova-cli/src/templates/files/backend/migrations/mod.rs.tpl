@@ -15,7 +15,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
             Box::new(m20240101_000004_create_auth_flow_tokens_table::Migration),
-            Box::new(suprnova::render_cache::migration::Migration),
         ]
     }
 }

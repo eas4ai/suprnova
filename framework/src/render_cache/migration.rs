@@ -96,9 +96,13 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+        // `if_not_exists()` here too: an idempotency test that re-runs the
+        // whole migration would otherwise fail on this index specifically,
+        // not just on the epoch seed below - found by writing that test.
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("suprnova_render_generation_log_identity")
                     .table(GenerationLog::Table)
                     .col(GenerationLog::Identity)
@@ -123,10 +127,23 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+        // `do_nothing_on` rather than the bare `do_nothing()`: sea-query's
+        // own doc admits the target-less `DO NOTHING` "is not valid today"
+        // for MySQL and renders `ON DUPLICATE KEY IGNORE`, which MySQL
+        // rejects outright. Naming the conflict column here compiles to
+        // `INSERT IGNORE` on MySQL and `ON CONFLICT (singleton) DO NOTHING`
+        // on Postgres/SQLite - both real, and both make the seed a no-op on
+        // a second run, which every `create_table(...).if_not_exists()`
+        // above already implies is safe.
         let insert = Query::insert()
             .into_table(Epochs::Table)
             .columns([Epochs::Singleton, Epochs::Epoch])
             .values_panic([1_i16.into(), 1_i64.into()])
+            .on_conflict(
+                OnConflict::column(Epochs::Singleton)
+                    .do_nothing_on([Epochs::Singleton])
+                    .to_owned(),
+            )
             .to_owned();
         manager.exec_stmt(insert).await
     }

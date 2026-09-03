@@ -127,11 +127,25 @@ echo "==> cargo test -p suprnova --test pagination -- --ignored live_postgres"
 cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_postgres
 
 # `render_cache_ledger` is the same shape: SQLite tests run unconditionally,
-# and one Postgres-tagged and one MySQL-tagged `#[ignore]`d test share the
-# file. Select the Postgres one by name for the same reason as above.
+# and Postgres-tagged and MySQL-tagged `#[ignore]`d tests share the file.
+# Select the Postgres-tagged ones by name for the same reason as above.
+#
+# `--ignored live_postgres` exits 0 when the filter matches nothing, so a
+# renamed test would silently stop testing Postgres here while the gate
+# stayed green. Assert on the output, not just the exit code, the way the
+# workflow lease-reclaim step below already does.
 echo
 echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_postgres"
-cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_postgres
+render_cache_pg_out="$(cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_postgres 2>&1)"
+echo "$render_cache_pg_out"
+for render_cache_pg_test in \
+    live_postgres_generation_ledger_advances_and_reads \
+    live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock; do
+    if ! grep -qE "^test ${render_cache_pg_test} \.\.\. ok" <<<"$render_cache_pg_out"; then
+        echo "check-postgres: ${render_cache_pg_test} did not report ok (filter may have matched nothing)" >&2
+        exit 1
+    fi
+done
 
 # The workflow lease-reclaim tests are in-source unit tests, and they are
 # gated TWICE: `#[ignore]` keeps them out of the normal run, and even when

@@ -10,7 +10,7 @@ use suprnova_live::render_cache::generation::{
 };
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
-use crate::{DB, FrameworkError, Transaction};
+use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
 /// Hex-encodes an identity's digest for the `identity` column. Every value
 /// that crosses the database boundary as an identity goes through this, so
@@ -24,10 +24,19 @@ fn identity_column(identity: &DependencyIdentity) -> String {
 
 /// Collapses a database failure into the one closed provider kind
 /// [`RenderCacheError`] exposes for this contract. The underlying message
-/// is dropped deliberately: `RenderCacheError`'s messages never carry keys,
-/// bodies, or identity material, and a raw `DbErr` string could echo bound
-/// values back into logs or a response.
-fn provider_error(_: FrameworkError) -> RenderCacheError {
+/// is dropped from the returned error deliberately: `RenderCacheError`'s
+/// messages never carry keys, bodies, or identity material, and a raw
+/// `DbErr` string could echo bound values back into a response. It is not
+/// thrown away entirely, though: logged first at `warn`, so "no owning
+/// transaction" (a programming error at the call site) stays distinguishable
+/// from "the database is down" in whatever collects these logs, even though
+/// both surface identically to the caller.
+fn provider_error(error: FrameworkError) -> RenderCacheError {
+    tracing::warn!(
+        target: "suprnova::render_cache",
+        %error,
+        "render cache generation ledger provider failure",
+    );
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
 }
 
@@ -87,19 +96,40 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 /// Advances each identity by one inside the caller's `DB::transaction`
 /// scope and appends one append-only row per identity to the change log.
 ///
-/// Fails outright when no transaction is active. A generation advance that
-/// is not part of the same transaction as the data change it represents
-/// could commit after a rollback undoes that change, or be lost after the
-/// change survives - either way the cached entries it is meant to fence
-/// would disagree with the database they claim to track. Every read this
-/// function issues (the current epoch, and the post-upsert generation) goes
-/// through the `DB` facade rather than the transaction handle directly, but
-/// still lands on the same connection: the facade's read/write resolution
-/// consults the ambient `CURRENT_TX` task-local before falling back to the
-/// pool, and this function has already confirmed that task-local is set.
+/// An empty slice is a no-op that touches neither the transaction
+/// requirement nor the database, matching [`GenerationLedger::current`]'s
+/// own empty-input short circuit: a caller with nothing to advance should
+/// not be forced to hold an open transaction just to ask for one.
+///
+/// Otherwise fails outright when no transaction is active. A generation
+/// advance that is not part of the same transaction as the data change it
+/// represents could commit after a rollback undoes that change, or be lost
+/// after the change survives - either way the cached entries it is meant to
+/// fence would disagree with the database they claim to track. Every read
+/// this function issues (the current epoch, and the post-upsert generation)
+/// goes through the `DB` facade rather than the transaction handle
+/// directly, but still lands on the same connection: the facade's
+/// read/write resolution consults the ambient `CURRENT_TX` task-local
+/// before falling back to the pool, and this function has already
+/// confirmed that task-local is set.
+///
+/// Identities are locked in ascending digest order, never in the order the
+/// caller supplied. Two overlapping transactions advancing the same two
+/// identities in opposite orders - which happens routinely, since the
+/// collector reports identities in first-seen order and two requests can
+/// observe them in either order - would otherwise each hold one row and
+/// wait on the other's, and the database's deadlock detector kills one of
+/// them (`DB::transaction` does not retry). Sorting first makes every
+/// concurrent caller acquire locks in the same global order, so that
+/// circular wait can never form. Proven live against Postgres: see
+/// `live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock` in
+/// `framework/tests/render_cache_ledger.rs`.
 pub async fn advance_in_current_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
+    if identities.is_empty() {
+        return Ok(());
+    }
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
@@ -110,7 +140,10 @@ pub async fn advance_in_current_transaction(
     )
     .await?;
 
-    for identity in identities {
+    let mut ordered: Vec<&DependencyIdentity> = identities.iter().collect();
+    ordered.sort_by_key(|identity| identity.digest());
+
+    for identity in ordered {
         let digest = identity_column(identity);
         DB::statement(
             upsert_sql(backend)?,
@@ -160,13 +193,31 @@ impl SqlGenerationLedger {
     /// epoch becomes unreachable at its next freshness check, since
     /// [`suprnova_live::render_cache::CoherenceCheck::compare`] treats any
     /// epoch change as every observed dependency having moved.
+    ///
+    /// Errors when no row was updated. `DB::statement` alone would report
+    /// only that the driver accepted the statement, which is `true` for an
+    /// `UPDATE` that matched zero rows just as much as one that matched the
+    /// singleton - an operator invoking this as the emergency lever would
+    /// see `Ok(())` and believe the cache had been invalidated when nothing
+    /// had changed. `DB::affecting_statement` reports the row count, so a
+    /// missing singleton (an unapplied migration) fails loudly instead.
     pub async fn advance_epoch(&self) -> Result<(), RenderCacheError> {
-        DB::statement(
+        let rows_affected = DB::affecting_statement(
             "UPDATE suprnova_render_epochs SET epoch = epoch + 1 WHERE singleton = 1",
             vec![],
         )
         .await
         .map_err(provider_error)?;
+        if rows_affected == 0 {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                "advance_epoch updated no row; suprnova_render_epochs is missing its \
+                 singleton, most likely because the render cache migration has not run",
+            );
+            return Err(RenderCacheError::new(
+                RenderCacheErrorKind::ProviderUnavailable,
+            ));
+        }
         Ok(())
     }
 }
@@ -179,6 +230,15 @@ impl GenerationLedger for SqlGenerationLedger {
             return Ok(set);
         }
 
+        // Pinned to the primary, not `DB::select`: `resolve_read` silently
+        // routes an ambient-transaction-free read to a registered
+        // `__read_replica__`, and a database-authoritative ledger reading a
+        // lagging follower would recheck an entry against a generation the
+        // primary already moved past, reporting it fresh when it is not.
+        // `DB::select_on` still yields to `CURRENT_TX` first (see its own
+        // doc), which is the precedence this needs: inside a transaction
+        // the transaction's own connection wins, exactly as `DB::select`
+        // would have resolved it.
         let backend = DB::connection()
             .map_err(provider_error)?
             .inner()
@@ -189,7 +249,9 @@ impl GenerationLedger for SqlGenerationLedger {
             placeholders(backend, digests.len()).map_err(provider_error)?
         );
         let values: Vec<Value> = digests.into_iter().map(Value::from).collect();
-        let rows = DB::select(&sql, values).await.map_err(provider_error)?;
+        let rows = DB::select_on(PRIMARY_CONNECTION_NAME, &sql, values)
+            .await
+            .map_err(provider_error)?;
 
         let mut found: HashMap<String, u64> = HashMap::new();
         for row in rows {
@@ -223,12 +285,28 @@ impl GenerationLedger for SqlGenerationLedger {
     }
 
     async fn epoch(&self) -> Result<u64, RenderCacheError> {
-        let epoch: i64 = DB::scalar(
+        // Same primary pin as `current`, and it matters even more here:
+        // `advance_epoch` is the emergency invalidation lever, its `UPDATE`
+        // always lands on the primary, and if this read came from a lagging
+        // replica the lever would appear to do nothing for the length of
+        // replication lag. `DB::scalar` has no `_on` variant, so this reads
+        // the row through `DB::select_on` and decodes it by column name
+        // instead.
+        let rows = DB::select_on(
+            PRIMARY_CONNECTION_NAME,
             "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
             vec![],
         )
         .await
         .map_err(provider_error)?;
+        let row = rows.first().ok_or_else(|| {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                "epoch: suprnova_render_epochs has no singleton row",
+            );
+            RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
+        })?;
+        let epoch = row.get_int("epoch").map_err(provider_error)?;
         Ok(epoch as u64)
     }
 }

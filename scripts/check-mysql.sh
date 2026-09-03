@@ -59,12 +59,26 @@ echo "==> cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored"
 cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-threads=1
 
 # `render_cache_ledger` is a mixed file: SQLite tests run unconditionally,
-# and one Postgres-tagged and one MySQL-tagged `#[ignore]`d test share it.
-# Select the MySQL one by name so this run never trips the Postgres-only
+# and Postgres-tagged and MySQL-tagged `#[ignore]`d tests share it. Select
+# the MySQL-tagged ones by name so this run never trips a Postgres-only
 # test for want of a Postgres.
+#
+# `--ignored live_mysql` exits 0 when the filter matches nothing, so a
+# renamed test would silently stop testing MySQL here while the gate stayed
+# green. Assert on the output, not just the exit code, the way the workflow
+# regression step below already does.
 echo
 echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_mysql"
-cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_mysql
+render_cache_mysql_out="$(cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_mysql 2>&1)"
+echo "$render_cache_mysql_out"
+for render_cache_mysql_test in \
+    live_mysql_generation_ledger_advances_and_reads \
+    live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock; do
+    if ! grep -qE "^test ${render_cache_mysql_test} \.\.\. ok" <<<"$render_cache_mysql_out"; then
+        echo "check-mysql: ${render_cache_mysql_test} did not report ok (filter may have matched nothing)" >&2
+        exit 1
+    fi
+done
 
 echo
 echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"

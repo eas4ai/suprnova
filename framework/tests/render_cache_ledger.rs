@@ -138,6 +138,24 @@ async fn generations_advance_only_when_the_owning_transaction_commits() {
     .await
     .expect("log count");
     assert_eq!(log_rows, 1, "the log is append-only per committed change");
+
+    // A count alone would still pass if the row logged the wrong identity,
+    // generation, or epoch. Assert what actually landed.
+    let log_row = DB::select(
+        "SELECT identity, generation, epoch FROM suprnova_render_generation_log WHERE identity = ?",
+        vec![hex::encode(posts.digest()).into()],
+    )
+    .await
+    .expect("log row")
+    .into_iter()
+    .next()
+    .expect("one log row for posts");
+    assert_eq!(
+        log_row.get_string("identity").expect("identity"),
+        hex::encode(posts.digest())
+    );
+    assert_eq!(log_row.get_int("generation").expect("generation"), 1);
+    assert_eq!(log_row.get_int("epoch").expect("epoch"), 1);
 }
 
 #[tokio::test]
@@ -163,6 +181,25 @@ async fn advancing_two_identities_in_one_transaction_logs_two_rows() {
     .await
     .expect("log count");
     assert_eq!(log_rows, 2);
+
+    let comments_log_row = DB::select(
+        "SELECT identity, generation, epoch FROM suprnova_render_generation_log WHERE identity = ?",
+        vec![hex::encode(DependencyIdentity::table("comments").digest()).into()],
+    )
+    .await
+    .expect("comments log row")
+    .into_iter()
+    .next()
+    .expect("one log row for comments");
+    assert_eq!(
+        comments_log_row.get_string("identity").expect("identity"),
+        hex::encode(DependencyIdentity::table("comments").digest())
+    );
+    assert_eq!(
+        comments_log_row.get_int("generation").expect("generation"),
+        1
+    );
+    assert_eq!(comments_log_row.get_int("epoch").expect("epoch"), 1);
 
     let ledger = SqlGenerationLedger::new();
     let posts = DependencyIdentity::table("posts");
@@ -221,6 +258,27 @@ async fn advance_outside_a_transaction_fails_and_advances_nothing() {
 }
 
 #[tokio::test]
+async fn advance_with_no_identities_does_not_require_a_transaction() {
+    let _db = boot().await;
+
+    // `GenerationLedger::current` short-circuits on an empty request without
+    // touching the database; `advance_in_current_transaction` must match
+    // that, not demand an ambient transaction (or issue the epoch SELECT)
+    // for a call that has nothing to advance.
+    advance_in_current_transaction(&[])
+        .await
+        .expect("advancing nothing must not require an owning transaction");
+
+    let log_rows: i64 = DB::scalar(
+        "SELECT COUNT(*) FROM suprnova_render_generation_log",
+        vec![],
+    )
+    .await
+    .expect("log count");
+    assert_eq!(log_rows, 0, "advancing nothing must not touch the log");
+}
+
+#[tokio::test]
 async fn the_epoch_starts_at_one_and_advances_on_demand() {
     let _db = boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -230,13 +288,46 @@ async fn the_epoch_starts_at_one_and_advances_on_demand() {
     assert_eq!(ledger.epoch().await.expect("epoch"), 2);
 }
 
+#[tokio::test]
+async fn migration_up_can_run_twice_without_erroring() {
+    let db = boot().await;
+
+    // Every `create_table` in the migration uses `if_not_exists()`, which
+    // implies the migration is safe to re-run - but the epoch seed used to
+    // be an unconditional `INSERT`, which would fail on the primary key the
+    // second time. Prove the implication actually holds.
+    let manager = sea_orm_migration::SchemaManager::new(db.conn());
+    suprnova::render_cache::migration::Migration
+        .up(&manager)
+        .await
+        .expect("running up() a second time must be a no-op, not a primary-key violation");
+
+    let epoch: i64 = DB::scalar(
+        "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+        vec![],
+    )
+    .await
+    .expect("epoch");
+    assert_eq!(
+        epoch, 1,
+        "the second run must not reset or duplicate the singleton row"
+    );
+    let epoch_rows: i64 = DB::scalar("SELECT COUNT(*) FROM suprnova_render_epochs", vec![])
+        .await
+        .expect("epoch row count");
+    assert_eq!(epoch_rows, 1, "still exactly one singleton row");
+}
+
 // --- Live-DB tests (gated by #[ignore]) ---
 //
 // `render_cache_ledger` is a mixed file, same shape as `pagination.rs`:
-// the tests above run against SQLite unconditionally; these two exercise
-// the same migration and ledger against real Postgres / MySQL, where the
-// upsert dialect, the placeholder syntax, and the `CHECK` constraint on
-// `suprnova_render_epochs` actually differ from SQLite's.
+// the tests above run against SQLite unconditionally; the four below
+// exercise the same migration and ledger against real Postgres / MySQL,
+// where the upsert dialect, the placeholder syntax, and the `CHECK`
+// constraint on `suprnova_render_epochs` actually differ from SQLite's -
+// plus one pair that only a real server can prove at all: that two
+// concurrent transactions advancing the same identities in opposite
+// orders do not deadlock.
 //
 // Skipped by default. To run them, point the URL env var at a DISPOSABLE
 // database and pass `--ignored`:
@@ -318,6 +409,146 @@ async fn live_postgres_generation_ledger_advances_and_reads() {
     assert_eq!(ledger.epoch().await.unwrap(), 1);
     ledger.advance_epoch().await.unwrap();
     assert_eq!(ledger.epoch().await.unwrap(), 2);
+}
+
+/// Runs two concurrent `advance_in_current_transaction` transactions over
+/// the same two identities in opposite orders and asserts both commit.
+///
+/// Before the fix, `advance_in_current_transaction` locked rows in the
+/// caller's slice order - the collector's first-seen order, which is
+/// request-dependent. Two overlapping transactions requesting `[posts,
+/// comments]` and `[comments, posts]` would each hold one row and block on
+/// the other's, and the database's deadlock detector kills one of them.
+/// `DB::transaction` does not retry, so that abort would propagate into
+/// whatever business transaction the caller spliced this call into.
+/// Sorting by digest before the loop makes every caller lock in the same
+/// global order, so the circular wait this reproduces cannot form.
+///
+/// The `Barrier` synchronizes both tasks' first statement as closely as two
+/// real network round trips allow, but on its own that is not reliable
+/// proof of anything: against a local, unloaded server both transactions
+/// can run to completion faster than the two tasks actually interleave, so
+/// this would pass even with the caller-order bug still in place. Confirmed
+/// by hand, reverting the sort:
+///
+/// - On MySQL/MariaDB, the barrier alone was enough - InnoDB's row locking
+///   under `INSERT ... ON DUPLICATE KEY UPDATE` made the bad interleaving
+///   land reliably (3/3 manual runs), and the test failed with SQLSTATE
+///   40001 every time.
+/// - On Postgres, the barrier alone was NOT enough - 5/5 manual runs
+///   passed even with the bug present, because a local `ON CONFLICT`
+///   upsert resolves faster than the two tasks reliably overlap. The
+///   Postgres test below additionally installs a `BEFORE INSERT OR UPDATE`
+///   trigger on `suprnova_render_generations` that sleeps briefly, widening
+///   the window between a transaction's first and second lock acquisition
+///   enough that the bad interleaving lands every time (3/3 manual runs
+///   deadlocked with the bug present, 3/3 passed once the sort was
+///   restored, under the identical widened timing).
+async fn assert_concurrent_opposite_order_advances_do_not_deadlock() {
+    let posts = DependencyIdentity::table("posts");
+    let comments = DependencyIdentity::table("comments");
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let task_a = {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let posts = posts.clone();
+        let comments = comments.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            DB::transaction(|_tx| {
+                Box::pin(async move { advance_in_current_transaction(&[posts, comments]).await })
+            })
+            .await
+        })
+    };
+    let task_b = {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let posts = posts.clone();
+        let comments = comments.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            DB::transaction(|_tx| {
+                Box::pin(async move { advance_in_current_transaction(&[comments, posts]).await })
+            })
+            .await
+        })
+    };
+
+    let (result_a, result_b) = tokio::join!(task_a, task_b);
+    result_a
+        .expect("task a must not panic")
+        .expect("transaction a must not be aborted by a deadlock");
+    result_b
+        .expect("task b must not panic")
+        .expect("transaction b must not be aborted by a deadlock");
+
+    let ledger = SqlGenerationLedger::new();
+    let set = ledger
+        .current(&[posts.digest(), comments.digest()])
+        .await
+        .expect("current");
+    assert_eq!(set.get(&posts), Some(2), "both transactions advanced posts");
+    assert_eq!(
+        set.get(&comments),
+        Some(2),
+        "both transactions advanced comments"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+    widen_postgres_lock_window().await;
+    assert_concurrent_opposite_order_advances_do_not_deadlock().await;
+}
+
+/// Widens the window between a transaction's first and second lock
+/// acquisition on Postgres, so the barrier-synchronized concurrency test
+/// above reliably overlaps instead of racing to completion on a fast local
+/// server - see that test's doc for the manual runs that showed the barrier
+/// alone is not sufficient here. Self-cleaning: the trigger lives on
+/// `suprnova_render_generations`, which the next live test's
+/// `reset_and_migrate` drops and recreates from scratch.
+async fn widen_postgres_lock_window() {
+    use sea_orm::ConnectionTrait;
+    let conn = suprnova::DB::connection().expect("primary connection registered");
+    conn.inner()
+        .execute_unprepared(
+            "CREATE OR REPLACE FUNCTION suprnova_render_test_delay() RETURNS trigger AS $$
+             BEGIN
+                 PERFORM pg_sleep(0.2);
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .await
+        .expect("install delay function");
+    conn.inner()
+        .execute_unprepared(
+            "CREATE TRIGGER suprnova_render_test_delay_trigger
+             BEFORE INSERT OR UPDATE ON suprnova_render_generations
+             FOR EACH ROW EXECUTE FUNCTION suprnova_render_test_delay()",
+        )
+        .await
+        .expect("install delay trigger");
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored live_mysql"]
+async fn live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+    assert_concurrent_opposite_order_advances_do_not_deadlock().await;
 }
 
 #[tokio::test]
