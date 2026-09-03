@@ -3,6 +3,9 @@
 
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use super::policy::RepresentationClass;
 use super::{RenderCacheError, RenderCacheErrorKind};
 use crate::crypto::SnapshotKeyRing;
@@ -13,7 +16,7 @@ pub const MAX_DIMENSION_VALUE_BYTES: usize = 256;
 pub const MAX_DIMENSIONS: usize = 24;
 
 /// A request or application dimension allowed to change bytes or metadata.
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum VarianceDimension {
     /// Trusted host, where deployment policy makes it meaningful.
     Host,
@@ -110,8 +113,33 @@ impl std::fmt::Debug for PrivateMaterial {
     }
 }
 
+impl serde::Serialize for PrivateMaterial {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PrivateMaterial {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(text.as_bytes())
+            .map_err(serde::de::Error::custom)?;
+        let array: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("private material must be exactly 32 bytes"))?;
+        Ok(Self(array))
+    }
+}
+
 /// One dimension's normalized value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DimensionValue {
     /// A bounded public value that may appear in inspection output.
     Public(String),
@@ -122,7 +150,8 @@ pub enum DimensionValue {
 }
 
 /// The complete declared variance of one representation.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct VarianceDescriptor {
     dimensions: BTreeMap<VarianceDimension, DimensionValue>,
 }

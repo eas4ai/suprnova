@@ -15,6 +15,18 @@ pub mod variance;
 /// identity.
 pub mod key;
 
+/// Dependency generation counters observed while rendering.
+pub mod generation;
+
+/// Versioned Complete entry codec with structural integrity and body-free
+/// inspection.
+pub mod entry;
+
+pub use entry::{
+    CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
+    decode, encode, inspect,
+};
+pub use generation::GenerationSet;
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,

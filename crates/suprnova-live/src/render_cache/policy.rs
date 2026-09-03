@@ -12,7 +12,9 @@ pub const MAX_INTERVAL_MS: u64 = 31 * 24 * 60 * 60 * 1000;
 pub const MAX_DECLARED_QUERY: usize = 32;
 
 /// How a representation may be shared. Order is widest to narrowest sharing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum RepresentationClass {
     /// One representation for every request that matches the public dimensions.
     PublicShared,
