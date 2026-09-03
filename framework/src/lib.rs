@@ -89,6 +89,8 @@ pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
 pub(crate) mod redis_retry;
+/// Route and group render caching: policy, variance, and Tier 0 providers.
+pub mod render_cache;
 pub mod resources;
 pub mod routing;
 pub mod schedule;
@@ -354,6 +356,7 @@ pub use rate_limit::{
     names_identity,
 };
 pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
+pub use render_cache::RenderCache;
 pub use resources::{
     AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,
     IncludedSink, IntoJsonResource, JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe,

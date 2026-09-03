@@ -603,6 +603,8 @@ pub struct Router {
     /// Live uses this startup-only ledger to reserve its namespace before
     /// mutating any method router.
     registered_patterns: Vec<String>,
+    /// Registered RenderCache route and group policies.
+    render_cache_policies: crate::render_cache::registry::RenderCachePolicyTable,
     /// Version of the one permitted Live route installation.
     live_installation_version: Option<u16>,
     /// Fallback handler for when no routes match (overrides default 404)
@@ -635,6 +637,7 @@ impl Router {
             live_routes: HashMap::new(),
             live_mounts: Mutex::new(Some(Vec::new())),
             registered_patterns: Vec::new(),
+            render_cache_policies: crate::render_cache::registry::RenderCachePolicyTable::default(),
             live_installation_version: None,
             fallback_handler: None,
             fallback_middleware: Vec::new(),
@@ -757,6 +760,49 @@ impl Router {
     pub(crate) fn mark_live_installed(&mut self, version: u16) {
         debug_assert!(self.live_installation_version.is_none());
         self.live_installation_version = Some(version);
+    }
+
+    /// Whether `pattern` was registered by a route (any method).
+    pub(crate) fn has_route_pattern(&self, pattern: &str) -> bool {
+        self.registered_patterns
+            .iter()
+            .any(|registered| registered == pattern)
+    }
+
+    /// Opts one registered route pattern into RenderCache with a full policy
+    /// or a patch of its group. Register routes and groups before installing
+    /// the RenderCache middleware.
+    pub fn try_render_cache(
+        mut self,
+        pattern: &str,
+        policy: impl Into<crate::render_cache::registry::GroupPolicy>,
+    ) -> Result<Self, FrameworkError> {
+        if !self.has_route_pattern(pattern) {
+            return Err(FrameworkError::internal(
+                "RenderCache policy names an unregistered route",
+            ));
+        }
+        self.render_cache_policies
+            .register_route(pattern, policy.into())?;
+        Ok(self)
+    }
+
+    /// Opts every route under a prefix into RenderCache.
+    pub fn try_render_cache_group(
+        mut self,
+        prefix: &str,
+        policy: impl Into<crate::render_cache::registry::GroupPolicy>,
+    ) -> Result<Self, FrameworkError> {
+        self.render_cache_policies
+            .register_group(prefix, policy.into())?;
+        Ok(self)
+    }
+
+    /// The registered RenderCache policy table.
+    pub(crate) fn render_cache_policies(
+        &self,
+    ) -> &crate::render_cache::registry::RenderCachePolicyTable {
+        &self.render_cache_policies
     }
 
     /// Register middleware for a `(method, path)` pair (internal use).

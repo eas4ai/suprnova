@@ -1,0 +1,106 @@
+//! Route and group policy resolution is deterministic: exact route wins,
+//! then the longest group prefix; patches narrow; duplicates fail.
+
+use suprnova::render_cache::{
+    FreshnessPolicy, PolicyPatch, RenderCachePolicy, RepresentationClass,
+};
+use suprnova::{HttpResponse, Request, Router};
+
+#[allow(
+    clippy::manual_async_fn,
+    reason = "brief specifies this exact handler shape verbatim; behavior is identical to an async fn"
+)]
+fn ok(_request: Request) -> impl std::future::Future<Output = suprnova::Response> {
+    async { Ok(HttpResponse::text("ok")) }
+}
+
+fn public() -> RenderCachePolicy {
+    RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("policy")
+}
+
+#[test]
+fn exact_route_policy_wins_over_the_longest_group_prefix() {
+    let router: Router = Router::new()
+        .get("/docs", ok)
+        .get("/docs/{page}", ok)
+        .get("/docs/private/{page}", ok)
+        .into();
+    let router = router
+        .try_render_cache_group("/docs", public())
+        .expect("group")
+        .try_render_cache_group(
+            "/docs/private",
+            PolicyPatch::default().class(RepresentationClass::PrivateCached),
+        )
+        .expect("nested group")
+        .try_render_cache(
+            "/docs/{page}",
+            PolicyPatch::default().freshness(FreshnessPolicy::new(5_000, 0, 0).expect("f")),
+        )
+        .expect("route");
+    let table = suprnova::render_cache::testing::policy_table(&router);
+    assert_eq!(
+        table
+            .effective_policy("/docs")
+            .expect("group")
+            .freshness()
+            .fresh_ms(),
+        60_000
+    );
+    assert_eq!(
+        table
+            .effective_policy("/docs/{page}")
+            .expect("route")
+            .freshness()
+            .fresh_ms(),
+        5_000
+    );
+    assert_eq!(
+        table
+            .effective_policy("/docs/private/{page}")
+            .expect("nested")
+            .class(),
+        RepresentationClass::PrivateCached
+    );
+    assert!(table.effective_policy("/other").is_none());
+}
+
+fn private_group_router() -> Router {
+    let router: Router = Router::new().get("/a", ok).into();
+    router
+        .try_render_cache_group(
+            "/",
+            RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+                .build()
+                .expect("p"),
+        )
+        .expect("group")
+}
+
+#[test]
+fn duplicates_and_widening_patches_fail_at_construction() {
+    assert!(
+        private_group_router()
+            .try_render_cache_group("/", public())
+            .is_err(),
+        "duplicate group prefix"
+    );
+    assert!(
+        private_group_router()
+            .try_render_cache(
+                "/a",
+                PolicyPatch::default().class(RepresentationClass::PublicShared)
+            )
+            .is_err(),
+        "a route may not widen its group"
+    );
+    assert!(
+        private_group_router()
+            .try_render_cache("/missing", public())
+            .is_err(),
+        "an unregistered route cannot be opted in"
+    );
+}
