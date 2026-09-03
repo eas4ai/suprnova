@@ -88,6 +88,61 @@ async fn database_driver_reserved_rows_invisible_to_other_pops() {
 }
 
 #[tokio::test]
+async fn positive_subsecond_visibility_persists_deadline_and_preserves_fencing() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db.clone(), "jobs".to_string()).unwrap();
+    d.push(env("subsecond")).await.unwrap();
+
+    let first = d
+        .pop(Duration::from_nanos(999_999_999))
+        .await
+        .unwrap()
+        .expect("initial claim");
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Sqlite,
+        "UPDATE jobs SET reserved_until = ?",
+        vec![sea_orm::Value::from(i64::MIN)],
+    ))
+    .await
+    .unwrap();
+    let second = d
+        .pop(Duration::MAX)
+        .await
+        .unwrap()
+        .expect("claim after forced expiry");
+    assert_eq!(second.envelope.attempts, 1, "reclaim consumes one attempt");
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT reserved_until FROM jobs",
+        ))
+        .await
+        .unwrap()
+        .expect("reserved row");
+    let reserved_until: Option<i64> = row.try_get_by_index(0).unwrap();
+    assert_eq!(
+        reserved_until,
+        Some(i64::MAX),
+        "pop_filtered must persist the helper's saturated deadline",
+    );
+
+    d.ack(&first.token).await.unwrap();
+    assert!(
+        d.pop(Duration::from_millis(10)).await.unwrap().is_none(),
+        "settling the stale first token must not clear the new reservation",
+    );
+    d.nack(&second.token, Duration::ZERO).await.unwrap();
+    let third = d
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("nack makes the job visible again");
+    assert_eq!(third.envelope.attempts, 2, "nack consumes one attempt");
+    d.ack(&third.token).await.unwrap();
+    assert_eq!(d.size().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn database_driver_nack_bumps_attempts() {
     let db = fresh_db().await;
     let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
