@@ -45,6 +45,12 @@ const MAX_KEY_BYTES: usize = 512;
 pub type Generation = u64;
 
 /// A typed dependency of a representation.
+///
+/// The checked constructors (`try_table`/`table`, `try_record`/`record`,
+/// `query_class`, `try_config`/`config`, `try_feature`/`feature`) enforce
+/// the name and key bounds; constructing a variant directly bypasses those
+/// bounds entirely, so callers inside this crate should prefer the
+/// constructors over building a variant by hand.
 #[derive(
     Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -137,6 +143,32 @@ impl DependencyIdentity {
             table: table.to_owned(),
             class: class.to_owned(),
         }
+    }
+
+    /// A configuration key identity; panics only on an unbounded name, so
+    /// callers with untrusted names use [`Self::try_config`].
+    #[must_use]
+    pub fn config(name: &str) -> Self {
+        Self::try_config(name).expect("bounded config name")
+    }
+
+    /// A configuration key identity with bounds checked.
+    pub fn try_config(name: &str) -> Result<Self, RenderCacheError> {
+        bounded(name)?;
+        Ok(Self::Config(name.to_owned()))
+    }
+
+    /// A feature flag identity; panics only on an unbounded name, so
+    /// callers with untrusted names use [`Self::try_feature`].
+    #[must_use]
+    pub fn feature(name: &str) -> Self {
+        Self::try_feature(name).expect("bounded feature name")
+    }
+
+    /// A feature flag identity with bounds checked.
+    pub fn try_feature(name: &str) -> Result<Self, RenderCacheError> {
+        bounded(name)?;
+        Ok(Self::Feature(name.to_owned()))
     }
 
     /// The broad authority.
@@ -400,7 +432,12 @@ pub struct ObservationWindow {
 
 impl ObservationWindow {
     /// Opens a window at the authority epoch; the broad authority is always
-    /// observed and does not count against [`MAX_OBSERVATIONS`].
+    /// observed and counts toward [`MAX_OBSERVATIONS`] like any other
+    /// identity, so a window filled to the bound holds exactly
+    /// [`MAX_OBSERVATIONS`] identities including it. This matches
+    /// [`GenerationSet`]'s own bound exactly, so a full window always
+    /// closes: [`Self::close`] can never see more digests than a
+    /// [`GenerationSet`] can hold.
     #[must_use]
     pub fn open(epoch: u64) -> Self {
         Self {
@@ -409,18 +446,11 @@ impl ObservationWindow {
         }
     }
 
-    /// Records one identity; bounded and idempotent. The always-present
-    /// broad authority does not count against the bound, so a window may
-    /// hold at most [`MAX_OBSERVATIONS`] identities beyond it.
+    /// Records one identity; bounded and idempotent, under the same
+    /// [`MAX_OBSERVATIONS`] bound [`GenerationSet::insert_digest`] enforces,
+    /// counting the always-present broad authority.
     pub fn observe(&mut self, identity: DependencyIdentity) -> Result<(), RenderCacheError> {
-        let observed = self
-            .identities
-            .iter()
-            .filter(|existing| **existing != DependencyIdentity::Broad)
-            .count();
-        let already_present = self.identities.contains(&identity);
-        if observed >= MAX_OBSERVATIONS && !already_present && identity != DependencyIdentity::Broad
-        {
+        if self.identities.len() >= MAX_OBSERVATIONS && !self.identities.contains(&identity) {
             return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
         }
         self.identities.insert(identity);

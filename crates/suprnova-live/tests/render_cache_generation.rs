@@ -1,7 +1,8 @@
 //! Typed dependency identities, bounded observation, and coherence checks.
 
 use suprnova_live::render_cache::generation::{
-    CoherenceCheck, DependencyIdentity, GenerationLedger, MemoryGenerationLedger, ObservationWindow,
+    CoherenceCheck, DependencyIdentity, GenerationLedger, MAX_OBSERVATIONS, MemoryGenerationLedger,
+    ObservationWindow,
 };
 
 fn users_table() -> DependencyIdentity {
@@ -35,6 +36,14 @@ async fn identities_are_typed_versioned_and_digest_stably() {
         "names are bounded and non-empty"
     );
     assert!(DependencyIdentity::try_table(&"t".repeat(129)).is_err());
+    assert!(
+        DependencyIdentity::try_config(&"c".repeat(129)).is_err(),
+        "an over-long config name is rejected"
+    );
+    assert!(
+        DependencyIdentity::try_feature(&"f".repeat(129)).is_err(),
+        "an over-long feature name is rejected"
+    );
 }
 
 #[tokio::test]
@@ -91,7 +100,10 @@ async fn an_observation_window_detects_any_moved_generation() {
         CoherenceCheck::Coherent => panic!("a moved generation must be visible"),
     }
     let mut full = ObservationWindow::open(1);
-    for index in 0..4_096 {
+    // The broad authority seeded by `open` already occupies one slot, so
+    // only `MAX_OBSERVATIONS - 1` more distinct identities fit before the
+    // window holds exactly `MAX_OBSERVATIONS` in total.
+    for index in 0..(MAX_OBSERVATIONS - 1) {
         full.observe(DependencyIdentity::record(
             "t",
             index.to_string().as_bytes(),
@@ -102,5 +114,30 @@ async fn an_observation_window_detects_any_moved_generation() {
         full.observe(DependencyIdentity::record("t", b"overflow"))
             .is_err(),
         "observations are bounded"
+    );
+}
+
+#[tokio::test]
+async fn a_full_observation_window_closes_to_exactly_the_bound() {
+    let ledger = MemoryGenerationLedger::new();
+    let mut full = ObservationWindow::open(1);
+    // The broad authority seeded by `open` already occupies one slot, so
+    // only `MAX_OBSERVATIONS - 1` more distinct identities fit before the
+    // window holds exactly `MAX_OBSERVATIONS` in total.
+    for index in 0..(MAX_OBSERVATIONS - 1) {
+        full.observe(DependencyIdentity::record(
+            "t",
+            index.to_string().as_bytes(),
+        ))
+        .expect("within bound");
+    }
+    let observed = full
+        .close(&ledger)
+        .await
+        .expect("a window filled to the bound must still close");
+    assert_eq!(
+        observed.len(),
+        MAX_OBSERVATIONS,
+        "the closed set holds exactly the bound, including the broad authority"
     );
 }
