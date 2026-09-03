@@ -69,6 +69,17 @@ pub async fn register() {
     // application uses Magnetar-owned credentials and sessions.
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
+    // Live: one immutable component registry, the upload host with this
+    // application's finalizer, and the gates that authorize the dogfood stream
+    // and upload. Process-wide, so the console tooling helper reads them too.
+    App::singleton(crate::live::registry().expect("Live component registry"));
+    App::singleton(
+        suprnova::live::LiveUploadHost::new().with_finalizer(Arc::new(
+            crate::live::providers::upload_finalizer::AppUploadFinalizer::default(),
+        )),
+    );
+    crate::live::providers::authorize_live();
+
     // Inertia shared data - visible on every Inertia response.
     //
     // Static values: process-global, set once at boot.
@@ -337,11 +348,14 @@ pub fn register_http_stack() {
     Inertia::install(&inertia_config())
         .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
-    global_middleware!(CsrfMiddleware::new().except(vec![
-        "/api/ping",
-        "/api/welcome",
-        "/lang-demo"
-    ]));
+    // Same-origin requests verified through the browser's `Sec-Fetch-Site`
+    // header pass without a token; the Live runtime relies on exactly that
+    // proof for its action and upload requests.
+    global_middleware!(
+        CsrfMiddleware::new()
+            .with_origin_policy(suprnova::OriginPolicy::SameOriginOnly)
+            .except(vec!["/api/ping", "/api/welcome", "/lang-demo"])
+    );
 
     global_middleware!(FeatureMiddleware::new());
 }

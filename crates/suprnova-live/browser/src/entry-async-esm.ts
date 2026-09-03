@@ -4,6 +4,13 @@ import { asyncFeature } from "./async-updates/feature.js";
 export { asyncFeature };
 export { AsyncDocumentOwner, configureAsync, createAsyncFeature } from "./async-updates/feature.js";
 export {
+  BrowserAsyncAuthority,
+  browserAsyncOptions,
+  browserSseMembership,
+  decodeAuthorizedSubscription,
+} from "./async-updates/browser-host.js";
+export type { BrowserAsyncHostOptions } from "./async-updates/browser-host.js";
+export {
   BrowserAsyncTransportPorts,
   OriginHandshakeScheduler,
 } from "./async-updates/connections.js";

@@ -10,6 +10,7 @@ pub mod factories;
 pub mod features;
 pub mod jobs;
 pub mod listeners;
+pub mod live;
 pub mod mail;
 pub mod middleware;
 pub mod migrations;

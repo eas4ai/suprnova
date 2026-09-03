@@ -75,11 +75,13 @@ with `must-revalidate`. Every response carries an exact `Content-Type`,
 `X-Content-Type-Options: nosniff`, and honours `If-None-Match` with 304. A
 wrong identity, an unknown or differently cased name, a query string, or a
 path segment that is not a recorded file is a closed 404 with no body; other
-methods are 405 with `Allow: GET, HEAD`. Two framework-owned boot scripts,
-`suprnova-live.boot.esm.js` (`import { boot } ...; boot();`) and
-`suprnova-live.boot.classic.js` (`window.SuprnovaLive.boot();`), are served
-the same way with their own integrity values, so a document loads only
-external scripts.
+methods are 405 with `Allow: GET, HEAD`. Three framework-owned boot scripts,
+`suprnova-live.boot.esm.js` (`import { boot } ...; boot();`),
+`suprnova-live.boot.async.esm.js` (the same after `configureAsync(browserAsyncOptions())`
+from the asynchronous artifact), and `suprnova-live.boot.classic.js` (which
+configures the classic artifact's `window.SuprnovaLiveAsync` host when present
+before `window.SuprnovaLive.boot();`), are served the same way with their own
+integrity values, so a document loads only external scripts.
 
 A document calls `LiveDocument::bootstrap(LiveBootstrapOptions)` after its
 last mount and inserts the returned markup in `<head>` through
@@ -102,7 +104,7 @@ tag; a second `bootstrap()` call or a mount after bootstrap fails closed.
 
 `suprnova live:assets --out <dir>` publishes the same reviewed bytes without a
 JavaScript toolchain: the application's hidden tooling helper exports the
-manifest, the eight artifacts, and the two boot scripts with their lengths and
+manifest, the eight artifacts, and the three boot scripts with their lengths and
 digests over the tooling protocol described in
 [views and checker](views-and-checker.md), the CLI verifies every digest on
 the transport, stages a complete `<dir>/<asset_identity>/` directory, and

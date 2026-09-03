@@ -185,6 +185,86 @@ impl TypedCommand for CleanCache {
 
 ---
 
+## live:make
+
+Live コンポーネントを生成します。サーバーが所有するアイランドで、型付きアクションは
+Live プロトコルで到着し、再レンダリングされたビューは同梱のブラウザーランタイムが
+その場でモーフします。
+
+```bash
+suprnova live:make Counter
+suprnova live:make todo-list
+suprnova live:make Counter --dry-run
+```
+
+名前は `Counter`、`TodoList`、`todo-list`、`todo_list` のいずれかの形の単純な ASCII
+識別子でなければなりません。ファイルとモジュールは snake_case、構造体は PascalCase
+になり、登録されるコンポーネント名は `<package>.<kebab>` です（`demo-app` という
+パッケージなら `demo-app.counter`）。Rust のキーワード、区切り文字、ドット、非 ASCII
+入力は、何かを書く前に拒否されます。
+
+### 生成されるファイル
+
+```rust
+// src/live/counter.rs
+use suprnova::live::{LiveComponent, live};
+
+/// A counter island rendered by `live/counter.html`.
+#[derive(LiveComponent)]
+#[live(name = "demo-app.counter", view = "live/counter.html")]
+pub struct Counter {
+    /// Current count, exposed to the view.
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl Counter {
+    /// Increments the counter in response to `live:click="increment"`.
+    #[action]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+```html
+<!-- templates/live/counter.html -->
+<div>
+<p>Count: {{ count }}</p>
+<button type="button" live:click="increment">Increment</button>
+</div>
+```
+
+### 配線されるもの
+
+1. まずすべての対象パスを検証し、トラバーサルとシンボリックリンクを拒否します。
+   コンポーネントファイルまたはビューがすでに存在する場合は警告し、何も書きません。
+2. `src/live/<snake>.rs` と `templates/live/<snake>.html` をアトミックに書きます。
+   いずれかの書き込みが失敗すると、その実行で作成または変更したすべてのファイルを
+   ロールバックします。
+3. `src/live/mod.rs` の `registry()` ビルダーに `pub mod <snake>;` と
+   `.register::<snake::Pascal>()?` を挿入します。`suprnova new` で作成したすべての
+   プロジェクトには、空のレジストリ、ガード付きの予約済み Live ルートをインストールする
+   `routes()` 関数、レジストリをバインドするブートストラップを備えたこのモジュールが
+   含まれます。古いプロジェクトでは、初回使用時に同じモジュールが作成されます。
+4. `src/lib.rs` に `pub mod live;` がなければ追加します。
+5. レジストリをバインドするブートストラップの行を表示し、続いて確認コマンド
+   `suprnova live:check` を表示します。
+
+Live モジュールより前のプロジェクトでは、ブートストラップ中にレジストリをバインドし、
+`cmd/main.rs` からルートを手動でインストールします:
+
+```rust
+suprnova::App::singleton(crate::live::registry().expect("Live registry"));
+```
+
+```rust
+.try_routes(|| live::routes(routes::register()))
+```
+
+---
+
 ## make:error
 
 ドメインエラーをスキャフォルドします - `#[domain_error]` がアノテーションされたユニット構造体であり、そのままでHTTPステータス、`Display` のメッセージ、そして `From<…> for FrameworkError` のimplを運びます。

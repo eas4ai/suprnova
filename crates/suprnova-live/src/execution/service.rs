@@ -1401,6 +1401,7 @@ impl ExecutionService {
                         revision: successor_revision,
                         lazy_complete: false,
                         flags: Vec::new(),
+                        stream: crate::view::declared_stream(descriptor.metadata()),
                     },
                     MAX_SUCCESSOR_METADATA_BYTES,
                 )

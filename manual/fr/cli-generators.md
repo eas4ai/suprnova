@@ -231,6 +231,87 @@ rôle du binaire console par projet.
 
 ---
 
+## live:make
+
+Génère un composant Live : un îlot appartenant au serveur dont les actions typées
+arrivent par le protocole Live et dont la vue re-rendue est morphée sur place par
+le runtime navigateur livré.
+
+```bash
+suprnova live:make Counter
+suprnova live:make todo-list
+suprnova live:make Counter --dry-run
+```
+
+Les noms doivent être de simples identifiants ASCII sous l'une des formes
+`Counter`, `TodoList`, `todo-list` ou `todo_list` ; le fichier et le module sont en
+snake_case, la struct en PascalCase et le nom de composant enregistré est
+`<package>.<kebab>` (pour un paquet nommé `demo-app` : `demo-app.counter`). Les
+mots-clés Rust, les séparateurs, les points et les entrées non ASCII sont rejetés
+avant toute écriture.
+
+### Fichier généré
+
+```rust
+// src/live/counter.rs
+use suprnova::live::{LiveComponent, live};
+
+/// A counter island rendered by `live/counter.html`.
+#[derive(LiveComponent)]
+#[live(name = "demo-app.counter", view = "live/counter.html")]
+pub struct Counter {
+    /// Current count, exposed to the view.
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl Counter {
+    /// Increments the counter in response to `live:click="increment"`.
+    #[action]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+```html
+<!-- templates/live/counter.html -->
+<div>
+<p>Count: {{ count }}</p>
+<button type="button" live:click="increment">Increment</button>
+</div>
+```
+
+### Ce qui est câblé
+
+1. Valide d'abord chaque chemin cible et refuse la traversée et les liens
+   symboliques ; si le fichier du composant ou la vue existe déjà, il avertit et
+   n'écrit rien du tout.
+2. Écrit `src/live/<snake>.rs` et `templates/live/<snake>.html` de façon atomique ;
+   si une écriture échoue, chaque fichier créé ou modifié par l'exécution est annulé.
+3. Insère `pub mod <snake>;` et `.register::<snake::Pascal>()?` dans le builder
+   `registry()` de `src/live/mod.rs`. Tout projet créé par `suprnova new` livre ce
+   module avec un registre vide, une fonction `routes()` qui installe les routes Live
+   réservées gardées et un bootstrap qui lie le registre ; un projet plus ancien
+   obtient le même module au premier usage.
+4. Ajoute `pub mod live;` à `src/lib.rs` lorsqu'il manque.
+5. Affiche la ligne de bootstrap qui lie le registre, puis la commande de
+   vérification : `suprnova live:check`.
+
+Dans un projet antérieur au module Live, liez le registre pendant le bootstrap et
+installez les routes depuis `cmd/main.rs` à la main :
+
+```rust
+suprnova::App::singleton(crate::live::registry().expect("Live registry"));
+```
+
+```rust
+.try_routes(|| live::routes(routes::register()))
+```
+
+---
+
 ## make:error
 
 Scaffolde une erreur de domaine - une unit struct annotée avec

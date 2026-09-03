@@ -603,7 +603,10 @@ class FetchEventSourceAdapter implements EventSourcePort {
     try {
       const response = await fetchPort(url.href, {
         cache: "no-store",
-        credentials: "omit",
+        // Same-origin identity travels on the cookie so the host can re-resolve
+        // session, principal, and tenant before matching the bearer credential;
+        // a cross-origin document transport sends no ambient credential.
+        credentials: "same-origin",
         headers,
         method: "GET",
         redirect: "error",

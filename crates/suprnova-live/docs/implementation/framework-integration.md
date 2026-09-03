@@ -56,9 +56,40 @@ anonymous visitor can render a public island but cannot invoke an action; the
 guard answers `401` before any engine or application work. `LiveTenantMiddleware`
 records the resolved tenant or the tenantless disposition, and the rate-limit
 middleware records the rate fact on its allowed branch. A document route
-registered through `try_live_mount` or `try_live_document` carries the public
-document policy instead, which waives the identity facts for public seeds and
-requires them for identity-bound mounts.
+registered through `try_live_mount` or `try_live_document` carries the
+document policy instead: a public seed waives the identity facts, and an
+identity-bound mount requires the session and principal facts from the route's
+own middleware. The tenant is optional for identity-bound mounts: a resolver
+that names a tenant binds it into the island's scope, a single-tenant
+deployment leaves it absent, and a request whose tenant differs from the bound
+one fails the scope comparison either way.
+
+A component that declares streams renders its island root with the
+island-owned `live:stream` directive for its first declared stream. The engine
+emits that root itself and rejects a template that carries one, so component
+templates never declare island-owned directives; the browser runtime reads the
+directive from the emitted root and opens the asynchronous transport.
+
+The asynchronous feature of the browser runtime stays inert until a host
+supplies clocks, timers, randomness, transports, and an authority that issues
+subscriptions. The runtime's asynchronous artifacts now ship that host:
+`browserAsyncOptions()` issues and renews through `/__live/v1/async/subscriptions`
+with the browser's same-origin credentials, drives SSE membership control
+through `/__live/v1/async/memberships` with the issued bearer credential, and
+opens the native transports. A document whose islands declare streams boots
+through `suprnova-live.boot.async.esm.js`, which configures that host before
+`boot()`; the classic boot configures `window.SuprnovaLiveAsync` when the
+classic asynchronous artifact is present. The bearer SSE reader sends
+same-origin credentials so the events route can re-resolve the session
+identity, and the framework follows each productive SSE batch with a delayed
+comment trailer because WebKit releases a fetch stream's buffered tail only
+when more bytes arrive (see the asynchronous-updates record).
+
+An action on an island whose component declares an upload field additionally
+resolves the registered upload mount authority by route, slot, component, and
+contract. The protocol version takes no part in that match: the request's own
+selection already proved its version is one the component supports, and the
+shipped runtime negotiates the newest one.
 
 ## CSRF and origin verification
 
@@ -106,11 +137,36 @@ mount declared after that point is rejected at startup.
 - Adapter errors preserve typed recovery and redaction; production messages
   never carry snapshots, tokens, cookies, or rendered HTML.
 
+## Dogfood surface
+
+The root `app/` crate hosts the durable dogfood surface in `app/src/live/`:
+`app.counter` (a plain island), `app.avatar-uploader` (an upload field with a
+PNG policy finalized by `save_avatar`), and `app.activity-feed` (a
+stream-backed island refreshed over SSE or WebSocket with polling as the
+fallback). `app::live::registry()` builds the registry, `bootstrap::register`
+binds it with `LiveUploadHost` and the stream and upload gates, and
+`app::live::routes` installs the guarded reserved routes, the authenticated
+reacquisition route `/account/uploads/{handle}/reacquire`, the identity-bound
+dashboard at `/live`, and the public page at `/live/public`. The application
+entry point installs those routes through `Application::try_routes`. Templates
+live under `app/templates/live/`, the Askama default for a crate without an
+`askama.toml`, which is also where `suprnova live:make` writes.
+
 ## Evidence
 
 `framework/tests/live_dogfood.rs` drives a public island through the real
 session, CSRF, guard, tenant, and rate-limit middleware in process, and
 `framework/tests/live_dogfood_server.rs` boots `Server::run` on a socket and
-performs the same document and action round trip. The application-level
-evidence lives in `app/tests/live_*.rs` and the browser scenario in
-`browser/e2e/`.
+performs the same document and action round trip. `app/tests/live_dogfood.rs`,
+`live_upload_reacquire.rs`, and `live_async_dogfood.rs` exercise the
+application surface through its own global middleware stack with seeded
+sessions: ordinary SSR, identity-bound and public islands, actions, CSRF and
+principal enforcement, polling, a closed 409 for a tampered snapshot,
+immutable assets, the complete upload lifecycle with reacquisition and
+finalization, an SSE-delivered published event, a cookie-authorized WebSocket
+membership, and the ordinary fresh render as the poll. The browser scenario in
+`browser/e2e/app-dogfood.spec.ts` drives `app/examples/live_dogfood_host.rs`,
+a real `Server::run` of the application routes behind the production stack:
+the public page for an anonymous visitor, sign-in and three actions through
+the shipped runtime, the anonymous action refused with `401`, and the feed's
+asynchronous subscription with a refresh after a published event.

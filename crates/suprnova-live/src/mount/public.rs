@@ -361,6 +361,7 @@ impl PublicSeedMountService {
                     .iter()
                     .map(|(name, value)| IslandRootFlag::from_validated(name, value))
                     .collect(),
+                stream: crate::view::declared_stream(descriptor.metadata()),
             },
             self.max_metadata_bytes,
         )

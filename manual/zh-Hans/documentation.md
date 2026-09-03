@@ -58,6 +58,7 @@
     - [监督程序](supervisors.md)
     - [Server-Sent 事件](sse.md)
     - [WebSocket](websockets.md)
+    - [Live](live.md)
     - [幂等性](idempotency.md)
     - [超时](timeout.md)
     - [功能标志](feature-flags.md)

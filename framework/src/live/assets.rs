@@ -36,9 +36,16 @@ const MANIFEST_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const MANIFEST_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 const CLOSED_CACHE_CONTROL: &str = "no-store";
 const ESM_BOOT_FILE: &str = "suprnova-live.boot.esm.js";
+const ESM_ASYNC_BOOT_FILE: &str = "suprnova-live.boot.async.esm.js";
 const CLASSIC_BOOT_FILE: &str = "suprnova-live.boot.classic.js";
 const ESM_BOOT_SOURCE: &str = "import { boot } from \"./suprnova-live.esm.js\";\nboot();\n";
-const CLASSIC_BOOT_SOURCE: &str = "window.SuprnovaLive.boot();\n";
+/// The asynchronous role needs the runtime's default browser host configured
+/// before boot; the ESM boot for documents with that role imports it from the
+/// reviewed asynchronous artifact.
+const ESM_ASYNC_BOOT_SOURCE: &str = "import { boot } from \"./suprnova-live.esm.js\";\nimport { browserAsyncOptions, configureAsync } from \"./suprnova-live.async.esm.js\";\nconfigureAsync(browserAsyncOptions());\nboot();\n";
+/// The classic asynchronous artifact publishes its default host on a global;
+/// the classic boot configures it when present and boots either way.
+const CLASSIC_BOOT_SOURCE: &str = "if (window.SuprnovaLiveAsync) {\n  window[Symbol.for(\"suprnova.live.features.v1\")].configureAsync(window.SuprnovaLiveAsync.browserOptions());\n}\nwindow.SuprnovaLive.boot();\n";
 const REQUEST_TIMEOUT_MS: u32 = 5_000;
 const MAX_QUEUED_PER_ISLAND: u8 = 8;
 const MAX_PARALLEL_PER_ISLAND: u8 = 1;
@@ -196,7 +203,7 @@ impl BootScript {
 /// Everything Suprnova serves under the Live asset namespace.
 pub struct LiveAssetCatalog {
     manifest: &'static suprnova_live::artifacts::RuntimeArtifactManifest,
-    boot: [BootScript; 2],
+    boot: [BootScript; 3],
 }
 
 impl LiveAssetCatalog {
@@ -224,18 +231,32 @@ impl LiveAssetCatalog {
         self.manifest.artifact(role)
     }
 
-    /// Returns the two framework-owned boot scripts.
+    /// Returns the three framework-owned boot scripts.
     #[must_use]
     pub fn boot_scripts(&self) -> &[BootScript] {
         &self.boot
     }
 
-    /// Returns the boot script for `strategy`.
+    /// Returns the boot script for `strategy` on a document without the
+    /// asynchronous role.
     #[must_use]
     pub const fn boot_script(&self, strategy: LiveBootstrapStrategy) -> &BootScript {
-        match strategy {
-            LiveBootstrapStrategy::Esm => &self.boot[0],
-            LiveBootstrapStrategy::Classic => &self.boot[1],
+        self.boot_script_for(strategy, false)
+    }
+
+    /// Returns the boot script for `strategy`; an ESM document carrying the
+    /// asynchronous role boots through the variant that configures the
+    /// runtime's default browser host first.
+    #[must_use]
+    pub const fn boot_script_for(
+        &self,
+        strategy: LiveBootstrapStrategy,
+        asynchronous: bool,
+    ) -> &BootScript {
+        match (strategy, asynchronous) {
+            (LiveBootstrapStrategy::Esm, false) => &self.boot[0],
+            (LiveBootstrapStrategy::Esm, true) => &self.boot[2],
+            (LiveBootstrapStrategy::Classic, _) => &self.boot[1],
         }
     }
 
@@ -306,6 +327,11 @@ pub fn live_asset_catalog() -> Result<&'static LiveAssetCatalog, ArtifactError> 
                         LiveBootstrapStrategy::Classic,
                         CLASSIC_BOOT_FILE,
                         CLASSIC_BOOT_SOURCE,
+                    ),
+                    BootScript::new(
+                        LiveBootstrapStrategy::Esm,
+                        ESM_ASYNC_BOOT_FILE,
+                        ESM_ASYNC_BOOT_SOURCE,
                     ),
                 ],
             })
@@ -479,7 +505,10 @@ pub(crate) fn render_bootstrap(
                     nonce,
                 ));
             }
-            let boot = catalog.boot_script(strategy);
+            let boot = catalog.boot_script_for(
+                strategy,
+                required.contains(&RequiredCapability::AsyncUpdates),
+            );
             html.push_str(&module_script(&catalog.url(boot.file()), boot.sri(), nonce));
         }
         LiveBootstrapStrategy::Classic => {

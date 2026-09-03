@@ -28,7 +28,7 @@ pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
 pub(crate) use root::{
     IslandRootFlag, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES,
-    assemble_island_root,
+    assemble_island_root, declared_stream,
 };
 pub use trusted_html::{
     RegisteredSanitizer, SanitizerFailure, SanitizerId, TrustedHtml, TrustedMarkupError,

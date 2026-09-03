@@ -94,6 +94,21 @@ forma.
 Consulta [Generadores](cli-generators.md) para el detalle completo del
 andamiaje y el aspecto de cada archivo generado.
 
+### Live
+
+| Comando | Descripción |
+|---|---|
+| `suprnova live:make <name>` | Genera un componente Live en `src/live/`, su vista en `templates/live/` y su registro en `src/live/mod.rs`. Nunca sobrescribe; `--dry-run` muestra el plan. |
+| `suprnova live:check` | Comprueba cada vista Live registrada con el comprobador integrado. Lee `dirs` de `askama.toml` o `templates/`; `--templates <dir>` lo anula, `--allow-unproved` acepta estructuras dinámicas no probadas. |
+| `suprnova live:inspect` | Informa del estado seguro de runtime, registro, proveedores y artefactos de Live (`--json` para un único documento JSON). |
+| `suprnova live:assets --out <dir>` | Publica atómicamente los artefactos de runtime Live revisados en `<dir>/<identity>/`; `--replace` reemplaza una publicación cuyos bytes difieren. |
+
+`live:check`, `live:inspect` y `live:assets` se ejecutan dentro de tu aplicación:
+la CLI arranca `cargo run --bin console` y lee un informe acotado y versionado en
+líneas JSON del ayudante de herramientas oculto del framework, así que nunca
+necesita una dependencia del framework propia. La salida del build se queda en
+stderr; cualquier cosa inesperada en stdout hace fallar el comando de forma cerrada.
+
 ### Base de datos
 
 | Comando | Descripción |

@@ -262,6 +262,7 @@ impl PrivateMountService {
                         .iter()
                         .map(|(name, value)| IslandRootFlag::from_validated(name, value))
                         .collect(),
+                    stream: crate::view::declared_stream(descriptor.metadata()),
                 },
                 self.limits.max_metadata_bytes,
             )

@@ -92,6 +92,21 @@ façon.
 Voir [Générateurs de code](cli-generators.md) pour le détail complet
 du scaffold et à quoi ressemble chaque fichier généré.
 
+### Live
+
+| Commande | Description |
+|---|---|
+| `suprnova live:make <name>` | Génère un composant Live dans `src/live/`, sa vue dans `templates/live/` et son enregistrement dans `src/live/mod.rs`. N'écrase jamais ; `--dry-run` affiche le plan. |
+| `suprnova live:check` | Vérifie chaque vue Live enregistrée avec le vérificateur intégré. Lit les `dirs` de `askama.toml` ou `templates/` ; `--templates <dir>` remplace, `--allow-unproved` accepte les structures dynamiques non prouvées. |
+| `suprnova live:inspect` | Rapporte l'état sûr du runtime, du registre, des fournisseurs et des artefacts Live (`--json` pour un seul document JSON). |
+| `suprnova live:assets --out <dir>` | Publie atomiquement les artefacts de runtime Live relus dans `<dir>/<identity>/` ; `--replace` remplace une publication dont les octets diffèrent. |
+
+`live:check`, `live:inspect` et `live:assets` s'exécutent dans votre application :
+la CLI lance `cargo run --bin console` et lit un rapport borné et versionné en
+lignes JSON depuis l'assistant d'outillage caché du framework, de sorte qu'elle
+n'a jamais besoin d'une dépendance au framework. La sortie de build reste sur
+stderr ; tout ce qui est inattendu sur stdout fait échouer la commande de façon fermée.
+
 ### Base de données
 
 | Commande | Description |

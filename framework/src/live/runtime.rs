@@ -1057,12 +1057,16 @@ impl LiveRuntime {
         }
         self.finalize_mount_catalog()?;
         let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
+        // The registered mount identifies the upload authority by route,
+        // slot, component, and contract. The request's own selection already
+        // proved its protocol version is one the component supports, and the
+        // browser runtime negotiates the newest one, so the protocol never
+        // takes part in this match.
         let mut matches = selectors.iter().filter(|candidate| {
             candidate.selection.route() == selection.route()
                 && candidate.selection.slot() == selection.slot()
                 && candidate.selection.component() == selection.component()
                 && candidate.selection.contract_digest() == selection.contract_digest()
-                && candidate.selection.protocol() == selection.protocol()
         });
         let selector = matches.next().ok_or_else(live_boot_error)?;
         if matches.next().is_some() {
@@ -1072,13 +1076,8 @@ impl LiveRuntime {
         }
         let base_scope = super::context::request_scope(request)?;
         let scope = super::upload::derive_mount_scope(&selector.scope_binding(base_scope))?;
-        self.validate_request_context_with_scope(
-            request,
-            selector.selection.clone(),
-            Some(scope),
-            None,
-        )
-        .map(Some)
+        self.validate_request_context_with_scope(request, selection.clone(), Some(scope), None)
+            .map(Some)
     }
 
     pub(crate) async fn resolve_upload_request_context(

@@ -65,6 +65,21 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 
 完全なスキャフォルドの詳細と、各生成ファイルの見た目については、[コード ジェネレーター](cli-generators.md)を参照してください。
 
+### Live
+
+| コマンド | 説明 |
+|---|---|
+| `suprnova live:make <name>` | `src/live/` に Live コンポーネントを、`templates/live/` にそのビューを、`src/live/mod.rs` にその登録を生成します。決して上書きしません。`--dry-run` は計画を表示します。 |
+| `suprnova live:check` | 登録済みのすべての Live ビューを統合チェッカーで検査します。`askama.toml` の `dirs` または `templates/` を読みます。`--templates <dir>` で上書きし、`--allow-unproved` は未証明の動的構造を受け入れます。 |
+| `suprnova live:inspect` | Live のランタイム、レジストリ、プロバイダー、成果物の安全な状態を報告します（`--json` で単一の JSON ドキュメント）。 |
+| `suprnova live:assets --out <dir>` | 精査済みの Live ランタイム成果物を `<dir>/<identity>/` にアトミックに公開します。`--replace` はバイト列が異なる公開物を置き換えます。 |
+
+`live:check`、`live:inspect`、`live:assets` はアプリケーションの内部で実行されます。
+CLI は `cargo run --bin console` を起動し、フレームワークの隠しツーリングヘルパーから
+有界でバージョン付きの JSON 行レポートを読むため、CLI 自身にフレームワーク依存は
+不要です。ビルド出力は stderr に残り、stdout 上の予期しないものはコマンドを
+閉じた形で失敗させます。
+
 ### データベース
 
 | コマンド | 説明 |

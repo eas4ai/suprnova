@@ -59,6 +59,20 @@ pub(crate) struct IslandRootInput {
     pub(crate) revision: Revision,
     pub(crate) lazy_complete: bool,
     pub(crate) flags: Vec<IslandRootFlag>,
+    /// The declared stream the island subscribes to, emitted as the
+    /// island-owned `live:stream` directive so the browser runtime opens the
+    /// asynchronous transport for framework-rendered islands.
+    pub(crate) stream: Option<String>,
+}
+
+/// The first stream a component declares, if any; the runtime honors one
+/// island-owned stream directive per island.
+#[must_use]
+pub(crate) fn declared_stream(metadata: &crate::metadata::ComponentMetadata) -> Option<String> {
+    metadata
+        .subscriptions()
+        .first()
+        .map(|subscription| subscription.stream().as_str().to_owned())
 }
 
 pub(crate) fn assemble_island_root(
@@ -131,6 +145,9 @@ pub(crate) fn assemble_island_root(
         let _ = write!(attributes, " data-suprnova-live-flag-{}=\"", flag.name);
         escape_attribute(&mut attributes, &flag.value);
         attributes.push('"');
+    }
+    if let Some(stream) = &input.stream {
+        write_attribute(&mut attributes, "live:stream", stream);
     }
     if attributes.len() > max_metadata_bytes {
         return Err(ViewError::new(ViewErrorKind::InvalidMountMetadata));

@@ -406,16 +406,16 @@ fn attacker_headers_do_not_mint_framework_security_evidence() {
     assert_eq!(report.present_count(), 0);
 }
 
+/// The shipped Live runtime carries no session token: the configured origin
+/// proof is the CSRF proof for a Live action, exactly as it is for every other
+/// same-origin state change under an origin-verifying policy.
 #[tokio::test]
-async fn live_csrf_requires_both_same_origin_and_a_valid_token() {
+async fn live_actions_accept_the_configured_origin_proof_without_a_token() {
     let request = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
             "/__live/v1/action",
-            [
-                ("sec-fetch-site", "same-origin"),
-                ("x-csrf-token", "test_csrf_token"),
-            ],
+            [("sec-fetch-site", "same-origin")],
         )
         .with_route_pattern("/__live/v1/action"),
         LiveTestOperation::Action,
@@ -442,7 +442,67 @@ async fn live_csrf_requires_both_same_origin_and_a_valid_token() {
     );
     assert_eq!(
         report.disposition(LiveSecurityCheck::Csrf),
+        Some(LiveSecurityDisposition::NotRequired)
+    );
+}
+
+/// Without an accepted origin proof the token path still decides: a valid
+/// token passes and records the CSRF fact, and a missing token is refused.
+#[tokio::test]
+async fn live_actions_without_an_origin_proof_fall_back_to_the_token() {
+    let with_token = prepare_live_request_for_test(
+        Request::for_test_with_headers(
+            "POST",
+            "/__live/v1/action",
+            [("x-csrf-token", "test_csrf_token")],
+        )
+        .with_route_pattern("/__live/v1/action"),
+        LiveTestOperation::Action,
+    );
+    let captured = Arc::new(Mutex::new(None));
+    let middleware = CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly);
+    let session = suprnova::session::new_session_slot_for_test();
+    let response = suprnova::session::session_scope_for_test(
+        session,
+        middleware.handle(with_token, capture_attestation(Arc::clone(&captured))),
+    )
+    .await;
+    assert!(response.is_ok());
+    let report = captured
+        .lock()
+        .expect("capture lock")
+        .take()
+        .expect("downstream request report");
+    assert_eq!(report.disposition(LiveSecurityCheck::Origin), None);
+    assert_eq!(
+        report.disposition(LiveSecurityCheck::Csrf),
         Some(LiveSecurityDisposition::Passed)
+    );
+
+    let without_token = prepare_live_request_for_test(
+        Request::for_test_with_headers(
+            "POST",
+            "/__live/v1/action",
+            [("sec-fetch-site", "cross-site")],
+        )
+        .with_route_pattern("/__live/v1/action"),
+        LiveTestOperation::Action,
+    );
+    let captured = Arc::new(Mutex::new(None));
+    let session = suprnova::session::new_session_slot_for_test();
+    let response = suprnova::session::session_scope_for_test(
+        session,
+        middleware.handle(without_token, capture_attestation(Arc::clone(&captured))),
+    )
+    .await;
+    let status = match response {
+        Err(rejected) => rejected.status_code(),
+        Ok(_) => panic!("a cross-site Live action without a token must be refused"),
+    };
+    assert_eq!(status, 419);
+    assert!(
+        captured.lock().expect("capture lock").is_none(),
+        "the handler never ran"
     );
 }
 

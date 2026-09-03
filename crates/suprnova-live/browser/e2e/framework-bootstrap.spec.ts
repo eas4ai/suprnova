@@ -65,7 +65,7 @@ test("SSR content is visible and every island connects through the ESM strategy"
       "suprnova-live.esm.js",
       "suprnova-live.uploads.esm.js",
       "suprnova-live.async.esm.js",
-      "suprnova-live.boot.esm.js",
+      "suprnova-live.boot.async.esm.js",
     ]),
   );
   for (const path of requests) {

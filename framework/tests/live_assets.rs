@@ -544,7 +544,8 @@ async fn esm_bootstrap_emits_config_preload_optional_roles_and_boot_in_order() {
     let core = catalog.artifact(ArtifactRole::CoreEsm);
     let uploads = catalog.artifact(ArtifactRole::UploadsEsm);
     let async_role = catalog.artifact(ArtifactRole::AsyncEsm);
-    let boot = catalog.boot_script(suprnova::live::LiveBootstrapStrategy::Esm);
+    let boot = catalog.boot_script_for(suprnova::live::LiveBootstrapStrategy::Esm, true);
+    assert_eq!(boot.file(), "suprnova-live.boot.async.esm.js");
     let core_link = format!(
         "<link rel=\"modulepreload\" href=\"/__live/v1/assets/{identity}/suprnova-live.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\">",
         core.sri()
@@ -574,6 +575,10 @@ async fn esm_bootstrap_emits_config_preload_optional_roles_and_boot_in_order() {
     );
     assert_eq!(html.matches("suprnova-live.esm.js").count(), 1);
     assert_eq!(html.matches(boot.file()).count(), 1);
+    assert!(
+        !html.contains("suprnova-live.boot.esm.js"),
+        "a document with the async role boots through the configuring script"
+    );
     assert!(!html.contains("stimulus"), "Stimulus loads only on request");
     assert!(
         !html.contains(".classic.js"),
@@ -590,6 +595,7 @@ async fn esm_bootstrap_emits_config_preload_optional_roles_and_boot_in_order() {
 async fn repeated_islands_and_core_only_documents_do_not_duplicate_roles() {
     let html = render_shop(true, LiveBootstrapOptions::esm()).await;
     let boot = catalog().boot_script(suprnova::live::LiveBootstrapStrategy::Esm);
+    assert_eq!(boot.file(), "suprnova-live.boot.esm.js");
     assert_eq!(html.matches("data-suprnova-live-island").count(), 2);
     assert_eq!(html.matches("suprnova-live.esm.js").count(), 1);
     assert_eq!(html.matches(boot.file()).count(), 1);

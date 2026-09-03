@@ -175,12 +175,24 @@ impl<C: ComponentContract> LiveMount<C> {
     }
 
     fn scope_requirements(&self) -> MountScopeRequirements {
-        let requirement = if self.kind == LiveMountKind::PublicSeed {
-            ScopeRequirement::Optional
-        } else {
-            ScopeRequirement::Required
-        };
-        MountScopeRequirements::new(requirement, requirement, requirement)
+        match self.kind {
+            LiveMountKind::PublicSeed => MountScopeRequirements::new(
+                ScopeRequirement::Optional,
+                ScopeRequirement::Optional,
+                ScopeRequirement::Optional,
+            ),
+            // An identity-bound island belongs to a session and a principal.
+            // The tenant is bound into the scope whenever the application's
+            // resolver names one and stays absent for a single-tenant
+            // deployment; a request from another tenant, or a tenant-less
+            // request against a tenant-bound instance, still fails the scope
+            // comparison.
+            LiveMountKind::IdentityBound => MountScopeRequirements::new(
+                ScopeRequirement::Required,
+                ScopeRequirement::Required,
+                ScopeRequirement::Optional,
+            ),
+        }
     }
 }
 

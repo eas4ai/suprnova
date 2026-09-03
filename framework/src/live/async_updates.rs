@@ -68,6 +68,11 @@ pub(crate) const LIVE_ASYNC_SOCKET_PATH: &str = "/__live/v1/async/socket";
 pub(crate) const SUBSCRIPTION_LIFETIME_MS: u64 = 120_000;
 pub(crate) const HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// Delay after a productive SSE batch before a non-authoritative comment
+/// follows it. WebKit hands a fetch stream's buffered bytes to the page only
+/// when further bytes arrive, so without a trailer the tail of a batch stays
+/// invisible until the next idle heartbeat.
+const SSE_DELIVERY_TRAILER_DELAY: Duration = Duration::from_millis(200);
 pub(crate) const POLL_INTERVAL_MS: u64 = 30_000;
 pub(crate) const POLL_JITTER_BASIS_POINTS: u16 = 2_000;
 pub(crate) const RECONNECT_MINIMUM_DELAY_MS: u64 = 250;
@@ -2195,8 +2200,15 @@ fn spawn_delivery_loop(
         let sse = key.kind == TransportKind::Sse;
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut trailer = tokio::time::interval(SSE_DELIVERY_TRAILER_DELAY);
+        trailer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut trailer_pending = false;
         loop {
             let (frames, mut retire) = drain_transport(&state, &key, generation, sse).await;
+            if sse && !frames.is_empty() {
+                trailer.reset();
+                trailer_pending = true;
+            }
             for frame in frames {
                 if sender.send(frame).await.is_err() {
                     retire = true;
@@ -2216,6 +2228,17 @@ fn spawn_delivery_loop(
                 }
                 _ = heartbeat.tick() => {
                     state.heartbeat(&key);
+                }
+                _ = trailer.tick(), if trailer_pending => {
+                    trailer_pending = false;
+                    if sender
+                        .send(Bytes::from_static(SseEncoder::heartbeat_comment()))
+                        .await
+                        .is_err()
+                    {
+                        state.retire_transport(&key, generation).await;
+                        break;
+                    }
                 }
             }
         }

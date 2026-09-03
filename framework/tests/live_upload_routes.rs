@@ -995,6 +995,75 @@ async fn malformed_upload_control_json_fails_before_runtime_or_provider_work() {
     assert!(body.is_empty());
 }
 
+/// The shipped browser runtime negotiates protocol 2, so an action on an
+/// upload-capable island must resolve its upload mount authority regardless of
+/// the protocol version the mount was registered with.
+#[tokio::test]
+#[serial_test::serial]
+async fn protocol_two_actions_reach_upload_capable_components() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let (router, _runtime) = semantic_router_and_runtime();
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let document_request = hyper::Request::builder()
+        .uri("/upload-fixture")
+        .body(Full::new(Bytes::new()))
+        .expect("build upload document request");
+    let (status, _, document_body) = dispatch_shared(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        document_request,
+    )
+    .await;
+    assert_eq!(status, hyper::StatusCode::OK);
+    let document = std::str::from_utf8(&document_body).expect("upload document UTF-8");
+    let seed: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(html_attribute(document, "data-suprnova-live-snapshot"))
+            .expect("decode upload seed snapshot"),
+    )
+    .expect("parse upload seed snapshot");
+
+    SAVE_ACTION_CALLS.store(0, Ordering::SeqCst);
+    let body = serde_json::to_vec(&json!({
+        "base_revision": "0",
+        "child_parameters": null,
+        "component": "tests.upload-route-component",
+        "correlation_id": "MDEyMzQ1Njc4OTo7PD0-Pw",
+        "extensions": {"x_suprnova_live_document_key_v1": "avatar-document"},
+        "idempotency_key": "QEFCQ0RFRkdISUpLTE1OTw",
+        "model_proposals": {},
+        "operations": [{"arguments": {}, "kind": "invoke_action", "name": "save_avatar"}],
+        "protocol_version": 2,
+        "runtime_contract_version": 2,
+        "snapshot": {
+            "browser_nonce": "ICEiIyQlJicoKSorLC0uLw",
+            "envelope": seed,
+            "kind": "seed_promotion",
+        },
+        "snapshot_schema_version": 1,
+    }))
+    .expect("encode protocol 2 action");
+    let request = hyper::Request::builder()
+        .method(Method::POST)
+        .uri("/__live/v1/action")
+        .header(
+            "content-type",
+            "application/vnd.suprnova.live+json; charset=utf-8; version=2",
+        )
+        .body(Full::new(Bytes::from(body)))
+        .expect("build protocol 2 action");
+    let (status, _, body) =
+        dispatch_shared(Arc::clone(&router), Arc::clone(&middleware), request).await;
+    assert_eq!(
+        status,
+        hyper::StatusCode::OK,
+        "a protocol 2 action on an upload-capable island was refused: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(SAVE_ACTION_CALLS.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_control_and_data_route_drives_the_engine_state_machine() {

@@ -65,6 +65,20 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 
 完整的脚手架细节，以及每个生成文件的样子，请参见[生成器](cli-generators.md)。
 
+### Live
+
+| 命令 | 描述 |
+|---|---|
+| `suprnova live:make <name>` | 在 `src/live/` 生成一个 Live 组件，在 `templates/live/` 生成其视图，并在 `src/live/mod.rs` 中注册。从不覆盖；`--dry-run` 报告计划。 |
+| `suprnova live:check` | 用集成检查器检查每一个已注册的 Live 视图。读取 `askama.toml` 的 `dirs` 或 `templates/`；`--templates <dir>` 覆盖，`--allow-unproved` 接受未证明的动态结构。 |
+| `suprnova live:inspect` | 报告 Live 运行时、注册表、提供者和工件的安全状态（`--json` 输出单个 JSON 文档）。 |
+| `suprnova live:assets --out <dir>` | 把经过审阅的 Live 运行时工件原子地发布到 `<dir>/<identity>/`；`--replace` 替换字节不同的发布。 |
+
+`live:check`、`live:inspect` 和 `live:assets` 在你的应用内部运行：
+CLI 启动 `cargo run --bin console`，并从框架隐藏的工具助手读取一份有界、带版本的
+JSON 行报告，因此 CLI 自身永远不需要框架依赖。构建输出留在 stderr；stdout 上任何
+意外内容都会使命令以封闭方式失败。
+
 ### 数据库
 
 | 命令 | 描述 |

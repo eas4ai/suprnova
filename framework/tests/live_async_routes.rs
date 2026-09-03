@@ -327,6 +327,56 @@ async fn one_sse_transport_multiplexes_two_islands_and_delivers_typed_events_in_
     assert_eq!(third["payload"]["payload"], "third");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_productive_sse_batch_is_followed_by_a_comment_trailer() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let orders = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = orders.credential.clone().expect("bearer");
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    let opened = stream.next_record().await.expect("stream opened");
+    assert_eq!(opened.comment.as_deref(), Some("suprnova-live heartbeat"));
+    let ack = subscribe(
+        server.port,
+        &alice,
+        &credential,
+        &orders,
+        "nonce-orders-1",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status, StatusCode::OK);
+
+    let streams = LiveStreams::resolve().expect("Live streams publisher");
+    streams
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Document,
+            CanonicalValue::String("first".to_owned()),
+        )
+        .await
+        .expect("publish first event");
+    let (_, first) = next_envelope(&mut stream).await;
+    assert_eq!(first["payload"]["payload"], "first");
+
+    // WebKit hands a fetch stream's buffered bytes to the page only when more
+    // bytes arrive, so every productive batch is followed shortly by a
+    // non-authoritative comment, long before any idle heartbeat is due.
+    let trailer = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next_record())
+        .await
+        .expect("a comment trailer follows the batch within its delay")
+        .expect("stream stays open");
+    assert_eq!(trailer.comment.as_deref(), Some("suprnova-live heartbeat"));
+    assert!(trailer.data.is_none(), "the trailer carries no envelope");
+}
+
 async fn next_envelope(stream: &mut SseClient) -> (SseRecord, Value) {
     loop {
         let record = stream.next_record().await.expect("stream stays open");

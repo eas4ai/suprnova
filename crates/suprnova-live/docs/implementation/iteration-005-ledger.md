@@ -4,6 +4,105 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-02 -- Generated-application proof and the durable dogfood surface
+
+A fresh `suprnova new` application now passes `live:check` out of the box and
+the dogfood application under `app/` exercises every Live surface end to end,
+closing plan Task 10. Wiring the two surfaces uncovered six integration
+defects, each fixed at its owner with a regression test:
+
+- Applications had no way to attach their own middleware to the reserved
+  routes. `Router::try_live_with` takes a `LiveRouteGuard` whose middleware
+  chain is applied to the action, upload, and three asynchronous control
+  routes and to the WebSocket upgrade (which also pins a same-origin
+  policy); asset routes stay unguarded. `Router::try_live()` is the empty
+  guard.
+- The CSRF middleware demanded a token from a runtime that sends none. A Live
+  operation whose origin check passes now records `Origin` as passed and
+  `Csrf` as not required under the stateless policy; the token path applies
+  only when no origin proof is present.
+- Identity-bound mounts required a tenant even for single-tenant
+  applications; the requirement is now optional for that scope while session
+  and principal stay required.
+- Upload-capable islands concealed protocol 2 actions because the upload
+  selector match compared protocol versions; the match now validates the
+  request's own selection against the selector scope.
+- Component templates cannot declare the island-owned `live:stream`
+  directive and a bare island root is rejected by the checker, so the engine
+  now emits `live:stream="<name>"` on the island root it renders from the
+  component's first declared stream, at execution, mount, and public mount.
+- The browser runtime's asynchronous feature stayed inert without host glue.
+  The asynchronous artifacts now ship a default browser host
+  (`browserAsyncOptions()`, `BrowserAsyncAuthority`, `browserSseMembership`;
+  classic `window.SuprnovaLiveAsync`) that issues and renews through the
+  reserved subscription route, drives SSE membership control with the issued
+  bearer credential, and opens the native transports. The framework serves a
+  third boot script, `suprnova-live.boot.async.esm.js`, selected whenever a
+  document's roles include the asynchronous artifact, and the classic boot
+  configures the host when the classic asynchronous artifact is present.
+- The runtime's bearer SSE reader omitted credentials, so the guarded events
+  route answered 401 before the stream opened; it now sends same-origin
+  credentials while the bearer stays the transport authority.
+- WebKit delivered only the first piece of a two-record batch to the page and
+  held the rest until more bytes arrived, which a system-call trace of its
+  network process confirmed. The framework now follows every productive SSE
+  batch with a 200 ms delayed comment trailer, proven by a framework test and
+  the three-engine dogfood suite; the reference host's two-second comment
+  cadence had masked the behavior in the runtime's own evidence.
+
+The scaffold writes `src/live/mod.rs` with an empty registry builder and a
+`routes()` function that guards the reserved routes with authentication,
+single-tenant resolution, and rate limiting; `bootstrap.rs` binds the registry
+and the same-origin CSRF policy; `cmd/main.rs` installs the Live routes.
+`live:make` inserts into an empty builder and declares the module after the
+use block. `suprnova-cli/tests/live_generated_app.rs` holds a fast template
+proof plus an ignored acceptance test that scaffolds, generates a component,
+points the application at the local framework, and runs `live:check` and
+`live:inspect --json`; the repository gate's scaffold step runs that suite.
+
+The dogfood application registers a counter, an avatar uploader, and an
+activity feed; mounts them identity-bound on `/live` and the counter as a
+public seed on `/live/public`; guards the reserved routes; declares the
+reacquisition route `/account/uploads/{handle}/reacquire`; and supplies a
+single-tenant resolver, an upload finalizer, and Gate abilities for the
+stream and every upload control. `app/examples/live_dogfood_host.rs` is the
+real server the Playwright suite drives on port 4178. `manual/live.md` is the
+application-facing chapter, translated into the six locales, with `cli.md`,
+`cli-generators.md`, and `documentation.md` updated in every locale.
+
+Verification completed from the integration worktree:
+
+```bash
+rtk cargo fmt --all -- --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_assets --test live_tooling_protocol
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --lib live::
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test live_async_routes
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --test <every framework/tests/live_*.rs suite>
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p app
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live --all-targets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --test live_generated_app --test live_cli --test live_scaffold --test live_assets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --test live_generated_app -- --ignored
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo clippy -p suprnova -p suprnova-live -p app -p suprnova-cli --all-targets --all-features
+cd crates/suprnova-live/browser && npm run format:check && npm run lint && npm run typecheck && npm run test:unit
+cd crates/suprnova-live/browser && npm run build && npm run build:check
+cd crates/suprnova-live/browser && npx playwright test e2e/app-dogfood.spec.ts e2e/framework-bootstrap.spec.ts --project=chromium --project=firefox --project=webkit
+cd crates/suprnova-live && node scripts/check-correctness-delays.mjs
+cd crates/suprnova-live && tests/documentation_contract.sh && node scripts/check-implementation-docs.mjs && node scripts/check-specs.mjs
+scripts/check-manual-translations.sh && python3 scripts/check-manual-structure.py
+git diff --check
+```
+
+Those commands passed the 44 framework Live suites (123 cases) and the 11
+Live unit cases, 110 application cases including the dogfood, reacquisition,
+and SSE, WebSocket, and polling suites, 705 engine cases, 27 CLI cases plus
+the ignored generated-application acceptance case, 858 browser unit cases,
+the reproducible build with byte-identical artifacts, 39 Playwright cases
+across three engines (12 dogfood, 27 framework bootstrap), the delay scanner,
+and the documentation, specification, and manual gates. Clippy reported only
+the four pre-existing findings in the Magnetar integration module and its
+test helpers and the engine's promoted-action constructor, none in files
+this task touched.
+
 ## 2026-09-02 -- Live CLI workflows and the application tooling protocol
 
 The Suprnova CLI gained `live:make`, `live:check`, `live:inspect`, and

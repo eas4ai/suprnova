@@ -58,6 +58,7 @@
     - [Supervisores](supervisors.md)
     - [Eventos enviados por el servidor](sse.md)
     - [WebSockets](websockets.md)
+    - [Live](live.md)
     - [Idempotencia](idempotency.md)
     - [Tiempo de espera](timeout.md)
     - [Indicadores de características](feature-flags.md)

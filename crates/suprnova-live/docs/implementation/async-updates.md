@@ -145,6 +145,11 @@ and skips visibility-bound work while hidden. `immediate`, `visible`, and
 `always` adjust the generated eligibility contract; duplicate or conflicting
 modifiers are rejected.
 
+A framework-rendered island does not author the directive in its template:
+the engine emits `live:stream` on the island root it assembles, naming the
+component's first declared stream, because the engine owns that root and
+rejects a template that carries one.
+
 `live:stream="orders"` requests push with hybrid fallback. Explicit
 `live:stream.hybrid="orders"` has the same freshness class and may pair with an
 empty `live:poll` directive to override presentation of the fallback interval.
@@ -322,3 +327,27 @@ object `{"error": code}` with a stable `async_*` code and `Cache-Control:
 no-store`. Test-only inspection lives in `suprnova::live::testing`
 (`inspect_async_transports_for_test`, `await_async_transport_retirement_for_test`,
 `AdjustableTestClock`, `prepare_live_router_with_clock_for_test`).
+
+## Browser host and delivery evidence
+
+The asynchronous artifacts ship a default browser host, `browserAsyncOptions()`
+(ESM) and `window.SuprnovaLiveAsync.browserOptions()` (classic), that issues
+and renews subscriptions and drives SSE membership through the reserved
+`/__live/v1/async/*` routes; an application on another host supplies its own
+`AsyncFeatureOptions` through `configureAsync` before boot instead. The bearer
+SSE reader fetches with same-origin credentials: the bearer stays the
+transport authority and never enters a URL, while the same-origin cookie lets
+the host re-resolve session, principal, and tenant before matching the
+credential, as the framework events route requires. A cross-origin transport
+therefore carries no ambient credential.
+
+WebKit hands a fetch stream's buffered bytes to the page only when further
+bytes arrive: a system-call trace of the dogfood suite showed its network
+process reading a two-record batch completely and relaying every piece to
+the web process, while the page's reader received only the first piece until
+the next write. The framework therefore follows every productive SSE batch
+with a non-authoritative comment after a 200 ms delay
+(`SSE_DELIVERY_TRAILER_DELAY`), which the runtime's reader discards, so a
+held tail becomes visible within that delay on every engine. The reference
+host's two-second comment cadence had masked the same behavior in the
+runtime's own WebKit evidence.

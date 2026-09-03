@@ -58,6 +58,7 @@
     - [スーパーバイザー](supervisors.md)
     - [Server-Sent イベント](sse.md)
     - [WebSocket](websockets.md)
+    - [Live](live.md)
     - [べき等性](idempotency.md)
     - [タイムアウト](timeout.md)
     - [フィーチャー フラグ](feature-flags.md)

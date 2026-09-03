@@ -328,8 +328,8 @@ fn assets_exports_exactly_the_reviewed_bytes() {
         .collect();
     assert_eq!(
         assets.len(),
-        11,
-        "manifest, eight artifacts, two boot scripts"
+        12,
+        "manifest, eight artifacts, three boot scripts"
     );
     for asset in &assets {
         let decoded = BASE64.decode(&asset.content).expect("standard base64");
@@ -367,7 +367,7 @@ fn assets_exports_exactly_the_reviewed_bytes() {
         assert_eq!(decoded, expected);
     }
     let files: std::collections::BTreeSet<&str> = assets.iter().map(|a| a.file.as_str()).collect();
-    assert_eq!(files.len(), 11, "every file is exported once");
+    assert_eq!(files.len(), 12, "every file is exported once");
 }
 
 #[test]

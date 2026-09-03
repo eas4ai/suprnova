@@ -188,6 +188,80 @@ impl TypedCommand for CleanCache {
 
 ---
 
+## live:make
+
+生成一个 Live 组件：一个由服务器拥有的岛屿，其类型化动作通过 Live 协议到达，其重新
+渲染的视图由随附的浏览器运行时就地变形。
+
+```bash
+suprnova live:make Counter
+suprnova live:make todo-list
+suprnova live:make Counter --dry-run
+```
+
+名称必须是 `Counter`、`TodoList`、`todo-list` 或 `todo_list` 任一形式的纯 ASCII
+标识符；文件和模块使用 snake_case，结构体使用 PascalCase，注册的组件名为
+`<package>.<kebab>`（对于名为 `demo-app` 的包：`demo-app.counter`）。Rust 关键字、
+分隔符、点以及非 ASCII 输入会在写入任何内容之前被拒绝。
+
+### 生成的文件
+
+```rust
+// src/live/counter.rs
+use suprnova::live::{LiveComponent, live};
+
+/// A counter island rendered by `live/counter.html`.
+#[derive(LiveComponent)]
+#[live(name = "demo-app.counter", view = "live/counter.html")]
+pub struct Counter {
+    /// Current count, exposed to the view.
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl Counter {
+    /// Increments the counter in response to `live:click="increment"`.
+    #[action]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+```html
+<!-- templates/live/counter.html -->
+<div>
+<p>Count: {{ count }}</p>
+<button type="button" live:click="increment">Increment</button>
+</div>
+```
+
+### 它接线了什么
+
+1. 先验证每一个目标路径，拒绝路径穿越和符号链接；如果组件文件或视图已经存在，则
+   发出警告且完全不写入。
+2. 原子地写入 `src/live/<snake>.rs` 与 `templates/live/<snake>.html`；如果任一写入
+   失败，本次运行创建或修改的每个文件都会被回滚。
+3. 把 `pub mod <snake>;` 和 `.register::<snake::Pascal>()?` 插入到
+   `src/live/mod.rs` 的 `registry()` 构建器中。由 `suprnova new` 创建的每个项目都
+   附带该模块：一个空的注册表、一个安装带守卫的保留 Live 路由的 `routes()` 函数，
+   以及一个绑定注册表的引导；较旧的项目会在首次使用时创建同一个模块。
+4. 在 `src/lib.rs` 缺少 `pub mod live;` 时添加它。
+5. 打印绑定注册表的引导行，然后打印检查命令：`suprnova live:check`。
+
+在早于 Live 模块的项目中，请在引导期间手动绑定注册表，并从 `cmd/main.rs` 安装路由：
+
+```rust
+suprnova::App::singleton(crate::live::registry().expect("Live registry"));
+```
+
+```rust
+.try_routes(|| live::routes(routes::register()))
+```
+
+---
+
 ## make:error
 
 脚手架出一个领域错误 - 一个标注了 `#[domain_error]` 的单元结构体，这样它天生就带着一个 HTTP 状态、一条 `Display` 消息，以及一个 `From<…> for FrameworkError` 的实现。

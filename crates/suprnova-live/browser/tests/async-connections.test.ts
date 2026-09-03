@@ -435,6 +435,8 @@ describe("browser SSE authorization adapters", () => {
     expect(requestUrl).toBe("https://app.example.test/__live/v1/async/events");
     expect(requestUrl).not.toContain(secret);
     expect(new Headers(init?.headers).get("Authorization")).toBe(`SuprnovaAsync ${secret}`);
+    expect(init?.credentials).toBe("same-origin");
+    expect(init?.redirect).toBe("error");
     expect(native).not.toHaveBeenCalled();
 
     releaseResponse?.(

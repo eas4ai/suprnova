@@ -47,3 +47,10 @@ serde_json = "1"
 # e2e tests do not collide on the same on-disk path.
 tempfile = "3"
 serial_test = "=2.0.0"
+# Live dogfood tests decode island snapshots, checksum upload chunks, and
+# open the asynchronous WebSocket transport.
+base64 = "0.22"
+sha2 = "0.11"
+hex = "0.4.3"
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3.32"

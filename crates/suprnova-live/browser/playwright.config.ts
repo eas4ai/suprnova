@@ -45,6 +45,13 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 600_000,
     },
+    {
+      command:
+        "SUPRNOVA_LIVE_DOGFOOD_PORT=4178 SESSION_SECURE=false cargo run --manifest-path ../Cargo.toml -p app --example live_dogfood_host",
+      url: "http://127.0.0.1:4178/health",
+      reuseExistingServer: false,
+      timeout: 600_000,
+    },
   ],
   projects: [
     {
