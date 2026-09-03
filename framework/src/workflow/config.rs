@@ -8,9 +8,15 @@ use crate::error::FrameworkError;
 /// would never process anything.
 pub const MIN_CONCURRENCY: usize = 1;
 
-/// Minimum allowed workflow lease duration in seconds. Zero expires at the
-/// claim timestamp, allowing another worker to reclaim the same workflow.
-pub const MIN_LOCK_TIMEOUT_SECS: u64 = 1;
+/// Minimum allowed workflow lease duration in seconds.
+///
+/// The heartbeat refreshes at `max(lock_timeout / 2, 1s)`, so a lease
+/// below 2s is due for its first refresh at or after its own expiry:
+/// any claim latency or scheduling jitter opens a reclaim window another
+/// worker can walk through while the first worker is already executing
+/// effects. Two seconds is the smallest lease whose first refresh still
+/// lands with margin.
+pub const MIN_LOCK_TIMEOUT_SECS: u64 = 2;
 
 /// Minimum allowed `max_attempts`. A value below 1 prevents any attempt
 /// from running (`attempts < max_attempts` is never true after the
@@ -23,7 +29,7 @@ pub const MIN_MAX_ATTEMPTS: i32 = 1;
 ///
 /// - `WORKFLOW_POLL_INTERVAL_MS` - Worker poll interval in milliseconds (default: 1000)
 /// - `WORKFLOW_CONCURRENCY` - Number of workflows to process concurrently (default: 4, min: 1)
-/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30, min: 1)
+/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30, min: 2)
 /// - `WORKFLOW_MAX_ATTEMPTS` - Max workflow attempts (default: 3, min: 1)
 /// - `WORKFLOW_RETRY_BACKOFF_SECS` - Linear backoff seconds (default: 5, min: 0)
 ///
@@ -39,7 +45,7 @@ pub struct WorkflowConfig {
     pub poll_interval_ms: u64,
     /// Max concurrent workflows processed by a worker
     pub concurrency: usize,
-    /// Lease duration in seconds (minimum: 1)
+    /// Lease duration in seconds (minimum: 2)
     pub lock_timeout_secs: u64,
     /// Max attempts per workflow
     pub max_attempts: i32,
@@ -101,7 +107,7 @@ impl WorkflowConfig {
                 env = "WORKFLOW_LOCK_TIMEOUT_SECS",
                 value = raw_lock_timeout,
                 clamped_to = MIN_LOCK_TIMEOUT_SECS,
-                "WORKFLOW_LOCK_TIMEOUT_SECS below minimum; clamping (a zero-second lease is immediately reclaimable)"
+                "WORKFLOW_LOCK_TIMEOUT_SECS below minimum; clamping (a sub-two-second lease can expire before its first heartbeat refresh)"
             );
             MIN_LOCK_TIMEOUT_SECS
         } else {
@@ -148,8 +154,8 @@ impl WorkflowConfig {
         if self.lock_timeout_secs < MIN_LOCK_TIMEOUT_SECS {
             return Err(FrameworkError::internal(format!(
                 "WorkflowConfig.lock_timeout_secs must be >= {MIN_LOCK_TIMEOUT_SECS}; got {}. \
-                 A zero-second lease expires at claim time, allowing concurrent workers \
-                 to reclaim the same workflow.",
+                 Shorter leases expire at or before their first heartbeat refresh, \
+                 allowing concurrent workers to reclaim the same workflow.",
                 self.lock_timeout_secs
             )));
         }
@@ -229,6 +235,13 @@ mod tests {
                 "lock_timeout_secs=0 must be clamped to >= {MIN_LOCK_TIMEOUT_SECS}, got {}",
                 cfg.lock_timeout_secs,
             ),
+            // P4-05: a 1s lease cannot preserve a heartbeat safety
+            // margin, so env loading clamps it to the 2s minimum.
+            "one-lock-timeout" => assert_eq!(
+                cfg.lock_timeout_secs, MIN_LOCK_TIMEOUT_SECS,
+                "lock_timeout_secs=1 must clamp to {MIN_LOCK_TIMEOUT_SECS}, got {}",
+                cfg.lock_timeout_secs,
+            ),
             "positive-lock-timeout" => assert_eq!(cfg.lock_timeout_secs, 7),
             other => panic!("unknown workflow config probe scenario: {other}"),
         }
@@ -252,6 +265,11 @@ mod tests {
     #[test]
     fn from_env_clamps_zero_lock_timeout_to_positive_minimum() {
         run_from_env_probe("zero-lock-timeout", "WORKFLOW_LOCK_TIMEOUT_SECS", "0");
+    }
+
+    #[test]
+    fn from_env_clamps_one_second_lock_timeout_to_minimum() {
+        run_from_env_probe("one-lock-timeout", "WORKFLOW_LOCK_TIMEOUT_SECS", "1");
     }
 
     #[test]
@@ -321,6 +339,39 @@ mod tests {
             err.to_string().contains("lock_timeout_secs"),
             "error must name lock_timeout_secs, got: {err}",
         );
+    }
+
+    #[test]
+    fn validate_rejects_one_second_lock_timeout() {
+        // P4-05: a 1s lease is due for its first heartbeat refresh at or
+        // after its own expiry (interval is max(lease/2, 1s)), so any
+        // claim latency opens a reclaim window while effects execute.
+        let cfg = WorkflowConfig {
+            poll_interval_ms: 1000,
+            concurrency: 4,
+            lock_timeout_secs: 1,
+            max_attempts: 3,
+            retry_backoff_secs: 5,
+        };
+        let err = cfg.validate().expect_err("one-second lease must error");
+        assert!(
+            err.to_string().contains("lock_timeout_secs"),
+            "error must name lock_timeout_secs, got: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_accepts_two_second_lock_timeout() {
+        // Two seconds is the smallest lease whose first heartbeat refresh
+        // still lands with margin.
+        let cfg = WorkflowConfig {
+            poll_interval_ms: 1000,
+            concurrency: 4,
+            lock_timeout_secs: 2,
+            max_attempts: 3,
+            retry_backoff_secs: 5,
+        };
+        cfg.validate().expect("two-second lease is the minimum");
     }
 
     #[test]

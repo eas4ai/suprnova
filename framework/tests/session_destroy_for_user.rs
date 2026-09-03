@@ -200,6 +200,122 @@ async fn destroy_for_user_removes_only_that_users_rows() {
     );
 }
 
+/// P4-02: a user signed in only through a non-default guard has a row
+/// with `user_id = NULL`. User-wide revocation must still find the row
+/// through the payload's guard identities and delete it, so the same
+/// cookie cannot restore the named identity on replay.
+#[tokio::test]
+async fn destroy_for_user_revokes_named_only_guard_session() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut sess = SessionData::new("named-only-sess".into(), "csrf".into());
+    assert!(sess.user_id.is_none());
+    sess.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "admin": { "id": "admin-uid" } }),
+    );
+    driver.write(&sess).await.unwrap();
+    assert!(
+        driver.read("named-only-sess").await.unwrap().is_some(),
+        "precondition: the named-only session must exist"
+    );
+
+    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
+    assert_eq!(deleted, 1, "revocation must reach the named-only row");
+
+    assert!(
+        driver.read("named-only-sess").await.unwrap().is_none(),
+        "the revoked row must be gone, so the cookie cannot replay the identity"
+    );
+}
+
+/// P4-02: a session carrying several principals under different guards
+/// must die when any one of them is revoked - the surviving row would
+/// otherwise keep authenticating the revoked principal.
+#[tokio::test]
+async fn destroy_for_user_revokes_multi_principal_session_for_any_principal() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut sess = SessionData::new("multi-principal-sess".into(), "csrf".into());
+    sess.user_id = Some("web-uid".into());
+    sess.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "admin": { "id": "admin-uid" } }),
+    );
+    driver.write(&sess).await.unwrap();
+
+    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
+    assert_eq!(deleted, 1);
+    assert!(
+        driver.read("multi-principal-sess").await.unwrap().is_none(),
+        "revoking any principal must remove the whole session row"
+    );
+
+    // The other principal's revocation now finds nothing left to do.
+    let deleted = driver.destroy_for_user("web-uid").await.unwrap();
+    assert_eq!(deleted, 0);
+}
+
+/// P4-02 negative: revoking one user must not touch sessions whose guard
+/// identities belong to someone else.
+#[tokio::test]
+async fn destroy_for_user_leaves_other_guard_identities_alone() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut sess = SessionData::new("other-admin-sess".into(), "csrf".into());
+    sess.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "admin": { "id": "other-admin-uid" } }),
+    );
+    driver.write(&sess).await.unwrap();
+
+    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
+    assert_eq!(deleted, 0);
+    assert!(
+        driver.read("other-admin-sess").await.unwrap().is_some(),
+        "another user's named-guard session must survive"
+    );
+}
+
+/// P4-09: a programmatically built driver with an absurd lifetime must
+/// neither panic in deadline arithmetic nor mass-expire live sessions.
+/// The `u64`->`i64` conversion caps, the deadline addition is checked,
+/// and the GC threshold floors instead of deleting everything.
+#[tokio::test]
+async fn oversized_programmatic_lifetime_neither_panics_nor_mass_expires() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(u64::MAX));
+
+    let mut sess = SessionData::new("huge-lifetime-sess".into(), "csrf".into());
+    sess.user_id = Some("u-huge".into());
+    driver.write(&sess).await.unwrap();
+
+    assert!(
+        driver
+            .read("huge-lifetime-sess")
+            .await
+            .expect("read must not panic on an oversized lifetime")
+            .is_some(),
+        "a fresh session under a capped lifetime must read back as live"
+    );
+    assert_eq!(
+        driver.gc().await.expect("gc must not panic"),
+        0,
+        "gc under an oversized lifetime must delete nothing, not mass-expire"
+    );
+    assert!(
+        driver
+            .read("huge-lifetime-sess")
+            .await
+            .expect("read after gc")
+            .is_some(),
+        "the session must survive the gc pass"
+    );
+}
+
 #[tokio::test]
 async fn destroy_for_user_returns_zero_when_no_matching_rows() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();

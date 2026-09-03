@@ -54,11 +54,12 @@ fn run_migrations() -> Result<(), String> {
         return Ok(());
     }
 
-    if !Path::new("src/bin/migrate.rs").exists() {
-        ui::warning("Migration binary not found, skipping migrations");
-        return Ok(());
-    }
-
+    // Current full-stack and API scaffolds register their migrator in the
+    // default application binary (`cmd/main.rs` / `src/main.rs`), which
+    // `Application::run` drives through its `migrate` subcommand - there
+    // is no `src/bin/migrate.rs` anymore, so its absence must not skip
+    // migrations. Fail loudly instead: running discovery against a stale
+    // database regenerates stale models while exiting successfully.
     ui::info("Running pending migrations...");
 
     let status = crate::commands::cargo_run(&["migrate"])

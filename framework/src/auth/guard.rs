@@ -760,6 +760,19 @@ impl Auth {
         Ok(user)
     }
 
+    /// Whether `err` is the "no user provider configured" error from the
+    /// [`user`](Self::user) legacy fallback: a persisted identity exists but
+    /// no provider is bound to resolve it against. The auth middleware uses
+    /// this to preserve the providerless `login_id`-only fast path while
+    /// still failing closed on genuine provider failures.
+    pub(crate) fn is_missing_provider(err: &crate::error::FrameworkError) -> bool {
+        matches!(
+            err,
+            crate::error::FrameworkError::Internal { message }
+            if message.starts_with("No user provider configured")
+        )
+    }
+
     /// Get the currently authenticated user, or fail with an unauthorised
     /// error.
     ///

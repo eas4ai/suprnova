@@ -719,6 +719,24 @@ impl SessionData {
     }
 }
 
+/// Every guard principal in a deserialized session `data` map.
+///
+/// Operates on the map (rather than [`SessionData`]) so the database
+/// driver can apply it to stored payloads during user-wide revocation
+/// without reconstructing a full session value.
+pub(crate) fn guard_principal_ids_in(
+    data: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    data.get(AUTH_GUARDS_KEY)
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|guards| guards.values())
+        .filter_map(|state| state.get(AUTH_GUARD_ID_KEY))
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Returns true when `id` matches the shape minted by
 /// [`super::generate_session_id`] - 40 lowercase-alphanumeric
 /// characters. Mirrors Laravel's `Store::isValidId`

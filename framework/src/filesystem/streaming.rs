@@ -48,6 +48,11 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 ///   fails mid-stream, a chunk write fails, or the final close fails. Each
 ///   boundary uses a distinct message prefix so failures are identifiable in
 ///   logs.
+///
+/// If the task running the transfer is cancelled, the same abort+delete
+/// cleanup is diverted to a detached task instead of being skipped: a
+/// cancelled copy must not leave a partial destination object (or staged
+/// upload parts) behind either.
 pub async fn copy_between_disks(
     src: &str,
     src_path: &str,
@@ -67,40 +72,160 @@ pub async fn copy_between_disks(
         .await
         .map_err(|e| FrameworkError::internal(format!("open source: {e}")))?;
 
-    let mut writer = dest_op
+    let writer = dest_op
         .writer(dest_path)
         .await
         .map_err(|e| FrameworkError::internal(format!("open dest: {e}")))?;
 
     // Once the writer is open, a mid-stream failure can leave a partial object
-    // at `dest_path`. Run the transfer separately so that on ANY error we
-    // discard the partial write before propagating - a failed copy must never
-    // be observable as a truncated destination object.
-    match stream_to_writer(reader, &mut writer).await {
-        Ok(total) => Ok(total),
-        Err(err) => {
-            // `abort` discards staged writes for backends that buffer them
-            // (e.g. S3 multipart parts); `delete` removes an already-visible
-            // partial file (e.g. the local FS backend). Both are best-effort
-            // and only logged - the caller still sees the original error.
-            if let Err(abort_err) = writer.abort().await {
-                tracing::warn!(
-                    disk = dest,
-                    path = dest_path,
-                    error = %abort_err,
-                    "failed to abort writer while cleaning up a failed cross-disk copy"
-                );
-            }
-            if let Err(delete_err) = dest_op.delete(dest_path).await {
-                tracing::warn!(
-                    disk = dest,
-                    path = dest_path,
-                    error = %delete_err,
-                    "failed to delete partial destination while cleaning up a failed cross-disk copy"
-                );
-            }
-            Err(err)
+    // at `dest_path`. The guard below owns the writer across the transfer:
+    // errors settle inline with abort+delete before propagating (a failed
+    // copy must never be observable as a truncated destination object),
+    // while task cancellation - which drops the future instead of
+    // returning an error - diverts the same cleanup to a detached task.
+    let mut guard = WriterGuard::new(dest_op.clone(), dest, dest_path, writer);
+    let result = stream_to_writer(reader, guard.writer()).await;
+    guard.settle(result).await
+}
+
+/// Owns the destination writer across the transfer loop so cleanup runs on
+/// every exit path, including task cancellation.
+///
+/// Errors settle inline ([`WriterGuard::settle`]) with the same
+/// abort+delete the old code ran. If the guard is dropped first - the task
+/// was aborted or panicked mid-transfer, so no error ever comes back -
+/// the unclosed writer's staged/partial output is diverted to a detached
+/// task instead of being left behind.
+struct WriterGuard {
+    writer: Option<opendal::Writer>,
+    dest_op: opendal::Operator,
+    dest: String,
+    dest_path: String,
+    complete: bool,
+}
+
+impl WriterGuard {
+    fn new(
+        dest_op: opendal::Operator,
+        dest: &str,
+        dest_path: &str,
+        writer: opendal::Writer,
+    ) -> Self {
+        Self {
+            writer: Some(writer),
+            dest_op,
+            dest: dest.to_string(),
+            dest_path: dest_path.to_string(),
+            complete: false,
         }
+    }
+
+    fn writer(&mut self) -> &mut opendal::Writer {
+        self.writer
+            .as_mut()
+            .expect("writer is taken only while settling")
+    }
+
+    /// Settle a finished transfer. Success disarms the guard (the loop
+    /// already closed the writer); failure runs abort+delete and then
+    /// propagates the original error.
+    ///
+    /// Cleanup runs on a detached task that is awaited here: if this
+    /// task is cancelled mid-cleanup, the detached task still runs it to
+    /// completion instead of abandoning the remainder.
+    async fn settle(mut self, result: Result<u64, FrameworkError>) -> Result<u64, FrameworkError> {
+        match result {
+            Ok(total) => {
+                self.complete = true;
+                Ok(total)
+            }
+            Err(err) => {
+                let writer = self.writer.take();
+                // Disarm first: the detached task owns cleanup from here,
+                // so a later abort must not divert it a second time.
+                self.complete = true;
+                let cleanup = run_cleanup(
+                    writer,
+                    self.dest_op.clone(),
+                    self.dest.clone(),
+                    self.dest_path.clone(),
+                    "failed",
+                );
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        let _ = handle.spawn(cleanup).await;
+                    }
+                    // No runtime to spawn onto (foreign executor): inline
+                    // is the only option left.
+                    Err(_) => cleanup.await,
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Abort the staged write, then delete any visible partial - best
+/// effort, failures only logged. `kind` is `"failed"` for the error
+/// path and `"cancelled"` for the divert path, so logs say which exit
+/// the transfer took.
+async fn run_cleanup(
+    writer: Option<opendal::Writer>,
+    dest_op: opendal::Operator,
+    dest: String,
+    dest_path: String,
+    kind: &'static str,
+) {
+    if let Some(mut writer) = writer
+        && let Err(abort_err) = writer.abort().await
+    {
+        tracing::warn!(
+            disk = dest,
+            path = dest_path,
+            error = %abort_err,
+            "failed to abort writer while cleaning up a {kind} cross-disk copy"
+        );
+    }
+    if let Err(delete_err) = dest_op.delete(&dest_path).await {
+        tracing::warn!(
+            disk = dest,
+            path = dest_path,
+            error = %delete_err,
+            "failed to delete partial destination while cleaning up a {kind} cross-disk copy"
+        );
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        if self.complete || self.writer.is_none() {
+            return;
+        }
+        // Cancelled (or panicked) mid-transfer: the writer was never
+        // closed, so without this the partial object - or staged upload
+        // parts - would be left behind. This task is going away; divert
+        // the same cleanup to a detached task that outlives it.
+        let writer = self.writer.take();
+        let dest_op = self.dest_op.clone();
+        let dest = self.dest.clone();
+        let dest_path = self.dest_path.clone();
+        spawn_cleanup(run_cleanup(writer, dest_op, dest, dest_path, "cancelled"));
+    }
+}
+
+/// Run `future` on a detached task that outlives the spawning task's
+/// cancellation. Cancellation-divert only, never the happy path; the
+/// cleanup needs no ambient context (operator, writer, and paths are all
+/// owned), so nothing is propagated. Without a running runtime
+/// (shutdown) there is nothing to spawn onto, which is logged.
+fn spawn_cleanup(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(future);
+    } else {
+        tracing::error!(
+            "cross-disk copy cancelled with no async runtime running; \
+             its partial destination may remain"
+        );
     }
 }
 

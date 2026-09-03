@@ -4,6 +4,23 @@ use std::time::Duration;
 
 use crate::http::CookiePrefix;
 
+/// Maximum session/remember lifetime in seconds: 9999-12-31T23:59:59Z as
+/// a Unix timestamp.
+///
+/// Lifetimes are added to `last_activity` timestamps in [`chrono`] date
+/// arithmetic, which panics on overflow, and converted to `i64` for the
+/// same computation. Any lifetime beyond this bound risks an exploded or
+/// wrapped deadline (mass-expiry or a panic) instead of a long session,
+/// so env parsing clamps here and the database driver caps here too.
+/// Nobody needs a session longer than ~8,000 years; anything larger is a
+/// misconfiguration, not intent.
+pub const MAX_SESSION_LIFETIME_SECS: u64 = 253_402_300_799;
+
+/// Maximum lifetime in whole minutes, for clamping minute-denominated env
+/// knobs before the minutes-to-seconds multiplication (which would itself
+/// overflow on huge inputs).
+pub const MAX_SESSION_LIFETIME_MINUTES: u64 = MAX_SESSION_LIFETIME_SECS / 60;
+
 /// Session configuration.
 ///
 /// This struct is non-exhaustive so adding a session knob does not become a
@@ -99,7 +116,9 @@ impl SessionConfig {
     /// Load session configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `SESSION_LIFETIME`: Session lifetime in minutes (default: 120)
+    /// - `SESSION_LIFETIME`: Session lifetime in minutes (default: 120;
+    ///   clamped to [`MAX_SESSION_LIFETIME_MINUTES`] so oversized values
+    ///   cannot overflow the deadline arithmetic into mass-expiry)
     /// - `SESSION_TOUCH_INTERVAL`: Minimum sliding-expiry write interval in
     ///   seconds (default: 300)
     /// - `SESSION_GC_INTERVAL`: Expired-session collection interval in
@@ -116,7 +135,8 @@ impl SessionConfig {
     /// - `SESSION_CONNECTION`: Named DB connection for the session
     ///   store (default: unset)
     /// - `REMEMBER_LIFETIME`: Remember-me token/cookie lifetime in
-    ///   minutes (default: `43200` = 30 days)
+    ///   minutes (default: `43200` = 30 days; clamped like
+    ///   `SESSION_LIFETIME`)
     pub fn from_env() -> Self {
         fn bool_env(name: &str, default: bool) -> bool {
             crate::env_optional(name)
@@ -153,7 +173,15 @@ impl SessionConfig {
             .unwrap_or(30 * 24 * 60); // 30 days
 
         Self {
-            lifetime: Duration::from_secs(lifetime_minutes * 60),
+            // Clamp before multiplying: `SESSION_LIFETIME=u64::MAX`
+            // would otherwise wrap the minutes-to-seconds conversion
+            // (panic in debug, silent wrap in release) into a tiny or
+            // negative deadline that mass-expires every session.
+            lifetime: Duration::from_secs(
+                lifetime_minutes
+                    .min(MAX_SESSION_LIFETIME_MINUTES)
+                    .saturating_mul(60),
+            ),
             touch_interval: Duration::from_secs(touch_interval_seconds.max(1)),
             gc_interval: Duration::from_secs(gc_interval_seconds.max(1)),
             cookie_name: crate::env_optional("SESSION_COOKIE")
@@ -169,7 +197,13 @@ impl SessionConfig {
             expire_on_close,
             table_name: "sessions".to_string(),
             connection: crate::env_optional("SESSION_CONNECTION"),
-            remember_lifetime: Duration::from_secs(remember_lifetime_minutes * 60),
+            // Same clamp as `lifetime` above: the remember row TTL feeds
+            // the same `i64` deadline arithmetic.
+            remember_lifetime: Duration::from_secs(
+                remember_lifetime_minutes
+                    .min(MAX_SESSION_LIFETIME_MINUTES)
+                    .saturating_mul(60),
+            ),
         }
     }
 

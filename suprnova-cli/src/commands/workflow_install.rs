@@ -34,7 +34,10 @@ pub fn run() {
         migrations_dir.join(format!("{}.rs", NORMALIZE_WORKFLOW_DATETIMES_MIGRATION));
 
     if !workflows_file.exists() {
-        if let Err(e) = fs::write(&workflows_file, templates::create_workflows_migration()) {
+        if let Err(e) = crate::secure_fs::write_generated(
+            &workflows_file,
+            templates::create_workflows_migration(),
+        ) {
             ui::error(&format!("Failed to write workflows migration: {}", e));
             std::process::exit(1);
         }
@@ -44,7 +47,10 @@ pub fn run() {
     }
 
     if !steps_file.exists() {
-        if let Err(e) = fs::write(&steps_file, templates::create_workflow_steps_migration()) {
+        if let Err(e) = crate::secure_fs::write_generated(
+            &steps_file,
+            templates::create_workflow_steps_migration(),
+        ) {
             ui::error(&format!("Failed to write workflow steps migration: {}", e));
             std::process::exit(1);
         }
@@ -54,7 +60,7 @@ pub fn run() {
     }
 
     if !normalize_datetimes_file.exists() {
-        if let Err(e) = fs::write(
+        if let Err(e) = crate::secure_fs::write_generated(
             &normalize_datetimes_file,
             templates::normalize_workflow_datetimes_migration(),
         ) {
@@ -108,7 +114,7 @@ pub fn run() {
             NORMALIZE_WORKFLOW_DATETIMES_MIGRATION
         );
 
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -182,7 +188,8 @@ fn update_mod_file(mod_file: &Path, module_name: &str) -> Result<(), String> {
     }
 
     let new_content = new_lines.join("\n") + "\n";
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
 }

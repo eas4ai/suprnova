@@ -391,3 +391,140 @@ async fn auth_for_guard_authenticated_reaches_handler() {
     assert_eq!(status, 200);
     assert_eq!(body, "reached");
 }
+
+// ── Stale persisted identities (P4-01) ───────────────────────────────────────
+// A session can outlive its principal (deleted user). The middleware must
+// resolve the user through the provider - not authorize on ID presence -
+// return 401, and clear the stale slot.
+
+// The `FakeProvider` knows only id `"7"`; `"deleted"` is the removed user.
+const STALE_USER_ID: &str = "deleted";
+
+/// Install a session whose default-guard identity names the removed user,
+/// keeping the slot so the test can prove the stale identity was cleared.
+struct StaleDefaultSessionScope {
+    slot: std::sync::Arc<std::sync::Mutex<Option<suprnova::session::SessionData>>>,
+}
+
+#[async_trait::async_trait]
+impl Middleware for StaleDefaultSessionScope {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        {
+            let mut slot = self.slot.lock().expect("lock test session");
+            let session = slot.as_mut().expect("test session slot");
+            session.user_id = Some(STALE_USER_ID.to_string());
+        }
+        let pending = suprnova::session::new_pending_cookies_slot_for_test();
+        suprnova::session::session_scope_for_test(
+            self.slot.clone(),
+            suprnova::session::pending_cookies_scope_for_test(pending, next(request)),
+        )
+        .await
+    }
+}
+
+/// Install a session whose named-guard identity names the removed user,
+/// keeping the slot so the test can prove the stale identity was cleared.
+struct StaleWebSessionScope {
+    slot: std::sync::Arc<std::sync::Mutex<Option<suprnova::session::SessionData>>>,
+}
+
+#[async_trait::async_trait]
+impl Middleware for StaleWebSessionScope {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        {
+            let mut slot = self.slot.lock().expect("lock test session");
+            let session = slot.as_mut().expect("test session slot");
+            session.data.insert(
+                "_auth_guards".to_string(),
+                serde_json::json!({ "web": { "id": STALE_USER_ID } }),
+            );
+        }
+        let pending = suprnova::session::new_pending_cookies_slot_for_test();
+        suprnova::session::session_scope_for_test(
+            self.slot.clone(),
+            suprnova::session::pending_cookies_scope_for_test(pending, next(request)),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn auth_default_stale_identity_returns_401_and_clears_slot() {
+    Lazy::force(&SETUP);
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registry = MiddlewareRegistry::new()
+        .append(StaleDefaultSessionScope { slot: slot.clone() })
+        .append(AuthMiddleware::new());
+    let addr = spawn_server(router(), registry, 1).await;
+
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
+
+    assert_eq!(status, 401);
+    assert_ne!(body, "reached");
+    let slot = slot.lock().expect("lock test session");
+    assert!(
+        slot.as_ref().and_then(|s| s.user_id.clone()).is_none(),
+        "stale default-guard identity must be cleared from the session"
+    );
+}
+
+#[tokio::test]
+async fn auth_for_guard_stale_identity_returns_401_and_clears_slot() {
+    Lazy::force(&SETUP);
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registry = MiddlewareRegistry::new()
+        .append(StaleWebSessionScope { slot: slot.clone() })
+        .append(AuthMiddleware::new().for_guard("web"));
+    let addr = spawn_server(router(), registry, 1).await;
+
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
+
+    assert_eq!(status, 401);
+    assert_ne!(body, "reached");
+    let slot = slot.lock().expect("lock test session");
+    let session = slot.as_ref().expect("test session slot");
+    assert!(
+        session
+            .data
+            .get("_auth_guards")
+            .and_then(|v| v.get("web"))
+            .is_none(),
+        "stale named-guard identity must be cleared from the session"
+    );
+}
+
+#[tokio::test]
+async fn auth_default_valid_identity_still_reaches_handler() {
+    Lazy::force(&SETUP);
+    // The provider knows id `"7"`: a live principal must keep working after
+    // the boundary started resolving users instead of trusting IDs.
+    let slot = suprnova::session::new_session_slot_for_test();
+    {
+        let mut locked = slot.lock().expect("lock test session");
+        locked.as_mut().expect("test session slot").user_id = Some("7".to_string());
+    }
+    struct ValidDefaultSessionScope {
+        slot: std::sync::Arc<std::sync::Mutex<Option<suprnova::session::SessionData>>>,
+    }
+    #[async_trait::async_trait]
+    impl Middleware for ValidDefaultSessionScope {
+        async fn handle(&self, request: Request, next: Next) -> Response {
+            let pending = suprnova::session::new_pending_cookies_slot_for_test();
+            suprnova::session::session_scope_for_test(
+                self.slot.clone(),
+                suprnova::session::pending_cookies_scope_for_test(pending, next(request)),
+            )
+            .await
+        }
+    }
+    let registry = MiddlewareRegistry::new()
+        .append(ValidDefaultSessionScope { slot })
+        .append(AuthMiddleware::new());
+    let addr = spawn_server(router(), registry, 1).await;
+
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body, "reached");
+}

@@ -146,6 +146,214 @@ impl oio::ReadStream for FailReadStream {
     }
 }
 
+/// Layer that lets the first destination write through and stalls every
+/// later write forever. The transfer parks mid-flight with an unclosed
+/// writer after observable progress, so aborting the copy task lands
+/// deterministically mid-transfer instead of racing completion.
+#[derive(Debug, Clone)]
+struct GateWritesLayer {
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Layer for GateWritesLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(GateWritesService {
+            inner,
+            writes: self.writes.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct GateWritesService {
+    inner: Servicer,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Service for GateWritesService {
+    type Reader = oio::Reader;
+    type Writer = GateWriter;
+    type Lister = oio::Lister;
+    type Deleter = oio::Deleter;
+    type Copier = oio::Copier;
+
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
+    }
+
+    fn capability(&self) -> Capability {
+        self.inner.capability()
+    }
+
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        Ok(GateWriter {
+            inner: self.inner.write(ctx, path, args)?,
+            writes: self.writes.clone(),
+        })
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        self.inner.delete(ctx)
+    }
+
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<Self::Copier> {
+        self.inner.copy(ctx, from, to, args, opts)
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
+    }
+}
+
+struct GateWriter {
+    inner: oio::Writer,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl oio::Write for GateWriter {
+    async fn write(&mut self, bs: Buffer) -> Result<()> {
+        // Counted only after the inner write completes, so `writes == 1`
+        // proves bytes reached the backend - not merely that `write()`
+        // was called. (`Writer` is `&mut`-exclusive, so no two writes
+        // race here.)
+        if self.writes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            let outcome = self.inner.write(bs).await;
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            outcome
+        } else {
+            // Never resolves: the transfer parks here until aborted.
+            std::future::pending().await
+        }
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.inner.abort().await
+    }
+}
+
+/// Count the staged (not yet published) files of an atomic fs disk.
+fn staging_file_count(root: &std::path::Path) -> usize {
+    std::fs::read_dir(root.join(suprnova::filesystem::ATOMIC_STAGING_DIR))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+/// P4-08: cancelling the copy task mid-transfer must divert the same
+/// abort+delete cleanup the error path runs. The write gate parks the
+/// transfer after its first observable write with the writer unclosed,
+/// so the abort lands deterministically mid-flight.
+#[tokio::test]
+async fn copy_cleans_up_staging_and_destination_on_cancel() {
+    use std::sync::atomic::Ordering;
+
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+
+    // Source: plain memory disk holding a real multi-chunk object.
+    Storage::register_memory("cancel_src");
+    Storage::disk("cancel_src")
+        .expect("src disk")
+        .write("big.bin", vec![0xABu8; 4 * 1024 * 1024])
+        .await
+        .expect("seed source");
+
+    // Destination: fs disk whose second write stalls forever.
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Storage::register_fs_with("cancel_fs_dest", tmp.path(), {
+        let writes = writes.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: writes.clone(),
+            })
+        }
+    })
+    .expect("fs dest");
+
+    let handle = tokio::spawn(copy_between_disks(
+        "cancel_src",
+        "big.bin",
+        "cancel_fs_dest",
+        "cancelled.bin",
+    ));
+
+    // The first write must land before the abort: proves the transfer is
+    // parked mid-flight with an unclosed writer.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while writes.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the gated transfer must perform its first write");
+
+    handle.abort();
+    let _ = handle.await;
+
+    // The diverted cleanup runs detached: staged state must disappear,
+    // the destination must never materialize, and no further write may
+    // land after the abort.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while staging_file_count(tmp.path()) != 0 || tmp.path().join("cancelled.bin").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled copy must leave no staged chunk and no destination");
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        1,
+        "no further destination write may land after the abort"
+    );
+}
+
 #[tokio::test]
 async fn copy_cleans_up_partial_destination_on_midstream_failure() {
     let _guard = Storage::fake();

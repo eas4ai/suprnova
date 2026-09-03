@@ -104,6 +104,44 @@ pub(crate) struct TxState {
     pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
 }
 
+/// Cancellation finalizer for the [`DB::transaction`] closure scope.
+///
+/// Armed while the closure future is pending. On normal completion the
+/// caller disarms it and the registries drain through the usual paths.
+/// If the future never completes - task abort, or a panic unwinding
+/// through the scope - the guard drains the deferred registry and hands
+/// it to [`GuardedCallbacks`](super::after_commit::GuardedCallbacks),
+/// whose own `Drop` diverts the compensation to a detached task. The
+/// database half needs no help: SeaORM rolls the transaction back when
+/// its last `Arc` drops.
+struct ScopeFinalizer {
+    state: Option<Arc<TxState>>,
+}
+
+impl ScopeFinalizer {
+    fn armed(state: Arc<TxState>) -> Self {
+        Self { state: Some(state) }
+    }
+
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for ScopeFinalizer {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            let (after_commit, on_rollback) = super::after_commit::drain(&state);
+            if !after_commit.is_empty() || !on_rollback.is_empty() {
+                drop(super::after_commit::GuardedCallbacks::compensating(
+                    after_commit,
+                    on_rollback,
+                ));
+            }
+        }
+    }
+}
+
 /// Why a `DB::transaction` call failed, kept out of the flat `FrameworkError`
 /// so [`DB::transaction_with_attempts`] can tell the two apart.
 ///
@@ -1129,7 +1167,16 @@ impl DB {
             registry: Some(tx_state.clone()),
         };
 
+        // Cancellation finalizer for the closure scope: if the closure
+        // future never completes (task abort or panic), the database
+        // rolls back when SeaORM drops the transaction, but the deferred
+        // registry would otherwise be dropped silently - stranding a
+        // `push_unique` dedupe lock for its whole TTL. The guard diverts
+        // the same compensation the `Err` path runs to a detached task.
+        // Disarmed on normal completion just below.
+        let mut scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
         let result = CURRENT_TX.scope(Some(tx_state), f(&transaction)).await;
+        scope_finalizer.disarm();
 
         // Take the deferred callbacks off the shared state and release our
         // `TxState` clone right away: `TxState` holds an
@@ -1164,8 +1211,12 @@ impl DB {
                     Ok(tx) => tx,
                     Err(arc) => {
                         drop(arc); // release OUR ref; leaked refs still keep the tx alive
-                        super::after_commit::compensate(after_commit_callbacks, rollback_callbacks)
-                            .await;
+                        super::after_commit::GuardedCallbacks::compensating(
+                            after_commit_callbacks,
+                            rollback_callbacks,
+                        )
+                        .compensate()
+                        .await;
                         return Err(FrameworkError::internal(
                             "DB::transaction: TxHandle clones outlived the closure; \
                              drop them before the closure returns Ok so commit can proceed",
@@ -1174,8 +1225,12 @@ impl DB {
                     }
                 };
                 if let Err(commit_err) = tx.commit().await {
-                    super::after_commit::compensate(after_commit_callbacks, rollback_callbacks)
-                        .await;
+                    super::after_commit::GuardedCallbacks::compensating(
+                        after_commit_callbacks,
+                        rollback_callbacks,
+                    )
+                    .compensate()
+                    .await;
                     return Err(FrameworkError::database(commit_err.to_string()).into());
                 }
                 emit_tx_event(super::events::TransactionCommitted {
@@ -1189,7 +1244,10 @@ impl DB {
                 // commit, and `transaction_with_attempts` must never re-run the
                 // closure for it, however deadlock-shaped the callback's error
                 // reads.
-                if let Err(e) = super::after_commit::run_after_commit(after_commit_callbacks).await
+                if let Err(e) =
+                    super::after_commit::GuardedCallbacks::after_commit(after_commit_callbacks)
+                        .run_after_commit()
+                        .await
                 {
                     return Err(TransactionFailure::AfterCommitCallback(e));
                 }
@@ -1248,7 +1306,12 @@ impl DB {
                 // transaction is still one that did not commit. Callback errors
                 // are logged, never returned - the caller needs the original
                 // error, not the compensation's.
-                super::after_commit::compensate(after_commit_callbacks, rollback_callbacks).await;
+                super::after_commit::GuardedCallbacks::compensating(
+                    after_commit_callbacks,
+                    rollback_callbacks,
+                )
+                .compensate()
+                .await;
                 Err(e.into())
             }
         }

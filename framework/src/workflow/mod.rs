@@ -139,6 +139,12 @@ impl Drop for AbortOnDrop {
 /// heartbeat. The interval is `max(lock_timeout / 2, 1s)` so very small
 /// timeouts still produce sane tick rates instead of busy-looping.
 ///
+/// The first tick fires immediately at spawn: the claim-to-first-refresh
+/// window (claim latency plus scheduling) must never be unguarded, and an
+/// immediate refresh of a just-set lease is harmless - it re-extends from
+/// now. Skipping it is what left short leases reclaimable before their
+/// first heartbeat.
+///
 /// `worker_id` and `attempts` are the fencing token from the claim that
 /// started this run - threaded through to `store::refresh_lock` so a
 /// heartbeat that fires after another worker has reclaimed this row (this
@@ -154,9 +160,6 @@ fn spawn_lease_heartbeat(
     let interval = std::cmp::max(lock_timeout / 2, Duration::from_secs(1));
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
-        // First tick fires immediately; skip it so we don't refresh the
-        // lease the worker just set in `claim_next_workflow`.
-        ticker.tick().await;
         loop {
             ticker.tick().await;
             match store::refresh_lock_if_owned(workflow_id, lock_timeout, &worker_id, attempts)

@@ -865,12 +865,16 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
                     Ok(s) => s.to_string(),
                     Err(_) => return err_response(404, "unknown provider"),
                 };
-                // Consume the request to read the body.
+                // Consume the request to read the body. Preserve the
+                // typed error status: an over-cap body is a 413, and
+                // flattening it to 400 obscures the configured limit
+                // and breaks the status contract shared by the other
+                // capped request paths.
                 let (_, body) = match req.body_bytes().await {
                     Ok(pair) => pair,
                     Err(e) => {
                         tracing::error!(error = %e, "failed to read webhook body");
-                        return err_response(400, "body");
+                        return err_response(e.status_code(), "body");
                     }
                 };
                 handle_webhook_inner(&db, &provider_name, remote_addr_str, headers, body).await

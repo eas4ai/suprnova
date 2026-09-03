@@ -768,7 +768,11 @@ impl RequestBuilder {
                     return Ok(resp.with_max_bytes(effective_max));
                 }
                 Err(e) => {
-                    if let Some(p) = policy.filter(|_| attempt < max_attempts) {
+                    // Like the 5xx branch above, transport-error retries
+                    // require `method_retryable`: replaying a POST/PATCH
+                    // whose first attempt may already have taken effect
+                    // needs the explicit `retry_non_idempotent` opt-in.
+                    if method_retryable && let Some(p) = policy.filter(|_| attempt < max_attempts) {
                         let allowed = self
                             .retry_when
                             .as_ref()

@@ -141,8 +141,15 @@ pub async fn claim_next_workflow(
         ));
     }
 
-    let lock_until = Utc::now().naive_utc()
-        + ChronoDuration::seconds(i64::try_from(config.lock_timeout_secs).unwrap_or(i64::MAX));
+    // The initial expiry is computed by the database (`NOW() + $1`),
+    // not from a client-side timestamp taken before the round trip.
+    // A client-side deadline shrinks by the whole claim latency - and by
+    // any clock skew between the worker host and the database - so a
+    // short lease can already be reclaimable the moment the claim
+    // returns, before the first heartbeat ever fires. Measuring from the
+    // server clock removes both, and matches the reclaim predicate,
+    // which also reads `NOW()`.
+    let lock_timeout_secs = i64::try_from(config.lock_timeout_secs).unwrap_or(i64::MAX);
 
     // Eligible-row predicate covers two cases:
     //   1. status='pending' rows ready to run (next_run_at elapsed, no live lock).
@@ -215,7 +222,7 @@ pub async fn claim_next_workflow(
         UPDATE workflows
         SET status = 'running',
             attempts = attempts + 1,
-            locked_until = $1,
+            locked_until = NOW() + ($1 * INTERVAL '1 second'),
             worker_id = $2,
             started_at = COALESCE(started_at, NOW()),
             updated_at = NOW()
@@ -229,7 +236,7 @@ pub async fn claim_next_workflow(
         DatabaseBackend::Postgres,
         sql,
         vec![
-            lock_until.into(),
+            lock_timeout_secs.into(),
             worker_id.into(),
             ATTEMPT_BUDGET_EXHAUSTED_ERROR.into(),
         ],

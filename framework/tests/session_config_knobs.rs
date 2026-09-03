@@ -96,6 +96,81 @@ fn fluent_setters_chain() {
     assert_eq!(cfg.connection.as_deref(), Some("sessions_db"));
 }
 
+/// Save/restore process env around `from_env` probes. `#[serial]` keeps
+/// the mutation from racing other tests in the same binary.
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn set(pairs: &[(&'static str, String)]) -> Self {
+        let saved = pairs
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in pairs {
+            // SAFETY: serial test - no other thread reads or writes these
+            // process-global vars concurrently.
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            // SAFETY: same as above.
+            unsafe {
+                match v {
+                    Some(value) => std::env::set_var(k, value),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
+/// P4-09: `SESSION_LIFETIME=u64::MAX` must clamp to the arithmetic-safe
+/// maximum, not wrap the minutes-to-seconds multiplication (panic in
+/// debug, silent wrap in release) into a deadline that mass-expires
+/// every session.
+#[test]
+#[serial_test::serial]
+fn oversized_session_lifetime_clamps_instead_of_overflowing() {
+    let _env = EnvGuard::set(&[("SESSION_LIFETIME", u64::MAX.to_string())]);
+    let cfg = SessionConfig::from_env();
+    // Minute-granularity clamp: the minute bound times sixty (the lost
+    // remainder seconds are irrelevant next to ~8,000 years).
+    let expected = suprnova::session::MAX_SESSION_LIFETIME_MINUTES.saturating_mul(60);
+    assert_eq!(
+        cfg.lifetime,
+        Duration::from_secs(expected),
+        "oversized SESSION_LIFETIME must clamp to the safe maximum"
+    );
+    assert!(
+        expected <= suprnova::session::MAX_SESSION_LIFETIME_SECS,
+        "the clamp itself must stay within the arithmetic-safe bound"
+    );
+}
+
+/// P4-09: same clamp for the remember-me knob, which feeds the same
+/// `i64` deadline arithmetic.
+#[test]
+#[serial_test::serial]
+fn oversized_remember_lifetime_clamps_instead_of_overflowing() {
+    let _env = EnvGuard::set(&[("REMEMBER_LIFETIME", u64::MAX.to_string())]);
+    let cfg = SessionConfig::from_env();
+    let expected = suprnova::session::MAX_SESSION_LIFETIME_MINUTES.saturating_mul(60);
+    assert_eq!(
+        cfg.remember_lifetime,
+        Duration::from_secs(expected),
+        "oversized REMEMBER_LIFETIME must clamp to the safe maximum"
+    );
+}
+
 #[test]
 fn default_keeps_partitioned_off_and_no_domain() {
     let cfg = SessionConfig::default();

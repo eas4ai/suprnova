@@ -388,3 +388,134 @@ async fn client_does_not_follow_redirects_ssrf_guard() {
     );
     // On drop, `internal` asserts its `.expect(0)` - it was never contacted.
 }
+
+// ---------------------------------------------------------------------------
+// P4-07: a caller-supplied redirect-following transport must not send
+// under Strict as if it were confined.
+// ---------------------------------------------------------------------------
+
+/// `with_client_builder` forcibly disables redirects even when the
+/// caller explicitly configures a following policy: the 302 surfaces
+/// verbatim and the redirect target is never contacted.
+#[tokio::test]
+async fn client_builder_forces_no_redirects_despite_caller_policy() {
+    let internal = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&internal)
+        .await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/push"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/latest/meta-data", internal.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signer = VapidSigner::new(VapidKey::generate());
+    // Explicitly ask for redirect-following: the builder form must
+    // override it.
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10));
+    let client = WebPushClient::with_client_builder(builder, signer, "mailto:admin@example.org")
+        .expect("test subject is a valid mailto: URI")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
+
+    let err = client
+        .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, WebPushError::PushServiceRejected { status: 302, .. }),
+        "expected an unfollowed 302; got {err:?}"
+    );
+    // On drop, `internal` asserts its `.expect(0)` - it was never contacted.
+}
+
+/// `with_client` with a stock (redirect-following) transport is refused
+/// under Strict before any I/O: neither the endpoint nor the redirect
+/// target may be contacted.
+#[tokio::test]
+async fn with_client_refuses_strict_send_without_confinement() {
+    let internal = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&internal)
+        .await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/push"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/latest/meta-data", internal.uri())),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let signer = VapidSigner::new(VapidKey::generate());
+    let http = reqwest::Client::builder()
+        .build()
+        .expect("stock client builds");
+    let client = WebPushClient::with_client(http, signer, "mailto:admin@example.org")
+        .expect("test subject is a valid mailto: URI");
+
+    let err = client
+        .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, WebPushError::UnconfinedRedirects),
+        "Strict send over an uncharacterized transport must be refused; got {err:?}"
+    );
+    assert!(
+        !err.is_retryable(),
+        "a pre-I/O refusal must not be retryable"
+    );
+    // On drop, both mocks assert their `.expect(0)` - nothing left the process.
+}
+
+/// The explicit opt-out restores following for callers that accept it:
+/// the redirect target receives the POST.
+#[tokio::test]
+async fn allow_unconfined_redirects_follows_explicitly() {
+    let internal = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&internal)
+        .await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/push"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/latest/meta-data", internal.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signer = VapidSigner::new(VapidKey::generate());
+    let http = reqwest::Client::builder()
+        .build()
+        .expect("stock client builds");
+    let client = WebPushClient::with_client(http, signer, "mailto:admin@example.org")
+        .expect("test subject is a valid mailto: URI")
+        .with_endpoint_policy(EndpointPolicy::AllowAny)
+        .allow_unconfined_redirects();
+
+    let resp = client
+        .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
+        .await
+        .expect("explicitly-unchecked transport sends");
+    assert_eq!(resp.status, 201);
+    // On drop, `internal` asserts its `.expect(1)` - the redirect was followed.
+}

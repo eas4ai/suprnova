@@ -1375,3 +1375,209 @@ async fn a_rolled_back_deferred_push_releases_its_lock_even_when_the_primary_is_
         "and the re-dispatch itself still falls over to the fallback"
     );
 }
+
+// ── Cancellation barriers (P4-04) ───────────────────────────────────────────
+// Aborting the task running `DB::transaction` must not strand deferred
+// work: the database rolls back on drop, but queue publication and lock
+// ownership live outside the database. These tests abort before the
+// commit and while post-commit callbacks are pending, then prove the
+// effects still land exactly once.
+
+/// Poll `cond` until it holds or `timeout` elapses. The sleeps yield,
+/// which is what lets detached finalizer tasks run on the
+/// `current_thread` test runtime.
+async fn poll_until(cond: impl Fn() -> bool, timeout: Duration, what: &str) {
+    tokio::time::timeout(timeout, async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+#[tokio::test]
+#[serial]
+async fn an_aborted_transaction_releases_its_deferred_unique_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_in, release_in) = (entered.clone(), release.clone());
+    let handle = tokio::spawn(async move {
+        DB::transaction(|_tx| {
+            Box::pin(async move {
+                let taken = Queue::push_unique(UniqueAfterCommitJob {
+                    key: "abort-1".into(),
+                })
+                .await?;
+                assert!(taken, "the lock is taken at push time");
+                entered_in.store(true, Ordering::SeqCst);
+                release_in.notified().await;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+
+    poll_until(
+        || entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "the transaction to take its lock and park",
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+
+    // The diverted compensation must release the lock: the same unique
+    // key becomes pushable again immediately, not after `unique_for`.
+    // A bespoke loop here (rather than `poll_until`) because the
+    // condition itself awaits.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let retried = Queue::push_unique(UniqueAfterCommitJob {
+                key: "abort-1".into(),
+            })
+            .await
+            .unwrap_or(false);
+            if retried {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the aborted transaction's unique lock must be released");
+    assert_eq!(
+        driver.count(),
+        1,
+        "only the re-push envelope exists; the aborted dispatch never published"
+    );
+}
+
+/// Driver that parks its first push behind a gate, so a test can abort
+/// the transaction task while a post-commit callback is in flight.
+struct GatedDriver {
+    pushed: Mutex<Vec<Envelope>>,
+    gate_armed: AtomicBool,
+    entered: AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl GatedDriver {
+    fn new() -> Self {
+        Self {
+            pushed: Mutex::new(Vec::new()),
+            gate_armed: AtomicBool::new(true),
+            entered: AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl QueueDriver for GatedDriver {
+    async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+        if self.gate_armed.swap(false, Ordering::SeqCst) {
+            self.entered.store(true, Ordering::SeqCst);
+            self.release.notified().await;
+        }
+        self.pushed.lock().unwrap().push(env);
+        Ok(())
+    }
+
+    async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn ack(&self, _t: &ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn nack(&self, _t: &ReservationToken, _delay: Duration) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        Ok(self.pushed.lock().unwrap().len() as u64)
+    }
+
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlockingAfterCommitJob;
+
+#[async_trait]
+impl Job for BlockingAfterCommitJob {
+    fn job_name() -> &'static str {
+        "wave5-after-commit-blocking"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn an_abort_after_commit_still_completes_every_callback_exactly_once() {
+    let driver = Arc::new(GatedDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    let handle = tokio::spawn(async {
+        DB::transaction(|_tx| {
+            Box::pin(async {
+                // Registration order is execution order: the blocking push
+                // runs first and parks inside the driver gate.
+                Queue::push(BlockingAfterCommitJob).await?;
+                Queue::push(OtherAfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+
+    poll_until(
+        || driver.entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "the first post-commit callback to go in flight",
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+    // Let the in-flight callback finish; the unstarted remainder was
+    // diverted to a detached task by the abort. `notify_one` (not
+    // `notify_waiters`) so the permit survives if the child has not
+    // parked yet.
+    driver.release.notify_one();
+
+    poll_until(
+        || driver.pushed.lock().unwrap().len() == 2,
+        Duration::from_secs(10),
+        "both post-commit callbacks to complete after the abort",
+    )
+    .await;
+    let names: Vec<String> = driver
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|env| env.job_name.clone())
+        .collect();
+    assert!(
+        names.contains(&BlockingAfterCommitJob::job_name().to_string()),
+        "the in-flight callback must survive the abort, got: {names:?}"
+    );
+    assert!(
+        names.contains(&OtherAfterCommitJob::job_name().to_string()),
+        "the unstarted remainder must divert, got: {names:?}"
+    );
+}

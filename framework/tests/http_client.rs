@@ -487,6 +487,88 @@ async fn retry_skips_non_idempotent_post_by_default() {
     );
 }
 
+/// Accept-and-drop fixture: every connection is counted, then closed
+/// without a response, so each request attempt ends in a transport
+/// error rather than a status.
+async fn spawn_drop_all() -> (SocketAddr, Arc<Mutex<u32>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let attempts: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let attempts_in_task = attempts.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            *attempts_in_task.lock().unwrap() += 1;
+            drop(stream);
+        }
+    });
+    (addr, attempts)
+}
+
+#[tokio::test]
+async fn retry_skips_transport_error_for_post_by_default() {
+    let _net = NETWORK_LOCK.lock().await;
+    // P4-03: a POST whose response is lost to a transport failure must
+    // NOT be replayed without `retry_non_idempotent` - the first attempt
+    // may already have taken effect server-side. Exactly one attempt,
+    // and the transport error is returned to the caller.
+    let (addr, attempts) = spawn_drop_all().await;
+    let url = format!("http://{}/x", addr);
+    let result = Http::post(&url)
+        .retry(3, std::time::Duration::from_millis(1))
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "a dropped POST must surface the transport error"
+    );
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        1,
+        "POST transport failure must not be replayed without opt-in"
+    );
+}
+
+#[tokio::test]
+async fn retry_replays_transport_error_for_get() {
+    let _net = NETWORK_LOCK.lock().await;
+    // Control: the same fixture IS retried for idempotent GET, proving
+    // the POST behavior above differs by method, not by fixture.
+    let (addr, attempts) = spawn_drop_all().await;
+    let url = format!("http://{}/x", addr);
+    let result = Http::get(&url)
+        .retry(3, std::time::Duration::from_millis(1))
+        .send()
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        3,
+        "GET transport failures must be retried through max_attempts"
+    );
+}
+
+#[tokio::test]
+async fn retry_non_idempotent_replays_post_transport_error() {
+    let _net = NETWORK_LOCK.lock().await;
+    // Opt-in control: POST with `retry_non_idempotent` replays through
+    // transport failures like an idempotent method.
+    let (addr, attempts) = spawn_drop_all().await;
+    let url = format!("http://{}/x", addr);
+    let result = Http::post(&url)
+        .retry_non_idempotent(3, std::time::Duration::from_millis(1))
+        .send()
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        3,
+        "retry_non_idempotent must replay POST transport failures"
+    );
+}
+
 #[tokio::test]
 async fn retry_non_idempotent_opts_post_into_retries() {
     let _net = NETWORK_LOCK.lock().await;

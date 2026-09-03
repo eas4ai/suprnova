@@ -223,19 +223,26 @@ pub(crate) fn drain(
     (take(&state.after_commit), take(&state.on_rollback))
 }
 
-/// Run every after-commit callback in registration order.
+/// Run every after-commit callback in registration order, consuming the
+/// list front to back.
 ///
 /// The transaction is already committed and cannot be taken back, so one
 /// failing callback must not skip the rest: each error is logged, the first is
 /// remembered, and the whole list still runs. The first error is returned so
 /// the caller learns that a deferred effect was lost, with wording that says
 /// the durable half already happened.
-pub(crate) async fn run_after_commit(
-    callbacks: Vec<AfterCommitCallback>,
+///
+/// Borrowed so [`GuardedCallbacks`] can run its owned lists inline while
+/// keeping the unstarted remainder available to divert when the task is
+/// cancelled. Each callback runs as an awaited child task (see
+/// [`run_one_callback`]), so sequential order is preserved.
+async fn run_after_commit_list(
+    callbacks: &mut Vec<AfterCommitCallback>,
 ) -> Result<(), FrameworkError> {
     let mut first_err: Option<FrameworkError> = None;
-    for cb in callbacks {
-        if let Err(e) = cb().await {
+    while !callbacks.is_empty() {
+        let cb = callbacks.remove(0);
+        if let Err(e) = run_one_callback(cb).await {
             tracing::error!(
                 target: "suprnova::database",
                 error = %e,
@@ -251,6 +258,42 @@ pub(crate) async fn run_after_commit(
             "after-commit callback failed (the transaction itself committed): {e}"
         ))),
         None => Ok(()),
+    }
+}
+
+/// Run one callback to completion and report its outcome.
+///
+/// The callback executes as an awaited child task rather than inline: an
+/// abort of the awaiting task cannot recall work already handed to the
+/// runtime, so a callback in flight when cancellation lands still runs to
+/// completion instead of being dropped mid-effect. Order is unchanged -
+/// callers await each child before starting the next. A panicking
+/// callback surfaces as an error (and no longer skips the callbacks
+/// behind it); a child cancelled only by runtime shutdown is logged as
+/// lost work.
+async fn run_one_callback(cb: AfterCommitCallback) -> Result<(), FrameworkError> {
+    // Task-local test container follows the callback across the spawn
+    // boundary; without it, fakes registered under
+    // `TestContainer::scope` would be invisible to the child. Production
+    // resolves from the global container either way.
+    let task_container = crate::container::TASK_CONTAINER
+        .try_with(|c| c.clone())
+        .ok();
+    let child = tokio::spawn(async move {
+        match task_container {
+            Some(container) => {
+                crate::container::TASK_CONTAINER
+                    .scope(container, cb())
+                    .await
+            }
+            None => cb().await,
+        }
+    });
+    match child.await {
+        Ok(outcome) => outcome,
+        Err(join_err) => Err(FrameworkError::internal(format!(
+            "transaction callback task ended without a result: {join_err}"
+        ))),
     }
 }
 
@@ -280,8 +323,20 @@ pub(crate) async fn compensate(
 /// action failed" would hide the reason the transaction rolled back in the
 /// first place.
 pub(crate) async fn run_rollback(callbacks: Vec<AfterCommitCallback>) {
-    for cb in callbacks {
-        if let Err(e) = cb().await {
+    let mut callbacks = callbacks;
+    run_rollback_list(&mut callbacks).await;
+}
+
+/// [`run_rollback`] over a borrowed list, consuming it front to back.
+///
+/// Borrowed so [`GuardedCallbacks`] can run its owned lists inline while
+/// keeping the unstarted remainder available to divert when the task is
+/// cancelled. Each callback runs as an awaited child task (see
+/// [`run_one_callback`]), so sequential order is preserved.
+async fn run_rollback_list(callbacks: &mut Vec<AfterCommitCallback>) {
+    while !callbacks.is_empty() {
+        let cb = callbacks.remove(0);
+        if let Err(e) = run_one_callback(cb).await {
             tracing::error!(
                 target: "suprnova::database",
                 error = %e,
@@ -289,6 +344,133 @@ pub(crate) async fn run_rollback(callbacks: Vec<AfterCommitCallback>) {
                  surfaced to the caller",
             );
         }
+    }
+}
+
+/// A callback runner that survives its own task's cancellation.
+///
+/// Owns the not-yet-run callbacks. The happy path runs them inline in the
+/// caller's context, with the same semantics as [`compensate`] and the
+/// list runners. If the runner is dropped first - the task was aborted
+/// while callbacks were pending - the unstarted remainder diverts to a
+/// detached task instead of being silently discarded: an aborted
+/// transaction rolls its database work back on drop, but nothing rolls
+/// back a deferred queue push or a held uniqueness lock for it.
+///
+/// Each callback runs as an awaited child task (see [`run_one_callback`]):
+/// a callback already in flight when the abort lands keeps running on its
+/// own task, and work that never started diverts through the `Drop` below,
+/// so every callback still runs exactly once. Callbacks are `Send +
+/// 'static`, so detached work needs no borrowed state; the task-local
+/// test container is re-scoped when present, while thread-local test
+/// bindings do not cross the spawn boundary (production resolves from
+/// the global container).
+pub(crate) struct GuardedCallbacks {
+    after_commit: Vec<AfterCommitCallback>,
+    on_rollback: Vec<AfterCommitCallback>,
+    /// `true`: the transaction committed, so a diverted remainder must
+    /// still RUN the after-commit list. `false`: no commit, so divert
+    /// compensates (drop after-commit, run rollback).
+    committed: bool,
+    complete: bool,
+}
+
+impl GuardedCallbacks {
+    /// Runner for the post-commit path: the remainder keeps after-commit
+    /// semantics when diverted.
+    pub(crate) fn after_commit(callbacks: Vec<AfterCommitCallback>) -> Self {
+        Self {
+            after_commit: callbacks,
+            on_rollback: Vec::new(),
+            committed: true,
+            complete: false,
+        }
+    }
+
+    /// Runner for the no-commit paths: the remainder compensates when
+    /// diverted.
+    pub(crate) fn compensating(
+        after_commit: Vec<AfterCommitCallback>,
+        on_rollback: Vec<AfterCommitCallback>,
+    ) -> Self {
+        Self {
+            after_commit,
+            on_rollback,
+            committed: false,
+            complete: false,
+        }
+    }
+
+    /// Run the after-commit list inline to completion, disarming the divert.
+    pub(crate) async fn run_after_commit(mut self) -> Result<(), FrameworkError> {
+        let result = run_after_commit_list(&mut self.after_commit).await;
+        self.complete = true;
+        result
+    }
+
+    /// Compensate inline to completion, disarming the divert.
+    pub(crate) async fn compensate(mut self) {
+        // Explicit rather than letting the binding fall out of scope:
+        // dropping the after-commit list is the decision, not a side
+        // effect of the borrow ending.
+        self.after_commit.clear();
+        run_rollback_list(&mut self.on_rollback).await;
+        self.complete = true;
+    }
+}
+
+impl Drop for GuardedCallbacks {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        if self.after_commit.is_empty() && self.on_rollback.is_empty() {
+            return;
+        }
+        let after_commit = std::mem::take(&mut self.after_commit);
+        let on_rollback = std::mem::take(&mut self.on_rollback);
+        let committed = self.committed;
+        spawn_detached(async move {
+            if committed {
+                let mut rest = after_commit;
+                // Errors are already logged inside; nothing to surface to.
+                let _ = run_after_commit_list(&mut rest).await;
+            } else {
+                compensate(after_commit, on_rollback).await;
+            }
+        });
+    }
+}
+
+/// Run `future` on a detached task that outlives the spawning task's
+/// cancellation.
+///
+/// Used only for cancellation diverts, never the happy path. The
+/// task-local test container is captured and re-scoped inside the
+/// spawned task so test fakes stay visible; without a running runtime
+/// (shutdown) there is nothing to spawn onto, which is logged.
+fn spawn_detached(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    let task_container = crate::container::TASK_CONTAINER
+        .try_with(|c| c.clone())
+        .ok();
+    let runner = async move {
+        match task_container {
+            Some(container) => {
+                crate::container::TASK_CONTAINER
+                    .scope(container, future)
+                    .await;
+            }
+            None => future.await,
+        }
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(runner);
+    } else {
+        tracing::error!(
+            target: "suprnova::database",
+            "transaction callbacks diverted after task cancellation, but no \
+             async runtime is running to complete them; deferred work is lost",
+        );
     }
 }
 
@@ -370,9 +552,15 @@ mod tests {
             }) as AfterCommitCallback
         };
 
-        let err = run_after_commit(vec![mk(1, false), mk(2, true), mk(3, true), mk(4, false)])
-            .await
-            .expect_err("a failing callback surfaces");
+        let err = GuardedCallbacks::after_commit(vec![
+            mk(1, false),
+            mk(2, true),
+            mk(3, true),
+            mk(4, false),
+        ])
+        .run_after_commit()
+        .await
+        .expect_err("a failing callback surfaces");
         assert!(err.to_string().contains("cb 2"), "first error wins: {err}");
         assert!(
             err.to_string()
