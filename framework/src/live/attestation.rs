@@ -32,10 +32,6 @@ pub(crate) enum LiveOperation {
 }
 
 impl LiveOperation {
-    pub(crate) const fn requires_csrf(self) -> bool {
-        matches!(self, Self::Action | Self::Upload)
-    }
-
     const fn label(self) -> &'static [u8] {
         match self {
             Self::Document => b"document",

@@ -568,21 +568,26 @@ impl Middleware for CsrfMiddleware {
         //   here is a 403, and token validation is skipped entirely.
         match self.check_origin(&request) {
             OriginCheck::Pass => {
-                let live_operation = request.live_operation();
-                if live_operation.is_some() {
+                // The verified origin is this deployment's configured CSRF
+                // proof: every same-origin state change short-circuits here,
+                // and a Live action or upload follows the same configured
+                // policy. The shipped Live runtime sends the Live media type
+                // and the browser's `Sec-Fetch-Site`, never a session token,
+                // so an application that uses Live enables origin
+                // verification and the attestation records the stateless
+                // CSRF policy rather than a token match.
+                if request.live_operation().is_some() {
                     request.record_live_security_check(
                         crate::live::attestation::SecurityCheck::Origin,
                         None,
                     );
-                }
-                if !live_operation.is_some_and(|operation| operation.requires_csrf()) {
                     request.record_live_security_not_required(
                         crate::live::attestation::SecurityCheck::Csrf,
                         suprnova_live::host::PolicyReason::StatelessCsrfPolicy,
                     );
-                    let response = next(request).await;
-                    return self.maybe_attach_xsrf_cookie(response);
                 }
+                let response = next(request).await;
+                return self.maybe_attach_xsrf_cookie(response);
             }
             OriginCheck::Fail if matches!(self.origin_policy, OriginPolicy::OriginOnly) => {
                 return reject_origin_mismatch();

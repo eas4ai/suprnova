@@ -68,11 +68,15 @@ for required_file in \
     docs/implementation/browser-testing.md \
     docs/implementation/uploads.md \
     docs/implementation/async-updates.md \
-    docs/implementation/iteration-004-operations.md
+    docs/implementation/iteration-004-operations.md \
+    docs/implementation/framework-integration.md
 do
     require_file "${required_file}"
 done
 
+require_heading docs/implementation/framework-integration.md "Reserved routes and the route guard"
+require_heading docs/implementation/framework-integration.md "CSRF and origin verification"
+require_heading docs/implementation/framework-integration.md "Providers and configuration"
 require_heading docs/implementation/component-authoring.md "Application-facing authoring"
 require_heading docs/implementation/component-authoring.md "Generated metadata and registration"
 require_heading docs/implementation/component-authoring.md "Internal standalone machinery"

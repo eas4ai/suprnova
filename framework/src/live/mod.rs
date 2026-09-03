@@ -45,6 +45,7 @@ pub use document::{
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
+pub use routes::LiveRouteGuard;
 pub use runtime::LiveRuntime;
 pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
