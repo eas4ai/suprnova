@@ -205,6 +205,7 @@ impl Gate {
     /// filled in. This distinguishes "explicitly denied" from "no rule
     /// defined", mirroring Laravel's `Gate::raw`.
     pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
+        crate::render_cache::collector::observe_authorization_read();
         global().raw::<U, R>(action, user, resource)
     }
 
@@ -214,6 +215,7 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Option<Response> {
+        crate::render_cache::collector::observe_authorization_read();
         global().raw_async::<U, R>(action, user, resource).await
     }
 

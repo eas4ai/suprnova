@@ -200,6 +200,31 @@ async fn gate_inspect_async_observes_authorization() {
     assert!(report.context.authorization_read);
 }
 
+/// `raw` bypasses `inspect` entirely (it preserves the "undefined" case as
+/// `None` instead of normalizing to a default deny), so it needs its own
+/// hook rather than inheriting `inspect`'s. This test fails if that hook is
+/// removed: nothing else on this call path sets `authorization_read`.
+#[tokio::test]
+async fn gate_raw_observes_authorization() {
+    let report = Collector::scope(async {
+        let _ = suprnova::Gate::raw("render-cache-collector-probe-action", &(), &());
+        collector::current_report().expect("report")
+    })
+    .await;
+    assert!(report.context.authorization_read);
+}
+
+/// Async sibling of [`gate_raw_observes_authorization`]; same reasoning.
+#[tokio::test]
+async fn gate_raw_async_observes_authorization() {
+    let report = Collector::scope(async {
+        let _ = suprnova::Gate::raw_async("render-cache-collector-probe-action", &(), &()).await;
+        collector::current_report().expect("report")
+    })
+    .await;
+    assert!(report.context.authorization_read);
+}
+
 // ---- Eloquent read-seam coverage -------------------------------------
 //
 // Each test below exercises exactly one production hook end to end
