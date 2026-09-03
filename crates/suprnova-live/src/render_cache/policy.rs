@@ -322,7 +322,23 @@ impl RenderCachePolicy {
         if let Some(vary) = &patch.vary {
             next.vary = vary.clone();
         }
+        next.validate()?;
         Ok(next)
+    }
+
+    /// Validates the bounds `build` and `apply` both must enforce: declared
+    /// query names stay within [`MAX_DECLARED_QUERY`] and a lease's maximum
+    /// age stays within [`MAX_INTERVAL_MS`].
+    fn validate(&self) -> Result<(), RenderCacheError> {
+        if self.query.declared.len() > MAX_DECLARED_QUERY {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
+        if let CoherenceMode::Lease { max_age_ms } = self.coherence
+            && max_age_ms > MAX_INTERVAL_MS
+        {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
+        Ok(())
     }
 
     /// Decides whether a concrete response may be stored, and in which class.
@@ -432,14 +448,7 @@ impl RenderCachePolicyBuilder {
 
     /// Validates bounds and returns the policy.
     pub fn build(self) -> Result<RenderCachePolicy, RenderCacheError> {
-        if self.policy.query.declared.len() > MAX_DECLARED_QUERY {
-            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
-        }
-        if let CoherenceMode::Lease { max_age_ms } = self.policy.coherence
-            && max_age_ms > MAX_INTERVAL_MS
-        {
-            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
-        }
+        self.policy.validate()?;
         Ok(self.policy)
     }
 }

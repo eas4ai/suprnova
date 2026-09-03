@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use suprnova_live::render_cache::{
-    DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch, QueryPolicy,
-    RenderCachePolicy, RepresentationClass, ResponseSignals, SharedCachePolicy, StorageLayers,
-    VarianceDimension,
+    CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
+    QueryPolicy, RenderCachePolicy, RepresentationClass, ResponseSignals, SharedCachePolicy,
+    StorageLayers, VarianceDimension,
 };
 
 fn public_policy() -> RenderCachePolicy {
@@ -130,6 +130,29 @@ fn patches_apply_deterministically_and_can_only_narrow_the_class() {
         .map(String::as_str)
         .collect();
     assert_eq!(declared, ["page", "sort"].into_iter().collect());
+}
+
+#[test]
+fn apply_rejects_a_lease_patch_beyond_the_bound() {
+    let group = public_policy();
+    let patch = PolicyPatch::default().coherence(CoherenceMode::Lease {
+        max_age_ms: 31 * 24 * 60 * 60 * 1000 + 1,
+    });
+    assert!(
+        group.apply(&patch).is_err(),
+        "a lease beyond the bound is rejected"
+    );
+}
+
+#[test]
+fn apply_rejects_a_query_patch_beyond_the_declared_bound() {
+    let group = public_policy();
+    let too_many: Vec<String> = (0..33).map(|index| format!("q{index}")).collect();
+    let patch = PolicyPatch::default().query(QueryPolicy::declared(too_many));
+    assert!(
+        group.apply(&patch).is_err(),
+        "more than the declared bound is rejected"
+    );
 }
 
 #[test]

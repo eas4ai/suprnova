@@ -3,6 +3,8 @@
 //! contracts needed to prove safe reuse. The host adapts these contracts;
 //! Live is complete without them.
 
+/// Route and group policy, deterministic patches, and concrete-response
+/// eligibility.
 pub mod policy;
 
 pub use policy::{
