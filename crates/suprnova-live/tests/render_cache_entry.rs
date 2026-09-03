@@ -6,7 +6,7 @@ use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{KeyId, UnixMillis};
 use suprnova_live::render_cache::entry::{
     CompleteEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, Validator, decode, encode,
-    encode_with_kind_for_test, inspect,
+    encode_raw_header_for_test, encode_with_kind_for_test, inspect,
 };
 use suprnova_live::render_cache::generation::GenerationSet;
 use suprnova_live::render_cache::key::RenderKey;
@@ -32,10 +32,22 @@ fn keys() -> SnapshotKeyRing {
 }
 
 fn entry(keys: &SnapshotKeyRing) -> CompleteEntry {
-    entry_with_variance(keys, VarianceDescriptor::new())
+    entry_with(keys, VarianceDescriptor::new(), GenerationSet::default())
 }
 
 fn entry_with_variance(keys: &SnapshotKeyRing, variance: VarianceDescriptor) -> CompleteEntry {
+    entry_with(keys, variance, GenerationSet::default())
+}
+
+fn entry_with_observed(keys: &SnapshotKeyRing, observed: GenerationSet) -> CompleteEntry {
+    entry_with(keys, VarianceDescriptor::new(), observed)
+}
+
+fn entry_with(
+    keys: &SnapshotKeyRing,
+    variance: VarianceDescriptor,
+    observed: GenerationSet,
+) -> CompleteEntry {
     let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
     CompleteEntry::new(
         EntryHeader {
@@ -46,7 +58,7 @@ fn entry_with_variance(keys: &SnapshotKeyRing, variance: VarianceDescriptor) -> 
             fresh_ms: 60_000,
             stale_servable_ms: 0,
             stale_on_error_ms: 0,
-            observed: GenerationSet::default(),
+            observed,
             epoch: 1,
             seed_deadline_ms: None,
             status: 200,
@@ -59,6 +71,33 @@ fn entry_with_variance(keys: &SnapshotKeyRing, variance: VarianceDescriptor) -> 
         },
         body,
     )
+}
+
+/// The same header shape [`entry`] builds, as a `serde_json::Value` rather
+/// than a typed `EntryHeader`, so a test can inject content the typed
+/// constructors (`SafeHeaders::from_pairs`, `VarianceDescriptor::declare`)
+/// would refuse before encoding it through
+/// [`encode_raw_header_for_test`], which still produces a correctly-signed
+/// entry.
+fn base_header_json(keys: &SnapshotKeyRing) -> serde_json::Value {
+    serde_json::json!({
+        "key": RenderKey::for_test(keys, "/hello").to_base64url(),
+        "class": "PublicShared",
+        "variance": {},
+        "published_at_ms": 1_000,
+        "fresh_ms": 60_000,
+        "stale_servable_ms": 0,
+        "stale_on_error_ms": 0,
+        "observed": {},
+        "epoch": 1,
+        "seed_deadline_ms": serde_json::Value::Null,
+        "status": 200,
+        "headers": {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "private",
+        },
+        "content_encoding": serde_json::Value::Null,
+    })
 }
 
 /// Encodes the fixture header with the kind byte forced to `kind`, using the
@@ -177,4 +216,54 @@ fn a_declared_application_dimension_round_trips_through_encode_and_decode() {
         "the declared application dimension survives the round trip"
     );
     assert_eq!(decoded.header().variance.dimensions().len(), 1);
+}
+
+#[test]
+fn a_populated_observed_generation_set_round_trips_through_encode_and_decode() {
+    let keys = keys();
+    let mut observed = GenerationSet::default();
+    observed.insert([0x11; 32], 7);
+    observed.insert([0x22; 32], 42);
+    let original = entry_with_observed(&keys, observed);
+    let encoded = encode(&original, &keys).expect("encode");
+    let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");
+    assert_eq!(
+        decoded.header(),
+        original.header(),
+        "the observed generation set survives the round trip"
+    );
+    assert_eq!(decoded.header().observed.len(), 2);
+}
+
+#[test]
+fn a_forbidden_response_header_with_a_valid_integrity_tag_still_fails_to_decode() {
+    let keys = keys();
+    let mut header = base_header_json(&keys);
+    header["headers"] = serde_json::json!({ "set-cookie": "a=b" });
+    let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
+    let encoded = encode_raw_header_for_test(&header, &body, &keys);
+    let error = decode(&encoded, &keys, &EntryLimits::default())
+        .expect_err("a forbidden header must never replay even with a valid integrity tag");
+    assert_eq!(error.kind(), RenderCacheErrorKind::EntryInvalid);
+}
+
+#[test]
+fn variance_beyond_the_declared_dimension_bound_with_a_valid_integrity_tag_still_fails_to_decode() {
+    let keys = keys();
+    let mut header = base_header_json(&keys);
+    let mut dimensions = serde_json::Map::new();
+    for index in 0..25 {
+        dimensions.insert(
+            format!("app:d{index}"),
+            serde_json::Value::String("Anonymous".to_owned()),
+        );
+    }
+    header["variance"] = serde_json::Value::Object(dimensions);
+    let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
+    let encoded = encode_raw_header_for_test(&header, &body, &keys);
+    let error = decode(&encoded, &keys, &EntryLimits::default()).expect_err(
+        "more declared dimensions than the maximum must never replay even with a valid \
+         integrity tag",
+    );
+    assert_eq!(error.kind(), RenderCacheErrorKind::EntryInvalid);
 }

@@ -222,10 +222,15 @@ fn integrity(keys: &SnapshotKeyRing, bytes: &[u8]) -> [u8; 32] {
         .expect("active key derives")
 }
 
-/// Bounds for the entry header's canonical JSON form.
-fn header_limits() -> crate::limits::InputLimits {
-    crate::limits::InputLimits::new(EntryLimits::default().max_header_bytes, 32, 512, 4_096)
-        .expect("header limits are within the engine ceilings")
+/// Bounds for the entry header's canonical JSON form: the caller's header
+/// byte ceiling with the engine's fixed structural bounds (container depth,
+/// entry count, string length) underneath it. Fallible because the byte
+/// ceiling comes from the caller-supplied [`EntryLimits`], not a fixed
+/// constant, and [`crate::limits::InputLimits::new`] rejects a zero or
+/// above-ceiling value.
+fn header_limits(max_header_bytes: usize) -> Result<crate::limits::InputLimits, RenderCacheError> {
+    crate::limits::InputLimits::new(max_header_bytes, 32, 512, 4_096)
+        .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::EntryInvalid))
 }
 
 /// Validates that `header_bytes` is well-formed canonical-bounded JSON
@@ -235,11 +240,45 @@ fn header_limits() -> crate::limits::InputLimits {
 /// [`crate::canonical::to_canonical_bytes`], so decoding re-checks them here
 /// rather than trusting stored bytes: an oversized or too-deeply-nested
 /// header fails closed on both sides.
-fn validate_header_bounds(header_bytes: &[u8]) -> Result<(), RenderCacheError> {
-    let limits = header_limits();
-    crate::canonical::parse_canonical_value(header_bytes, &limits)
+fn validate_header_bounds(
+    header_bytes: &[u8],
+    limits: &crate::limits::InputLimits,
+) -> Result<(), RenderCacheError> {
+    crate::canonical::parse_canonical_value(header_bytes, limits)
         .map(|_| ())
         .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::EntryInvalid))
+}
+
+/// Frames already-canonicalized header bytes and a body into the wire
+/// layout (magic, version, kind, lengths, header, body, digest, integrity
+/// tag) and signs it. Shared by [`encode_with_kind`] and the test-only raw
+/// header encoder below, since both produce the same wire shape from
+/// different header sources.
+fn frame(
+    header_bytes: &[u8],
+    body: &[u8],
+    kind: EntryKind,
+    keys: &SnapshotKeyRing,
+) -> Result<Bytes, RenderCacheError> {
+    let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
+    let header_len = u32::try_from(header_bytes.len()).map_err(|_| invalid())?;
+    let body_len = u32::try_from(body.len()).map_err(|_| invalid())?;
+    let mut out = Vec::with_capacity(4 + 2 + 1 + 4 + header_bytes.len() + 4 + body.len() + 64);
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&ENTRY_FORMAT_VERSION.to_be_bytes());
+    out.push(match kind {
+        EntryKind::Complete => 1,
+        EntryKind::Composite => 2,
+    });
+    out.extend_from_slice(&header_len.to_be_bytes());
+    out.extend_from_slice(header_bytes);
+    out.extend_from_slice(&body_len.to_be_bytes());
+    out.extend_from_slice(body);
+    let digest: [u8; 32] = Sha256::digest(body).into();
+    out.extend_from_slice(&digest);
+    let mac = integrity(keys, &out);
+    out.extend_from_slice(&mac);
+    Ok(Bytes::from(out))
 }
 
 fn encode_with_kind(
@@ -248,27 +287,12 @@ fn encode_with_kind(
     kind: EntryKind,
 ) -> Result<Bytes, RenderCacheError> {
     let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
-    let header = serde_json::to_vec(entry.header()).map_err(|_| invalid())?;
-    let limits = header_limits();
-    let header = crate::canonical::parse_canonical_value(&header, &limits)
+    let header_json = serde_json::to_vec(entry.header()).map_err(|_| invalid())?;
+    let limits = header_limits(EntryLimits::default().max_header_bytes)?;
+    let header_bytes = crate::canonical::parse_canonical_value(&header_json, &limits)
         .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
         .map_err(|_| invalid())?;
-    let mut out = Vec::with_capacity(4 + 2 + 1 + 4 + header.len() + 4 + entry.body().len() + 64);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&ENTRY_FORMAT_VERSION.to_be_bytes());
-    out.push(match kind {
-        EntryKind::Complete => 1,
-        EntryKind::Composite => 2,
-    });
-    out.extend_from_slice(&(header.len() as u32).to_be_bytes());
-    out.extend_from_slice(&header);
-    out.extend_from_slice(&(entry.body().len() as u32).to_be_bytes());
-    out.extend_from_slice(entry.body());
-    let Validator::Strong(digest) = entry.validator();
-    out.extend_from_slice(digest);
-    let mac = integrity(keys, &out);
-    out.extend_from_slice(&mac);
-    Ok(Bytes::from(out))
+    frame(&header_bytes, entry.body(), kind, keys)
 }
 
 /// Encodes a Complete entry.
@@ -287,6 +311,30 @@ pub fn encode_with_kind_for_test(
     kind: EntryKind,
 ) -> Bytes {
     encode_with_kind(entry, keys, kind).expect("test encoding")
+}
+
+/// Test-only encoder that serializes an arbitrary `Serialize` value as the
+/// header instead of a typed [`EntryHeader`], so tests can produce a
+/// structurally valid, correctly-signed entry whose header carries content
+/// the typed constructors (`SafeHeaders::from_pairs`,
+/// `VarianceDescriptor::declare`) would have rejected. `decode` must still
+/// reject such an entry: an intact integrity tag alone is not sufficient,
+/// since a future encoder bug or another producer sharing the key ring
+/// could otherwise smuggle unsafe content through.
+#[doc(hidden)]
+#[must_use]
+pub fn encode_raw_header_for_test<T: serde::Serialize>(
+    header: &T,
+    body: &Bytes,
+    keys: &SnapshotKeyRing,
+) -> Bytes {
+    let header_json = serde_json::to_vec(header).expect("test header serializes");
+    let limits =
+        header_limits(EntryLimits::default().max_header_bytes).expect("default header limits");
+    let header_bytes = crate::canonical::parse_canonical_value(&header_json, &limits)
+        .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
+        .expect("test header canonicalizes");
+    frame(&header_bytes, body, EntryKind::Complete, keys).expect("test framing")
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> Result<usize, RenderCacheError> {
@@ -316,16 +364,15 @@ pub fn decode(
             RenderCacheErrorKind::EntryUnsupported,
         ));
     }
-    let kind = match bytes[6] {
-        1 => EntryKind::Complete,
+    match bytes[6] {
+        1 => {}
         2 => {
             return Err(RenderCacheError::new(
                 RenderCacheErrorKind::EntryUnsupported,
             ));
         }
         _ => return Err(invalid()),
-    };
-    debug_assert_eq!(kind, EntryKind::Complete);
+    }
     let header_len = read_u32(bytes, 7)?;
     if header_len > limits.max_header_bytes {
         return Err(invalid());
@@ -334,7 +381,8 @@ pub fn decode(
     let header_bytes = bytes
         .get(header_start..header_start + header_len)
         .ok_or_else(invalid)?;
-    validate_header_bounds(header_bytes)?;
+    let canonical_limits = header_limits(limits.max_header_bytes)?;
+    validate_header_bounds(header_bytes, &canonical_limits)?;
     let header: EntryHeader = serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
     if header.headers.0.len() > limits.max_headers
         || header.observed.len() > limits.max_observations
@@ -342,6 +390,25 @@ pub fn decode(
     {
         return Err(invalid());
     }
+    // The derived `Deserialize` for `SafeHeaders` and `VarianceDescriptor`
+    // rebuilds their private maps straight from JSON, bypassing the
+    // allowlist, charset, count, and length bounds their validating
+    // constructors apply. A correct integrity tag only proves the bytes
+    // were not corrupted in transit, not that whatever produced them
+    // respected those bounds, so what was read back is rebuilt through the
+    // same validating constructors before it is trusted.
+    let rebuilt_headers = SafeHeaders::from_pairs(header.headers.iter()).map_err(|_| invalid())?;
+    let mut rebuilt_variance = VarianceDescriptor::new();
+    for (dimension, value) in header.variance.dimensions() {
+        rebuilt_variance
+            .declare(dimension.clone(), value.clone())
+            .map_err(|_| invalid())?;
+    }
+    let header = EntryHeader {
+        headers: rebuilt_headers,
+        variance: rebuilt_variance,
+        ..header
+    };
     let body_len_at = header_start + header_len;
     let body_len = read_u32(bytes, body_len_at)?;
     if body_len > limits.max_body_bytes {
@@ -371,7 +438,13 @@ pub fn decode(
     Ok(entry)
 }
 
-/// Reads metadata without decoding or exposing the body.
+/// Reads metadata without decoding or exposing the body. This is the
+/// lighter read: it verifies structural bounds and the integrity of the
+/// framing (magic, version, kind, lengths) but, unlike `decode`, it neither
+/// takes a key ring nor applies the business-rule bounds `decode` enforces
+/// on the header content (the safe-header allowlist, the variance bounds,
+/// or the stored digest). The asymmetry is deliberate, since `inspect`
+/// exists for body-free triage without those inputs.
 pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, RenderCacheError> {
     let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
     if bytes.len() < 11 || &bytes[..4] != MAGIC {
@@ -387,7 +460,8 @@ pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, R
         return Err(invalid());
     }
     let header_bytes = bytes.get(11..11 + header_len).ok_or_else(invalid)?;
-    validate_header_bounds(header_bytes)?;
+    let canonical_limits = header_limits(limits.max_header_bytes)?;
+    validate_header_bounds(header_bytes, &canonical_limits)?;
     let header: EntryHeader = serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
     let body_bytes = read_u32(bytes, 11 + header_len)?;
     Ok(EntryInspection {
