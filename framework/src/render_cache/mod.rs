@@ -6,14 +6,17 @@
 //! application capability.
 //!
 //! This module starts small: Task 9 added configuration, route and group
-//! policy registration, and effective policy resolution. Task 10 (this
-//! one) adds the request-scoped dependency collector. The remaining
-//! submodules (the file store, the ledger, the Live integration, the
-//! middleware, migrations, and the ORM entities) are added by later tasks
-//! in the same iteration.
+//! policy registration, and effective policy resolution. Task 10 added the
+//! request-scoped dependency collector. Task 11 (this one) adds the
+//! database-authoritative generation ledger and its migration. The
+//! remaining submodules (the file store, the Live integration, the
+//! middleware, and the ORM entities) are added by later tasks in the same
+//! iteration.
 
 pub mod collector;
 pub mod config;
+pub mod ledger;
+pub mod migration;
 pub mod registry;
 pub mod telemetry;
 #[doc(hidden)]

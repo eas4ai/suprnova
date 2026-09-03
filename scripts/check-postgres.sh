@@ -126,6 +126,13 @@ echo
 echo "==> cargo test -p suprnova --test pagination -- --ignored live_postgres"
 cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_postgres
 
+# `render_cache_ledger` is the same shape: SQLite tests run unconditionally,
+# and one Postgres-tagged and one MySQL-tagged `#[ignore]`d test share the
+# file. Select the Postgres one by name for the same reason as above.
+echo
+echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_postgres"
+cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_postgres
+
 # The workflow lease-reclaim tests are in-source unit tests, and they are
 # gated TWICE: `#[ignore]` keeps them out of the normal run, and even when
 # un-ignored they return early unless `DATABASE_URL` names a Postgres. Both

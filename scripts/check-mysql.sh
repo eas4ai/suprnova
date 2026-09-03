@@ -58,6 +58,14 @@ echo
 echo "==> cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored"
 cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-threads=1
 
+# `render_cache_ledger` is a mixed file: SQLite tests run unconditionally,
+# and one Postgres-tagged and one MySQL-tagged `#[ignore]`d test share it.
+# Select the MySQL one by name so this run never trips the Postgres-only
+# test for want of a Postgres.
+echo
+echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_mysql"
+cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_mysql
+
 echo
 echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"
 workflow_out="$(cargo test -p suprnova --lib \

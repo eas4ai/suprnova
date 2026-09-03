@@ -822,6 +822,27 @@ impl ExecutorChoice {
 }
 
 impl Transaction {
+    /// The transaction installed as the ambient `CURRENT_TX` by the active
+    /// [`DB::transaction`] / [`DB::transaction_with_attempts`] closure, or
+    /// `None` when no transaction is active.
+    ///
+    /// Lets a helper called from inside the closure - without itself
+    /// receiving a `&Transaction` argument - detect the ambient transaction
+    /// and gate on its presence, or read its pinned backend, while still
+    /// issuing its actual reads and writes through `DB::select` /
+    /// `DB::statement` / `Model` calls, which already consult `CURRENT_TX`
+    /// on their own. `pub(crate)`: this is an internal detection seam, not
+    /// a second way to run statements against the transaction - use
+    /// [`Self::query_all`] or the `DB` facade for that.
+    pub(crate) fn current() -> Option<Self> {
+        let state = CURRENT_TX.try_with(|t| t.clone()).ok().flatten()?;
+        Some(Self {
+            inner: state.tx.clone(),
+            connection_name: state.connection_name.clone(),
+            registry: Some(state),
+        })
+    }
+
     /// Return the backend used by this transaction's pinned connection.
     pub fn backend(&self) -> sea_orm::DbBackend {
         self.inner.get_database_backend()

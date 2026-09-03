@@ -87,6 +87,13 @@ impl MigratorTrait for Migrator {
             Box::new(m_2026_08_01_queue_tables::Migration),
             Box::new(m_2026_08_01_bench_tables::Migration),
             Box::new(m_2026_08_02_bench_tick_task::Migration),
+            // RenderCache Tier 0 - the database-authoritative generation
+            // ledger (current generations, an append-only change log, and
+            // the authority epoch). The framework ships the migration; the
+            // app's Migrator lists it so `suprnova migrate` provisions the
+            // three `suprnova_render_*` tables alongside this project's own
+            // schema.
+            Box::new(suprnova::render_cache::migration::Migration),
         ]
     }
 }
