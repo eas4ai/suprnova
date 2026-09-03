@@ -771,7 +771,9 @@ impl Router {
 
     /// Opts one registered route pattern into RenderCache with a full policy
     /// or a patch of its group. Register routes and groups before installing
-    /// the RenderCache middleware.
+    /// the RenderCache middleware. A patch inherits its enclosing policy and
+    /// may only narrow it; a full policy is a complete, explicit declaration
+    /// and may widen it.
     pub fn try_render_cache(
         mut self,
         pattern: &str,
@@ -787,7 +789,9 @@ impl Router {
         Ok(self)
     }
 
-    /// Opts every route under a prefix into RenderCache.
+    /// Opts every route under a prefix into RenderCache. A patch inherits
+    /// its enclosing group's policy and may only narrow it; a full policy is
+    /// a complete, explicit declaration and may widen it.
     pub fn try_render_cache_group(
         mut self,
         prefix: &str,

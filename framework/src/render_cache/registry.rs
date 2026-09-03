@@ -48,12 +48,13 @@ impl RenderCachePolicyTable {
             ));
         }
         if let GroupPolicy::Patch(patch) = &policy {
-            let enclosing = self.enclosing(prefix, prefix).ok_or_else(|| {
-                FrameworkError::internal("RenderCache group patch has no enclosing policy")
-            })?;
-            enclosing
-                .apply(patch)
-                .map_err(|_| FrameworkError::internal("RenderCache group patch widens sharing"))?;
+            self.validate_patch(
+                prefix,
+                prefix,
+                patch,
+                "RenderCache group patch has no enclosing policy",
+                "RenderCache group patch widens sharing",
+            )?;
         }
         self.groups.insert(prefix.to_owned(), policy);
         Ok(())
@@ -71,14 +72,36 @@ impl RenderCachePolicyTable {
             ));
         }
         if let GroupPolicy::Patch(patch) = &policy {
-            let group = self.enclosing(pattern, "").ok_or_else(|| {
-                FrameworkError::internal("RenderCache route patch has no group policy")
-            })?;
-            group
-                .apply(patch)
-                .map_err(|_| FrameworkError::internal("RenderCache route patch widens sharing"))?;
+            self.validate_patch(
+                pattern,
+                "",
+                patch,
+                "RenderCache route patch has no group policy",
+                "RenderCache route patch widens sharing",
+            )?;
         }
         self.routes.insert(pattern.to_owned(), policy);
+        Ok(())
+    }
+
+    /// Resolves the enclosing policy for `key` (excluding `exclude`) and
+    /// checks that `patch` only narrows it. Shared by `register_group` and
+    /// `register_route`, which differ only in the exclusion and the error
+    /// wording for their respective contexts.
+    fn validate_patch(
+        &self,
+        key: &str,
+        exclude: &str,
+        patch: &PolicyPatch,
+        missing_enclosing_message: &str,
+        widens_message: &str,
+    ) -> Result<(), FrameworkError> {
+        let enclosing = self
+            .enclosing(key, exclude)
+            .ok_or_else(|| FrameworkError::internal(missing_enclosing_message))?;
+        enclosing
+            .apply(patch)
+            .map_err(|_| FrameworkError::internal(widens_message))?;
         Ok(())
     }
 

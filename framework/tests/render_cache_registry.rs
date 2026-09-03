@@ -6,12 +6,8 @@ use suprnova::render_cache::{
 };
 use suprnova::{HttpResponse, Request, Router};
 
-#[allow(
-    clippy::manual_async_fn,
-    reason = "brief specifies this exact handler shape verbatim; behavior is identical to an async fn"
-)]
-fn ok(_request: Request) -> impl std::future::Future<Output = suprnova::Response> {
-    async { Ok(HttpResponse::text("ok")) }
+async fn ok(_request: Request) -> suprnova::Response {
+    Ok(HttpResponse::text("ok"))
 }
 
 fn public() -> RenderCachePolicy {
@@ -102,5 +98,17 @@ fn duplicates_and_widening_patches_fail_at_construction() {
             .try_render_cache("/missing", public())
             .is_err(),
         "an unregistered route cannot be opted in"
+    );
+}
+
+#[test]
+fn a_full_route_policy_overrides_a_stricter_enclosing_group() {
+    let router = private_group_router()
+        .try_render_cache("/a", public())
+        .expect("a full policy is a complete override, not a patch");
+    let table = suprnova::render_cache::testing::policy_table(&router);
+    assert_eq!(
+        table.effective_policy("/a").expect("route").class(),
+        RepresentationClass::PublicShared
     );
 }

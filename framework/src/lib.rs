@@ -89,7 +89,6 @@ pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
 pub(crate) mod redis_retry;
-/// Route and group render caching: policy, variance, and Tier 0 providers.
 pub mod render_cache;
 pub mod resources;
 pub mod routing;
