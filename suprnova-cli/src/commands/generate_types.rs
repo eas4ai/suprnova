@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use syn::visit::Visit;
 use syn::{Attribute, Fields, GenericArgument, ItemStruct, PathArguments, Type};
 use walkdir::WalkDir;
@@ -62,6 +64,11 @@ pub enum RustType {
 /// hence an alias rather than an inline union at each use site.
 const JSON_VALUE_ALIAS: &str = "export type JsonValue = string | number | boolean | null | JsonValue[] \
 | { [key: string]: JsonValue };\n\n";
+
+/// Process-local nonce for collision-free sibling temporary files.
+static NEXT_GENERATED_FILE_ATTEMPT: AtomicU64 = AtomicU64::new(0);
+/// Bound collision retries so a hostile or corrupted directory cannot spin.
+const MAX_GENERATED_FILE_ATTEMPTS: usize = 128;
 
 /// Visitor that collects structs with #[derive(InertiaProps)] or #[derive(Data)]
 /// into `structs`, and every other named-field struct into `plain_structs` so
@@ -957,8 +964,8 @@ pub fn generate_types_string(input: ScanInput) -> String {
     output
 }
 
-/// Write `contents` to `path`, but only when they differ from what is
-/// already there. Returns whether a write actually happened.
+/// Atomically replace `path` with `contents`, but only when they differ from
+/// what is already there. Returns whether a write actually happened.
 ///
 /// Regeneration is not a change. `suprnova serve` runs the backend under
 /// `cargo watch`, which restarts on any write inside the project, and the
@@ -971,14 +978,167 @@ pub fn generate_types_string(input: ScanInput) -> String {
 /// A file that exists but cannot be read counts as changed: the write is
 /// attempted anyway, so a real permissions or IO problem surfaces as the
 /// write error it is rather than as a silent skip.
+///
+/// Existing output symlinks keep their prior `fs::write` behavior: their
+/// resolved target is replaced atomically and the link remains in place. A
+/// changed read-only destination is rejected, and replacement files inherit
+/// the destination's permissions.
 fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
-    if let Ok(existing) = fs::read(path)
+    write_if_changed_with_hook(path, contents, |_| {})
+}
+
+/// Follow the output path's final-component symlink chain without requiring
+/// the eventual target to exist. Relative link targets are resolved from the
+/// directory containing each link, matching filesystem path resolution.
+fn resolve_generated_output_target(path: &Path) -> Result<PathBuf, String> {
+    const MAX_SYMLINKS: usize = 40;
+
+    let mut target = path.to_path_buf();
+    let mut followed = 0;
+    loop {
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if followed == MAX_SYMLINKS {
+                    return Err(format!(
+                        "Refusing to follow more than {MAX_SYMLINKS} generated output symlinks from {}",
+                        path.display()
+                    ));
+                }
+                followed += 1;
+                let link = fs::read_link(&target).map_err(|error| {
+                    format!(
+                        "Failed to read generated output symlink {}: {error}",
+                        target.display()
+                    )
+                })?;
+                target = if link.is_absolute() {
+                    link
+                } else {
+                    target.parent().unwrap_or_else(|| Path::new("")).join(link)
+                };
+            }
+            Ok(_) => return Ok(target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect generated output {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+}
+
+fn write_if_changed_with_hook(
+    path: &Path,
+    contents: &str,
+    before_replace: impl FnOnce(&Path),
+) -> Result<bool, String> {
+    let target = resolve_generated_output_target(path)?;
+
+    if let Ok(existing) = fs::read(&target)
         && existing == contents.as_bytes()
     {
         return Ok(false);
     }
 
-    fs::write(path, contents).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    let existing_permissions = match fs::metadata(&target) {
+        Ok(metadata) => {
+            let permissions = metadata.permissions();
+            if permissions.readonly() {
+                return Err(format!(
+                    "Refusing to replace read-only generated output {}",
+                    target.display()
+                ));
+            }
+            Some(permissions)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect generated output {}: {error}",
+                target.display()
+            ));
+        }
+    };
+
+    let parent = target.parent().ok_or_else(|| {
+        format!(
+            "Refusing to write {}: it has no parent directory",
+            target.display()
+        )
+    })?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Refusing to write {}: it has no file name",
+                target.display()
+            )
+        })?;
+
+    let mut temporary_file = None;
+    for _ in 0..MAX_GENERATED_FILE_ATTEMPTS {
+        let attempt = NEXT_GENERATED_FILE_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            attempt
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(handle) => {
+                temporary_file = Some((candidate, handle));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create temporary file {}: {error}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    let Some((temporary, mut handle)) = temporary_file else {
+        return Err(format!(
+            "Failed to create a unique temporary file beside {} after {} attempts",
+            target.display(),
+            MAX_GENERATED_FILE_ATTEMPTS
+        ));
+    };
+
+    if let Err(error) = handle.write_all(contents.as_bytes()) {
+        drop(handle);
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Failed to write {}: {error}", temporary.display()));
+    }
+    drop(handle);
+
+    if let Some(permissions) = existing_permissions
+        && let Err(error) = fs::set_permissions(&temporary, permissions)
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Failed to preserve permissions on {}: {error}",
+            target.display()
+        ));
+    }
+
+    before_replace(&temporary);
+
+    fs::rename(&temporary, &target).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!(
+            "Failed to move {} into place at {}: {error}",
+            temporary.display(),
+            target.display()
+        )
+    })?;
     Ok(true)
 }
 
@@ -1000,16 +1160,11 @@ pub struct GenerationOutcome {
 impl GenerationOutcome {
     /// Whether a watcher should announce this pass.
     ///
-    /// Two kinds of pass say nothing. One that emitted no items at all has
-    /// no artifact to talk about. One that emitted the same bytes already
-    /// on disk deliberately did not touch the file - and a watcher only
-    /// reaches here after a real source change, so silence carries
-    /// information: your edit did not change the props. Announcing it
-    /// anyway would contradict the write the tool decided not to make, and
-    /// under `--json` it would put a `types_regenerated` event on the wire
-    /// for a regeneration that did not happen.
+    /// A changed empty artifact is still a regeneration: it removes stale
+    /// declarations (or a stale message-id union) even though the new item
+    /// count is zero. Only a byte-identical pass stays silent.
     pub(crate) fn is_reportable_regeneration(&self) -> bool {
-        self.count > 0 && self.wrote
+        self.wrote
     }
 }
 
@@ -1022,13 +1177,6 @@ pub fn generate_types_to_file(
     output_path: &Path,
 ) -> Result<GenerationOutcome, String> {
     let structs = scan_inertia_props_checked(project_path)?;
-
-    if structs.is_empty() {
-        return Ok(GenerationOutcome {
-            count: 0,
-            wrote: false,
-        });
-    }
 
     // Surface prop fields that reference un-generatable types (degraded to
     // `unknown` in the output) so the missing derive is fixed at the source.
@@ -1476,6 +1624,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
     match generate_types_to_file(project_path, &output_path) {
         Ok(outcome) if outcome.count == 0 => {
             ui::warning("No InertiaProps structs found.");
+            report_generation(&output_path, &outcome);
         }
         Ok(outcome) => {
             ui::info(&format!("Found {} InertiaProps struct(s)", outcome.count));
@@ -1918,13 +2067,9 @@ mod reportable_regeneration_tests {
     }
 
     #[test]
-    fn a_pass_that_emitted_nothing_stays_silent() {
-        // No structs, or no message ids: there is no artifact to talk
-        // about. This is the pre-existing "stay quiet" case, and the
-        // stale-file removal that reports `wrote` with a zero count rides
-        // on it - the watcher has never announced that either.
+    fn an_empty_pass_reports_only_when_it_changed_the_artifact() {
         assert!(!outcome(0, false).is_reportable_regeneration());
-        assert!(!outcome(0, true).is_reportable_regeneration());
+        assert!(outcome(0, true).is_reportable_regeneration());
     }
 }
 
@@ -1954,6 +2099,10 @@ mod write_if_changed_tests {
             .expect("metadata")
             .modified()
             .expect("modified")
+    }
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace tempdir")
     }
 
     #[test]
@@ -1999,6 +2148,274 @@ mod write_if_changed_tests {
     }
 
     #[test]
+    fn another_attempts_temporary_file_is_never_deleted() {
+        let dir = workspace_tempdir();
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "last complete output\n").expect("seed output");
+        let temporary = dir
+            .path()
+            .join(format!(".out.ts.{}.tmp", std::process::id()));
+        fs::write(&temporary, "another attempt owns this\n").expect("seed other temp");
+
+        assert!(write_if_changed(&path, "replacement\n").expect("replace output"));
+
+        assert_eq!(
+            fs::read_to_string(&temporary).expect("read other attempt's temp"),
+            "another attempt owns this\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_atomic_replace_cleans_up_its_temporary_file() {
+        let dir = workspace_tempdir();
+        let path = dir.path().join("out.ts");
+        fs::create_dir(&path).expect("block destination replacement");
+        let error = write_if_changed(&path, "replacement\n")
+            .expect_err("renaming over a directory must fail");
+
+        assert!(error.contains("move"), "unexpected error: {error}");
+        assert!(path.is_dir(), "the existing destination is preserved");
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read tempdir")
+                .filter_map(Result::ok)
+                .all(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with(".out.ts.") || !name.ends_with(".tmp")
+                }),
+            "a failed replacement must remove its temporary file"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_use_distinct_temporary_files_and_commit_complete_output() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+
+        let dir = workspace_tempdir();
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "old\n").expect("seed output");
+        let barrier = Arc::new(Barrier::new(2));
+        let temporaries = Arc::new(Mutex::new(Vec::new()));
+
+        let writers: Vec<_> = ["first complete output\n", "second complete output\n"]
+            .into_iter()
+            .map(|contents| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                let temporaries = Arc::clone(&temporaries);
+                thread::spawn(move || {
+                    write_if_changed_with_hook(&path, contents, |temporary| {
+                        temporaries
+                            .lock()
+                            .expect("temporary paths lock")
+                            .push(temporary.to_path_buf());
+                        barrier.wait();
+                    })
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            assert!(writer.join().expect("writer thread").expect("write result"));
+        }
+
+        let temporaries = temporaries.lock().expect("temporary paths lock");
+        assert_eq!(temporaries.len(), 2);
+        assert_ne!(
+            temporaries[0], temporaries[1],
+            "each in-flight write must own a distinct temporary path"
+        );
+        assert!(temporaries.iter().all(|path| !path.exists()));
+        let output = fs::read_to_string(&path).expect("read final output");
+        assert!(
+            output == "first complete output\n" || output == "second complete output\n",
+            "one complete contender must win, got {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_output_through_a_symlink_replaces_the_target_not_the_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace_tempdir();
+        let target = dir.path().join("shared.ts");
+        let path = dir.path().join("out.ts");
+        fs::write(&target, "old\n").expect("seed target");
+        symlink(&target, &path).expect("create output symlink");
+
+        assert!(write_if_changed(&path, "new\n").expect("replace through symlink"));
+
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "generation must preserve the configured output symlink"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("read target"), "new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_relative_output_symlink_creates_its_target_and_keeps_the_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace_tempdir();
+        let target = dir.path().join("shared.ts");
+        let path = dir.path().join("out.ts");
+        symlink("shared.ts", &path).expect("create dangling relative symlink");
+
+        assert!(write_if_changed(&path, "new\n").expect("create through symlink"));
+
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "generation must preserve the configured output symlink"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("read target"), "new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_symlink_cycle_is_rejected_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace_tempdir();
+        let first = dir.path().join("first.ts");
+        let second = dir.path().join("second.ts");
+        symlink("second.ts", &first).expect("create first link");
+        symlink("first.ts", &second).expect("create second link");
+
+        let error = write_if_changed(&first, "new\n").expect_err("cycle must fail closed");
+
+        assert!(error.contains("more than 40"), "unexpected error: {error}");
+        assert!(
+            fs::symlink_metadata(&first)
+                .expect("first metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(&second)
+                .expect("second metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forty_link_output_chain_reaches_and_creates_its_terminal_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace_tempdir();
+        let terminal = dir.path().join("terminal.ts");
+        for index in 0..40 {
+            let link = dir.path().join(format!("link-{index}.ts"));
+            let target = if index == 39 {
+                "terminal.ts".to_string()
+            } else {
+                format!("link-{}.ts", index + 1)
+            };
+            symlink(target, link).expect("create link chain");
+        }
+        let first = dir.path().join("link-0.ts");
+
+        assert!(write_if_changed(&first, "new\n").expect("follow 40 links"));
+
+        assert_eq!(
+            fs::read_to_string(&terminal).expect("read terminal"),
+            "new\n"
+        );
+        assert!(
+            fs::symlink_metadata(&first)
+                .expect("first metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forty_one_link_output_chain_is_rejected_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace_tempdir();
+        let terminal = dir.path().join("terminal.ts");
+        for index in 0..41 {
+            let link = dir.path().join(format!("link-{index}.ts"));
+            let target = if index == 40 {
+                "terminal.ts".to_string()
+            } else {
+                format!("link-{}.ts", index + 1)
+            };
+            symlink(target, link).expect("create link chain");
+        }
+        let first = dir.path().join("link-0.ts");
+
+        let error = write_if_changed(&first, "new\n").expect_err("41 links must fail closed");
+
+        assert!(error.contains("more than 40"), "unexpected error: {error}");
+        assert!(
+            !terminal.exists(),
+            "the terminal target must not be created"
+        );
+        assert!(
+            fs::symlink_metadata(&first)
+                .expect("first metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_read_only_output_is_rejected_and_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = workspace_tempdir();
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "old\n").expect("seed output");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444))
+            .expect("make output read-only");
+
+        let error = write_if_changed(&path, "new\n").expect_err("read-only output must fail");
+
+        assert!(error.contains("read-only"), "unexpected error: {error}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read preserved output"),
+            "old\n"
+        );
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o444
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_preserves_existing_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = workspace_tempdir();
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "old\n").expect("seed output");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("set custom mode");
+
+        assert!(write_if_changed(&path, "new\n").expect("replace output"));
+
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[test]
     fn regenerating_an_unchanged_project_leaves_the_output_file_alone() {
         // The `serve` watcher watches the tree the generator reads, and
         // cargo-watch watches the tree the generator writes into. A
@@ -2029,6 +2446,86 @@ mod write_if_changed_tests {
         );
         assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
         assert_eq!(fs::read_to_string(&out).expect("read output"), first);
+    }
+
+    #[test]
+    fn removing_the_final_props_struct_replaces_stale_declarations_once() {
+        let dir = workspace_tempdir();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        let props = src.join("props.rs");
+        fs::write(
+            &props,
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed props.rs");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        assert_eq!(populated.count, 1);
+        assert!(populated.wrote);
+        assert!(
+            fs::read_to_string(&out)
+                .expect("read populated output")
+                .contains("export interface HomeProps")
+        );
+
+        fs::write(&props, "pub struct PlainRustType;\n").expect("remove final props derive");
+
+        let emptied = generate_types_to_file(dir.path(), &out).expect("empty run");
+        assert_eq!(emptied.count, 0);
+        assert!(
+            emptied.wrote,
+            "removing the final declaration must mutate the generated artifact"
+        );
+        let empty_output = fs::read_to_string(&out).expect("read empty output");
+        assert_eq!(empty_output, generate_typescript(&[]));
+        assert!(!empty_output.contains("HomeProps"));
+        let before = set_old_mtime(&out);
+
+        let unchanged = generate_types_to_file(dir.path(), &out).expect("unchanged empty run");
+        assert_eq!(unchanged.count, 0);
+        assert!(!unchanged.wrote, "identical empty output is unchanged");
+        assert_eq!(mtime(&out), before, "empty rerun must not rewrite");
+    }
+
+    #[test]
+    fn an_empty_project_gets_a_stable_module_and_can_later_gain_types() {
+        let dir = workspace_tempdir();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        let props = src.join("props.rs");
+        fs::write(&props, "pub struct PlainRustType;\n").expect("seed plain Rust");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        let empty = generate_types_to_file(dir.path(), &out).expect("first empty run");
+        assert_eq!(empty.count, 0);
+        assert!(empty.wrote, "a missing artifact must be created");
+        assert_eq!(
+            fs::read_to_string(&out).expect("read empty module"),
+            generate_typescript(&[])
+        );
+        let before = set_old_mtime(&out);
+
+        let unchanged = generate_types_to_file(dir.path(), &out).expect("second empty run");
+        assert_eq!(unchanged.count, 0);
+        assert!(!unchanged.wrote);
+        assert_eq!(mtime(&out), before);
+
+        fs::write(
+            &props,
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("add props derive");
+
+        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        assert_eq!(populated.count, 1);
+        assert!(populated.wrote);
+        assert!(
+            fs::read_to_string(&out)
+                .expect("read populated module")
+                .contains("export interface HomeProps")
+        );
     }
 
     #[test]

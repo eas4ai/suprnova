@@ -340,10 +340,10 @@ enum DevEvent {
     },
     /// The watcher on `src/` (or `lang/`) regenerated a TypeScript
     /// artifact in response to a file change. `count` is how many items
-    /// (types or message ids) were written; a `count` of 0 - nothing to
-    /// regenerate, or the file was cleaned up - never fires this event,
-    /// same as the equivalent human-readable line stays quiet in that
-    /// case.
+    /// (types or message ids) the new artifact contains. A `count` of 0
+    /// still fires when the artifact changed, such as when stale declarations
+    /// were replaced by the canonical empty module; an unchanged pass stays
+    /// silent.
     TypesRegenerated {
         ts: String,
         artifact: TypesArtifact,
@@ -1032,19 +1032,18 @@ pub fn run(
             ui::info("Generating TypeScript types...");
         }
         match super::generate_types::generate_types_to_file(project_path, &output_path) {
-            Ok(outcome) if outcome.count == 0 => {
-                if !json {
-                    ui::hint("No InertiaProps structs found (skipping type generation)");
-                }
-            }
             Ok(outcome) => {
                 if !json {
-                    report_startup_generation(
-                        outcome.count,
-                        "type(s)",
-                        &output_path,
-                        outcome.wrote,
-                    );
+                    let (empty_hint, notice) =
+                        startup_type_generation_notices(outcome.count, &output_path, outcome.wrote);
+                    if let Some(hint) = empty_hint {
+                        ui::hint(hint);
+                    }
+                    if outcome.wrote {
+                        ui::success(&notice);
+                    } else {
+                        ui::info(&notice);
+                    }
                 }
             }
             Err(e) => {
@@ -1246,6 +1245,21 @@ fn generation_notice(count: usize, unit: &str, path: &Path, wrote: bool) -> Stri
     } else {
         format!("{} {} up to date → {}", count, unit, path.display())
     }
+}
+
+/// Human-readable startup messages for the Inertia props artifact.
+///
+/// An empty scan is useful context, but it is not a skipped generation: the
+/// generator may have replaced stale declarations with the canonical empty
+/// module. The filesystem notice therefore remains authoritative.
+fn startup_type_generation_notices(
+    count: usize,
+    path: &Path,
+    wrote: bool,
+) -> (Option<&'static str>, String) {
+    let empty_hint = (count == 0).then_some("No InertiaProps structs found.");
+    let notice = generation_notice(count, "type(s)", path, wrote);
+    (empty_hint, notice)
 }
 
 /// Print [`generation_notice`], as a success when the file changed and as
@@ -1636,6 +1650,32 @@ mod generation_notice_tests {
         assert_eq!(
             generation_notice(12, "message id(s)", Path::new("lang-keys.ts"), false),
             "12 message id(s) up to date → lang-keys.ts"
+        );
+    }
+
+    #[test]
+    fn an_empty_written_type_artifact_is_not_reported_as_skipped() {
+        assert_eq!(
+            startup_type_generation_notices(
+                0,
+                Path::new("frontend/src/types/inertia-props.ts"),
+                true,
+            ),
+            (
+                Some("No InertiaProps structs found."),
+                "Generated 0 type(s) → frontend/src/types/inertia-props.ts".to_string(),
+            )
+        );
+        assert_eq!(
+            startup_type_generation_notices(
+                0,
+                Path::new("frontend/src/types/inertia-props.ts"),
+                false,
+            ),
+            (
+                Some("No InertiaProps structs found."),
+                "0 type(s) up to date → frontend/src/types/inertia-props.ts".to_string(),
+            )
         );
     }
 }

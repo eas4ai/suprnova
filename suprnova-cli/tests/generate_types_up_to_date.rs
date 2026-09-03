@@ -10,8 +10,6 @@
 use std::fs;
 use std::process::{Command, Output};
 
-use tempfile::tempdir;
-
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
 fn combined(out: &Output) -> String {
@@ -23,7 +21,7 @@ fn combined(out: &Output) -> String {
 /// A minimal project: a manifest so `generate-types` accepts the directory,
 /// one prop struct, and one Fluent catalog so both artifacts are exercised.
 fn seed_project() -> tempfile::TempDir {
-    let dir = tempdir().expect("create tempdir");
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create workspace tempdir");
     fs::write(
         dir.path().join("Cargo.toml"),
         "[package]\nname = \"smoke\"\n",
@@ -111,5 +109,42 @@ fn a_real_edit_is_reported_as_generated_again() {
     assert!(
         text.contains("./frontend/src/types/lang-keys.ts is up to date"),
         "the untouched catalog must not be reported as regenerated; got: {text}"
+    );
+}
+
+#[test]
+fn removing_the_final_props_type_reports_one_mutation_then_up_to_date() {
+    let dir = seed_project();
+    generate_types_in(&dir);
+    fs::write(
+        dir.path().join("src/props.rs"),
+        "pub struct PlainRustType;\n",
+    )
+    .expect("remove final props derive");
+
+    let changed = generate_types_in(&dir);
+    assert!(
+        changed.contains("No InertiaProps structs found."),
+        "the empty scan remains visible; got: {changed}"
+    );
+    assert!(
+        changed.contains("Generated ./frontend/src/types/inertia-props.ts"),
+        "removing stale declarations changed the artifact; got: {changed}"
+    );
+    assert!(
+        !fs::read_to_string(dir.path().join("frontend/src/types/inertia-props.ts"))
+            .expect("read emptied output")
+            .contains("HomeProps"),
+        "the stale declaration must be removed"
+    );
+
+    let unchanged = generate_types_in(&dir);
+    assert!(
+        unchanged.contains("./frontend/src/types/inertia-props.ts is up to date"),
+        "the identical empty artifact is unchanged; got: {unchanged}"
+    );
+    assert!(
+        !unchanged.contains("Generated ./frontend/src/types/inertia-props.ts"),
+        "an empty no-op must not claim a mutation; got: {unchanged}"
     );
 }
