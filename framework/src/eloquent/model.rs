@@ -425,6 +425,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let row = Self::try_from_storage(inserted)?;
+        crate::render_cache::orm::after_model_write(&row).await?;
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
@@ -480,6 +481,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
+        crate::render_cache::orm::after_model_write(&current).await?;
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -519,6 +521,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
+        crate::render_cache::orm::after_model_write(&current).await?;
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -555,6 +558,7 @@ where
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write(&snapshot).await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
         snapshot.touch_owners().await?;
@@ -584,6 +588,7 @@ where
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write(&snapshot).await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
@@ -764,6 +769,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
+        crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -796,6 +802,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
+        crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -819,6 +826,7 @@ where
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write_with_tx(tx, &snapshot).await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
         snapshot.touch_owners_with_tx(tx).await?;
@@ -850,6 +858,7 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let row = Self::try_from_storage(inserted)?;
+        crate::render_cache::orm::after_model_write_with_tx(tx, &row).await?;
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
@@ -874,6 +883,7 @@ where
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write_with_tx(tx, &snapshot).await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
@@ -1633,6 +1643,10 @@ where
         return Err(FrameworkError::not_found(
             "delete_or_fail: row no longer exists",
         ));
+    }
+    match tx {
+        Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, &snapshot).await?,
+        None => crate::render_cache::orm::after_model_write(&snapshot).await?,
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;

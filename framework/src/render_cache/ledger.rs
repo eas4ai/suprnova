@@ -10,6 +10,7 @@ use suprnova_live::render_cache::generation::{
 };
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
+use crate::database::transaction::ExecutorChoice;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
 /// Hex-encodes an identity's digest for the `identity` column. Every value
@@ -20,6 +21,28 @@ use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 /// this hashes).
 fn identity_column(identity: &DependencyIdentity) -> String {
     hex::encode(identity.digest())
+}
+
+/// True when `error` looks like "this table does not exist" rather than a
+/// real database failure.
+///
+/// SeaORM does not expose a typed "table missing" variant - every driver
+/// surfaces it as an opaque `DbErr::Query` / `DbErr::Exec` wrapping a
+/// backend-specific message, so this matches on the phrasing each backend
+/// is known to use: SQLite's `no such table`, Postgres's `relation ... does
+/// not exist`, and MySQL's `Table '...' doesn't exist`. The same
+/// string-matching technique is already used elsewhere in this codebase
+/// (`vector/qdrant.rs`) for the same class of "the resource I expect isn't
+/// there" signal. Scoped to callers that already know the failing
+/// statement names one of the three `suprnova_render_*` tables, so a false
+/// positive here would have to be some other error that happens to share
+/// this exact phrasing against the exact same query - not a realistic risk
+/// in practice.
+fn is_missing_table_error(error: &sea_orm::DbErr) -> bool {
+    let message = error.to_string();
+    message.contains("no such table")
+        || message.contains("does not exist")
+        || message.contains("doesn't exist")
 }
 
 /// Collapses a database failure into the one closed provider kind
@@ -133,35 +156,100 @@ pub async fn advance_in_current_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    let backend = tx.backend();
-    let epoch: i64 = DB::scalar(
-        "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
-        vec![],
-    )
-    .await?;
+    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
+}
+
+/// The upsert-and-log body shared by [`advance_in_current_transaction`]
+/// (the ambient `CURRENT_TX` form) and [`advance_via_tx`] (the explicit
+/// `&Transaction` form the `Model::*_with_tx` shims need - see ruling
+/// R47): each identity's generation row upserted and its change-log row
+/// appended, in ascending digest order.
+///
+/// Issues every statement directly through `exec` - never through the
+/// `DB` facade's `DB::statement` / `DB::scalar` - because `DB::statement`
+/// itself calls [`super::orm::after_unknown_write`] for any non-`SELECT`
+/// statement, and this function's own upsert and log-insert statements
+/// are exactly that shape. Routing them back through `DB::statement`
+/// would recurse: this advance would trigger another broad-authority
+/// advance, which would trigger another, without ever returning.
+async fn advance_through(
+    exec: &ExecutorChoice,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    if identities.is_empty() {
+        return Ok(());
+    }
+    let backend = exec.backend();
+    let epoch_row = match exec
+        .query_one(sea_orm::Statement::from_sql_and_values(
+            backend,
+            "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+            vec![],
+        ))
+        .await
+    {
+        Ok(row) => row,
+        // The three `suprnova_render_*` tables land in one migration, so a
+        // missing `suprnova_render_epochs` means none of them exist: this
+        // database has never run `render_cache::migration::Migration`, most
+        // likely because the application (or, overwhelmingly, a test
+        // database built without it) does not use RenderCache at all.
+        // "Live is complete without it" (see the module documentation)
+        // extends to every write path this module instruments: a model
+        // save must keep working exactly as it always has when the
+        // generation ledger's own schema was never installed, the same way
+        // any other write on an unmigrated table would simply not exist
+        // yet rather than becoming mandatory infrastructure everyone pays
+        // for. Every other database failure - a real connectivity problem,
+        // a permissions error - still propagates.
+        Err(e) if is_missing_table_error(&e) => return Ok(()),
+        Err(e) => return Err(FrameworkError::database(e.to_string())),
+    }
+    .ok_or_else(|| {
+        FrameworkError::internal(
+            "RenderCache generation advance: suprnova_render_epochs has no singleton row",
+        )
+    })?;
+    let epoch: i64 = epoch_row
+        .try_get_by_index(0)
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
 
     let mut ordered: Vec<&DependencyIdentity> = identities.iter().collect();
     ordered.sort_by_key(|identity| identity.digest());
 
     for identity in ordered {
         let digest = identity_column(identity);
-        DB::statement(
+        exec.run(sea_orm::Statement::from_sql_and_values(
+            backend,
             upsert_sql(backend)?,
             vec![Value::from(digest.clone()), Value::from(epoch)],
-        )
-        .await?;
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
 
-        let generation: i64 = DB::scalar(
-            &format!(
-                "SELECT generation FROM suprnova_render_generations WHERE identity = {}",
-                placeholders(backend, 1)?
-            ),
-            vec![Value::from(digest.clone())],
-        )
-        .await?;
+        let generation_row = exec
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT generation FROM suprnova_render_generations WHERE identity = {}",
+                    placeholders(backend, 1)?
+                ),
+                vec![Value::from(digest.clone())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| {
+                FrameworkError::internal(
+                    "RenderCache generation advance: row disappeared immediately after upsert",
+                )
+            })?;
+        let generation: i64 = generation_row
+            .try_get_by_index(0)
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
-        DB::statement(
-            &format!(
+        exec.run(sea_orm::Statement::from_sql_and_values(
+            backend,
+            format!(
                 "INSERT INTO suprnova_render_generation_log \
                  (identity, generation, epoch, committed_at) VALUES ({}, CURRENT_TIMESTAMP)",
                 placeholders(backend, 3)?
@@ -171,10 +259,36 @@ pub async fn advance_in_current_transaction(
                 Value::from(generation),
                 Value::from(epoch),
             ],
-        )
-        .await?;
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
     }
     Ok(())
+}
+
+/// Advances `identities` through an explicit transaction handle instead of
+/// the ambient `CURRENT_TX` task-local `advance_in_current_transaction`
+/// consults.
+///
+/// The `Model::*_with_tx` shims (`save_with_tx`, `update_with_tx`,
+/// `create_with_tx`, `delete_with_tx`, `force_delete_with_tx`) route their
+/// row write through `ExecutorChoice::from_tx(tx)` and bypass `CURRENT_TX`
+/// by design - the explicit handle is authoritative, not the task-local.
+/// Calling [`advance_in_current_transaction`] from inside one of them
+/// would find no ambient transaction: it would either fail outright, or -
+/// worse - open a transaction of its own that commits independently of
+/// the caller's `tx`, so a caller that rolls back `tx` would undo the row
+/// write while that separately-committed advance stood. This function
+/// closes that gap by taking the transaction explicitly. See ruling R47.
+///
+/// Mirrors [`advance_in_current_transaction`] statement-for-statement
+/// (same upsert, same lock ordering, same append-only log row per
+/// identity), substituting `tx`'s executor for the ambient one.
+pub async fn advance_via_tx(
+    tx: &Transaction,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    advance_through(&ExecutorChoice::from_tx(tx), identities).await
 }
 
 /// The application-database generation authority: a [`GenerationLedger`]

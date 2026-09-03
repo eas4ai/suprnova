@@ -756,6 +756,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await
                     .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::suprnova::render_cache::orm::after_model_write(&self).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
@@ -813,6 +814,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await
                     .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::suprnova::render_cache::orm::after_model_write(&self).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_restored(&self).await?;
                     ::core::result::Result::Ok(())
@@ -878,6 +880,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     exec.delete_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::suprnova::render_cache::orm::after_model_write(&snapshot).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;

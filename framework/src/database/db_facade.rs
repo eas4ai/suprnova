@@ -57,6 +57,16 @@ fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> 
     }
 }
 
+/// True when `sql`, ignoring leading whitespace, starts with `SELECT`
+/// (case-insensitive). Used by [`DB::statement`](crate::DB::statement) to
+/// decide whether a raw statement is a read (skip the render cache's
+/// broad-authority advance) or a write of unknown shape (advance it).
+fn is_select_statement(sql: &str) -> bool {
+    sql.trim_start()
+        .get(.."SELECT".len())
+        .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
+}
+
 fn write_value_expression(
     backend: DbBackend,
     value: &serde_json::Value,
@@ -406,7 +416,7 @@ impl DbTableBuilder {
             placeholders.join(", "),
         );
 
-        match backend {
+        let id: i64 = match backend {
             DbBackend::Postgres | DbBackend::Sqlite => {
                 let sql = format!("{base} RETURNING id");
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -427,7 +437,7 @@ impl DbTableBuilder {
                          primary keys use the typed Eloquent Model surface instead.",
                         self.table,
                     ))
-                })
+                })?
             }
             DbBackend::MySql => {
                 // MySQL doesn't support `RETURNING`. Use the driver's
@@ -456,10 +466,12 @@ impl DbTableBuilder {
                         self.table,
                     )));
                 }
-                Ok(raw as i64)
+                raw as i64
             }
-            _ => Err(super::unsupported_database_backend(backend)),
-        }
+            _ => return Err(super::unsupported_database_backend(backend)),
+        };
+        crate::render_cache::orm::after_table_write(&self.table).await?;
+        Ok(id)
     }
 
     /// Update every row matched by the WHERE clauses. Returns the
@@ -504,6 +516,7 @@ impl DbTableBuilder {
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_table_write(&self.table).await?;
         Ok(result.rows_affected())
     }
 
@@ -547,6 +560,7 @@ impl DbTableBuilder {
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_table_write(&self.table).await?;
         Ok(result.rows_affected())
     }
 
@@ -823,6 +837,15 @@ impl DB {
     /// Use for DDL with bindings, or any statement that doesn't fit
     /// the `select` / `insert` / `update` / `delete` shape. For DDL
     /// with no bindings, [`Self::unprepared`] is the explicit form.
+    ///
+    /// This is the raw escape hatch, so the render cache cannot know
+    /// which tables or rows a given statement touches: every call whose
+    /// `sql` does not start with `SELECT` (case-insensitively, leading
+    /// whitespace ignored) advances the broad authority every
+    /// representation observes, on the assumption that it changed
+    /// something. A statement beginning with `SELECT` never does -
+    /// over-invalidating a read is merely wasted cache, but treating a
+    /// write as a read would serve stale content forever.
     pub async fn statement(
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
@@ -832,10 +855,15 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        exec.run(stmt)
+        let ok = exec
+            .run(stmt)
             .await
             .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        if !is_select_statement(sql) {
+            crate::render_cache::orm::after_unknown_write().await?;
+        }
+        Ok(ok)
     }
 
     /// Run a raw, unprepared SQL statement (no placeholder binding).

@@ -4785,6 +4785,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_bulk_write(M::TABLE).await?;
         Ok(result.rows_affected())
     }
 
@@ -4807,6 +4808,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_bulk_write(M::TABLE).await?;
         Ok(result.rows_affected())
     }
 

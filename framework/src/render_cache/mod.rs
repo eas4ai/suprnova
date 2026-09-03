@@ -7,16 +7,18 @@
 //!
 //! This module starts small: Task 9 added configuration, route and group
 //! policy registration, and effective policy resolution. Task 10 added the
-//! request-scoped dependency collector. Task 11 (this one) adds the
-//! database-authoritative generation ledger and its migration. The
-//! remaining submodules (the file store, the Live integration, the
-//! middleware, and the ORM entities) are added by later tasks in the same
-//! iteration.
+//! request-scoped dependency collector. Task 11 added the
+//! database-authoritative generation ledger and its migration. Task 12
+//! (this one) adds the write side: every supported ORM and query-builder
+//! write path advances the generation of what it changed. The remaining
+//! submodules (the file store, the Live integration, and the middleware)
+//! are added by later tasks in the same iteration.
 
 pub mod collector;
 pub mod config;
 pub mod ledger;
 pub mod migration;
+pub mod orm;
 pub mod registry;
 pub mod telemetry;
 #[doc(hidden)]
