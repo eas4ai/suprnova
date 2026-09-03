@@ -282,7 +282,8 @@ impl Counter {
    warns and writes nothing at all.
 2. Writes `src/live/<snake>.rs` and `templates/live/<snake>.html`
    atomically; if any write fails, every file the run created or changed
-   is rolled back.
+   is rolled back, and any file that could not be restored is named in
+   the error instead of being reported as untouched.
 3. Inserts `pub mod <snake>;` and `.register::<snake::Pascal>()?` into
    the `registry()` builder in `src/live/mod.rs`. Every project created
    by `suprnova new` ships that module with an empty registry, a

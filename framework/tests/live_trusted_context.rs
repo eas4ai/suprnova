@@ -410,7 +410,7 @@ fn attacker_headers_do_not_mint_framework_security_evidence() {
 /// proof is the CSRF proof for a Live action, exactly as it is for every other
 /// same-origin state change under an origin-verifying policy.
 #[tokio::test]
-async fn live_actions_accept_the_configured_origin_proof_without_a_token() {
+async fn live_actions_accept_the_browser_origin_proof_under_the_default_policy() {
     let request = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
@@ -421,7 +421,7 @@ async fn live_actions_accept_the_configured_origin_proof_without_a_token() {
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
-    let middleware = CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly);
+    let middleware = CsrfMiddleware::new();
     let session = suprnova::session::new_session_slot_for_test();
 
     let response = suprnova::session::session_scope_for_test(
@@ -446,6 +446,74 @@ async fn live_actions_accept_the_configured_origin_proof_without_a_token() {
     );
 }
 
+/// Live's origin proof never relaxes ordinary routes: under the default policy
+/// a same-origin state change outside `/__live/` still needs its token.
+#[tokio::test]
+async fn ordinary_routes_keep_token_validation_under_the_default_policy() {
+    let request =
+        Request::for_test_with_headers("POST", "/profile", [("sec-fetch-site", "same-origin")])
+            .with_route_pattern("/profile");
+    let middleware = CsrfMiddleware::new();
+    let session = suprnova::session::new_session_slot_for_test();
+
+    let response = suprnova::session::session_scope_for_test(
+        session,
+        middleware.handle(
+            request,
+            Arc::new(|_| Box::pin(async { Ok(HttpResponse::text("ok")) })),
+        ),
+    )
+    .await;
+    match response {
+        Ok(_) => panic!("an ordinary same-origin POST without a token was accepted"),
+        Err(refusal) => assert_eq!(refusal.status_code(), 419),
+    }
+}
+
+/// A Live read such as the event stream changes no state: with the browser's
+/// origin proof it records the origin fact and a not-required CSRF check, and
+/// without the proof it records neither, so the Live boundary refuses it.
+#[tokio::test]
+async fn live_reads_record_the_origin_proof_and_no_csrf_requirement() {
+    for (site, expect_recorded) in [(Some("same-origin"), true), (None, false)] {
+        let mut headers = Vec::new();
+        if let Some(site) = site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let request = prepare_live_request_for_test(
+            Request::for_test_with_headers("GET", "/__live/v1/async/events", headers)
+                .with_route_pattern("/__live/v1/async/events"),
+            LiveTestOperation::SseControl,
+        );
+        let captured = Arc::new(Mutex::new(None));
+        let middleware = CsrfMiddleware::new();
+        let session = suprnova::session::new_session_slot_for_test();
+        let response = suprnova::session::session_scope_for_test(
+            session,
+            middleware.handle(request, capture_attestation(Arc::clone(&captured))),
+        )
+        .await;
+        assert!(response.is_ok(), "reads never fail in the CSRF middleware");
+        let report = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("downstream request report");
+        let expected_origin = expect_recorded.then_some(LiveSecurityDisposition::Passed);
+        let expected_csrf = expect_recorded.then_some(LiveSecurityDisposition::NotRequired);
+        assert_eq!(
+            report.disposition(LiveSecurityCheck::Origin),
+            expected_origin,
+            "{site:?}"
+        );
+        assert_eq!(
+            report.disposition(LiveSecurityCheck::Csrf),
+            expected_csrf,
+            "{site:?}"
+        );
+    }
+}
+
 /// Without an accepted origin proof the token path still decides: a valid
 /// token passes and records the CSRF fact, and a missing token is refused.
 #[tokio::test]
@@ -460,7 +528,7 @@ async fn live_actions_without_an_origin_proof_fall_back_to_the_token() {
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
-    let middleware = CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly);
+    let middleware = CsrfMiddleware::new();
     let session = suprnova::session::new_session_slot_for_test();
     let response = suprnova::session::session_scope_for_test(
         session,
@@ -518,7 +586,7 @@ async fn live_sse_control_records_csrf_as_explicitly_not_required() {
         LiveTestOperation::SseControl,
     );
     let captured = Arc::new(Mutex::new(None));
-    let middleware = CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly);
+    let middleware = CsrfMiddleware::new();
 
     let response = middleware
         .handle(request, capture_attestation(Arc::clone(&captured)))

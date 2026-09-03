@@ -242,7 +242,8 @@ impl Counter {
 1. 先验证每一个目标路径，拒绝路径穿越和符号链接；如果组件文件或视图已经存在，则
    发出警告且完全不写入。
 2. 原子地写入 `src/live/<snake>.rs` 与 `templates/live/<snake>.html`；如果任一写入
-   失败，本次运行创建或修改的每个文件都会被回滚。
+   失败，本次运行创建或修改的每个文件都会被回滚，任何无法恢复的文件都会在错误中
+   被点名，而不是被报告为未受影响。
 3. 把 `pub mod <snake>;` 和 `.register::<snake::Pascal>()?` 插入到
    `src/live/mod.rs` 的 `registry()` 构建器中。由 `suprnova new` 创建的每个项目都
    附带该模块：一个空的注册表、一个安装带守卫的保留 Live 路由的 `routes()` 函数，

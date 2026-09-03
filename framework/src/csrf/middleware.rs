@@ -475,6 +475,17 @@ impl CsrfMiddleware {
         }
     }
 
+    /// Origin verification for a Live operation: `same-origin` always
+    /// passes, `same-site` passes when the configured policy allows it, and
+    /// everything else falls through to token validation.
+    fn check_live_origin(&self, request: &Request) -> OriginCheck {
+        match request.header("Sec-Fetch-Site") {
+            Some("same-origin") => OriginCheck::Pass,
+            Some("same-site") if self.origin_policy.allows_same_site() => OriginCheck::Pass,
+            _ => OriginCheck::Fail,
+        }
+    }
+
     /// Whether to attach the `XSRF-TOKEN` cookie on the response.
     /// Disabled in `OriginOnly` mode (Laravel's
     /// `shouldAddXsrfTokenCookie` returns `false` when token-based
@@ -552,6 +563,26 @@ impl Middleware for CsrfMiddleware {
         // out a usable token.
         let is_excluded = self.is_excluded(request.path(), method);
 
+        // A Live read, such as the event stream, changes no state, so its
+        // CSRF check is not required; the browser still sends its origin
+        // proof, and recording it lets the Live boundary require the complete
+        // check set for a stream exactly as for an action. A read without the
+        // proof records nothing and the boundary refuses it.
+        if is_reading && request.live_operation().is_some() {
+            if matches!(self.check_live_origin(&request), OriginCheck::Pass) {
+                request.record_live_security_check(
+                    crate::live::attestation::SecurityCheck::Origin,
+                    None,
+                );
+                request.record_live_security_not_required(
+                    crate::live::attestation::SecurityCheck::Csrf,
+                    suprnova_live::host::PolicyReason::StatelessCsrfPolicy,
+                );
+            }
+            let response = next(request).await;
+            return self.maybe_attach_xsrf_cookie(response);
+        }
+
         // Fast path: no validation needed. Run the inner stack, then
         // attach the cookie on the way out.
         if is_reading || is_excluded {
@@ -566,16 +597,19 @@ impl Middleware for CsrfMiddleware {
         //   header, otherwise fall through to token validation.
         // - `OriginOnly` makes the header the *only* gate: a fail
         //   here is a 403, and token validation is skipped entirely.
-        match self.check_origin(&request) {
+        // A Live operation always verifies the browser's `Sec-Fetch-Site`
+        // proof, whatever origin policy the application configured: the
+        // shipped Live runtime sends the Live media type and the browser's
+        // origin proof, never a session token. Ordinary routes keep the
+        // configured policy, so using Live never relaxes token validation
+        // anywhere else in the application.
+        let origin = if request.live_operation().is_some() {
+            self.check_live_origin(&request)
+        } else {
+            self.check_origin(&request)
+        };
+        match origin {
             OriginCheck::Pass => {
-                // The verified origin is this deployment's configured CSRF
-                // proof: every same-origin state change short-circuits here,
-                // and a Live action or upload follows the same configured
-                // policy. The shipped Live runtime sends the Live media type
-                // and the browser's `Sec-Fetch-Site`, never a session token,
-                // so an application that uses Live enables origin
-                // verification and the attestation records the stateless
-                // CSRF policy rather than a token match.
                 if request.live_operation().is_some() {
                     request.record_live_security_check(
                         crate::live::attestation::SecurityCheck::Origin,

@@ -74,9 +74,37 @@ function documentInstance(): string {
 }
 
 async function boundedJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (text.length > MAX_CONTROL_RESPONSE_BYTES) throw new Error("async_host_response_too_large");
-  return JSON.parse(text) as unknown;
+  const declared = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_CONTROL_RESPONSE_BYTES) {
+    throw new Error("async_host_response_too_large");
+  }
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    const fallback = await response.text();
+    if (new TextEncoder().encode(fallback).byteLength > MAX_CONTROL_RESPONSE_BYTES) {
+      throw new Error("async_host_response_too_large");
+    }
+    return JSON.parse(fallback) as unknown;
+  }
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MAX_CONTROL_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error("async_host_response_too_large");
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(joined)) as unknown;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -193,11 +221,13 @@ function eventContract(value: unknown): AsyncRegisteredEventContract {
             kind: "maximum_hops" as const,
             maximumHops: integer(cycle["maximumHops"]),
           }),
-    maximumFanout: integer(fields["maximumFanout"] ?? fields["maximum_fanout"] ?? 1),
+    // `maximumHops`, `maximumFanout`, and `payloadContract` are the registered
+    // event fields of the runtime's inherited descriptor contract; an absent
+    // field is a foreign descriptor, never a default.
+    maximumFanout: integer(fields["maximumFanout"]),
     name: text(fields["name"]),
     order: "per_source_sequence" as const,
-    payloadContract:
-      typeof fields["payloadContract"] === "string" ? fields["payloadContract"] : schema,
+    payloadContract: text(fields["payloadContract"]),
     schema,
     source: "stream" as const,
     targets,

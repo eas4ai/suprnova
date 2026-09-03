@@ -51,11 +51,27 @@ router.try_live_with(|guard| {
 })?
 ```
 
-`AuthMiddleware` records the principal only on its authenticated branch, so an
-anonymous visitor can render a public island but cannot invoke an action; the
-guard answers `401` before any engine or application work. `LiveTenantMiddleware`
-records the resolved tenant or the tenantless disposition, and the rate-limit
-middleware records the rate fact on its allowed branch. A document route
+`AuthMiddleware::new()` records the principal only on its authenticated branch
+and answers `401` for an anonymous request before any engine or application
+work. `AuthMiddleware::optional()` records the principal when one exists and
+lets an anonymous request continue; the action boundary then closes only the
+identity absences the request's mount kind permits, recorded by kind at
+registration, so a public seed promotes for the anonymous visitor's own
+session while an identity-bound island still fails with a missing principal.
+The engine validates the closed facts against the catalog's own requirements,
+so a closure the catalog does not permit still fails. An identity-bound island
+binds the session fact its render request carried; the session middleware
+rotates the session id when a request signs the user in, so a document that
+renders identity-bound islands in the very request that logs the user in binds
+the pre-rotation id and its first action refreshes. Ordinary login flows
+render on the following request and never meet this. `LiveTenantMiddleware`
+records the resolved tenant or, when the resolver answers `None`, the
+tenantless disposition; a resolver that cannot determine the tenant returns an
+error so the request fails instead of mounting untenanted. The rate-limit
+middleware records the rate fact on its allowed branch. The asynchronous
+control routes and the WebSocket upgrade require the same complete,
+unexpired check set as a mount-bound request before any fact is trusted, and
+the transport table is bounded per scope and process-wide. A document route
 registered through `try_live_mount` or `try_live_document` carries the
 document policy instead: a public seed waives the identity facts, and an
 identity-bound mount requires the session and principal facts from the route's
@@ -64,11 +80,14 @@ that names a tenant binds it into the island's scope, a single-tenant
 deployment leaves it absent, and a request whose tenant differs from the bound
 one fails the scope comparison either way.
 
-A component that declares streams renders its island root with the
-island-owned `live:stream` directive for its first declared stream. The engine
-emits that root itself and rejects a template that carries one, so component
-templates never declare island-owned directives; the browser runtime reads the
-directive from the emitted root and opens the asynchronous transport.
+A component that declares exactly one stream renders its island root with
+the island-owned `live:stream` directive for it. The framework enables the
+engine's opt-in island-stream policy on its mount and execution services; the
+engine emits the root itself and rejects a template that carries the
+directive, so component templates never declare island-owned directives, and
+the browser runtime reads the directive from the emitted root and opens the
+asynchronous transport. A component with several streams gets no directive
+and subscribes each through the runtime's registered calls.
 
 The asynchronous feature of the browser runtime stays inert until a host
 supplies clocks, timers, randomness, transports, and an authority that issues
@@ -96,15 +115,17 @@ shipped runtime negotiates the newest one.
 The shipped browser runtime sends the Live media type, the request body, and
 the browser's own `Sec-Fetch-Site` header; it carries no session CSRF token.
 `CsrfMiddleware` therefore treats a verified origin as the configured CSRF
-proof for Live requests exactly as it does for every other same-origin state
-change: when the configured origin policy accepts the request, it records the
-origin fact and the stateless CSRF disposition, and the token path is not
-consulted. When the origin policy is disabled or the header is absent or
-cross-site, token validation runs and the Live request is refused with the
-ordinary `419`. An application that uses Live enables origin verification with
-`CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly)` or one
-of the same-site variants. The custom media type additionally forces a
-cross-origin preflight that no Live route answers.
+proof for every Live request on its own, whatever origin policy the
+application configured: a same-origin Live request records the origin fact
+and the stateless CSRF disposition, and the token path is not consulted. When
+the header is absent or cross-site, token validation runs and the Live request
+is refused with the ordinary `419`. A Live read such as the event stream
+changes no state: with the origin proof it records the origin fact and a
+not-required CSRF check, and without the proof it records neither, so the
+asynchronous boundary's complete-check requirement refuses it. Ordinary
+routes keep the configured policy, so using Live never relaxes token
+validation elsewhere; the default `CsrfMiddleware::new()` is enough. The custom media type additionally forces
+a cross-origin preflight that no Live route answers.
 
 ## Providers and configuration
 
@@ -165,7 +186,7 @@ principal enforcement, polling, a closed 409 for a tampered snapshot,
 immutable assets, the complete upload lifecycle with reacquisition and
 finalization, an SSE-delivered published event, a cookie-authorized WebSocket
 membership, and the ordinary fresh render as the poll. The browser scenario in
-`browser/e2e/app-dogfood.spec.ts` drives `app/examples/live_dogfood_host.rs`,
+`crates/suprnova-live/browser/e2e/app-dogfood.spec.ts` drives `app/examples/live_dogfood_host.rs`,
 a real `Server::run` of the application routes behind the production stack:
 the public page for an anonymous visitor, sign-in and three actions through
 the shipped runtime, the anonymous action refused with `401`, and the feed's

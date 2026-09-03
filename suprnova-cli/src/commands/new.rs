@@ -349,7 +349,9 @@ fn create_api_project(
 ) -> Result<(), String> {
     let project_path = Path::new(project_name);
 
-    if project_path.exists() {
+    // `symlink_metadata` sees a dangling symlink too; `exists` would follow
+    // it and then create the whole tree at the link's target.
+    if project_path.symlink_metadata().is_ok() {
         return Err(format!("Directory '{}' already exists", project_name));
     }
 
@@ -380,7 +382,9 @@ fn create_project(
 ) -> Result<(), String> {
     let project_path = Path::new(project_name);
 
-    if project_path.exists() {
+    // `symlink_metadata` sees a dangling symlink too; `exists` would follow
+    // it and then create the whole tree at the link's target.
+    if project_path.symlink_metadata().is_ok() {
         return Err(format!("Directory '{}' already exists", project_name));
     }
 

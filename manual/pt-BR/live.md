@@ -146,7 +146,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let limiter = Arc::new(InMemoryRateLimiter::new());
     router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(LiveTenantMiddleware::new(Arc::new(SingleTenant)))
             .middleware(RateLimitMiddleware::new(
                 limiter,
@@ -258,19 +258,29 @@ Live nunca contorna o middleware do framework. O que cada requisição precisa:
 | Limite de taxa | `RateLimitMiddleware` em seu ramo permitido |
 
 O runtime distribuído envia o tipo de mídia Live e o cabeçalho
-`Sec-Fetch-Site` do próprio navegador; ele não carrega token de sessão.
-Configure o middleware CSRF para verificar origens: uma requisição Live de
-mesma origem passa com a disposição CSRF sem estado, enquanto uma requisição
-entre sites ou sem cabeçalho recorre à validação por token e é recusada:
+`Sec-Fetch-Site` do próprio navegador; ele não carrega token de sessão. O
+middleware CSRF verifica essa prova por conta própria em toda requisição Live,
+seja qual for a política de origem configurada: uma requisição Live de mesma
+origem passa com a disposição CSRF sem estado, enquanto uma requisição entre
+sites ou sem cabeçalho recorre à validação por token e é recusada. As rotas
+comuns mantêm a validação por token sob a política padrão; usar Live não
+afrouxa nada mais:
 
 ```rust
-global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+global_middleware!(CsrfMiddleware::new());
 ```
 
-Visitantes anônimos podem renderizar sementes públicas, mas não executar
-ações: a `AuthMiddleware` do guarda responde `401` antes de qualquer trabalho
-do motor. Ilhas ligadas à identidade exigem uma sessão e um principal; o tenant
-é vinculado ao escopo da ilha sempre que o seu resolvedor nomear um. Toda
+Visitantes anônimos renderizam sementes públicas e podem agir sobre elas
+quando o guarda usa `AuthMiddleware::optional()`: um principal autenticado é
+registrado, um visitante anônimo segue adiante e o tipo de montagem decide.
+Uma semente pública é então promovida para a própria sessão do visitante na
+primeira ação, enquanto uma ilha ligada à identidade continua recusando uma
+requisição sem prova de principal. Com `AuthMiddleware::new()` o guarda
+responde `401` a toda requisição anônima antes de qualquer trabalho do motor.
+Ilhas ligadas à identidade exigem uma sessão e um principal; o tenant é
+vinculado ao escopo da ilha sempre que o seu resolvedor nomear um, e um
+resolvedor que não consiga determinar o tenant deve devolver um erro em vez de
+`None`. Toda
 recusa é fechada: um `409` para um snapshot obsoleto ou adulterado não carrega
 corpo, e mensagens de produção nunca incluem snapshots, tokens, cookies ou HTML
 renderizado.
@@ -377,7 +387,12 @@ streams.refresh("activity").await?;
 
 Um refresh diz às ilhas inscritas para renderizarem do zero; um evento é
 entregue aos handlers registrados da ilha. O polling é a renderização nova
-comum, então nada se perde quando um transporte está indisponível.
+comum: o estado da ilha se atualiza quando um transporte está indisponível,
+mas as cargas de eventos publicadas nesse intervalo não são reenviadas aos
+seus handlers, o que o runtime relata como um stream degradado em vez de
+atual. Um componente que declara exatamente um stream tem a raiz da ilha
+inscrita nele; um componente com vários streams inscreve cada um pelas
+chamadas registradas do runtime.
 
 ## Assets e uso sem build
 

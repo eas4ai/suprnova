@@ -147,7 +147,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let limiter = Arc::new(InMemoryRateLimiter::new());
     router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(LiveTenantMiddleware::new(Arc::new(SingleTenant)))
             .middleware(RateLimitMiddleware::new(
                 limiter,
@@ -261,20 +261,28 @@ besoin :
 
 Le runtime livré envoie le type de média Live et l'en-tête propre au
 navigateur `Sec-Fetch-Site` ; il ne transporte aucun jeton de session.
-Configurez le middleware CSRF pour vérifier les origines : une requête Live de
-même origine passe avec la disposition CSRF sans état, tandis qu'une requête
+Le middleware CSRF vérifie cette preuve lui-même pour chaque requête Live,
+quelle que soit la politique d'origine configurée : une requête Live de même
+origine passe avec la disposition CSRF sans état, tandis qu'une requête
 inter-sites ou sans en-tête retombe sur la validation par jeton et est
-refusée :
+refusée. Les routes ordinaires conservent la validation par jeton sous la
+politique par défaut ; utiliser Live n'assouplit rien d'autre :
 
 ```rust
-global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+global_middleware!(CsrfMiddleware::new());
 ```
 
-Les visiteurs anonymes peuvent rendre des graines publiques mais pas exécuter
-d'actions : l'`AuthMiddleware` du garde répond `401` avant tout travail du
-moteur. Les îlots liés à l'identité exigent une session et un principal ; le
-tenant est lié à la portée de l'îlot dès que votre résolveur en nomme un.
-Chaque refus est fermé : un `409` pour un instantané périmé ou altéré ne porte
+Les visiteurs anonymes rendent des graines publiques et peuvent agir dessus
+lorsque le garde utilise `AuthMiddleware::optional()` : un principal connecté
+est enregistré, un visiteur anonyme continue, et le type de montage décide.
+Une graine publique est alors promue pour la propre session du visiteur à la
+première action, tandis qu'un îlot lié à l'identité refuse toujours une
+requête sans preuve de principal. Avec `AuthMiddleware::new()`, le garde répond
+`401` à toute requête anonyme avant tout travail du moteur. Les îlots liés à
+l'identité exigent une session et un principal ; le tenant est lié à la portée
+de l'îlot dès que votre résolveur en nomme un, et un résolveur qui ne peut pas
+déterminer le tenant doit renvoyer une erreur plutôt que `None`. Chaque refus
+est fermé : un `409` pour un instantané périmé ou altéré ne porte
 aucun corps, et les messages de production n'incluent jamais d'instantanés, de
 jetons, de cookies ni de HTML rendu.
 
@@ -381,7 +389,12 @@ streams.refresh("activity").await?;
 
 Un refresh demande aux îlots abonnés un rendu frais ; un événement est délivré
 aux gestionnaires enregistrés de l'îlot. Le polling est le rendu frais
-ordinaire, donc rien n'est perdu lorsqu'un transport est indisponible.
+ordinaire : l'état de l'îlot se remet à jour lorsqu'un transport est
+indisponible, mais les charges d'événements publiées entre-temps ne sont pas
+rejouées à leurs gestionnaires, ce que le runtime signale comme un flux dégradé
+plutôt qu'à jour. Un composant qui déclare exactement un flux voit sa racine
+d'îlot abonnée à celui-ci ; un composant avec plusieurs flux s'abonne à chacun
+par les appels enregistrés du runtime.
 
 ## Assets et usage sans build
 

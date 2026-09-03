@@ -348,14 +348,13 @@ pub fn register_http_stack() {
     Inertia::install(&inertia_config())
         .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
-    // Same-origin requests verified through the browser's `Sec-Fetch-Site`
-    // header pass without a token; the Live runtime relies on exactly that
-    // proof for its action and upload requests.
-    global_middleware!(
-        CsrfMiddleware::new()
-            .with_origin_policy(suprnova::OriginPolicy::SameOriginOnly)
-            .except(vec!["/api/ping", "/api/welcome", "/lang-demo"])
-    );
+    // Live requests verify the browser's `Sec-Fetch-Site` proof on their
+    // own; every other state change keeps token validation.
+    global_middleware!(CsrfMiddleware::new().except(vec![
+        "/api/ping",
+        "/api/welcome",
+        "/lang-demo"
+    ]));
 
     global_middleware!(FeatureMiddleware::new());
 }

@@ -662,14 +662,17 @@ export class DocumentRuntime {
     response: ValidatedCommittedResponse,
   ): PreparedSuccessor {
     if (response.render.kind !== "html") throw new Error("successor_render_missing");
-    if (record.metadata.instanceId === null) throw new Error("successor_instance_missing");
+    // A seed island has no instance yet: its first committed response names
+    // the promoted instance, and that id is the successor authority.
+    const instanceId = response.snapshotView.instanceId ?? record.metadata.instanceId;
+    if (instanceId === null) throw new Error("successor_instance_missing");
     const currentRoot = record.element as HTMLElement;
     const plan = preflightIslandMorph({
       authority: {
         component: record.metadata.component,
         documentKey: record.metadata.documentKey,
         encodedSnapshot: base64UrlText(canonicalize(response.snapshot)),
-        instanceId: response.snapshotView.instanceId ?? record.metadata.instanceId,
+        instanceId,
         slot: record.metadata.slot,
         successorRevision: response.acceptedRevision,
       },

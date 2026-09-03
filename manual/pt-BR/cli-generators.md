@@ -287,7 +287,9 @@ impl Counter {
 1. Valida primeiro cada caminho de destino e recusa traversal e links simbólicos;
    se o arquivo do componente ou a view já existirem, avisa e não escreve nada.
 2. Escreve `src/live/<snake>.rs` e `templates/live/<snake>.html` atomicamente; se
-   qualquer escrita falhar, cada arquivo que a execução criou ou alterou é revertido.
+   qualquer escrita falhar, cada arquivo que a execução criou ou alterou é revertido, e
+   qualquer arquivo que não pôde ser restaurado é nomeado no erro em vez de ser
+   relatado como intacto.
 3. Insere `pub mod <snake>;` e `.register::<snake::Pascal>()?` no builder
    `registry()` em `src/live/mod.rs`. Todo projeto criado por `suprnova new` traz esse
    módulo com um registro vazio, uma função `routes()` que instala as rotas Live

@@ -377,6 +377,51 @@ async fn a_productive_sse_batch_is_followed_by_a_comment_trailer() {
     assert!(trailer.data.is_none(), "the trailer carries no envelope");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn async_routes_refuse_a_chain_that_recorded_no_security_facts() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let body = orders_issue_body("sse", "doc-instance-0001");
+    let refused = send(
+        server.port,
+        &alice,
+        Method::POST,
+        SUBSCRIPTION_PATH,
+        &[
+            ("content-type", "application/json"),
+            ("x-suprnova-live", "async-v1"),
+            ("x-test-no-facts", "1"),
+        ],
+        Bytes::from(serde_json::to_vec(&body).expect("encode issue body")),
+    )
+    .await;
+    assert!(
+        refused.status.is_client_error(),
+        "issuance without a complete check set is refused: {} {}",
+        refused.status,
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert!(!refused.error_code().is_empty());
+
+    let issued = issue(server.port, &alice, body).await;
+    let credential = issued.credential.clone().expect("bearer");
+    let stream = SseClient::open(
+        server.port,
+        &alice,
+        &credential,
+        1,
+        &[("x-test-no-facts", "1")],
+    )
+    .await;
+    assert!(
+        stream.status.is_client_error(),
+        "an event stream without a complete check set is refused: {}",
+        stream.status
+    );
+}
+
 async fn next_envelope(stream: &mut SseClient) -> (SseRecord, Value) {
     loop {
         let record = stream.next_record().await.expect("stream stays open");

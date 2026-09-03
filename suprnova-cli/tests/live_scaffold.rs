@@ -293,3 +293,24 @@ fn a_failed_write_rolls_back_everything_the_run_wrote() {
         "src/live is empty after rollback: {entries:?}"
     );
 }
+
+#[test]
+fn registration_never_splices_into_a_builder_outside_registry() {
+    let tmp = project();
+    fs::create_dir_all(tmp.path().join("src/live")).expect("live dir");
+    let module = "use suprnova::live::{LiveRegistry, RegistryError};\n\n\
+pub fn registry() -> Result<LiveRegistry, RegistryError> {\n    build_registry()\n}\n\n\
+fn build_registry() -> Result<LiveRegistry, RegistryError> {\n    let registry = LiveRegistry::builder().build();\n    Ok(registry)\n}\n";
+    fs::write(tmp.path().join("src/live/mod.rs"), module).expect("mod.rs");
+    let output = make(tmp.path(), &["Counter"]);
+    let text = combined(&output);
+    let after = fs::read_to_string(tmp.path().join("src/live/mod.rs")).expect("mod.rs after");
+    assert!(
+        !after.contains("register::<"),
+        "no registration was spliced into the delegate builder: {after}"
+    );
+    assert!(
+        text.to_lowercase().contains("register"),
+        "the user is told to register the component by hand: {text}"
+    );
+}

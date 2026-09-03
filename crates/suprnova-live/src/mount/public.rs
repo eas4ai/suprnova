@@ -138,6 +138,7 @@ pub struct PublicSeedMountService {
     snapshot_limits: SnapshotLimits,
     views: ViewRenderer,
     max_metadata_bytes: usize,
+    island_stream_directive: bool,
 }
 
 impl PublicSeedMountService {
@@ -152,6 +153,7 @@ impl PublicSeedMountService {
             return Err(MountError::new(MountErrorKind::InvalidConfiguration));
         }
         Ok(Self {
+            island_stream_directive: false,
             registry: providers.registry,
             clock: providers.clock,
             keys: providers.keys,
@@ -159,6 +161,16 @@ impl PublicSeedMountService {
             views,
             max_metadata_bytes,
         })
+    }
+
+    /// Emits the island-owned `live:stream` directive on every island root
+    /// whose component declares exactly one stream, so the browser runtime
+    /// subscribes that island without application markup. Off by default:
+    /// a host that drives subscriptions itself keeps its roots unchanged.
+    #[must_use]
+    pub const fn with_island_stream_directive(mut self) -> Self {
+        self.island_stream_directive = true;
+        self
     }
 
     /// Signs and publishes a verified public seed without touching an instance ledger.
@@ -361,7 +373,10 @@ impl PublicSeedMountService {
                     .iter()
                     .map(|(name, value)| IslandRootFlag::from_validated(name, value))
                     .collect(),
-                stream: crate::view::declared_stream(descriptor.metadata()),
+                stream: self
+                    .island_stream_directive
+                    .then(|| crate::view::declared_stream(descriptor.metadata()))
+                    .flatten(),
             },
             self.max_metadata_bytes,
         )

@@ -5,19 +5,7 @@
 )]
 #![forbid(unsafe_code)]
 
-extern crate self as suprnova;
-
-pub mod live {
-    pub use suprnova_live::*;
-    pub use suprnova_macros::{LiveComponent, live};
-
-    #[doc(hidden)]
-    pub mod __private {
-        pub use suprnova_live::*;
-    }
-}
-
-use live::{LiveComponent, live};
+use suprnova::live::{LiveComponent, live};
 
 macro_rules! define_component {
     ($component:ident, $name:literal, $view:literal) => {
@@ -32,8 +20,8 @@ macro_rules! define_component {
         #[live]
         impl $component {
             #[action]
-            pub fn submit(&mut self) -> crate::live::action::ActionOutcome {
-                crate::live::action::ActionOutcome::NoRender
+            pub fn submit(&mut self) -> suprnova::live::action::ActionOutcome {
+                suprnova::live::action::ActionOutcome::NoRender
             }
         }
     };

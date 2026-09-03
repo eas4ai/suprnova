@@ -72,9 +72,11 @@ impl fmt::Debug for LiveRouteGuard {
 impl Router {
     /// Installs Suprnova Live's reserved HTTP namespace exactly once.
     ///
-    /// Installation performs a complete collision preflight before adding
-    /// the versioned update endpoint. Literal, parameterized, and catch-all
-    /// application routes that can claim `/__live` cause startup to fail.
+    /// Installation performs a collision preflight over the routes registered
+    /// so far before adding the versioned update endpoint: literal,
+    /// parameterized, and catch-all application routes that can claim
+    /// `/__live` cause startup to fail. Register application routes before
+    /// installing Live so the preflight sees them.
     /// The reserved request routes carry no application middleware; use
     /// [`Router::try_live_with`] to attach the principal, tenant, and
     /// rate-limit middleware the strict Live policy requires.

@@ -132,6 +132,10 @@ pub struct StrictAsyncFacts;
 #[async_trait]
 impl Middleware for StrictAsyncFacts {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
+        // A chain that records no facts at all models a misconfigured host.
+        if request.header("x-test-no-facts") == Some("1") {
+            return next(request).await;
+        }
         let session = request
             .header("x-test-session")
             .unwrap_or("async-session")

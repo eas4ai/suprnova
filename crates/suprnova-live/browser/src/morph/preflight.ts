@@ -41,6 +41,13 @@ function validateCurrent(root: HTMLElement, authority: MorphAuthority): void {
   attribute(root, "data-suprnova-live-slot", authority.slot);
   attribute(root, "data-suprnova-live-root", authority.slot);
   attribute(root, "data-suprnova-live-document-key", authority.documentKey);
+  if (root.getAttribute("data-suprnova-live-snapshot-kind") === "seed") {
+    // A seed root promotes: it carries no instance yet, and the successor
+    // authority names the instance the committed response minted for it.
+    if (root.hasAttribute("data-suprnova-live-instance")) fail("data-suprnova-live-instance");
+    attribute(root, "data-suprnova-live-revision", "0");
+    return;
+  }
   attribute(root, "data-suprnova-live-snapshot-kind", "instance");
   attribute(root, "data-suprnova-live-instance", authority.instanceId);
 }

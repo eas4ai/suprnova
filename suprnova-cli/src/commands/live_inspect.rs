@@ -57,12 +57,18 @@ fn run_inner(json: bool, timeout_secs: u64) -> Result<(), String> {
         return Ok(());
     }
     ui::header("Live runtime");
-    ui::label_value("Framework", &session.framework);
+    ui::label_value(
+        "Framework",
+        &super::live_tool::display_text(&session.framework),
+    );
     ui::label_value(
         "Asset identity",
-        session.assets.as_deref().unwrap_or("unavailable"),
+        &super::live_tool::display_text(session.assets.as_deref().unwrap_or("unavailable")),
     );
-    ui::label_value("Browser runtime", &runtime.browser_runtime_version);
+    ui::label_value(
+        "Browser runtime",
+        &super::live_tool::display_text(&runtime.browser_runtime_version),
+    );
     let protocols: Vec<String> = runtime
         .protocol_versions
         .iter()
@@ -132,7 +138,10 @@ fn run_inner(json: bool, timeout_secs: u64) -> Result<(), String> {
     if !session.components.is_empty() {
         ui::header("Components");
         for component in &session.components {
-            ui::label_value(&component.name, &component.view);
+            ui::label_value(
+                &super::live_tool::display_text(&component.name),
+                &super::live_tool::display_text(&component.view),
+            );
             ui::hint(&format!(
                 "fields {} (uploads {}), actions {}, events {}, effects {}, subscriptions {}, min protocol {}, digest {}",
                 component.fields,

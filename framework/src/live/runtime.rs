@@ -95,11 +95,26 @@ struct RuntimeGraph {
     mount_catalog: OnceLock<Arc<MountCatalog>>,
     upload_mount_builder: Mutex<Option<Vec<UploadMountSelector>>>,
     upload_mounts: OnceLock<Arc<[UploadMountSelector]>>,
+    mount_kind_builder: Mutex<Option<Vec<MountKindRecord>>>,
+    mount_kinds: OnceLock<Arc<[MountKindRecord]>>,
+}
+
+/// Framework-side record of one registered mount's declared kind.
+///
+/// The engine catalog owns the scope requirements; this record lets the
+/// action boundary close the identity absences a public seed permits before
+/// the engine validates the request against that same catalog.
+#[derive(Clone)]
+struct MountKindRecord {
+    route: RouteIdentity,
+    slot: IslandSlot,
+    kind: super::document::LiveMountKind,
 }
 
 pub(crate) struct LiveMountRegistration {
     entry: MountCatalogEntry,
     upload_selector: UploadMountSelector,
+    kind: super::document::LiveMountKind,
 }
 
 impl LiveMountRegistration {
@@ -108,6 +123,7 @@ impl LiveMountRegistration {
         selection: MountSelection,
         document_key: DocumentMountKey,
         build: BuildId,
+        kind: super::document::LiveMountKind,
     ) -> Self {
         Self {
             entry,
@@ -116,6 +132,7 @@ impl LiveMountRegistration {
                 document_key,
                 build,
             },
+            kind,
         }
     }
 }
@@ -922,7 +939,13 @@ impl LiveRuntime {
         let LiveMountRegistration {
             entry,
             upload_selector,
+            kind,
         } = registration;
+        let kind_record = MountKindRecord {
+            route: upload_selector.selection.route().clone(),
+            slot: upload_selector.selection.slot().clone(),
+            kind,
+        };
         let next = current
             .register(self.graph.registry.engine(), entry)
             .map_err(|_| FrameworkError::internal("Live mount catalog was rejected"))?;
@@ -934,6 +957,58 @@ impl LiveRuntime {
             .as_mut()
             .ok_or_else(live_boot_error)?
             .push(upload_selector);
+        self.graph
+            .mount_kind_builder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .ok_or_else(live_boot_error)?
+            .push(kind_record);
+        Ok(())
+    }
+
+    /// Closes the identity absences the request's mount kind permits.
+    ///
+    /// A public seed accepts anonymous, sessionless, and tenantless requests
+    /// and an identity-bound mount accepts a tenantless one; the route policy
+    /// cannot know the mount before the body is inspected, so the action
+    /// boundary records those typed absences here. The engine then validates
+    /// the closed facts against the catalog's own requirements, so a closure
+    /// the catalog does not permit still fails.
+    pub(crate) fn close_mount_scope_absences(
+        &self,
+        request: &mut Request,
+        selection: &MountSelection,
+    ) -> Result<(), FrameworkError> {
+        use super::attestation::SecurityCheck;
+        use super::document::LiveMountKind;
+        use suprnova_live::host::PolicyReason;
+
+        self.finalize_mount_catalog()?;
+        let kinds = self.graph.mount_kinds.get().ok_or_else(live_boot_error)?;
+        let record = kinds
+            .iter()
+            .find(|record| &record.route == selection.route() && &record.slot == selection.slot())
+            .ok_or_else(|| FrameworkError::internal("Live request context was rejected"))?;
+        let closable: &[(SecurityCheck, PolicyReason)] = match record.kind {
+            LiveMountKind::PublicSeed => &[
+                (SecurityCheck::Session, PolicyReason::StatelessRequest),
+                (SecurityCheck::Principal, PolicyReason::AnonymousPrincipal),
+                (SecurityCheck::Tenant, PolicyReason::TenantlessRoute),
+            ],
+            LiveMountKind::IdentityBound => {
+                &[(SecurityCheck::Tenant, PolicyReason::TenantlessRoute)]
+            }
+        };
+        for (check, reason) in closable {
+            if request
+                .live_security_attestation()
+                .disposition(*check)
+                .is_none()
+            {
+                request.record_live_security_not_required(*check, *reason);
+            }
+        }
         Ok(())
     }
 
@@ -957,6 +1032,17 @@ impl LiveRuntime {
         self.graph
             .upload_mounts
             .set(Arc::from(selectors))
+            .map_err(|_| live_boot_error())?;
+        let kinds = self
+            .graph
+            .mount_kind_builder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(live_boot_error)?;
+        self.graph
+            .mount_kinds
+            .set(Arc::from(kinds))
             .map_err(|_| live_boot_error())?;
         self.graph
             .mount_catalog
@@ -1058,10 +1144,10 @@ impl LiveRuntime {
         self.finalize_mount_catalog()?;
         let selectors = self.graph.upload_mounts.get().ok_or_else(live_boot_error)?;
         // The registered mount identifies the upload authority by route,
-        // slot, component, and contract. The request's own selection already
-        // proved its protocol version is one the component supports, and the
-        // browser runtime negotiates the newest one, so the protocol never
-        // takes part in this match.
+        // slot, component, and contract. The catalog validates the request's
+        // protocol version against the component below, and the browser
+        // runtime negotiates the newest one, so the protocol never takes part
+        // in this match.
         let mut matches = selectors.iter().filter(|candidate| {
             candidate.selection.route() == selection.route()
                 && candidate.selection.slot() == selection.slot()
@@ -1606,7 +1692,8 @@ fn assemble_runtime(
             renderer,
             config.max_response_bytes(),
         )
-        .map_err(|_| live_boot_error())?,
+        .map_err(|_| live_boot_error())?
+        .with_island_stream_directive(),
     );
     let private_mount = Arc::new(
         PrivateMountService::new(
@@ -1622,7 +1709,8 @@ fn assemble_runtime(
             MountLimits::new(604_800_000, 8, config.max_response_bytes(), 64)
                 .map_err(|_| live_boot_error())?,
         )
-        .map_err(|_| live_boot_error())?,
+        .map_err(|_| live_boot_error())?
+        .with_island_stream_directive(),
     );
     let execution = Arc::new(
         ExecutionService::new(
@@ -1632,7 +1720,8 @@ fn assemble_runtime(
             snapshot_limits.clone(),
             renderer,
         )
-        .with_reporter(Arc::clone(&ports.reporter)),
+        .with_reporter(Arc::clone(&ports.reporter))
+        .with_island_stream_directive(),
     );
     let context_validator = LiveRequestContextValidator::new(config.max_context_lifetime_ms())
         .map_err(|_| live_boot_error())?;
@@ -1669,6 +1758,8 @@ fn assemble_runtime(
             mount_catalog: OnceLock::new(),
             upload_mount_builder: Mutex::new(Some(Vec::new())),
             upload_mounts: OnceLock::new(),
+            mount_kind_builder: Mutex::new(Some(Vec::new())),
+            mount_kinds: OnceLock::new(),
         }),
     })
 }

@@ -111,6 +111,17 @@ impl HostCheckFacts {
         }
         Ok(())
     }
+
+    /// Requires every security check to be present, unexpired at `now`, and
+    /// carrying a disposition its kind permits.
+    ///
+    /// Mount-bound requests validate through
+    /// [`LiveRequestContextValidator`](super::LiveRequestContextValidator);
+    /// a host boundary without a mount, such as a document transport, uses
+    /// this to refuse a request whose middleware chain skipped a check.
+    pub fn require_complete(&self, now: UnixMillis) -> Result<(), HostContextError> {
+        RequiredChecks::validate(self.clone(), now, UnixMillis::new(u64::MAX)).map(|_| ())
+    }
 }
 
 /// Complete validated check dispositions retained by trusted request context.
@@ -189,4 +200,55 @@ fn disposition_matches(kind: CheckKind, disposition: CheckDisposition) -> bool {
                 CheckDisposition::NotRequired(PolicyReason::NoAdditionalMiddleware),
             )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn complete_facts(expires_at: u64) -> HostCheckFacts {
+        let mut facts = HostCheckFacts::new();
+        for kind in CheckKind::ALL {
+            facts
+                .record(
+                    kind,
+                    CheckFact::new(CheckDisposition::Passed, UnixMillis::new(expires_at)),
+                )
+                .expect("record once");
+        }
+        facts
+    }
+
+    #[test]
+    fn complete_unexpired_facts_are_required_without_a_mount() {
+        complete_facts(10)
+            .require_complete(UnixMillis::new(5))
+            .expect("complete facts pass");
+        let expired = complete_facts(5)
+            .require_complete(UnixMillis::new(5))
+            .expect_err("an expired fact fails closed");
+        assert_eq!(expired.kind(), HostContextErrorKind::CheckExpired);
+        for missing in CheckKind::ALL {
+            let mut facts = HostCheckFacts::new();
+            for kind in CheckKind::ALL {
+                if kind == missing {
+                    continue;
+                }
+                facts
+                    .record(
+                        kind,
+                        CheckFact::new(CheckDisposition::Passed, UnixMillis::new(10)),
+                    )
+                    .expect("record once");
+            }
+            let error = facts
+                .require_complete(UnixMillis::new(5))
+                .expect_err("a skipped check fails closed");
+            assert_eq!(
+                error.kind(),
+                HostContextErrorKind::MissingCheck,
+                "{missing:?}"
+            );
+        }
+    }
 }

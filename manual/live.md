@@ -142,7 +142,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let limiter = Arc::new(InMemoryRateLimiter::new());
     router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(LiveTenantMiddleware::new(Arc::new(SingleTenant)))
             .middleware(RateLimitMiddleware::new(
                 limiter,
@@ -253,19 +253,27 @@ Live never bypasses the framework's middleware. What each request needs:
 | Rate limit | `RateLimitMiddleware` on its allowed branch |
 
 The shipped runtime sends the Live media type and the browser's own
-`Sec-Fetch-Site` header; it carries no session token. Configure the CSRF
-middleware to verify origins, and a same-origin Live request passes with the
-stateless CSRF disposition while a cross-site or header-less request falls
-back to token validation and is refused:
+`Sec-Fetch-Site` header; it carries no session token. The CSRF middleware
+verifies that proof for every Live request on its own, whatever origin policy
+you configure, so a same-origin Live request passes with the stateless CSRF
+disposition while a cross-site or header-less request falls back to token
+validation and is refused. Ordinary routes keep token validation under the
+default policy; using Live relaxes nothing else:
 
 ```rust
-global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+global_middleware!(CsrfMiddleware::new());
 ```
 
-Anonymous visitors can render public seeds but cannot run actions: the
-guard's `AuthMiddleware` answers `401` before any engine work. Identity-bound
-islands require a session and a principal; the tenant is bound into the
-island's scope whenever your resolver names one. Every rejection is closed:
+Anonymous visitors render public seeds, and they can act on them when the
+guard uses `AuthMiddleware::optional()`: a signed-in principal is recorded, an
+anonymous visitor continues, and the mount kind decides. A public seed then
+promotes for the visitor's own session on the first action, while an
+identity-bound island still refuses a request without principal evidence.
+With `AuthMiddleware::new()` the guard answers `401` for every anonymous
+request before any engine work. Identity-bound islands require a session and
+a principal; the tenant is bound into the island's scope whenever your
+resolver names one, and a resolver that cannot determine the tenant must
+return an error rather than `None`. Every rejection is closed:
 a `409` for a stale or tampered snapshot carries no body, and production
 messages never include snapshots, tokens, cookies, or rendered HTML.
 
@@ -370,8 +378,13 @@ streams.refresh("activity").await?;
 ```
 
 A refresh tells subscribed islands to fresh-render; an event is delivered to
-the island's registered handlers. Polling is the ordinary fresh render, so
-nothing is lost when a transport is unavailable.
+the island's registered handlers. Polling is the ordinary fresh render: the
+island's state catches up whenever a transport is unavailable, but event
+payloads published in between are not replayed to their handlers, which the
+runtime reports as a degraded stream rather than a current one. A component
+that declares exactly one stream gets its island root subscribed for it; a
+component with several streams subscribes each through the runtime's
+registered calls.
 
 ## Assets and no-build use
 

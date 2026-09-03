@@ -147,7 +147,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let limiter = Arc::new(InMemoryRateLimiter::new());
     router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(LiveTenantMiddleware::new(Arc::new(SingleTenant)))
             .middleware(RateLimitMiddleware::new(
                 limiter,
@@ -260,20 +260,30 @@ Live umgeht niemals die Middleware des Frameworks. Was jede Anfrage benötigt:
 | Ratenlimit | `RateLimitMiddleware` in ihrem erlaubten Zweig |
 
 Die ausgelieferte Laufzeit sendet den Live-Medientyp und den browsereigenen
-Header `Sec-Fetch-Site`; sie trägt kein Sitzungstoken. Konfigurieren Sie die
-CSRF-Middleware so, dass sie Origins prüft: Eine Same-Origin-Live-Anfrage
-passiert mit der zustandslosen CSRF-Disposition, während eine Cross-Site- oder
-headerlose Anfrage auf die Token-Validierung zurückfällt und abgewiesen wird:
+Header `Sec-Fetch-Site`; sie trägt kein Sitzungstoken. Die CSRF-Middleware
+prüft diesen Nachweis für jede Live-Anfrage selbst, unabhängig von der
+konfigurierten Origin-Richtlinie: Eine Same-Origin-Live-Anfrage passiert mit
+der zustandslosen CSRF-Disposition, während eine Cross-Site- oder headerlose
+Anfrage auf die Token-Validierung zurückfällt und abgewiesen wird. Gewöhnliche
+Routen behalten unter der Standardrichtlinie die Token-Validierung; Live
+lockert nichts anderes:
 
 ```rust
-global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+global_middleware!(CsrfMiddleware::new());
 ```
 
-Anonyme Besucher können öffentliche Seeds rendern, aber keine Aktionen
-ausführen: Die `AuthMiddleware` des Wächters antwortet mit `401`, bevor
-irgendeine Engine-Arbeit beginnt. Identitätsgebundene Inseln benötigen eine
-Sitzung und einen Principal; der Mandant wird in den Geltungsbereich der Insel
-gebunden, sobald Ihr Resolver einen benennt. Jede Ablehnung ist geschlossen:
+Anonyme Besucher rendern öffentliche Seeds und können darauf Aktionen
+ausführen, wenn der Wächter `AuthMiddleware::optional()` verwendet: Ein
+angemeldeter Principal wird aufgezeichnet, ein anonymer Besucher fährt fort,
+und die Mount-Art entscheidet. Ein öffentlicher Seed wird dann bei der ersten
+Aktion für die eigene Sitzung des Besuchers befördert, während eine
+identitätsgebundene Insel eine Anfrage ohne Principal-Nachweis weiterhin
+abweist. Mit `AuthMiddleware::new()` antwortet der Wächter auf jede anonyme
+Anfrage mit `401`, bevor irgendeine Engine-Arbeit beginnt. Identitätsgebundene
+Inseln benötigen eine Sitzung und einen Principal; der Mandant wird in den
+Geltungsbereich der Insel gebunden, sobald Ihr Resolver einen benennt, und ein
+Resolver, der den Mandanten nicht bestimmen kann, muss einen Fehler statt
+`None` zurückgeben. Jede Ablehnung ist geschlossen:
 Ein `409` für einen veralteten oder manipulierten Snapshot trägt keinen
 Rumpf, und Produktionsmeldungen enthalten niemals Snapshots, Tokens, Cookies
 oder gerendertes HTML.
@@ -382,8 +392,12 @@ streams.refresh("activity").await?;
 
 Ein Refresh weist abonnierte Inseln an, frisch zu rendern; ein Ereignis wird
 an die registrierten Handler der Insel zugestellt. Polling ist das gewöhnliche
-frische Rendern, sodass nichts verloren geht, wenn ein Transport nicht
-verfügbar ist.
+frische Rendern: Der Zustand der Insel holt auf, sobald ein Transport nicht
+verfügbar ist, aber zwischenzeitlich veröffentlichte Ereignisnutzlasten werden
+ihren Handlern nicht erneut zugestellt, was die Laufzeit als beeinträchtigten
+statt aktuellen Stream meldet. Eine Komponente, die genau einen Stream
+deklariert, bekommt ihre Inselwurzel dafür abonniert; eine Komponente mit
+mehreren Streams abonniert jeden über die registrierten Aufrufe der Laufzeit.
 
 ## Assets und Nutzung ohne Build
 

@@ -190,7 +190,7 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(runtime) => runtime,
         Err(_) => return error_response(EndpointErrorKind::KernelUnavailable),
     };
-    let request = match request
+    let mut request = match request
         .buffer_body(runtime.config().max_request_bytes())
         .await
     {
@@ -200,10 +200,14 @@ pub(crate) async fn handle(request: Request) -> Response {
         }
         Err(_) => return error_response(EndpointErrorKind::KernelUnavailable),
     };
-    let body = request
-        .cached_body()
-        .expect("the Live handler just buffered the complete request body");
-    let selection = match runtime.inspect_mount(body, media) {
+    // An owned copy: the request is mutated below to close the identity
+    // absences its mount permits, after the body has named that mount.
+    let body = Bytes::copy_from_slice(
+        request
+            .cached_body()
+            .expect("the Live handler just buffered the complete request body"),
+    );
+    let selection = match runtime.inspect_mount(&body, media) {
         Ok(selection) => selection,
         Err(error) => return error_response(error.kind()),
     };
@@ -211,6 +215,12 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(context) => context,
         Err(_) => return error_response(EndpointErrorKind::ContextInconsistent),
     };
+    if runtime
+        .close_mount_scope_absences(&mut request, &selection)
+        .is_err()
+    {
+        return error_response(EndpointErrorKind::ContextInconsistent);
+    }
     let current_route = selection.route().clone();
     let current_slot = selection.slot().clone();
     let context =
@@ -221,7 +231,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     let endpoint_request = match LiveEndpointRequest::try_new(
         request.method().clone(),
         media,
-        Bytes::copy_from_slice(body),
+        body,
         Some(context),
         RequestCachePolicy::Bypass,
     ) {

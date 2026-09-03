@@ -406,6 +406,7 @@ impl SseClient {
     ) -> Self {
         let request = request(app, Method::GET, EVENTS_PATH, Some(session), true)
             .header("accept", "text/event-stream")
+            .header("sec-fetch-site", "same-origin")
             .header("authorization", format!("SuprnovaAsync {credential}"))
             .header("suprnova-transport-generation", generation.to_string())
             .body(empty())

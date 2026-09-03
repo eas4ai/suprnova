@@ -545,6 +545,22 @@ fn file_name_ok(name: &str) -> bool {
 ///
 /// Every cap, the sequence, the identity, the marker order, and every asset
 /// digest are checked here; the first violation ends the exchange.
+/// Escape control characters in helper-provided text before it reaches the
+/// terminal, and bound its length; the helper is trusted code, but its
+/// strings quote template and component names an application controls.
+pub(crate) fn display_text(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_control() {
+                ch.escape_default().to_string()
+            } else {
+                ch.to_string()
+            }
+        })
+        .take(200)
+        .collect()
+}
+
 pub fn consume<R: BufRead>(reader: R, operation: Operation) -> Result<Session, ToolFailure> {
     let mut reader = reader.take((MAX_TOTAL_BYTES + 1) as u64);
     let mut buffer = Vec::new();

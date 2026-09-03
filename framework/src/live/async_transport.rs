@@ -16,6 +16,7 @@ use suprnova_live::async_updates::{
     WebSocketControlRecord, WebSocketFrame, WebSocketOriginPolicy,
 };
 use suprnova_live::host::HostScopeFacts;
+use suprnova_live::identity::UnixMillis;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::ws::{WebSocketHandler, WsSocket};
@@ -237,7 +238,7 @@ async fn membership_control(
         return Err(AsyncErrorKind::GenerationInvalid);
     }
     let credential = bearer_credential(request).ok_or(AsyncErrorKind::AuthorityMissing)?;
-    let facts = request_scope_facts(request)?;
+    let facts = request_scope_facts(request, state.now()?)?;
     let key = state.transport_for_credential(&credential, &facts)?;
     state.admit_sse_control(&key, control.transport_generation, &control.control_nonce)?;
     let expected = Some((control.descriptor_binding.as_str(), control.stream.as_str()));
@@ -287,7 +288,7 @@ async fn events_inner(request: Request) -> Result<HttpResponse, AsyncErrorKind> 
     if crate::auth::guard::Auth::id().is_none() {
         return Err(AsyncErrorKind::AuthorityInvalid);
     }
-    let facts = request_scope_facts(&request)?;
+    let facts = request_scope_facts(&request, state.now()?)?;
     let key = state.transport_for_credential(&credential, &facts)?;
     let mut receiver = state.open_sse_reader(&key, generation)?;
     let stream = futures::stream::poll_fn(move |context| {
@@ -316,7 +317,10 @@ impl WebSocketHandler for AsyncSocketHandler {
         let Ok(origin) = socket_origin(&request) else {
             return close(&mut socket, "origin_invalid").await;
         };
-        let Ok(facts) = request_scope_facts(&request) else {
+        let Ok(now) = state.now() else {
+            return close(&mut socket, "unavailable").await;
+        };
+        let Ok(facts) = request_scope_facts(&request, now) else {
             return close(&mut socket, "membership_authority_invalid").await;
         };
         let authenticated = request.auth_user_id().is_some();
@@ -443,8 +447,12 @@ fn bind_state() -> Result<(LiveRuntime, Arc<AsyncState>), AsyncErrorKind> {
     Ok((runtime, state))
 }
 
-fn request_scope_facts(request: &Request) -> Result<HostScopeFacts, AsyncErrorKind> {
-    super::context::request_host_scope_facts(request).map_err(|_| AsyncErrorKind::ContextRejected)
+fn request_scope_facts(
+    request: &Request,
+    now: UnixMillis,
+) -> Result<HostScopeFacts, AsyncErrorKind> {
+    super::context::request_host_scope_facts(request, now)
+        .map_err(|_| AsyncErrorKind::ContextRejected)
 }
 
 /// Derives the exact application origin the browser document was served from.

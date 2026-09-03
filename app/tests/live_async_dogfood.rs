@@ -183,7 +183,9 @@ async fn the_feed_receives_events_over_sse_and_websocket_and_polls() {
     assert_eq!(ack["kind"], "membership_authenticated", "{ack}");
     let _ = socket.close(None).await;
 
-    // Polling is the ordinary fresh render on the feed island.
+    // Polling is the ordinary fresh render on the feed island, and it shows
+    // the server data recorded since the document rendered.
+    let posted = app::live::components::activity_feed::record_post();
     let reply = send(
         app.addr,
         action_request(
@@ -207,6 +209,8 @@ async fn the_feed_receives_events_over_sse_and_websocket_and_polls() {
     assert!(
         reply.json()["render"]["html"]
             .as_str()
-            .is_some_and(|h| h.contains("<h2>Activity</h2>"))
+            .is_some_and(|h| h.contains(&format!("data-posted=\"{posted}\""))),
+        "the fresh render shows the server data recorded before it: {}",
+        reply.text()
     );
 }

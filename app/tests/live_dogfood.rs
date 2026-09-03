@@ -175,9 +175,19 @@ async fn csrf_origin_and_principal_gates_hold_on_the_real_stack() {
     let reply = send(app.addr, cross).await;
     assert_eq!(reply.status, StatusCode::from_u16(419).expect("419"));
 
-    // Anonymous, same-origin: the route guard's AuthMiddleware answers first.
+    // Anonymous, same-origin: a public seed promotes for the visitor's own
+    // session and the action runs, because the guard's authentication is
+    // optional and the public mount permits an anonymous principal.
     let reply = send(app.addr, action_request(&app, spec(13), None, true)).await;
-    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.text());
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let accepted = reply.json();
+    assert_eq!(accepted["outcome"], "accepted", "{accepted}");
+    assert!(
+        accepted["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains("Count: 1")),
+        "{accepted}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

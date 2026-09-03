@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         })
         .get("/live/demo-post", |_request: Request| async {
+            app::live::components::activity_feed::record_post();
             let streams = LiveStreams::resolve()
                 .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
             streams

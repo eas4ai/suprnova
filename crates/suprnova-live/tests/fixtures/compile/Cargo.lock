@@ -667,22 +667,28 @@ dependencies = [
 name = "suprnova-live-compile-1"
 version = "0.0.0"
 dependencies = [
- "suprnova-live",
- "suprnova-macros",
+ "suprnova-live-macro-fixture",
 ]
 
 [[package]]
 name = "suprnova-live-compile-10"
 version = "0.0.0"
 dependencies = [
- "suprnova-live",
- "suprnova-macros",
+ "suprnova-live-macro-fixture",
 ]
 
 [[package]]
 name = "suprnova-live-compile-100"
 version = "0.0.0"
 dependencies = [
+ "suprnova-live-macro-fixture",
+]
+
+[[package]]
+name = "suprnova-live-macro-fixture"
+version = "1.3.7"
+dependencies = [
+ "askama",
  "suprnova-live",
  "suprnova-macros",
 ]

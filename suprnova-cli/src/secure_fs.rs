@@ -26,14 +26,28 @@ pub fn write_private(path: &Path, contents: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
+        // A link at the final component would carry the secret elsewhere.
+        if let Ok(existing) = std::fs::symlink_metadata(path)
+            && existing.file_type().is_symlink()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a symlink; refusing to write a secret through it",
+                    path.display()
+                ),
+            ));
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        // `mode` applies only on creation; an existing file keeps its bits.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(contents.as_bytes())
     }
     #[cfg(not(unix))]
@@ -257,5 +271,39 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_refuses_a_symlinked_target_and_pins_an_existing_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tmp.path().join("outside.env");
+        std::fs::write(&outside, "old\n").expect("outside");
+        let link = tmp.path().join("link.env");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        let error = write_private(&link, "APP_KEY=secret\n").expect_err("symlink refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("untouched"),
+            "old\n"
+        );
+
+        let existing = tmp.path().join("existing.env");
+        std::fs::write(&existing, "APP_KEY=old\n").expect("existing");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen");
+        write_private(&existing, "APP_KEY=new\n").expect("rewrite");
+        let mode = std::fs::metadata(&existing)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&existing).expect("content"),
+            "APP_KEY=new\n"
+        );
     }
 }

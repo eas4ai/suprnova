@@ -47,7 +47,7 @@ test("a signed-in user runs actions through the production middleware stack", as
   await expect(page.locator('input[type="file"]')).toHaveCount(1);
 });
 
-test("an anonymous visitor cannot run an action on the public island", async ({ page }) => {
+test("an anonymous visitor promotes the public island and increments it", async ({ page }) => {
   const statuses: number[] = [];
   page.on("response", (response) => {
     const url = new URL(response.url());
@@ -56,9 +56,8 @@ test("an anonymous visitor cannot run an action on the public island", async ({ 
   await page.goto(`${APP_ORIGIN}/live/public`);
   await expectConnected(page, 1);
   await page.getByRole("button", { name: "Increment" }).click();
-  await expect.poll(() => statuses.length).toBeGreaterThanOrEqual(1);
-  expect(statuses[0]).toBe(401);
-  await expect(page.getByText("Count: 0", { exact: true })).toBeVisible();
+  await expect(page.getByText("Count: 1", { exact: true })).toBeVisible();
+  expect(statuses).toEqual([200]);
 });
 
 test("the activity feed subscribes over the asynchronous transport and refreshes on a published event", async ({
@@ -98,9 +97,16 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
     )
     .toBe(true);
   const before = renders.length;
+  // The server counts posts for its whole lifetime, across engine projects.
+  const postedBefore = Number(await page.locator("[data-posted]").getAttribute("data-posted"));
   const posted = await page.request.get(`${APP_ORIGIN}/live/demo-post`);
   expect(posted.status()).toBe(200);
   await expect.poll(() => renders.length).toBeGreaterThan(before);
   expect(renders.every((status) => status === 200)).toBe(true);
+  // The delivered refresh is visible in the island, not only in the log: the
+  // fresh render shows the post the server recorded.
+  const expected = String(postedBefore + 1);
+  await expect(page.locator("[data-posted]")).toHaveAttribute("data-posted", expected);
+  await expect(page.getByText(`Posted ${expected}`, { exact: true })).toBeVisible();
   await expectConnected(page, 3);
 });

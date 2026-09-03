@@ -126,7 +126,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let limiter = Arc::new(InMemoryRateLimiter::new());
     router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(LiveTenantMiddleware::new(Arc::new(SingleTenant)))
             .middleware(RateLimitMiddleware::new(
                 limiter,
@@ -233,16 +233,21 @@ Live 从不绕过框架的中间件。每个请求需要的内容：
 | 限流 | 处于放行分支的 `RateLimitMiddleware` |
 
 随附的运行时发送 Live 媒体类型和浏览器自身的 `Sec-Fetch-Site` 头；它不携带会话
-令牌。把 CSRF 中间件配置为验证来源：同源的 Live 请求以无状态 CSRF 判定通过，而
-跨站或缺少该头的请求回退到令牌验证并被拒绝：
+令牌。无论你配置了哪种来源策略，CSRF 中间件都会自行为每个 Live 请求验证这一
+证明：同源的 Live 请求以无状态 CSRF 判定通过，而跨站或缺少该头的请求回退到令牌
+验证并被拒绝。普通路由在默认策略下保留令牌验证；使用 Live 不会放松其他任何东西：
 
 ```rust
-global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+global_middleware!(CsrfMiddleware::new());
 ```
 
-匿名访客可以渲染公共种子，但不能执行动作：守卫的 `AuthMiddleware` 在任何引擎工作
-之前就以 `401` 应答。绑定身份的岛屿需要会话和主体；只要你的解析器指定了租户，
-租户就会绑定到岛屿的作用域中。每一次拒绝都是封闭的：对过期或被篡改快照的 `409`
+匿名访客可以渲染公共种子，并且在守卫使用 `AuthMiddleware::optional()` 时可以对其
+执行动作：已登录的主体会被记录，匿名访客继续通行，由挂载类型决定。公共种子随后在
+首次动作时为访客自己的会话完成晋升，而绑定身份的岛屿仍然拒绝没有主体证据的请求。
+使用 `AuthMiddleware::new()` 时，守卫在任何引擎工作之前就对每个匿名请求以 `401`
+应答。绑定身份的岛屿需要会话和主体；只要你的解析器指定了租户，租户就会绑定到岛屿的
+作用域中，而无法确定租户的解析器必须返回错误而不是 `None`。每一次拒绝都是封闭的：
+对过期或被篡改快照的 `409`
 不携带正文，生产环境的消息从不包含快照、令牌、Cookie 或渲染后的 HTML。
 
 ## 上传
@@ -340,7 +345,9 @@ streams.refresh("activity").await?;
 ```
 
 刷新告诉已订阅的岛屿重新渲染；事件被投递到岛屿注册的处理器。轮询就是普通的
-重新渲染，因此在传输不可用时不会丢失任何内容。
+重新渲染：传输不可用时岛屿的状态会追平，但其间发布的事件负载不会重放给它们的
+处理器，运行时会把该流报告为降级而非最新。恰好声明一个流的组件会让其岛屿根订阅
+该流；拥有多个流的组件通过运行时的已注册调用逐个订阅。
 
 ## 资产与免构建使用
 

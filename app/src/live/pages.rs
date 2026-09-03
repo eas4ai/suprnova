@@ -41,10 +41,8 @@ fn intent() -> Result<DocumentResponseIntent, FrameworkError> {
 }
 
 fn failed(error: FrameworkError) -> HttpResponse {
+    // The detail goes to the log only; a visitor sees a closed failure.
     tracing::warn!(error = %error, "Live document failed");
-    if cfg!(debug_assertions) {
-        return HttpResponse::text(format!("Live document failed: {error}")).status(500);
-    }
     HttpResponse::text("Live document failed").status(500)
 }
 

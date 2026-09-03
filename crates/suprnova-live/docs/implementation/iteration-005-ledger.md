@@ -4,6 +4,187 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-03 -- Framework-integration qualification gate
+
+Plan Task 11 ran the focused static and test gates, the Live crate's own gate
+inside the integrated workspace, the architecture and drift audit, and two
+independent adversarial reviews of the complete framework integration, one on
+architecture and security and one on production quality. The Live crate gate
+exposed the first defect itself: the 1-, 10-, and 100-component compile
+fixtures under `tests/fixtures/compile/` still carried a hand-written facade
+shim from before the integrated macro expansion, so the MSRV phase failed on
+the facade's missing `askama` re-export. The fixtures now depend on the
+maintained `suprnova-live-macro-fixture` facade, carry the templates the
+expansion compiles, and pass the MSRV check.
+
+The reviews returned two blockers, ten majors, and a set of minors between
+them. Every blocker and major was either fixed with a regression test or
+accepted with the reason recorded here:
+
+- CSRF. Enabling `OriginPolicy::SameOriginOnly` application-wide, as the
+  scaffold and the dogfood did, let every same-origin state change pass on
+  the browser's origin proof alone. A Live operation now verifies that proof
+  on its own inside the CSRF middleware, whatever policy the application
+  configured, and ordinary routes keep the configured policy; the scaffold,
+  the dogfood, and the manual use the default `CsrfMiddleware::new()`.
+  `framework/tests/live_trusted_context.rs` proves the Live proof under the
+  default policy, that a Live read records the proof with a not-required
+  CSRF check and nothing without it, and that an ordinary same-origin POST
+  without a token is still refused.
+- Asynchronous routes. The events route and the WebSocket handshake derived
+  scope facts without requiring the complete eight-check set, so a bare
+  `try_live()` opened anonymous transports. `HostCheckFacts::require_complete`
+  is a new engine entry point, `request_host_scope_facts` requires it, and
+  `live_async_routes.rs` proves a chain that recorded no facts is refused on
+  issuance and on the event stream.
+- Public seeds. Anonymous visitors could render a public seed but never act
+  on it, because the action route's strict policy needed a principal record
+  and the guard's `AuthMiddleware::new()` answered first. The framework
+  records each mount's kind at registration, the action boundary closes only
+  the identity absences that kind permits before the engine validates the
+  request, and `AuthMiddleware::optional()` records a principal when one
+  exists and lets an anonymous request continue.
+  `framework/tests/live_public_seed_actions.rs` proves the anonymous
+  promotion, the identity-bound refusal, and the owner's acceptance through
+  the production middleware stack; the dogfood application, its tests, and
+  the browser suite now exercise the anonymous increment. That browser case
+  exposed a runtime defect the reference-host evidence had never reached: the
+  island's morph preflight demanded the island's own instance id, which a
+  seed never has, so a seed's first rendered committed response could not
+  promote even though the runtime's own authority already preferred the
+  response's instance, and the morph preflight then refused the seed root
+  itself because it validated every current root as an instance. The
+  successor preflight now takes the instance from the response, the morph
+  preflight accepts a seed root that carries no instance and revision zero,
+  `tests/morph-preflight.test.ts` pins both rules, and the dogfood browser
+  suite proves the rendered promotion through the real framework on all three
+  engines; the runtime's own static host promotes no seed with a rendered
+  response, which is why its evidence never reached this path. Because the core
+  bundle changed, the test host's reviewed module-boot and classic-runtime
+  integrity pins were recomputed from the same build and reviewed here. The same test
+  exposed a fixture defect: the dogfood helper took the first `Set-Cookie`
+  header, the XSRF token cookie, so identity-bound requests ran on fresh
+  sessions; it now selects the session cookie by name.
+- Transports. WebSocket transports were bounded only per rotatable scope and
+  the two per-scope counts disagreed; a process-wide bound
+  (`MAX_TRANSPORTS_TOTAL`) applies at both creation sites and both count every
+  transport in scope. The total bound is a constant reviewed here, not
+  exercised by a test that opens thousands of transports.
+- `live:make` searched for `.build()` from `registry()` to the end of the
+  file and could splice a registration into an unrelated builder; the search
+  is bounded to the function body, and `live_scaffold.rs` proves a delegating
+  `registry()` leaves the delegate untouched and asks for manual registration.
+  Rollback failures are now named in the error instead of being reported as
+  untouched, and `live:assets` reports a failed restore with the retired
+  path and compares names and sizes before reading a publication.
+- `suprnova new` followed a dangling symlink at the project path;
+  `symlink_metadata` refuses it, proven by `new_project.rs`.
+  `secure_fs::write_private` refuses a symlinked target and pins the mode of
+  an existing file, proven by a unit test.
+- The dogfood finalizer prefixed the idempotency key past the 128-byte
+  finalize-identity budget and retained every upload forever; it now uses
+  the key itself and keeps a bounded window. The activity feed renders its
+  refresh count so the browser suite asserts the delivered refresh in the
+  markup, not only in the request log.
+- The browser host defaulted missing registered-event fields; it now fails
+  closed on `maximumHops`, `maximumFanout`, and `payloadContract`, which keep
+  the runtime's iteration 004 descriptor names. Renaming them to snake case
+  is a versioned contract change captured in
+  `iterations/next/registered-event-descriptor-casing.md`. The host's bounded
+  JSON reader now counts bytes as it reads instead of after.
+- A component that declares several streams gets no island-owned
+  `live:stream` directive instead of silently getting its first stream;
+  `live_multi_stream_root.rs` proves both cases. The classic boot script
+  guards a clobbered `SuprnovaLiveAsync` global, the tooling helper bounds
+  the base64-encoded asset line and keeps the operation's own failure ahead of
+  an end-marker failure, the dogfood's rate limiter is shared and fails
+  closed, and its document error page no longer leaks detail in debug builds.
+- The Live crate's own gate then exposed a conformance regression from Task
+  10: the engine emitted `live:stream` automatically on every single-stream
+  island root, which put the directive on the iteration 004 reference host's
+  fresh-render island beside its own poll directive and changed the pinned
+  polling behavior across three engines. The emission is now an explicit
+  opt-in on the engine's mount and execution services
+  (`with_island_stream_directive`), off by default so reference-host evidence
+  is unchanged, and the framework enables it; the framework's stream tests
+  and the reference host matrix prove both settings.
+- Accepted with rationale: the identity-bound tenant requirement stays
+  `Optional` because `Ok(None)` from `LiveTenantResolver` is a positive
+  statement that the request has no tenant, and the trait now documents that
+  a resolver which cannot determine the tenant returns an error. The dogfood
+  server test keeps its connect-until-accepted readiness probe because
+  `Server::run` binds its own listener; the transfer-grant lifetime and the
+  byte-budget acquisition order are recorded as review observations for the
+  upload domain rather than changed here. The manual no longer claims
+  polling loses nothing; it states that event payloads published while a
+  transport is unavailable are not replayed.
+
+The drift audit found no engine-to-framework dependency, no application code
+naming the internal engine crate, no reference to the retired standalone
+macros package, no RenderCache implementation beyond pre-existing error and
+doc mentions, and no Magnetar change on the branch: the Magnetar differences
+against local `main` come from `main` having advanced past the branch's last
+merge, which the branch must merge before hand-off. `rtk tilth diff main..HEAD`
+reported 1211 files, 222 modified and 14974 added symbols, and GitNexus
+`detect_changes` (compare scope, base `main`) reported 23292 changed symbols
+across 1203 files and 208 affected processes at its "critical" level, both
+dominated by the imported Live subtree exactly as the cutover entry records.
+
+Verification completed from the integration worktree after the fixes:
+
+```bash
+rtk cargo fmt --all -- --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --no-fail-fast --test <every framework/tests/live_*.rs suite>
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --lib live::
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova --lib csrf
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p app
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --test live_scaffold --test new_project --test live_cli --test live_assets --test live_generated_app
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --test live_generated_app -- --ignored
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-cli --lib secure_fs
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live --all-targets
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live --lib host::checks
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live --test runtime_artifacts
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-macros --test live_ui
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo clippy -p suprnova -p suprnova-live -p app -p suprnova-cli -p suprnova-macros --all-targets --all-features
+CARGO_INCREMENTAL=0 rtk cargo +1.94.0 check --manifest-path crates/suprnova-live/tests/fixtures/compile/Cargo.toml --workspace --all-targets
+cd crates/suprnova-live/browser && npm run format:check && npm run lint && npm run typecheck && npm run test:unit
+cd crates/suprnova-live/browser && npm run build && npm run build:check
+cd crates/suprnova-live/browser && npx playwright test e2e/app-dogfood.spec.ts e2e/framework-bootstrap.spec.ts e2e/seed-and-lazy.spec.ts --project=chromium --project=firefox --project=webkit
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 rtk cargo test -p suprnova-live-test-support --test reference_host -- --test-threads=1
+cd crates/suprnova-live/browser && npx playwright test e2e/iteration-004-integration.spec.ts e2e/app-dogfood.spec.ts --project=chromium
+cd crates/suprnova-live && tests/documentation_contract.sh && node scripts/check-implementation-docs.mjs && node scripts/check-specs.mjs
+scripts/check-manual-translations.sh && python3 scripts/check-manual-structure.py
+git diff --check
+rtk tilth diff main..HEAD --blast --budget 12000
+```
+
+Those commands passed the 24 framework Live suites (129 cases) and the Live
+and CSRF unit cases, 111 application cases, 30 CLI cases plus the ignored
+generated-application acceptance case and the private-writer unit case, the
+engine's 705 all-target cases plus the new complete-check case, the macro UI
+suite, the compile fixtures under the workspace MSRV, 860 browser unit cases,
+the reproducible build with byte-identical artifacts, 48 Playwright cases
+across three engines (12 dogfood, 27 framework bootstrap, 9 seed and lazy),
+the Rust reference-host suite and the iteration 004 integration matrix on
+Chromium after the stream opt-in, and the documentation, specification, and
+manual gates. Clippy reported only
+the four pre-existing findings recorded in the Task 10 entry. The Live
+crate's own gate and the repository gate are recorded below.
+
+The Live crate's own gate (`crates/suprnova-live/scripts/gate.sh`) then
+passed end to end inside the integrated workspace: the documentation,
+specification, and license contracts, formatting and Clippy review, the
+fixture, checker, protocol, and security boundaries, the iteration 004 Rust
+boundaries, the workspace MSRV check including the compile fixtures, the
+nightly fuzz build, the browser dependency and conformance gates, tracked
+artifact parity, the Rust reference host, all-target and documentation tests,
+the correctness-delay scanner, the browser unit boundaries and broad suite
+(860 cases), the iteration 004 browser matrix (249 cases), the real BFCache
+lifecycle, the broad browser matrix (631 cases), and the final worktree diff
+check. The repository gate refuses an uncommitted tree; it is the push's
+precondition and runs on this commit rather than being recorded here.
+
+
 ## 2026-09-02 -- Generated-application proof and the durable dogfood surface
 
 A fresh `suprnova new` application now passes `live:check` out of the box and
@@ -92,7 +273,7 @@ scripts/check-manual-translations.sh && python3 scripts/check-manual-structure.p
 git diff --check
 ```
 
-Those commands passed the 44 framework Live suites (123 cases) and the 11
+Those commands passed the 22 framework Live suites (123 cases) and the 11
 Live unit cases, 110 application cases including the dogfood, reacquisition,
 and SSE, WebSocket, and polling suites, 705 engine cases, 27 CLI cases plus
 the ignored generated-application acceptance case, 858 browser unit cases,

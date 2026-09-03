@@ -3,7 +3,7 @@
 //!
 //! Artifacts are addressed by the manifest-derived asset identity, so every
 //! URL is immutable and safe to cache for a year. The only executable code a
-//! document loads is external: the reviewed artifacts and two deterministic
+//! document loads is external: the reviewed artifacts and three deterministic
 //! boot scripts, all with integrity metadata, so a strict `script-src 'self'`
 //! policy needs no inline exception.
 
@@ -45,7 +45,7 @@ const ESM_BOOT_SOURCE: &str = "import { boot } from \"./suprnova-live.esm.js\";\
 const ESM_ASYNC_BOOT_SOURCE: &str = "import { boot } from \"./suprnova-live.esm.js\";\nimport { browserAsyncOptions, configureAsync } from \"./suprnova-live.async.esm.js\";\nconfigureAsync(browserAsyncOptions());\nboot();\n";
 /// The classic asynchronous artifact publishes its default host on a global;
 /// the classic boot configures it when present and boots either way.
-const CLASSIC_BOOT_SOURCE: &str = "if (window.SuprnovaLiveAsync) {\n  window[Symbol.for(\"suprnova.live.features.v1\")].configureAsync(window.SuprnovaLiveAsync.browserOptions());\n}\nwindow.SuprnovaLive.boot();\n";
+const CLASSIC_BOOT_SOURCE: &str = "var suprnovaLiveAsync = window.SuprnovaLiveAsync;\nif (suprnovaLiveAsync && typeof suprnovaLiveAsync.browserOptions === \"function\") {\n  window[Symbol.for(\"suprnova.live.features.v1\")].configureAsync(suprnovaLiveAsync.browserOptions());\n}\nwindow.SuprnovaLive.boot();\n";
 const REQUEST_TIMEOUT_MS: u32 = 5_000;
 const MAX_QUEUED_PER_ISLAND: u8 = 8;
 const MAX_PARALLEL_PER_ISLAND: u8 = 1;

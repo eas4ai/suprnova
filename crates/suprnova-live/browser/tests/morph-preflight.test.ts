@@ -32,6 +32,40 @@ describe("Live-owned morph preflight", () => {
     expect(Object.isFrozen(plan)).toBe(true);
   });
 
+  it("accepts a seed root promoting into the successor's instance", () => {
+    const fixture = morphFixture({
+      currentOverrides: {
+        "data-suprnova-live-revision": "0",
+        "data-suprnova-live-snapshot-kind": "seed",
+      },
+    });
+    fixture.currentRoot.removeAttribute("data-suprnova-live-instance");
+
+    const plan = preflight(fixture);
+
+    expect(plan.currentRoot).toBe(fixture.currentRoot);
+    expect(plan.replacementRoot).toBe(fixture.replacementRoot);
+  });
+
+  it("rejects a seed root that already claims an instance or a later revision", () => {
+    const claimed = morphFixture({
+      currentOverrides: {
+        "data-suprnova-live-revision": "0",
+        "data-suprnova-live-snapshot-kind": "seed",
+      },
+    });
+    expect(() => preflight(claimed)).toThrow(MorphPreflightError);
+
+    const advanced = morphFixture({
+      currentOverrides: {
+        "data-suprnova-live-revision": "3",
+        "data-suprnova-live-snapshot-kind": "seed",
+      },
+    });
+    advanced.currentRoot.removeAttribute("data-suprnova-live-instance");
+    expect(() => preflight(advanced)).toThrow(MorphPreflightError);
+  });
+
   it("rejects empty, multiple-root, parser-error, and parser-failure input", () => {
     const empty = morphFixture();
     expect(() => preflight(empty, "")).toThrow(MorphPreflightError);

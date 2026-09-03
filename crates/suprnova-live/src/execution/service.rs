@@ -579,6 +579,7 @@ pub struct ExecutionService {
     snapshot_limits: SnapshotLimits,
     renderer: ViewRenderer,
     reporter: Option<Arc<dyn AcceptedOutcomeReporter>>,
+    island_stream_directive: bool,
 }
 
 struct ClaimedOutcome {
@@ -679,7 +680,18 @@ impl ExecutionService {
             snapshot_limits,
             renderer,
             reporter: None,
+            island_stream_directive: false,
         }
+    }
+
+    /// Emits the island-owned `live:stream` directive on every island root
+    /// whose component declares exactly one stream, so the browser runtime
+    /// subscribes that island without application markup. Off by default:
+    /// a host that drives subscriptions itself keeps its roots unchanged.
+    #[must_use]
+    pub const fn with_island_stream_directive(mut self) -> Self {
+        self.island_stream_directive = true;
+        self
     }
 
     /// Installs non-authoritative post-acceptance reporting.
@@ -1401,7 +1413,10 @@ impl ExecutionService {
                         revision: successor_revision,
                         lazy_complete: false,
                         flags: Vec::new(),
-                        stream: crate::view::declared_stream(descriptor.metadata()),
+                        stream: self
+                            .island_stream_directive
+                            .then(|| crate::view::declared_stream(descriptor.metadata()))
+                            .flatten(),
                     },
                     MAX_SUCCESSOR_METADATA_BYTES,
                 )

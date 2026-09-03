@@ -15,6 +15,12 @@ use super::attestation::SecurityCheck;
 /// Implementations may consult route parameters, authenticated principal state,
 /// or application services. A resolver must not treat an untrusted header as
 /// authoritative without validating it against application policy.
+///
+/// `Ok(None)` is a positive statement that this request has no tenant, and
+/// the middleware records the tenant check as not required: an identity-bound
+/// island then binds session and principal alone. A resolver that cannot
+/// determine the tenant must return `Err`, never `Ok(None)`, so the request
+/// fails instead of mounting untenanted.
 #[async_trait]
 pub trait LiveTenantResolver: Send + Sync {
     /// Returns the current tenant identity, or `None` for a tenantless request.

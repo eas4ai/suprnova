@@ -294,7 +294,8 @@ impl Counter {
    Komponentendatei oder die View bereits, warnt der Befehl und schreibt gar nichts.
 2. Schreibt `src/live/<snake>.rs` und `templates/live/<snake>.html` atomar; schlägt
    ein Schreibvorgang fehl, wird jede Datei, die der Lauf erstellt oder geändert hat,
-   zurückgerollt.
+   zurückgerollt, und jede Datei, die nicht wiederhergestellt werden konnte, wird im
+   Fehler benannt, statt als unberührt gemeldet zu werden.
 3. Fügt `pub mod <snake>;` und `.register::<snake::Pascal>()?` in den
    `registry()`-Builder in `src/live/mod.rs` ein. Jedes mit `suprnova new` erstellte
    Projekt liefert dieses Modul mit einer leeren Registry, einer `routes()`-Funktion,

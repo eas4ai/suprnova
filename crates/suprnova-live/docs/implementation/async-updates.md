@@ -146,9 +146,12 @@ and skips visibility-bound work while hidden. `immediate`, `visible`, and
 modifiers are rejected.
 
 A framework-rendered island does not author the directive in its template:
-the engine emits `live:stream` on the island root it assembles, naming the
-component's first declared stream, because the engine owns that root and
-rejects a template that carries one.
+the framework asks the engine's mount and execution services, through their
+`with_island_stream_directive` policy, to emit `live:stream` on the island
+root they assemble when the component declares exactly one stream, because
+the engine owns that root and rejects a template that carries one. The policy
+is off by default, so a host that drives subscriptions itself, such as the
+iteration 004 reference host, keeps its roots exactly as before.
 
 `live:stream="orders"` requests push with hybrid fallback. Explicit
 `live:stream.hybrid="orders"` has the same freshness class and may pair with an
@@ -351,3 +354,15 @@ with a non-authoritative comment after a 200 ms delay
 held tail becomes visible within that delay on every engine. The reference
 host's two-second comment cadence had masked the same behavior in the
 runtime's own WebKit evidence.
+
+A component that declares exactly one stream has its island root subscribed
+for it through the `live:stream` directive the framework asks the engine to
+emit. A component with
+several streams gets no island-owned directive, because the root carries one,
+and subscribes each stream through the runtime's registered calls; nothing
+is chosen silently. The registered-event fields of the issued descriptor
+(`maximumHops`, `maximumFanout`, `payloadContract`) keep the camel-case names
+the runtime's iteration 004 descriptor contract fixed, unlike every other
+public JSON field; the framework emits them as the runtime reads them, the
+browser host fails closed when any is absent, and the naming is recorded for
+a future contract revision rather than changed under the runtime.

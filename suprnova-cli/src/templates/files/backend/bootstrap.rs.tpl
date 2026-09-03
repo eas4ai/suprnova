@@ -180,10 +180,10 @@ pub fn register_http_stack() {
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");
 
-    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Same-origin
-    // requests verified through the browser's `Sec-Fetch-Site` header pass
-    // without a token; the Live runtime relies on exactly that proof.
-    global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
+    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Live
+    // requests verify the browser's `Sec-Fetch-Site` proof on their own, so
+    // ordinary routes keep token validation under the default policy.
+    global_middleware!(CsrfMiddleware::new());
 
     // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
     // into the per-request task-local so `#[derive(Data)]` responses,

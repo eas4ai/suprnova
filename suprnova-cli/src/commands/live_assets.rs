@@ -38,7 +38,9 @@ fn identity_ok(identity: &str) -> bool {
 /// Compare an existing publication with the exported assets: `Ok(true)` when
 /// the file set and every byte match, `Ok(false)` on any difference.
 fn publication_matches(target: &Path, assets: &[PublishedAsset]) -> Result<bool, String> {
-    let mut on_disk = BTreeMap::new();
+    // Names and sizes first, so a foreign directory is never read into memory
+    // before it has proved it is even the right shape.
+    let mut entries = BTreeMap::new();
     for entry in
         fs::read_dir(target).map_err(|e| format!("Failed to read {}: {e}", target.display()))?
     {
@@ -46,15 +48,25 @@ fn publication_matches(target: &Path, assets: &[PublishedAsset]) -> Result<bool,
         let name = entry.file_name().to_string_lossy().into_owned();
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|e| format!("Failed to inspect {}: {e}", entry.path().display()))?;
-        if !metadata.is_file() {
+        if !metadata.is_file() || entries.len() >= assets.len() {
             return Ok(false);
         }
-        let bytes = fs::read(entry.path())
-            .map_err(|e| format!("Failed to read {}: {e}", entry.path().display()))?;
-        on_disk.insert(name, bytes);
+        entries.insert(name, (entry.path(), metadata.len()));
     }
-    if on_disk.len() != assets.len() {
+    if entries.len() != assets.len()
+        || !assets.iter().all(|asset| {
+            entries
+                .get(&asset.file)
+                .is_some_and(|(_, len)| *len == asset.bytes.len() as u64)
+        })
+    {
         return Ok(false);
+    }
+    let mut on_disk = BTreeMap::new();
+    for (name, (path, _)) in entries {
+        let bytes =
+            fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        on_disk.insert(name, bytes);
     }
     Ok(assets.iter().all(|asset| {
         on_disk
@@ -172,10 +184,14 @@ fn publish(
         fs::rename(target, &retired)
             .map_err(|e| format!("Failed to retire {}: {e}", target.display()))?;
         if let Err(e) = fs::rename(staging, target) {
-            let _ = fs::rename(&retired, target);
-            return Err(format!(
-                "Failed to move the new publication into place: {e}"
-            ));
+            return Err(match fs::rename(&retired, target) {
+                Ok(()) => format!("Failed to move the new publication into place: {e}"),
+                Err(restore) => format!(
+                    "Failed to move the new publication into place: {e}; the previous \
+                     publication could not be restored either ({restore}) and remains at {}",
+                    retired.display()
+                ),
+            });
         }
         let _ = fs::remove_dir_all(&retired);
         return Ok(());

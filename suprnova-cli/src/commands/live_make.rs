@@ -102,14 +102,8 @@ impl Naming {
 
 /// Escape control characters before echoing untrusted input back.
 fn display_name(raw: &str) -> String {
-    raw.chars()
-        .map(|ch| {
-            if ch.is_control() {
-                ch.escape_default().to_string()
-            } else {
-                ch.to_string()
-            }
-        })
+    super::live_tool::display_text(raw)
+        .chars()
         .take(80)
         .collect()
 }
@@ -160,7 +154,9 @@ pub fn register_component(source: &str, snake: &str, pascal: &str) -> Result<Str
         .iter()
         .position(|line| line.trim_start().starts_with("pub fn registry()"))
         .ok_or_else(|| "no `pub fn registry()` found".to_string())?;
-    let build = lines[registry_start..]
+    let registry_end = function_end(&lines, registry_start)
+        .ok_or_else(|| "`pub fn registry()` never closes its body".to_string())?;
+    let build = lines[registry_start..registry_end]
         .iter()
         .position(|line| line.contains(".build()"))
         .map(|offset| registry_start + offset)
@@ -222,19 +218,46 @@ impl Plan {
     }
 }
 
-/// Undo the writes of one run, newest first: created files are removed and
-/// updated files get their previous content back.
-fn rollback(written: &[&Plan]) {
-    for plan in written.iter().rev() {
-        match plan {
-            Plan::Create(path, _) => {
-                let _ = fs::remove_file(path);
-            }
-            Plan::Update(path, _, previous) => {
-                let _ = secure_fs::write_atomic(path, previous.as_bytes());
+/// Index one past the line that closes the function whose signature starts
+/// at `start`, found by brace depth, so a search never leaves that body.
+fn function_end(lines: &[String], start: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut opened = false;
+    for (offset, line) in lines[start..].iter().enumerate() {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
             }
         }
+        if opened && depth <= 0 {
+            return Some(start + offset + 1);
+        }
     }
+    None
+}
+
+/// Undo the writes of one run, newest first: created files are removed and
+/// updated files get their previous content back. Returns every path whose
+/// restore itself failed, so the caller can report them instead of claiming
+/// nothing changed.
+fn rollback(written: &[&Plan]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for plan in written.iter().rev() {
+        let outcome: Result<(), String> = match plan {
+            Plan::Create(path, _) => fs::remove_file(path).map_err(|error| error.to_string()),
+            Plan::Update(path, _, previous) => secure_fs::write_atomic(path, previous.as_bytes())
+                .map_err(|error| error.to_string()),
+        };
+        if let Err(error) = outcome {
+            failed.push(format!("{} ({error})", plan.path().display()));
+        }
+    }
+    failed
 }
 
 pub fn run(name: String, dry_run: bool) {
@@ -346,10 +369,19 @@ fn run_inner(raw: &str, dry_run: bool) -> Result<(), String> {
     let mut written: Vec<&Plan> = Vec::with_capacity(plans.len());
     for plan in &plans {
         if let Err(e) = secure_fs::write_atomic(plan.path(), plan.content().as_bytes()) {
-            rollback(&written);
+            let failed = rollback(&written);
+            if failed.is_empty() {
+                return Err(format!(
+                    "{e}; rolled back the {} file(s) this run had written, nothing was changed",
+                    written.len()
+                ));
+            }
             return Err(format!(
-                "{e}; rolled back the {} file(s) this run had written, nothing was changed",
-                written.len()
+                "{e}; rolled back {} of the {} file(s) this run had written, but these could \
+                 not be restored and need attention: {}",
+                written.len() - failed.len(),
+                written.len(),
+                failed.join(", ")
             ));
         }
         written.push(plan);

@@ -252,6 +252,7 @@ impl Router {
             selection,
             mount.document_key.clone(),
             mount.build.clone(),
+            mount.kind,
         ))?;
         Ok(self)
     }

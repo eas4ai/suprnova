@@ -293,7 +293,9 @@ impl Counter {
    simbólicos; si el archivo del componente o la vista ya existen, avisa y no
    escribe nada en absoluto.
 2. Escribe `src/live/<snake>.rs` y `templates/live/<snake>.html` atómicamente; si
-   alguna escritura falla, cada archivo que la ejecución creó o cambió se revierte.
+   alguna escritura falla, cada archivo que la ejecución creó o cambió se revierte, y
+   cualquier archivo que no pudo restaurarse se nombra en el error en lugar de
+   informarse como intacto.
 3. Inserta `pub mod <snake>;` y `.register::<snake::Pascal>()?` en el builder
    `registry()` de `src/live/mod.rs`. Todo proyecto creado con `suprnova new` incluye
    ese módulo con un registro vacío, una función `routes()` que instala las rutas

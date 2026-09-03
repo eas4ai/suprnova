@@ -68,7 +68,10 @@ pub(crate) fn explain_helper_failure(kind: &str) -> String {
             );
             "No Live registry is bound in the application container".to_string()
         }
-        other => format!("The application helper failed: {other}"),
+        other => format!(
+            "The application helper failed: {}",
+            super::live_tool::display_text(&other.to_string())
+        ),
     }
 }
 
@@ -103,14 +106,16 @@ fn run_inner(
     for diagnostic in &session.diagnostics {
         let location = format!(
             "{}:{}:{}",
-            diagnostic.view.as_deref().unwrap_or("<no view>"),
+            super::live_tool::display_text(diagnostic.view.as_deref().unwrap_or("<no view>")),
             diagnostic.line,
             diagnostic.column
         );
-        let component = diagnostic.component.as_deref().unwrap_or("<no component>");
+        let component = super::live_tool::display_text(
+            diagnostic.component.as_deref().unwrap_or("<no component>"),
+        );
         let message = format!(
             "{location}: {} [{}] in {component}",
-            diagnostic.code,
+            super::live_tool::display_text(&diagnostic.code),
             diagnostic.severity.as_str()
         );
         match diagnostic.severity {

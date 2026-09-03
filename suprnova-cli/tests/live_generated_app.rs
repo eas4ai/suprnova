@@ -70,10 +70,13 @@ fn a_generated_application_is_live_ready() {
     assert_eq!(lib.matches("pub mod live;").count(), 1, "{lib}");
     let bootstrap = read(project.join("src/bootstrap.rs"));
     assert!(bootstrap.contains("crate::live::registry()"), "{bootstrap}");
+    // Live verifies the browser's origin proof on its own; the scaffold keeps
+    // the default policy so ordinary routes keep token validation.
     assert!(
-        bootstrap.contains("OriginPolicy::SameOriginOnly"),
+        bootstrap.contains("global_middleware!(CsrfMiddleware::new());"),
         "{bootstrap}"
     );
+    assert!(!bootstrap.contains("with_origin_policy"), "{bootstrap}");
     let main = read(project.join("cmd/main.rs"));
     assert!(
         main.contains(".try_routes(|| live::routes(routes::register()))"),

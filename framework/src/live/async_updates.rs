@@ -82,6 +82,9 @@ pub(crate) const MIN_DOCUMENT_INSTANCE_BYTES: usize = 16;
 pub(crate) const MAX_DOCUMENT_INSTANCE_BYTES: usize = 64;
 pub(crate) const MAX_CONTROL_NONCE_BYTES: usize = 128;
 const MAX_TRANSPORTS_PER_SCOPE: usize = 8;
+/// Process-wide bound on live document transports across every scope, so
+/// rotating sessions cannot grow the transport table without limit.
+const MAX_TRANSPORTS_TOTAL: usize = 4_096;
 const MAX_ISSUED_PER_SCOPE: usize = 512;
 const MAX_LOG_ENTRIES: usize = 256;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -719,7 +722,9 @@ impl AsyncState {
             transport.credential_expires_at = transport.credential_expires_at.max(expires_at);
             transport.credential.clone()
         } else {
-            if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE {
+            if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE
+                || tables.transports.len() >= MAX_TRANSPORTS_TOTAL
+            {
                 return Err(AsyncErrorKind::TransportLimit);
             }
             let credential = (kind == TransportKind::Sse).then(mint_credential);
@@ -1082,9 +1087,11 @@ impl AsyncState {
         let transports_in_scope = tables
             .transports
             .values()
-            .filter(|transport| transport.scope == scope && transport.reader_active)
+            .filter(|transport| transport.scope == scope)
             .count();
-        if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE {
+        if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE
+            || tables.transports.len() >= MAX_TRANSPORTS_TOTAL
+        {
             return Err(AsyncErrorKind::TransportLimit);
         }
         let handle = DocumentTransportHandle::from_bytes(&random_bytes(16))

@@ -662,6 +662,7 @@ pub fn register_live_mount_for_test<C: super::ComponentContract>(
         selection,
         document_key,
         BuildId::parse("test-build").map_err(|_| fixture_error())?,
+        super::document::LiveMountKind::PublicSeed,
     ))
 }
 
@@ -980,6 +981,7 @@ impl LiveContextHarness {
             suprnova_live::mount::DocumentMountKey::parse(current_slot.as_str())
                 .map_err(|_| test_error())?,
             BuildId::parse("test-build").map_err(|_| test_error())?,
+            super::document::LiveMountKind::PublicSeed,
         ))?;
         runtime.finalize_mount_catalog()?;
 

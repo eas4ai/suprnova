@@ -31,6 +31,8 @@ use super::guard::Auth;
 pub struct AuthMiddleware {
     /// Path to redirect to if not authenticated (None = return 401)
     redirect_to: Option<String>,
+    /// Let anonymous requests continue without principal evidence.
+    optional: bool,
     /// Named guard to check (None = the sync session-backed default-guard
     /// fast path; `Some(name)` checks that guard via the `AuthManager`).
     guard: Option<String>,
@@ -43,6 +45,23 @@ impl AuthMiddleware {
     pub fn new() -> Self {
         Self {
             redirect_to: None,
+            optional: false,
+            guard: None,
+        }
+    }
+
+    /// Create middleware that records the principal when a user is
+    /// authenticated and lets anonymous requests continue without one.
+    ///
+    /// Use it on routes that serve both signed-in and anonymous visitors, such
+    /// as the reserved Live routes of an application whose public-seed
+    /// islands accept anonymous actions. Nothing downstream is granted by the
+    /// absence: an identity-bound Live mount still refuses a request without
+    /// principal evidence, and ordinary handlers see `Auth::check()` as false.
+    pub fn optional() -> Self {
+        Self {
+            redirect_to: None,
+            optional: true,
             guard: None,
         }
     }
@@ -60,6 +79,7 @@ impl AuthMiddleware {
     pub fn redirect_to(path: impl Into<String>) -> Self {
         Self {
             redirect_to: Some(path.into()),
+            optional: false,
             guard: None,
         }
     }
@@ -112,6 +132,9 @@ impl Middleware for AuthMiddleware {
         }
 
         // User is not authenticated
+        if self.optional {
+            return next(request).await;
+        }
         match &self.redirect_to {
             Some(path) => {
                 // For Inertia requests, return 409 with redirect location

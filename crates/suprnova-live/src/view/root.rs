@@ -65,14 +65,18 @@ pub(crate) struct IslandRootInput {
     pub(crate) stream: Option<String>,
 }
 
-/// The first stream a component declares, if any; the runtime honors one
-/// island-owned stream directive per island.
+/// The stream the island root subscribes on the component's behalf.
+///
+/// The root carries one island-owned `live:stream` directive, so only a
+/// component that declares exactly one stream gets it. A component with
+/// several streams gets none and subscribes each through the runtime's
+/// registered calls, rather than having one chosen silently for it.
 #[must_use]
 pub(crate) fn declared_stream(metadata: &crate::metadata::ComponentMetadata) -> Option<String> {
-    metadata
-        .subscriptions()
-        .first()
-        .map(|subscription| subscription.stream().as_str().to_owned())
+    match metadata.subscriptions() {
+        [only] => Some(only.stream().as_str().to_owned()),
+        _ => None,
+    }
 }
 
 pub(crate) fn assemble_island_root(

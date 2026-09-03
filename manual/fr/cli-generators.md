@@ -289,7 +289,9 @@ impl Counter {
    symboliques ; si le fichier du composant ou la vue existe déjà, il avertit et
    n'écrit rien du tout.
 2. Écrit `src/live/<snake>.rs` et `templates/live/<snake>.html` de façon atomique ;
-   si une écriture échoue, chaque fichier créé ou modifié par l'exécution est annulé.
+   si une écriture échoue, chaque fichier créé ou modifié par l'exécution est annulé,
+   et tout fichier qui n'a pas pu être restauré est nommé dans l'erreur au lieu
+   d'être signalé comme intact.
 3. Insère `pub mod <snake>;` et `.register::<snake::Pascal>()?` dans le builder
    `registry()` de `src/live/mod.rs`. Tout projet créé par `suprnova new` livre ce
    module avec un registre vide, une fonction `routes()` qui installe les routes Live

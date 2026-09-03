@@ -10,14 +10,14 @@ pub mod components;
 pub mod pages;
 pub mod providers;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware, RegistryError};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::{
-    AuthMiddleware, FrameworkError, RateLimitMiddleware, RateLimiterDriver, Request, Router,
-    SlidingWindowConfig, container::App,
+    AuthMiddleware, BackendErrorPolicy, FrameworkError, RateLimitMiddleware, RateLimiterDriver,
+    Request, Router, SlidingWindowConfig, container::App,
 };
 
 use components::activity_feed::ActivityFeed;
@@ -92,9 +92,14 @@ impl PublicMounts {
     }
 }
 
+/// One limiter shared by every Live route, resolved once: separate
+/// instances would give each route its own quota.
 fn limiter() -> Arc<dyn RateLimiterDriver> {
-    App::resolve_make::<dyn RateLimiterDriver>()
-        .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()))
+    static LIMITER: OnceLock<Arc<dyn RateLimiterDriver>> = OnceLock::new();
+    Arc::clone(LIMITER.get_or_init(|| {
+        App::resolve_make::<dyn RateLimiterDriver>()
+            .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()))
+    }))
 }
 
 fn live_rate_limit() -> RateLimitMiddleware<impl Fn(&Request) -> String + Send + Sync + 'static> {
@@ -106,6 +111,7 @@ fn live_rate_limit() -> RateLimitMiddleware<impl Fn(&Request) -> String + Send +
         },
         |request: &Request| format!("live:ip:{}", request.ip().unwrap_or_else(|| "anon".into())),
     )
+    .on_backend_error(BackendErrorPolicy::FailClosed)
 }
 
 fn tenant() -> LiveTenantMiddleware {
@@ -119,9 +125,12 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let dashboard = DashboardMounts::declare()?;
     let public = PublicMounts::declare()?;
 
+    // Optional authentication: a signed-in principal is recorded, an
+    // anonymous visitor continues, and the mount kind decides. Public seeds
+    // accept the anonymous action; identity-bound islands refuse it.
     let router = router.try_live_with(|guard| {
         guard
-            .middleware(AuthMiddleware::new())
+            .middleware(AuthMiddleware::optional())
             .middleware(tenant())
             .middleware(live_rate_limit())
     })?;

@@ -44,6 +44,10 @@ use crate::console::CommandEntry;
 use crate::error::FrameworkError;
 
 /// Bytes kept free so the end marker always fits under the total cap.
+/// Envelope, digest, and metadata bytes that surround one encoded asset on
+/// its protocol line.
+const ASSET_LINE_OVERHEAD_BYTES: usize = 1_024;
+
 const END_MARKER_RESERVE: usize = 1024;
 /// Content type the manifest is published with.
 const MANIFEST_CONTENT_TYPE: &str = "application/json";
@@ -256,12 +260,18 @@ pub fn execute(request: &ToolRequest, sink: &mut dyn Write) -> Result<(), Toolin
         },
         error: failure.map(|error| error.kind().as_str().to_owned()),
     };
-    emitter.emit(Body::End(report))?;
-    emitter
-        .sink
-        .flush()
-        .map_err(|_| ToolingError::new(ToolingErrorKind::OutputFailed))?;
-    failure.map_or(Ok(()), Err)
+    // The operation's own failure is the one the caller must see; a failing
+    // end marker or flush only replaces it when the operation succeeded.
+    let end = emitter.emit(Body::End(report)).and_then(|()| {
+        emitter
+            .sink
+            .flush()
+            .map_err(|_| ToolingError::new(ToolingErrorKind::OutputFailed))
+    });
+    match (failure, end) {
+        (Some(failure), _) => Err(failure),
+        (None, end) => end,
+    }
 }
 
 fn sorted_names(registry: &LiveRegistry) -> Result<Vec<ComponentName>, ToolingError> {
@@ -567,7 +577,16 @@ fn run_assets(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
         ));
     }
     let total: u64 = reports.iter().map(|report| report.bytes).sum();
-    if reports.len() > MAX_ASSETS || total > MAX_ASSET_BYTES as u64 {
+    // Each asset travels base64-encoded on one line, so the effective bound
+    // is the encoded size against the line cap, not the raw byte count.
+    let encoded_line_fits = reports.iter().all(|report| {
+        report
+            .content
+            .len()
+            .saturating_add(ASSET_LINE_OVERHEAD_BYTES)
+            <= MAX_LINE_BYTES
+    });
+    if reports.len() > MAX_ASSETS || total > MAX_ASSET_BYTES as u64 || !encoded_line_fits {
         return Err(ToolingError::new(ToolingErrorKind::OutputLimitExceeded));
     }
     for report in reports {

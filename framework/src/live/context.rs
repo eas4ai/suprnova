@@ -13,7 +13,7 @@ use suprnova_live::host::{
     LiveRequestContextCandidate, MountSelection, PrincipalFingerprint, SessionFingerprint,
     TenantFingerprint,
 };
-use suprnova_live::identity::{IslandSlot, RouteIdentity, ScopeFingerprint};
+use suprnova_live::identity::{IslandSlot, RouteIdentity, ScopeFingerprint, UnixMillis};
 use suprnova_live::upload::UploadAuthorizationPort;
 
 use crate::{FrameworkError, Request};
@@ -235,9 +235,28 @@ pub(crate) fn candidate(
 }
 
 /// Returns the normalized identity facts of one attested request without a mount.
+///
+/// A mount-bound request proves its complete check set inside the engine
+/// validator; this boundary has no mount, so it requires the same complete,
+/// unexpired, well-formed check set itself before any fact is trusted.
 pub(crate) fn request_host_scope_facts(
     request: &Request,
+    now: UnixMillis,
 ) -> Result<HostScopeFacts, FrameworkError> {
+    let identity = request.live_request_identity();
+    let attestation = request.live_security_attestation();
+    if !attestation.order_valid() {
+        return Err(context_error());
+    }
+    let mut checks = HostCheckFacts::new();
+    for (security, engine) in check_pairs() {
+        if let Some(fact) = attestation.fact(identity, security) {
+            checks
+                .record(engine, CheckFact::new(fact.disposition, fact.expires_at))
+                .map_err(|_| context_error())?;
+        }
+    }
+    checks.require_complete(now).map_err(|_| context_error())?;
     scope_facts(request, None)
 }
 
