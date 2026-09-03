@@ -57,7 +57,13 @@ a failed run, exact idempotent publication, drift refusal and replacement,
 and digest mismatches), the existing console and Live suites, zero new Clippy findings,
 and the documentation contracts. The generated application's bootstrap does
 not yet bind the registry; plan Task 10 wires that so a fresh scaffold passes
-`live:check` out of the box.
+`live:check` out of the box. The repository gate run for this checkpoint also
+surfaced a pre-existing race in the framework quarantine store: a chunk
+write completed after `write_all` while Tokio's buffered file finished the
+operating-system write on the blocking pool, so a whole-file verification
+could read a short file and reject the checksum. The store now flushes before
+a write operation completes (`framework/src/live/ports/upload_provider.rs`),
+and both upload suites passed 25 consecutive runs after the change.
 
 ## 2026-09-02 -- Framework artifact delivery and document bootstrap
 

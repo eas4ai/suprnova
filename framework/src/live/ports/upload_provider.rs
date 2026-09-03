@@ -356,7 +356,14 @@ impl QuarantineStore for SuprnovaQuarantineStore {
             file.seek(std::io::SeekFrom::Start(offset))
                 .await
                 .map_err(provider_error)?;
-            file.write_all(bytes.as_ref()).await.map_err(provider_error)
+            file.write_all(bytes.as_ref())
+                .await
+                .map_err(provider_error)?;
+            // Tokio files buffer writes and complete them on the blocking pool
+            // after `write_all` returns; flushing makes the bytes visible (and
+            // any write error reportable) before this operation completes and
+            // a verification read can start.
+            file.flush().await.map_err(provider_error)
         })
     }
 
