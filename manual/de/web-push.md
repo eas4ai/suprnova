@@ -157,20 +157,33 @@ missbraucht werden kann.
 
 `WebPushClient::new` wendet einen 30-Sekunden-Timeout pro Anfrage an.
 Wenn Sie eine andere Transport-Policy brauchen - Firmen-Proxy,
-gepinntes TLS, kürzerer Timeout - bauen Sie einen `reqwest::Client`
-und verwenden Sie `WebPushClient::with_client`:
+gepinntes TLS, kürzerer Timeout - übergeben Sie einen
+`reqwest::ClientBuilder` an `WebPushClient::with_client_builder`.
+Jede Builder-Option wird übernommen, aber die Redirect-Policy wird
+zwangsweise deaktiviert: Ein validierter Endpunkt, der mit 3xx
+antwortet, darf den POST nicht an eine nicht validierte URL
+weiterleiten, deshalb übernimmt die Library die
+Redirect-Einstellung des Aufrufers nicht.
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` nimmt einen bereits gebauten Client
+entgegen, dessen Redirect-Policy die Library nicht prüfen kann.
+Sends unter der Default-`Strict`-Policy werden für einen solchen
+Transport noch vor jeder I/O abgelehnt - wechseln Sie zu
+`with_client_builder`, oder akzeptieren Sie das Risiko explizit mit
+`.allow_unconfined_redirects()`, wenn bekannt ist, dass der Client
+keinen Redirects folgt.
 
 ## WebPushChannel in die Benachrichtigungen verdrahten
 

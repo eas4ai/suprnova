@@ -154,21 +154,33 @@ transformée en arme.
 
 `WebPushClient::new` applique un délai d'attente de 30 secondes par
 requête. Si vous avez besoin d'une politique de transport différente -
-proxy d'entreprise, TLS épinglé, délai d'attente plus court -
-construisez un `reqwest::Client` et utilisez
-`WebPushClient::with_client` :
+proxy d'entreprise, TLS épinglé, délai d'attente plus court - passez
+un `reqwest::ClientBuilder` à `WebPushClient::with_client_builder`.
+Toutes les options du builder sont honorées, mais la politique de
+redirection est désactivée de force : un endpoint validé qui répond
+3xx ne doit pas faire rebondir le POST vers une URL non validée, la
+bibliothèque n'accepte donc pas le réglage de redirection de
+l'appelant.
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` prend un client déjà construit dont la
+bibliothèque ne peut pas inspecter la politique de redirection. Les
+envois sous la politique `Strict` par défaut sont refusés pour un
+tel transport avant toute I/O - passez à `with_client_builder`, ou
+acceptez explicitement le risque avec
+`.allow_unconfined_redirects()` quand il est établi que le client ne
+suit pas les redirections.
 
 ## Câbler WebPushChannel dans les notifications
 

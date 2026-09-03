@@ -151,20 +151,33 @@ convierta en un arma.
 
 `WebPushClient::new` aplica un timeout de 30 segundos por solicitud.
 Si necesitas una política de transporte distinta - un proxy
-corporativo, TLS anclado, un timeout más corto - construye un
-`reqwest::Client` y usa `WebPushClient::with_client`:
+corporativo, TLS anclado, un timeout más corto - pasa un
+`reqwest::ClientBuilder` a `WebPushClient::with_client_builder`.
+Todas las opciones del builder se respetan, pero la política de
+redirección se desactiva forzosamente: un endpoint validado que
+responde 3xx no debe rebotar el POST a una URL no validada, así
+que la librería no acepta la configuración de redirección del
+llamador.
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` acepta un cliente ya construido cuya
+política de redirección la librería no puede inspeccionar. Los
+envíos bajo la política `Strict` por defecto se rechazan para ese
+transporte antes de cualquier I/O - cambia a
+`with_client_builder`, o acepta el riesgo explícitamente con
+`.allow_unconfined_redirects()` cuando se sabe que el cliente no
+sigue redirecciones.
 
 ## Conectar WebPushChannel con las notificaciones
 

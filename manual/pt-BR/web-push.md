@@ -148,20 +148,33 @@ impedir que uma tabela de assinaturas adulterada seja usada como arma.
 
 `WebPushClient::new` aplica um timeout de 30 segundos por solicitação.
 Se você precisa de uma política de transporte diferente - proxy
-corporativo, TLS fixado, timeout mais curto - construa um
-`reqwest::Client` e use `WebPushClient::with_client`:
+corporativo, TLS fixado, timeout mais curto - passe um
+`reqwest::ClientBuilder` para `WebPushClient::with_client_builder`.
+Todas as opções do builder são respeitadas, mas a política de
+redirecionamento é desativada à força: um endpoint validado que
+responde 3xx não deve rebater o POST para uma URL não validada,
+por isso a biblioteca não aceita a configuração de
+redirecionamento do chamador.
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` recebe um cliente já construído cuja
+política de redirecionamento a biblioteca não consegue
+inspecionar. Envios sob a política `Strict` padrão são recusados
+para esse transporte antes de qualquer I/O - mude para
+`with_client_builder`, ou aceite o risco explicitamente com
+`.allow_unconfined_redirects()` quando se sabe que o cliente não
+segue redirecionamentos.
 
 ## Conecte o WebPushChannel às notificações
 
