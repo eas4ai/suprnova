@@ -48,6 +48,9 @@ pub mod protocol;
 pub mod random;
 /// Explicit immutable component registration and contract lookup.
 pub mod registry;
+/// Typed Complete representations of canonical documents, their policy,
+/// variance, key, entry, storage, generation, coherence, and HTTP contracts.
+pub mod render_cache;
 /// Executor-neutral bounded queues, permits, cancellation, and lifecycle ownership.
 pub mod resource;
 /// Versioned signed snapshots and verified hydration capabilities.
