@@ -1,10 +1,42 @@
 //! Request-scoped dependency collector: a Tokio task-local that framework
 //! reads register into. Absent outside a scope, so ordinary requests pay
 //! one `try_with` per read and nothing else.
+//!
+//! # Limitations, by design
+//!
+//! - **Config and Feature identities have no producer.** No write path
+//!   advances a config or feature generation, so observing them would spend
+//!   the bounded observation budget while contributing nothing to
+//!   invalidation - the same reasoning as ruling R24 on query classes.
+//!   `Config::get::<T>()` is also type-keyed rather than name-keyed, so
+//!   there is no stable name to build an identity from at that seam.
+//! - **[`observe_secret_context_read`] has no automatic producer.**
+//!   `Config::get::<T>()` returns whole typed structs, so a secret read is
+//!   indistinguishable from any other configuration read at that seam;
+//!   hooking it there would mark either everything or nothing as
+//!   secret-touching. This flag exists for application code and later
+//!   adapters to set explicitly - it is not automatic protection.
+//! - **Per-connection reads collapse into one table identity.**
+//!   [`observe_table_read`] ignores the connection name, so the same table
+//!   read on two different connections shares one identity. This
+//!   over-invalidates, which is safe; tenancy is handled at the key level
+//!   through the Tenant variance dimension, not here.
 
 use std::sync::{Arc, Mutex};
 
 use suprnova_live::render_cache::generation::{DependencyIdentity, MAX_OBSERVATIONS};
+
+/// The collector's own cap, one below [`MAX_OBSERVATIONS`].
+///
+/// [`suprnova_live::render_cache::generation::ObservationWindow::open`]
+/// always seeds `DependencyIdentity::Broad` before a representation's own
+/// observations are added, and that seed counts toward the same
+/// [`MAX_OBSERVATIONS`] budget. A collector report holding exactly
+/// `MAX_OBSERVATIONS` identities (none of them `Broad`) would therefore
+/// overflow the window the moment `Broad` is folded in, and could never be
+/// closed. Reserving one slot here keeps a non-overflowed report always
+/// closeable. Do not raise this back to `MAX_OBSERVATIONS`.
+const MAX_COLLECTED: usize = MAX_OBSERVATIONS - 1;
 
 /// Context flags the collector accumulates.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -17,7 +49,9 @@ pub struct CollectedContext {
     pub authorization_read: bool,
     /// Secret configuration was read.
     pub secret_context_read: bool,
-    /// Observation bound exceeded; the response must not be stored.
+    /// Observation bound exceeded, or a dependency could not be encoded
+    /// into an identity at all; the report is incomplete either way and
+    /// the response it describes must not be stored.
     pub overflowed: bool,
 }
 
@@ -30,6 +64,29 @@ pub struct CollectorReport {
     pub context: CollectedContext,
     /// Undeclared request context names that affected rendering.
     pub undeclared: Vec<String>,
+}
+
+impl CollectorReport {
+    /// The observed identities, or `None` when the report overflowed (bound
+    /// exceeded, or a dependency could not be encoded).
+    ///
+    /// This is the only way callers should read `observed` for the purpose
+    /// of deciding whether to store a response: an overflowed report's
+    /// `observed` field still holds a full-looking list, but it is missing
+    /// whichever identities did not fit or could not be built, and those can
+    /// include a broader identity (a whole-table read) than anything that
+    /// did fit. Storing on that partial list risks a cached response that
+    /// no write can ever invalidate. Prefer `storable().is_some()` to
+    /// `!context.overflowed` so a future field never has to be
+    /// remembered separately.
+    #[must_use]
+    pub fn storable(&self) -> Option<&[DependencyIdentity]> {
+        if self.context.overflowed {
+            None
+        } else {
+            Some(&self.observed)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -63,9 +120,22 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 }
 
 /// Whether a collector is active on this task.
+///
+/// Read-site hooks check this before doing any work to build an identity
+/// (a bounds scan, a `String` allocation, a JSON encode) so that on an
+/// ordinary request - no [`Collector::scope`] active - a framework read
+/// costs exactly one cheap `try_with` and nothing else.
 #[must_use]
 pub fn is_active() -> bool {
     COLLECTOR.try_with(|_| ()).is_ok()
+}
+
+/// Marks the current report incomplete: either the observation bound was
+/// reached, or a dependency could not be encoded into an identity at all.
+/// Either way the report must not be treated as a complete accounting of
+/// what the representation depended on.
+fn mark_incomplete() {
+    with_state(|state| state.report.context.overflowed = true);
 }
 
 /// Records a typed dependency; bounded, idempotent, no-op outside a scope.
@@ -74,7 +144,7 @@ pub fn observe(identity: DependencyIdentity) {
         if state.seen.contains(&identity) {
             return;
         }
-        if state.seen.len() >= MAX_OBSERVATIONS {
+        if state.seen.len() >= MAX_COLLECTED {
             state.report.context.overflowed = true;
             return;
         }
@@ -84,28 +154,63 @@ pub fn observe(identity: DependencyIdentity) {
 }
 
 /// A read of one table.
-pub fn observe_table_read(table: &str) {
-    if let Ok(identity) = DependencyIdentity::try_table(table) {
-        observe(identity);
-    }
-}
-
-/// A record read by primary key bytes.
-pub fn observe_record_read(table: &str, key: &[u8]) {
-    if let Ok(identity) = DependencyIdentity::try_record(table, key) {
-        observe(identity);
-    }
-}
-
-/// A record read identified by its JSON-encoded primary key value.
 ///
-/// This is the only place a record's primary key becomes bytes: the write
-/// side advances a record's generation using
-/// `model.primary_key_value_json().to_string()`, so the read side must
-/// encode the same value the same way or the two identities never match and
-/// record-level invalidation silently never fires.
+/// A table or record name that fails [`DependencyIdentity`]'s bounds marks
+/// the report incomplete instead of silently recording nothing: a
+/// dependency that cannot be named is not a dependency that can be safely
+/// ignored.
+pub fn observe_table_read(table: &str) {
+    if !is_active() {
+        return;
+    }
+    match DependencyIdentity::try_table(table) {
+        Ok(identity) => observe(identity),
+        Err(_) => mark_incomplete(),
+    }
+}
+
+/// A record read by primary key bytes. See [`observe_table_read`] for the
+/// bound-failure behaviour.
+pub fn observe_record_read(table: &str, key: &[u8]) {
+    if !is_active() {
+        return;
+    }
+    match DependencyIdentity::try_record(table, key) {
+        Ok(identity) => observe(identity),
+        Err(_) => mark_incomplete(),
+    }
+}
+
+/// The canonical [`DependencyIdentity::Record`] for a table and a
+/// JSON-encoded primary key value.
+///
+/// This is the only place a record's primary key becomes bytes:
+/// `key.to_string()` (the JSON value's `Display` form, e.g. `42` for a
+/// number or `"abc"` with the quotes retained for a string), UTF-8 encoded.
+/// The write side that advances a record's generation on a model write
+/// **must** build its identity through this same function - encoding the
+/// key any other way means a write's identity never matches a read's
+/// observed identity, and record-level invalidation silently never fires
+/// for that table. See ruling R29.
+///
+/// Returns `None` when the table name or the encoded key falls outside
+/// [`DependencyIdentity::try_record`]'s bounds.
+#[must_use]
+pub fn record_identity(table: &str, key: &serde_json::Value) -> Option<DependencyIdentity> {
+    DependencyIdentity::try_record(table, key.to_string().as_bytes()).ok()
+}
+
+/// A record read identified by its JSON-encoded primary key value. See
+/// [`record_identity`] for the encoding and [`observe_table_read`] for the
+/// bound-failure behaviour.
 pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
-    observe_record_read(table, key.to_string().as_bytes());
+    if !is_active() {
+        return;
+    }
+    match record_identity(table, key) {
+        Some(identity) => observe(identity),
+        None => mark_incomplete(),
+    }
 }
 
 /// The principal was resolved or checked.
@@ -120,7 +225,10 @@ pub fn observe_session_read() {
 pub fn observe_authorization_read() {
     with_state(|state| state.report.context.authorization_read = true);
 }
-/// Secret configuration was read.
+/// Secret configuration was read. No framework read hooks this
+/// automatically (see the module documentation); application code and
+/// later adapters call it explicitly to mark a representation as having
+/// touched secret configuration.
 pub fn observe_secret_context_read() {
     with_state(|state| state.report.context.secret_context_read = true);
 }

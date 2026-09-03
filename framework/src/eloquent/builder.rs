@@ -3850,6 +3850,7 @@ where
         mut self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         self.limit = Some(2);
@@ -3958,10 +3959,13 @@ where
         page_param: &str,
         per_page: u64,
     ) -> Result<crate::pagination::LengthAwarePaginator<M>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
         if per_page == 0 {
             return Err(FrameworkError::param("per_page"));
         }
+        // Observed here, before the COUNT phase, rather than only relying
+        // on the page phase's `get()` call: a COUNT that itself fails
+        // returns before `get()` ever runs, and the table was still read.
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         let page = current_page_from_request(page_param);
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
@@ -4550,6 +4554,7 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4572,6 +4577,7 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Vec<T>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4596,6 +4602,7 @@ where
         key_col: impl IntoColumn,
         val_col: impl IntoColumn,
     ) -> Result<HashMap<K, V>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4636,6 +4643,7 @@ where
     /// key that won't decode means the declared `key_type` disagrees
     /// with the column, which is a bug worth surfacing.
     pub async fn model_keys(self) -> Result<Vec<<M as EloquentModel>::Key>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4689,6 +4697,7 @@ where
         self,
         expr: &str,
     ) -> Result<Option<T>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;

@@ -236,10 +236,16 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let hydrated = row.map(Self::try_from_storage).transpose()?;
         if let Some(ref m) = hydrated {
-            crate::render_cache::collector::observe_record_read_json(
-                Self::TABLE,
-                &m.primary_key_value_json(),
-            );
+            // Guarded on `is_active()` before computing
+            // `primary_key_value_json()`/`to_string()` - both would
+            // otherwise run unconditionally on every `find`, including on
+            // the (common) request that has no collector scope at all.
+            if crate::render_cache::collector::is_active() {
+                crate::render_cache::collector::observe_record_read_json(
+                    Self::TABLE,
+                    &m.primary_key_value_json(),
+                );
+            }
             Self::__dispatch_retrieved(m).await?;
         }
         Ok(hydrated)
