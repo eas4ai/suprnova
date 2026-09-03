@@ -10,7 +10,9 @@ use suprnova_live::render_cache::entry::{
 };
 use suprnova_live::render_cache::generation::GenerationSet;
 use suprnova_live::render_cache::key::RenderKey;
-use suprnova_live::render_cache::variance::VarianceDescriptor;
+use suprnova_live::render_cache::variance::{
+    DimensionValue, VarianceDescriptor, VarianceDimension,
+};
 use suprnova_live::render_cache::{RenderCacheErrorKind, RepresentationClass};
 
 fn keys_from(root: u8) -> SnapshotKeyRing {
@@ -30,12 +32,16 @@ fn keys() -> SnapshotKeyRing {
 }
 
 fn entry(keys: &SnapshotKeyRing) -> CompleteEntry {
+    entry_with_variance(keys, VarianceDescriptor::new())
+}
+
+fn entry_with_variance(keys: &SnapshotKeyRing, variance: VarianceDescriptor) -> CompleteEntry {
     let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
     CompleteEntry::new(
         EntryHeader {
             key: RenderKey::for_test(keys, "/hello"),
             class: RepresentationClass::PublicShared,
-            variance: VarianceDescriptor::new(),
+            variance,
             published_at_ms: 1_000,
             fresh_ms: 60_000,
             stale_servable_ms: 0,
@@ -150,4 +156,25 @@ fn inspection_reads_metadata_without_the_body() {
         !format!("{inspection:?}").contains("hello"),
         "the body never appears in inspection"
     );
+}
+
+#[test]
+fn a_declared_application_dimension_round_trips_through_encode_and_decode() {
+    let keys = keys();
+    let mut variance = VarianceDescriptor::new();
+    variance
+        .declare(
+            VarianceDimension::Application("checkout".to_owned()),
+            DimensionValue::Public("v2".to_owned()),
+        )
+        .expect("declare");
+    let original = entry_with_variance(&keys, variance);
+    let encoded = encode(&original, &keys).expect("encode");
+    let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");
+    assert_eq!(
+        decoded.header(),
+        original.header(),
+        "the declared application dimension survives the round trip"
+    );
+    assert_eq!(decoded.header().variance.dimensions().len(), 1);
 }

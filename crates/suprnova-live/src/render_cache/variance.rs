@@ -16,7 +16,7 @@ pub const MAX_DIMENSION_VALUE_BYTES: usize = 256;
 pub const MAX_DIMENSIONS: usize = 24;
 
 /// A request or application dimension allowed to change bytes or metadata.
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum VarianceDimension {
     /// Trusted host, where deployment policy makes it meaningful.
     Host,
@@ -61,6 +61,55 @@ impl VarianceDimension {
             Self::FeatureVersion => "feature_version".to_owned(),
             Self::ConfigVersion => "config_version".to_owned(),
             Self::Application(name) => format!("app:{name}"),
+        }
+    }
+}
+
+/// Serializes as the dimension's canonical name, the same string form
+/// [`VarianceDescriptor::canonical_bytes`] already uses to feed the lookup
+/// key. This keeps the stored header and the key digest on one naming
+/// scheme, and a plain string is the only representation `serde_json`
+/// accepts as a JSON object key, which every declared dimension must be
+/// once it appears in `VarianceDescriptor`'s transparent map form.
+impl serde::Serialize for VarianceDimension {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.canonical_name())
+    }
+}
+
+/// The exact inverse of [`VarianceDimension`]'s `Serialize` impl: the eight
+/// fixed names map to their unit variants, `app:<name>` maps to
+/// `Application(<name>)`, and anything else (including a bare `app:` with an
+/// empty name, which no encoder produces) is rejected.
+impl<'de> serde::Deserialize<'de> for VarianceDimension {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        match text.as_str() {
+            "host" => Ok(Self::Host),
+            "locale" => Ok(Self::Locale),
+            "media" => Ok(Self::Media),
+            "encoding" => Ok(Self::Encoding),
+            "tenant" => Ok(Self::Tenant),
+            "principal" => Ok(Self::Principal),
+            "feature_version" => Ok(Self::FeatureVersion),
+            "config_version" => Ok(Self::ConfigVersion),
+            _ => {
+                let name = text
+                    .strip_prefix("app:")
+                    .ok_or_else(|| serde::de::Error::custom("unknown variance dimension name"))?;
+                if name.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "application dimension name must not be empty",
+                    ));
+                }
+                Ok(Self::Application(name.to_owned()))
+            }
         }
     }
 }

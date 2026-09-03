@@ -198,6 +198,34 @@ fn anonymous_and_authenticated_variants_cannot_collide() {
 }
 
 #[test]
+fn every_variance_dimension_round_trips_through_its_canonical_name_and_rejects_unknown_text() {
+    let dimensions = [
+        VarianceDimension::Host,
+        VarianceDimension::Locale,
+        VarianceDimension::Media,
+        VarianceDimension::Encoding,
+        VarianceDimension::Tenant,
+        VarianceDimension::Principal,
+        VarianceDimension::FeatureVersion,
+        VarianceDimension::ConfigVersion,
+        VarianceDimension::Application("checkout".to_owned()),
+    ];
+    for dimension in dimensions {
+        let json = serde_json::to_string(&dimension).expect("serialize");
+        let decoded: VarianceDimension = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, dimension, "round trip for {json}");
+    }
+    assert!(
+        serde_json::from_str::<VarianceDimension>("\"nonsense\"").is_err(),
+        "an unknown name never parses"
+    );
+    assert!(
+        serde_json::from_str::<VarianceDimension>("\"app:\"").is_err(),
+        "a bare app: with no name never parses"
+    );
+}
+
+#[test]
 fn tenant_and_authorization_observations_both_accumulate() {
     let keys = keys_from(7);
     let observed = ObservedContext {
