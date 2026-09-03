@@ -22,6 +22,7 @@ reference/
 docs/
 .claude/
 .codex
+.agents/
 .gitnexus
 
 # Local-only AI review notes (Grok, Opus, etc.) - working artifacts, not source
