@@ -11,6 +11,11 @@ pub mod policy;
 /// that only preserves or reduces sharing.
 pub mod variance;
 
+/// Canonical, bounded, versioned lookup keys derived from representation
+/// identity.
+pub mod key;
+
+pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
     QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
