@@ -47,10 +47,10 @@ pub type Generation = u64;
 /// A typed dependency of a representation.
 ///
 /// The checked constructors (`try_table`/`table`, `try_record`/`record`,
-/// `query_class`, `try_config`/`config`, `try_feature`/`feature`) enforce
-/// the name and key bounds; constructing a variant directly bypasses those
-/// bounds entirely, so callers inside this crate should prefer the
-/// constructors over building a variant by hand.
+/// `try_query_class`/`query_class`, `try_config`/`config`,
+/// `try_feature`/`feature`) enforce the name and key bounds; constructing a
+/// variant directly bypasses those bounds entirely, so callers inside this
+/// crate should prefer the constructors over building a variant by hand.
 #[derive(
     Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -133,16 +133,21 @@ impl DependencyIdentity {
         })
     }
 
-    /// A query class identity; panics only on an unbounded name.
+    /// A query class identity; panics only on an unbounded name, so callers
+    /// with untrusted names use [`Self::try_query_class`].
     #[must_use]
     pub fn query_class(table: &str, class: &str) -> Self {
-        bounded(table)
-            .and(bounded(class))
-            .expect("bounded query class");
-        Self::QueryClass {
+        Self::try_query_class(table, class).expect("bounded query class")
+    }
+
+    /// A query class identity with bounds checked.
+    pub fn try_query_class(table: &str, class: &str) -> Result<Self, RenderCacheError> {
+        bounded(table)?;
+        bounded(class)?;
+        Ok(Self::QueryClass {
             table: table.to_owned(),
             class: class.to_owned(),
-        }
+        })
     }
 
     /// A configuration key identity; panics only on an unbounded name, so

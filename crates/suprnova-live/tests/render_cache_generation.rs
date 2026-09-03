@@ -37,6 +37,18 @@ async fn identities_are_typed_versioned_and_digest_stably() {
     );
     assert!(DependencyIdentity::try_table(&"t".repeat(129)).is_err());
     assert!(
+        DependencyIdentity::try_record("users", b"").is_err(),
+        "an empty record key is rejected"
+    );
+    assert!(
+        DependencyIdentity::try_record("users", &vec![0_u8; 513]).is_err(),
+        "a record key past the maximum length is rejected"
+    );
+    assert!(
+        DependencyIdentity::try_query_class("users", &"c".repeat(129)).is_err(),
+        "an over-long query class name is rejected"
+    );
+    assert!(
         DependencyIdentity::try_config(&"c".repeat(129)).is_err(),
         "an over-long config name is rejected"
     );
@@ -115,6 +127,31 @@ async fn an_observation_window_detects_any_moved_generation() {
             .is_err(),
         "observations are bounded"
     );
+}
+
+#[tokio::test]
+async fn an_epoch_change_reports_the_broad_authority_moved_with_no_generation_change() {
+    let ledger = MemoryGenerationLedger::new();
+    let window = ObservationWindow::open(ledger.epoch().await.expect("epoch"));
+    let window_epoch = window.epoch();
+    let observed = window.close(&ledger).await.expect("close");
+    ledger.advance_epoch();
+    let current = ledger.current(&observed.digests()).await.expect("current");
+    let current_epoch = ledger.epoch().await.expect("epoch");
+    assert_ne!(
+        current_epoch, window_epoch,
+        "the ledger epoch must actually have advanced"
+    );
+    match CoherenceCheck::compare(&observed, &current, current_epoch, window_epoch) {
+        CoherenceCheck::Moved(moved) => {
+            assert_eq!(
+                moved,
+                vec![DependencyIdentity::broad().digest()],
+                "an epoch change alone reports only the broad authority as moved"
+            );
+        }
+        CoherenceCheck::Coherent => panic!("an epoch change must be visible"),
+    }
 }
 
 #[tokio::test]
