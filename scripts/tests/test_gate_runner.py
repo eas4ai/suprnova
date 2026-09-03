@@ -192,7 +192,7 @@ class StepRegistryTests(unittest.TestCase):
             (
                 "scaffold-tests",
                 ["default", "full"],
-                1200,
+                2400,
                 [
                     "cargo",
                     "test",
@@ -200,6 +200,8 @@ class StepRegistryTests(unittest.TestCase):
                     "suprnova-cli",
                     "--test",
                     "scaffold_snapshot",
+                    "--test",
+                    "live_generated_app",
                     "--",
                     "--ignored",
                 ],

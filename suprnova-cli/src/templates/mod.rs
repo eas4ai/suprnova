@@ -71,11 +71,10 @@ pub fn live_view() -> &'static str {
     include_str!("files/backend/live/view.html.tpl")
 }
 
-/// `src/live/mod.rs` created by the first `live:make`.
-pub fn live_mod_rs(snake: &str, pascal: &str) -> String {
+/// `src/live/mod.rs`: the empty registry and the guarded reserved routes,
+/// written by `suprnova new` and by the first `live:make` in an older project.
+pub fn live_mod_rs() -> &'static str {
     include_str!("files/backend/live/mod.rs.tpl")
-        .replace("{snake}", snake)
-        .replace("{pascal}", pascal)
 }
 
 pub fn lib_rs() -> &'static str {

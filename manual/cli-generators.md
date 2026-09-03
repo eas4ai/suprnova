@@ -283,18 +283,25 @@ impl Counter {
 2. Writes `src/live/<snake>.rs` and `templates/live/<snake>.html`
    atomically; if any write fails, every file the run created or changed
    is rolled back.
-3. Creates `src/live/mod.rs` with a `registry()` builder on first use,
-   or inserts `pub mod <snake>;` and `.register::<snake::Pascal>()?`
-   into the existing builder.
+3. Inserts `pub mod <snake>;` and `.register::<snake::Pascal>()?` into
+   the `registry()` builder in `src/live/mod.rs`. Every project created
+   by `suprnova new` ships that module with an empty registry, a
+   `routes()` function that installs the guarded reserved Live routes,
+   and a bootstrap that binds the registry; an older project gets the
+   same module created on first use.
 4. Adds `pub mod live;` to `src/lib.rs` when it is missing.
 5. Prints the bootstrap line that binds the registry, then the check
    command: `suprnova live:check`.
 
-The registry must be bound during bootstrap for the runtime, the routes,
-and `live:check` to see the component:
+In a project that predates the Live module, bind the registry during
+bootstrap and install the routes from `cmd/main.rs` by hand:
 
 ```rust
 suprnova::App::singleton(crate::live::registry().expect("Live registry"));
+```
+
+```rust
+.try_routes(|| live::routes(routes::register()))
 ```
 
 ---

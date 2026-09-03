@@ -129,8 +129,8 @@
       "id": "scaffold-tests",
       "name": "scaffold compile tests",
       "tiers": ["default", "full"],
-      "argv": ["cargo", "test", "-p", "suprnova-cli", "--test", "scaffold_snapshot", "--", "--ignored"],
-      "timeout_seconds": 1200,
+      "argv": ["cargo", "test", "-p", "suprnova-cli", "--test", "scaffold_snapshot", "--test", "live_generated_app", "--", "--ignored"],
+      "timeout_seconds": 2400,
       "category": "code",
       "capabilities": ["cargo"]
     },

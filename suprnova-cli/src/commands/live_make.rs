@@ -128,12 +128,32 @@ pub fn register_component(source: &str, snake: &str, pascal: &str) -> Result<Str
     match last_mod {
         Some(index) => lines.insert(index + 1, declaration),
         None => {
-            let index = lines
+            // No module yet: declare it after the `use` block, else right
+            // before the registry function.
+            let after_uses = lines
                 .iter()
-                .position(|line| line.trim_start().starts_with("/// Builds the registry"))
-                .unwrap_or(lines.len());
-            lines.insert(index, declaration);
-            lines.insert(index + 1, String::new());
+                .rposition(|line| line.starts_with("use "))
+                .and_then(|start| {
+                    lines[start..]
+                        .iter()
+                        .position(|line| line.trim_end().ends_with(';'))
+                        .map(|offset| start + offset + 1)
+                });
+            let before_registry = lines.iter().position(|line| {
+                line.trim_start().starts_with("/// Builds the registry")
+                    || line.trim_start().starts_with("pub fn registry()")
+            });
+            match (after_uses, before_registry) {
+                (Some(index), _) => {
+                    lines.insert(index, String::new());
+                    lines.insert(index + 1, declaration);
+                }
+                (None, Some(index)) => {
+                    lines.insert(index, declaration);
+                    lines.insert(index + 1, String::new());
+                }
+                (None, None) => lines.push(declaration),
+            }
         }
     }
     let registry_start = lines
@@ -142,14 +162,27 @@ pub fn register_component(source: &str, snake: &str, pascal: &str) -> Result<Str
         .ok_or_else(|| "no `pub fn registry()` found".to_string())?;
     let build = lines[registry_start..]
         .iter()
-        .position(|line| line.trim() == ".build();")
+        .position(|line| line.contains(".build()"))
         .map(|offset| registry_start + offset)
-        .ok_or_else(|| "no `.build();` line found inside `registry()`".to_string())?;
-    let indent: String = lines[build]
-        .chars()
-        .take_while(|ch| ch.is_whitespace())
-        .collect();
-    lines.insert(build, format!("{indent}.register::<{snake}::{pascal}>()?"));
+        .ok_or_else(|| "no `.build()` call found inside `registry()`".to_string())?;
+    let line = lines[build].clone();
+    let indent: String = line.chars().take_while(|ch| ch.is_whitespace()).collect();
+    if line.trim_start().starts_with(".build()") {
+        // Already chained one call per line: keep the registration at the
+        // chain's indentation.
+        lines.insert(build, format!("{indent}.register::<{snake}::{pascal}>()?"));
+    } else {
+        // `LiveRegistry::builder().build()` on one line (rustfmt's shape for an
+        // empty registry): split the chain before `.build()`.
+        let split = line.find(".build()").unwrap_or(line.len());
+        let (head, tail) = line.split_at(split);
+        lines[build] = head.trim_end().to_string();
+        lines.insert(
+            build + 1,
+            format!("{indent}    .register::<{snake}::{pascal}>()?"),
+        );
+        lines.insert(build + 2, format!("{indent}    {tail}"));
+    }
     Ok(lines.join("\n") + "\n")
 }
 
@@ -273,10 +306,10 @@ fn run_inner(raw: &str, dry_run: bool) -> Result<(), String> {
             Err(reason) => manual_registration = Some(reason),
         }
     } else {
-        plans.push(Plan::Create(
-            mod_path.clone(),
-            templates::live_mod_rs(&naming.snake, &naming.pascal),
-        ));
+        // An older project without a Live module: create the standard module
+        // and register through the same insertion path a later run uses.
+        let created = register_component(templates::live_mod_rs(), &naming.snake, &naming.pascal)?;
+        plans.push(Plan::Create(mod_path.clone(), created));
     }
     let mut lib_plan: Option<Plan> = None;
     let mut lib_missing = false;
@@ -420,7 +453,8 @@ mod tests {
 
     #[test]
     fn registration_is_inserted_before_build_and_after_the_last_module() {
-        let source = templates::live_mod_rs("counter", "Counter");
+        let source = register_component(templates::live_mod_rs(), "counter", "Counter").unwrap();
+        assert!(source.contains("pub mod counter;"), "{source}");
         let updated = register_component(&source, "todo_list", "TodoList").unwrap();
         let counter_mod = updated.find("pub mod counter;").unwrap();
         let todo_mod = updated.find("pub mod todo_list;").unwrap();
@@ -433,6 +467,23 @@ mod tests {
         assert!(
             register_component("pub mod x;\n", "y", "Y").is_err(),
             "missing registry() anchor"
+        );
+    }
+
+    #[test]
+    fn registration_splits_a_single_line_builder_chain() {
+        let formatted = "pub fn registry() -> Result<LiveRegistry, RegistryError> {\n    let registry = LiveRegistry::builder().build();\n    Ok(registry)\n}\n";
+        let updated = register_component(formatted, "counter", "Counter").unwrap();
+        assert!(
+            updated.contains("let registry = LiveRegistry::builder()\n        .register::<counter::Counter>()?\n        .build();"),
+            "{updated}"
+        );
+        assert!(updated.starts_with("pub mod counter;\n"), "{updated}");
+        let again = register_component(&updated, "feed", "Feed").unwrap();
+        assert_eq!(again.matches(".build()").count(), 1);
+        assert!(
+            again.contains(".register::<counter::Counter>()?\n        .register::<feed::Feed>()?\n        .build();"),
+            "{again}"
         );
     }
 

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
     EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig, LocaleMiddleware,
-    LocaleShare, SessionConfig, SessionMiddleware, DB,
+    LocaleShare, OriginPolicy, SessionConfig, SessionMiddleware, DB,
 };
 
 use crate::middleware;
@@ -57,6 +57,11 @@ pub async fn register() {
     App::singleton(AuthManager::new(AuthConfig::from_env()));
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
         .expect("register users provider");
+
+    // Live components: one immutable registry shared by the server, the
+    // workers, and the `suprnova live:*` commands. `suprnova live:make`
+    // registers new components in `src/live/mod.rs`.
+    App::singleton(crate::live::registry().expect("Live component registry"));
 
     // Example: Register a trait binding with runtime config
     // bind!(dyn Database, PostgresDB::new());
@@ -175,8 +180,10 @@ pub fn register_http_stack() {
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");
 
-    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
-    global_middleware!(CsrfMiddleware::new());
+    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Same-origin
+    // requests verified through the browser's `Sec-Fetch-Site` header pass
+    // without a token; the Live runtime relies on exactly that proof.
+    global_middleware!(CsrfMiddleware::new().with_origin_policy(OriginPolicy::SameOriginOnly));
 
     // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
     // into the per-request task-local so `#[derive(Data)]` responses,

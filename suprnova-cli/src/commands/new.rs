@@ -400,6 +400,8 @@ fn create_project(
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/commands"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
+    fs::create_dir_all(project_path.join("src/live"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/models"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/migrations"))
@@ -477,6 +479,14 @@ fn create_project(
     // Write src/routes.rs
     fs::write(project_path.join("src/routes.rs"), templates::routes_rs())
         .map_err(|e| format!("Failed to write src/routes.rs: {}", e))?;
+
+    // Write src/live/mod.rs - the Live registry and reserved routes.
+    // `suprnova live:make <name>` registers components here.
+    fs::write(
+        project_path.join("src/live/mod.rs"),
+        templates::live_mod_rs(),
+    )
+    .map_err(|e| format!("Failed to write src/live/mod.rs: {}", e))?;
 
     // Write src/controllers/mod.rs
     fs::write(
