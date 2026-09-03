@@ -33,6 +33,10 @@ pub mod coherence;
 /// Conditional evaluation and cache metadata for represented variants.
 pub mod http;
 
+/// Fenced rebuild coordination: one accepted publication per key and
+/// coherence fence, bounded waiters, expiry, and release.
+pub mod singleflight;
+
 pub use coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
 };
@@ -50,6 +54,10 @@ pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
     QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
     ResponseSignals, SharedCachePolicy, StorageLayers,
+};
+pub use singleflight::{
+    LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildAdmission, RebuildCoordinator,
+    RebuildLease, RebuildWait,
 };
 pub use store::{
     MemoryRenderStore, MemoryStoreLimits, PublicationFence, PublishOutcome, RenderStore,
