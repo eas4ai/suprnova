@@ -2,7 +2,11 @@
 
 //! Framework-hosted Magnetar authentication integration.
 
-use std::{any::TypeId, sync::Arc};
+use std::{
+    any::TypeId,
+    process::{Command, Output},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use magnetar::{
@@ -36,7 +40,6 @@ use sea_orm::{
 };
 #[cfg(feature = "magnetar-oauth")]
 use secrecy::ExposeSecret;
-use serial_test::serial;
 use suprnova::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 use suprnova::testing::TestContainer;
 use suprnova::{
@@ -49,6 +52,8 @@ use suprnova::{
     },
     model,
 };
+
+const CHILD_MODE: &str = "SUPRNOVA_MAGNETAR_HOST_ENGINE_CHILD";
 
 #[model(table = "framework_magnetar_engine_users", timestamps = false)]
 pub struct FrameworkMagnetarEngineUser {
@@ -945,8 +950,51 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
 }
 
 #[tokio::test]
-#[serial]
-async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real_sqlite_rows() {
+async fn magnetar_host_engine_child() {
+    let Ok(mode) = std::env::var(CHILD_MODE) else {
+        return;
+    };
+
+    match mode.as_str() {
+        "password" => {
+            run_password_host_engine_scenario().await;
+        }
+        "passkey" => {
+            run_passkey_host_engine_scenario().await;
+        }
+        #[cfg(feature = "magnetar-oauth")]
+        "oauth" => {
+            run_oauth_host_engine_scenario().await;
+        }
+        other => panic!("unknown Magnetar host-engine child mode: {other}"),
+    }
+}
+
+fn run_magnetar_host_engine_child(mode: &str) -> Output {
+    Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", "magnetar_host_engine_child", "--nocapture"])
+        .env(CHILD_MODE, mode)
+        .output()
+        .expect("spawn Magnetar host-engine child")
+}
+
+fn assert_magnetar_host_engine_child_succeeds(mode: &str) {
+    let output = run_magnetar_host_engine_child(mode);
+    assert!(
+        output.status.success(),
+        "Magnetar host-engine {mode} child failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real_sqlite_rows() {
+    assert_magnetar_host_engine_child_succeeds("password");
+}
+
+async fn run_password_host_engine_scenario() {
     assert_ne!(
         TypeId::of::<framework_magnetar_engine_user::Entity>(),
         TypeId::of::<framework_magnetar_engine_session::Entity>()
@@ -1469,9 +1517,12 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
     drop(event_fake);
 }
 
-#[tokio::test]
-#[serial]
-async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and_sessions() {
+#[test]
+fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and_sessions() {
+    assert_magnetar_host_engine_child_succeeds("passkey");
+}
+
+async fn run_passkey_host_engine_scenario() {
     const EMAIL: &str = "passkey-host-engine@example.test";
 
     let connection = Database::connect("sqlite::memory:")
@@ -1524,17 +1575,11 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
             .passkey_service(&PasskeyConfig::default())
             .expect("compose the real passkey adapter over the host engine"),
     );
-    if suprnova::magnetar_integration::install_magnetar_passkey_engine_with_factor_for_test(
+    suprnova::magnetar_integration::install_magnetar_passkey_engine_with_factor_for_test(
         passkey_engine.clone(),
         engine.clone(),
     )
-    .is_err()
-    {
-        suprnova::magnetar_integration::install_magnetar_passkey_engine_for_test(
-            passkey_engine.clone(),
-        )
-        .expect("install the passkey dispatcher beside the prior test authority");
-    }
+    .expect("install the passkey dispatcher with its factor and session authority");
 
     let session_slot = suprnova::session::new_session_slot_for_test();
     let registration = suprnova::session::session_scope_for_test(session_slot.clone(), async {
@@ -2093,9 +2138,13 @@ fn offline_config(
 }
 
 #[cfg(feature = "magnetar-oauth")]
-#[tokio::test]
-#[serial]
-async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_after_success() {
+#[test]
+fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_after_success() {
+    assert_magnetar_host_engine_child_succeeds("oauth");
+}
+
+#[cfg(feature = "magnetar-oauth")]
+async fn run_oauth_host_engine_scenario() {
     let connection = Database::connect("sqlite::memory:")
         .await
         .expect("connect SQLite");
@@ -2227,12 +2276,15 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
             r#"{"access_token":"offline-apple-access","token_type":"Bearer","id_token":"offline-apple-id-token"}"#,
         ),
     ]));
-    suprnova::magnetar_integration::install_magnetar_oauth_engine(Arc::new(
-        engine
-            .oauth_service(offline_config(public_transport.clone()))
-            .expect("compose installed OAuth service"),
-    ))
-    .expect("install OAuth dispatcher");
+    suprnova::magnetar_integration::install_magnetar_oauth_engine_with_factor(
+        Arc::new(
+            engine
+                .oauth_service(offline_config(public_transport.clone()))
+                .expect("compose installed OAuth service"),
+        ),
+        engine.clone(),
+    )
+    .expect("install OAuth dispatcher with its factor and session authority");
     let slot = suprnova::session::new_session_slot_for_test();
     let kickoff = suprnova::session::session_scope_for_test(slot.clone(), async {
         suprnova::Auth::oauth("offline").begin().await
