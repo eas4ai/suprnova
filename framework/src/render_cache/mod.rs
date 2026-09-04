@@ -98,11 +98,29 @@ fn runtime_slot() -> &'static RwLock<Option<Arc<RenderCacheRuntime>>> {
 
 impl RenderCache {
     /// Assembles the RenderCache runtime from `config` and the policies
-    /// `router` has registered, installs the middleware, and returns the
-    /// router unchanged (the middleware itself is added to the process-wide
-    /// global middleware chain - see the note on
-    /// [`crate::middleware::register_global_middleware`] about snapshotting
-    /// it into a [`crate::middleware::MiddlewareRegistry`] before serving).
+    /// `router` has registered, appends the middleware to the process-wide
+    /// global middleware chain via
+    /// [`crate::middleware::register_global_middleware`], and returns the
+    /// router unchanged.
+    ///
+    /// # Call this after registering locale, session, and auth middleware
+    ///
+    /// `register_global_middleware` appends to whatever is already
+    /// registered; it does not insert at a fixed position. The middleware
+    /// reads `Lang::locale()` and `Auth::id()` *before* calling the route
+    /// handler (to build the lookup key's declared variance), and both are
+    /// only meaningful once the middleware that establishes them - the
+    /// locale middleware, session/auth middleware - has already run around
+    /// it. Call `RenderCache::install` **after** every `global_middleware!`
+    /// registration that establishes request-scoped locale or identity, so
+    /// this middleware lands after them in the chain, not before. Calling
+    /// it first would make every request collapse onto the default locale
+    /// and see no principal, silently over-sharing exactly the kind of
+    /// entry [`middleware::key_omits_observed_privacy`] exists to catch -
+    /// that check declines to store rather than mis-key, so the failure
+    /// mode of installing too early is reduced rendering, not a privacy
+    /// leak, but it is still not what an application installing this in
+    /// the wrong order would want.
     ///
     /// # Errors
     ///
@@ -121,6 +139,13 @@ impl RenderCache {
     /// (ruling R66) - without this, the cache installs and serves,
     /// generations never advance, and every entry is served stale forever
     /// with nothing failing.
+    ///
+    /// Never clears the global middleware registry: an application that
+    /// registered its own logging, session, CSRF, or auth middleware before
+    /// calling this must keep every one of them. A repeated `install()` in
+    /// one process (this crate's own test suite calls it once per test) is
+    /// a test concern, solved by the test harness clearing the registry
+    /// itself before each call - never by this production path.
     pub async fn install(
         router: Router,
         config: RenderCacheConfig,
@@ -168,14 +193,17 @@ impl RenderCache {
             leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         });
         *runtime_slot().write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runtime));
-        // Idempotent-per-type registration (see `register_global_middleware`'s
-        // own doc) means a second `install()` in the same process - every run
-        // of this crate's own middleware test suite, one process, many
-        // `#[tokio::test]` functions - would otherwise keep dispatching to the
-        // FIRST call's now-stale runtime forever. Clearing first is safe in
-        // production too: `install` is called once, at boot, before any other
-        // global middleware would have had a request to run against.
-        crate::middleware::clear_global_middleware_for_test();
+        // Appends, never clears: `register_global_middleware` is
+        // idempotent per type on its own (a second `install()` call in the
+        // same process registers nothing further, since a
+        // `RenderCacheMiddleware` of some earlier install is already
+        // present) - the fix round 1 review proved that an earlier draft's
+        // `clear_global_middleware_for_test()` call here silently deleted
+        // an application's own logging, session, CSRF, and auth middleware
+        // on every install. A process that genuinely needs to replace an
+        // already-installed runtime (this crate's own test suite: one
+        // process, many `#[tokio::test]` functions) clears the registry
+        // itself, in test-only code, before calling this - never here.
         crate::middleware::register_global_middleware(RenderCacheMiddleware::new(runtime));
         mark_installed();
         Ok(router)

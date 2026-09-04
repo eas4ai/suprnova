@@ -218,11 +218,29 @@ pub struct Harness {
 /// transaction began and never blocks a writer, and a writer never blocks
 /// a reader. That is exactly the isolation the render's read view needs.
 pub async fn boot_with_render_cache() -> Arc<Harness> {
+    boot(true).await
+}
+
+/// Test-only for the fix round 1, item 2 regression test: boots exactly
+/// like [`boot_with_render_cache`] but does **not** clear the global
+/// middleware registry first, so a caller can register its own marker
+/// middleware beforehand and then observe whether `RenderCache::install`
+/// preserved it. Production `install` never clears the registry (see its
+/// own doc); this seam exists only so a test can arrange "an application
+/// already registered its own middleware" without also fighting this
+/// harness's own test-isolation clear.
+pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
+    boot(false).await
+}
+
+async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
     counting_route::reset();
-    suprnova::middleware::clear_global_middleware_for_test();
+    if clear_global_middleware {
+        suprnova::middleware::clear_global_middleware_for_test();
+    }
 
     let guard = TestContainer::fake();
     let tempdir = tempfile::tempdir().expect("tempdir for render cache middleware test database");
@@ -287,12 +305,19 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("overflow policy");
+    // Fix round 1, item 1: deliberately declares no `Principal` variance,
+    // matching the reviewer's proven shape exactly.
+    let leaky_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("leaky policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
+    let router: Router = router.get("/leaky", leaky_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -303,7 +328,9 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
         .try_render_cache("/sets-cookie", GroupPolicy::from(sets_cookie_policy))
         .expect("attach sets-cookie policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
-        .expect("attach overflow policy");
+        .expect("attach overflow policy")
+        .try_render_cache("/leaky", GroupPolicy::from(leaky_policy))
+        .expect("attach leaky policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -311,11 +338,26 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
     let mut config = config;
     config.enabled = true;
     config.l1 = suprnova::render_cache::L1Config::Disabled;
+
+    // Fix round 1, item 3: register the identity-establishing middleware
+    // globally, and do it *before* `RenderCache::install`, so the ordering
+    // matches production exactly - `RenderCache::install` appends to
+    // whatever is already registered (see its own doc), never inserts at a
+    // fixed position, so calling it after `LoginHeader` is what makes the
+    // cache middleware see `Auth::id()` as `LoginHeader` set it, the same
+    // way a real deployment's locale/session/auth middleware would have to
+    // be registered before this call for the same reason. An earlier draft
+    // built the registry with `MiddlewareRegistry::from_global().prepend(LoginHeader)`
+    // instead - a *local* prepend that put `LoginHeader` first regardless of
+    // global registration order, which is an ordering no production
+    // deployment can produce and which would have hidden exactly the
+    // ordering bug fix round 1 found.
+    suprnova::middleware::register_global_middleware(LoginHeader);
     let router = RenderCache::install(router, config)
         .await
         .expect("install render cache");
 
-    let middleware = Arc::new(MiddlewareRegistry::from_global().prepend(LoginHeader));
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
 
     Arc::new(Harness {
         router: Arc::new(router),
@@ -381,6 +423,20 @@ async fn private_handler(_request: Request) -> Response {
     let _ = Auth::id();
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("private render {n}")))
+}
+
+/// Fix round 1, item 1: declares `PublicShared` with **no** `Principal`
+/// variance, yet reads an identity held in `auth::request_state` (via
+/// `Auth::id()`, the same mechanism `LoginHeader` writes through
+/// `Auth::set_user` - bearer-token or remember-me shaped authentication,
+/// not a session read, which would already force `Uncacheable` through
+/// `session_read`). Without `key_omits_observed_privacy`, this is exactly
+/// the shape that stores one identity's render under a principal-free key
+/// and serves it back to a different identity.
+async fn leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!("leaky render for {identity}")))
 }
 
 async fn sets_cookie_handler(_request: Request) -> Response {

@@ -30,11 +30,15 @@
 //!   freshly built one with cookies stripped: this codebase's `Request`
 //!   has no public constructor from parts plus a hyper request the way
 //!   this would need, and building one is a change to `http::request`,
-//!   not to this middleware. `classify` still narrows correctly if the
-//!   background render happens to observe a principal from the carried
-//!   cookie, so this is a possible wasted or misdirected rebuild, not a
-//!   correctness or security defect - flagged here rather than silently
-//!   matched to the ideal.
+//!   not to this middleware. If the background render happens to observe a
+//!   principal from the carried cookie on a route that never declared
+//!   `Principal` variance, [`key_omits_observed_privacy`] declines to
+//!   store the result - narrowing the served class alone would not be
+//!   enough, since narrowing never repartitions the key that was already
+//!   derived before the render ran (see that function's own doc). So this
+//!   is a possible wasted or misdirected rebuild, not a correctness or
+//!   security defect - flagged here rather than silently matched to the
+//!   ideal.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -52,7 +56,7 @@ use suprnova_live::render_cache::entry::{
     CompleteEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders, decode, encode,
 };
 use suprnova_live::render_cache::generation::{
-    CoherenceCheck, GenerationLedger, GenerationSet, ObservationWindow,
+    CoherenceCheck, DependencyIdentity, GenerationLedger, GenerationSet, ObservationWindow,
 };
 use suprnova_live::render_cache::http::{
     ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value,
@@ -730,20 +734,73 @@ async fn render_and_publish(
             wait.wait().await;
             match lookup(runtime, &key).await {
                 Ok(Some((entry, stored, layer))) => {
-                    (match layer {
-                        Layer::L0 => LookupOutcome::L0Hit,
-                        Layer::L1 => LookupOutcome::L1Hit,
-                    })
-                    .record();
+                    // Fix round 1, item 4: the leader may have declined to
+                    // publish (a moved dependency, an ineligible response,
+                    // an overflowed report, an uncacheable classification)
+                    // or may not have improved on what was already there.
+                    // What `lookup` just found is therefore not proven
+                    // fresh by virtue of having waited for it - it must
+                    // pass the same coherence and freshness evaluation the
+                    // primary hit path in `serve` applies to every hit,
+                    // never served as if the wait itself were the proof.
+                    let coherence_result =
+                        match coherence(runtime, &key, policy, entry.header()).await {
+                            Ok(coherence) => coherence,
+                            Err(()) => return Err(ProviderFailure(request, next)),
+                        };
                     let now = runtime.now_ms();
-                    Ok(respond_hit(
-                        &request,
+                    let state = freshness_state(
                         policy,
-                        &entry,
+                        coherence_result,
+                        entry.header().class,
                         stored.published_at_ms,
                         now,
-                        None,
-                    ))
+                    );
+                    match state {
+                        FreshnessState::Fresh => {
+                            (match layer {
+                                Layer::L0 => LookupOutcome::L0Hit,
+                                Layer::L1 => LookupOutcome::L1Hit,
+                            })
+                            .record();
+                            Ok(respond_hit(
+                                &request,
+                                policy,
+                                &entry,
+                                stored.published_at_ms,
+                                now,
+                                None,
+                            ))
+                        }
+                        FreshnessState::StaleServable => {
+                            LookupOutcome::Stale.record();
+                            Ok(respond_hit(
+                                &request,
+                                policy,
+                                &entry,
+                                stored.published_at_ms,
+                                now,
+                                warning_header(state),
+                            ))
+                        }
+                        // `StaleOnError`'s stale-only-on-provider-failure
+                        // behavior is the primary hit path's own concern
+                        // (and a separately known gap - out of scope for
+                        // this fix); a waiter treats it the same as `Dead`:
+                        // neither is safe to serve as a plain hit, so both
+                        // fall through to a fresh admission attempt.
+                        FreshnessState::StaleOnError | FreshnessState::Dead => {
+                            LookupOutcome::Miss.record();
+                            let epoch = match runtime.ledger.epoch().await {
+                                Ok(epoch) => epoch,
+                                Err(_) => return Err(ProviderFailure(request, next)),
+                            };
+                            Box::pin(render_and_publish(
+                                runtime, request, next, key, policy, epoch, variance,
+                            ))
+                            .await
+                        }
+                    }
                 }
                 _ => Ok(next(request).await),
             }
@@ -817,6 +874,11 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
+    if key_omits_observed_privacy(&job, &observed_context, &report) {
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
 
     if let Err(()) = fresh_reread_is_coherent(runtime, &observed, job.epoch).await {
         LookupOutcome::Moved.record();
@@ -851,6 +913,44 @@ async fn lead_render(
         now,
         None,
     )
+}
+
+/// Whether the render observed something private, or a locale, that the
+/// lookup key's declared variance does not account for.
+///
+/// Classification narrows the served class and the `Cache-Control`/staleness
+/// rules, but it cannot repartition the lookup key: the key was already
+/// derived, before this render ran, from the route's *declared* variance
+/// alone (see [`key_input`]). A route declared `PublicShared` with no
+/// `Principal` variance, whose handler reads an identity out of
+/// `auth::request_state` (bearer-token or remember-me authentication,
+/// rather than a session read - a session read already forces
+/// `Uncacheable` through `session_read`) would otherwise store its render
+/// under one shared, principal-free key and serve it back to a different
+/// signed-in visitor, or an anonymous one. The same shape applies to a
+/// route that renders translated content without declaring `Locale`
+/// variance: one language would be cached for everyone. Declining to store
+/// here - not merely narrowing the class - is the fix; see ruling on this
+/// task's fix round 1, item 1.
+fn key_omits_observed_privacy(
+    job: &RenderJob,
+    observed_context: &ObservedContext,
+    report: &super::collector::CollectorReport,
+) -> bool {
+    let declared = job.variance.dimensions();
+    if observed_context.principal.is_some() && !declared.contains_key(&VarianceDimension::Principal)
+    {
+        return true;
+    }
+    if observed_context.tenant.is_some() && !declared.contains_key(&VarianceDimension::Tenant) {
+        return true;
+    }
+    let locale_observed = report.storable().is_some_and(|identities| {
+        identities
+            .iter()
+            .any(|identity| matches!(identity, DependencyIdentity::Locale))
+    });
+    locale_observed && !declared.contains_key(&VarianceDimension::Locale)
 }
 
 /// Closes a collector report into the generations it observed, or `None`

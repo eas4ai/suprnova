@@ -20,12 +20,14 @@
 //! thread, driven by explicit `Notify`-based state barriers rather than
 //! real OS parallelism.
 
-use suprnova::StatusCode;
-use suprnova::render_cache::RenderCache;
+use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
+use suprnova::{StatusCode, async_trait};
 
 mod render_cache_middleware_support;
 use render_cache_middleware_support::{
-    advance_posts, boot_with_render_cache, clock, counting_route, dispatch_get, dispatch_head,
+    advance_posts, boot_with_render_cache,
+    boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
+    dispatch_get, dispatch_head,
 };
 
 #[tokio::test]
@@ -213,4 +215,135 @@ async fn an_overflowed_report_is_never_published() {
     // stored to hit against.
     dispatch_get(&harness, "/overflow", &[]).await;
     assert_eq!(counting_route::renders(), 2);
+}
+
+/// Fix round 1, item 1 (Critical): classification narrows the served class
+/// and the `Cache-Control`/staleness rules, but it cannot repartition the
+/// lookup key, which was already derived from the route's *declared*
+/// variance before this render ran. `/leaky` declares `PublicShared` with
+/// no `Principal` variance, and its handler reads an identity held in
+/// `auth::request_state` (`Auth::id()`, the way bearer-token or
+/// remember-me authentication would, not a session read - a session read
+/// already forces `Uncacheable`). Without the fix, alice's render
+/// publishes under the one shared, principal-free key and bob's request
+/// for the same route is served alice's body back.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_route_with_no_declared_principal_variance_never_leaks_across_identities() {
+    let harness = boot_with_render_cache().await;
+    let alice = dispatch_get(&harness, "/leaky", &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice.body).contains("alice"));
+
+    let bob = dispatch_get(&harness, "/leaky", &[("x-test-login", "bob")]).await;
+    assert_eq!(bob.status, StatusCode::OK);
+    assert!(
+        !String::from_utf8_lossy(&bob.body).contains("alice"),
+        "a route with no declared Principal variance must never serve one identity's \
+         rendered body to a different identity"
+    );
+    assert!(String::from_utf8_lossy(&bob.body).contains("bob"));
+
+    // Neither render was ever safe to store: a bug that instead served bob
+    // a cache hit (merely narrowing the served class to PrivateCached, not
+    // repartitioning the key) would render only once, not twice.
+    assert_eq!(counting_route::renders(), 2);
+}
+
+/// Fix round 1, item 2 (Critical): `RenderCache::install` must never clear
+/// the process-wide global middleware registry - an application that
+/// registered its own logging, session, CSRF, or auth middleware before
+/// calling `install` must keep every one of them.
+#[tokio::test]
+#[serial_test::serial]
+async fn install_does_not_clear_the_applications_own_global_middleware() {
+    struct MarkerMiddleware;
+
+    #[async_trait]
+    impl suprnova::Middleware for MarkerMiddleware {
+        async fn handle(
+            &self,
+            request: suprnova::Request,
+            next: suprnova::Next,
+        ) -> suprnova::Response {
+            next(request).await
+        }
+    }
+
+    suprnova::middleware::clear_global_middleware_for_test();
+    suprnova::middleware::register_global_middleware(MarkerMiddleware);
+    assert!(suprnova::middleware::has_global_middleware::<
+        MarkerMiddleware,
+    >());
+
+    let _harness = boot_with_render_cache_preserving_global_middleware_for_test().await;
+
+    assert!(
+        suprnova::middleware::has_global_middleware::<MarkerMiddleware>(),
+        "RenderCache::install must not clear an application's own already-registered \
+         global middleware"
+    );
+    assert!(
+        suprnova::middleware::has_global_middleware::<RenderCacheMiddleware>(),
+        "install must still register its own middleware"
+    );
+}
+
+/// Fix round 1, item 4 (Important, proven): a singleflight waiter must
+/// re-evaluate coherence and freshness on what it finds after waiting, the
+/// same as the primary hit path does - not serve it as an unconditional
+/// hit just because it waited for someone else to try.
+///
+/// `/cached/{id}` has no stale window (fresh then dead), so a request
+/// against a dead entry always reaches `render_and_publish`'s admission -
+/// both the leader's and the waiter's. The leader is armed (via
+/// `write_during_next_render`, the same mechanism the "moved" test uses)
+/// to have its own candidate discarded as moved, so it never republishes:
+/// the entry the waiter's post-wait lookup finds is still the original,
+/// long-dead one. Without the fix, the waiter serves that dead entry
+/// directly (`renders()` stops at 2 - the leader's one discarded attempt);
+/// with the fix, the waiter's own freshness check sees it is dead and
+/// renders a third, genuinely fresh time instead of trusting the wait.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh() {
+    let harness = boot_with_render_cache().await;
+    let original = dispatch_get(&harness, "/cached/9", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+    // Past `fresh_ms` (60_000) with no stale window declared for this
+    // route: the entry is dead, so both dispatches below reach admission
+    // in the foreground rather than taking the StaleServable hit path
+    // (which would never call `admit` from a client-visible request at
+    // all).
+    clock(&harness).advance_ms(70_000);
+
+    counting_route::hold_next_render(&harness);
+    let leader = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/cached/9", &[]).await })
+    };
+    counting_route::wait_until_rendering(&harness).await;
+    let waiter = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/cached/9", &[]).await })
+    };
+    counting_route::wait_until_waiting(&harness, 1).await;
+    counting_route::write_during_next_render(&harness);
+    counting_route::release_render(&harness);
+
+    let (leader_response, waiter_response) =
+        (leader.await.expect("leader"), waiter.await.expect("waiter"));
+    assert_eq!(leader_response.status, StatusCode::OK);
+    assert_eq!(waiter_response.status, StatusCode::OK);
+    assert_ne!(
+        waiter_response.body, original.body,
+        "the waiter served a superseded, long-dead entry with no coherence or freshness \
+         check, indistinguishable from a fresh hit"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "the leader's discarded attempt (2) plus the waiter's own fresh re-render (3) - a \
+         waiter that trusted the wait alone would leave this at 2"
+    );
 }
