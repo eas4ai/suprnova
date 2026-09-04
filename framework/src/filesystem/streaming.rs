@@ -29,6 +29,7 @@
 use super::Storage;
 use crate::FrameworkError;
 use futures::TryStreamExt;
+use opendal::{Operator, Writer};
 
 /// Streaming chunk size for the reader. 64 KiB strikes a balance between
 /// syscall / network round-trips and memory pressure for large files.
@@ -96,31 +97,35 @@ pub async fn copy_between_disks(
 /// was aborted or panicked mid-transfer, so no error ever comes back -
 /// the unclosed writer's staged/partial output is diverted to a detached
 /// task instead of being left behind.
-struct WriterGuard {
-    writer: Option<opendal::Writer>,
-    dest_op: opendal::Operator,
+pub(crate) struct WriterGuard {
+    writer: Option<Writer>,
+    dest_op: Operator,
     dest: String,
     dest_path: String,
     complete: bool,
+    delete_destination: bool,
 }
 
 impl WriterGuard {
-    fn new(
-        dest_op: opendal::Operator,
-        dest: &str,
-        dest_path: &str,
-        writer: opendal::Writer,
-    ) -> Self {
+    pub(crate) fn new(dest_op: Operator, dest: &str, dest_path: &str, writer: Writer) -> Self {
         Self {
             writer: Some(writer),
             dest_op,
             dest: dest.to_string(),
             dest_path: dest_path.to_string(),
             complete: false,
+            delete_destination: true,
         }
     }
 
-    fn writer(&mut self) -> &mut opendal::Writer {
+    /// Abort only: an existing destination or conditional-write winner is not
+    /// this transfer's object to delete.
+    pub(crate) fn preserve_destination(mut self) -> Self {
+        self.delete_destination = false;
+        self
+    }
+
+    pub(crate) fn writer(&mut self) -> &mut Writer {
         self.writer
             .as_mut()
             .expect("writer is taken only while settling")
@@ -133,47 +138,52 @@ impl WriterGuard {
     /// Cleanup runs on a detached task that is awaited here: if this
     /// task is cancelled mid-cleanup, the detached task still runs it to
     /// completion instead of abandoning the remainder.
-    async fn settle(mut self, result: Result<u64, FrameworkError>) -> Result<u64, FrameworkError> {
+    pub(crate) async fn settle<T, E>(mut self, result: Result<T, E>) -> Result<T, E> {
         match result {
             Ok(total) => {
                 self.complete = true;
                 Ok(total)
             }
             Err(err) => {
-                let writer = self.writer.take();
-                // Disarm first: the detached task owns cleanup from here,
-                // so a later abort must not divert it a second time.
-                self.complete = true;
-                let cleanup = run_cleanup(
-                    writer,
-                    self.dest_op.clone(),
-                    self.dest.clone(),
-                    self.dest_path.clone(),
-                    "failed",
-                );
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        let _ = handle.spawn(cleanup).await;
-                    }
-                    // No runtime to spawn onto (foreign executor): inline
-                    // is the only option left.
-                    Err(_) => cleanup.await,
-                }
+                self.cleanup().await;
                 Err(err)
             }
+        }
+    }
+
+    /// Discard a failed transfer or an unpublished promotion that lost a race.
+    /// The cleanup task retains ownership if its caller is cancelled.
+    pub(crate) async fn cleanup(mut self) {
+        let writer = self.writer.take();
+        self.complete = true;
+        let cleanup = run_cleanup(
+            writer,
+            self.dest_op.clone(),
+            self.dest.clone(),
+            self.dest_path.clone(),
+            self.delete_destination,
+            "discarded",
+        );
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let _ = handle.spawn(cleanup).await;
+            }
+            // Foreign executors have no runtime to spawn onto.
+            Err(_) => cleanup.await,
         }
     }
 }
 
 /// Abort the staged write, then delete any visible partial - best
-/// effort, failures only logged. `kind` is `"failed"` for the error
+/// effort, failures only logged. `kind` is `"discarded"` for the error
 /// path and `"cancelled"` for the divert path, so logs say which exit
 /// the transfer took.
 async fn run_cleanup(
-    writer: Option<opendal::Writer>,
-    dest_op: opendal::Operator,
+    writer: Option<Writer>,
+    dest_op: Operator,
     dest: String,
     dest_path: String,
+    delete_destination: bool,
     kind: &'static str,
 ) {
     if let Some(mut writer) = writer
@@ -186,7 +196,7 @@ async fn run_cleanup(
             "failed to abort writer while cleaning up a {kind} cross-disk copy"
         );
     }
-    if let Err(delete_err) = dest_op.delete(&dest_path).await {
+    if delete_destination && let Err(delete_err) = dest_op.delete(&dest_path).await {
         tracing::warn!(
             disk = dest,
             path = dest_path,
@@ -201,15 +211,21 @@ impl Drop for WriterGuard {
         if self.complete || self.writer.is_none() {
             return;
         }
-        // Cancelled (or panicked) mid-transfer: the writer was never
-        // closed, so without this the partial object - or staged upload
-        // parts - would be left behind. This task is going away; divert
-        // the same cleanup to a detached task that outlives it.
+        // Cancelled (or panicked) before the transfer settled: an open writer
+        // or a closed but unpublished promotion may still own staged output.
+        // Divert cleanup to a detached task that outlives this task.
         let writer = self.writer.take();
         let dest_op = self.dest_op.clone();
         let dest = self.dest.clone();
         let dest_path = self.dest_path.clone();
-        spawn_cleanup(run_cleanup(writer, dest_op, dest, dest_path, "cancelled"));
+        spawn_cleanup(run_cleanup(
+            writer,
+            dest_op,
+            dest,
+            dest_path,
+            self.delete_destination,
+            "cancelled",
+        ));
     }
 }
 

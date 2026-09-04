@@ -17,8 +17,10 @@ use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
 };
 use std::sync::Arc;
-use suprnova::Storage;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use suprnova::filesystem::streaming::copy_between_disks;
+use suprnova::{ReadThroughConfig, Storage};
 
 /// Layer whose reader returns one 1 KiB chunk and then fails on the next read.
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +155,7 @@ impl oio::ReadStream for FailReadStream {
 #[derive(Debug, Clone)]
 struct GateWritesLayer {
     writes: Arc<std::sync::atomic::AtomicUsize>,
+    close_gate: Option<(bool, Arc<AtomicUsize>)>,
 }
 
 impl Layer for GateWritesLayer {
@@ -160,6 +163,7 @@ impl Layer for GateWritesLayer {
         Arc::new(GateWritesService {
             inner,
             writes: self.writes.clone(),
+            close_gate: self.close_gate.clone(),
         })
     }
 }
@@ -168,6 +172,7 @@ impl Layer for GateWritesLayer {
 struct GateWritesService {
     inner: Servicer,
     writes: Arc<std::sync::atomic::AtomicUsize>,
+    close_gate: Option<(bool, Arc<AtomicUsize>)>,
 }
 
 impl Service for GateWritesService {
@@ -206,6 +211,7 @@ impl Service for GateWritesService {
         Ok(GateWriter {
             inner: self.inner.write(ctx, path, args)?,
             writes: self.writes.clone(),
+            close_gate: self.close_gate.clone(),
         })
     }
 
@@ -251,6 +257,7 @@ impl Service for GateWritesService {
 struct GateWriter {
     inner: oio::Writer,
     writes: Arc<std::sync::atomic::AtomicUsize>,
+    close_gate: Option<(bool, Arc<AtomicUsize>)>,
 }
 
 impl oio::Write for GateWriter {
@@ -271,11 +278,24 @@ impl oio::Write for GateWriter {
     }
 
     async fn close(&mut self) -> Result<Metadata> {
+        if let Some((close_first, reached)) = &self.close_gate {
+            if *close_first {
+                self.inner.close().await?;
+            }
+            reached.store(1, Ordering::SeqCst);
+            while reached.load(Ordering::SeqCst) == 1 {
+                tokio::task::yield_now().await;
+            }
+        }
         self.inner.close().await
     }
 
     async fn abort(&mut self) -> Result<()> {
-        self.inner.abort().await
+        let result = self.inner.abort().await;
+        if let Some((_, reached)) = &self.close_gate {
+            reached.store(2, Ordering::SeqCst);
+        }
+        result
     }
 }
 
@@ -312,6 +332,7 @@ async fn copy_cleans_up_staging_and_destination_on_cancel() {
         move |op| {
             op.layer(GateWritesLayer {
                 writes: writes.clone(),
+                close_gate: None,
             })
         }
     })
@@ -351,6 +372,313 @@ async fn copy_cleans_up_staging_and_destination_on_cancel() {
         writes.load(Ordering::SeqCst),
         1,
         "no further destination write may land after the abort"
+    );
+}
+
+/// Exercise the public read-through copy and move paths with a real fs primary.
+async fn cancel_read_through_transfer(rename: bool, destination_exists: bool) {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    Storage::register_memory("fallback");
+    let fallback = Storage::disk("fallback").expect("fallback disk");
+    fallback
+        .write("source.bin", vec![0xAB; 4 * 1024 * 1024])
+        .await
+        .expect("seed source");
+    if destination_exists {
+        std::fs::write(tmp.path().join("destination.bin"), b"original")
+            .expect("seed existing destination");
+    }
+    let writes = Arc::new(AtomicUsize::new(0));
+    Storage::register_fs_with("primary", tmp.path(), {
+        let writes = writes.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes,
+                close_gate: None,
+            })
+        }
+    })
+    .expect("register primary");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("register read-through");
+    let assets = Storage::disk("assets").expect("read-through disk");
+    let transfer = tokio::spawn(async move {
+        if rename {
+            assets.rename("source.bin", "destination.bin").await
+        } else {
+            assets
+                .copy("source.bin", "destination.bin")
+                .await
+                .map(|_| ())
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while writes.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first write reaches the primary");
+    assert_ne!(
+        staging_file_count(tmp.path()),
+        0,
+        "test reaches staged state"
+    );
+    transfer.abort();
+    assert!(
+        transfer
+            .await
+            .expect_err("transfer is cancelled")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while staging_file_count(tmp.path()) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled read-through transfer removes staged data");
+    assert!(fallback.exists("source.bin").await.expect("source exists"));
+    if destination_exists {
+        assert_eq!(
+            std::fs::read(tmp.path().join("destination.bin"))
+                .expect("existing destination remains"),
+            b"original"
+        );
+    } else {
+        assert!(!tmp.path().join("destination.bin").exists());
+    }
+}
+
+#[tokio::test]
+async fn read_through_copy_cleans_staging_on_cancel() {
+    cancel_read_through_transfer(false, false).await;
+}
+
+#[tokio::test]
+async fn read_through_copy_preserves_existing_destination_on_cancel() {
+    cancel_read_through_transfer(false, true).await;
+}
+
+#[tokio::test]
+async fn read_through_rename_cleans_staging_on_cancel() {
+    cancel_read_through_transfer(true, false).await;
+}
+
+#[tokio::test]
+async fn read_through_rename_preserves_existing_destination_on_cancel() {
+    cancel_read_through_transfer(true, true).await;
+}
+
+async fn cancel_read_through_promotion(close_first: bool) {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    Storage::register_memory("fallback");
+    let fallback = Storage::disk("fallback").expect("fallback disk");
+    fallback
+        .write("source.bin", "cold bytes")
+        .await
+        .expect("seed source");
+    let reached = Arc::new(AtomicUsize::new(0));
+    Storage::register_fs_with("primary", tmp.path(), {
+        let reached = reached.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: Arc::new(AtomicUsize::new(0)),
+                close_gate: Some((close_first, reached)),
+            })
+        }
+    })
+    .expect("register primary");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("register read-through");
+    let assets = Storage::disk("assets").expect("read-through disk");
+    let promotion = tokio::spawn(async move { assets.read("source.bin").await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reached.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("promotion reaches close gate");
+    // A concurrent primary write wins, and cleanup must never delete it.
+    std::fs::write(tmp.path().join("source.bin"), b"concurrent winner").expect("publish winner");
+    promotion.abort();
+    assert!(
+        promotion
+            .await
+            .expect_err("promotion is cancelled")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let siblings = std::fs::read_dir(tmp.path())
+                .expect("primary directory")
+                .map(|entry| entry.expect("directory entry").file_name())
+                .filter(|name| {
+                    name != "source.bin" && name != suprnova::filesystem::ATOMIC_STAGING_DIR
+                })
+                .count();
+            if siblings == 0 && staging_file_count(tmp.path()) == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled promotion removes writer and sibling staging");
+    assert_eq!(
+        std::fs::read(tmp.path().join("source.bin")).expect("winner remains"),
+        b"concurrent winner"
+    );
+    assert!(
+        fallback
+            .exists("source.bin")
+            .await
+            .expect("fallback remains")
+    );
+}
+
+#[tokio::test]
+async fn read_through_promotion_cleans_staging_on_cancel_during_close() {
+    cancel_read_through_promotion(false).await;
+}
+
+#[tokio::test]
+async fn read_through_promotion_cleans_staging_on_cancel_after_close() {
+    cancel_read_through_promotion(true).await;
+}
+
+#[tokio::test]
+async fn read_through_direct_promotion_aborts_writer_on_cancel() {
+    let _guard = Storage::fake();
+    Storage::register_memory("fallback");
+    Storage::disk("fallback")
+        .expect("fallback")
+        .write("source.bin", "cold bytes")
+        .await
+        .expect("seed source");
+    let reached = Arc::new(AtomicUsize::new(0));
+    Storage::register_memory_with("primary", {
+        let reached = reached.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: Arc::new(AtomicUsize::new(0)),
+                close_gate: Some((false, reached)),
+            })
+        }
+    });
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("register read-through");
+    let primary = Storage::disk("primary").expect("primary");
+    assert!(
+        !primary.info().capability().rename,
+        "exercise direct promotion"
+    );
+    let assets = Storage::disk("assets").expect("read-through");
+    let promotion = tokio::spawn(async move { assets.read("source.bin").await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reached.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("direct promotion reaches close");
+    promotion.abort();
+    assert!(
+        promotion
+            .await
+            .expect_err("promotion is cancelled")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while reached.load(Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("direct promotion must abort its backend writer");
+    assert!(!primary.exists("source.bin").await.expect("primary answers"));
+}
+
+#[tokio::test]
+async fn read_through_conditional_copy_preserves_concurrent_winner() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    Storage::register_memory("fallback");
+    Storage::disk("fallback")
+        .expect("fallback")
+        .write("source.bin", "cold bytes")
+        .await
+        .expect("seed source");
+    let reached = Arc::new(AtomicUsize::new(0));
+    Storage::register_fs_with("primary", tmp.path(), {
+        let reached = reached.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: Arc::new(AtomicUsize::new(0)),
+                close_gate: Some((false, reached)),
+            })
+        }
+    })
+    .expect("register primary");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("register read-through");
+    let assets = Storage::disk("assets").expect("read-through");
+    let transfer = tokio::spawn(async move {
+        assets
+            .copy_with("source.bin", "destination.bin")
+            .if_not_exists(true)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reached.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("conditional copy reaches close");
+    std::fs::write(tmp.path().join("destination.bin"), b"concurrent winner")
+        .expect("publish winner");
+    reached.store(3, Ordering::SeqCst);
+    let error = transfer
+        .await
+        .expect("copy task finishes")
+        .expect_err("conditional publish loses race");
+    assert_eq!(error.kind(), ErrorKind::ConditionNotMatch);
+    assert_eq!(staging_file_count(tmp.path()), 0);
+    assert_eq!(
+        std::fs::read(tmp.path().join("destination.bin")).expect("concurrent winner remains"),
+        b"concurrent winner"
     );
 }
 
