@@ -284,6 +284,11 @@ pub struct LiveDocument<'a> {
     scope: DocumentMountScope,
     metadata: Vec<MountMetadata>,
     bootstrapped: bool,
+    /// The mount kind of every island mounted so far, in mount order.
+    kinds: Vec<LiveMountKind>,
+    /// Earliest public-seed promotion deadline among the mounted islands,
+    /// `None` when no public-seed island has been mounted yet.
+    seed_deadline_ms: Option<u64>,
 }
 
 impl<'a> LiveDocument<'a> {
@@ -302,6 +307,8 @@ impl<'a> LiveDocument<'a> {
             scope: DocumentMountScope::new(),
             metadata: Vec::new(),
             bootstrapped: false,
+            kinds: Vec::new(),
+            seed_deadline_ms: None,
         })
     }
 
@@ -340,19 +347,26 @@ impl<'a> LiveDocument<'a> {
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::ContextRejected))?;
         let key = declaration.document_key.clone();
         let (html, metadata) = match declaration.kind {
-            LiveMountKind::PublicSeed => self
-                .runtime
-                .mount_public_component(
-                    &mut self.scope,
-                    key,
-                    parameters,
-                    flags,
-                    &document_path,
-                    &context,
-                )
-                .await
-                .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?
-                .into_document_parts(),
+            LiveMountKind::PublicSeed => {
+                let output = self
+                    .runtime
+                    .mount_public_component(
+                        &mut self.scope,
+                        key,
+                        parameters,
+                        flags,
+                        &document_path,
+                        &context,
+                    )
+                    .await
+                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                let expires = output.expires_at().get();
+                self.seed_deadline_ms = Some(
+                    self.seed_deadline_ms
+                        .map_or(expires, |current| current.min(expires)),
+                );
+                output.into_document_parts()
+            }
             LiveMountKind::IdentityBound => self
                 .runtime
                 .mount_private_component(
@@ -365,6 +379,7 @@ impl<'a> LiveDocument<'a> {
                 .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?
                 .into_document_parts(),
         };
+        self.kinds.push(declaration.kind);
         self.metadata.push(metadata);
         Ok(MountedIsland { html })
     }
@@ -448,6 +463,11 @@ impl<'a> LiveDocument<'a> {
                 renderer.render_document(view, template, response, assets, self.metadata)
             })
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?;
+        crate::render_cache::live::record_document(
+            &render.response,
+            &self.kinds,
+            self.seed_deadline_ms,
+        );
         document_response(render)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))
     }

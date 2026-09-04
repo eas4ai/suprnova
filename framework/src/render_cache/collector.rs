@@ -152,6 +152,8 @@ pub struct CollectorReport {
     pub context: CollectedContext,
     /// Undeclared request context names that affected rendering.
     pub undeclared: Vec<String>,
+    /// Facts a rendered Live document recorded, if the render mounted one.
+    pub live_document: Option<super::live::LiveDocumentFacts>,
 }
 
 impl CollectorReport {
@@ -373,6 +375,12 @@ pub fn observe_authorization_read() {
 /// touched secret configuration.
 pub fn observe_secret_context_read() {
     with_state(|state| state.report.context.secret_context_read = true);
+}
+/// Records the facts a rendered Live document reported; a no-op outside a
+/// scope. Called by [`super::live::record_document`], never directly by
+/// application code.
+pub fn observe_live_document(facts: super::live::LiveDocumentFacts) {
+    with_state(|state| state.report.live_document = Some(facts));
 }
 /// Undeclared request context affected rendering.
 pub fn observe_undeclared(name: &str) {

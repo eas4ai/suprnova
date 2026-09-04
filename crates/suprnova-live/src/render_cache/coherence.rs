@@ -17,14 +17,22 @@ pub enum FreshnessState {
 }
 
 /// Evaluates freshness at `now_ms`; private representations are never stale
-/// served, so past fresh they are dead.
+/// served, so past fresh they are dead. A stored public-seed deadline at or
+/// before `now_ms` is dead regardless of the fresh, stale-servable, and
+/// stale-on-error intervals: a seed past its promotion deadline can no
+/// longer be promoted, so serving it is never correct no matter how fresh
+/// the entry otherwise looks.
 #[must_use]
 pub fn evaluate_freshness(
     policy: &FreshnessPolicy,
     class: RepresentationClass,
     published_at_ms: u64,
     now_ms: u64,
+    seed_deadline_ms: Option<u64>,
 ) -> FreshnessState {
+    if seed_deadline_ms.is_some_and(|deadline| deadline <= now_ms) {
+        return FreshnessState::Dead;
+    }
     let age = now_ms.saturating_sub(published_at_ms);
     if age < policy.fresh_ms() {
         return FreshnessState::Fresh;

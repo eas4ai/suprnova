@@ -22,7 +22,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            50_000
+            50_000,
+            None
         ),
         FreshnessState::Fresh
     );
@@ -31,7 +32,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            70_000
+            70_000,
+            None
         ),
         FreshnessState::StaleServable
     );
@@ -40,7 +42,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            100_000
+            100_000,
+            None
         ),
         FreshnessState::StaleOnError
     );
@@ -49,7 +52,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            200_000
+            200_000,
+            None
         ),
         FreshnessState::Dead
     );
@@ -58,7 +62,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            published + policy.fresh_ms()
+            published + policy.fresh_ms(),
+            None
         ),
         FreshnessState::StaleServable,
         "the exact millisecond the fresh window ends is already stale-servable"
@@ -68,7 +73,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            published + policy.fresh_ms() + policy.stale_servable_ms()
+            published + policy.fresh_ms() + policy.stale_servable_ms(),
+            None
         ),
         FreshnessState::StaleOnError,
         "the exact millisecond the stale-servable window ends is already stale-on-error"
@@ -78,7 +84,8 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PublicShared,
             published,
-            published + policy.fresh_ms() + policy.stale_on_error_ms()
+            published + policy.fresh_ms() + policy.stale_on_error_ms(),
+            None
         ),
         FreshnessState::Dead,
         "the exact millisecond the stale-on-error window ends is already dead"
@@ -88,10 +95,33 @@ fn freshness_intervals_are_explicit_and_private_output_never_serves_stale() {
             &policy,
             RepresentationClass::PrivateCached,
             published,
-            70_000
+            70_000,
+            None
         ),
         FreshnessState::Dead,
         "private output is never served stale"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
+            RepresentationClass::PublicShared,
+            published,
+            50_000,
+            Some(50_000)
+        ),
+        FreshnessState::Dead,
+        "a seed deadline reached exactly at now_ms is already dead even though the entry is otherwise fresh"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
+            RepresentationClass::PublicShared,
+            published,
+            50_000,
+            Some(50_001)
+        ),
+        FreshnessState::Fresh,
+        "one millisecond before the seed deadline the entry is still fresh"
     );
     assert_eq!(age_seconds(published, 70_000), 69);
     assert_eq!(

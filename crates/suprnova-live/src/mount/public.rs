@@ -88,6 +88,7 @@ pub struct PublicSeedMountOutput {
     body: String,
     metadata: MountMetadata,
     revision: Revision,
+    expires_at: UnixMillis,
 }
 
 impl PublicSeedMountOutput {
@@ -109,6 +110,13 @@ impl PublicSeedMountOutput {
         self.revision
     }
 
+    /// Returns the non-authoritative seed publication deadline used to
+    /// bound how long a host may keep this seed publishable.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.expires_at
+    }
+
     /// Consumes the completed mount into checked document markup and inert metadata.
     #[must_use]
     pub fn into_document_parts(self) -> (TrustedHtml, MountMetadata) {
@@ -126,6 +134,7 @@ impl fmt::Debug for PublicSeedMountOutput {
             .field("body_bytes", &self.body.len())
             .field("metadata", &self.metadata)
             .field("revision", &self.revision)
+            .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }
 }
@@ -326,6 +335,11 @@ impl PublicSeedMountService {
         if !context.is_current(now) {
             return Err(MountError::new(MountErrorKind::ContextRejected));
         }
+        let expires_at = now
+            .get()
+            .checked_add(self.snapshot_limits.max_seed_age_ms())
+            .map(UnixMillis::new)
+            .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
         let catalog = context.mount();
         let descriptor = self
             .registry
@@ -390,6 +404,7 @@ impl PublicSeedMountService {
                 .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?,
             metadata,
             revision,
+            expires_at,
         })
     }
 }

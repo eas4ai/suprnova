@@ -203,3 +203,80 @@ async fn public_seed_mount_runs_the_registered_component_lifecycle_without_insta
         ]
     );
 }
+
+#[test]
+fn a_public_seed_output_reports_its_non_authoritative_expiry() {
+    let context = trusted_context();
+    let component = ComponentContract::new(
+        metadata().identity().clone(),
+        metadata().contract_digest().clone(),
+        1,
+        1,
+        1,
+    )
+    .expect("component contract");
+    let build_id = BuildId::parse("build-lifecycle-tests").expect("build identity");
+    let route = context.mount().route().clone();
+    let slot = context.mount().slot().clone();
+    let schemas = schema_set();
+    let keys = Arc::new(key_ring());
+    let limits = snapshot_limits();
+    let seed = SeedBodyV1::new(
+        SeedFieldsV1 {
+            component,
+            build_id,
+            route,
+            slot: slot.clone(),
+            key_id: keys.active_key_id().clone(),
+            issued_at: UnixMillis::new(1_000),
+            max_age_ms: 500,
+            mount: CanonicalValue::Object(BTreeMap::new()),
+            state: CanonicalValue::Object(BTreeMap::new()),
+            memo: CanonicalValue::Object(BTreeMap::new()),
+            advisory_generations: vec![],
+            refresh_on_promote: false,
+            extensions: BTreeMap::new(),
+        },
+        &schemas,
+        &limits,
+    )
+    .expect("public seed state validates");
+    let registry = ComponentRegistryBuilder::new()
+        .register(ComponentDescriptor::new(metadata().clone()))
+        .expect("component registers")
+        .build();
+    let now = 1_000;
+    let service = PublicSeedMountService::new(
+        PublicMountProviders::new(
+            Arc::new(registry),
+            Arc::new(ManualClock::new(now)),
+            keys.clone(),
+        ),
+        limits.clone(),
+        ViewRenderer::new(RenderLimits::standard()).expect("render limits"),
+        8_192,
+    )
+    .expect("public mount service");
+    let request = PublicSeedMountRequest::new(
+        DocumentMountKey::parse("public-search-expiry").expect("document key"),
+        seed,
+        IslandRender {
+            body: Bytes::from_static(b"<p>Public search results</p>"),
+            assets: AssetSet::empty(),
+            children: vec![],
+        },
+        MountFlags::empty(),
+    );
+    let mut document = DocumentMountScope::new();
+
+    let output = service
+        .mount(&mut document, request, &context)
+        .expect("public seed mount succeeds");
+
+    // The engine's non-authoritative expiry is `now` plus the service's own
+    // configured `max_seed_age_ms` (10_000, set by `snapshot_limits()` in
+    // `component_support`), not the seed's own `max_age_ms` field (500
+    // above): it mirrors `mount/output.rs`'s `PrivateMountOutput::expires_at`,
+    // which is likewise `now + max_seed_age_ms` from the service's limits.
+    assert_eq!(output.expires_at().get(), now + 10_000);
+}

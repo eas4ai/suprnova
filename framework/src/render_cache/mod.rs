@@ -11,16 +11,17 @@
 //! database-authoritative generation ledger and its migration. Task 12
 //! added the write side: every supported ORM and query-builder write path
 //! advances the generation of what it changed. Task 13 added the
-//! file-backed L1 store. Task 14 (this one) adds the middleware and
+//! file-backed L1 store. Task 14 added the middleware and
 //! [`RenderCache::install`], which assembles the runtime and puts the
-//! middleware on the router. The Live integration - reading a seed
-//! promotion deadline out of a mounted document for `EntryHeader` - is a
-//! later task in the same iteration.
+//! middleware on the router. Task 15 (this one) adds the Live integration
+//! in [`live`]: reading a seed promotion deadline out of a mounted document
+//! for `EntryHeader`, and declining identity-bound documents.
 
 pub mod collector;
 pub mod config;
 pub mod file_store;
 pub mod ledger;
+pub mod live;
 pub mod middleware;
 pub mod migration;
 pub mod orm;

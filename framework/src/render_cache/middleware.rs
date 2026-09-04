@@ -188,6 +188,7 @@ use crate::{Auth, Lang};
 use super::collector::{self, Collector};
 use super::config::RenderCacheConfig;
 use super::file_store::FileRenderStore;
+use super::live;
 use super::registry::RenderCachePolicyTable;
 use super::telemetry as render_cache_telemetry;
 
@@ -454,6 +455,7 @@ impl RenderCacheMiddleware {
             entry.header().class,
             stored.published_at_ms,
             now,
+            entry.header().seed_deadline_ms,
         );
         match state {
             FreshnessState::Fresh => {
@@ -862,14 +864,27 @@ fn freshness_state(
     class: RepresentationClass,
     published_at_ms: u64,
     now_ms: u64,
+    seed_deadline_ms: Option<u64>,
 ) -> FreshnessState {
     if coherence == Coherence::Coherent {
-        return evaluate_freshness(&policy.freshness(), class, published_at_ms, now_ms);
+        return evaluate_freshness(
+            &policy.freshness(),
+            class,
+            published_at_ms,
+            now_ms,
+            seed_deadline_ms,
+        );
     }
     let age = now_ms.saturating_sub(published_at_ms);
     let effective_age = age.max(policy.freshness().fresh_ms());
     let synthetic_now = published_at_ms.saturating_add(effective_age);
-    evaluate_freshness(&policy.freshness(), class, published_at_ms, synthetic_now)
+    evaluate_freshness(
+        &policy.freshness(),
+        class,
+        published_at_ms,
+        synthetic_now,
+        seed_deadline_ms,
+    )
 }
 
 /// Builds the served response for a hit: a 304 when the request's
@@ -941,9 +956,17 @@ fn conditional_response(
         response = response.header(name.to_owned(), value.to_owned());
     }
     response = response.header("ETag", entry.validator().etag());
+    let seed_remaining = header
+        .seed_deadline_ms
+        .map(|deadline| deadline.saturating_sub(now_ms));
     response = response.header(
         "Cache-Control",
-        cache_control_value(header.class, policy.shared(), &policy.freshness(), None),
+        cache_control_value(
+            header.class,
+            policy.shared(),
+            &policy.freshness(),
+            seed_remaining,
+        ),
     );
     if let Some(vary) = vary_value(&header.variance) {
         response = response.header("Vary", vary);
@@ -1011,6 +1034,7 @@ async fn render_and_publish(
                         entry.header().class,
                         stored.published_at_ms,
                         now,
+                        entry.header().seed_deadline_ms,
                     );
                     match state {
                         FreshnessState::Fresh => {
@@ -1166,7 +1190,17 @@ async fn lead_render(
         undeclared_reads: report.undeclared.clone(),
     };
     let classification = classify(policy.class(), &observed_context);
-    if classification.class == RepresentationClass::Uncacheable {
+    // Narrows `classify`'s own class with what the rendered Live document
+    // (if any) reported: an identity-bound island or a no-store document
+    // intent declines regardless of what `classify` decided, and a
+    // public-seed island without a resolvable deadline declines too. A
+    // route with no Live document keeps `classify`'s class unchanged. This
+    // must run before `key_used_different_values_than_the_render_saw`
+    // below: that guard's debug assertion expects every `Uncacheable`
+    // decline to have already happened, so narrowing after it would open a
+    // second, unaccounted-for decline path.
+    let class = live::document_class(report.live_document.as_ref(), classification.class);
+    if class == RepresentationClass::Uncacheable {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1184,13 +1218,30 @@ async fn lead_render(
     }
 
     let now = runtime.now_ms();
+    let seed_deadline_ms = report
+        .live_document
+        .as_ref()
+        .and_then(|facts| facts.seed_deadline_ms);
+    let seed_remaining = report
+        .live_document
+        .as_ref()
+        .and_then(|facts| live::seed_remaining_ms(facts, now));
+    if seed_remaining == Some(0) {
+        // The seed's own promotion deadline was reached between the render
+        // starting and this point; publishing it now would store an entry
+        // that is already dead on arrival.
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     let Some(entry) = build_entry(
         &job,
         policy,
-        classification.class,
+        class,
         &observed,
         &response,
         now,
+        seed_deadline_ms,
     ) else {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
@@ -1240,9 +1291,20 @@ fn finish_fresh_render(
         response
     };
     out = out.replace_header("ETag", entry.validator().etag());
+    // Age is always 0 here (see this function's own doc), so the seed's
+    // remaining lifetime at this instant is the deadline minus the very
+    // publication time already stored in `header`.
+    let seed_remaining = header
+        .seed_deadline_ms
+        .map(|deadline| deadline.saturating_sub(header.published_at_ms));
     out = out.replace_header(
         "Cache-Control",
-        cache_control_value(header.class, policy.shared(), &policy.freshness(), None),
+        cache_control_value(
+            header.class,
+            policy.shared(),
+            &policy.freshness(),
+            seed_remaining,
+        ),
     );
     if let Some(vary) = vary_value(&header.variance) {
         out = out.replace_header("Vary", vary);
@@ -1601,6 +1663,7 @@ fn build_entry(
     observed: &GenerationSet,
     response: &HttpResponse,
     now: u64,
+    seed_deadline_ms: Option<u64>,
 ) -> Option<CompleteEntry> {
     let safe_pairs: Vec<(String, String)> = response
         .headers()
@@ -1618,7 +1681,7 @@ fn build_entry(
         stale_on_error_ms: policy.freshness().stale_on_error_ms(),
         observed: observed.clone(),
         epoch: job.epoch,
-        seed_deadline_ms: None,
+        seed_deadline_ms,
         status: 200,
         headers: safe_headers,
         content_encoding: None,
