@@ -22,6 +22,7 @@
 //! $retryAfter, $response)` shape.
 
 use async_trait::async_trait;
+use hex::encode;
 
 use crate::Middleware;
 use crate::Next;
@@ -31,6 +32,7 @@ use crate::http::{HttpResponse, Response};
 use super::laravel::{NamedLimiterFn, RateLimiter};
 use super::limit::{Limit, LimitResult};
 
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 /// HTTP throttling middleware backed by the Cache-shape
@@ -127,6 +129,8 @@ impl Middleware for ThrottleRequestsMiddleware {
             }
         };
 
+        let keys = independent_keys(&limits, &self.mode, &self.prefix);
+
         // Apply each limit's gate. First trip wins, then short-circuit with
         // the 429 (or its custom-response equivalent). Matches Laravel's
         // first-trip-wins pass through `handleRequest`.
@@ -144,18 +148,15 @@ impl Middleware for ThrottleRequestsMiddleware {
         //   post-response predicate matches, so the debit is deferred until
         //   after `next`. They gate on the already-recorded count via a read
         //   (`too_many_attempts`); there is nothing to increment yet.
-        for limit in &limits {
-            let key = match prefixed_key(limit, &self.mode, &self.prefix) {
-                Some(k) => k,
-                None => continue, // Unlimited limit -- never trips.
-            };
+        for (limit, key) in limits.iter().zip(&keys) {
+            let Some(key) = key else { continue }; // Unlimited never trips.
             let over = if limit.after_callback.is_some() {
-                RateLimiter::too_many_attempts(&key, limit.max_attempts).await?
+                RateLimiter::too_many_attempts(key, limit.max_attempts).await?
             } else {
-                RateLimiter::hit_and_check(&key, limit.max_attempts, limit.decay_seconds()).await?
+                RateLimiter::hit_and_check(key, limit.max_attempts, limit.decay_seconds()).await?
             };
             if over {
-                return Err(build_too_many_attempts_response(&request, limit, &key).await?);
+                return Err(build_too_many_attempts_response(&request, limit, key).await?);
             }
         }
 
@@ -165,35 +166,29 @@ impl Middleware for ThrottleRequestsMiddleware {
         // headers on the outgoing response.
         match response {
             Ok(mut r) => {
-                for limit in &limits {
-                    let key = match prefixed_key(limit, &self.mode, &self.prefix) {
-                        Some(k) => k,
-                        None => continue,
-                    };
+                for (limit, key) in limits.iter().zip(&keys) {
+                    let Some(key) = key else { continue };
                     if let Some(after) = &limit.after_callback
                         && after(&r)
                         && limit.max_attempts != i64::MAX
                     {
-                        RateLimiter::hit(&key, limit.decay_seconds()).await?;
+                        RateLimiter::hit(key, limit.decay_seconds()).await?;
                     }
-                    let remaining = RateLimiter::remaining(&key, limit.max_attempts).await?;
+                    let remaining = RateLimiter::remaining(key, limit.max_attempts).await?;
                     r = inject_headers(r, limit.max_attempts, remaining, None);
                 }
                 Ok(r)
             }
             Err(mut r) => {
-                for limit in &limits {
-                    let key = match prefixed_key(limit, &self.mode, &self.prefix) {
-                        Some(k) => k,
-                        None => continue,
-                    };
+                for (limit, key) in limits.iter().zip(&keys) {
+                    let Some(key) = key else { continue };
                     if let Some(after) = &limit.after_callback
                         && after(&r)
                         && limit.max_attempts != i64::MAX
                     {
-                        RateLimiter::hit(&key, limit.decay_seconds()).await?;
+                        RateLimiter::hit(key, limit.decay_seconds()).await?;
                     }
-                    let remaining = RateLimiter::remaining(&key, limit.max_attempts).await?;
+                    let remaining = RateLimiter::remaining(key, limit.max_attempts).await?;
                     r = inject_headers(r, limit.max_attempts, remaining, None);
                 }
                 Err(r)
@@ -268,6 +263,68 @@ fn prefixed_key(limit: &Limit, mode: &Mode, prefix: &str) -> Option<String> {
     }
     key.push_str(&base);
     Some(RateLimiter::clean_rate_limiter_key(&key))
+}
+
+// Keep legacy keys unless multiple finite clauses share a storage identity.
+// Compute once so gating, deferred hits, and response headers use the same key.
+fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<String>> {
+    let mut keys: Vec<_> = limits
+        .iter()
+        .map(|limit| prefixed_key(limit, mode, prefix))
+        .collect();
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut reserved = HashSet::new();
+    for (index, key) in keys.iter().enumerate() {
+        if let Some(key) = key {
+            // The facade cleans once more. Cleaning nested entity markers
+            // is not idempotent, so compare the actual backing-store identity.
+            let stored = RateLimiter::clean_rate_limiter_key(key);
+            reserved.insert(stored.clone());
+            reserved.insert(format!("{stored}:timer"));
+            groups.entry(stored).or_default().push(index);
+        }
+    }
+    for (base, mut indices) in groups {
+        if indices.len() < 2 {
+            continue;
+        }
+        indices.sort_by_key(|&index| {
+            (
+                limits[index].max_attempts,
+                limits[index].decay_seconds(),
+                limits[index].after_callback.is_some(),
+            )
+        });
+        let mut occurrences = BTreeMap::new();
+        for index in indices {
+            let limit = &limits[index];
+            let identity = (
+                limit.max_attempts,
+                limit.decay_seconds(),
+                limit.after_callback.is_some(),
+            );
+            let occurrence = occurrences.entry(identity).or_insert(0_usize);
+            // Hex is unambiguous and unaffected by the facade's cleaner.
+            let mut key = format!(
+                "suprnova:throttle:{}:{}:{}:{}:{}",
+                encode(&base),
+                identity.0,
+                identity.1,
+                identity.2,
+                occurrence
+            );
+            *occurrence += 1;
+            // Caller-provided keys may even match this private namespace.
+            // Reserve both counter and timer identities, deterministically.
+            while reserved.contains(&key) || reserved.contains(&format!("{key}:timer")) {
+                key.push('_');
+            }
+            reserved.insert(key.clone());
+            reserved.insert(format!("{key}:timer"));
+            keys[index] = Some(key);
+        }
+    }
+    keys
 }
 
 fn default_request_key(request: &Request) -> String {
@@ -349,6 +406,51 @@ fn inject_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_keys_preserve_singletons_and_skip_unlimited() {
+        let limits = vec![Limit::per_minute(2).by("user:1"), Limit::none().into()];
+        assert_eq!(
+            independent_keys(&limits, &Mode::Named("api".into()), "shop"),
+            vec![Some("shop:api:user:1".into()), None]
+        );
+    }
+
+    #[test]
+    fn independent_keys_handle_nested_normalization_and_reordering() {
+        let mut limits = vec![
+            Limit::per_minute(2).by("&a&bc;;"),
+            Limit::per_hour(10).by("a"),
+        ];
+        let keys = independent_keys(&limits, &Mode::Limits(vec![]), "");
+        assert_ne!(keys[0], keys[1]);
+        for key in keys.iter().flatten() {
+            assert_eq!(RateLimiter::clean_rate_limiter_key(key), *key);
+        }
+        limits.reverse();
+        let mut reversed = independent_keys(&limits, &Mode::Limits(vec![]), "");
+        reversed.reverse();
+        assert_eq!(keys, reversed);
+    }
+
+    #[test]
+    fn independent_keys_do_not_overlap_caller_counter_or_timer_keys() {
+        let mode = Mode::Limits(vec![]);
+        let base_limits = vec![Limit::per_minute(2).by("a"), Limit::per_hour(10).by("a")];
+        let original = independent_keys(&base_limits, &mode, "");
+        let generated = original[0].as_ref().unwrap();
+        for caller_key in [generated.clone(), format!("{generated}:timer")] {
+            let mut limits = base_limits.clone();
+            limits.push(Limit::per_minute(4).by(&caller_key));
+            let keys = independent_keys(&limits, &mode, "");
+            assert_eq!(keys[2].as_deref(), Some(caller_key.as_str()));
+            let mut identities = HashSet::new();
+            for key in keys.into_iter().flatten() {
+                assert!(identities.insert(key.clone()));
+                assert!(identities.insert(format!("{key}:timer")));
+            }
+        }
+    }
 
     #[test]
     fn prefixed_key_includes_named_limiter_name() {
