@@ -1190,20 +1190,6 @@ async fn lead_render(
         undeclared_reads: report.undeclared.clone(),
     };
     let classification = classify(policy.class(), &observed_context);
-    // Test-only, see `strip_classification_reasons_for_test`'s own doc: no
-    // production code ever sets this flag, and `classify` never produces a
-    // narrowed, reason-less class on its own, so this is a no-op on every
-    // real request. Read from `report` (already extracted from the
-    // collector by `run_render`, above), not the collector itself: the
-    // scope that flag was set in has already closed by this point.
-    #[cfg(any(test, feature = "testing"))]
-    let classification = {
-        let mut classification = classification;
-        if report.strip_classification_reasons {
-            classification.reasons.clear();
-        }
-        classification
-    };
     if classification.class == RepresentationClass::Uncacheable {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
@@ -1227,7 +1213,27 @@ async fn lead_render(
     // against, and the guard's loop simply never runs. See
     // `is_unreasoned_private_class`'s own doc for how this is reachable,
     // and for why a route that *declared* `PrivateCached` is excluded.
-    if is_unreasoned_private_class(&classification, policy.class()) {
+    //
+    // R90: this check runs against a *copy*, never the real
+    // `classification` - see `strip_classification_reasons_for_test`'s own
+    // doc for why the test-only seam that copy exists for must never touch
+    // the value passed to the value guard or to `build_entry` below.
+    let classification_for_invariant = classification.clone();
+    // Test-only, see `strip_classification_reasons_for_test`'s own doc: no
+    // production code ever sets this flag, and `classify` never produces a
+    // narrowed, reason-less class on its own, so this is a no-op on every
+    // real request. Read from `report` (already extracted from the
+    // collector by `run_render`, above), not the collector itself: the
+    // scope that flag was set in has already closed by this point.
+    #[cfg(any(test, feature = "testing"))]
+    let classification_for_invariant = {
+        let mut classification_for_invariant = classification_for_invariant;
+        if report.strip_classification_reasons {
+            classification_for_invariant.reasons.clear();
+        }
+        classification_for_invariant
+    };
+    if is_unreasoned_private_class(&classification_for_invariant, policy.class()) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);

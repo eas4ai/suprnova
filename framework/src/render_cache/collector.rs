@@ -444,10 +444,14 @@ pub fn current_report() -> Option<CollectorReport> {
     with_state(|state| state.report.clone())
 }
 
-/// Test-only: marks the active collector scope so the classification this
-/// request produces has its `reasons` cleared immediately after `classify`
-/// runs, before the R86 invariant (`is_unreasoned_private_class` in
-/// `middleware.rs`) checks it.
+/// Test-only: marks the active collector scope so a *copy* of the
+/// classification this request produces - never the real one, which still
+/// reaches the value guard and `build_entry` untouched (R90) - has its
+/// `reasons` cleared immediately after `classify` runs, right before the
+/// R86 invariant (`is_unreasoned_private_class` in `middleware.rs`) checks
+/// that copy; because the real classification is never mutated, calling
+/// this can only ever make the invariant decline, never weaken any guard
+/// downstream of it.
 ///
 /// Simulates a class `classify` genuinely narrowed to `PrivateCached` but
 /// that somehow carries no attached reason - a shape `classify`'s own

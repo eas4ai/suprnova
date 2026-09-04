@@ -7,8 +7,10 @@ mod render_cache_live_support;
 
 use live_dogfood_support::{DOCUMENT_PATH, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
-    RAW_PATH, STRIP_PATH, UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get,
-    private_renders, public_renders, public_seed_lifetime_ms, strip_renders, unreasoned_renders,
+    RAW_PATH, SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH, UNREASONED_PATH,
+    boot_with_render_cache_and_live, clock, dispatch_get, private_renders, public_renders,
+    public_seed_lifetime_ms, seam_control_renders, seam_leak_renders, strip_renders,
+    unreasoned_renders,
 };
 use suprnova::StatusCode;
 use suprnova::live::LiveMountKind;
@@ -360,4 +362,82 @@ async fn a_class_narrowed_with_no_attached_reason_is_declined() {
         "a class narrowed with no attached reason must be declined, never stored"
     );
     assert!(again.header("etag").is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_seam_can_only_decline_never_serve_one_user_another_users_body() {
+    // Finding 10 / R90: on a route declared `PrivateCached` with `Tenant`
+    // variance only (no `Principal` dimension in the key - R89 exempts the
+    // declared class from the invariant), a `PrincipalObserved` reason with
+    // no `Principal` dimension declared must decline via the pre-existing
+    // value guard whether or not the test-only seam is called. If the seam
+    // ever touched the real classification the value guard checks, calling
+    // it would blank that guard's input and let `user-9` be served the
+    // body rendered for `user-7`.
+    let harness = boot_with_render_cache_and_live().await;
+    let login7 = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let cookie7 = login7.session_cookie();
+    let login9 = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-9")]).await;
+    let cookie9 = login9.session_cookie();
+
+    // Control: identical policy and handler shape, no seam call. Confirms
+    // the value guard alone already declines this shape, so any difference
+    // measured on the leak route below is attributable to the seam.
+    let c1 = dispatch_get(
+        &harness,
+        SEAM_CONTROL_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie7)],
+    )
+    .await;
+    assert_eq!(
+        c1.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&c1.body)
+    );
+    let _c2 = dispatch_get(
+        &harness,
+        SEAM_CONTROL_PATH,
+        &[("x-test-login", "user-9"), ("cookie", &cookie9)],
+    )
+    .await;
+    assert_eq!(
+        seam_control_renders(),
+        2,
+        "without the seam, the value guard declines a Principal reason with no Principal \
+         dimension declared"
+    );
+
+    // Leak shape: identical except the handler calls the seam.
+    let l1 = dispatch_get(
+        &harness,
+        SEAM_LEAK_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie7)],
+    )
+    .await;
+    assert_eq!(
+        l1.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&l1.body)
+    );
+    let l2 = dispatch_get(
+        &harness,
+        SEAM_LEAK_PATH,
+        &[("x-test-login", "user-9"), ("cookie", &cookie9)],
+    )
+    .await;
+    assert_eq!(l2.status, StatusCode::OK);
+    assert_eq!(
+        seam_leak_renders(),
+        2,
+        "the seam must only ever cause the invariant to decline, never weaken the value \
+         guard that runs after it"
+    );
+    assert!(l2.header("etag").is_none(), "never stored, so no validator");
+    assert_ne!(
+        l1.body, l2.body,
+        "user-9 must never be served the body rendered for user-7"
+    );
 }

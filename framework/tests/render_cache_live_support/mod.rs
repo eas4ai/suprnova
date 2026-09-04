@@ -63,15 +63,32 @@ pub const RAW_PATH: &str = "/dogfood/private-raw";
 /// this exercises `middleware.rs`'s classification path directly.
 pub const UNREASONED_PATH: &str = "/unreasoned-private-cached";
 
-/// Fix round 2 (finding 8): a route declared `PublicShared` with no
-/// variance, whose handler reads an identity (attaching
-/// `ClassificationReason::PrincipalObserved`) and then calls the test-only
-/// `strip_classification_reasons_for_test` seam, simulating a class
-/// `classify` genuinely narrowed to `PrivateCached` with the reason
-/// stripped away - the shape `is_unreasoned_private_class`'s call site
-/// exists to catch, reached here through `lead_render`'s real control flow
-/// since `classify` itself cannot produce it unaided.
+/// Fix round 2 (finding 8), policy updated in round 3 (R90): a route
+/// declared `PublicShared` with `Principal` variance, whose handler reads
+/// an identity (attaching `ClassificationReason::PrincipalObserved`) and
+/// then calls the test-only `strip_classification_reasons_for_test` seam.
+/// Since the seam only ever strips a *copy* used for the invariant check
+/// (R90), the value guard sees the real, unstripped reason and is
+/// satisfied by the declared `Principal` variance - it cannot be what
+/// declines a second request from the same user. Only
+/// `is_unreasoned_private_class`, seeing the copy narrowed to
+/// `PrivateCached` with the reason stripped away, can still decline this
+/// shape, reached here through `lead_render`'s real control flow since
+/// `classify` itself cannot produce it unaided.
 pub const STRIP_PATH: &str = "/strip-classification-reason";
+
+/// Fix round 3 (R90, finding 10): declared `PrivateCached` with `Tenant`
+/// variance only - no `Principal` dimension in the key. The handler reads
+/// an identity (attaching `ClassificationReason::PrincipalObserved`) and
+/// then calls the test-only seam. Without the fix, stripping the *real*
+/// classification also blanks `key_used_different_values_than_the_render_saw`'s
+/// input, and R89 exempts the declared-`PrivateCached` class from the
+/// invariant, so the two combine into a cross-user serve. Paired with
+/// `SEAM_CONTROL_PATH`, identical except it never calls the seam, to prove
+/// the value guard alone already declines this shape.
+pub const SEAM_LEAK_PATH: &str = "/seam-leak";
+/// See `SEAM_LEAK_PATH`'s own doc.
+pub const SEAM_CONTROL_PATH: &str = "/seam-control";
 
 /// Counts renders reaching the handler side of the RenderCache middleware,
 /// split by which route was hit so the probe routes do not share a
@@ -93,6 +110,12 @@ impl Middleware for RenderCounter {
             STRIP_PATH => {
                 STRIP_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
+            SEAM_LEAK_PATH => {
+                SEAM_LEAK_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
+            SEAM_CONTROL_PATH => {
+                SEAM_CONTROL_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {
                 PUBLIC_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
@@ -105,6 +128,8 @@ static PUBLIC_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static PRIVATE_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static UNREASONED_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static STRIP_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static SEAM_LEAK_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static SEAM_CONTROL_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The single RenderCache migration this harness needs; mirrors
 /// `render_cache_middleware_support::MiddlewareMigrator`, which is private
@@ -200,14 +225,28 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .vary(VarianceDimension::Principal)
         .build()
         .expect("unreasoned private cached policy");
-    // Finding 8's shape: declared `PublicShared`, no variance at all - the
-    // point is that nothing partitions the key, so if the invariant's call
-    // site did not run, the reason-stripped render would be stored and
-    // served to every caller regardless of identity.
+    // Finding 8's shape: declared `PublicShared` with `Principal` variance
+    // declared. R90 means the seam only ever touches a *copy* used for the
+    // invariant check, so the value guard sees the render's real,
+    // unstripped `PrincipalObserved` reason - declaring `Principal`
+    // satisfies that guard for two requests from the same signed-in user,
+    // so it cannot be what declines the second one. Only the invariant,
+    // seeing the copy narrowed to `PrivateCached` with the reason stripped
+    // away, can still decline this shape; without its call site running,
+    // nothing else would.
     let strip_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
         .build()
         .expect("strip classification reason policy");
+    // Shared by SEAM_LEAK_PATH and SEAM_CONTROL_PATH: declared PrivateCached
+    // (so R89 exempts it from the invariant) with only Tenant variance, so
+    // a PrincipalObserved reason has no Principal dimension in the key.
+    let seam_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Tenant)
+        .build()
+        .expect("seam policy");
 
     let raw = LiveMount::<DogfoodCounter>::identity_bound(RAW_PATH, "counter", "dogfood-raw")
         .expect("declare raw identity-bound mount");
@@ -226,6 +265,8 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .expect("register raw identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
     let router: Router = router.get(STRIP_PATH, strip_handler).into();
+    let router: Router = router.get(SEAM_LEAK_PATH, seam_leak_handler).into();
+    let router: Router = router.get(SEAM_CONTROL_PATH, seam_control_handler).into();
     let router = router
         .try_render_cache(DOCUMENT_PATH, public_policy)
         .expect("attach public seed render cache policy")
@@ -236,7 +277,11 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .try_render_cache(UNREASONED_PATH, unreasoned_policy)
         .expect("attach unreasoned private cached policy")
         .try_render_cache(STRIP_PATH, strip_policy)
-        .expect("attach strip classification reason policy");
+        .expect("attach strip classification reason policy")
+        .try_render_cache(SEAM_LEAK_PATH, seam_policy.clone())
+        .expect("attach seam leak policy")
+        .try_render_cache(SEAM_CONTROL_PATH, seam_policy)
+        .expect("attach seam control policy");
 
     let mut render_cache_config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -268,6 +313,8 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     PRIVATE_RENDERS.store(0, Ordering::SeqCst);
     UNREASONED_RENDERS.store(0, Ordering::SeqCst);
     STRIP_RENDERS.store(0, Ordering::SeqCst);
+    SEAM_LEAK_RENDERS.store(0, Ordering::SeqCst);
+    SEAM_CONTROL_RENDERS.store(0, Ordering::SeqCst);
     suprnova::middleware::register_global_middleware(RenderCounter);
     let router = Arc::new(router);
     prepare_live_router_with_clock_for_test(&router, Arc::clone(&clock))
@@ -315,14 +362,40 @@ async fn unreasoned_handler(_request: Request) -> Response {
 }
 
 /// Finding 8's shape: reads an identity (attaching
-/// `ClassificationReason::PrincipalObserved` inside `classify`), then
-/// immediately strips that reason via the test-only seam, simulating a
-/// class `classify` narrowed to `PrivateCached` with no reason surviving.
+/// `ClassificationReason::PrincipalObserved` inside `classify`), then calls
+/// the test-only seam, which strips that reason only from the copy
+/// `is_unreasoned_private_class` checks (R90) - the real classification the
+/// value guard and `build_entry` see keeps the reason.
 async fn strip_handler(_request: Request) -> Response {
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
     suprnova::render_cache::collector::strip_classification_reasons_for_test();
     Ok(HttpResponse::html(format!(
         "strip classification reason render for {identity}"
+    )))
+}
+
+/// R90's own regression shape: reads an identity and calls the seam, on a
+/// route whose key does not carry `Principal` material. If the seam ever
+/// touched the real classification again, this would store under a key
+/// that does not partition by principal and serve `user-9` the body
+/// rendered for `user-7`.
+async fn seam_leak_handler(_request: Request) -> Response {
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    suprnova::render_cache::collector::strip_classification_reasons_for_test();
+    Ok(HttpResponse::html(format!(
+        "seam leak render for {identity}"
+    )))
+}
+
+/// Identical to `seam_leak_handler` except it never calls the seam: proves
+/// the value guard alone already declines this shape (a `PrincipalObserved`
+/// reason with no `Principal` dimension in the key), so `SEAM_LEAK_PATH`'s
+/// behavior is genuinely attributable to the seam and not to some other
+/// difference between the two routes.
+async fn seam_control_handler(_request: Request) -> Response {
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "seam control render for {identity}"
     )))
 }
 
@@ -356,6 +429,16 @@ pub fn unreasoned_renders() -> usize {
 /// Renders reaching `STRIP_PATH`'s handler so far.
 pub fn strip_renders() -> usize {
     STRIP_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `SEAM_LEAK_PATH`'s handler so far.
+pub fn seam_leak_renders() -> usize {
+    SEAM_LEAK_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `SEAM_CONTROL_PATH`'s handler so far.
+pub fn seam_control_renders() -> usize {
+    SEAM_CONTROL_RENDERS.load(Ordering::SeqCst)
 }
 
 /// One dispatched response: status, an accessor for a header, and the body.
