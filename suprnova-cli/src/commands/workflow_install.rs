@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::secure_fs::ensure_contained;
 use crate::templates;
 use crate::ui;
 
@@ -14,6 +15,11 @@ const NORMALIZE_WORKFLOW_DATETIMES_MIGRATION: &str =
 pub fn run() {
     let migrations_dir = Path::new("src/migrations");
     let mod_file = migrations_dir.join("mod.rs");
+
+    if let Err(error) = ensure_contained(Path::new("."), &mod_file) {
+        ui::error(&format!("Invalid migrations path: {error}"));
+        std::process::exit(1);
+    }
 
     if !Path::new("src").exists() {
         ui::error("Not in a Suprnova project root directory");

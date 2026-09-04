@@ -16,6 +16,32 @@ use tempfile::tempdir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
+#[cfg(unix)]
+#[test]
+fn workflow_install_checks_parent_before_creating_directories() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().expect("create fixture");
+    let root = dir.path().join("project");
+    let outside = dir.path().join("outside");
+    fs::create_dir(&root).expect("create project");
+    fs::create_dir(&outside).expect("create external directory");
+    symlink(&outside, root.join("src")).expect("link source directory");
+
+    let out = Command::new(BIN)
+        .arg("workflow:install")
+        .current_dir(&root)
+        .output()
+        .expect("run workflow installer");
+
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert_eq!(
+        fs::read_dir(&outside).expect("read external directory").count(),
+        0,
+        "installer must check containment before creating any directory"
+    );
+}
+
 /// Combined stdout + stderr, since the `ui` helpers may write to either stream.
 fn combined(out: &Output) -> String {
     let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
