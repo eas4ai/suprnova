@@ -180,7 +180,7 @@ impl Service for GateWritesService {
     type Writer = GateWriter;
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
-    type Copier = oio::Copier;
+    type Copier = GateCopier;
 
     fn info(&self) -> ServiceInfo {
         self.inner.info()
@@ -231,7 +231,10 @@ impl Service for GateWritesService {
         args: OpCopy,
         opts: OpCopier,
     ) -> Result<Self::Copier> {
-        self.inner.copy(ctx, from, to, args, opts)
+        Ok(GateCopier {
+            inner: self.inner.copy(ctx, from, to, args, opts)?,
+            reached: self.close_gate.as_ref().map(|(_, reached)| reached.clone()),
+        })
     }
 
     async fn rename(
@@ -260,6 +263,30 @@ struct GateWriter {
     close_gate: Option<(bool, Arc<AtomicUsize>)>,
 }
 
+struct GateCopier {
+    inner: oio::Copier,
+    reached: Option<Arc<AtomicUsize>>,
+}
+
+impl oio::Copy for GateCopier {
+    async fn next(&mut self) -> Result<Option<usize>> {
+        self.inner.next().await
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        if let Some(reached) = &self.reached {
+            while self.inner.next().await?.is_some() {}
+            reached.store(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.inner.abort().await
+    }
+}
+
 impl oio::Write for GateWriter {
     async fn write(&mut self, bs: Buffer) -> Result<()> {
         // Counted only after the inner write completes, so `writes == 1`
@@ -285,6 +312,9 @@ impl oio::Write for GateWriter {
             reached.store(1, Ordering::SeqCst);
             while reached.load(Ordering::SeqCst) == 1 {
                 tokio::task::yield_now().await;
+            }
+            if reached.load(Ordering::SeqCst) == 4 {
+                return Err(Error::new(ErrorKind::Unexpected, "injected close failure"));
             }
         }
         self.inner.close().await
@@ -710,5 +740,186 @@ async fn copy_cleans_up_partial_destination_on_midstream_failure() {
     assert!(
         !tmp.path().join("partial.bin").exists(),
         "a failed copy must not leave a partial destination file"
+    );
+}
+
+async fn copy_preserves_existing_destination(local: bool, fail: bool) {
+    let _guard = Storage::fake();
+    let root = tempfile::tempdir().expect("destination root");
+    if local {
+        Storage::register_fs("destination", root.path()).expect("local destination");
+    } else {
+        Storage::register_memory("destination");
+    }
+    if fail {
+        Storage::register_memory_with("source", |op| op.layer(FailAfterOneChunkLayer));
+    } else {
+        Storage::register_memory("source");
+    }
+    Storage::disk("source")
+        .expect("source")
+        .write("source.bin", "replacement")
+        .await
+        .expect("seed source metadata");
+    let destination = Storage::disk("destination").expect("destination");
+    destination
+        .write("destination.bin", "original")
+        .await
+        .expect("seed destination");
+    let result = copy_between_disks("source", "source.bin", "destination", "destination.bin").await;
+    if fail {
+        let error = result.expect_err("source fails after destination writer opens");
+        assert!(
+            error.to_string().contains("injected direct read failure"),
+            "{error}"
+        );
+    } else {
+        assert_eq!(result.expect("copy succeeds"), 11);
+    }
+    assert_eq!(
+        destination
+            .read("destination.bin")
+            .await
+            .expect("destination survives")
+            .to_vec(),
+        if fail {
+            b"original".as_slice()
+        } else {
+            b"replacement".as_slice()
+        }
+    );
+    assert_eq!(staging_file_count(root.path()), 0);
+}
+
+#[tokio::test]
+async fn failed_copy_preserves_existing_memory_destination() {
+    copy_preserves_existing_destination(false, true).await;
+}
+
+#[tokio::test]
+async fn failed_copy_preserves_existing_local_destination() {
+    copy_preserves_existing_destination(true, true).await;
+}
+
+#[tokio::test]
+async fn successful_copy_replaces_existing_memory_destination() {
+    copy_preserves_existing_destination(false, false).await;
+}
+
+#[tokio::test]
+async fn successful_copy_replaces_existing_local_destination() {
+    copy_preserves_existing_destination(true, false).await;
+}
+
+#[tokio::test]
+async fn read_through_ordinary_copy_preserves_concurrent_winner_on_failure() {
+    let _guard = Storage::fake();
+    let root = tempfile::tempdir().expect("primary root");
+    Storage::register_memory("fallback");
+    Storage::disk("fallback")
+        .expect("fallback")
+        .write("source.bin", "cold bytes")
+        .await
+        .expect("seed fallback");
+    let reached = Arc::new(AtomicUsize::new(0));
+    Storage::register_fs_with("primary", root.path(), {
+        let reached = reached.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: Arc::new(AtomicUsize::new(0)),
+                close_gate: Some((false, reached)),
+            })
+        }
+    })
+    .expect("primary");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("read-through");
+    let assets = Storage::disk("assets").expect("assets");
+    let transfer = tokio::spawn(async move { assets.copy("source.bin", "destination.bin").await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reached.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("copy reaches close after observing absent destination");
+    std::fs::write(root.path().join("destination.bin"), b"concurrent winner")
+        .expect("publish winner");
+    reached.store(4, Ordering::SeqCst);
+    let error = transfer
+        .await
+        .expect("copy finishes")
+        .expect_err("close fails before publishing");
+    assert!(
+        error.to_string().contains("injected close failure"),
+        "{error}"
+    );
+    assert_eq!(staging_file_count(root.path()), 0);
+    assert_eq!(
+        std::fs::read(root.path().join("destination.bin")).expect("winner survives"),
+        b"concurrent winner"
+    );
+}
+
+#[tokio::test]
+async fn read_through_native_copy_cleans_staging_on_cancel() {
+    let _guard = Storage::fake();
+    let root = tempfile::tempdir().expect("primary root");
+    std::fs::write(root.path().join("source.bin"), b"primary bytes").expect("seed native source");
+    std::fs::write(root.path().join("destination.bin"), b"original").expect("seed destination");
+    Storage::register_memory("fallback");
+    let reached = Arc::new(AtomicUsize::new(0));
+    Storage::register_fs_with("primary", root.path(), {
+        let reached = reached.clone();
+        move |op| {
+            op.layer(GateWritesLayer {
+                writes: Arc::new(AtomicUsize::new(0)),
+                close_gate: Some((false, reached)),
+            })
+        }
+    })
+    .expect("primary");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("read-through");
+    let assets = Storage::disk("assets").expect("assets");
+    let transfer = tokio::spawn(async move { assets.copy("source.bin", "destination.bin").await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reached.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native copier stages bytes before publication");
+    assert_ne!(
+        staging_file_count(root.path()),
+        0,
+        "private copy stage exists"
+    );
+    transfer.abort();
+    assert!(transfer.await.expect_err("copy cancelled").is_cancelled());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while staging_file_count(root.path()) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled native copier removes its stage");
+    assert_eq!(
+        std::fs::read(root.path().join("destination.bin")).expect("destination"),
+        b"original"
     );
 }

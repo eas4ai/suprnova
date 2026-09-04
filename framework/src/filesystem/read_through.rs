@@ -754,12 +754,10 @@ struct TransferConditions {
 /// cannot express that condition fails the transfer through opendal's own
 /// correctness check rather than quietly ignoring it.
 ///
-/// A failure mid-stream must not be observable as a truncated destination, so
-/// the writer is aborted and a destination this transfer created is deleted
-/// before the error is returned - the same cleanup `copy_between_disks`
-/// performs. Cancellation diverts the same cleanup to a detached task. A
-/// destination that was already there is left alone; abort removes only the
-/// writer's staging. A backend that truncates in place cannot restore old bytes.
+/// Failure aborts only the writer's owned state, as `copy_between_disks` does.
+/// A public destination can belong to another writer even if it was absent
+/// when this transfer began. Cancellation diverts abort to a detached task.
+/// A backend that truncates in place cannot restore old bytes.
 async fn stream_across(
     primary: &Operator,
     fallback: &Operator,
@@ -779,11 +777,6 @@ async fn stream_across(
         .await?;
     let mut stream = std::pin::pin!(reader.into_bytes_stream(..).await?);
 
-    // Whether the destination is this transfer's to remove if it fails. An
-    // object that was already there belongs to the caller, and a failed copy
-    // must not be the thing that destroys it.
-    let destination_existed = primary.exists(to).await?;
-
     let writer = primary
         .writer_options(
             to,
@@ -794,12 +787,8 @@ async fn stream_across(
         )
         .await?;
 
-    let mut guard = WriterGuard::new(primary.clone(), "read-through primary", to, writer);
-    if destination_existed || conditions.if_not_exists {
-        // A conditional write may lose to an object published after the
-        // existence probe. That winner never belongs to this transfer.
-        guard = guard.preserve_destination();
-    }
+    let mut guard = WriterGuard::new(primary.clone(), "read-through primary", to, writer)
+        .preserve_destination();
     let result = async {
         while let Some(chunk) = stream.try_next().await.map_err(|e| {
             Error::new(

@@ -50,10 +50,10 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 ///   boundary uses a distinct message prefix so failures are identifiable in
 ///   logs.
 ///
-/// If the task running the transfer is cancelled, the same abort+delete
-/// cleanup is diverted to a detached task instead of being skipped: a
-/// cancelled copy must not leave a partial destination object (or staged
-/// upload parts) behind either.
+/// Failure aborts the writer without deleting the public destination, which
+/// may still hold an earlier object or a concurrent writer's bytes. Cancellation
+/// diverts that cleanup to a detached task. Backends that overwrite in place
+/// cannot restore old bytes; abort cleans up only what the backend owns.
 pub async fn copy_between_disks(
     src: &str,
     src_path: &str,
@@ -78,13 +78,10 @@ pub async fn copy_between_disks(
         .await
         .map_err(|e| FrameworkError::internal(format!("open dest: {e}")))?;
 
-    // Once the writer is open, a mid-stream failure can leave a partial object
-    // at `dest_path`. The guard below owns the writer across the transfer:
-    // errors settle inline with abort+delete before propagating (a failed
-    // copy must never be observable as a truncated destination object),
-    // while task cancellation - which drops the future instead of
-    // returning an error - diverts the same cleanup to a detached task.
-    let mut guard = WriterGuard::new(dest_op.clone(), dest, dest_path, writer);
+    // Only the backend knows which staged state belongs to this writer.
+    // Even an earlier absence check cannot make a public key ours to delete.
+    let mut guard =
+        WriterGuard::new(dest_op.clone(), dest, dest_path, writer).preserve_destination();
     let result = stream_to_writer(reader, guard.writer()).await;
     guard.settle(result).await
 }
@@ -92,11 +89,10 @@ pub async fn copy_between_disks(
 /// Owns the destination writer across the transfer loop so cleanup runs on
 /// every exit path, including task cancellation.
 ///
-/// Errors settle inline ([`WriterGuard::settle`]) with the same
-/// abort+delete the old code ran. If the guard is dropped first - the task
-/// was aborted or panicked mid-transfer, so no error ever comes back -
-/// the unclosed writer's staged/partial output is diverted to a detached
-/// task instead of being left behind.
+/// Errors settle inline ([`WriterGuard::settle`]) by aborting the writer.
+/// Deletion is enabled only for a unique staging path; callers targeting a
+/// public destination must use [`WriterGuard::preserve_destination`]. If the
+/// guard is dropped first, cleanup runs on a detached task.
 pub(crate) struct WriterGuard {
     writer: Option<Writer>,
     dest_op: Operator,
@@ -132,7 +128,7 @@ impl WriterGuard {
     }
 
     /// Settle a finished transfer. Success disarms the guard (the loop
-    /// already closed the writer); failure runs abort+delete and then
+    /// already closed the writer); failure runs the configured cleanup and
     /// propagates the original error.
     ///
     /// Cleanup runs on a detached task that is awaited here: if this
