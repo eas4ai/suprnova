@@ -25,6 +25,8 @@
 
 use crate::error::FrameworkError;
 use futures::future::BoxFuture;
+use std::future::Future;
+use tokio::task::JoinHandle;
 
 /// A deferred action to run after the surrounding transaction commits (or, for
 /// the rollback registry, after it rolls back).
@@ -232,10 +234,8 @@ pub(crate) fn drain(
 /// the caller learns that a deferred effect was lost, with wording that says
 /// the durable half already happened.
 ///
-/// Borrowed so [`GuardedCallbacks`] can run its owned lists inline while
-/// keeping the unstarted remainder available to divert when the task is
-/// cancelled. Each callback runs as an awaited child task (see
-/// [`run_one_callback`]), so sequential order is preserved.
+/// The owning runner awaits each callback before starting the next, even
+/// when its caller stops waiting for the result.
 async fn run_after_commit_list(
     callbacks: &mut Vec<AfterCommitCallback>,
 ) -> Result<(), FrameworkError> {
@@ -272,23 +272,7 @@ async fn run_after_commit_list(
 /// behind it); a child cancelled only by runtime shutdown is logged as
 /// lost work.
 async fn run_one_callback(cb: AfterCommitCallback) -> Result<(), FrameworkError> {
-    // Task-local test container follows the callback across the spawn
-    // boundary; without it, fakes registered under
-    // `TestContainer::scope` would be invisible to the child. Production
-    // resolves from the global container either way.
-    let task_container = crate::container::TASK_CONTAINER
-        .try_with(|c| c.clone())
-        .ok();
-    let child = tokio::spawn(async move {
-        match task_container {
-            Some(container) => {
-                crate::container::TASK_CONTAINER
-                    .scope(container, cb())
-                    .await
-            }
-            None => cb().await,
-        }
-    });
+    let child = spawn_owned(async move { cb().await });
     match child.await {
         Ok(outcome) => outcome,
         Err(join_err) => Err(FrameworkError::internal(format!(
@@ -323,16 +307,26 @@ pub(crate) async fn compensate(
 /// action failed" would hide the reason the transaction rolled back in the
 /// first place.
 pub(crate) async fn run_rollback(callbacks: Vec<AfterCommitCallback>) {
-    let mut callbacks = callbacks;
-    run_rollback_list(&mut callbacks).await;
+    // Savepoint rollback also enters here after slicing callbacks out of
+    // the registry. Its caller can be cancelled, so own the whole list
+    // before awaiting the first callback.
+    if let Err(error) = spawn_owned(async move {
+        let mut callbacks = callbacks;
+        run_rollback_list(&mut callbacks).await;
+    })
+    .await
+    {
+        tracing::error!(
+            target: "suprnova::database",
+            error = %error,
+            "rollback callback runner ended without completing compensation",
+        );
+    }
 }
 
 /// [`run_rollback`] over a borrowed list, consuming it front to back.
 ///
-/// Borrowed so [`GuardedCallbacks`] can run its owned lists inline while
-/// keeping the unstarted remainder available to divert when the task is
-/// cancelled. Each callback runs as an awaited child task (see
-/// [`run_one_callback`]), so sequential order is preserved.
+/// The owning runner retains the entire sequence across caller cancellation.
 async fn run_rollback_list(callbacks: &mut Vec<AfterCommitCallback>) {
     while !callbacks.is_empty() {
         let cb = callbacks.remove(0);
@@ -349,22 +343,12 @@ async fn run_rollback_list(callbacks: &mut Vec<AfterCommitCallback>) {
 
 /// A callback runner that survives its own task's cancellation.
 ///
-/// Owns the not-yet-run callbacks. The happy path runs them inline in the
-/// caller's context, with the same semantics as [`compensate`] and the
-/// list runners. If the runner is dropped first - the task was aborted
-/// while callbacks were pending - the unstarted remainder diverts to a
-/// detached task instead of being silently discarded: an aborted
-/// transaction rolls its database work back on drop, but nothing rolls
-/// back a deferred queue push or a held uniqueness lock for it.
-///
-/// Each callback runs as an awaited child task (see [`run_one_callback`]):
-/// a callback already in flight when the abort lands keeps running on its
-/// own task, and work that never started diverts through the `Drop` below,
-/// so every callback still runs exactly once. Callbacks are `Send +
-/// 'static`, so detached work needs no borrowed state; the task-local
-/// test container is re-scoped when present, while thread-local test
-/// bindings do not cross the spawn boundary (production resolves from
-/// the global container).
+/// Before awaiting anything, transfers the entire list to one owned task.
+/// That task keeps the in-flight callback and the remainder together, so
+/// cancellation cannot start the remainder ahead of the current callback.
+/// Dropping a guard before starting it also transfers its list to a runner.
+/// Task-local container bindings follow every spawn; thread-local bindings
+/// do not (production resolves from the global container).
 pub(crate) struct GuardedCallbacks {
     after_commit: Vec<AfterCommitCallback>,
     on_rollback: Vec<AfterCommitCallback>,
@@ -401,21 +385,23 @@ impl GuardedCallbacks {
         }
     }
 
-    /// Run the after-commit list inline to completion, disarming the divert.
+    /// Transfer the whole sequence before waiting for its result.
     pub(crate) async fn run_after_commit(mut self) -> Result<(), FrameworkError> {
-        let result = run_after_commit_list(&mut self.after_commit).await;
+        let mut callbacks = std::mem::take(&mut self.after_commit);
         self.complete = true;
-        result
+        spawn_owned(async move { run_after_commit_list(&mut callbacks).await })
+            .await
+            .map_err(|error| FrameworkError::internal(format!(
+                "after-commit runner ended without a result (the transaction itself committed): {error}"
+            )))?
     }
 
-    /// Compensate inline to completion, disarming the divert.
+    /// Transfer all compensations to one serial runner before waiting.
     pub(crate) async fn compensate(mut self) {
-        // Explicit rather than letting the binding fall out of scope:
-        // dropping the after-commit list is the decision, not a side
-        // effect of the borrow ending.
-        self.after_commit.clear();
-        run_rollback_list(&mut self.on_rollback).await;
+        let after_commit = std::mem::take(&mut self.after_commit);
+        let on_rollback = std::mem::take(&mut self.on_rollback);
         self.complete = true;
+        compensate(after_commit, on_rollback).await;
     }
 }
 
@@ -445,26 +431,11 @@ impl Drop for GuardedCallbacks {
 /// Run `future` on a detached task that outlives the spawning task's
 /// cancellation.
 ///
-/// Used only for cancellation diverts, never the happy path. The
-/// task-local test container is captured and re-scoped inside the
-/// spawned task so test fakes stay visible; without a running runtime
-/// (shutdown) there is nothing to spawn onto, which is logged.
-fn spawn_detached(future: impl std::future::Future<Output = ()> + Send + 'static) {
-    let task_container = crate::container::TASK_CONTAINER
-        .try_with(|c| c.clone())
-        .ok();
-    let runner = async move {
-        match task_container {
-            Some(container) => {
-                crate::container::TASK_CONTAINER
-                    .scope(container, future)
-                    .await;
-            }
-            None => future.await,
-        }
-    };
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(runner);
+/// Used from drop guards, including during runtime shutdown, when failure
+/// to find a runtime must be logged rather than panicking.
+pub(crate) fn spawn_detached(future: impl Future<Output = ()> + Send + 'static) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        spawn_owned(future);
     } else {
         tracing::error!(
             target: "suprnova::database",
@@ -474,11 +445,138 @@ fn spawn_detached(future: impl std::future::Future<Output = ()> + Send + 'static
     }
 }
 
+/// Own finalization work independently of its caller while retaining the
+/// task-local container used by database listeners and callback services.
+pub(crate) fn spawn_owned<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> JoinHandle<T> {
+    let task_container = crate::container::TASK_CONTAINER
+        .try_with(|c| c.clone())
+        .ok();
+    tokio::spawn(async move {
+        match task_container {
+            Some(container) => {
+                crate::container::TASK_CONTAINER
+                    .scope(container, future)
+                    .await
+            }
+            None => future.await,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn bare_rollback_runner_keeps_sliced_savepoint_callbacks_after_abort() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicUsize::new(0));
+        let first: AfterCommitCallback = {
+            let entered = entered.clone();
+            let release = release.clone();
+            let completed = completed.clone();
+            Box::new(move || {
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    assert_eq!(completed.fetch_add(1, Ordering::SeqCst), 0);
+                    Ok(())
+                })
+            })
+        };
+        let second: AfterCommitCallback = {
+            let completed = completed.clone();
+            Box::new(move || {
+                Box::pin(async move {
+                    assert_eq!(completed.fetch_add(1, Ordering::SeqCst), 1);
+                    Ok(())
+                })
+            })
+        };
+        // rollback_to has already removed this list from the transaction
+        // registry, so the scope finalizer cannot recover it on cancellation.
+        let caller = tokio::spawn(run_rollback(vec![first, second]));
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("first callback entered");
+        caller.abort();
+        assert!(caller.await.expect_err("caller aborted").is_cancelled());
+        release.notify_one();
+        timeout(Duration::from_secs(2), async {
+            while completed.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all sliced savepoint callbacks must complete in order");
+    }
+
+    #[tokio::test]
+    async fn guarded_compensation_preserves_order_after_caller_abort() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let finished = Arc::new(Notify::new());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first: AfterCommitCallback = {
+            let entered = entered.clone();
+            let release = release.clone();
+            let order = order.clone();
+            Box::new(move || {
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    order.lock().unwrap().push(1);
+                    Ok(())
+                })
+            })
+        };
+        let second: AfterCommitCallback = {
+            let finished = finished.clone();
+            let order = order.clone();
+            Box::new(move || {
+                Box::pin(async move {
+                    order.lock().unwrap().push(2);
+                    finished.notify_one();
+                    Ok(())
+                })
+            })
+        };
+        let caller = tokio::spawn(async move {
+            GuardedCallbacks::compensating(Vec::new(), vec![first, second])
+                .compensate()
+                .await;
+        });
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("first callback entered");
+        caller.abort();
+        assert!(caller.await.expect_err("caller aborted").is_cancelled());
+        let second_started = timeout(Duration::from_millis(100), finished.notified())
+            .await
+            .is_ok();
+        release.notify_one();
+        timeout(Duration::from_secs(2), async {
+            while order.lock().unwrap().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both callbacks complete");
+        assert!(
+            !second_started,
+            "second compensation started before first completed"
+        );
+        assert_eq!(*order.lock().unwrap(), [1, 2]);
+    }
 
     #[tokio::test]
     async fn no_ambient_transaction_reports_false() {

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use suprnova::App;
 use suprnova::cache::{CacheStore, InMemoryCache};
+use suprnova::database::events::{TransactionCommitted, TransactionRolledBack};
 use suprnova::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use suprnova::queue::testing::{install_fake, pushed};
 use suprnova::queue::worker::register_job;
@@ -24,6 +25,173 @@ use suprnova::{
     DB, DatabaseConfig, DbConnection, EnvelopeOverrides, FrameworkError, Job, Queue, TxHandle,
     async_trait,
 };
+use suprnova::{EventFacade, Listener};
+use tokio::sync::Notify;
+use tokio::time::timeout;
+
+#[derive(Default)]
+struct CompletionEventGate {
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl Listener<TransactionCommitted> for CompletionEventGate {
+    async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<TransactionRolledBack> for CompletionEventGate {
+    async fn handle(&self, _: &TransactionRolledBack) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_during_commit_event_preserves_deferred_dispatch() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let gate = Arc::new(CompletionEventGate::default());
+    EventFacade::listen::<TransactionCommitted, _>(gate.clone()).await;
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                Queue::push(AfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+    timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("commit listener entered");
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    gate.release.notify_one();
+    EventFacade::forget::<TransactionCommitted>();
+    poll_until(
+        || driver.count() == 1,
+        Duration::from_secs(2),
+        "dispatch after committed caller cancellation",
+    )
+    .await;
+    assert_eq!(driver.only().job_name, AfterCommitJob::job_name());
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_during_rollback_event_releases_unique_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    let gate = Arc::new(CompletionEventGate::default());
+    EventFacade::listen::<TransactionRolledBack, _>(gate.clone()).await;
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                assert!(
+                    Queue::push_unique(UniqueAfterCommitJob {
+                        key: "rollback-event-abort".into()
+                    })
+                    .await?
+                );
+                Err::<(), FrameworkError>(FrameworkError::internal("rollback"))
+            })
+        })
+        .await
+    });
+    timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("rollback listener entered");
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    gate.release.notify_one();
+    EventFacade::forget::<TransactionRolledBack>();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if Queue::push_unique(UniqueAfterCommitJob {
+                key: "rollback-event-abort".into(),
+            })
+            .await
+            .expect("retry dispatch")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rollback compensation must release lock");
+    assert_eq!(driver.count(), 1, "only the retry dispatch publishes");
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_preserves_callback_registration_order() {
+    let driver = Arc::new(GatedDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                Queue::push(BlockingAfterCommitJob).await?;
+                Queue::push(OtherAfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+    poll_until(
+        || driver.entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "first callback entered",
+    )
+    .await;
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    let second_started = timeout(Duration::from_millis(100), async {
+        loop {
+            if !driver.pushed.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    driver.release.notify_one();
+    poll_until(
+        || driver.pushed.lock().unwrap().len() == 2,
+        Duration::from_secs(2),
+        "ordered callbacks complete",
+    )
+    .await;
+    assert!(
+        !second_started,
+        "second callback must wait for the first callback after caller cancellation"
+    );
+    let names: Vec<_> = driver
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|env| env.job_name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            BlockingAfterCommitJob::job_name(),
+            OtherAfterCommitJob::job_name()
+        ]
+    );
+}
 
 // --- Driver -----------------------------------------------------------------
 
@@ -1553,8 +1721,8 @@ async fn an_abort_after_commit_still_completes_every_callback_exactly_once() {
     .await;
     handle.abort();
     let _ = handle.await;
-    // Let the in-flight callback finish; the unstarted remainder was
-    // diverted to a detached task by the abort. `notify_one` (not
+    // Let the in-flight callback finish; the owned runner then starts
+    // the remaining callbacks in order. `notify_one` (not
     // `notify_waiters`) so the permit survives if the child has not
     // parked yet.
     driver.release.notify_one();

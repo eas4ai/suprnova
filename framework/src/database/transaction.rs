@@ -106,14 +106,11 @@ pub(crate) struct TxState {
 
 /// Cancellation finalizer for the [`DB::transaction`] closure scope.
 ///
-/// Armed while the closure future is pending. On normal completion the
-/// caller disarms it and the registries drain through the usual paths.
-/// If the future never completes - task abort, or a panic unwinding
-/// through the scope - the guard drains the deferred registry and hands
-/// it to [`GuardedCallbacks`](super::after_commit::GuardedCallbacks),
-/// whose own `Drop` diverts the compensation to a detached task. The
-/// database half needs no help: SeaORM rolls the transaction back when
-/// its last `Arc` drops.
+/// The closure's scoped future owns every other framework transaction
+/// reference and drops them before this guard. Cancellation can therefore
+/// hand the database transaction and callbacks to one rollback task, which
+/// finishes the database rollback before releasing deferred queue locks.
+/// Normal completion transfers the same state to an awaited owned task.
 struct ScopeFinalizer {
     state: Option<Arc<TxState>>,
 }
@@ -123,22 +120,113 @@ impl ScopeFinalizer {
         Self { state: Some(state) }
     }
 
-    fn disarm(&mut self) {
-        self.state = None;
+    async fn complete(mut self, commit: bool) -> Result<(), TransactionFailure> {
+        let state = self.state.take().ok_or_else(|| {
+            FrameworkError::internal("DB::transaction: finalization state already consumed")
+        })?;
+        super::after_commit::spawn_owned(finish_transaction(state, commit))
+            .await
+            .map_err(|error| {
+                TransactionFailure::FinalizationInterrupted(FrameworkError::internal(format!(
+                    "DB::transaction: finalization task ended without a result; \
+                     the database outcome is unknown and must not be retried: {error}"
+                )))
+            })?
     }
 }
 
 impl Drop for ScopeFinalizer {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            let (after_commit, on_rollback) = super::after_commit::drain(&state);
-            if !after_commit.is_empty() || !on_rollback.is_empty() {
-                drop(super::after_commit::GuardedCallbacks::compensating(
-                    after_commit,
-                    on_rollback,
-                ));
-            }
+            super::after_commit::spawn_detached(async move {
+                if let Err(error) = finish_transaction(state, false).await {
+                    tracing::error!(
+                        target: "suprnova::database",
+                        error = %error.into_error(),
+                        "cancelled transaction finalization failed",
+                    );
+                }
+            });
         }
+    }
+}
+
+/// Own the physical outcome, event listeners, and callback sequence as one
+/// completion task. The caller's generic closure and return value never move
+/// into this task, so neither needs an added `'static` bound.
+async fn finish_transaction(state: Arc<TxState>, commit: bool) -> Result<(), TransactionFailure> {
+    let (after_commit, on_rollback) = super::after_commit::drain(&state);
+    let tx = state.tx.clone();
+    let connection_name = state.connection_name.clone();
+    drop(state);
+
+    let tx = match Arc::try_unwrap(tx) {
+        Ok(tx) => tx,
+        Err(tx) => {
+            let leaked = Arc::strong_count(&tx).saturating_sub(1);
+            drop(tx);
+            tracing::error!(
+                target: "suprnova::database",
+                leaked_handles = leaked,
+                "DB::transaction: TxHandle clones outlived the closure; transaction is in \
+                 ZOMBIE STATE until all leaked handles drop and trigger rollback",
+            );
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return if commit {
+                Err(FrameworkError::internal(
+                    "DB::transaction: TxHandle clones outlived the closure; \
+                     drop them before the closure returns Ok so commit can proceed",
+                )
+                .into())
+            } else {
+                Ok(())
+            };
+        }
+    };
+
+    if commit {
+        if let Err(error) = tx.commit().await {
+            tracing::error!(
+                target: "suprnova::database",
+                error = %error,
+                "Transaction commit failed; deferred dispatches will be compensated",
+            );
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return Err(FrameworkError::database(error.to_string()).into());
+        }
+        drop(on_rollback);
+        // Arm the committed branch before invoking any listener code. A
+        // listener panic must not discard an already-committed dispatch.
+        let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+        emit_tx_event(super::events::TransactionCommitted {
+            connection_name: connection_name.to_string(),
+        })
+        .await;
+        callbacks
+            .run_after_commit()
+            .await
+            .map_err(TransactionFailure::AfterCommitCallback)
+    } else {
+        let callbacks =
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+        if let Err(error) = tx.rollback().await {
+            tracing::warn!(
+                error = %error,
+                "Transaction rollback failed; the original closure error is still surfaced. \
+                 The connection may have been lost between BEGIN and rollback.",
+            );
+        } else {
+            emit_tx_event(super::events::TransactionRolledBack {
+                connection_name: connection_name.to_string(),
+            })
+            .await;
+        }
+        callbacks.compensate().await;
+        Ok(())
     }
 }
 
@@ -159,22 +247,26 @@ enum TransactionFailure {
     /// The transaction committed and an after-commit callback then failed.
     /// Never retryable.
     AfterCommitCallback(FrameworkError),
+    /// The completion task failed without establishing the database outcome.
+    /// Retrying could duplicate committed writes.
+    FinalizationInterrupted(FrameworkError),
 }
 
 impl TransactionFailure {
-    /// Flatten to the error the public surface returns. Both variants carry a
+    /// Flatten to the error the public surface returns. All variants carry a
     /// user-facing error already; the variant only ever mattered internally.
     fn into_error(self) -> FrameworkError {
         match self {
-            Self::NotCommitted(e) | Self::AfterCommitCallback(e) => e,
+            Self::NotCommitted(e)
+            | Self::AfterCommitCallback(e)
+            | Self::FinalizationInterrupted(e) => e,
         }
     }
 }
 
 impl From<FrameworkError> for TransactionFailure {
-    /// Every `?` inside `transaction_inner` fires before the COMMIT, so the
-    /// blanket conversion is the pre-commit case. The post-commit case is
-    /// constructed explicitly at its one call site.
+    /// Closure/setup failures use the pre-commit conversion. Finalization
+    /// constructs post-commit and interrupted outcomes explicitly.
     fn from(e: FrameworkError) -> Self {
         Self::NotCommitted(e)
     }
@@ -1147,174 +1239,33 @@ impl DB {
             connection_name: conn_name.to_string(),
         })
         .await;
-        let tx_arc = Arc::new(tx);
-
         let tx_state = Arc::new(TxState {
-            tx: tx_arc.clone(),
-            connection_name: conn_name.clone(),
+            tx: Arc::new(tx),
+            connection_name: conn_name,
             after_commit: std::sync::Mutex::new(Vec::new()),
             on_rollback: std::sync::Mutex::new(Vec::new()),
             savepoints: std::sync::Mutex::new(Vec::new()),
         });
-        let registry = tx_state.clone();
-
-        // The handle carries the registry so `tx.savepoint(...)` /
-        // `tx.rollback_to(...)` act on *this* transaction's deferred dispatches
-        // rather than on whatever the ambient task-local happens to hold.
-        let transaction = Transaction {
-            inner: tx_arc.clone(),
-            connection_name: conn_name.clone(),
-            registry: Some(tx_state.clone()),
-        };
-
-        // Cancellation finalizer for the closure scope: if the closure
-        // future never completes (task abort or panic), the database
-        // rolls back when SeaORM drops the transaction, but the deferred
-        // registry would otherwise be dropped silently - stranding a
-        // `push_unique` dedupe lock for its whole TTL. The guard diverts
-        // the same compensation the `Err` path runs to a detached task.
-        // Disarmed on normal completion just below.
-        let mut scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
-        let result = CURRENT_TX.scope(Some(tx_state), f(&transaction)).await;
-        scope_finalizer.disarm();
-
-        // Take the deferred callbacks off the shared state and release our
-        // `TxState` clone right away: `TxState` holds an
-        // `Arc<DatabaseTransaction>`, so `Arc::try_unwrap` below cannot reach
-        // the transaction to commit it while this clone is alive. The
-        // callbacks themselves run further down, after the physical commit or
-        // rollback and outside `CURRENT_TX::scope`, so a callback that
-        // dispatches its own work sees no ambient transaction.
-        let (after_commit_callbacks, rollback_callbacks) = super::after_commit::drain(&registry);
-        drop(registry);
-
-        // Drop the wrapper BEFORE calling `Arc::try_unwrap`. The
-        // `transaction` binding holds the second `Arc` clone (the
-        // first is `tx_arc`); without this explicit drop the unwrap
-        // always fails with refcount==2 and we'd never commit. The
-        // task-local clone is released automatically when
-        // `CURRENT_TX::scope` returns. It also holds the last `TxState`
-        // clone once `registry` above is gone, and `TxState` holds a third
-        // `Arc<DatabaseTransaction>`, so this drop has to come after that one.
-        drop(transaction);
-
-        match result {
-            Ok(value) => {
-                // Two ways an `Ok` closure still fails to commit, and both have
-                // to compensate before surfacing. A leaked `TxHandle` leaves the
-                // transaction pending rollback; a refused COMMIT rolls it back
-                // outright. Returning early from either without running the
-                // rollback callbacks would strand a deferred `push_unique`'s
-                // dedupe lock for the whole `unique_for` window, on a dispatch
-                // that never happened.
-                let tx = match Arc::try_unwrap(tx_arc) {
-                    Ok(tx) => tx,
-                    Err(arc) => {
-                        drop(arc); // release OUR ref; leaked refs still keep the tx alive
-                        super::after_commit::GuardedCallbacks::compensating(
-                            after_commit_callbacks,
-                            rollback_callbacks,
-                        )
-                        .compensate()
-                        .await;
-                        return Err(FrameworkError::internal(
-                            "DB::transaction: TxHandle clones outlived the closure; \
-                             drop them before the closure returns Ok so commit can proceed",
-                        )
-                        .into());
-                    }
+        let scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
+        // Keep every temporary handle inside the scoped future. On abort,
+        // they drop before ScopeFinalizer, so its owned rollback task can
+        // unwrap the transaction without racing framework-owned references.
+        let result = CURRENT_TX
+            .scope(Some(tx_state.clone()), async move {
+                let transaction = Transaction {
+                    inner: tx_state.tx.clone(),
+                    connection_name: tx_state.connection_name.clone(),
+                    registry: Some(tx_state),
                 };
-                if let Err(commit_err) = tx.commit().await {
-                    super::after_commit::GuardedCallbacks::compensating(
-                        after_commit_callbacks,
-                        rollback_callbacks,
-                    )
-                    .compensate()
-                    .await;
-                    return Err(FrameworkError::database(commit_err.to_string()).into());
-                }
-                emit_tx_event(super::events::TransactionCommitted {
-                    connection_name: conn_name.to_string(),
-                })
-                .await;
-                // The rollback list is dropped here: Laravel discards the
-                // branch that did not happen.
-                drop(rollback_callbacks);
-                // Deliberately NOT `?`: this failure happened *after* a durable
-                // commit, and `transaction_with_attempts` must never re-run the
-                // closure for it, however deadlock-shaped the callback's error
-                // reads.
-                if let Err(e) =
-                    super::after_commit::GuardedCallbacks::after_commit(after_commit_callbacks)
-                        .run_after_commit()
-                        .await
-                {
-                    return Err(TransactionFailure::AfterCommitCallback(e));
-                }
-                Ok(value)
-            }
-            Err(e) => {
-                // Try to roll back immediately. If TxHandle clones
-                // were leaked past the closure boundary,
-                // `Arc::try_unwrap` returns the `Arc` back - drop it
-                // here so OUR reference goes away, log loudly, and
-                // surface the original closure error. SeaORM's
-                // `DatabaseTransaction::drop` rolls back when the
-                // LAST reference drops; until the leaked clones go
-                // away the transaction is in a zombie state
-                // (queries via the leaked handle still run against
-                // an open tx). Audit HIGH `database` #3 - escalate
-                // the diagnostic so this can't disappear silently.
-                match Arc::try_unwrap(tx_arc) {
-                    Ok(tx) => {
-                        if let Err(rb_err) = tx.rollback().await {
-                            tracing::warn!(
-                                error = %rb_err,
-                                "Transaction rollback failed after closure error; \
-                                 the original closure error is still surfaced to \
-                                 the caller. Common cause: connection lost between \
-                                 BEGIN and the failing query.",
-                            );
-                        } else {
-                            emit_tx_event(super::events::TransactionRolledBack {
-                                connection_name: conn_name.to_string(),
-                            })
-                            .await;
-                        }
-                    }
-                    Err(arc) => {
-                        // Leaked clones - count them before our Arc
-                        // drops so the operator sees the size of the
-                        // leak.
-                        let strong_count = Arc::strong_count(&arc);
-                        let leaked = strong_count.saturating_sub(1);
-                        drop(arc); // release OUR ref; leaked refs still keep the tx alive
-                        tracing::error!(
-                            leaked_handles = leaked,
-                            closure_error = %e,
-                            "DB::transaction: closure returned Err but TxHandle clones \
-                             leaked past the closure boundary. The transaction is in \
-                             ZOMBIE STATE - pending rollback until ALL leaked handles \
-                             drop. Queries via the leaked handles continue to run \
-                             against the still-open transaction. Drop them before the \
-                             closure returns so rollback is deterministic.",
-                        );
-                    }
-                }
-                // Compensate for whatever the closure deferred: the commit it
-                // was waiting for is never going to happen, and a zombie
-                // transaction is still one that did not commit. Callback errors
-                // are logged, never returned - the caller needs the original
-                // error, not the compensation's.
-                super::after_commit::GuardedCallbacks::compensating(
-                    after_commit_callbacks,
-                    rollback_callbacks,
-                )
-                .compensate()
-                .await;
-                Err(e.into())
-            }
-        }
+                f(&transaction).await
+            })
+            .await;
+
+        // Transfer state before the next await. Dropping the caller now only
+        // stops waiting: the physical outcome, listeners, and callbacks remain
+        // owned by the completion task. T stays here, without a 'static bound.
+        scope_finalizer.complete(result.is_ok()).await?;
+        result.map_err(TransactionFailure::from)
     }
 
     /// Open a manual transaction. The caller is responsible for
