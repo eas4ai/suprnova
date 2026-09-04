@@ -22,9 +22,13 @@
 //! - `framework/src/database/db_facade.rs`
 
 use sea_orm::Set;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::database::{DatabaseConfig, DbConnection, EntityExt, EntityExtMut};
+use suprnova::render_cache::DependencyIdentity;
+use suprnova::render_cache::ledger::SqlGenerationLedger;
 use suprnova::testing::TestDatabase;
 use suprnova::{DB, FrameworkError};
+use suprnova_live::render_cache::generation::GenerationLedger;
 
 // ---- EntityExt entity ---------------------------------------------------
 //
@@ -63,6 +67,90 @@ async fn setup_widget_db() -> TestDatabase {
     .await
     .unwrap();
     db
+}
+
+// ---- fix4 item 2: EntityExtMut advances the render-cache table generation
+//
+// Round 2 instrumented `insert_one` / `update_one` / `delete_by_pk` /
+// `save_one` with `after_table_write`, but nothing in this file (or
+// anywhere else) asserted any of the four actually advances a generation -
+// `entity_ext_insert_inside_transaction_rolls_back` and its siblings above
+// call two of them while asserting nothing about the ledger. A silently
+// dropped call would be caught by nothing.
+
+struct EntityExtMutRenderCacheMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for EntityExtMutRenderCacheMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(suprnova::render_cache::migration::Migration)]
+    }
+}
+
+/// Same shape as [`setup_widget_db`], plus the RenderCache migration and the
+/// process-wide install gate, so `EntityExtMut`'s `after_table_write` calls
+/// have a `suprnova_render_epochs` table to advance and are not silently
+/// skipped by `render_cache::is_installed()`.
+async fn setup_widget_db_with_render_cache() -> TestDatabase {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<EntityExtMutRenderCacheMigrator>()
+        .await
+        .expect("render cache migration should apply cleanly to a fresh SQLite database");
+    db.execute_unprepared(
+        "CREATE TABLE audit_widgets (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await
+    .expect("create audit_widgets table");
+    db
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn entity_ext_mut_insert_and_update_advance_the_table_generation() {
+    let _db = setup_widget_db_with_render_cache().await;
+    let ledger = SqlGenerationLedger::new();
+    let table = DependencyIdentity::table("audit_widgets");
+
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+
+    let am = widget::ActiveModel {
+        name: Set("insert-advances".into()),
+        ..Default::default()
+    };
+    let row = widget::Entity::insert_one(am).await.expect("insert_one");
+    let after_insert = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after_insert,
+        Some(before.unwrap_or(0) + 1),
+        "EntityExtMut::insert_one must advance the table generation"
+    );
+
+    let am = widget::ActiveModel {
+        id: Set(row.id),
+        name: Set("update-advances".into()),
+    };
+    widget::Entity::update_one(am).await.expect("update_one");
+    let after_update = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after_update,
+        Some(after_insert.unwrap_or(0) + 1),
+        "EntityExtMut::update_one must advance the table generation"
+    );
 }
 
 // ---- Finding 1: EntityExt routes through the transaction layer --------

@@ -9,11 +9,28 @@
 //! commit: a rollback, ambient or through an explicit `_with_tx` handle,
 //! must advance nothing.
 
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::attrs;
 use suprnova::eloquent::{MassPrunable, prune_one};
+use suprnova::payments::{
+    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, webhook_routes,
+};
 use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::ledger::SqlGenerationLedger;
-use suprnova::{DB, FrameworkError, Model, Persistable};
+use suprnova::testing::TestDatabase;
+use suprnova::{
+    DB, FrameworkError, MiddlewareRegistry, Model, Persistable, Router, handle_request,
+};
 use suprnova_live::render_cache::generation::GenerationLedger;
 
 mod render_cache_support;
@@ -1300,5 +1317,186 @@ async fn both_persistable_implementations_advance_their_table() {
         after_tag,
         Some(before_tag.unwrap_or(0) + 1),
         "the macro-generated Persistable impl must advance its table"
+    );
+}
+
+// ---- fix4 item 1: assert payments writes advance ---------------------------
+//
+// Round 3 instrumented all thirteen raw-SeaORM write sites in
+// `payments::webhook_route` via `advance_mirror_table`, but nothing asserted
+// that any of them actually advances anything - the existing hydration and
+// idempotency suites would catch a panic or a wrong entity type, but a
+// silently removed call, a wrong branch guard, or the wrong entity would pass
+// every test in the repository. Payments was the one confirmed live
+// under-invalidation bug on this branch (fix3's whole reason for existing),
+// so this closes that gap against the real webhook route.
+//
+// This test proves sites 1 and 13 (the `payments_webhook_events` audit-row
+// insert and `mark_failed`'s update), NOT sites 3-12 (the
+// `payments_subscriptions`/`payments_transactions`/`payments_customers`
+// mirror-table upserts `upsert_subscription` etc. perform). That narrowing is
+// deliberate, not an oversight: driving a successful `subscription.created`
+// webhook through the real route with RenderCache installed deadlocks under
+// SQLite, unconditionally, regardless of connection pool size - see the
+// finding recorded in the round 4 report. Sites 1 and 13 both run on the bare
+// `db: &DatabaseConnection` OUTSIDE `try_hydrate`'s transaction (the doc
+// comment above `handle_webhook_inner`'s hydration call spells this out:
+// provider HTTP calls, and therefore this event's audit bookkeeping, run
+// before the transaction opens), so they are exactly the two sites this
+// harness CAN exercise safely - one insert, one update, both against a real
+// payments table, both able to fail exactly as fix4 describes (a silently
+// removed call, a wrong branch guard, or the wrong entity would go undetected
+// otherwise).
+//
+// The scenario: post a `subscription.created` webhook for a `sub_id` that
+// was never registered with the mock provider. `try_hydrate` pre-fetches the
+// provider's state (`Subscription::get`) BEFORE opening its transaction; an
+// unknown id makes that fetch fail with `NotFound`, so `try_hydrate` returns
+// `Err` without ever calling `db.begin()`. `handle_webhook_inner` still (a)
+// inserts the audit row before dispatching to `try_hydrate` (site 1) and (b)
+// calls `mark_failed` on the `Err` branch (site 13) - both real writes to
+// `payments_webhook_events`, both outside any transaction, from one HTTP
+// call.
+
+/// Combined migrator: the payments schema (for the webhook route's mirror
+/// tables) plus the RenderCache migration (so `advance_mirror_table`'s
+/// `SqlGenerationLedger` calls have `suprnova_render_epochs` to write to).
+struct PaymentsRenderCacheMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for PaymentsRenderCacheMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        let mut migrations = suprnova::payments::migrations::migrations();
+        migrations.push(Box::new(suprnova::render_cache::migration::Migration));
+        migrations
+    }
+}
+
+/// Same shape as `payments_webhook_hydration.rs`'s `spawn_server`: accept
+/// `accepts` sequential connections against the webhook router, each served
+/// on its own spawned task.
+async fn spawn_payments_server(router: Router, accepts: usize) -> SocketAddr {
+    let router = Arc::new(router);
+    let middleware = Arc::new(MiddlewareRegistry::new());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        for _ in 0..accepts {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let io = TokioIo::new(stream);
+            let router = router.clone();
+            let middleware = middleware.clone();
+            tokio::spawn(async move {
+                let svc = service_fn(move |req: hyper::Request<Incoming>| {
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
+async fn send_payments_webhook(
+    addr: SocketAddr,
+    path: &str,
+    body: Bytes,
+) -> (hyper::http::StatusCode, Bytes) {
+    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .expect("handshake");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let content_len = body.len().to_string();
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("Host", "localhost")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", content_len)
+        .body(Full::new(body))
+        .expect("build request");
+
+    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
+        .await
+        .expect("send timeout")
+        .expect("send_request");
+    let (parts, resp_body) = resp.into_parts();
+    let collected = resp_body.collect().await.expect("collect body").to_bytes();
+    (parts.status, collected)
+}
+
+#[tokio::test]
+async fn payments_webhook_insert_and_update_advance_the_table_generation() {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+
+    let provider_name: &'static str = "render-cache-payments-probe";
+    let mock = Arc::new(MockPaymentProvider::new());
+    let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(provider_name, as_trait);
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_payments_server(router, 1).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let ledger = SqlGenerationLedger::new();
+    let table = DependencyIdentity::table("payments_webhook_events");
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+
+    // A `subscription.created` webhook for a `sub_id` the mock provider has
+    // never seen: `try_hydrate` pre-fetches `Subscription::get(sub_id)`
+    // before opening its transaction, that lookup fails `NotFound`, so
+    // `try_hydrate` returns `Err` without ever calling `db.begin()`. One
+    // request therefore drives both: the audit-row insert (site 1) before
+    // dispatch, and `mark_failed`'s update (site 13) on the error branch.
+    let body = Bytes::from(
+        serde_json::json!({
+            "id": "evt_render_cache_probe",
+            "type": "subscription.created",
+            "data": { "object": { "id": "sub_never_registered", "customer": "cus_never_registered" } }
+        })
+        .to_string(),
+    );
+    let (status, resp) = send_payments_webhook(addr, &path, body).await;
+    assert_eq!(
+        status.as_u16(),
+        503,
+        "an unknown subscription id must fail hydration (503), not succeed: {}",
+        String::from_utf8_lossy(&resp)
+    );
+
+    let after = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after,
+        Some(before.unwrap_or(0) + 2),
+        "the audit-row insert (site 1) and mark_failed's update (site 13) must each advance \
+         the payments_webhook_events table generation - one request, two writes, two advances"
     );
 }
