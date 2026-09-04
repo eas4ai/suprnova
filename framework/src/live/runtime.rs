@@ -1895,7 +1895,16 @@ fn assemble_upload_runtime(
     })
 }
 
-fn build_key_ring() -> Result<SnapshotKeyRing, FrameworkError> {
+/// Builds a `SnapshotKeyRing` from the framework's own configured root key
+/// material (`Crypt::current_key_bytes` / `previous_key_bytes`).
+///
+/// `pub(crate)`, not private: `RenderCache::install`
+/// (`crate::render_cache::mod`) derives its own key ring from this same root
+/// material so render-cache key, variance, and entry MACs are
+/// cryptographically distinct from Live's snapshot and child-parameter MACs
+/// (purpose separation - see `SnapshotPurpose`) while still sharing one root
+/// secret rather than requiring a second one to configure. See ruling R56.
+pub(crate) fn build_key_ring() -> Result<SnapshotKeyRing, FrameworkError> {
     let current = crate::crypto::Crypt::current_key_bytes().ok_or_else(live_boot_error)?;
     let active = key_record(current, true)?;
     let verification = crate::crypto::Crypt::previous_key_bytes()

@@ -22,9 +22,41 @@
 //!   over-invalidates, which is safe; tenancy is handled at the key level
 //!   through the Tenant variance dimension, not here.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use suprnova_live::render_cache::generation::{DependencyIdentity, MAX_OBSERVATIONS};
+
+/// Process-wide permission-version counter fed into `Principal` variance
+/// (`PrivateMaterial::principal`) so a cached private representation stops
+/// matching a user whose permissions changed since it was published.
+///
+/// Starts at 0. Nothing in the framework bumps this on its own: role and
+/// permission changes are application-defined (a `roles` table update, a
+/// policy reassignment), so only the application knows when they happen.
+/// An application that grants or revokes permissions and cares about
+/// RenderCache must call [`crate::render_cache::RenderCache::bump_permission_version`]
+/// when it does - documented on that function and in the manual. Without
+/// that call, a user whose permissions were just revoked keeps matching the
+/// cache key their prior permission set produced, and keeps being served
+/// whatever was cached under it.
+static PERMISSION_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// The current process-wide permission version. Read by the middleware
+/// while building `Principal` variance material; see
+/// [`crate::render_cache::RenderCache::bump_permission_version`] for what
+/// advances it.
+#[must_use]
+pub fn permission_version() -> u64 {
+    PERMISSION_VERSION.load(Ordering::SeqCst)
+}
+
+/// Advances the permission version. `pub(crate)`: the public entry point is
+/// [`crate::render_cache::RenderCache::bump_permission_version`], which this
+/// backs.
+pub(crate) fn bump_permission_version() {
+    PERMISSION_VERSION.fetch_add(1, Ordering::SeqCst);
+}
 
 /// The collector's own cap, one below [`MAX_OBSERVATIONS`].
 ///

@@ -20,6 +20,13 @@ mod response;
 mod routes;
 mod runtime;
 pub(crate) use runtime::LiveMountRegistration;
+// `render_cache::RenderCache::install` derives its own `SnapshotKeyRing`
+// from the same root key material Live uses (purpose separation keeps the
+// two rings' MACs distinct; see `runtime::build_key_ring`'s doc and ruling
+// R56). `mod runtime` above is private, so re-exporting the function here
+// is what makes `crate::live::build_key_ring()` reachable from a sibling
+// module (`render_cache`) rather than only from within `live` itself.
+pub(crate) use runtime::build_key_ring;
 mod streams;
 mod tenant;
 mod upload;

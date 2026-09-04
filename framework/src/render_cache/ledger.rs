@@ -47,13 +47,31 @@ fn identity_column(identity: &DependencyIdentity) -> String {
 /// The same string-matching technique (minus this table-name requirement)
 /// is used elsewhere in this codebase (`vector/qdrant.rs`) for the same
 /// class of "the resource I expect isn't there" signal.
-fn is_missing_table_error(error: &sea_orm::DbErr) -> bool {
-    let message = error.to_string();
+///
+/// Takes the already-stringified message rather than a `&sea_orm::DbErr`
+/// so [`migration_present`] can reuse the exact same check against a
+/// [`FrameworkError`](crate::FrameworkError)'s text (its `Display` passes
+/// the underlying database message through verbatim - see
+/// [`FrameworkError::database`](crate::FrameworkError::database)) without a
+/// second, drifting copy of these three phrasings.
+fn is_missing_table_error(message: &str) -> bool {
     message.contains("suprnova_render_epochs")
         && (message.contains("no such table")
             || message.contains("does not exist")
             || message.contains("doesn't exist"))
 }
+
+/// Once-per-process warning that a write path skipped advancing a
+/// generation because `suprnova_render_epochs` is missing, even though a
+/// RenderCache runtime is installed for this process. See ruling R65: a
+/// missing table on a process that never called `RenderCache::install` is
+/// silent by design (`MissingTablePolicy::Skip`'s ordinary case, matching
+/// every uninstalled application and test database); a missing table
+/// after `RenderCache::install` succeeded is a schema regression - a bad
+/// deploy, a dropped table - that would otherwise stop advancing
+/// generations, and therefore stop invalidating anything, silently
+/// forever.
+static WARNED_MISSING_TABLE_AFTER_INSTALL: std::sync::Once = std::sync::Once::new();
 
 /// Collapses a database failure into the one closed provider kind
 /// [`RenderCacheError`] exposes for this contract. The underlying message
@@ -71,6 +89,34 @@ fn provider_error(error: FrameworkError) -> RenderCacheError {
         "render cache generation ledger provider failure",
     );
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
+}
+
+/// Whether the RenderCache migration's tables are present on the primary
+/// connection.
+///
+/// `RenderCache::install` calls this at boot (ruling R58): the migration
+/// is deliberately not part of the CLI scaffold template (the same
+/// opt-in shape as `two_factor` and `features`), so an application that
+/// enables RenderCache without adding it would otherwise install
+/// successfully and fail every request against a missing table - a much
+/// worse first experience than one sentence at boot naming the fix.
+///
+/// Any database error other than a missing `suprnova_render_epochs`
+/// propagates unchanged (for example, no primary connection registered at
+/// all): `install` should fail loudly on that too, not report it as "the
+/// migration is missing".
+pub(crate) async fn migration_present() -> Result<bool, FrameworkError> {
+    match DB::select_on(
+        PRIMARY_CONNECTION_NAME,
+        "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+        vec![],
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) if is_missing_table_error(&e.to_string()) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// One `?` (MySQL/SQLite) or `$N` (Postgres) placeholder per position,
@@ -265,8 +311,28 @@ async fn advance_through(
         Ok(row) => row,
         Err(e)
             if matches!(on_missing_table, MissingTablePolicy::Skip)
-                && is_missing_table_error(&e) =>
+                && is_missing_table_error(&e.to_string()) =>
         {
+            // See ruling R65: silent when no RenderCache runtime is
+            // installed (the ordinary case for every application and test
+            // database that does not use RenderCache at all), but a
+            // process-lifetime-once warning when one is - a schema that
+            // regressed underneath an installed runtime stops advancing
+            // generations silently otherwise, and every entry it should
+            // have invalidated is served stale forever.
+            if super::is_installed() {
+                WARNED_MISSING_TABLE_AFTER_INSTALL.call_once(|| {
+                    tracing::warn!(
+                        target: "suprnova::render_cache",
+                        "a write skipped advancing a RenderCache generation because \
+                         suprnova_render_epochs is missing, even though a RenderCache \
+                         runtime is installed for this process; every entry that \
+                         depends on the tables this write touched will keep being \
+                         served without invalidation until the RenderCache migration \
+                         is applied",
+                    );
+                });
+            }
             return Ok(());
         }
         Err(e) => return Err(FrameworkError::database(e.to_string())),

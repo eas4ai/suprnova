@@ -1,6 +1,10 @@
 //! Process-wide RenderCache configuration.
 
+use std::sync::Arc;
+
+use suprnova_live::clock::Clock;
 pub use suprnova_live::render_cache::FailurePolicy;
+use suprnova_live::render_cache::singleflight::RebuildCoordinator;
 
 /// In-process store bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +30,7 @@ pub enum L1Config {
 }
 
 /// Configuration read once at install.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct RenderCacheConfig {
     /// Master switch; disabled means every request bypasses.
     pub enabled: bool,
@@ -38,9 +42,77 @@ pub struct RenderCacheConfig {
     pub failure: FailurePolicy,
     /// Application and view build identity namespace.
     pub build_id: String,
+    /// Test-only clock override; `None` means `install` uses the system
+    /// clock. `#[doc(hidden)]`: not part of the public contract, set only
+    /// through [`Self::with_clock_for_test`].
+    #[doc(hidden)]
+    pub clock_override: Option<Arc<dyn Clock>>,
+    /// Test-only rebuild coordinator override; `None` means `install`
+    /// builds its own [`suprnova_live::render_cache::singleflight::LocalRebuildCoordinator`].
+    /// `#[doc(hidden)]`: not part of the public contract, set only through
+    /// [`Self::with_coordinator_for_test`] - needed to observe singleflight
+    /// admission (a waiter actually parked) from a test without a
+    /// timing-based wait.
+    #[doc(hidden)]
+    pub coordinator_override: Option<Arc<dyn RebuildCoordinator>>,
+}
+
+/// Manual, not derived: `clock_override` is `Option<Arc<dyn Clock>>`, and
+/// trait objects have no `PartialEq`. Equality (used by tests that assert
+/// two configs came out the same, and nowhere in production logic) compares
+/// every field a real config difference could show up in; the clock
+/// override is a test seam, never part of what "the same configuration"
+/// means.
+impl PartialEq for RenderCacheConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.l0 == other.l0
+            && self.l1 == other.l1
+            && self.failure == other.failure
+            && self.build_id == other.build_id
+    }
+}
+
+impl Eq for RenderCacheConfig {}
+
+/// Manual, not derived: `dyn Clock` has no `Debug` impl. Prints the clock
+/// override as present or absent rather than omitting the field, so a test
+/// failure that hinges on which clock was installed still shows that much.
+impl std::fmt::Debug for RenderCacheConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RenderCacheConfig")
+            .field("enabled", &self.enabled)
+            .field("l0", &self.l0)
+            .field("l1", &self.l1)
+            .field("failure", &self.failure)
+            .field("build_id", &self.build_id)
+            .field("clock_override", &self.clock_override.is_some())
+            .field("coordinator_override", &self.coordinator_override.is_some())
+            .finish()
+    }
 }
 
 impl RenderCacheConfig {
+    /// Test-only: inject the clock the runtime reads instead of the system
+    /// clock. `#[doc(hidden)]`: not part of the public contract.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock_for_test(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock_override = Some(clock);
+        self
+    }
+
+    /// Test-only: inject the rebuild coordinator the runtime uses instead of
+    /// the default `LocalRebuildCoordinator`. `#[doc(hidden)]`: not part of
+    /// the public contract.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_coordinator_for_test(mut self, coordinator: Arc<dyn RebuildCoordinator>) -> Self {
+        self.coordinator_override = Some(coordinator);
+        self
+    }
+
     /// Reads `RENDER_CACHE_ENABLED` (default `true`), `RENDER_CACHE_L0_ENTRIES`
     /// (default 4096), `RENDER_CACHE_L0_BYTES` (default 128 MiB),
     /// `RENDER_CACHE_L1_DIR` (unset disables L1), `RENDER_CACHE_L1_BYTES`
@@ -70,6 +142,8 @@ impl RenderCacheConfig {
                 FailurePolicy::Open
             },
             build_id: read("APP_BUILD_ID").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()),
+            clock_override: None,
+            coordinator_override: None,
         }
     }
 }

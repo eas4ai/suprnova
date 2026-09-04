@@ -93,6 +93,24 @@ impl HttpResponse {
         }
     }
 
+    /// Create a response from already-owned `Bytes` with an explicit
+    /// `Content-Type`, storing the body with no copy.
+    ///
+    /// `text`, `json`, and `html` all take owned Rust values (`String`,
+    /// `serde_json::Value`) and encode them into fresh bytes. RenderCache
+    /// serves a stored [`Bytes`](bytes::Bytes) representation to every hit
+    /// against the same key - cloning a `Bytes` is a refcount bump, not a
+    /// byte copy, so this constructor exists to preserve that on the
+    /// response path rather than allocating a new buffer per hit the way
+    /// `HttpResponse::text` would.
+    pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: Body::Static(body),
+            headers: vec![("Content-Type".to_string(), content_type.into())],
+        }
+    }
+
     /// Create an HTML response. Sets `Content-Type: text/html; charset=utf-8`.
     pub fn html(body: impl Into<String>) -> Self {
         Self {

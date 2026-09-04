@@ -1512,14 +1512,13 @@ async fn payments_webhook_insert_and_update_advance_the_table_generation() {
 // deadlock; this test is the proof - the same insert/update scenario round 4
 // could not safely drive.
 //
-// Shared by the unconditional SQLite test below and the two `#[ignore]`d
-// live-Postgres/live-MySQL tests further down, so the same scenario proves
-// the fix on all three backends rather than three independently-written
-// (and independently-driftable) copies.
-async fn payments_webhook_mirror_scenario(
-    conn: Arc<sea_orm::DatabaseConnection>,
-    provider_name: &'static str,
-) {
+// This has exactly one caller (the unconditional SQLite test right below).
+// An earlier draft also built `#[ignore]`d live-Postgres and live-MySQL
+// variants of this scenario, sharing this function across all three
+// backends; those were reverted for an unrelated pre-existing failure
+// before they ever landed, and do not exist in this file - see ruling R77.
+async fn payments_webhook_mirror_scenario(conn: Arc<sea_orm::DatabaseConnection>) {
+    let provider_name = "render-cache-payments-mirror-probe";
     let mock = Arc::new(MockPaymentProvider::new());
     let as_trait: Arc<dyn PaymentProvider> = mock.clone();
     PaymentProviderRegistry::bind(provider_name, as_trait);
@@ -1621,5 +1620,5 @@ async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_tabl
         .await
         .expect("payments + render-cache migrations should apply cleanly");
     let conn = Arc::new(db.conn().clone());
-    payments_webhook_mirror_scenario(conn, "render-cache-payments-mirror-probe").await;
+    payments_webhook_mirror_scenario(conn).await;
 }
