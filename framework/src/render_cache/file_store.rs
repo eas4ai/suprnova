@@ -313,10 +313,32 @@ impl RenderStore for FileRenderStore {
                 if state.total_bytes - existing_len + payload_len <= self.max_bytes {
                     break;
                 }
+                // Mirrors `evict`: remove the file first, and drop the
+                // tally entry only when the removal succeeded or the file
+                // was already absent. A victim whose removal fails for a
+                // real reason stays tracked and counted instead of being
+                // written off as freed space that was never actually
+                // given back - the same disk-versus-tally divergence
+                // `evict` and `get` were fixed to avoid, reached a third
+                // way through this loop. Move on to the next candidate
+                // rather than proceeding as if room had been made.
+                match tokio::fs::remove_file(self.path_for_name(&victim)).await {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => continue,
+                }
                 if let Some(removed) = state.entries.remove(&victim) {
                     state.total_bytes -= removed.payload_bytes;
-                    let _ = tokio::fs::remove_file(self.path_for_name(&victim)).await;
                 }
+            }
+            if state.total_bytes - existing_len + payload_len > self.max_bytes {
+                // Eviction could not free enough room - at least one
+                // victim's removal failed for a real reason and was left
+                // in place. Publishing an entry the store cannot actually
+                // hold within its bound is worse than declining, the same
+                // fail-closed shape the oversized-payload guard above
+                // already uses.
+                return Ok(PublishOutcome::Rejected);
             }
         }
         let framed = encode_frame(&fence, now_ms, 0, &bytes);

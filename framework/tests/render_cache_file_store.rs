@@ -662,3 +662,123 @@ async fn a_directory_sync_failure_after_a_successful_rename_still_updates_the_ta
     );
     assert_eq!(inspection.bytes, "live-despite-a-sync-failure".len());
 }
+
+/// Occupies `key`'s on-disk path with an empty directory, so a subsequent
+/// `remove_file` against it fails with a real, non-`NotFound` error
+/// (`IsADirectory`) instead of silently succeeding. A real filesystem
+/// condition rather than a test-only fault-injection hook in the store
+/// itself, the same spirit as the directory-sync test above, adapted to a
+/// call site where restricting directory permissions would also break the
+/// publish under test's own write.
+fn make_removal_fail(store: &FileRenderStore, key: &RenderKey) {
+    let path = store.path_for_test(key);
+    std::fs::remove_file(&path).expect("remove the real file before replacing it");
+    std::fs::create_dir(&path).expect("occupy the path with a directory");
+}
+
+#[tokio::test]
+async fn a_victim_whose_removal_fails_stays_tracked_and_a_different_candidate_is_evicted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 100).expect("open");
+    let a = key("/a");
+    let b = key("/b");
+    let c = key("/c");
+    store
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
+        .await
+        .expect("publish a");
+    store
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .await
+        .expect("publish b");
+    store
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .await
+        .expect("publish c");
+
+    make_removal_fail(&store, &b);
+
+    // Growing "/a" from 40 to 70 genuinely breaches the bound
+    // (80 - 40 + 70 = 110 > 100). "/b" is the oldest candidate, but its
+    // removal fails, so the loop must leave it tracked and move on to
+    // "/c" (110 - 20 = 90 <= 100) instead of silently treating "/b" as
+    // freed space it never actually gave back.
+    assert_eq!(
+        store
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
+            .await
+            .expect("publish a again"),
+        PublishOutcome::Published
+    );
+
+    assert!(
+        store.get(&c).await.expect("get c").is_none(),
+        "the next candidate is evicted once the first one's removal fails"
+    );
+    let hit_a = store
+        .get(&a)
+        .await
+        .expect("get a")
+        .expect("a must be present with its new, grown bytes");
+    assert_eq!(hit_a.bytes.len(), 70);
+
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        inspection.entries, 2,
+        "a and b; b's removal failed, so it stays tracked rather than being written off"
+    );
+    assert_eq!(
+        inspection.bytes, 90,
+        "b's bytes are still counted since they were never actually freed"
+    );
+}
+
+#[tokio::test]
+async fn publish_is_rejected_and_changes_nothing_when_eviction_cannot_free_enough_room() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 100).expect("open");
+    let a = key("/a");
+    let b = key("/b");
+    let c = key("/c");
+    store
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
+        .await
+        .expect("publish a");
+    store
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .await
+        .expect("publish b");
+    store
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .await
+        .expect("publish c");
+
+    // Both other entries are made undeletable, so the eviction loop
+    // exhausts every candidate without ever freeing enough room.
+    make_removal_fail(&store, &b);
+    make_removal_fail(&store, &c);
+
+    assert_eq!(
+        store
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
+            .await
+            .expect("publish a again"),
+        PublishOutcome::Rejected,
+        "a bound that cannot be honoured is a rejection, not an over-limit acceptance"
+    );
+
+    let hit_a = store
+        .get(&a)
+        .await
+        .expect("get a")
+        .expect("a's original entry is untouched");
+    assert_eq!(hit_a.bytes.len(), 40, "a rejected publish changes nothing");
+    assert_eq!(hit_a.fence.token, 1);
+
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        inspection.entries, 3,
+        "nothing was actually evicted, and nothing new was written"
+    );
+    assert_eq!(inspection.bytes, 80);
+}
