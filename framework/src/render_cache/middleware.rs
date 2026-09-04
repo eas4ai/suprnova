@@ -1190,6 +1190,20 @@ async fn lead_render(
         undeclared_reads: report.undeclared.clone(),
     };
     let classification = classify(policy.class(), &observed_context);
+    // Test-only, see `strip_classification_reasons_for_test`'s own doc: no
+    // production code ever sets this flag, and `classify` never produces a
+    // narrowed, reason-less class on its own, so this is a no-op on every
+    // real request. Read from `report` (already extracted from the
+    // collector by `run_render`, above), not the collector itself: the
+    // scope that flag was set in has already closed by this point.
+    #[cfg(any(test, feature = "testing"))]
+    let classification = {
+        let mut classification = classification;
+        if report.strip_classification_reasons {
+            classification.reasons.clear();
+        }
+        classification
+    };
     if classification.class == RepresentationClass::Uncacheable {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
@@ -1211,8 +1225,9 @@ async fn lead_render(
     // `classification.reasons`, so a `PrivateCached` class with an empty
     // reasons list has nothing there for it to check the resolved key
     // against, and the guard's loop simply never runs. See
-    // `is_unreasoned_private_class`'s own doc for how this is reachable.
-    if is_unreasoned_private_class(&classification) {
+    // `is_unreasoned_private_class`'s own doc for how this is reachable,
+    // and for why a route that *declared* `PrivateCached` is excluded.
+    if is_unreasoned_private_class(&classification, policy.class()) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1325,27 +1340,46 @@ fn finish_fresh_render(
     Ok(out)
 }
 
-/// Whether `classification` is a `PrivateCached` class with no recorded
-/// reason behind it. `key_used_different_values_than_the_render_saw`
-/// drives every requirement it checks off `classification.reasons`, so an
-/// empty list gives its loop nothing to check the resolved key against and
-/// it returns `false` unconditionally - not a bug in that guard, since its
-/// own reasoning never anticipated this shape.
+/// Whether `classification` is a `PrivateCached` class that `classify`
+/// genuinely narrowed to from a wider `declared` class (`declared`, which
+/// is always `policy.class()`, is not itself `PrivateCached`) with no
+/// recorded reason behind the narrowing.
+/// `key_used_different_values_than_the_render_saw` drives every
+/// requirement it checks off `classification.reasons`, so an empty list
+/// gives its loop nothing to check the resolved key against and it returns
+/// `false` unconditionally - not a bug in that guard, since its own
+/// reasoning never anticipated this shape.
 ///
-/// Two independent things can produce it. A route may declare itself
-/// `RepresentationClass::PrivateCached` up front (`RenderCachePolicy`
-/// requires such a route to also declare `Principal` or `Tenant` variance
-/// to build at all) and then render without its handler ever actually
-/// reading an identity - `classify` starts from the declared class and only
-/// ever narrows further, so a `PrivateCached` route with nothing to narrow
-/// keeps its declared class and an empty reasons list. This task's own
-/// [`live::document_declines`] never produces this shape (it only
-/// declines, never classifies), but the check stays here as the general
-/// invariant regardless of what upstream code changes next classify's
-/// inputs.
+/// `declared == PrivateCached` is deliberately excluded (R89): `classify`
+/// only ever narrows, so `class == PrivateCached` with empty reasons and
+/// `declared == PrivateCached` means nothing narrowed at all - the route
+/// simply declared `PrivateCached` up front and its render never happened
+/// to read an identity. `RenderCachePolicy` already requires such a route
+/// to declare `Principal` or `Tenant` variance to build at all, so the key
+/// is already partitioned by the resolved principal before the render
+/// begins; declining it would make a route Task 14 cached correctly
+/// permanently uncacheable. An earlier version of this check omitted the
+/// `declared` comparison and did exactly that (see this task's own fix
+/// round 1 report, finding 9).
+///
+/// With that case excluded, `classify`'s own implementation cannot
+/// currently reach the shape this checks for at all: every narrowing call
+/// it makes pushes its reason unconditionally, so a `PrivateCached` result
+/// with empty reasons only ever arises when `declared` was already
+/// `PrivateCached` - which is exactly the case just excluded. This is
+/// defense in depth against a future change to `classify` (or another
+/// upstream classifier) that narrows without attaching a reason, not a
+/// path any current input reaches; see the delivered test that reaches
+/// this exact call site anyway, using a test-only seam, precisely because
+/// nothing else does.
 #[must_use]
-fn is_unreasoned_private_class(classification: &ClassificationOutcome) -> bool {
-    classification.class == RepresentationClass::PrivateCached && classification.reasons.is_empty()
+fn is_unreasoned_private_class(
+    classification: &ClassificationOutcome,
+    declared: RepresentationClass,
+) -> bool {
+    classification.class == RepresentationClass::PrivateCached
+        && classification.reasons.is_empty()
+        && declared != RepresentationClass::PrivateCached
 }
 
 /// Whether the render's own observations diverge from the values the key
@@ -1832,30 +1866,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_reasonless_private_classification_is_declined() {
-        assert!(is_unreasoned_private_class(&ClassificationOutcome {
-            class: RepresentationClass::PrivateCached,
-            reasons: Vec::new(),
-        }));
+    fn a_reasonless_private_classification_narrowed_from_a_wider_declared_class_is_declined() {
+        assert!(is_unreasoned_private_class(
+            &ClassificationOutcome {
+                class: RepresentationClass::PrivateCached,
+                reasons: Vec::new(),
+            },
+            RepresentationClass::PublicShared,
+        ));
+    }
+
+    #[test]
+    fn a_declared_private_cached_route_with_no_narrowing_is_not_declined_by_this_check() {
+        // R89: `classify` never narrows without a reason, so a
+        // `PrivateCached` class with empty reasons here can only mean the
+        // route declared `PrivateCached` up front - already required to
+        // carry `Principal` or `Tenant` variance, and already correctly
+        // cacheable per Task 14.
+        assert!(!is_unreasoned_private_class(
+            &ClassificationOutcome {
+                class: RepresentationClass::PrivateCached,
+                reasons: Vec::new(),
+            },
+            RepresentationClass::PrivateCached,
+        ));
     }
 
     #[test]
     fn a_private_classification_with_a_reason_is_left_to_the_value_guard() {
-        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
-            class: RepresentationClass::PrivateCached,
-            reasons: vec![ClassificationReason::PrincipalObserved],
-        }));
+        assert!(!is_unreasoned_private_class(
+            &ClassificationOutcome {
+                class: RepresentationClass::PrivateCached,
+                reasons: vec![ClassificationReason::PrincipalObserved],
+            },
+            RepresentationClass::PublicShared,
+        ));
     }
 
     #[test]
     fn a_non_private_class_is_never_declined_by_this_check() {
-        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
-            class: RepresentationClass::PublicShared,
-            reasons: Vec::new(),
-        }));
-        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
-            class: RepresentationClass::Uncacheable,
-            reasons: Vec::new(),
-        }));
+        assert!(!is_unreasoned_private_class(
+            &ClassificationOutcome {
+                class: RepresentationClass::PublicShared,
+                reasons: Vec::new(),
+            },
+            RepresentationClass::PublicShared,
+        ));
+        assert!(!is_unreasoned_private_class(
+            &ClassificationOutcome {
+                class: RepresentationClass::Uncacheable,
+                reasons: Vec::new(),
+            },
+            RepresentationClass::PublicShared,
+        ));
     }
 }

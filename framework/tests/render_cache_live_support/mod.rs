@@ -35,8 +35,8 @@ use suprnova::render_cache::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    AuthMiddleware, CsrfMiddleware, HttpResponse, MiddlewareRegistry, Request, Response, Router,
-    SessionConfig, SessionMiddleware, StatusCode, handle_request,
+    Auth, AuthMiddleware, CsrfMiddleware, HttpResponse, MiddlewareRegistry, Request, Response,
+    Router, SessionConfig, SessionMiddleware, StatusCode, handle_request,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
@@ -54,20 +54,48 @@ use crate::live_dogfood_support::{
 /// even though `render_cache::live::record_document_intent` never runs.
 pub const RAW_PATH: &str = "/dogfood/private-raw";
 
+/// Fix round 2 (R89): a route declared `RepresentationClass::PrivateCached`
+/// with `Principal` variance, whose handler reads no identity at all.
+/// `classify` starts from the declared class and only narrows further, so
+/// this always produces `(PrivateCached, [])` - a shape `is_unreasoned_private_class`
+/// must not decline, since the declared class already required `Principal`
+/// variance and Task 14 cached this correctly. No Live document involved:
+/// this exercises `middleware.rs`'s classification path directly.
+pub const UNREASONED_PATH: &str = "/unreasoned-private-cached";
+
+/// Fix round 2 (finding 8): a route declared `PublicShared` with no
+/// variance, whose handler reads an identity (attaching
+/// `ClassificationReason::PrincipalObserved`) and then calls the test-only
+/// `strip_classification_reasons_for_test` seam, simulating a class
+/// `classify` genuinely narrowed to `PrivateCached` with the reason
+/// stripped away - the shape `is_unreasoned_private_class`'s call site
+/// exists to catch, reached here through `lead_render`'s real control flow
+/// since `classify` itself cannot produce it unaided.
+pub const STRIP_PATH: &str = "/strip-classification-reason";
+
 /// Counts renders reaching the handler side of the RenderCache middleware,
-/// split by which route was hit so the two probe routes do not share a
+/// split by which route was hit so the probe routes do not share a
 /// counter. Registered AFTER `RenderCache::install` (see the harness's own
-/// doc), so a request served from the cache never increments either one -
+/// doc), so a request served from the cache never increments any of them -
 /// only an actual render does.
 struct RenderCounter;
 
 #[async_trait::async_trait]
 impl Middleware for RenderCounter {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        if request.path() == PRIVATE_DOCUMENT_PATH || request.path() == RAW_PATH {
-            PRIVATE_RENDERS.fetch_add(1, Ordering::SeqCst);
-        } else {
-            PUBLIC_RENDERS.fetch_add(1, Ordering::SeqCst);
+        match request.path() {
+            PRIVATE_DOCUMENT_PATH | RAW_PATH => {
+                PRIVATE_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
+            UNREASONED_PATH => {
+                UNREASONED_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
+            STRIP_PATH => {
+                STRIP_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {
+                PUBLIC_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
         }
         next(request).await
     }
@@ -75,6 +103,8 @@ impl Middleware for RenderCounter {
 
 static PUBLIC_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static PRIVATE_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static UNREASONED_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static STRIP_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The single RenderCache migration this harness needs; mirrors
 /// `render_cache_middleware_support::MiddlewareMigrator`, which is private
@@ -161,6 +191,23 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .vary(VarianceDimension::Principal)
         .build()
         .expect("raw identity bound policy");
+    // R89's own shape: declared `PrivateCached` already requires `Principal`
+    // or `Tenant` variance to build at all (Task 14 round 6), so this is a
+    // legitimately cacheable route whose handler simply never happens to
+    // read an identity.
+    let unreasoned_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("unreasoned private cached policy");
+    // Finding 8's shape: declared `PublicShared`, no variance at all - the
+    // point is that nothing partitions the key, so if the invariant's call
+    // site did not run, the reason-stripped render would be stored and
+    // served to every caller regardless of identity.
+    let strip_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("strip classification reason policy");
 
     let raw = LiveMount::<DogfoodCounter>::identity_bound(RAW_PATH, "counter", "dogfood-raw")
         .expect("declare raw identity-bound mount");
@@ -177,13 +224,19 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     let router = router
         .try_live_mount(&raw)
         .expect("register raw identity-bound mount");
+    let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
+    let router: Router = router.get(STRIP_PATH, strip_handler).into();
     let router = router
         .try_render_cache(DOCUMENT_PATH, public_policy)
         .expect("attach public seed render cache policy")
         .try_render_cache(PRIVATE_DOCUMENT_PATH, private_policy)
         .expect("attach identity bound render cache policy")
         .try_render_cache(RAW_PATH, raw_policy)
-        .expect("attach raw render cache policy");
+        .expect("attach raw render cache policy")
+        .try_render_cache(UNREASONED_PATH, unreasoned_policy)
+        .expect("attach unreasoned private cached policy")
+        .try_render_cache(STRIP_PATH, strip_policy)
+        .expect("attach strip classification reason policy");
 
     let mut render_cache_config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -213,6 +266,8 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     // so an earlier test's counts never leak into this one.
     PUBLIC_RENDERS.store(0, Ordering::SeqCst);
     PRIVATE_RENDERS.store(0, Ordering::SeqCst);
+    UNREASONED_RENDERS.store(0, Ordering::SeqCst);
+    STRIP_RENDERS.store(0, Ordering::SeqCst);
     suprnova::middleware::register_global_middleware(RenderCounter);
     let router = Arc::new(router);
     prepare_live_router_with_clock_for_test(&router, Arc::clone(&clock))
@@ -252,6 +307,25 @@ async fn render_raw_document(
     )))
 }
 
+/// R89's shape: reads no identity at all. `UNREASONED_PATH`'s policy
+/// already declares `Principal` variance, so `key_input` derives an
+/// identity-scoped key without this handler's help.
+async fn unreasoned_handler(_request: Request) -> Response {
+    Ok(HttpResponse::html("unreasoned private cached"))
+}
+
+/// Finding 8's shape: reads an identity (attaching
+/// `ClassificationReason::PrincipalObserved` inside `classify`), then
+/// immediately strips that reason via the test-only seam, simulating a
+/// class `classify` narrowed to `PrivateCached` with no reason surviving.
+async fn strip_handler(_request: Request) -> Response {
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    suprnova::render_cache::collector::strip_classification_reasons_for_test();
+    Ok(HttpResponse::html(format!(
+        "strip classification reason render for {identity}"
+    )))
+}
+
 /// The adjustable clock this harness shared between both runtimes.
 pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
     &harness.clock
@@ -272,6 +346,16 @@ pub fn public_renders() -> usize {
 /// Renders reaching `PRIVATE_DOCUMENT_PATH`'s or `RAW_PATH`'s handler so far.
 pub fn private_renders() -> usize {
     PRIVATE_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `UNREASONED_PATH`'s handler so far.
+pub fn unreasoned_renders() -> usize {
+    UNREASONED_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `STRIP_PATH`'s handler so far.
+pub fn strip_renders() -> usize {
+    STRIP_RENDERS.load(Ordering::SeqCst)
 }
 
 /// One dispatched response: status, an accessor for a header, and the body.

@@ -154,6 +154,13 @@ pub struct CollectorReport {
     pub undeclared: Vec<String>,
     /// Facts a rendered Live document recorded, if the render mounted one.
     pub live_document: Option<super::live::LiveDocumentFacts>,
+    /// Test-only: see [`strip_classification_reasons_for_test`]'s own doc.
+    /// Lives on the report itself, not a separate collector field, because
+    /// `lead_render` reads it from the *extracted* report after the
+    /// collector scope has already closed - the same reason every other
+    /// field here is captured this way rather than re-queried later.
+    #[cfg(any(test, feature = "testing"))]
+    pub strip_classification_reasons: bool,
 }
 
 impl CollectorReport {
@@ -435,4 +442,33 @@ pub fn observe_undeclared(name: &str) {
 #[must_use]
 pub fn current_report() -> Option<CollectorReport> {
     with_state(|state| state.report.clone())
+}
+
+/// Test-only: marks the active collector scope so the classification this
+/// request produces has its `reasons` cleared immediately after `classify`
+/// runs, before the R86 invariant (`is_unreasoned_private_class` in
+/// `middleware.rs`) checks it.
+///
+/// Simulates a class `classify` genuinely narrowed to `PrivateCached` but
+/// that somehow carries no attached reason - a shape `classify`'s own
+/// implementation cannot produce today (every narrowing call pushes its
+/// reason unconditionally, so a `PrivateCached` result with empty reasons
+/// only ever arises when the route's own declared class was already
+/// `PrivateCached`, which the R89 scoping condition now exempts). This
+/// exists only so a test can exercise `is_unreasoned_private_class`'s call
+/// site through `lead_render`'s real control flow - reading an identity so
+/// `classify` narrows and attaches `PrincipalObserved`, then stripping that
+/// reason here - rather than constructing a `ClassificationOutcome`
+/// directly and calling the predicate in isolation, which the delivered
+/// suite already does separately. A no-op outside a collector scope, like
+/// every other observer in this module.
+///
+/// Sets the flag on the report itself rather than a separate collector
+/// field: `lead_render` calls `classify` using a `CollectorReport` already
+/// *extracted* from the collector (the scope has closed by then, the same
+/// reason every other field on this report is captured this way), so the
+/// flag has to travel with it to be readable at that point.
+#[cfg(any(test, feature = "testing"))]
+pub fn strip_classification_reasons_for_test() {
+    with_state(|state| state.report.strip_classification_reasons = true);
 }

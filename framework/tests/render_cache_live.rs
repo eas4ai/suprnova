@@ -7,8 +7,8 @@ mod render_cache_live_support;
 
 use live_dogfood_support::{DOCUMENT_PATH, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
-    RAW_PATH, boot_with_render_cache_and_live, clock, dispatch_get, private_renders,
-    public_renders, public_seed_lifetime_ms,
+    RAW_PATH, STRIP_PATH, UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get,
+    private_renders, public_renders, public_seed_lifetime_ms, strip_renders, unreasoned_renders,
 };
 use suprnova::StatusCode;
 use suprnova::live::LiveMountKind;
@@ -262,6 +262,102 @@ async fn an_identity_bound_mount_declines_even_when_the_handler_never_calls_rend
         private_renders(),
         2,
         "an identity-bound mount declines even when render is never called"
+    );
+    assert!(again.header("etag").is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_declared_private_cached_route_with_no_identity_read_is_still_cached() {
+    // R89: `UNREASONED_PATH` declares `PrivateCached` with `Principal`
+    // variance and reads no identity in its handler. `classify` starts
+    // from the declared class and only narrows further, so this always
+    // produces `(PrivateCached, [])` on every request - a shape the R86
+    // invariant must not decline, since the declared class already forced
+    // `Principal` variance (Task 14 round 6) and the key is already
+    // partitioned by the resolved principal before the render begins.
+    let harness = boot_with_render_cache_and_live().await;
+    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let cookie = login.session_cookie();
+
+    let first = dispatch_get(
+        &harness,
+        UNREASONED_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        first.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
+    assert_eq!(unreasoned_renders(), 1, "the first GET renders");
+
+    let again = dispatch_get(
+        &harness,
+        UNREASONED_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(
+        unreasoned_renders(),
+        1,
+        "a declared-PrivateCached route whose handler reads no identity is a hit for the \
+         same signed-in principal, not permanently uncacheable"
+    );
+    assert!(
+        again.header("etag").is_some(),
+        "a stored entry carries a validator"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_class_narrowed_with_no_attached_reason_is_declined() {
+    // Finding 8: `STRIP_PATH` declares `PublicShared` with no variance and
+    // reads an identity, which `classify` would normally narrow to
+    // `PrivateCached` with `ClassificationReason::PrincipalObserved`
+    // attached. The handler immediately strips that reason via the
+    // test-only seam, producing exactly the shape
+    // `is_unreasoned_private_class`'s call site exists to catch: a class
+    // genuinely narrowed away from the declared one, with no reason left
+    // for the value guard to check the key against. Since nothing
+    // partitions the key here, storing this would let every caller share
+    // one entry keyed to nobody in particular.
+    let harness = boot_with_render_cache_and_live().await;
+    // A session cookie is carried on both requests: without one, every
+    // response carries a fresh `Set-Cookie` and is ineligible for storage
+    // regardless of classification, which would make this test pass
+    // vacuously.
+    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let cookie = login.session_cookie();
+    let first = dispatch_get(
+        &harness,
+        STRIP_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        first.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
+    assert_eq!(strip_renders(), 1, "the first GET renders");
+
+    let again = dispatch_get(
+        &harness,
+        STRIP_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(
+        strip_renders(),
+        2,
+        "a class narrowed with no attached reason must be declined, never stored"
     );
     assert!(again.header("etag").is_none());
 }
