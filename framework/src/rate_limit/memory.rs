@@ -10,7 +10,8 @@
 //!
 //! [`InMemoryRateLimiter::purge_inactive`] is the manual sweep
 //! primitive: it drops every bucket whose last recorded hit aged out
-//! past the supplied window. The constructor pair makes the choice
+//! past both the supplied window and its longest observed quota window.
+//! The constructor pair makes the choice
 //! explicit:
 //!
 //! - [`InMemoryRateLimiter::new`] is sweep-free and runtime-free -
@@ -56,7 +57,8 @@ impl InMemoryRateLimiter {
 
     /// Build a driver that spawns a background sweep task. The task
     /// calls [`Self::purge_inactive`] every `interval`, dropping any
-    /// bucket whose last recorded hit is older than `inactivity_window`.
+    /// bucket whose last recorded hit is older than both `inactivity_window`
+    /// and the bucket's longest observed quota window.
     ///
     /// The task holds a [`Weak`] reference to the shared bucket map,
     /// so it self-terminates the next interval after the last `Arc`
@@ -105,7 +107,7 @@ impl InMemoryRateLimiter {
     }
 
     /// Drop every bucket whose last recorded hit aged out past
-    /// `window`. Returns the number of buckets removed; useful for
+    /// both `window` and its longest observed quota window. Returns the number of buckets removed; useful for
     /// metrics and the unit test that asserts the sweep ran.
     ///
     /// Safe to call from a non-async context (it takes `&self` and
@@ -155,11 +157,12 @@ impl RateLimiterDriver for InMemoryRateLimiter {
         key: &str,
         config: &SlidingWindowConfig,
     ) -> Result<bool, FrameworkError> {
-        let now = Instant::now();
         let mut g = self
             .buckets
             .lock()
             .map_err(|_| FrameworkError::internal("rate limiter poisoned"))?;
+        // Timestamp under the lock so contending callers append in time order.
+        let now = Instant::now();
         let b = g.entry(key.to_string()).or_insert_with(Bucket::new);
         Ok(b.try_record(config.max_requests, config.window, now))
     }
@@ -169,11 +172,11 @@ impl RateLimiterDriver for InMemoryRateLimiter {
         key: &str,
         config: &SlidingWindowConfig,
     ) -> Result<Option<Duration>, FrameworkError> {
-        let now = Instant::now();
         let g = self
             .buckets
             .lock()
             .map_err(|_| FrameworkError::internal("rate limiter poisoned"))?;
+        let now = Instant::now();
         Ok(g.get(key)
             .and_then(|b| b.retry_after(config.max_requests, config.window, now)))
     }
@@ -239,7 +242,7 @@ mod tests {
         );
         let cfg = SlidingWindowConfig {
             max_requests: 5,
-            window: Duration::from_secs(60),
+            window: Duration::from_millis(20),
         };
         assert!(limiter.try_acquire("expire-me", &cfg).await.unwrap());
         assert_eq!(limiter.bucket_count(), 1);

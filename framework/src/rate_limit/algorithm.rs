@@ -8,6 +8,7 @@ use tokio::time::Instant;
 /// rate-limit drivers.
 pub struct Bucket {
     hits: VecDeque<Instant>,
+    retention_window: Duration,
 }
 
 impl Bucket {
@@ -15,6 +16,7 @@ impl Bucket {
     pub fn new() -> Self {
         Self {
             hits: VecDeque::new(),
+            retention_window: Duration::ZERO,
         }
     }
 
@@ -33,8 +35,11 @@ impl Bucket {
     /// is under `max`. Returns `true` when the hit was recorded,
     /// `false` when the limit was hit.
     pub fn try_record(&mut self, max: u32, window: Duration, now: Instant) -> bool {
-        self.evict_old(window, now);
-        if self.hits.len() < max as usize {
+        // A shorter quota on the same key must not erase history that
+        // still enforces an already-observed longer quota.
+        self.retention_window = self.retention_window.max(window);
+        self.evict_old(self.retention_window, now);
+        if self.active_count(window, now) < max as usize {
             self.hits.push_back(now);
             true
         } else {
@@ -42,26 +47,34 @@ impl Bucket {
         }
     }
 
-    /// Time until the oldest in-window hit ages out. Returns `None`
+    /// Time until enough in-window hits age out to admit another hit. Returns `None`
     /// when the bucket is under the limit and a new hit would succeed
     /// immediately.
     pub fn retry_after(&self, max: u32, window: Duration, now: Instant) -> Option<Duration> {
-        if self.hits.len() < max as usize {
+        if self.active_count(window, now) < max as usize {
             return None;
         }
-        let oldest = self.hits.front().copied()?;
-        let elapsed = now.saturating_duration_since(oldest);
+        let boundary = self.hits.get(self.hits.len().checked_sub(max as usize)?)?;
+        let elapsed = now.saturating_duration_since(*boundary);
         Some(window.saturating_sub(elapsed))
     }
 
+    fn active_count(&self, window: Duration, now: Instant) -> usize {
+        let expired = self
+            .hits
+            .partition_point(|hit| now.saturating_duration_since(*hit) >= window);
+        self.hits.len() - expired
+    }
+
     /// Whether every recorded hit on this bucket has aged out beyond
-    /// `window` as of `now`. Used by the in-memory driver's periodic
+    /// both `window` and the longest observed quota window as of `now`.
+    /// Used by the in-memory driver's periodic
     /// sweep to evict buckets that no longer carry any state - without
     /// this, attacker-controlled keying (e.g. `X-Forwarded-For` with
     /// no trusted-proxy gating) can grow the bucket map unboundedly.
     pub fn is_inactive(&self, window: Duration, now: Instant) -> bool {
         match self.hits.back().copied() {
-            Some(last) => now.saturating_duration_since(last) >= window,
+            Some(last) => now.saturating_duration_since(last) >= window.max(self.retention_window),
             None => true,
         }
     }
