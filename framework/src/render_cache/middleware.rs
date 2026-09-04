@@ -416,6 +416,14 @@ impl RenderCacheMiddleware {
             Ok(epoch) => epoch,
             Err(_) => return Err(ProviderFailure(request, next)),
         };
+        // Test-only race seam (R72/R83): fires right after the epoch this
+        // request's `RenderJob` will carry is captured, and before the
+        // render it describes begins - so an epoch advance armed here is
+        // baked into the job as already stale by the time that render's
+        // own fresh reread checks it, proving such a render's candidate is
+        // never published.
+        #[cfg(any(test, feature = "testing"))]
+        race_points::fire(&race_points::EPOCH_CAPTURED).await;
         let Ok(input) = key_input(runtime, &request, pattern, policy, epoch) else {
             // Fix round 5: a dimension's value could not be declared (see
             // `variance_descriptor`'s own doc) - bypass uncached rather
@@ -1718,7 +1726,17 @@ async fn fresh_reread_is_coherent(
     let current = runtime.ledger.current(&digests).await.map_err(|_| ())?;
     let fresh_epoch = runtime.ledger.epoch().await.map_err(|_| ())?;
     match CoherenceCheck::compare(observed, &current, fresh_epoch, epoch) {
-        CoherenceCheck::Coherent => Ok(()),
+        CoherenceCheck::Coherent => {
+            // Test-only race seam (R72/R83): fires after this reread has
+            // already found the candidate coherent, so a write armed here
+            // lands too late to be caught by *this* check but still lands
+            // before the entry below is built and stored - proving that
+            // such a write is instead caught at the *next* lookup, through
+            // the stored `observed` set this reread already closed over.
+            #[cfg(any(test, feature = "testing"))]
+            race_points::fire(&race_points::AFTER_REREAD).await;
+            Ok(())
+        }
         CoherenceCheck::Moved(_) => Err(()),
     }
 }
@@ -1878,6 +1896,71 @@ pub fn key_input_for_test(
         // same key regardless of when it runs in a test.
         epoch: 1,
         variance,
+    }
+}
+
+/// Test-only race-injection seams for this module's own coherence checks.
+/// Each hook fires from the exact point in the request flow its name
+/// describes, awaited in place, so a test can land a write or an epoch
+/// advance inside a window that is otherwise too narrow to hit
+/// deterministically from outside.
+///
+/// Compiled only under `cfg(test)` or the `testing` feature (ruling R72):
+/// an integration test under `framework/tests/` is a separate crate with
+/// no `cfg(test)` of its own reaching this library, so it can only see
+/// these hooks through the feature - which is on by default, so an
+/// ordinary `cargo test` still exercises them, but a feature-matrix build
+/// that turns default features off compiles the race suite's own test
+/// file to nothing instead of failing against seams that do not exist.
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod race_points {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Mutex, OnceLock};
+
+    /// A one-shot, boxed async closure a test arms and this module
+    /// consumes exactly once, the next time its race point fires.
+    pub type Hook = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+    /// Fires from [`super::fresh_reread_is_coherent`], immediately after it
+    /// finds the render still coherent and before its caller acts on that
+    /// result - the exact window a write must land in to be "after the
+    /// reread" and "before publication": late enough that it cannot itself
+    /// be caught by this same reread, early enough that the entry this
+    /// request publishes still carries the observations from before it.
+    pub static AFTER_REREAD: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    /// Fires from [`super::RenderCacheMiddleware::serve`], immediately
+    /// after the epoch a new [`super::RenderJob`] will carry is read, and
+    /// before the render that job describes begins - the exact window an
+    /// epoch advance must land in to be baked into the job as stale by the
+    /// time that render's own fresh reread checks it.
+    pub static EPOCH_CAPTURED: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    /// The lazily-initialized, re-armable slot behind a race point: a
+    /// `Mutex` inside the `OnceLock` (rather than the hook itself in the
+    /// `OnceLock` directly) so the same static can be armed again by a
+    /// later test in the same process, not only set once for the life of
+    /// the binary.
+    fn slot(point: &'static OnceLock<Mutex<Option<Hook>>>) -> &'static Mutex<Option<Hook>> {
+        point.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Arms `point` to run `hook` exactly once, the next time it fires.
+    /// Replaces any hook already armed there.
+    pub fn arm(point: &'static OnceLock<Mutex<Option<Hook>>>, hook: Hook) {
+        *slot(point).lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Fires `point` if a hook is armed there, consuming the arm; a no-op
+    /// otherwise, so an ordinary request that never armed anything pays
+    /// only a lock check.
+    pub(crate) async fn fire(point: &'static OnceLock<Mutex<Option<Hook>>>) {
+        let hook = slot(point).lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
     }
 }
 
