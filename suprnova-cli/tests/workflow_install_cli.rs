@@ -36,7 +36,9 @@ fn workflow_install_checks_parent_before_creating_directories() {
 
     assert!(!out.status.success(), "{}", combined(&out));
     assert_eq!(
-        fs::read_dir(&outside).expect("read external directory").count(),
+        fs::read_dir(&outside)
+            .expect("read external directory")
+            .count(),
         0,
         "installer must check containment before creating any directory"
     );
