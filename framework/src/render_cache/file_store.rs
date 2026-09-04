@@ -1,13 +1,16 @@
 //! File-backed L1 [`RenderStore`]: one file per key under a directory the
 //! process owns, published atomically so a reader never observes a partial
 //! write. Entries survive a process restart, and a completed publication
-//! also survives a hard crash or power loss, since the directory entry
-//! created by its rename is itself synced before the call returns (see
-//! below). [`FileRenderStore::open`] rebuilds the in-memory byte tally by
-//! scanning the directory once, removing anything left behind by a
-//! publication that never completed, and every later publication keeps
-//! that tally in step with the directory so no publish or eviction ever
-//! needs to re-read the directory from disk.
+//! also survives a hard crash or power loss in the ordinary case, since the
+//! directory entry created by its rename is itself synced before the call
+//! returns (see below) - if that sync fails, the publication has still
+//! succeeded (the rename already landed), so a durability warning is
+//! logged rather than the publication being reported as failed.
+//! [`FileRenderStore::open`] rebuilds the in-memory byte tally by scanning
+//! the directory once, removing anything left behind by a publication that
+//! never completed, and every later publication keeps that tally in step
+//! with the directory so no publish or eviction ever needs to re-read the
+//! directory from disk.
 //!
 //! # File frame
 //!
@@ -319,9 +322,30 @@ impl RenderStore for FileRenderStore {
         let framed = encode_frame(&fence, now_ms, 0, &bytes);
         let final_path = self.path_for_name(&name);
         let temp_path = self.temp_path_for(&name, fence.token);
-        write_frame_atomically(temp_path, final_path, framed)
-            .await
-            .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        match write_frame_atomically(temp_path, final_path, framed).await {
+            Ok(Published::Durable) => {}
+            Ok(Published::RenamedWithoutDirectorySync(sync_error)) => {
+                // The rename already landed: the frame is live and correct
+                // on disk, so the publication succeeded. Only the
+                // directory entry's own durability is in question, which
+                // is a warning, not a failure - propagating an error here
+                // instead of falling through to the tally update below
+                // would leave the disk and the tally disagreeing about a
+                // key that is genuinely present, exactly the divergence
+                // `evict` and `get` were fixed to avoid on the race side.
+                tracing::warn!(
+                    target: "suprnova::render_cache",
+                    error = %sync_error,
+                    "render cache L1 directory sync failed after a successful rename; \
+                     the entry is live but its directory entry may not survive a crash",
+                );
+            }
+            Err(_) => {
+                return Err(RenderCacheError::new(
+                    RenderCacheErrorKind::ProviderUnavailable,
+                ));
+            }
+        }
         state.total_bytes = state.total_bytes - existing_len + payload_len;
         state.entries.insert(
             name,
@@ -461,6 +485,21 @@ fn decode_frame(bytes: &Bytes) -> Result<DecodedFrame, RenderCacheError> {
     })
 }
 
+/// Whether a call to [`write_frame_atomically`] left the frame durably
+/// synced, or merely renamed into place.
+enum Published {
+    /// The frame is live at the target path, and its directory entry is
+    /// itself synced: durable across a crash or power loss, not only a
+    /// plain process kill.
+    Durable,
+    /// The frame is live and correct at the target path - the rename
+    /// already succeeded - but the directory entry could not also be
+    /// synced. This is a durability warning, not a failed publication: the
+    /// entry may not survive a crash or power loss, but everything a
+    /// reader observes right now is exactly as if the sync had succeeded.
+    RenamedWithoutDirectorySync(std::io::Error),
+}
+
 /// Writes `framed` to `temp_path`, `fsync`s it, renames it over
 /// `final_path`, then `fsync`s the parent directory. Runs on a blocking
 /// thread: `File::create`, `write_all`, `sync_all`, `rename`, and opening
@@ -474,25 +513,42 @@ fn decode_frame(bytes: &Bytes) -> Result<DecodedFrame, RenderCacheError> {
 /// `crates/suprnova-live/benches/upload_framework_budget.rs`, which opens
 /// the parent directory and calls `sync_all` immediately after its own
 /// rename for the same reason.
+///
+/// A failure is returned only when nothing durable has landed yet - the
+/// temporary file's creation, its write, its own `fsync`, or the rename
+/// itself. Once the rename succeeds, the frame is live and correct, so a
+/// directory-open or directory-`fsync` failure after that point is
+/// reported as [`Published::RenamedWithoutDirectorySync`] rather than an
+/// error: the caller must update its bookkeeping either way, since the
+/// disk already has the new content.
 async fn write_frame_atomically(
     temp_path: PathBuf,
     final_path: PathBuf,
     framed: Vec<u8>,
-) -> std::io::Result<()> {
-    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let result = (|| {
+) -> std::io::Result<Published> {
+    match tokio::task::spawn_blocking(move || -> std::io::Result<Published> {
+        let result = (|| -> std::io::Result<Published> {
             let mut file = std::fs::File::create(&temp_path)?;
             file.write_all(&framed)?;
             file.sync_all()?;
             drop(file);
             std::fs::rename(&temp_path, &final_path)?;
-            let parent = final_path.parent().ok_or_else(|| {
-                std::io::Error::other("render cache entry path has no parent directory")
-            })?;
-            std::fs::OpenOptions::new()
-                .read(true)
-                .open(parent)?
-                .sync_all()
+            // The rename has landed: everything from here on is a
+            // durability question about the directory entry, not about
+            // whether the publication itself succeeded.
+            let synced_directory: std::io::Result<()> = (|| {
+                let parent = final_path.parent().ok_or_else(|| {
+                    std::io::Error::other("render cache entry path has no parent directory")
+                })?;
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .open(parent)?
+                    .sync_all()
+            })();
+            Ok(match synced_directory {
+                Ok(()) => Published::Durable,
+                Err(sync_error) => Published::RenamedWithoutDirectorySync(sync_error),
+            })
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);

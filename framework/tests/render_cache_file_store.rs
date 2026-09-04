@@ -350,47 +350,60 @@ async fn an_equal_fence_is_refused_and_leaves_the_entry_unchanged() {
 }
 
 #[tokio::test]
-async fn growing_the_same_key_never_evicts_a_different_entry_that_still_fits() {
+async fn growing_the_same_key_past_the_bound_evicts_others_but_never_itself() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileRenderStore::open(dir.path(), 100).expect("open");
     let a = key("/a");
     let b = key("/b");
+    let c = key("/c");
     store
-        .publish(&a, Bytes::from(vec![1_u8; 60]), fence(1), 1)
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
         .await
         .expect("publish a");
     store
-        .publish(&b, Bytes::from(vec![2_u8; 30]), fence(1), 2)
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
         .await
         .expect("publish b");
+    store
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .await
+        .expect("publish c");
 
-    // Growing "/a" to 50 bytes still fits once its own old 60 bytes are
-    // freed (100 - 60 + 50 + 30 = 80 <= 100 available): "/b" must survive,
-    // and "/a" must not be evicted to make room for itself.
+    // Growing "/a" from 40 to 70 bytes genuinely breaches the bound
+    // (80 - 40 + 70 = 110 > 100), so the eviction candidate loop must
+    // actually run, not just be entered and immediately satisfied. "/b" is
+    // the oldest other entry and must be evicted to make room; "/c" still
+    // fits once "/b" is gone (110 - 20 = 90 <= 100) and must be left
+    // alone; "/a" itself must never be picked as its own eviction victim,
+    // even though its own old published_at_ms is older than both.
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![3_u8; 50]), fence(2), 3)
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
             .await
             .expect("publish a again"),
         PublishOutcome::Published
     );
 
-    let hit_b = store
-        .get(&b)
+    assert!(
+        store.get(&b).await.expect("get b").is_none(),
+        "the oldest unrelated entry is evicted to make genuine room"
+    );
+    let hit_c = store
+        .get(&c)
         .await
-        .expect("get b")
-        .expect("b must still be present");
-    assert_eq!(hit_b.bytes.len(), 30);
+        .expect("get c")
+        .expect("c still fits once b is gone and must be left alone");
+    assert_eq!(hit_c.bytes.len(), 20);
     let hit_a = store
         .get(&a)
         .await
         .expect("get a")
-        .expect("a must be present");
-    assert_eq!(hit_a.bytes.len(), 50);
+        .expect("a must be present with its new, grown bytes");
+    assert_eq!(hit_a.bytes.len(), 70);
 
     let inspection = store.inspect().await.expect("inspect");
-    assert_eq!(inspection.entries, 2);
-    assert_eq!(inspection.bytes, 80);
+    assert_eq!(inspection.entries, 2, "a and c; b was evicted");
+    assert_eq!(inspection.bytes, 90);
 }
 
 #[tokio::test]
@@ -581,4 +594,71 @@ async fn a_get_cleanup_racing_a_publish_never_destroys_the_republished_entry() {
         assert_eq!(inspection.entries, 1);
         assert_eq!(inspection.bytes, republished.len());
     }
+}
+
+/// A directory-sync failure right after a successful rename must not leave
+/// the disk and the tally disagreeing: the rename already landed, so the
+/// publication succeeded, and the tally must say so.
+///
+/// Forces the failure with real permissions rather than a fault-injection
+/// hook: a directory chmoded to write and execute only (no read) still
+/// allows creating a file in it and renaming within it, but not opening the
+/// directory itself to `fsync` it - exactly the step this test targets.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_sync_failure_after_a_successful_rename_still_updates_the_tally() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300))
+        .expect("restrict the directory to write and execute only");
+    if std::fs::OpenOptions::new()
+        .read(true)
+        .open(dir.path())
+        .is_ok()
+    {
+        // A process that ignores directory modes (running as root, or an
+        // exotic filesystem) cannot express this precondition at all.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore permissions");
+        eprintln!(
+            "skipping: this process can open a directory it has no read permission on, \
+             so a directory-sync failure cannot be simulated"
+        );
+        return;
+    }
+
+    let outcome = store
+        .publish(
+            &a,
+            Bytes::from_static(b"live-despite-a-sync-failure"),
+            fence(1),
+            1,
+        )
+        .await
+        .expect("a directory sync failure is a durability warning, not a publish failure");
+    assert_eq!(
+        outcome,
+        PublishOutcome::Published,
+        "once the rename lands, the publication succeeded"
+    );
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("restore permissions so the assertions below can read the directory");
+
+    let hit = store
+        .get(&a)
+        .await
+        .expect("get")
+        .expect("the frame is live on disk regardless of the sync failure");
+    assert_eq!(hit.bytes.as_ref(), b"live-despite-a-sync-failure");
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        inspection.entries, 1,
+        "the tally must agree with the disk even when the directory sync failed"
+    );
+    assert_eq!(inspection.bytes, "live-despite-a-sync-failure".len());
 }
