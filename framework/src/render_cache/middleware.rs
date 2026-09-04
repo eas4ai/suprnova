@@ -1917,11 +1917,38 @@ pub fn key_input_for_test(
 pub mod race_points {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A one-shot, boxed async closure a test arms and this module
     /// consumes exactly once, the next time its race point fires.
     pub type Hook = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+    /// One race point: an `armed` flag plus the hook itself behind a
+    /// `Mutex`.
+    ///
+    /// `testing` is a default-on feature (see `Cargo.toml`'s `default`
+    /// list), so [`fire`] runs on every GET/HEAD to a policy-covered route
+    /// in an ordinary build, hits included - `EPOCH_CAPTURED` sits before
+    /// the L0 lookup. Fix round 1, F6: `armed` is the fast path that keeps
+    /// an unarmed race point to one relaxed load, rather than a mutex lock
+    /// on every such request. Fix round 1, F8: `Mutex::new` has been
+    /// `const` since Rust 1.63, so a race point needs no `OnceLock` layer
+    /// to lazily initialize the way the previous version did.
+    pub struct RacePoint {
+        armed: AtomicBool,
+        hook: Mutex<Option<Hook>>,
+    }
+
+    impl RacePoint {
+        /// A disarmed race point, usable directly as a `static` initializer.
+        const fn new() -> Self {
+            Self {
+                armed: AtomicBool::new(false),
+                hook: Mutex::new(None),
+            }
+        }
+    }
 
     /// Fires from [`super::fresh_reread_is_coherent`], immediately after it
     /// finds the render still coherent and before its caller acts on that
@@ -1929,35 +1956,45 @@ pub mod race_points {
     /// reread" and "before publication": late enough that it cannot itself
     /// be caught by this same reread, early enough that the entry this
     /// request publishes still carries the observations from before it.
-    pub static AFTER_REREAD: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub static AFTER_REREAD: RacePoint = RacePoint::new();
 
     /// Fires from [`super::RenderCacheMiddleware::serve`], immediately
     /// after the epoch a new [`super::RenderJob`] will carry is read, and
     /// before the render that job describes begins - the exact window an
     /// epoch advance must land in to be baked into the job as stale by the
-    /// time that render's own fresh reread checks it.
-    pub static EPOCH_CAPTURED: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
-
-    /// The lazily-initialized, re-armable slot behind a race point: a
-    /// `Mutex` inside the `OnceLock` (rather than the hook itself in the
-    /// `OnceLock` directly) so the same static can be armed again by a
-    /// later test in the same process, not only set once for the life of
-    /// the binary.
-    fn slot(point: &'static OnceLock<Mutex<Option<Hook>>>) -> &'static Mutex<Option<Hook>> {
-        point.get_or_init(|| Mutex::new(None))
-    }
+    /// time that render's own fresh reread checks it. Fires on whichever
+    /// *request* reaches that point next, not necessarily the next
+    /// *render*: `serve` reads the epoch before it knows whether the
+    /// request will be a hit, a stale serve, or a render (fix round 1, F7).
+    pub static EPOCH_CAPTURED: RacePoint = RacePoint::new();
 
     /// Arms `point` to run `hook` exactly once, the next time it fires.
     /// Replaces any hook already armed there.
-    pub fn arm(point: &'static OnceLock<Mutex<Option<Hook>>>, hook: Hook) {
-        *slot(point).lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    pub fn arm(point: &'static RacePoint, hook: Hook) {
+        *point.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+        point.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Clears any hook armed at `point` without firing it, and lowers the
+    /// flag [`fire`] checks. Fix round 1, F4: `AFTER_REREAD` only fires on
+    /// a coherent reread, and `lead_render` has several decline paths that
+    /// return before reaching it, so an arm a test made but that path never
+    /// consumed would otherwise leak into whichever test runs next in the
+    /// same process. Test-only cleanup; production code never calls this.
+    pub fn disarm(point: &'static RacePoint) {
+        point.armed.store(false, Ordering::Relaxed);
+        *point.hook.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Fires `point` if a hook is armed there, consuming the arm; a no-op
-    /// otherwise, so an ordinary request that never armed anything pays
-    /// only a lock check.
-    pub(crate) async fn fire(point: &'static OnceLock<Mutex<Option<Hook>>>) {
-        let hook = slot(point).lock().unwrap_or_else(|e| e.into_inner()).take();
+    /// otherwise. The relaxed load of `armed` is the only cost an ordinary,
+    /// unarmed request pays - it never reaches the mutex.
+    pub(crate) async fn fire(point: &'static RacePoint) {
+        if !point.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let hook = point.hook.lock().unwrap_or_else(|e| e.into_inner()).take();
+        point.armed.store(false, Ordering::Relaxed);
         if let Some(hook) = hook {
             hook().await;
         }

@@ -38,15 +38,23 @@ use render_cache_middleware_support::{
 /// still carries the render's now-stale observations into the store. The
 /// *next* lookup, not this one, is where it is caught: `coherence` reads
 /// the ledger fresh again and finds the stored entry's observations behind
-/// it, so the entry is a miss rather than served as current. Disabling the
-/// coherence check this depends on (temporarily changing
-/// `fresh_reread_is_coherent`'s `Coherent` arm to skip the race hook, or
-/// equivalently never firing `AFTER_REREAD`) makes this test still pass
-/// with `renders() == 1` after the second dispatch, since nothing then
-/// distinguishes the published entry's observations from the ledger's
-/// current state - proving the test does depend on the race actually
-/// landing, not merely on request ordering. See the task report for that
-/// manual check; the hook stays wired in the version below.
+/// it, so the entry is a miss rather than served as current.
+///
+/// Fix round 1, R98/F1: this is the production mechanism the test targets,
+/// and the two ways to disable it fail differently. With `AFTER_REREAD`
+/// never fired (the *test's own* write injection removed, e.g. by making
+/// `race::write_posts_after_reread` arm nothing), the extra write never
+/// lands at all, so the second dispatch below is a hit and `renders()`
+/// stays `1` where the assertion requires `2` - fails at that assertion.
+/// With the *production* lookup-time coherence check short-circuited to
+/// always report coherent (`authority_coherence` returning `Coherent`
+/// unconditionally, which is the mechanism `coherence()` calls on every
+/// hit), the stale entry is served as fresh regardless of what the write
+/// did, and `renders()` stays `1` at the same assertion for a different
+/// reason. Both were run against the production sabotage and both fail
+/// there; see the task report's R74 table for the exact lines and the
+/// masking checks (`no_publish`, `bypass`) that also correctly fail this
+/// test rather than passing vacuously.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_write_between_the_fresh_reread_and_publication_is_caught_at_the_next_lookup() {
@@ -109,6 +117,20 @@ async fn an_epoch_advance_during_a_render_discards_the_candidate() {
         2,
         "the epoch hook was one-shot; this second render sees no further race and publishes"
     );
+
+    // Fix round 1, R98/F2: a positive control. Without it, this test is
+    // satisfied by any run that never publishes anything at all (a broken
+    // `store_entry`, or the middleware removed from the request path
+    // entirely both leave the `inspect` above `None` and `renders()` at 1
+    // for reasons that have nothing to do with the epoch race). Requiring a
+    // *hit* here means the un-raced render really did publish, so a build
+    // that cannot publish turns this red instead of green.
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "control: the second render did publish, so this dispatch is a hit"
+    );
 }
 
 /// A background rebuild of a stale-servable entry actually refreshes the
@@ -128,6 +150,17 @@ async fn a_background_rebuild_publishes_fresh_output_and_a_write_during_it_disca
 
     dispatch_get(&harness, "/stale/1", &[]).await;
     assert_eq!(counting_route::renders(), 1);
+    // Fix round 1, R98/F5: a precondition, not a race hook, but load-bearing
+    // for failure mode: without it, a build that cannot publish at all
+    // turns the *next* dispatch below into a foreground miss instead of a
+    // stale hit, which would then render synchronously inside the armed
+    // hold with nothing else left to call `release_render` - a hang, not a
+    // red test. Asserting here instead makes that failure mode a clean,
+    // immediate red.
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "precondition: the first render published"
+    );
     clock(&harness).advance_ms(70_000);
 
     // A clean background rebuild: no race, just proof that it refreshes.
@@ -137,6 +170,11 @@ async fn a_background_rebuild_publishes_fresh_output_and_a_write_during_it_disca
         stale.header("warning").is_some(),
         "the client-visible dispatch is served from the entry the rebuild is about to replace"
     );
+    // `wait_until_rendering_count` counts renders started; `wait_until_background_finished`
+    // counts leases released. They agree at `2` here only because every
+    // render in this test is a lead's own render (no plain hit or `Wait`
+    // dispatch is mixed in) - see fix round 1, R98/F9. Don't assume they
+    // stay in lockstep if this test grows one.
     counting_route::wait_until_rendering_count(&harness, 2).await;
     counting_route::release_render(&harness);
     race::wait_until_background_finished(&harness, 2).await;
@@ -160,11 +198,24 @@ async fn a_background_rebuild_publishes_fresh_output_and_a_write_during_it_disca
     clock(&harness).advance_ms(70_000);
     counting_route::hold_next_render(&harness);
     dispatch_get(&harness, "/stale/1", &[]).await;
+    // See the `2`/`2` pairing above (R98/F9): same coincidence, same
+    // caveat, now at `3`.
     counting_route::wait_until_rendering_count(&harness, 3).await;
     counting_route::write_during_next_render(&harness);
     counting_route::release_render(&harness);
     race::wait_until_background_finished(&harness, 3).await;
 
+    // `published_at_ms` unchanged, not a header, is the proof here: a
+    // dispatch after a raced-and-discarded background rebuild is a *stale
+    // hit* on the entry the first rebuild published (the moved coherence
+    // check floors the effective age at `fresh_ms`, and `/stale/{id}`'s
+    // policy still has this age within its stale-servable window), not a
+    // foreground render - so it carries `Age`/`Warning` like any other
+    // stale hit and neither header distinguishes "discarded" from "never
+    // raced". `published_at_ms` does, and only because the clock advanced
+    // 70_000ms between the two rebuilds: a publish would have written a
+    // different value, which is exactly what the sabotage build below (see
+    // the task report's R74 table) produces when the discard is disabled.
     let after_race = RenderCache::inspect(&key)
         .await
         .expect("inspect")
@@ -202,4 +253,19 @@ async fn two_keys_rebuild_independently_while_one_leader_is_held() {
     counting_route::release_render(&harness);
     held.await.expect("held");
     assert_eq!(counting_route::renders(), 2);
+
+    // Fix round 1, R98/F3: a positive control. Without it, this test is
+    // satisfied even with the cache removed from the request path
+    // entirely - two independent renders that never touch the coordinator
+    // also produce two 200s and `renders() == 2`. Requiring both keys to
+    // actually be published ties the test to the cache genuinely being
+    // involved, not merely to two ordinary handlers not blocking each
+    // other.
+    for id in ["1", "2"] {
+        let key = RenderCache::key_for_route_for_test("/cached/{id}", &[("id", id)], None);
+        assert!(
+            RenderCache::inspect(&key).await.expect("inspect").is_some(),
+            "control: /cached/{id} really went through the cache and published"
+        );
+    }
 }
