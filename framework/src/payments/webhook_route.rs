@@ -60,25 +60,68 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
 }
 
 /// Advance the render-cache table generation for `E` after a raw
-/// `ActiveModel` write against one of the mirror entities below.
+/// `ActiveModel` write against one of the mirror entities below, issued
+/// against the bare `db: &DatabaseConnection` outside any transaction -
+/// today, only the audit-row bookkeeping in `handle_webhook_inner`
+/// (the receipt insert, the retry `process_error` clear) and `mark_failed`.
 ///
-/// Every write in this file goes through `db: &C` (a generic
-/// `ConnectionTrait`, threaded explicitly - the hydration transaction
-/// `try_hydrate` opens via `db.begin()`, not Suprnova's own
-/// `DB::transaction`/`ExecutorChoice`), so there is no ambient `CURRENT_TX`
-/// this call could join, the same shape `EntityExtMut` and the raw-SeaORM
-/// `Persistable` blanket impl are already in. This advances the table
-/// identity only (no per-row record - these entities are reached by raw
-/// `ActiveModel`, not a `Model`-trait instance with a `primary_key_value_json`
-/// to build one from), through its own transaction when nothing ambient is
-/// active. A page rendered from a payments entity already records that
-/// table as a dependency via the read collector (these are
-/// `#[suprnova::model]` entities), so leaving this uninstrumented meant a
-/// write here never invalidated a page that had already observed it.
+/// This is safe to call immediately, unlike the writes inside
+/// `try_hydrate`'s transaction (see [`advance_touched_mirror_tables`] for
+/// why those are collected and advanced separately, after commit): there is
+/// no ambient `CURRENT_TX` to join, but there is also no OTHER transaction
+/// open on this connection for a dedicated fallback transaction to contend
+/// with, so `after_table_write`'s "open one when nothing is ambient" branch
+/// runs uncontended. Advances the table identity only (no per-row record -
+/// these entities are reached by raw `ActiveModel`, not a `Model`-trait
+/// instance with a `primary_key_value_json` to build one from). A page
+/// rendered from a payments entity already records that table as a
+/// dependency via the read collector (these are `#[suprnova::model]`
+/// entities), so leaving this uninstrumented meant a write here never
+/// invalidated a page that had already observed it.
 async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentError> {
     crate::render_cache::orm::after_table_write(crate::database::model::entity_table_name::<E>())
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))
+}
+
+/// Advance every payments mirror table that `try_hydrate`'s transaction
+/// touched, once, strictly after that transaction has committed.
+///
+/// Round 3 called [`advance_mirror_table`] from inside each mirror write,
+/// while the transaction `try_hydrate` opens via `db.begin()` (a raw SeaORM
+/// transaction, not `DB::transaction`) was still open. `in_transaction()`
+/// cannot see that transaction, so every one of those calls took
+/// `after_table_write`'s no-ambient-transaction branch and opened a SECOND
+/// transaction against a database that already held one open - a deadlock
+/// under SQLite (confirmed empirically against both the default
+/// single-connection pool and an eight-connection shared-cache pool, which
+/// rules out pool exhaustion as the sole explanation: SQLite serializes
+/// writers at the database level regardless of how many connections are
+/// available - see `try_hydrate`'s own comment on `lock_exclusive` being a
+/// no-op there for the same reason) and a connection-starvation risk on any
+/// backend with a small enough pool, resolving only by timing out into a
+/// 503. This is the same root shape ruling R47 fixed for `Builder::with_tx`:
+/// a transaction the ambient check cannot see.
+///
+/// Collecting the touched tables instead and advancing once here, after
+/// `commit()` returns `Ok`, fixes the deadlock and removes an imprecision
+/// round 3 accepted rather than avoided: because this only runs on the
+/// success path, a hydration that rolls back no longer advances anything for
+/// a change that never landed.
+///
+/// Table-only, same as `advance_mirror_table` - callers push
+/// `entity_table_name::<E>()` for each entity type they wrote, not a
+/// row-level identity.
+async fn advance_touched_mirror_tables(touched: &[&'static str]) -> Result<(), PaymentError> {
+    let mut unique: Vec<&'static str> = touched.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    for table in unique {
+        crate::render_cache::orm::after_table_write(table)
+            .await
+            .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    }
+    Ok(())
 }
 
 fn validate_provider_event_id(event: &WebhookEvent) -> Result<(), PaymentError> {
@@ -364,13 +407,28 @@ async fn try_hydrate(
         return Ok(HydrationOutcome::AlreadyProcessed);
     }
 
-    match process_webhook(&txn, provider, event, subscription_snapshot.as_ref()).await {
-        Ok(()) => match mark_processed(&txn, event).await {
-            Ok(()) => txn
-                .commit()
-                .await
-                .map(|()| HydrationOutcome::Processed)
-                .map_err(|e| PaymentError::Internal(format!("commit: {e}"))),
+    // Mirror tables this transaction's writes touch, collected rather than
+    // advanced immediately - see `advance_touched_mirror_tables` for why
+    // advancing from inside this transaction deadlocks.
+    let mut touched: Vec<&'static str> = Vec::new();
+
+    match process_webhook(
+        &txn,
+        provider,
+        event,
+        subscription_snapshot.as_ref(),
+        &mut touched,
+    )
+    .await
+    {
+        Ok(()) => match mark_processed(&txn, event, &mut touched).await {
+            Ok(()) => match txn.commit().await {
+                Ok(()) => {
+                    advance_touched_mirror_tables(&touched).await?;
+                    Ok(HydrationOutcome::Processed)
+                }
+                Err(e) => Err(PaymentError::Internal(format!("commit: {e}"))),
+            },
             Err(e) => {
                 let _ = txn.rollback().await;
                 Err(e)
@@ -395,11 +453,15 @@ async fn try_hydrate(
 /// `subscription_snapshot` is the pre-fetched [`SubscriptionResult`] from
 /// `prefetch_provider_state`; the subscription branch consumes it directly
 /// rather than re-issuing the network call from inside the transaction.
+///
+/// `touched` collects the mirror tables written along the way rather than
+/// advancing them immediately - see `advance_touched_mirror_tables`.
 async fn process_webhook<C>(
     db: &C,
     provider: &dyn PaymentProvider,
     event: &WebhookEvent,
     subscription_snapshot: Option<&SubscriptionResult>,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -427,8 +489,8 @@ where
                         .into(),
                 )
             })?;
-            upsert_subscription(db, &event.provider, result, neutral).await?;
-            sync_subscription_items(db, &event.provider, sub_id, result).await?;
+            upsert_subscription(db, &event.provider, result, neutral, touched).await?;
+            sync_subscription_items(db, &event.provider, sub_id, result, touched).await?;
         }
         NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated => {
             let cust_id = ids.customer_id.as_deref().ok_or_else(|| {
@@ -438,7 +500,8 @@ where
                 ))
             })?;
             let snapshot = provider.extract_customer_snapshot(event);
-            update_customer_mirror(db, &event.provider, cust_id, snapshot.as_ref()).await?;
+            update_customer_mirror(db, &event.provider, cust_id, snapshot.as_ref(), touched)
+                .await?;
         }
         NeutralEventKind::PaymentSucceeded
         | NeutralEventKind::PaymentFailed
@@ -463,8 +526,14 @@ where
                     } else {
                         "disputed"
                     };
-                    update_existing_transaction_status(db, &event.provider, transaction_id, status)
-                        .await?;
+                    update_existing_transaction_status(
+                        db,
+                        &event.provider,
+                        transaction_id,
+                        status,
+                        touched,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 // Providers may intentionally omit snapshots for events that
@@ -486,6 +555,7 @@ where
                 &event.provider,
                 &snapshot,
                 preserve_missing_subscription,
+                touched,
             )
             .await?;
         }
@@ -509,6 +579,7 @@ async fn upsert_subscription<C>(
     provider: &str,
     result: &SubscriptionResult,
     neutral: NeutralEventKind,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -543,7 +614,9 @@ where
             am.update(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-            advance_mirror_table::<subscription::Entity>().await?;
+            touched.push(crate::database::model::entity_table_name::<
+                subscription::Entity,
+            >());
         }
         None => {
             let canceled_at = if mark_canceled {
@@ -568,7 +641,9 @@ where
             am.insert(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-            advance_mirror_table::<subscription::Entity>().await?;
+            touched.push(crate::database::model::entity_table_name::<
+                subscription::Entity,
+            >());
         }
     }
     Ok(())
@@ -579,6 +654,7 @@ async fn sync_subscription_items<C>(
     provider: &str,
     provider_subscription_id: &str,
     result: &SubscriptionResult,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -634,7 +710,9 @@ where
                 am.update(db)
                     .await
                     .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-                advance_mirror_table::<subscription_item::Entity>().await?;
+                touched.push(crate::database::model::entity_table_name::<
+                    subscription_item::Entity,
+                >());
             }
             None => {
                 let am = subscription_item::ActiveModel {
@@ -652,7 +730,9 @@ where
                 am.insert(db)
                     .await
                     .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-                advance_mirror_table::<subscription_item::Entity>().await?;
+                touched.push(crate::database::model::entity_table_name::<
+                    subscription_item::Entity,
+                >());
             }
         }
     }
@@ -668,7 +748,9 @@ where
         am.delete(db)
             .await
             .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-        advance_mirror_table::<subscription_item::Entity>().await?;
+        touched.push(crate::database::model::entity_table_name::<
+            subscription_item::Entity,
+        >());
     }
 
     Ok(())
@@ -679,6 +761,7 @@ async fn upsert_transaction<C>(
     provider: &str,
     snapshot: &PaymentSnapshot,
     preserve_missing_subscription: bool,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -713,7 +796,9 @@ where
             am.update(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-            advance_mirror_table::<transaction::Entity>().await?;
+            touched.push(crate::database::model::entity_table_name::<
+                transaction::Entity,
+            >());
         }
         None => {
             let am = transaction::ActiveModel {
@@ -734,7 +819,9 @@ where
             am.insert(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-            advance_mirror_table::<transaction::Entity>().await?;
+            touched.push(crate::database::model::entity_table_name::<
+                transaction::Entity,
+            >());
         }
     }
     Ok(())
@@ -747,6 +834,7 @@ async fn update_existing_transaction_status<C>(
     provider: &str,
     provider_transaction_id: &str,
     status: &str,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -769,7 +857,9 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    advance_mirror_table::<transaction::Entity>().await?;
+    touched.push(crate::database::model::entity_table_name::<
+        transaction::Entity,
+    >());
     Ok(())
 }
 
@@ -786,6 +876,7 @@ async fn update_customer_mirror<C>(
     provider: &str,
     provider_customer_id: &str,
     snapshot: Option<&CustomerSnapshot>,
+    touched: &mut Vec<&'static str>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -817,11 +908,15 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    advance_mirror_table::<customer::Entity>().await?;
+    touched.push(crate::database::model::entity_table_name::<customer::Entity>());
     Ok(())
 }
 
-async fn mark_processed<C>(db: &C, event: &WebhookEvent) -> Result<(), PaymentError>
+async fn mark_processed<C>(
+    db: &C,
+    event: &WebhookEvent,
+    touched: &mut Vec<&'static str>,
+) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
 {
@@ -838,7 +933,9 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    advance_mirror_table::<webhook_event::Entity>().await?;
+    touched.push(crate::database::model::entity_table_name::<
+        webhook_event::Entity,
+    >());
     Ok(())
 }
 

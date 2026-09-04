@@ -23,7 +23,8 @@ use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::attrs;
 use suprnova::eloquent::{MassPrunable, prune_one};
 use suprnova::payments::{
-    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, webhook_routes,
+    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
+    webhook_routes,
 };
 use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::ledger::SqlGenerationLedger;
@@ -1499,4 +1500,126 @@ async fn payments_webhook_insert_and_update_advance_the_table_generation() {
         "the audit-row insert (site 1) and mark_failed's update (site 13) must each advance \
          the payments_webhook_events table generation - one request, two writes, two advances"
     );
+}
+
+// ---- fix5 item 3: assert a mirror-table site now that the deadlock is fixed
+//
+// Round 4 could only test the audit-row bookkeeping sites (1 and 13) - the
+// actual mirror-table upserts (sites 3-12) deadlocked under SQLite when
+// exercised through the real webhook route, because `advance_mirror_table`
+// ran from inside `try_hydrate`'s own open transaction. Round 5 hoists that
+// advance to run once, after the transaction commits, which removes the
+// deadlock; this test is the proof - the same insert/update scenario round 4
+// could not safely drive.
+//
+// Shared by the unconditional SQLite test below and the two `#[ignore]`d
+// live-Postgres/live-MySQL tests further down, so the same scenario proves
+// the fix on all three backends rather than three independently-written
+// (and independently-driftable) copies.
+async fn payments_webhook_mirror_scenario(
+    conn: Arc<sea_orm::DatabaseConnection>,
+    provider_name: &'static str,
+) {
+    let mock = Arc::new(MockPaymentProvider::new());
+    let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(provider_name, as_trait);
+
+    // Seed a subscription in the mock provider so the webhook has a known
+    // sub_id/cust_id `Subscription::get` can resolve - same setup
+    // `payments_webhook_hydration.rs` uses.
+    let sub = mock
+        .subscribe(SubscribeRequest {
+            customer_ref: "cus_render_cache_mirror".into(),
+            price_refs: vec!["price_a".into()],
+            trial_days: None,
+            idempotency_key: None,
+            metadata: None,
+        })
+        .await
+        .expect("mock subscribe");
+    let sub_id = sub.provider_subscription_id.clone();
+    let cust_id = sub.provider_customer_id.clone();
+
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_payments_server(router, 2).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let ledger = SqlGenerationLedger::new();
+    let table = DependencyIdentity::table("payments_subscriptions");
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+
+    // Insert path: subscription.created has no existing mirror row, so
+    // `upsert_subscription`'s `None` branch runs `am.insert(db)` inside
+    // `try_hydrate`'s transaction - the site that deadlocked before the
+    // hoist.
+    let insert_body = Bytes::from(
+        serde_json::json!({
+            "id": "evt_render_cache_mirror_created",
+            "type": "subscription.created",
+            "data": { "object": { "id": sub_id, "customer": cust_id } }
+        })
+        .to_string(),
+    );
+    let (status, resp) = send_payments_webhook(addr, &path, insert_body).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "insert webhook failed: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let after_insert = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after_insert,
+        Some(before.unwrap_or(0) + 1),
+        "a subscription.created webhook insert must advance the payments_subscriptions table \
+         generation, once, after the hydration transaction commits"
+    );
+
+    // Update path: subscription.updated finds the mirror row just inserted,
+    // so `upsert_subscription`'s `Some` branch runs `am.update(db)`, again
+    // inside the transaction.
+    let update_body = Bytes::from(
+        serde_json::json!({
+            "id": "evt_render_cache_mirror_updated",
+            "type": "subscription.updated",
+            "data": { "object": { "id": sub_id, "customer": cust_id } }
+        })
+        .to_string(),
+    );
+    let (status, resp) = send_payments_webhook(addr, &path, update_body).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "update webhook failed: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let after_update = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after_update,
+        Some(after_insert.unwrap_or(0) + 1),
+        "a subscription.updated webhook update must advance the payments_subscriptions table \
+         generation again"
+    );
+}
+
+#[tokio::test]
+async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_table() {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+    payments_webhook_mirror_scenario(conn, "render-cache-payments-mirror-probe").await;
 }
