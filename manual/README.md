@@ -12,7 +12,7 @@ those, you'll feel at home.
 ## Languages
 
 The manual ships in six languages besides English, each a complete
-translation of all 106 chapters plus the table of contents and the
+translation of all 107 chapters plus the table of contents and the
 changelog. English is canonical - structure, code, identifiers and
 commands are byte-identical across languages; only the prose differs.
 
@@ -47,6 +47,7 @@ glossaries. Corrections are welcome in either repo.
 | **Deploy to production** | [Deployment](deployment.md) |
 | **Use named HTTPS dev URLs (passkeys, secure cookies)** | [HTTPS Dev URLs](dev-tls.md) |
 | **Add social login or Sign in with Apple** | [OAuth & Passwordless Login](oauth.md) |
+| **Cache a route's response automatically** | [RenderCache](render-cache.md) |
 
 ## Two reading paths
 
