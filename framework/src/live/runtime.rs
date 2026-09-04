@@ -1608,6 +1608,13 @@ fn topic_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// Every `LiveRuntime`'s public-seed promotion lifetime, in milliseconds:
+/// how long a published public seed stays promotable after it is mounted.
+/// `pub(crate)` so the framework's own test-support surface
+/// (`live::testing::PUBLIC_SEED_MAX_AGE_MS`) can refer to this one value
+/// instead of a second, hand-copied literal.
+pub(crate) const PUBLIC_SEED_MAX_AGE_MS: u64 = 86_400_000;
+
 fn assemble_runtime(
     config: LiveConfig,
     registry: LiveRegistry,
@@ -1627,8 +1634,15 @@ fn assemble_runtime(
         config.max_request_bytes().min(1024 * 1024),
     )
     .map_err(|_| live_boot_error())?;
-    let snapshot_limits = SnapshotLimits::new(input, 5_000, 86_400_000, 604_800_000, 1_024, 1_024)
-        .map_err(|_| live_boot_error())?;
+    let snapshot_limits = SnapshotLimits::new(
+        input,
+        5_000,
+        PUBLIC_SEED_MAX_AGE_MS,
+        604_800_000,
+        1_024,
+        1_024,
+    )
+    .map_err(|_| live_boot_error())?;
     let protocol_limits = ProtocolLimits::new(ProtocolLimitConfig {
         input,
         max_snapshot_bytes: config.max_request_bytes(),

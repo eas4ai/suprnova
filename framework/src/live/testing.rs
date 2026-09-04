@@ -666,6 +666,14 @@ pub fn register_live_mount_for_test<C: super::ComponentContract>(
     ))
 }
 
+/// The Live runtime's fixed public-seed promotion lifetime in
+/// milliseconds: the one value `assemble_runtime` uses for every
+/// `LiveRuntime`, including every runtime this module's own harness
+/// functions assemble. Exposed here, rather than left private, so a test
+/// harness that needs to compute a mounted seed's expected deadline refers
+/// to this constant instead of copying the literal.
+pub const PUBLIC_SEED_MAX_AGE_MS: u64 = super::runtime::PUBLIC_SEED_MAX_AGE_MS;
+
 /// Consumes test router mount declarations into the same immutable runtime path
 /// used by server preparation, without binding a listener.
 pub fn prepare_live_router_for_test(

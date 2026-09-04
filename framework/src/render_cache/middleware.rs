@@ -1190,17 +1190,29 @@ async fn lead_render(
         undeclared_reads: report.undeclared.clone(),
     };
     let classification = classify(policy.class(), &observed_context);
-    // Narrows `classify`'s own class with what the rendered Live document
-    // (if any) reported: an identity-bound island or a no-store document
-    // intent declines regardless of what `classify` decided, and a
-    // public-seed island without a resolvable deadline declines too. A
-    // route with no Live document keeps `classify`'s class unchanged. This
-    // must run before `key_used_different_values_than_the_render_saw`
-    // below: that guard's debug assertion expects every `Uncacheable`
-    // decline to have already happened, so narrowing after it would open a
-    // second, unaccounted-for decline path.
-    let class = live::document_class(report.live_document.as_ref(), classification.class);
-    if class == RepresentationClass::Uncacheable {
+    if classification.class == RepresentationClass::Uncacheable {
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
+    // The rendered Live document's own facts (if any) decline independently
+    // of `classify`: an identity-bound island, a `NoStore` document intent,
+    // or a public-seed island without a resolvable deadline. This can only
+    // decline, never narrow or widen `classification.class` (see
+    // `document_declines`'s own doc for why the document's cache intent
+    // does not feed classification at all).
+    if live::document_declines(report.live_document.as_ref()) {
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
+    // The invariant `key_used_different_values_than_the_render_saw` relies
+    // on without stating it: every requirement it checks is driven off
+    // `classification.reasons`, so a `PrivateCached` class with an empty
+    // reasons list has nothing there for it to check the resolved key
+    // against, and the guard's loop simply never runs. See
+    // `is_unreasoned_private_class`'s own doc for how this is reachable.
+    if is_unreasoned_private_class(&classification) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1237,7 +1249,7 @@ async fn lead_render(
     let Some(entry) = build_entry(
         &job,
         policy,
-        class,
+        classification.class,
         &observed,
         &response,
         now,
@@ -1311,6 +1323,29 @@ fn finish_fresh_render(
     }
     out = out.replace_header("Age", "0");
     Ok(out)
+}
+
+/// Whether `classification` is a `PrivateCached` class with no recorded
+/// reason behind it. `key_used_different_values_than_the_render_saw`
+/// drives every requirement it checks off `classification.reasons`, so an
+/// empty list gives its loop nothing to check the resolved key against and
+/// it returns `false` unconditionally - not a bug in that guard, since its
+/// own reasoning never anticipated this shape.
+///
+/// Two independent things can produce it. A route may declare itself
+/// `RepresentationClass::PrivateCached` up front (`RenderCachePolicy`
+/// requires such a route to also declare `Principal` or `Tenant` variance
+/// to build at all) and then render without its handler ever actually
+/// reading an identity - `classify` starts from the declared class and only
+/// ever narrows further, so a `PrivateCached` route with nothing to narrow
+/// keeps its declared class and an empty reasons list. This task's own
+/// [`live::document_declines`] never produces this shape (it only
+/// declines, never classifies), but the check stays here as the general
+/// invariant regardless of what upstream code changes next classify's
+/// inputs.
+#[must_use]
+fn is_unreasoned_private_class(classification: &ClassificationOutcome) -> bool {
+    classification.class == RepresentationClass::PrivateCached && classification.reasons.is_empty()
 }
 
 /// Whether the render's own observations diverge from the values the key
@@ -1789,5 +1824,38 @@ pub fn key_input_for_test(
         // same key regardless of when it runs in a test.
         epoch: 1,
         variance,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reasonless_private_classification_is_declined() {
+        assert!(is_unreasoned_private_class(&ClassificationOutcome {
+            class: RepresentationClass::PrivateCached,
+            reasons: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn a_private_classification_with_a_reason_is_left_to_the_value_guard() {
+        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
+            class: RepresentationClass::PrivateCached,
+            reasons: vec![ClassificationReason::PrincipalObserved],
+        }));
+    }
+
+    #[test]
+    fn a_non_private_class_is_never_declined_by_this_check() {
+        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
+            class: RepresentationClass::PublicShared,
+            reasons: Vec::new(),
+        }));
+        assert!(!is_unreasoned_private_class(&ClassificationOutcome {
+            class: RepresentationClass::Uncacheable,
+            reasons: Vec::new(),
+        }));
     }
 }

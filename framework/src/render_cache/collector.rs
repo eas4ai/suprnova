@@ -376,11 +376,48 @@ pub fn observe_authorization_read() {
 pub fn observe_secret_context_read() {
     with_state(|state| state.report.context.secret_context_read = true);
 }
-/// Records the facts a rendered Live document reported; a no-op outside a
-/// scope. Called by [`super::live::record_document`], never directly by
+/// Records one successful Live island mount; a no-op outside a scope.
+/// Accumulates rather than replaces, because a request can mount more than
+/// one island (or more than one `LiveDocument`): counts add, and the seed
+/// deadline takes the minimum of what was already recorded and this
+/// mount's own. Called by [`super::live::record_mount`], never directly by
 /// application code.
-pub fn observe_live_document(facts: super::live::LiveDocumentFacts) {
-    with_state(|state| state.report.live_document = Some(facts));
+pub fn observe_live_document_mount(
+    kind: crate::live::LiveMountKind,
+    seed_deadline_ms: Option<u64>,
+) {
+    with_state(|state| {
+        let facts = state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default);
+        match kind {
+            crate::live::LiveMountKind::PublicSeed => facts.public_seed_islands += 1,
+            crate::live::LiveMountKind::IdentityBound => facts.identity_bound_islands += 1,
+        }
+        if let Some(deadline) = seed_deadline_ms {
+            facts.seed_deadline_ms = Some(
+                facts
+                    .seed_deadline_ms
+                    .map_or(deadline, |current| current.min(deadline)),
+            );
+        }
+    });
+}
+
+/// Records that a rendered Live document declared `NoStore`; a no-op
+/// outside a scope. Sticky: once set by any document in the request, stays
+/// set regardless of what a later document in the same request declares.
+/// Called by [`super::live::record_document_intent`], never directly by
+/// application code.
+pub fn observe_live_document_no_store() {
+    with_state(|state| {
+        state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .no_store = true;
+    });
 }
 /// Undeclared request context affected rendering.
 pub fn observe_undeclared(name: &str) {

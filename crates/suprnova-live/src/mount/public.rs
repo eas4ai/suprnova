@@ -183,6 +183,13 @@ impl PublicSeedMountService {
     }
 
     /// Signs and publishes a verified public seed without touching an instance ledger.
+    ///
+    /// `request.seed` already carries its own `issued_at` and `max_age_ms`
+    /// (it was fully built by the caller, unlike `mount_component`, which
+    /// builds the seed here from a single clock read), so the published
+    /// expiry is derived from those fields rather than a fresh clock read:
+    /// the seed's own declared lifetime is authoritative for what it
+    /// actually expires at, whenever `mount_reserved` happens to run.
     pub fn mount(
         &self,
         document: &mut DocumentMountScope,
@@ -191,7 +198,19 @@ impl PublicSeedMountService {
     ) -> Result<PublicSeedMountOutput, MountError> {
         let key = request.key.clone();
         document.reserve(key.clone())?;
-        let result = self.mount_reserved(request, context);
+        let now = self.clock.now();
+        let result = now
+            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))
+            .and_then(|now| {
+                let expires_at = request
+                    .seed
+                    .issued_at()
+                    .get()
+                    .checked_add(request.seed.max_age_ms())
+                    .map(UnixMillis::new)
+                    .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
+                self.mount_reserved(request, context, now, expires_at)
+            });
         if result.is_err() {
             document.release(&key);
         }
@@ -317,29 +336,35 @@ impl PublicSeedMountService {
             &self.snapshot_limits,
         )
         .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+        // Threads the single clock read and its derived expiry from above,
+        // rather than letting `mount_reserved` read the clock again after
+        // the awaited component lifecycle: a second, later read would
+        // always land after this seed's own `issued_at` and could publish
+        // a cache deadline that outlives the seed it describes.
         self.mount_reserved(
             PublicSeedMountRequest::new(key, seed, render, flags),
             context,
+            now,
+            expires_at,
         )
     }
 
+    /// Signs and publishes the reserved, fully validated request under the
+    /// given `now` and non-authoritative `expires_at`. Callers supply both
+    /// rather than this function reading the clock itself, so a mount that
+    /// spans an awaited lifecycle (`mount_component_reserved`) reads the
+    /// clock exactly once and this function's own signing step reuses that
+    /// same reading instead of taking a second, later one.
     fn mount_reserved(
         &self,
         request: PublicSeedMountRequest,
         context: &TrustedLiveRequestContext,
+        now: UnixMillis,
+        expires_at: UnixMillis,
     ) -> Result<PublicSeedMountOutput, MountError> {
-        let now = self
-            .clock
-            .now()
-            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))?;
         if !context.is_current(now) {
             return Err(MountError::new(MountErrorKind::ContextRejected));
         }
-        let expires_at = now
-            .get()
-            .checked_add(self.snapshot_limits.max_seed_age_ms())
-            .map(UnixMillis::new)
-            .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
         let catalog = context.mount();
         let descriptor = self
             .registry

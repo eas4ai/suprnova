@@ -1,9 +1,11 @@
 //! Shared boot for `render_cache_live.rs`: the same production-shaped Live
 //! router `live_dogfood_support` builds (a public-seed document and an
-//! identity-bound one), with RenderCache's middleware installed on top and
-//! a single [`AdjustableTestClock`] shared between the Live runtime and the
-//! RenderCache runtime, so a seed's promotion deadline and the cache
-//! entry's publication time agree on what "now" means.
+//! identity-bound one), plus a route that mounts an identity-bound island
+//! and never calls `LiveDocument::render` at all, with RenderCache's
+//! middleware installed on top and a single [`AdjustableTestClock`] shared
+//! between the Live runtime and the RenderCache runtime, so a seed's
+//! promotion deadline and the cache entry's publication time agree on what
+//! "now" means.
 //!
 //! `#[serial_test::serial]` and plain `#[tokio::test]` (current-thread),
 //! never `flavor = "multi_thread"`: `RenderCache::install`'s runtime and
@@ -14,7 +16,9 @@
 //! this reasoning, which this file's tests follow for the same reasons.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -22,21 +26,55 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
+use suprnova::live::{LiveDocument, LiveMount, LiveTenantMiddleware};
+use suprnova::middleware::{Middleware, Next};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::{
-    FreshnessPolicy, RenderCache, RenderCachePolicy, RepresentationClass,
+    FreshnessPolicy, RenderCache, RenderCachePolicy, RepresentationClass, SharedCachePolicy,
+    VarianceDimension,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    CsrfMiddleware, MiddlewareRegistry, Router, SessionConfig, SessionMiddleware, StatusCode,
-    handle_request,
+    AuthMiddleware, CsrfMiddleware, HttpResponse, MiddlewareRegistry, Request, Response, Router,
+    SessionConfig, SessionMiddleware, StatusCode, handle_request,
 };
+use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
+use suprnova_live::mount::MountFlags;
 
 use crate::live_dogfood_support::{
-    DOCUMENT_PATH, LoginHeader, MemorySessionStore, PRIVATE_DOCUMENT_PATH, build_public_router,
-    fixture,
+    DOCUMENT_PATH, DogfoodCounter, LoginHeader, MemorySessionStore, PRIVATE_DOCUMENT_PATH,
+    Tenantless, build_public_router, fixture,
 };
+
+/// An identity-bound island mounted on a route whose handler never calls
+/// `LiveDocument::render`: the island markup goes straight into a
+/// hand-built response, exactly as `MountedIsland::html()`'s public
+/// `Display` allows. Proves the mount-time recording (R87) declines this
+/// even though `render_cache::live::record_document_intent` never runs.
+pub const RAW_PATH: &str = "/dogfood/private-raw";
+
+/// Counts renders reaching the handler side of the RenderCache middleware,
+/// split by which route was hit so the two probe routes do not share a
+/// counter. Registered AFTER `RenderCache::install` (see the harness's own
+/// doc), so a request served from the cache never increments either one -
+/// only an actual render does.
+struct RenderCounter;
+
+#[async_trait::async_trait]
+impl Middleware for RenderCounter {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if request.path() == PRIVATE_DOCUMENT_PATH || request.path() == RAW_PATH {
+            PRIVATE_RENDERS.fetch_add(1, Ordering::SeqCst);
+        } else {
+            PUBLIC_RENDERS.fetch_add(1, Ordering::SeqCst);
+        }
+        next(request).await
+    }
+}
+
+static PUBLIC_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static PRIVATE_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The single RenderCache migration this harness needs; mirrors
 /// `render_cache_middleware_support::MiddlewareMigrator`, which is private
@@ -49,16 +87,6 @@ impl MigratorTrait for LiveRenderCacheMigrator {
         vec![Box::new(suprnova::render_cache::migration::Migration)]
     }
 }
-
-/// The Live runtime hardcodes every `LiveRuntime`'s public-seed promotion
-/// deadline to this many milliseconds after mount time, in
-/// `framework/src/live/runtime.rs`'s `assemble_runtime`. Every assembly
-/// path, including this harness's own
-/// `prepare_live_router_with_clock_for_test`, funnels through that one
-/// function. There is no accessor that reads the value back off a built
-/// runtime, so this harness mirrors the constant directly rather than
-/// adding one only for this test.
-const LIVE_RUNTIME_MAX_SEED_AGE_MS: u64 = 86_400_000;
 
 /// Everything one test needs: the router and middleware registry to
 /// dispatch through, and the clock both the Live runtime and the
@@ -74,8 +102,9 @@ pub struct Harness {
 
 /// Boots a fresh SQLite database with the RenderCache migration applied,
 /// registers `live_dogfood_support`'s public-seed document
-/// (`DOCUMENT_PATH`) and identity-bound document (`PRIVATE_DOCUMENT_PATH`)
-/// with a generous shared `RenderCachePolicy`, installs RenderCache, and
+/// (`DOCUMENT_PATH`), identity-bound document (`PRIVATE_DOCUMENT_PATH`),
+/// and the render-bypassing identity-bound route (`RAW_PATH`) with a
+/// generous shared `RenderCachePolicy` each, installs RenderCache, and
 /// prepares the Live runtime on the same router with the same clock.
 pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     static CRYPT_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -106,25 +135,55 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
 
     let clock = Arc::new(AdjustableTestClock::new(1_000_000));
 
-    // `fresh_ms` is chosen larger than the Live runtime's fixed 24-hour
-    // seed lifetime so that ordinary freshness never governs the tests in
-    // this file: the seed deadline is always the tighter bound, which is
-    // exactly the mechanism under test.
+    // `fresh_ms` is chosen larger than the Live runtime's fixed public-seed
+    // lifetime so that ordinary freshness never governs the tests in this
+    // file: the seed deadline is always the tighter bound, which is
+    // exactly the mechanism under test. `shared(SMaxAge)` makes the served
+    // `Cache-Control` actually say `public, ...` when the class really is
+    // `PublicShared` - proving R86's fix, since the pre-fix `Private`
+    // narrowing demoted this exact route to `private, ...` regardless.
     let public_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .shared(SharedCachePolicy::SMaxAge { seconds: 200_000 })
         .build()
         .expect("public seed policy");
+    // Unlike an earlier draft of this harness, this declares `Principal`
+    // variance: `classify`'s own key/value guard is satisfied, and cannot
+    // be what declines the entry (see finding 4). Whatever declines it is
+    // `document_declines`'s identity-bound branch and nothing else.
     let private_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
         .build()
         .expect("identity bound policy");
+    let raw_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("raw identity bound policy");
 
+    let raw = LiveMount::<DogfoodCounter>::identity_bound(RAW_PATH, "counter", "dogfood-raw")
+        .expect("declare raw identity-bound mount");
+    let raw_handler = raw.clone();
     let router: Router = build_public_router();
+    let router: Router = router
+        .get(RAW_PATH, move |request: Request| {
+            let mount = raw_handler.clone();
+            async move { render_raw_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Tenantless)))
+        .into();
+    let router = router
+        .try_live_mount(&raw)
+        .expect("register raw identity-bound mount");
     let router = router
         .try_render_cache(DOCUMENT_PATH, public_policy)
         .expect("attach public seed render cache policy")
         .try_render_cache(PRIVATE_DOCUMENT_PATH, private_policy)
-        .expect("attach identity bound render cache policy");
+        .expect("attach identity bound render cache policy")
+        .try_render_cache(RAW_PATH, raw_policy)
+        .expect("attach raw render cache policy");
 
     let mut render_cache_config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -149,6 +208,12 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     let router = RenderCache::install(router, render_cache_config)
         .await
         .expect("install render cache");
+    // AFTER install, so it sits behind the cache middleware and is reached
+    // only when the cache decides to render; reset before it is registered
+    // so an earlier test's counts never leak into this one.
+    PUBLIC_RENDERS.store(0, Ordering::SeqCst);
+    PRIVATE_RENDERS.store(0, Ordering::SeqCst);
+    suprnova::middleware::register_global_middleware(RenderCounter);
     let router = Arc::new(router);
     prepare_live_router_with_clock_for_test(&router, Arc::clone(&clock))
         .expect("prepare Live runtime");
@@ -165,14 +230,48 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     })
 }
 
+async fn render_raw_document(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    let mut document = LiveDocument::from_request(&request)
+        .map_err(|error| HttpResponse::text(format!("from_request {error}")).status(500))?;
+    let island = document
+        .mount(
+            &mount,
+            CanonicalValue::Object(BTreeMap::new()),
+            MountFlags::empty(),
+        )
+        .await
+        .map_err(|error| HttpResponse::text(format!("mount {error}")).status(500))?;
+    // Deliberately NOT `document.render(..)`: the island markup goes
+    // straight into a hand-built response.
+    Ok(HttpResponse::html(format!(
+        "<!doctype html><html><body>{}</body></html>",
+        island.html()
+    )))
+}
+
 /// The adjustable clock this harness shared between both runtimes.
 pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
     &harness.clock
 }
 
-/// The Live runtime's fixed public-seed lifetime in milliseconds.
+/// The Live runtime's fixed public-seed lifetime in milliseconds - the one
+/// constant `assemble_runtime` uses for every `LiveRuntime`, exposed
+/// through `suprnova::live::testing` rather than mirrored here.
 pub fn public_seed_lifetime_ms(_harness: &Harness) -> u64 {
-    LIVE_RUNTIME_MAX_SEED_AGE_MS
+    suprnova::live::testing::PUBLIC_SEED_MAX_AGE_MS
+}
+
+/// Renders reaching `DOCUMENT_PATH`'s handler so far.
+pub fn public_renders() -> usize {
+    PUBLIC_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `PRIVATE_DOCUMENT_PATH`'s or `RAW_PATH`'s handler so far.
+pub fn private_renders() -> usize {
+    PRIVATE_RENDERS.load(Ordering::SeqCst)
 }
 
 /// One dispatched response: status, an accessor for a header, and the body.

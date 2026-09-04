@@ -284,11 +284,6 @@ pub struct LiveDocument<'a> {
     scope: DocumentMountScope,
     metadata: Vec<MountMetadata>,
     bootstrapped: bool,
-    /// The mount kind of every island mounted so far, in mount order.
-    kinds: Vec<LiveMountKind>,
-    /// Earliest public-seed promotion deadline among the mounted islands,
-    /// `None` when no public-seed island has been mounted yet.
-    seed_deadline_ms: Option<u64>,
 }
 
 impl<'a> LiveDocument<'a> {
@@ -307,8 +302,6 @@ impl<'a> LiveDocument<'a> {
             scope: DocumentMountScope::new(),
             metadata: Vec::new(),
             bootstrapped: false,
-            kinds: Vec::new(),
-            seed_deadline_ms: None,
         })
     }
 
@@ -346,6 +339,13 @@ impl<'a> LiveDocument<'a> {
             )
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::ContextRejected))?;
         let key = declaration.document_key.clone();
+        // Recorded here, at the mount that just succeeded, not later at
+        // `render`: `MountedIsland::html()` is `pub` and `TrustedHtml`
+        // implements `Display`, so a handler can take the returned island
+        // and hand-build its own response without ever calling `render` at
+        // all. The mount kind and (for a public seed) its deadline are
+        // security-relevant the moment the mount succeeds, so the fact
+        // must exist regardless of whether `render` is ever reached.
         let (html, metadata) = match declaration.kind {
             LiveMountKind::PublicSeed => {
                 let output = self
@@ -360,26 +360,27 @@ impl<'a> LiveDocument<'a> {
                     )
                     .await
                     .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
-                let expires = output.expires_at().get();
-                self.seed_deadline_ms = Some(
-                    self.seed_deadline_ms
-                        .map_or(expires, |current| current.min(expires)),
+                crate::render_cache::live::record_mount(
+                    LiveMountKind::PublicSeed,
+                    Some(output.expires_at().get()),
                 );
                 output.into_document_parts()
             }
-            LiveMountKind::IdentityBound => self
-                .runtime
-                .mount_private_component(
-                    &mut self.scope,
-                    PrivateMountRequest::new(key, parameters, flags)
-                        .with_document_path(document_path),
-                    &context,
-                )
-                .await
-                .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?
-                .into_document_parts(),
+            LiveMountKind::IdentityBound => {
+                let output = self
+                    .runtime
+                    .mount_private_component(
+                        &mut self.scope,
+                        PrivateMountRequest::new(key, parameters, flags)
+                            .with_document_path(document_path),
+                        &context,
+                    )
+                    .await
+                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                crate::render_cache::live::record_mount(LiveMountKind::IdentityBound, None);
+                output.into_document_parts()
+            }
         };
-        self.kinds.push(declaration.kind);
         self.metadata.push(metadata);
         Ok(MountedIsland { html })
     }
@@ -463,11 +464,10 @@ impl<'a> LiveDocument<'a> {
                 renderer.render_document(view, template, response, assets, self.metadata)
             })
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?;
-        crate::render_cache::live::record_document(
-            &render.response,
-            &self.kinds,
-            self.seed_deadline_ms,
-        );
+        // The mount kind and seed deadline facts are already recorded, at
+        // `mount` (see its own doc for why); only the document's cache
+        // intent is known here, so this call records only that.
+        crate::render_cache::live::record_document_intent(&render.response);
         document_response(render)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))
     }

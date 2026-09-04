@@ -4,6 +4,7 @@ mod component_support;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use component_support::{
@@ -11,6 +12,7 @@ use component_support::{
     snapshot_limits, trusted_context, trusted_context_for_with_schemas,
 };
 use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::{BuildId, ComponentName, ModelField, Revision, UnixMillis, ViewName};
 use suprnova_live::metadata::{ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::mount::{
@@ -273,10 +275,118 @@ fn a_public_seed_output_reports_its_non_authoritative_expiry() {
         .mount(&mut document, request, &context)
         .expect("public seed mount succeeds");
 
-    // The engine's non-authoritative expiry is `now` plus the service's own
-    // configured `max_seed_age_ms` (10_000, set by `snapshot_limits()` in
-    // `component_support`), not the seed's own `max_age_ms` field (500
-    // above): it mirrors `mount/output.rs`'s `PrivateMountOutput::expires_at`,
-    // which is likewise `now + max_seed_age_ms` from the service's limits.
-    assert_eq!(output.expires_at().get(), now + 10_000);
+    // `PublicSeedMountService::mount` (unlike `mount_component`) is handed
+    // an already fully built, already signed-shape seed: `request.seed`
+    // carries its own `issued_at` (1_000) and `max_age_ms` (500 above), and
+    // those are what the seed itself actually expires at, regardless of
+    // when this call happens to run or what the service's own
+    // `max_seed_age_ms` limit is (10_000, set by `snapshot_limits()` in
+    // `component_support`, only an upper bound `SeedBodyV1::new` enforces
+    // on `max_age_ms`, not the value `expires_at` reports).
+    assert_eq!(output.expires_at().get(), 1_000 + 500);
+}
+
+/// A clock that advances one millisecond per read, standing in for real
+/// time elapsing across the awaited component mount lifecycle that sits
+/// between the mount's one clock read and the seed's own signing. Proves
+/// `PublicSeedMountService::mount_component` reads the clock exactly once
+/// per mount, and that `expires_at()` reports the seed's own real expiry,
+/// not a later, independently recomputed one (see R88; this is the
+/// reviewer's ticking-clock probe, ported in as a permanent regression
+/// test).
+struct TickingClock {
+    reads: AtomicU64,
+    base: u64,
+}
+
+impl Clock for TickingClock {
+    fn now(&self) -> Result<UnixMillis, ClockError> {
+        let n = self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(UnixMillis::new(self.base + n))
+    }
+}
+
+#[tokio::test]
+async fn a_public_seed_mount_reads_the_clock_once_and_its_expiry_matches_the_seed() {
+    let public_metadata: &'static ComponentMetadata = Box::leak(Box::new(
+        ComponentMetadata::new(
+            ComponentName::parse("tests.trace").expect("component identity"),
+            ViewName::parse("tests/trace.html").expect("view identity"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            vec![FieldMetadata::new(
+                ModelField::parse("serial").expect("field identity"),
+                FieldCategory::Public,
+                StateCodec::Json,
+                true,
+            )],
+            vec![],
+        )
+        .expect("public component metadata"),
+    ));
+    let public_schemas = SnapshotSchemaSet::new(
+        StateSchema::new(
+            1,
+            vec![
+                FieldSpec::new("serial", StateCodec::Json, FieldCategory::Public, true)
+                    .expect("public state field"),
+            ],
+        )
+        .expect("public state schema"),
+        StateSchema::new(1, vec![]).expect("memo schema"),
+        StateSchema::new(1, vec![]).expect("mount schema"),
+    )
+    .expect("public schemas");
+    let control = FixtureControl::new_with_metadata(FailurePoint::None, public_metadata);
+    let context = trusted_context_for_with_schemas(public_metadata, None, public_schemas);
+    let keys = Arc::new(key_ring());
+    let limits = snapshot_limits();
+    let registry = ComponentRegistryBuilder::new()
+        .register(ComponentDescriptor::with_hooks(
+            public_metadata.clone(),
+            install(control.clone()),
+        ))
+        .expect("component registers")
+        .build();
+    let clock = Arc::new(TickingClock {
+        reads: AtomicU64::new(0),
+        base: 1_000,
+    });
+    let service = PublicSeedMountService::new(
+        PublicMountProviders::new(
+            Arc::new(registry),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            keys,
+        ),
+        limits.clone(),
+        ViewRenderer::new(RenderLimits::standard()).expect("render limits"),
+        8_192,
+    )
+    .expect("public mount service");
+    let mut document = DocumentMountScope::new();
+
+    let output = service
+        .mount_component(
+            &mut document,
+            DocumentMountKey::parse("public-lifecycle-expiry").expect("document key"),
+            CanonicalValue::Object(BTreeMap::new()),
+            MountFlags::empty(),
+            &context,
+        )
+        .await
+        .expect("registered public component mount succeeds");
+
+    assert_eq!(
+        clock.reads.load(Ordering::SeqCst),
+        1,
+        "one mount reads the clock exactly once, not once before and once after the awaited \
+         component lifecycle"
+    );
+    let issued_at = 1_000; // the one clock read, which becomes seed.issued_at
+    let seed_real_expiry = issued_at + 10_000; // component_support's snapshot_limits() max_seed_age_ms
+    assert_eq!(
+        output.expires_at().get(),
+        seed_real_expiry,
+        "the cache deadline must equal the seed's own expiry; a later value lets the cache \
+         serve a document whose embedded seed has already expired"
+    );
 }
