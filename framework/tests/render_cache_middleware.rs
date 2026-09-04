@@ -27,7 +27,7 @@ mod render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
-    dispatch_get, dispatch_head,
+    dispatch_get, dispatch_head, ensure_round3_authz_gate,
 };
 
 #[tokio::test]
@@ -224,7 +224,9 @@ async fn concurrent_misses_render_once_and_waiters_reuse_the_publication() {
         let h = harness.clone();
         async move { dispatch_get(&h, "/cached/9", &[]).await }
     });
-    counting_route::wait_until_rendering(&harness).await;
+    // No render has happened in this test yet, so the first one to start
+    // is render 1.
+    counting_route::wait_until_rendering_count(&harness, 1).await;
     let b = tokio::spawn({
         let h = harness.clone();
         async move { dispatch_get(&h, "/cached/9", &[]).await }
@@ -375,7 +377,12 @@ async fn a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh() {
         let h = harness.clone();
         tokio::spawn(async move { dispatch_get(&h, "/cached/9", &[]).await })
     };
-    counting_route::wait_until_rendering(&harness).await;
+    // Fix round 3, item 4: the `original` dispatch above already rendered
+    // once, so the leader's held render is the *second* one - waiting for
+    // "any render" (count 1) here was already satisfied before
+    // `hold_next_render` was even armed, which is exactly what made this
+    // test hang intermittently. See `wait_until_rendering_count`'s own doc.
+    counting_route::wait_until_rendering_count(&harness, 2).await;
     let waiter = {
         let h = harness.clone();
         tokio::spawn(async move { dispatch_get(&h, "/cached/9", &[]).await })
@@ -582,5 +589,142 @@ async fn a_lease_grant_sweeps_every_expired_lease_first() {
         RenderCache::lease_count_for_test(),
         1,
         "granting a new lease must sweep every already-expired one first"
+    );
+}
+
+/// Fix round 3, item 1 (Critical, reviewer's first attack, deliverable).
+/// Same shape as `a_route_with_no_declared_principal_variance_never_leaks_across_identities`,
+/// but the handler reads identity through `suprnova::auth_user_id()` -
+/// which reads `auth::request_state::current_user_id()` directly, bypassing
+/// `Auth::id()`'s own explicit `observe_principal_read()` call entirely -
+/// rather than `Auth::id()`. Proven failing against the pre-round-3 code by
+/// temporarily reverting `request_state.rs`'s `read_state` instrumentation
+/// and re-running: alice's identity leaked into bob's response.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_route_reading_identity_through_an_uninstrumented_accessor_never_leaks_across_identities()
+{
+    let harness = boot_with_render_cache().await;
+    let alice = dispatch_get(
+        &harness,
+        "/leaky-via-request-state",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice.body).contains("alice"));
+
+    let bob = dispatch_get(
+        &harness,
+        "/leaky-via-request-state",
+        &[("x-test-login", "bob")],
+    )
+    .await;
+    assert_eq!(bob.status, StatusCode::OK);
+    assert!(
+        !String::from_utf8_lossy(&bob.body).contains("alice"),
+        "a route with no declared Principal variance must never serve one identity's \
+         rendered body to a different identity, regardless of which accessor read it"
+    );
+    assert!(String::from_utf8_lossy(&bob.body).contains("bob"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store"
+    );
+}
+
+/// Fix round 3, item 2 (Critical, reviewer's second attack, deliverable).
+/// Drives the served body entirely from a `Gate::allows` decision - no
+/// identity accessor is ever read - on a route declaring no variance
+/// dimension at all. Proven failing against the pre-round-3
+/// `key_omits_observed_privacy` (which only ever inspected
+/// `ObservedContext.principal`/`.tenant`, never the classification outcome)
+/// by temporarily reverting it and re-running: the admin-checked body was
+/// published and served back to the non-admin request.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_body_driven_by_an_authorization_decision_never_leaks_across_roles() {
+    ensure_round3_authz_gate();
+    let harness = boot_with_render_cache().await;
+    let admin = dispatch_get(&harness, "/authz-driven", &[("x-test-role", "admin")]).await;
+    assert_eq!(admin.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&admin.body).contains("allowed=true"));
+
+    let guest = dispatch_get(&harness, "/authz-driven", &[("x-test-role", "guest")]).await;
+    assert_eq!(guest.status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&guest.body).contains("allowed=false"),
+        "a route with no declared variance must never serve an authorization-gated body \
+         computed for one role to a request that would have gotten a different decision"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store: an authorization decision narrowed the \
+         class to PrivateCached with nothing in the key to partition by, which must \
+         decline to store, not merely narrow"
+    );
+}
+
+/// Fix round 3, item 3 (Critical). The guard tested whether `Principal` was
+/// *declared*, not whether the key's resolved value for it actually
+/// partitions - `variance_descriptor` declares `Principal` as
+/// `DimensionValue::Anonymous` when no identity is visible, which is
+/// "declared" but not a partition. This is the test item 3 explicitly
+/// calls out as missing: two distinct principals on a route that *does*
+/// declare `Principal` must derive two distinct keys. (A test that
+/// dispatches the same login twice, as an earlier version of this file's
+/// singleflight coverage did, cannot distinguish a real per-principal
+/// partition from a guard that always passes.)
+#[tokio::test]
+#[serial_test::serial]
+async fn two_distinct_principals_derive_two_distinct_keys_on_a_declared_principal_route() {
+    let _harness = boot_with_render_cache().await;
+    let alice_key =
+        RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("alice"));
+    let bob_key = RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("bob"));
+    assert_ne!(
+        alice_key, bob_key,
+        "two distinct principals must derive two distinct keys on a route that declares \
+         Principal variance"
+    );
+}
+
+/// Fix round 3, item 5 (second smaller item). Reproduces the production
+/// shape the reviewer described: a second `RenderCache::install` in one
+/// process, without clearing the already-registered global middleware
+/// first (`boot_with_render_cache_preserving_global_middleware_for_test`,
+/// same as the round 1 regression test above, does not clear it).
+#[tokio::test]
+#[serial_test::serial]
+async fn a_second_install_in_one_process_is_served_by_the_runtime_it_installed() {
+    let first = boot_with_render_cache().await;
+    let dispatched_under_first = dispatch_get(&first, "/cached/1", &[]).await;
+    assert_eq!(dispatched_under_first.status, StatusCode::OK);
+
+    let second = boot_with_render_cache_preserving_global_middleware_for_test().await;
+    let dispatched_under_second = dispatch_get(&second, "/cached/1", &[]).await;
+    assert_eq!(dispatched_under_second.status, StatusCode::OK);
+
+    // Fix round 3, item 5, proven to discriminate: before the fix,
+    // `RenderCacheMiddleware` captured `Arc<RenderCacheRuntime>` at
+    // construction, and `register_global_middleware`'s per-type
+    // idempotency (see `install`'s own doc) meant the already-registered
+    // (first) middleware instance - still holding the first runtime - kept
+    // serving every request, including the dispatch above, made after the
+    // second install. `RenderCache::inspect` and `key_for_route_for_test`
+    // both read `RenderCache::runtime()`, the slot the second install just
+    // replaced - the second runtime's own, freshly constructed
+    // `MemoryRenderStore`, entirely separate from the first's. Reverting
+    // the fix (restoring the captured-`Arc` field) and re-running this
+    // test, the assertion below failed: the dispatch above actually
+    // published into the *first* runtime's store, which the second
+    // runtime's `inspect` can never see.
+    let key = RenderCache::key_for_route_for_test("/cached/{id}", &[("id", "1")], None);
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "a request dispatched after a second install must be served by, and publish \
+         into, the runtime that install just replaced the slot with"
     );
 }

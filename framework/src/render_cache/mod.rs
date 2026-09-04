@@ -116,11 +116,29 @@ impl RenderCache {
     /// this middleware lands after them in the chain, not before. Calling
     /// it first would make every request collapse onto the default locale
     /// and see no principal, silently over-sharing exactly the kind of
-    /// entry [`middleware::key_omits_observed_privacy`] exists to catch -
-    /// that check declines to store rather than mis-key, so the failure
-    /// mode of installing too early is reduced rendering, not a privacy
-    /// leak, but it is still not what an application installing this in
-    /// the wrong order would want.
+    /// entry [`middleware::key_omits_observed_privacy`] exists to catch.
+    ///
+    /// An earlier version of this note claimed that check's failure mode
+    /// was reduced rendering rather than a privacy leak. That was true only
+    /// for a route declaring no matching variance dimension at all; it was
+    /// false, and proven false, for a route that *does* declare `Principal`
+    /// (or `Tenant`): before fix round 3, item 3, the guard tested whether a
+    /// dimension was declared, not whether the key's resolved value for it
+    /// actually partitioned anything. Installed too early, `Auth::id()` is
+    /// still unset when the key is derived, so a declared `Principal`
+    /// dimension resolves to `DimensionValue::Anonymous` - present in the
+    /// map, but not a partition - while the handler, running later in the
+    /// chain after auth has established identity, still observes a real
+    /// principal. That combination published one shared, anonymous-keyed
+    /// entry that every signed-in visitor received: a privacy leak, not
+    /// merely reduced rendering. The guard now requires a *resolved*
+    /// `DimensionValue::Private` value, not merely a declared dimension, so
+    /// this specific ordering mistake is caught and declined rather than
+    /// mis-keyed - but installing in the wrong order still costs whatever
+    /// that route's variance depended on (locale collapsing to the default,
+    /// principal-scoped routes losing their cache entirely to declines),
+    /// which is still not what an application installing this in the wrong
+    /// order would want.
     ///
     /// # Errors
     ///
@@ -206,7 +224,7 @@ impl RenderCache {
         // already-installed runtime (this crate's own test suite: one
         // process, many `#[tokio::test]` functions) clears the registry
         // itself, in test-only code, before calling this - never here.
-        crate::middleware::register_global_middleware(RenderCacheMiddleware::new(runtime));
+        crate::middleware::register_global_middleware(RenderCacheMiddleware);
         mark_installed();
         Ok(router)
     }

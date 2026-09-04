@@ -85,6 +85,39 @@ tokio::task_local! {
     static AUTH_STATE: Arc<Mutex<AuthRequestState>>;
 }
 
+/// Reads a field of the request-scoped auth state, recording an identity
+/// observation before running the read. Every read accessor in this module
+/// that reveals an identity or identity-adjacent provenance - a resolved
+/// user, an id, a remember flag, a carrier - goes through this single choke
+/// point (fix round 3, item 1), so a new accessor built on it inherits the
+/// record automatically instead of depending on someone remembering to call
+/// `observe_principal_read` at the call site. This is the same "sweep by
+/// seam, not by name" technique used to close the write side: enumerating
+/// call sites can miss one; enumerating the one seam every read passes
+/// through cannot.
+///
+/// This closed a proven leak: `suprnova::auth_user_id()` (and
+/// `guard_auth_user_id`, `SessionGuard`/`TokenGuard`'s accessors, and
+/// `session::is_authenticated()`, all built on the functions below) read
+/// `current_user_id()` here directly, bypassing `Auth::id()`'s own explicit
+/// `observe_principal_read()` call entirely - a bearer-token, `set_user`, or
+/// remember-me identity was read with no observation at all, so a render
+/// using any of those accessors classified as if it had read nothing
+/// private, and could publish one identity's body under a shared key served
+/// back to a different identity.
+///
+/// Returns `None` outside a request scope, matching every accessor's
+/// original fallback behavior exactly (`AUTH_STATE.try_with` fails, `.ok()`
+/// converts to `None`) - `observe_principal_read` is itself a no-op outside
+/// an active [`crate::render_cache::collector::Collector`] scope, so this
+/// costs nothing extra on that path either.
+fn read_state<R>(f: impl FnOnce(&AuthRequestState) -> R) -> Option<R> {
+    crate::render_cache::collector::observe_principal_read();
+    AUTH_STATE
+        .try_with(|state| f(&state.lock().unwrap_or_else(|e| e.into_inner())))
+        .ok()
+}
+
 /// Run `fut` with a fresh request-scoped auth state installed.
 ///
 /// Called once per request from `handle_request`, nested next to the
@@ -109,16 +142,7 @@ pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
 
 /// The user resolved for this request, if any.
 pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .current_user
-                .clone()
-        })
-        .ok()
-        .flatten()
+    read_state(|state| state.current_user.clone()).flatten()
 }
 
 fn is_default_guard(guard: &str) -> bool {
@@ -146,17 +170,7 @@ pub(crate) fn set_guard_user(guard_name: &str, user: Arc<dyn Authenticatable>) {
 
 /// Return the user cached for one named session guard.
 pub(crate) fn guard_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .guard_users
-                .get(guard_name)
-                .cloned()
-        })
-        .ok()
-        .flatten()
+    read_state(|state| state.guard_users.get(guard_name).cloned()).flatten()
 }
 
 /// Record an identifier for one named session guard.
@@ -190,17 +204,14 @@ pub(crate) fn set_guard_user_id(guard_name: &str, user_id: impl Into<String>) {
 
 /// Return the identifier known for one named session guard.
 pub(crate) fn guard_user_id(guard_name: &str) -> Option<String> {
-    AUTH_STATE
-        .try_with(|state| {
-            let state = state.lock().unwrap_or_else(|error| error.into_inner());
-            state
-                .guard_users
-                .get(guard_name)
-                .map(|user| user.get_auth_identifier())
-                .or_else(|| state.guard_user_ids.get(guard_name).cloned())
-        })
-        .ok()
-        .flatten()
+    read_state(|state| {
+        state
+            .guard_users
+            .get(guard_name)
+            .map(|user| user.get_auth_identifier())
+            .or_else(|| state.guard_user_ids.get(guard_name).cloned())
+    })
+    .flatten()
 }
 
 /// Clear one named session guard without touching sibling guards.
@@ -230,15 +241,7 @@ pub(crate) fn clear_all_authentication() {
 
 /// Whether one named session guard already resolved a user instance.
 pub(crate) fn has_guard_user(guard_name: &str) -> bool {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .guard_users
-                .contains_key(guard_name)
-        })
-        .unwrap_or(false)
+    read_state(|state| state.guard_users.contains_key(guard_name)).unwrap_or(false)
 }
 
 /// Mark whether one guard was hydrated from a remember carrier.
@@ -259,15 +262,7 @@ pub(crate) fn set_guard_via_remember(guard_name: &str, value: bool) {
 
 /// Whether one guard was hydrated from a remember carrier this request.
 pub(crate) fn guard_via_remember(guard_name: &str) -> bool {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remembered_guards
-                .contains(guard_name)
-        })
-        .unwrap_or(false)
+    read_state(|state| state.remembered_guards.contains(guard_name)).unwrap_or(false)
 }
 
 /// Record the guard and non-secret selector carried by the browser.
@@ -306,56 +301,50 @@ pub(crate) fn set_verified_active_remember_carrier(
 pub(crate) fn verified_active_remember_carrier_for_guard(
     guard_name: &str,
 ) -> Option<(String, String)> {
-    AUTH_STATE
-        .try_with(|state| {
-            let state = state.lock().unwrap_or_else(|error| error.into_inner());
-            state
-                .active_remember_carrier
-                .as_ref()
-                .filter(|carrier| carrier.guard == guard_name)
-                .and_then(|carrier| {
-                    carrier
-                        .verified_owner
-                        .as_ref()
-                        .map(|owner| (owner.clone(), carrier.selector.clone()))
-                })
-        })
-        .ok()
-        .flatten()
+    read_state(|state| {
+        state
+            .active_remember_carrier
+            .as_ref()
+            .filter(|carrier| carrier.guard == guard_name)
+            .and_then(|carrier| {
+                carrier
+                    .verified_owner
+                    .as_ref()
+                    .map(|owner| (owner.clone(), carrier.selector.clone()))
+            })
+    })
+    .flatten()
 }
 
 /// Return the active carrier's guard and non-secret selector.
 pub(crate) fn active_remember_carrier() -> Option<(String, String)> {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .active_remember_carrier
-                .as_ref()
-                .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()))
-        })
-        .ok()
-        .flatten()
+    read_state(|state| {
+        state
+            .active_remember_carrier
+            .as_ref()
+            .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()))
+    })
+    .flatten()
 }
 
 /// Return the active carrier selector when it belongs to one guard.
 pub(crate) fn active_remember_selector_for_guard(guard_name: &str) -> Option<String> {
-    AUTH_STATE
-        .try_with(|state| {
-            let state = state.lock().unwrap_or_else(|error| error.into_inner());
-            state
-                .active_remember_carrier
-                .as_ref()
-                .filter(|carrier| carrier.guard == guard_name)
-                .map(|carrier| carrier.selector.clone())
-        })
-        .ok()
-        .flatten()
+    read_state(|state| {
+        state
+            .active_remember_carrier
+            .as_ref()
+            .filter(|carrier| carrier.guard == guard_name)
+            .map(|carrier| carrier.selector.clone())
+    })
+    .flatten()
 }
 
 /// Forget the active carrier only when both its guard and selector match.
 pub(crate) fn take_active_remember_carrier(guard_name: &str, selector: &str) -> bool {
+    // Read-and-clear, not a pure read, so it cannot go through `read_state`
+    // (which only hands out `&AuthRequestState`); instrumented explicitly
+    // here instead - still the same seam, `AUTH_STATE` itself.
+    crate::render_cache::collector::observe_principal_read();
     AUTH_STATE
         .try_with(|state| {
             let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -434,16 +423,7 @@ pub(crate) fn set_bearer_user_id(id: impl Into<String>) {
 
 /// The identifier validated from a bearer token, if any.
 pub(crate) fn bearer_user_id() -> Option<String> {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .bearer_user_id
-                .clone()
-        })
-        .ok()
-        .flatten()
+    read_state(|state| state.bearer_user_id.clone()).flatten()
 }
 
 /// Cache a user resolved specifically through bearer authentication.
@@ -463,29 +443,12 @@ pub(crate) fn set_bearer_user(user: Arc<dyn Authenticatable>) {
 
 /// The user resolved specifically through bearer authentication, if any.
 pub(crate) fn bearer_user() -> Option<Arc<dyn Authenticatable>> {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .bearer_user
-                .clone()
-        })
-        .ok()
-        .flatten()
+    read_state(|state| state.bearer_user.clone()).flatten()
 }
 
 /// Whether a bearer user has already been resolved for this request.
 pub(crate) fn has_bearer_user() -> bool {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .bearer_user
-                .is_some()
-        })
-        .unwrap_or(false)
+    read_state(|state| state.bearer_user.is_some()).unwrap_or(false)
 }
 
 /// The current request user's identifier, if one is known.
@@ -494,17 +457,14 @@ pub(crate) fn has_bearer_user() -> bool {
 /// both are present the resolved user is the more authoritative value
 /// (it came from the provider, not from a token payload).
 pub(crate) fn current_user_id() -> Option<String> {
-    AUTH_STATE
-        .try_with(|state| {
-            let guard = state.lock().unwrap_or_else(|e| e.into_inner());
-            guard
-                .current_user
-                .as_ref()
-                .map(|user| user.get_auth_identifier())
-                .or_else(|| guard.current_user_id.clone())
-        })
-        .ok()
-        .flatten()
+    read_state(|state| {
+        state
+            .current_user
+            .as_ref()
+            .map(|user| user.get_auth_identifier())
+            .or_else(|| state.current_user_id.clone())
+    })
+    .flatten()
 }
 
 /// Clear the resolved request user (used by `logout`).
@@ -521,23 +481,13 @@ pub(crate) fn clear_current_user() {
 /// Whether a user instance has been resolved for this request - without
 /// triggering provider resolution. Backs [`Guard::has_user`](super::Guard::has_user).
 pub(crate) fn has_current_user() -> bool {
-    AUTH_STATE
-        .try_with(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .current_user
-                .is_some()
-        })
-        .unwrap_or(false)
+    read_state(|state| state.current_user.is_some()).unwrap_or(false)
 }
 
 /// Whether the current user came from a remember-me cookie this request.
 /// Backs [`StatefulGuard::via_remember`](super::StatefulGuard::via_remember).
 pub(crate) fn via_remember() -> bool {
-    AUTH_STATE
-        .try_with(|state| state.lock().unwrap_or_else(|e| e.into_inner()).via_remember)
-        .unwrap_or(false)
+    read_state(|state| state.via_remember).unwrap_or(false)
 }
 
 /// Test-only: run `fut` with a fresh request-scoped auth state.

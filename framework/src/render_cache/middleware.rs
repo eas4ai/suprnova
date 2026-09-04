@@ -90,8 +90,8 @@ use suprnova_live::render_cache::store::{
     MemoryRenderStore, PublishOutcome, RenderStore, StoredEntry,
 };
 use suprnova_live::render_cache::variance::{
-    DimensionValue, ObservedContext, PrivateMaterial, VarianceDescriptor, VarianceDimension,
-    classify,
+    ClassificationOutcome, DimensionValue, ObservedContext, PrivateMaterial, VarianceDescriptor,
+    VarianceDimension, classify,
 };
 use suprnova_live::render_cache::{FailurePolicy, RepresentationClass};
 
@@ -114,6 +114,11 @@ use super::telemetry as render_cache_telemetry;
 /// other by accident, even though both ultimately hash a route pattern.
 const ROUTE_IDENTITY_DOMAIN: &[u8] = b"suprnova/render-cache/route-identity/v1\0";
 
+/// Maximum re-admission depth for a singleflight waiter whose post-wait
+/// entry comes back `StaleOnError` or `Dead`. See the recursive call site in
+/// `render_and_publish` (fix round 3, item 5).
+const MAX_WAIT_REBUILD_DEPTH: u32 = 8;
+
 /// A provider (store, ledger, or coordinator) failed **before** the route
 /// handler ran. Carries the untouched request and `next` back to the
 /// caller so [`FailurePolicy`] can decide whether to pass the request
@@ -129,17 +134,21 @@ struct ProviderFailure(Request, Next);
 /// The RenderCache middleware: one global layer that serves proven
 /// Complete representations. See the module documentation for the request
 /// flow.
-pub struct RenderCacheMiddleware {
-    runtime: Arc<RenderCacheRuntime>,
-}
-
-impl RenderCacheMiddleware {
-    /// Wraps an assembled runtime. `pub(crate)`: constructed only by
-    /// [`super::RenderCache::install`].
-    pub(crate) fn new(runtime: Arc<RenderCacheRuntime>) -> Self {
-        Self { runtime }
-    }
-}
+///
+/// Holds no state of its own (fix round 3, item 5): an earlier version
+/// captured `Arc<RenderCacheRuntime>` at construction, which meant a second
+/// `RenderCache::install` in one process replaced the runtime
+/// [`super::RenderCache::inspect`], [`super::RenderCache::advance_epoch`],
+/// and friends read, while `register_global_middleware`'s per-type
+/// idempotency (see `install`'s own doc) meant the *already registered*
+/// middleware instance - still holding the first runtime - kept serving
+/// every request. Inspection and epoch control would see one runtime while
+/// requests were served from another. This type now reads
+/// [`super::RenderCache::runtime`] fresh on every request instead, so there
+/// is only ever one source of truth, and repeated `install` calls (this
+/// crate's own test suite calls it once per test) behave correctly with no
+/// special case.
+pub struct RenderCacheMiddleware;
 
 /// The assembled RenderCache runtime: stores, ledger, coordinator, keys,
 /// policy table, configuration, and clock. One instance per installed
@@ -281,16 +290,21 @@ impl Middleware for RenderCacheMiddleware {
     /// 12. A provider failure before the handler ran is decided by the
     ///     route's [`FailurePolicy`]: pass through uncached, or refuse.
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // Read fresh on every request rather than captured at construction
+        // - see the type's own doc (fix round 3, item 5).
+        let Some(runtime) = super::RenderCache::runtime() else {
+            return next(request).await;
+        };
         let Some(pattern) = request.route_pattern().map(str::to_owned) else {
             return next(request).await;
         };
-        if !self.runtime.config.enabled || !matches!(request.method().as_str(), "GET" | "HEAD") {
+        if !runtime.config.enabled || !matches!(request.method().as_str(), "GET" | "HEAD") {
             return next(request).await;
         }
-        let Some(policy) = self.runtime.table.effective_policy(&pattern) else {
+        let Some(policy) = runtime.table.effective_policy(&pattern) else {
             return next(request).await;
         };
-        match self.serve(request, next, &pattern, &policy).await {
+        match self.serve(&runtime, request, next, &pattern, &policy).await {
             Ok(response) => response,
             Err(ProviderFailure(request, next)) => match policy.failure() {
                 FailurePolicy::Open => next(request).await,
@@ -303,6 +317,7 @@ impl Middleware for RenderCacheMiddleware {
 impl RenderCacheMiddleware {
     async fn serve(
         &self,
+        runtime: &Arc<RenderCacheRuntime>,
         request: Request,
         next: Next,
         pattern: &str,
@@ -312,32 +327,36 @@ impl RenderCacheMiddleware {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
         }
-        let epoch = match self.runtime.ledger.epoch().await {
+        let epoch = match runtime.ledger.epoch().await {
             Ok(epoch) => epoch,
             Err(_) => return Err(ProviderFailure(request, next)),
         };
-        let input = key_input(&self.runtime, &request, pattern, policy, epoch);
+        let input = key_input(runtime, &request, pattern, policy, epoch);
         let variance = input.variance.clone();
-        let Ok(key) = RenderKey::derive(&input, &self.runtime.keys) else {
+        let Ok(key) = RenderKey::derive(&input, &runtime.keys) else {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
         };
 
-        let hit = match lookup(&self.runtime, &key).await {
+        let hit = match lookup(runtime, &key).await {
             Ok(hit) => hit,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
         let Some((entry, stored, layer)) = hit else {
             LookupOutcome::Miss.record();
-            return render_and_publish(&self.runtime, request, next, key, policy, epoch, variance)
-                .await;
+            let job = RenderJob {
+                key,
+                epoch,
+                variance,
+            };
+            return render_and_publish(runtime, request, next, policy, job, 0).await;
         };
 
-        let coherence = match coherence(&self.runtime, &key, policy, entry.header()).await {
+        let coherence = match coherence(runtime, &key, policy, entry.header()).await {
             Ok(coherence) => coherence,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
-        let now = self.runtime.now_ms();
+        let now = runtime.now_ms();
         let state = freshness_state(
             policy,
             coherence,
@@ -385,12 +404,15 @@ impl RenderCacheMiddleware {
                 // refresh is skipped.
                 if !variance_depends_on_ambient_context(policy) {
                     self.spawn_background_rebuild(
+                        Arc::clone(runtime),
                         request,
                         next,
-                        key,
                         policy.clone(),
-                        epoch,
-                        variance,
+                        RenderJob {
+                            key,
+                            epoch,
+                            variance,
+                        },
                     );
                 }
                 Ok(response)
@@ -402,9 +424,12 @@ impl RenderCacheMiddleware {
                 // request back - matching `lead_render`'s own capture.
                 let method = request.method().as_str().to_owned();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
-                let outcome =
-                    render_and_publish(&self.runtime, request, next, key, policy, epoch, variance)
-                        .await;
+                let job = RenderJob {
+                    key,
+                    epoch,
+                    variance,
+                };
+                let outcome = render_and_publish(runtime, request, next, policy, job, 0).await;
                 // Stale-on-error exists for a foreground rebuild that fails,
                 // not only for a provider failure before the handler ran: a
                 // handler that itself returns an error or a 5xx status is an
@@ -436,7 +461,12 @@ impl RenderCacheMiddleware {
             }
             FreshnessState::Dead => {
                 LookupOutcome::Miss.record();
-                render_and_publish(&self.runtime, request, next, key, policy, epoch, variance).await
+                let job = RenderJob {
+                    key,
+                    epoch,
+                    variance,
+                };
+                render_and_publish(runtime, request, next, policy, job, 0).await
             }
         }
     }
@@ -448,18 +478,15 @@ impl RenderCacheMiddleware {
     /// admitted as leader at a time.
     fn spawn_background_rebuild(
         &self,
+        runtime: Arc<RenderCacheRuntime>,
         request: Request,
         next: Next,
-        key: RenderKey,
         policy: RenderCachePolicy,
-        epoch: u64,
-        variance: VarianceDescriptor,
+        job: RenderJob,
     ) {
-        let runtime = Arc::clone(&self.runtime);
         Metrics::counter(render_cache_telemetry::REBUILDS).inc();
         tokio::spawn(async move {
-            let _ =
-                render_and_publish(&runtime, request, next, key, &policy, epoch, variance).await;
+            let _ = render_and_publish(&runtime, request, next, &policy, job, 0).await;
         });
     }
 }
@@ -827,28 +854,22 @@ async fn render_and_publish(
     runtime: &Arc<RenderCacheRuntime>,
     request: Request,
     next: Next,
-    key: RenderKey,
     policy: &RenderCachePolicy,
-    epoch: u64,
-    variance: VarianceDescriptor,
+    mut job: RenderJob,
+    depth: u32,
 ) -> Result<Response, ProviderFailure> {
     let now = runtime.now_ms();
-    let admission = match runtime.coordinator.admit(&key, epoch, now).await {
+    let admission = match runtime.coordinator.admit(&job.key, job.epoch, now).await {
         Ok(admission) => admission,
         Err(_) => return Err(ProviderFailure(request, next)),
     };
     match admission {
         RebuildAdmission::Lead(lease) => {
-            let job = RenderJob {
-                key,
-                epoch,
-                variance,
-            };
             Ok(lead_render(runtime, request, next, *lease, policy, job).await)
         }
         RebuildAdmission::Wait(wait) => {
             wait.wait().await;
-            match lookup(runtime, &key).await {
+            match lookup(runtime, &job.key).await {
                 Ok(Some((entry, stored, layer))) => {
                     // Fix round 1, item 4: the leader may have declined to
                     // publish (a moved dependency, an ineligible response,
@@ -860,7 +881,7 @@ async fn render_and_publish(
                     // primary hit path in `serve` applies to every hit,
                     // never served as if the wait itself were the proof.
                     let coherence_result =
-                        match coherence(runtime, &key, policy, entry.header()).await {
+                        match coherence(runtime, &job.key, policy, entry.header()).await {
                             Ok(coherence) => coherence,
                             Err(()) => return Err(ProviderFailure(request, next)),
                         };
@@ -907,12 +928,28 @@ async fn render_and_publish(
                         // fall through to a fresh admission attempt.
                         FreshnessState::StaleOnError | FreshnessState::Dead => {
                             LookupOutcome::Miss.record();
-                            let epoch = match runtime.ledger.epoch().await {
+                            // Fix round 3, item 5: bounds a sustained herd
+                            // against a route that never successfully
+                            // publishes (every render sets a cookie, say) -
+                            // without this, each leader cycle that fails to
+                            // publish adds one nesting level to every waiter
+                            // still recursing behind it. Past the bound,
+                            // render without publishing rather than
+                            // recursing again.
+                            if depth >= MAX_WAIT_REBUILD_DEPTH {
+                                return Ok(next(request).await);
+                            }
+                            job.epoch = match runtime.ledger.epoch().await {
                                 Ok(epoch) => epoch,
                                 Err(_) => return Err(ProviderFailure(request, next)),
                             };
                             Box::pin(render_and_publish(
-                                runtime, request, next, key, policy, epoch, variance,
+                                runtime,
+                                request,
+                                next,
+                                policy,
+                                job,
+                                depth + 1,
                             ))
                             .await
                         }
@@ -990,7 +1027,7 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    if key_omits_observed_privacy(&job, &observed_context, &report) {
+    if key_omits_observed_privacy(&job, &classification, &report) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1070,34 +1107,63 @@ fn finish_fresh_render(
     Ok(out)
 }
 
-/// Whether the render observed something private, or a locale, that the
-/// lookup key's declared variance does not account for.
+/// Whether the key fails to partition by whatever narrowed the served class,
+/// or by an observed locale the key does not account for.
 ///
-/// Classification narrows the served class and the `Cache-Control`/staleness
-/// rules, but it cannot repartition the lookup key: the key was already
-/// derived, before this render ran, from the route's *declared* variance
-/// alone (see [`key_input`]). A route declared `PublicShared` with no
-/// `Principal` variance, whose handler reads an identity out of
-/// `auth::request_state` (bearer-token or remember-me authentication,
-/// rather than a session read - a session read already forces
-/// `Uncacheable` through `session_read`) would otherwise store its render
-/// under one shared, principal-free key and serve it back to a different
-/// signed-in visitor, or an anonymous one. The same shape applies to a
-/// route that renders translated content without declaring `Locale`
-/// variance: one language would be cached for everyone. Declining to store
-/// here - not merely narrowing the class - is the fix; see ruling on this
-/// task's fix round 1, item 1.
+/// # The classification outcome, not which field caused it (fix round 3, item 2)
+///
+/// The original version of this check tested `observed_context.principal`
+/// and `observed_context.tenant` individually against the declared
+/// dimensions. The reviewer broke it with a body driven by `Gate::allows`,
+/// which sets `authorization_read` and narrows the class to `PrivateCached`
+/// (see [`classify`]) without touching either identity field - the guard
+/// never looked at the classification outcome, so it published a body whose
+/// content depended on an authorization decision under a key that did not
+/// partition by anything.
+///
+/// This checks [`ClassificationOutcome::class`] directly: whatever narrowed
+/// the declared class to `PrivateCached` - a principal, a tenant, an
+/// authorization read, or a reason added later - the key must have at least
+/// one dimension whose *resolved* value is `DimensionValue::Private`, or
+/// this declines. One general check that reads the outcome, not an
+/// enumeration of the fields that can produce it, is what "covers ...
+/// anything else added later without anyone remembering to extend a list"
+/// (the round 3 instruction this responds to).
+///
+/// # Declared is not partitioning (fix round 3, item 3)
+///
+/// The original version also treated "the dimension is present in
+/// `job.variance.dimensions()`" as proof the key partitions by it. It does
+/// not: [`variance_descriptor`] declares `Principal` as
+/// `DimensionValue::Anonymous` when no identity is visible at key-derivation
+/// time. A route that declares `Principal`, installed before the
+/// identity-establishing middleware, keys every visitor identically as
+/// Anonymous while the handler - running later in the chain, after identity
+/// is established - still observes a real principal; the dimension is
+/// "declared" but the key never actually partitions by it. Requiring a
+/// *resolved* `DimensionValue::Private` (not merely a present key in the
+/// map) catches this: `Anonymous` and an absent dimension are both treated
+/// as "does not partition."
+///
+/// # Locale, unchanged
+///
+/// The locale check below predates this round and is orthogonal to
+/// `classify`, which has no locale-narrowing reason at all (locale is a
+/// content-variance concern, not a `RepresentationClass` privacy concern):
+/// a route that renders translated content without declaring `Locale`
+/// variance would otherwise cache one language for everyone. See ruling on
+/// this task's fix round 1, item 1, for its original introduction.
 fn key_omits_observed_privacy(
     job: &RenderJob,
-    observed_context: &ObservedContext,
+    classification: &ClassificationOutcome,
     report: &super::collector::CollectorReport,
 ) -> bool {
     let declared = job.variance.dimensions();
-    if observed_context.principal.is_some() && !declared.contains_key(&VarianceDimension::Principal)
+    if classification.class == RepresentationClass::PrivateCached
+        && !declared
+            .values()
+            .any(|value| matches!(value, DimensionValue::Private(_)))
     {
-        return true;
-    }
-    if observed_context.tenant.is_some() && !declared.contains_key(&VarianceDimension::Tenant) {
         return true;
     }
     let locale_observed = report.storable().is_some_and(|identities| {

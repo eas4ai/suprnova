@@ -361,6 +361,21 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
         .build()
         .expect("l1 cached policy");
+    // Fix round 3, item 1: same shape as `leaky_policy` - no declared
+    // `Principal` variance - paired with a handler that reads identity
+    // through a different, previously-uninstrumented accessor.
+    let leaky_via_request_state_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("leaky via request_state policy");
+    // Fix round 3, item 2: no declared variance at all - the shape the
+    // reviewer's `Gate::allows`-driven attack needs, since the point is
+    // that nothing partitions the key by which role was checked.
+    let authz_driven_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("authz driven policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
@@ -371,6 +386,10 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     let router: Router = router.get("/stale-principal/{id}", cached_handler).into();
     let router: Router = router.get("/leased/{id}", cached_handler).into();
     let router: Router = router.get("/l1-cached/{id}", cached_handler).into();
+    let router: Router = router
+        .get("/leaky-via-request-state", leaky_handler_via_request_state)
+        .into();
+    let router: Router = router.get("/authz-driven", authz_driven_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -392,7 +411,14 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .try_render_cache("/leased/{id}", GroupPolicy::from(leased_policy))
         .expect("attach leased policy")
         .try_render_cache("/l1-cached/{id}", GroupPolicy::from(l1_cached_policy))
-        .expect("attach l1 cached policy");
+        .expect("attach l1 cached policy")
+        .try_render_cache(
+            "/leaky-via-request-state",
+            GroupPolicy::from(leaky_via_request_state_policy),
+        )
+        .expect("attach leaky via request_state policy")
+        .try_render_cache("/authz-driven", GroupPolicy::from(authz_driven_policy))
+        .expect("attach authz driven policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -519,6 +545,57 @@ async fn leaky_handler(_request: Request) -> Response {
     Ok(HttpResponse::html(format!("leaky render for {identity}")))
 }
 
+/// Fix round 3, item 1: the reviewer's exact proof - same route, same
+/// policy as [`leaky_handler`], one line changed: reads the identity
+/// through `suprnova::auth_user_id()` (the seam `request_state::read_state`
+/// now instruments) instead of `Auth::id()` (which always called
+/// `observe_principal_read()` explicitly, even before this round).
+async fn leaky_handler_via_request_state(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = suprnova::auth_user_id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "leaky render via request_state for {identity}"
+    )))
+}
+
+/// Fix round 3, item 2: drives the served body entirely from a `Gate::allows`
+/// decision - `x-test-role: admin` gets a different body than any other
+/// value - without reading `Auth::id`, `auth_user_id`, or any other
+/// identity accessor. `Gate::inspect` (which `allows` routes through)
+/// already calls `observe_authorization_read()`, narrowing the served class
+/// to `PrivateCached` via `classify`'s `AuthorizationRead` reason - but the
+/// route below declares no variance dimension at all, so nothing partitions
+/// the key by which role was checked.
+async fn authz_driven_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let is_admin = request.header("x-test-role") == Some("admin");
+    let allowed = suprnova::Gate::allows::<bool, bool>(ROUND3_AUTHZ_GATE, &is_admin, &true);
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "authz render {n}: allowed={allowed}"
+    )))
+}
+
+/// Registered once per process by [`ensure_round3_authz_gate`]; action name
+/// scoped to this fix round so it cannot collide with a gate any other test
+/// file registers.
+const ROUND3_AUTHZ_GATE: &str = "fix-round-3-item-2-authz-gate";
+
+/// Registers [`ROUND3_AUTHZ_GATE`] exactly once for the process:
+/// `Gate::allows` on an undefined gate always denies (see its own doc), so
+/// [`authz_driven_handler`] needs this registered before it can produce a
+/// body that actually varies with `is_admin`. `Gate`'s registry is
+/// independent of this harness's own per-test reset, so registering once
+/// per process (not per test) is correct and sufficient.
+pub fn ensure_round3_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<bool, bool>(ROUND3_AUTHZ_GATE, |is_admin: &bool, _resource| {
+            *is_admin
+        });
+    });
+}
+
 async fn sets_cookie_handler(_request: Request) -> Response {
     counting_route::on_render_start().await;
     Ok(HttpResponse::html("has a cookie").cookie(suprnova::Cookie::new("session", "abc")))
@@ -592,10 +669,18 @@ pub mod counting_route {
         HOLD_NEXT.store(true, Ordering::SeqCst);
     }
 
-    /// Releases a render blocked by [`hold_next_render`]. The blocked
-    /// render is guaranteed to already be waiting by the time a caller
-    /// reaches this after `wait_until_rendering` and `wait_until_waiting`,
-    /// so a plain `notify_waiters` cannot race it.
+    /// Releases a render blocked by [`hold_next_render`].
+    ///
+    /// The blocked render must already be waiting on `release_notify()` by
+    /// the time a caller reaches this - `notify_waiters` stores no permit,
+    /// so a release that fires before the held render's own
+    /// `.notified().await` call is registered is lost forever, and that
+    /// render (and any singleflight waiter parked behind it) hangs with no
+    /// CPU and no output, not a red test. That guarantee holds only when
+    /// the caller waited on [`wait_until_rendering_count`] for the *correct*
+    /// count first - see that function's own doc for why "any render has
+    /// started" is not the same guarantee, and was the bug fix round 3,
+    /// item 4 found and fixed.
     pub fn release_render(_harness: &super::Harness) {
         release_notify().notify_waiters();
     }
@@ -609,13 +694,30 @@ pub mod counting_route {
         WRITE_DURING_NEXT.store(true, Ordering::SeqCst);
     }
 
-    /// Waits until a render has started (has called [`on_render_start`]).
-    /// Race-free: the notify handle is captured before the condition is
-    /// checked, so a notification that fires in between is never missed.
-    pub async fn wait_until_rendering(_harness: &super::Harness) {
+    /// Waits until at least `n` renders have started (called
+    /// [`on_render_start`]) since the harness booted. Race-free: the notify
+    /// handle is captured before the condition is checked, so a
+    /// notification that fires in between is never missed.
+    ///
+    /// Takes an explicit count, not "any render has started" (fix round 3,
+    /// item 4): `RENDER_STARTED` is cumulative across the whole test, never
+    /// reset between renders, so a caller that arms [`hold_next_render`]
+    /// *after* an earlier render already ran must wait for the *next* one
+    /// specifically - passing the count of renders that will have happened
+    /// by the time the held one starts (prior renders, plus one). An
+    /// earlier version of this function checked only `> 0`, which was
+    /// already satisfied by a prior render before `hold_next_render` was
+    /// even armed, so it returned immediately without the held render ever
+    /// having started - and [`release_render`]'s guarantee, which depends
+    /// on this having actually waited for it, did not hold. That produced a
+    /// real, if intermittent, hang: three hangs in forty isolated runs of
+    /// the singleflight test this exact race affected, per the fix round 3
+    /// review, not a background-task capture artifact as an earlier version
+    /// of this project's report claimed.
+    pub async fn wait_until_rendering_count(_harness: &super::Harness, n: u64) {
         loop {
             let notified = rendering_notify().notified();
-            if RENDER_STARTED.load(Ordering::SeqCst) > 0 {
+            if RENDER_STARTED.load(Ordering::SeqCst) >= n {
                 return;
             }
             notified.await;
