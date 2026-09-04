@@ -112,6 +112,9 @@ where
 {
     async fn persist(self) -> Result<Self, FrameworkError> {
         let db = crate::database::DB::connection()?;
-        persist_via_seaorm(self, db.inner()).await
+        let result = persist_via_seaorm(self, db.inner()).await?;
+        let table = crate::database::model::entity_table_name::<E>();
+        crate::render_cache::orm::after_table_write(table).await?;
+        Ok(result)
     }
 }

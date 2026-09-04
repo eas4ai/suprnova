@@ -56,16 +56,19 @@ where
         .map_err(|e| FrameworkError::database(e.to_string()))
 }
 
-/// The table name for an `EntityExtMut` write's render-cache advance.
+/// The table name for a render-cache advance generic over a raw SeaORM
+/// entity rather than Suprnova's `Model` trait.
 ///
-/// `EntityExtMut`'s methods are generic over `Self: EntityTrait`, the raw
-/// SeaORM entity type - not Suprnova's `Model` trait, so there is no
+/// `EntityExtMut`'s methods (and the raw-SeaORM `Persistable` blanket impl
+/// in `factory/persist.rs`) are generic over `Self: EntityTrait` / an
+/// `E: EntityTrait`, not Suprnova's `Model` trait, so there is no
 /// `M::TABLE` constant to reach. `EntityTrait: EntityName`, and
 /// `EntityName: Default` (entities are zero-sized marker structs), so a
 /// default-constructed instance's `table_name()` gives the same
 /// `&'static str` a `#[sea_orm(table_name = "...")]` attribute declares,
-/// with no query and no allocation.
-fn entity_table_name<E: EntityTrait>() -> &'static str {
+/// with no query and no allocation. `pub(crate)`: an internal seam for
+/// exactly these two call sites, not a public helper.
+pub(crate) fn entity_table_name<E: EntityTrait>() -> &'static str {
     <E as sea_orm::EntityName>::table_name(&E::default())
 }
 

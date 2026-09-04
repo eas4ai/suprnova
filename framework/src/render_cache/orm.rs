@@ -98,6 +98,14 @@ where
 /// After a model row was written - `create`, `save`, `update`, `delete`,
 /// `force_delete`, and the soft-delete `restore` override: advances the
 /// row's table and record generations.
+///
+/// Checks `super::is_installed()` before `model_identities` runs, not just
+/// inside `advance`, so an uninstalled app pays neither SQL nor the primary
+/// key's JSON serialization on this path - `advance`'s own check stays as
+/// the gate for its other callers, but this is the hottest entry point
+/// (every `create`/`save`/`update`/`delete` funnels through it), so the
+/// check is duplicated one level up rather than left to run after the work
+/// it is meant to skip.
 pub async fn after_model_write<M>(model: &M) -> Result<(), FrameworkError>
 where
     M: Model,
@@ -111,6 +119,9 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    if !super::is_installed() {
+        return Ok(());
+    }
     advance(model_identities(model)?).await
 }
 
@@ -140,6 +151,12 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    // Same reasoning as `after_model_write`: check before `model_identities`
+    // runs rather than after, since `advance_via_tx` / `advance_via_handle`
+    // check `is_installed` only once they are called.
+    if !super::is_installed() {
+        return Ok(());
+    }
     super::ledger::advance_via_tx(tx, &model_identities(model)?).await
 }
 

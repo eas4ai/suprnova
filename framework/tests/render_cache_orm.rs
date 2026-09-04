@@ -13,7 +13,7 @@ use suprnova::attrs;
 use suprnova::eloquent::{MassPrunable, prune_one};
 use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::ledger::SqlGenerationLedger;
-use suprnova::{DB, FrameworkError, Model};
+use suprnova::{DB, FrameworkError, Model, Persistable};
 use suprnova_live::render_cache::generation::GenerationLedger;
 
 mod render_cache_support;
@@ -951,6 +951,123 @@ async fn all_with_tx_shims_advance_on_commit() {
     );
 }
 
+/// fix3 item 4: `all_with_tx_shims_advance_on_commit` above proved only the
+/// committed half for `create_with_tx`/`update_with_tx`/`delete_with_tx`/
+/// `force_delete_with_tx`. `save_with_tx` already had the rollback
+/// discriminator (`with_tx_writes_advance_only_on_commit_never_on_rollback`
+/// above) - this gives the other four the same proof: not "did the
+/// committed case work" but "did a rolled back one leave the generation
+/// exactly where it started."
+#[tokio::test]
+async fn all_with_tx_shims_advance_only_on_commit_never_on_rollback() {
+    boot().await;
+    let ledger = SqlGenerationLedger::new();
+    let table = DependencyIdentity::table("posts");
+
+    // create_with_tx, rolled back: no row ever commits, so the table
+    // generation must be exactly what it was before the attempt.
+    let before_create = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    let tx = DB::begin_transaction().await.expect("begin");
+    Post::create_with_tx(&tx, attrs! { title: "rolled back create" })
+        .await
+        .expect("create_with_tx");
+    tx.rollback().await.expect("rollback");
+    let after_create = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table);
+    assert_eq!(
+        after_create, before_create,
+        "a rolled back create_with_tx must advance nothing"
+    );
+
+    // Committed fixture row for the remaining three shims.
+    let base = Post::create(attrs! { title: "base" })
+        .await
+        .expect("create");
+    let record = DependencyIdentity::record("posts", base.id.to_string().as_bytes());
+    let baseline = ledger
+        .current(&[table.digest(), record.digest()])
+        .await
+        .expect("current");
+    let (table_gen, record_gen) = (baseline.get(&table), baseline.get(&record));
+
+    // update_with_tx, rolled back: neither generation moves.
+    let tx = DB::begin_transaction().await.expect("begin");
+    let updated = base
+        .clone()
+        .update_with_tx(&tx, attrs! { title: "updated then rolled back" })
+        .await
+        .expect("update_with_tx");
+    tx.rollback().await.expect("rollback");
+    let after_update = ledger
+        .current(&[table.digest(), record.digest()])
+        .await
+        .expect("current");
+    assert_eq!(
+        after_update.get(&table),
+        table_gen,
+        "a rolled back update_with_tx must advance nothing"
+    );
+    assert_eq!(
+        after_update.get(&record),
+        record_gen,
+        "a rolled back update_with_tx must advance nothing"
+    );
+
+    // delete_with_tx, rolled back: neither generation moves, and the
+    // DELETE itself is undone, leaving the row in place for the next shim.
+    let tx = DB::begin_transaction().await.expect("begin");
+    updated
+        .clone()
+        .delete_with_tx(&tx)
+        .await
+        .expect("delete_with_tx");
+    tx.rollback().await.expect("rollback");
+    let after_delete = ledger
+        .current(&[table.digest(), record.digest()])
+        .await
+        .expect("current");
+    assert_eq!(
+        after_delete.get(&table),
+        table_gen,
+        "a rolled back delete_with_tx must advance nothing"
+    );
+    assert_eq!(
+        after_delete.get(&record),
+        record_gen,
+        "a rolled back delete_with_tx must advance nothing"
+    );
+
+    // force_delete_with_tx, rolled back: neither generation moves.
+    let tx = DB::begin_transaction().await.expect("begin");
+    updated
+        .clone()
+        .force_delete_with_tx(&tx)
+        .await
+        .expect("force_delete_with_tx");
+    tx.rollback().await.expect("rollback");
+    let after_force_delete = ledger
+        .current(&[table.digest(), record.digest()])
+        .await
+        .expect("current");
+    assert_eq!(
+        after_force_delete.get(&table),
+        table_gen,
+        "a rolled back force_delete_with_tx must advance nothing"
+    );
+    assert_eq!(
+        after_force_delete.get(&record),
+        record_gen,
+        "a rolled back force_delete_with_tx must advance nothing"
+    );
+}
+
 /// fix2 item 5: `delete_one_or_fail` in both branches had no assertions.
 /// `delete_or_fail` picks the branch on whether it is already inside an
 /// ambient transaction - a bare call takes the explicit-tx branch (it
@@ -1084,5 +1201,104 @@ async fn db_table_builder_insert_and_delete_advance_the_table() {
         after_delete,
         after_insert.map(|g| g + 1),
         "DbTableBuilder::delete must advance the table generation"
+    );
+}
+
+// ---- fix3 item 1: both `Persistable` implementations ----------------------
+//
+// `factory/persist.rs` carries two `Persistable` impls: a per-struct one
+// the `#[suprnova::model]` macro emits for Eloquent-facing structs (already
+// instrumented before this fix - `derive_eloquent.rs`), and a second,
+// blanket impl over any raw SeaORM `ModelTrait` type with no Suprnova
+// `Model` at all, which reached `ActiveModelTrait::insert` on the bare
+// connection and advanced nothing. This raw entity is the target for the
+// blanket path; `Widget` (already imported above) stands in for the macro
+// path so both are proven from the same test.
+mod raw_widget {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "raw_widgets")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = true)]
+        pub id: i64,
+        pub name: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[tokio::test]
+async fn both_persistable_implementations_advance_their_table() {
+    boot().await;
+    DB::unprepared(
+        "CREATE TABLE raw_widgets (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await
+    .expect("create raw_widgets table");
+
+    let ledger = SqlGenerationLedger::new();
+
+    // Blanket impl: a raw SeaORM `ModelTrait` type, reached only through
+    // `ActiveModelTrait::insert` on the bare `DB::connection()` - no
+    // `Model` trait, no `M::TABLE`, no ambient transaction routing.
+    let raw_table = DependencyIdentity::table("raw_widgets");
+    let before_raw = ledger
+        .current(&[raw_table.digest()])
+        .await
+        .expect("current")
+        .get(&raw_table);
+    let raw = raw_widget::Model {
+        id: 0,
+        name: "raw".to_owned(),
+    };
+    let raw = raw.persist().await.expect("blanket Persistable::persist");
+    assert!(raw.id > 0, "sqlite assigned the id: {}", raw.id);
+    let after_raw = ledger
+        .current(&[raw_table.digest()])
+        .await
+        .expect("current")
+        .get(&raw_table);
+    assert_eq!(
+        after_raw,
+        Some(before_raw.unwrap_or(0) + 1),
+        "the blanket Persistable impl over a raw SeaORM model must advance its table"
+    );
+
+    // Macro-generated impl: a Suprnova `#[model]` struct, called directly
+    // rather than through `create`/`Factory` so this proves the same
+    // `Persistable::persist` entry point `direct_persistable_call_on_eloquent_struct_works`
+    // (`eloquent_factory_persist.rs`) exercises, side by side with the
+    // blanket impl above. `Tag` (auto-increment integer PK), not `Widget`
+    // (`String` PK) - `persist_via_seaorm` flips every primary-key column
+    // to `NotSet` before inserting so the database can assign it, which
+    // only a database-generated (auto-increment) key can satisfy.
+    let tag_table = DependencyIdentity::table("tags");
+    let before_tag = ledger
+        .current(&[tag_table.digest()])
+        .await
+        .expect("current")
+        .get(&tag_table);
+    let tag = Tag {
+        id: 0,
+        name: "tag".to_owned(),
+        ..Default::default()
+    };
+    tag.persist().await.expect("macro Persistable::persist");
+    let after_tag = ledger
+        .current(&[tag_table.digest()])
+        .await
+        .expect("current")
+        .get(&tag_table);
+    assert_eq!(
+        after_tag,
+        Some(before_tag.unwrap_or(0) + 1),
+        "the macro-generated Persistable impl must advance its table"
     );
 }

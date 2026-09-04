@@ -59,6 +59,28 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
     )
 }
 
+/// Advance the render-cache table generation for `E` after a raw
+/// `ActiveModel` write against one of the mirror entities below.
+///
+/// Every write in this file goes through `db: &C` (a generic
+/// `ConnectionTrait`, threaded explicitly - the hydration transaction
+/// `try_hydrate` opens via `db.begin()`, not Suprnova's own
+/// `DB::transaction`/`ExecutorChoice`), so there is no ambient `CURRENT_TX`
+/// this call could join, the same shape `EntityExtMut` and the raw-SeaORM
+/// `Persistable` blanket impl are already in. This advances the table
+/// identity only (no per-row record - these entities are reached by raw
+/// `ActiveModel`, not a `Model`-trait instance with a `primary_key_value_json`
+/// to build one from), through its own transaction when nothing ambient is
+/// active. A page rendered from a payments entity already records that
+/// table as a dependency via the read collector (these are
+/// `#[suprnova::model]` entities), so leaving this uninstrumented meant a
+/// write here never invalidated a page that had already observed it.
+async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentError> {
+    crate::render_cache::orm::after_table_write(crate::database::model::entity_table_name::<E>())
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))
+}
+
 fn validate_provider_event_id(event: &WebhookEvent) -> Result<(), PaymentError> {
     if event.provider_event_id.trim().is_empty() {
         return Err(PaymentError::Validation(
@@ -160,16 +182,24 @@ async fn handle_webhook_inner(
             process_error: Set(None),
             ..Default::default()
         };
-        if let Err(e) = record.insert(db).await {
-            if !is_unique_violation(&e) {
-                tracing::error!(error = %e, "failed to persist webhook event");
-                return err_response(500, "persist");
+        match record.insert(db).await {
+            Ok(_) => {
+                if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
+                    tracing::error!(error = %e, "failed to advance render-cache generation for webhook event insert");
+                    return err_response(500, "persist");
+                }
             }
-            tracing::debug!(
-                provider = %provider_name,
-                event_id = %event.provider_event_id,
-                "webhook receipt insertion raced; continuing to serialized hydration"
-            );
+            Err(e) => {
+                if !is_unique_violation(&e) {
+                    tracing::error!(error = %e, "failed to persist webhook event");
+                    return err_response(500, "persist");
+                }
+                tracing::debug!(
+                    provider = %provider_name,
+                    event_id = %event.provider_event_id,
+                    "webhook receipt insertion raced; continuing to serialized hydration"
+                );
+            }
         }
     } else {
         // Retry: clear stale process_error from a previous failed attempt so
@@ -177,16 +207,24 @@ async fn handle_webhook_inner(
         if let Some(row) = existing {
             let mut am: webhook_event::ActiveModel = row.into();
             am.process_error = Set(None);
-            if let Err(e) = am.update(db).await {
-                tracing::error!(error = %e, "failed to clear stale process_error before retry");
-                let error = format!("clear stale process_error before retry: {e}");
-                if let Err(mark_error) = mark_failed(db, &event, &error).await {
-                    tracing::error!(
-                        error = %mark_error,
-                        "failed to record webhook retry preparation failure"
-                    );
+            match am.update(db).await {
+                Ok(_) => {
+                    if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
+                        tracing::error!(error = %e, "failed to advance render-cache generation for webhook event retry-clear");
+                        return err_response(503, "hydration-failed");
+                    }
                 }
-                return err_response(503, "hydration-failed");
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to clear stale process_error before retry");
+                    let error = format!("clear stale process_error before retry: {e}");
+                    if let Err(mark_error) = mark_failed(db, &event, &error).await {
+                        tracing::error!(
+                            error = %mark_error,
+                            "failed to record webhook retry preparation failure"
+                        );
+                    }
+                    return err_response(503, "hydration-failed");
+                }
             }
         }
     }
@@ -505,6 +543,7 @@ where
             am.update(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            advance_mirror_table::<subscription::Entity>().await?;
         }
         None => {
             let canceled_at = if mark_canceled {
@@ -529,6 +568,7 @@ where
             am.insert(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            advance_mirror_table::<subscription::Entity>().await?;
         }
     }
     Ok(())
@@ -594,6 +634,7 @@ where
                 am.update(db)
                     .await
                     .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+                advance_mirror_table::<subscription_item::Entity>().await?;
             }
             None => {
                 let am = subscription_item::ActiveModel {
@@ -611,6 +652,7 @@ where
                 am.insert(db)
                     .await
                     .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+                advance_mirror_table::<subscription_item::Entity>().await?;
             }
         }
     }
@@ -626,6 +668,7 @@ where
         am.delete(db)
             .await
             .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        advance_mirror_table::<subscription_item::Entity>().await?;
     }
 
     Ok(())
@@ -670,6 +713,7 @@ where
             am.update(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            advance_mirror_table::<transaction::Entity>().await?;
         }
         None => {
             let am = transaction::ActiveModel {
@@ -690,6 +734,7 @@ where
             am.insert(db)
                 .await
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            advance_mirror_table::<transaction::Entity>().await?;
         }
     }
     Ok(())
@@ -724,6 +769,7 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    advance_mirror_table::<transaction::Entity>().await?;
     Ok(())
 }
 
@@ -771,6 +817,7 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    advance_mirror_table::<customer::Entity>().await?;
     Ok(())
 }
 
@@ -791,6 +838,7 @@ where
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    advance_mirror_table::<webhook_event::Entity>().await?;
     Ok(())
 }
 
@@ -810,6 +858,9 @@ async fn mark_failed(
         .exec(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    if updated.rows_affected >= 1 {
+        advance_mirror_table::<webhook_event::Entity>().await?;
+    }
     if updated.rows_affected == 1 {
         return Ok(());
     }
