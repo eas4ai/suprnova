@@ -239,11 +239,24 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .layers(StorageLayers::l0_and_l1())
         .build()
         .expect("inverted policy");
+    // Fix round 2 (R99/N4): same freshness numbers as `stale_policy` above
+    // (60_000, 60_000, 120_000), but `PrivateCached` - the class-aware Dead
+    // edge (`fresh_ms` alone, 60_000) differs from the `PublicShared`
+    // edge with identical numbers (`fresh_ms + max(ss, soe)`, 180_000), so
+    // dispatching to both routes and comparing sweep behavior at 60_000 and
+    // at 180_000 proves `store_entry` frames a class-aware retention.
+    let private_l1_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .layers(StorageLayers::l0_and_l1())
+        .build()
+        .expect("private l1 policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
     let router: Router = router.get("/inverted/{id}", stale_handler).into();
+    let router: Router = router.get("/private-l1/{id}", private_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -252,7 +265,9 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .try_render_cache("/stale/{id}", GroupPolicy::from(stale_policy))
         .expect("attach stale policy")
         .try_render_cache("/inverted/{id}", GroupPolicy::from(inverted_policy))
-        .expect("attach inverted policy");
+        .expect("attach inverted policy")
+        .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
+        .expect("attach private l1 policy");
 
     let mut config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);

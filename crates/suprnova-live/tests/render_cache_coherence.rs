@@ -257,7 +257,10 @@ fn dead_after_ms_is_the_widest_stale_band_not_the_stale_on_error_band_alone() {
     // determines the edge, same as `fresh_ms + stale_on_error_ms` would
     // suggest.
     let ordinary = FreshnessPolicy::new(60_000, 60_000, 120_000).expect("policy");
-    assert_eq!(ordinary.dead_after_ms(), 180_000);
+    assert_eq!(
+        ordinary.dead_after_ms(RepresentationClass::PublicShared),
+        180_000
+    );
     assert_eq!(
         evaluate_freshness(
             &ordinary,
@@ -288,7 +291,7 @@ fn dead_after_ms_is_the_widest_stale_band_not_the_stale_on_error_band_alone() {
     // here by a factor of two.
     let inverted = FreshnessPolicy::new(60_000, 120_000, 0).expect("policy accepts this ordering");
     assert_eq!(
-        inverted.dead_after_ms(),
+        inverted.dead_after_ms(RepresentationClass::PublicShared),
         180_000,
         "the wider stale-servable window determines the Dead edge, not stale_on_error_ms"
     );
@@ -314,4 +317,101 @@ fn dead_after_ms_is_the_widest_stale_band_not_the_stale_on_error_band_alone() {
         FreshnessState::Dead,
         "at the true Dead edge (180_000, not 60_000), Dead"
     );
+}
+
+/// Fix round 2 (R99): `dead_after_ms` is class-aware. `PrivateCached` never
+/// gets a stale grace period at all - `evaluate_freshness` puts it at
+/// `Dead` the instant it stops being fresh (spec 16 line 78: private
+/// entries have bounded retention and eviction independent of public
+/// entries) - so for that class the Dead edge is `fresh_ms` alone, not
+/// `fresh_ms + max(stale_servable_ms, stale_on_error_ms)`. A `PublicShared`
+/// representation under the identical policy is not Dead until the wider
+/// edge. This is the reviewer's N4 probe, made permanent.
+#[test]
+fn dead_after_ms_is_class_aware_private_dies_at_fresh_ms_alone() {
+    let policy = FreshnessPolicy::new(60_000, 60_000, 120_000).expect("policy");
+    assert_eq!(
+        policy.dead_after_ms(RepresentationClass::PrivateCached),
+        60_000,
+        "PrivateCached has no stale grace period; its Dead edge is fresh_ms alone"
+    );
+    assert_eq!(
+        policy.dead_after_ms(RepresentationClass::PublicShared),
+        180_000,
+        "PublicShared under the identical policy gets the full stale grace period"
+    );
+    assert_eq!(
+        evaluate_freshness(&policy, RepresentationClass::PrivateCached, 0, 60_000, None),
+        FreshnessState::Dead,
+        "a private entry is Dead the instant it stops being fresh"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &policy,
+            RepresentationClass::PrivateCached,
+            0,
+            60_000 - 1,
+            None
+        ),
+        FreshnessState::Fresh,
+        "one millisecond earlier it is still fresh"
+    );
+    assert_eq!(
+        evaluate_freshness(&policy, RepresentationClass::PublicShared, 0, 60_000, None),
+        FreshnessState::StaleServable,
+        "a public entry with the same numbers is only stale-servable at the same age"
+    );
+}
+
+/// Exhaustive equivalence of the rewritten evaluator (which folds the old
+/// separate "PrivateCached is always Dead past fresh" branch into the
+/// class-aware `dead_after_ms` check - fix round 2, R99) against the
+/// original three-branch-plus-private-check logic, over a dense grid
+/// covering both classes.
+#[test]
+fn evaluate_freshness_matches_the_original_three_branch_logic_for_every_class() {
+    fn original(
+        fresh: u64,
+        ss: u64,
+        soe: u64,
+        class: RepresentationClass,
+        age: u64,
+    ) -> FreshnessState {
+        if age < fresh {
+            return FreshnessState::Fresh;
+        }
+        if class == RepresentationClass::PrivateCached {
+            return FreshnessState::Dead;
+        }
+        let pf = age - fresh;
+        if pf < ss {
+            return FreshnessState::StaleServable;
+        }
+        if pf < soe {
+            return FreshnessState::StaleOnError;
+        }
+        FreshnessState::Dead
+    }
+    let mut checked = 0_u64;
+    for fresh in [0_u64, 1, 5, 10] {
+        for ss in [0_u64, 1, 3, 7, 12] {
+            for soe in [0_u64, 1, 3, 7, 12] {
+                let policy = FreshnessPolicy::new(fresh, ss, soe).expect("policy");
+                for class in [
+                    RepresentationClass::PublicShared,
+                    RepresentationClass::PrivateCached,
+                ] {
+                    for age in 0..40_u64 {
+                        assert_eq!(
+                            evaluate_freshness(&policy, class, 0, age, None),
+                            original(fresh, ss, soe, class, age),
+                            "divergence at fresh={fresh} ss={ss} soe={soe} class={class:?} age={age}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 4 * 5 * 5 * 2 * 40, "sanity: every grid point ran");
 }

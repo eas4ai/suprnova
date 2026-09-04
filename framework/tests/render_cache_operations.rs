@@ -185,6 +185,50 @@ async fn sweep_the_dead_edge_uses_the_widest_stale_band_not_stale_on_error_alone
     assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
 }
 
+/// Fix round 2 (R99/N4): `store_entry` frames a class-aware retention, so a
+/// `PrivateCached` entry is swept at its own Dead point (`fresh_ms` alone,
+/// per spec 16 line 78 - private entries have bounded retention and
+/// eviction independent of public entries) while a `PublicShared` entry
+/// with the identical freshness numbers survives until the wider
+/// `fresh_ms + max(stale_servable_ms, stale_on_error_ms)` edge.
+/// `/private-l1/{id}` and `/stale/{id}` declare the same freshness
+/// (60_000, 60_000, 120_000); only their class differs. Reverting
+/// `store_entry` to the class-blind `dead_after_ms()` call (fix round 1's
+/// shape) makes the private entry's file survive to 180_000 too, failing
+/// the first sweep assertion below.
+#[tokio::test]
+#[serial_test::serial]
+async fn sweep_the_dead_edge_is_class_aware_private_entries_die_at_fresh_ms_alone() {
+    let (harness, dir) = boot_with_file_l1().await;
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    dispatch_get(&harness, "/private-l1/1", &[("x-test-login", "user-7")]).await;
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("dir").count(),
+        2,
+        "both routes use StorageLayers::l0_and_l1, so both publish a file"
+    );
+
+    // Past the private Dead edge (fresh_ms alone, 60_000) but nowhere near
+    // the public one (180_000).
+    clock(&harness).advance_ms(60_000 + 1);
+    let at_private_edge = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(
+        at_private_edge.removed, 1,
+        "only the PrivateCached entry is dead at fresh_ms alone (60_000)"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 1);
+
+    // Past the public Dead edge too.
+    clock(&harness).advance_ms(120_000);
+    let at_public_edge = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(
+        at_public_edge.removed, 1,
+        "the PublicShared entry with the same numbers is dead only at \
+         fresh_ms + max(stale_servable_ms, stale_on_error_ms) (180_000)"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
+
 /// Fix round 1 (R94/F11): an epoch advance clears L0 immediately rather
 /// than leaving unreachable entries to age out.
 #[tokio::test]
@@ -303,5 +347,74 @@ async fn console_inspect_propagates_failure_for_an_unparseable_key() {
     assert!(
         result.is_err(),
         "an unparseable key must fail the command, not resolve Ok(())"
+    );
+}
+
+/// Fix round 2 (N1): a ledger read failing after `render-cache:inspect`'s
+/// primary lookup already succeeded must not print the false epoch `0`; it
+/// prints an honest "unavailable" and still returns the inspection the
+/// caller asked for.
+///
+/// The ledger read and the epoch advance's own write both execute against
+/// the same `suprnova_render_epochs` table, so dropping it fails both
+/// identically - this harness cannot isolate "the advance succeeds and only
+/// the immediately-following read fails" as a distinct SQL-level fault (see
+/// the next test's own doc for how that half is covered instead). What it
+/// can isolate cleanly is this command's read, since `RenderCache::inspect`
+/// itself is a pure L0 lookup with no ledger dependency at all, so its
+/// primary result is unaffected by the table being gone.
+#[tokio::test]
+#[serial_test::serial]
+async fn console_inspect_reports_the_epoch_as_unavailable_when_the_ledger_read_fails() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/private/1", &[("x-test-login", "user-7")]).await;
+    let key = RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("user-7"));
+
+    suprnova::DB::unprepared("DROP TABLE suprnova_render_epochs")
+        .await
+        .expect("drop the epoch table to force the ledger read to fail");
+
+    let report = inspect_report_for_test(&key)
+        .await
+        .expect("the primary inspection succeeds independently of the ledger");
+    assert!(
+        report.contains("current epoch: unavailable"),
+        "N1: an unreadable epoch must be reported honestly, not as a false 0: {report}"
+    );
+}
+
+/// Fix round 2 (N1): `render-cache:epoch-advance` must propagate rather
+/// than print a false `epoch advanced to 0` when the ledger is unavailable.
+///
+/// This harness cannot isolate the exact sequence N1 describes ("the advance
+/// succeeds and only the immediately-following read fails"): `advance_epoch`'s
+/// own `UPDATE` and the read `current_epoch_for_display` performs afterward
+/// both execute against the same `suprnova_render_epochs` table and the same
+/// `epoch` column, so any corruption severe enough to fail the read also
+/// fails the write - there is no way to break only the second statement
+/// with a single-connection SQLite harness. Dropping the table instead
+/// makes `advance_epoch` itself fail first, which the pre-fix-round code
+/// already propagated correctly; what this test actually proves is the
+/// weaker but still meaningful claim the code now guarantees either way:
+/// on any ledger failure reachable from this command, it errors out and
+/// never reaches a codepath that could print a fabricated epoch value.
+/// `current_epoch_for_display`'s own `?` in `epoch_advance_report` (see
+/// `console.rs`) is what makes the specific N1 sequence impossible to
+/// observe printing `0` even though it cannot be independently triggered
+/// here.
+#[tokio::test]
+#[serial_test::serial]
+async fn console_epoch_advance_propagates_when_the_ledger_is_unavailable() {
+    let _harness = boot_with_render_cache().await;
+
+    suprnova::DB::unprepared("DROP TABLE suprnova_render_epochs")
+        .await
+        .expect("drop the epoch table to force the ledger to be unavailable");
+
+    let result = epoch_advance_report_for_test().await;
+    assert!(
+        result.is_err(),
+        "N1: a ledger failure must fail the command, never resolve with a \
+         printed epoch value"
     );
 }

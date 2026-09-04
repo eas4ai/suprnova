@@ -37,15 +37,17 @@ pub fn evaluate_freshness(
     if age < policy.fresh_ms() {
         return FreshnessState::Fresh;
     }
-    if class == RepresentationClass::PrivateCached {
-        return FreshnessState::Dead;
-    }
     // Single source of truth for the Dead edge (see `dead_after_ms`'s own
-    // doc): checking it first, rather than falling through to `Dead` after
-    // two threshold comparisons, is what lets a retention-based cleanup
-    // (a file-backed L1's sweep) call the same function and never disagree
-    // with this evaluator about when an entry is truly dead.
-    if age >= policy.dead_after_ms() {
+    // doc), class-aware (fix round 2, R99): checking it first, rather than
+    // falling through to `Dead` after two threshold comparisons, is what
+    // lets a retention-based cleanup (a file-backed L1's sweep) call the
+    // same function and never disagree with this evaluator about when an
+    // entry is truly dead - `PrivateCached` included, since
+    // `dead_after_ms(PrivateCached)` is `fresh_ms` alone and `age >=
+    // fresh_ms` already holds here, so this subsumes the old separate
+    // "private is dead past fresh" check rather than duplicating it as a
+    // second rule that could drift from this one.
+    if age >= policy.dead_after_ms(class) {
         return FreshnessState::Dead;
     }
     let past_fresh = age - policy.fresh_ms();

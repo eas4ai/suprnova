@@ -1822,19 +1822,25 @@ async fn store_entry(
     if policy.layers().l1()
         && let Some(l1) = &runtime.l1
     {
-        // The Dead edge (fix round 1, R93/F2): the single source of truth
-        // `coherence::evaluate_freshness` uses for its own Dead boundary,
-        // so `FileRenderStore::sweep` can never disagree with it about
-        // when this entry is truly dead. This is `fresh_ms +
-        // max(stale_servable_ms, stale_on_error_ms)`, not `fresh_ms +
-        // stale_on_error_ms` - the two stale bands are both measured from
-        // the end of the fresh interval, not cumulatively, and
-        // `FreshnessPolicy::new` does not require `stale_on_error_ms >=
-        // stale_servable_ms`. This is the one call site with a policy in
-        // scope to compute a real retention from; every other
-        // `RenderStore::publish` caller (including `file_store.rs`'s own
-        // tests) passes its own explicit value.
-        let retention_ms = policy.freshness().dead_after_ms();
+        // The Dead edge (fix round 1, R93/F2; class-aware since fix round
+        // 2, R99): the single source of truth `coherence::evaluate_freshness`
+        // uses for its own Dead boundary, so `FileRenderStore::sweep` can
+        // never disagree with it about when this entry is truly dead. This
+        // is `fresh_ms + max(stale_servable_ms, stale_on_error_ms)` for
+        // every class except `PrivateCached` (the two stale bands are both
+        // measured from the end of the fresh interval, not cumulatively,
+        // and `FreshnessPolicy::new` does not require `stale_on_error_ms >=
+        // stale_servable_ms`); `PrivateCached` gets no stale grace period at
+        // all and is `fresh_ms` alone - framing the class-blind value here
+        // for a private entry left its L1 file retained for the full stale
+        // window past the point it can never be served again (spec 16 line
+        // 78: private entries have bounded retention and eviction
+        // independent of public entries). This is the one call site with a
+        // policy and a classified entry in scope to compute a real
+        // retention from; every other `RenderStore::publish` caller
+        // (including `file_store.rs`'s own tests) passes its own explicit
+        // value.
+        let retention_ms = policy.freshness().dead_after_ms(entry.header().class);
         let _ = l1
             .publish(&job.key, encoded, fence, now, retention_ms)
             .await;

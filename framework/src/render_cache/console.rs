@@ -37,18 +37,23 @@ use super::RenderCache;
 const EPOCH_ADVANCE_COMMAND_NAME: &str = "render-cache:epoch-advance";
 const INSPECT_COMMAND_NAME: &str = "render-cache:inspect";
 
-/// The current authority epoch, for display only. `unwrap_or_default`
-/// (reads as epoch `0`) rather than propagating a second failure: this is
-/// called only after the primary operation (`advance_epoch` or `inspect`)
-/// has already succeeded against an installed runtime, so a failure here
-/// would be surprising, not a normal case worth failing the whole command
-/// over - the primary result is still worth printing and returning `Ok`
-/// for.
-async fn current_epoch_for_display() -> u64 {
+/// The current authority epoch, or `Err` if it could not be read.
+///
+/// Fix round 2 (N1): this used to fall back to `unwrap_or_default()` (epoch
+/// `0`) on a failed read, which printed a specific, false epoch value to an
+/// operator rather than a hint that anything went wrong - `0` is not even a
+/// reachable epoch (the migration seeds the singleton row at `1`), so it
+/// was a de facto sentinel nothing told the caller about. Callers now
+/// decide for themselves how to treat a failure here: `epoch_advance_report`
+/// propagates it, since reporting the epoch it just advanced to is the
+/// entire point of that command; `inspect_report` prints an explicit
+/// "unavailable" instead, since its primary result (the entry inspection)
+/// already succeeded independently of this read.
+async fn current_epoch_for_display() -> Result<u64, FrameworkError> {
     RenderCache::store_inspection()
         .await
         .map(|store| store.epoch)
-        .unwrap_or_default()
+        .map_err(|_| FrameworkError::internal("render-cache: could not read the current epoch"))
 }
 
 /// Builds exactly the text `render-cache:epoch-advance` prints, so a test
@@ -57,7 +62,9 @@ async fn epoch_advance_report() -> Result<String, FrameworkError> {
     RenderCache::advance_epoch()
         .await
         .map_err(|_| FrameworkError::internal("render-cache:epoch-advance failed"))?;
-    let epoch = current_epoch_for_display().await;
+    // N1: propagate rather than print a false `0` - see
+    // `current_epoch_for_display`'s own doc.
+    let epoch = current_epoch_for_display().await?;
     Ok(format!("epoch advanced to {epoch}"))
 }
 
@@ -121,7 +128,14 @@ async fn inspect_report(key: &str) -> Result<String, FrameworkError> {
     let inspection = RenderCache::inspect(key).await.map_err(|_| {
         FrameworkError::internal("render-cache:inspect failed: invalid key or no runtime installed")
     })?;
-    let epoch = current_epoch_for_display().await;
+    // N1: the primary result above already succeeded, so a failure reading
+    // the current epoch is reported honestly alongside it rather than
+    // failing the whole command or printing a false `0` - see
+    // `current_epoch_for_display`'s own doc.
+    let epoch = match current_epoch_for_display().await {
+        Ok(epoch) => epoch.to_string(),
+        Err(_) => "unavailable".to_owned(),
+    };
     Ok(match inspection {
         Some(inspection) => format!("{inspection:?} (current epoch: {epoch})"),
         None => format!("no entry (current epoch: {epoch})"),

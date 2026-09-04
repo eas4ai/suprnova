@@ -886,9 +886,8 @@ async fn a_corrupted_entrys_tally_stays_intact_when_its_removal_fails() {
     assert_eq!(inspection.bytes, 40);
 }
 
-/// `publish_with_retention` frames a real `stale_on_error_ms`; `sweep`
-/// removes the file at, but not before, `published_at_ms +
-/// stale_on_error_ms`.
+/// `publish`'s `retention_ms` argument frames a real value; `sweep`
+/// removes the file at, but not before, `published_at_ms + retention_ms`.
 #[tokio::test]
 async fn sweep_removes_an_entry_whose_retention_window_has_elapsed() {
     let dir = tempfile::tempdir().expect("tempdir");

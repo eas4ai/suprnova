@@ -85,18 +85,26 @@ impl FreshnessPolicy {
     /// [`super::coherence::evaluate_freshness`] and any retention-based
     /// cleanup (a file-backed L1's sweep, for one) must agree on.
     ///
-    /// This is **not** `fresh_ms + stale_on_error_ms`: the stale-servable
-    /// and stale-on-error windows are both measured from the same point -
-    /// the end of the fresh interval, not cumulatively - and this
-    /// constructor does not require `stale_on_error_ms >=
+    /// Class-aware (fix round 2, R99): `PrivateCached` never gets a stale
+    /// grace period at all - [`super::coherence::evaluate_freshness`] puts
+    /// it at `Dead` the instant it stops being fresh, per spec 16's private
+    /// entries having bounded retention and eviction independent of public
+    /// entries - so for that class this is `fresh_ms` alone. For every
+    /// other class this is **not** `fresh_ms + stale_on_error_ms`: the
+    /// stale-servable and stale-on-error windows are both measured from the
+    /// same point - the end of the fresh interval, not cumulatively - and
+    /// this constructor does not require `stale_on_error_ms >=
     /// stale_servable_ms`. A policy may legally declare a wider
     /// stale-servable window than its stale-on-error window (serve stale
     /// content longer than it tolerates a failed rebuild), in which case
     /// the stale-servable window alone determines when the representation
-    /// is truly dead. The correct edge is therefore
-    /// `fresh_ms + max(stale_servable_ms, stale_on_error_ms)`.
+    /// is truly dead. The edge for every non-`PrivateCached` class is
+    /// therefore `fresh_ms + max(stale_servable_ms, stale_on_error_ms)`.
     #[must_use]
-    pub const fn dead_after_ms(&self) -> u64 {
+    pub const fn dead_after_ms(&self, class: RepresentationClass) -> u64 {
+        if matches!(class, RepresentationClass::PrivateCached) {
+            return self.fresh_ms;
+        }
         let widest_stale = if self.stale_servable_ms > self.stale_on_error_ms {
             self.stale_servable_ms
         } else {

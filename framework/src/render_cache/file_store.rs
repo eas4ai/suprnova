@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(decoded.published_at_ms, 1_234_567);
         assert_eq!(
             decoded.retention_ms, 60_000,
-            "retention_ms round-trips even though no reader consumes it yet"
+            "retention_ms round-trips; sweep has read it since Task 16"
         );
         assert_eq!(decoded.payload.as_ref(), payload.as_slice());
     }

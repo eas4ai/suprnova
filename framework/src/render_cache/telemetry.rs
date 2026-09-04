@@ -8,6 +8,9 @@ pub const HITS: &str = "suprnova.render_cache.hits";
 pub const PUBLICATIONS: &str = "suprnova.render_cache.publications";
 /// Counter: RenderCache rebuilds coordinated.
 pub const REBUILDS: &str = "suprnova.render_cache.rebuilds";
-/// Attribute `outcome` values: `l0`, `l1`, `conditional`, `stale`, `miss`,
-/// `bypass`, `rebuild`, `declined`, `fenced`, `moved`.
+/// Attribute `outcome` values, emitted only on `LOOKUPS` and `HITS` (see
+/// `middleware.rs`'s `LookupOutcome::as_str`): `l0`, `l1`, `conditional`,
+/// `stale`, `miss`, `bypass`, `moved`, `declined`. `PUBLICATIONS` and
+/// `REBUILDS` carry no `outcome` attribute at all - each has exactly one
+/// outcome.
 pub const OUTCOME: &str = "outcome";
