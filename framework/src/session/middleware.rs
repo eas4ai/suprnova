@@ -430,6 +430,14 @@ pub fn session_mut<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut SessionData) -> R,
 {
+    // Fix round 4, Leak C: `session()` records a session read;
+    // `session_mut` - the idiomatic way to read and touch session state in
+    // one call - did not, even though the caller's closure can read
+    // whatever it also mutates. Recorded unconditionally, matching
+    // `session()`'s own posture: over-observing a pure-write call is safe
+    // (it costs a caching opportunity, never a leak), under-observing a
+    // read is not.
+    crate::render_cache::collector::observe_session_read();
     SESSION_CONTEXT
         .try_with(|slot| slot.lock().unwrap().as_mut().map(f))
         .ok()

@@ -17,7 +17,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use suprnova::auth::Authenticatable;
+use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
@@ -90,6 +90,63 @@ impl suprnova::Middleware for LoginHeader {
     async fn handle(&self, request: Request, next: Next) -> Response {
         if let Some(id) = request.header("x-test-login") {
             Auth::set_user(Arc::new(Principal(id.to_owned())));
+        }
+        next(request).await
+    }
+}
+
+/// Resolves the Live tenant from an `x-test-tenant` header, for fix round
+/// 4's tenant-partitioning tests. Wired through the real
+/// `suprnova::live::LiveTenantMiddleware`, exactly like a production tenant
+/// resolver, rather than setting `Request::live_tenant` directly - that
+/// setter is crate-private, reachable only through this middleware.
+pub struct TestTenantResolver;
+
+#[async_trait]
+impl suprnova::live::LiveTenantResolver for TestTenantResolver {
+    async fn resolve(&self, request: &Request) -> Result<Option<String>, FrameworkError> {
+        Ok(request.header("x-test-tenant").map(str::to_owned))
+    }
+}
+
+/// A `UserProvider` whose `retrieve_by_id` is never actually exercised in
+/// the fix round 4 Leak B reproduction: the test sets the named guard's
+/// user directly via `set_user`, which the guard's own per-request cache
+/// (`request_state::guard_user`) serves back without a provider lookup.
+struct NamedGuardDummyProvider;
+
+#[async_trait]
+impl UserProvider for NamedGuardDummyProvider {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// The name a fix round 4 Leak B route resolves its identity through - a
+/// guard other than the configured default - so `Auth::id()` (the default
+/// guard's own slot) never reflects an identity this middleware sets.
+const NAMED_GUARD: &str = "admin-guard-round-4";
+
+/// Stands in for a non-default guard's own sign-in, the same shape
+/// [`LoginHeader`] provides for the default guard: a request carrying
+/// `x-test-named-login: <id>` is signed in on [`NAMED_GUARD`] specifically.
+/// `SessionGuard::set_user` mirrors into the generic `Auth`-facade slot
+/// only when the guard's name matches the configured default guard (see
+/// `auth::request_state::set_guard_user`'s own doc), so `Auth::id()` stays
+/// `None` for a request that only this middleware touched - exactly the
+/// shape that defeated round 3's re-read-based classification (fix round
+/// 4, Leak B).
+pub struct NamedGuardLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for NamedGuardLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = request.header("x-test-named-login") {
+            let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+            guard.set_user(Arc::new(Principal(id.to_owned()))).await;
         }
         next(request).await
     }
@@ -376,6 +433,64 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("authz driven policy");
+    // Fix round 4, Leak B: no declared variance at all, matching `/leaky`'s
+    // shape - the point is that classification must narrow (and this guard
+    // must then decline, since nothing partitions) regardless of which
+    // accessor observed the identity.
+    let leaky_via_named_guard_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("leaky via named guard policy");
+    // Fix round 4, Leak C: no declared variance; the point is that a
+    // `session_mut` read alone must force Uncacheable.
+    let session_mut_reading_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("session mut reading policy");
+    // Fix round 4: one pair of policies per classification reason - the
+    // wrong dimension declared for that reason, and the matching one -
+    // parameterising the leak shape instead of pinning it to one remembered
+    // route. `PrincipalObserved`'s pair:
+    let tenant_declared_reads_principal_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads principal policy");
+    let principal_declared_reads_principal_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads principal policy");
+    // `TenantObserved`'s pair:
+    let principal_declared_reads_tenant_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads tenant policy");
+    let tenant_declared_reads_tenant_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads tenant policy");
+    // `AuthorizationRead`'s pair (requires `Principal`, per that reason's
+    // own "the decision is per-user" rule, not `Tenant`):
+    let tenant_declared_reads_authz_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads authz policy");
+    let principal_declared_reads_authz_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads authz policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
@@ -390,6 +505,51 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .get("/leaky-via-request-state", leaky_handler_via_request_state)
         .into();
     let router: Router = router.get("/authz-driven", authz_driven_handler).into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-principal/{id}",
+            reads_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-principal/{id}",
+            reads_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-tenant/{id}",
+            reads_tenant_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-tenant/{id}",
+            reads_tenant_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-authz/{id}",
+            reads_authz_by_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-authz/{id}",
+            reads_authz_by_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/leaky-via-named-guard",
+            reads_via_named_guard_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get("/session-mut-reading", session_mut_reading_handler)
+        .into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -418,7 +578,47 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         )
         .expect("attach leaky via request_state policy")
         .try_render_cache("/authz-driven", GroupPolicy::from(authz_driven_policy))
-        .expect("attach authz driven policy");
+        .expect("attach authz driven policy")
+        .try_render_cache(
+            "/tenant-declared-reads-principal/{id}",
+            GroupPolicy::from(tenant_declared_reads_principal_policy),
+        )
+        .expect("attach tenant declared reads principal policy")
+        .try_render_cache(
+            "/principal-declared-reads-principal/{id}",
+            GroupPolicy::from(principal_declared_reads_principal_policy),
+        )
+        .expect("attach principal declared reads principal policy")
+        .try_render_cache(
+            "/principal-declared-reads-tenant/{id}",
+            GroupPolicy::from(principal_declared_reads_tenant_policy),
+        )
+        .expect("attach principal declared reads tenant policy")
+        .try_render_cache(
+            "/tenant-declared-reads-tenant/{id}",
+            GroupPolicy::from(tenant_declared_reads_tenant_policy),
+        )
+        .expect("attach tenant declared reads tenant policy")
+        .try_render_cache(
+            "/tenant-declared-reads-authz/{id}",
+            GroupPolicy::from(tenant_declared_reads_authz_policy),
+        )
+        .expect("attach tenant declared reads authz policy")
+        .try_render_cache(
+            "/principal-declared-reads-authz/{id}",
+            GroupPolicy::from(principal_declared_reads_authz_policy),
+        )
+        .expect("attach principal declared reads authz policy")
+        .try_render_cache(
+            "/leaky-via-named-guard",
+            GroupPolicy::from(leaky_via_named_guard_policy),
+        )
+        .expect("attach leaky via named guard policy")
+        .try_render_cache(
+            "/session-mut-reading",
+            GroupPolicy::from(session_mut_reading_policy),
+        )
+        .expect("attach session mut reading policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -455,6 +655,16 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     // deployment can produce and which would have hidden exactly the
     // ordering bug fix round 1 found.
     suprnova::middleware::register_global_middleware(LoginHeader);
+    // Fix round 4, Leak B: the non-default-guard sign-in, same ordering
+    // requirement as `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(NamedGuardLoginHeader);
+    // Fix round 4: the tenant resolver, same ordering requirement as
+    // `LoginHeader` above and for the same reason - `RenderCacheMiddleware`
+    // reads `Request::live_tenant()` while building declared `Tenant`
+    // variance, which is only meaningful once this has already run.
+    suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
+        Arc::new(TestTenantResolver),
+    ));
     let router = RenderCache::install(router, config)
         .await
         .expect("install render cache");
@@ -594,6 +804,99 @@ pub fn ensure_round3_authz_gate() {
             *is_admin
         });
     });
+}
+
+/// Fix round 4: reads identity through `Auth::id()` and includes it in the
+/// body, used across three routes with different declared variance so the
+/// same reason (`PrincipalObserved`) can be tested against a route that
+/// declares the wrong dimension, the right one, and (for `AuthorizationRead`,
+/// below) as the input to a per-user gate decision.
+async fn reads_principal_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "principal-reading render for {identity}"
+    )))
+}
+
+/// Fix round 4: reads the Live tenant through `Request::live_tenant()`
+/// (which now records a `tenant_read` observation on every call) and
+/// includes it in the body.
+async fn reads_tenant_leaky_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    Ok(HttpResponse::html(format!(
+        "tenant-reading render for {tenant}"
+    )))
+}
+
+/// Registered once per process by [`ensure_round4_per_user_authz_gate`].
+/// Deliberately keyed by the caller's own id (a `String`), not a bare
+/// `bool` like [`ROUND3_AUTHZ_GATE`]: the point of this gate is that the
+/// decision genuinely varies *by principal* ("admin" allowed, anyone else
+/// denied), which is what makes `Principal` the dimension `AuthorizationRead`
+/// must require - not merely a role flag carried on the request.
+const ROUND4_PER_USER_AUTHZ_GATE: &str = "fix-round-4-per-user-authz-gate";
+
+/// Registers [`ROUND4_PER_USER_AUTHZ_GATE`] exactly once for the process.
+/// See [`ensure_round3_authz_gate`]'s own doc for why once-per-process is
+/// correct and sufficient here too.
+pub fn ensure_round4_per_user_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<String, bool>(
+            ROUND4_PER_USER_AUTHZ_GATE,
+            |user: &String, _resource| user == "admin",
+        );
+    });
+}
+
+/// Fix round 4: drives the served body from a per-user `Gate::allows`
+/// decision - reading identity through `Auth::id()` to decide the
+/// decision, so `principal_read` is set (via `Auth::id()`'s own explicit
+/// observation) *and* `authorization_read` is set (via `Gate::inspect`'s),
+/// exactly the shape `AuthorizationRead` names `Principal` as the required
+/// dimension for.
+async fn reads_authz_by_principal_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let user = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    let allowed = suprnova::Gate::allows::<String, bool>(ROUND4_PER_USER_AUTHZ_GATE, &user, &true);
+    Ok(HttpResponse::html(format!(
+        "authz-by-principal render for {user}: allowed={allowed}"
+    )))
+}
+
+/// Fix round 4, Leak B (proven): reads identity through the named,
+/// non-default guard [`NAMED_GUARD`] rather than `Auth::id()`. Round 3's
+/// seam makes `SessionGuard::id`'s underlying `guard_auth_user_id` read
+/// record a `principal_read` observation regardless; the leak was that
+/// classification then re-read `Auth::id()` specifically to build the
+/// observed value, and that accessor returns `None` for an identity this
+/// guard alone holds.
+async fn reads_via_named_guard_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "named-guard render for {identity}"
+    )))
+}
+
+/// Fix round 4, Leak C (proven): reads session state through `session_mut`
+/// rather than `session()`. Before this round, `session_mut` recorded no
+/// observation at all, so a render depending on session state through this
+/// idiomatic read-and-mutate accessor was never forced `Uncacheable` the
+/// way an equivalent `session()` read already was.
+async fn session_mut_reading_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = suprnova::session::session_mut(|session| session.get::<String>("anything"));
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("session-mut render {n}")))
 }
 
 async fn sets_cookie_handler(_request: Request) -> Response {

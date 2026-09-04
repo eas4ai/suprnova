@@ -27,7 +27,7 @@ mod render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
-    dispatch_get, dispatch_head, ensure_round3_authz_gate,
+    dispatch_get, dispatch_head, ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
 };
 
 #[tokio::test]
@@ -726,5 +726,302 @@ async fn a_second_install_in_one_process_is_served_by_the_runtime_it_installed()
         RenderCache::inspect(&key).await.expect("inspect").is_some(),
         "a request dispatched after a second install must be served by, and publish \
          into, the runtime that install just replaced the slot with"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Fix round 4: the guard reconciles what the render observed against what
+// the key partitioned by through loose proxies, so each patch closed one
+// proxy and left another. These tests are parameterised over
+// `ClassificationReason` rather than pinned to two remembered leak shapes:
+// for each reason, a route declaring the *wrong* dimension must decline to
+// store (proven via render count and cross-identity body checks, the same
+// technique the reviewer used), and a route declaring the *matching*
+// dimension must serve a correctly partitioned cache. Round 3's two attack
+// tests are kept above as the record of what actually happened; these are
+// additional, not a replacement.
+// ---------------------------------------------------------------------
+
+/// Fix round 4, Leak A (Critical, proven) and `PrincipalObserved`'s half of
+/// the parameterised rule. A route declaring `Tenant` variance whose
+/// handler reads an identity narrows for a `PrincipalObserved` reason;
+/// round 3's guard passed because `Tenant` happened to resolve private,
+/// even though `Tenant` is not the dimension that reason names. Verified
+/// failing (bob's render served alice's identity, render count staying at
+/// 1) against the pre-fix guard by temporarily restoring the "some
+/// dimension is private" check.
+#[tokio::test]
+#[serial_test::serial]
+async fn principal_observed_requires_the_principal_dimension_to_partition() {
+    let harness = boot_with_render_cache().await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-principal/1",
+        &[("x-test-tenant", "acme"), ("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice.body).contains("alice"));
+
+    let bob = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-principal/1",
+        &[("x-test-tenant", "acme"), ("x-test-login", "bob")],
+    )
+    .await;
+    assert!(
+        !String::from_utf8_lossy(&bob.body).contains("alice"),
+        "a route declaring Tenant, not Principal, must never serve one principal's \
+         PrincipalObserved-narrowed body to a different principal in the same tenant"
+    );
+    assert!(String::from_utf8_lossy(&bob.body).contains("bob"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store: Tenant resolves private for this key, \
+         but Tenant is not the dimension PrincipalObserved requires"
+    );
+
+    // The matching dimension: a route declaring Principal partitions
+    // correctly - a repeat from the same principal is a hit, a different
+    // principal is a genuine, correctly separated miss.
+    let carol_first = dispatch_get(
+        &harness,
+        "/principal-declared-reads-principal/1",
+        &[("x-test-login", "carol")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&carol_first.body).contains("carol"));
+    let renders_after_carol = counting_route::renders();
+
+    let carol_again = dispatch_get(
+        &harness,
+        "/principal-declared-reads-principal/1",
+        &[("x-test-login", "carol")],
+    )
+    .await;
+    assert_eq!(carol_again.body, carol_first.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_carol,
+        "a repeat request from the same, matching principal is a cache hit"
+    );
+
+    let dave = dispatch_get(
+        &harness,
+        "/principal-declared-reads-principal/1",
+        &[("x-test-login", "dave")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&dave.body).contains("dave"));
+    assert!(!String::from_utf8_lossy(&dave.body).contains("carol"));
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_carol + 1,
+        "a different principal is a genuine miss, correctly partitioned"
+    );
+}
+
+/// `TenantObserved`'s half of the parameterised rule: a route declaring
+/// `Principal` variance whose handler reads the Live tenant narrows for a
+/// `TenantObserved` reason, but `Principal` is not the dimension that
+/// reason names. Verified failing (globex's render served acme's tenant
+/// identity) against the pre-fix guard the same way as the principal test
+/// above.
+#[tokio::test]
+#[serial_test::serial]
+async fn tenant_observed_requires_the_tenant_dimension_to_partition() {
+    let harness = boot_with_render_cache().await;
+
+    let acme = dispatch_get(
+        &harness,
+        "/principal-declared-reads-tenant/1",
+        &[("x-test-login", "shared-user"), ("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&acme.body).contains("acme"));
+
+    let globex = dispatch_get(
+        &harness,
+        "/principal-declared-reads-tenant/1",
+        &[("x-test-login", "shared-user"), ("x-test-tenant", "globex")],
+    )
+    .await;
+    assert!(
+        !String::from_utf8_lossy(&globex.body).contains("acme"),
+        "a route declaring Principal, not Tenant, must never serve one tenant's \
+         TenantObserved-narrowed body to a different tenant behind the same principal"
+    );
+    assert!(String::from_utf8_lossy(&globex.body).contains("globex"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store"
+    );
+
+    let acme2_first = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-tenant/1",
+        &[("x-test-tenant", "acme2")],
+    )
+    .await;
+    let renders_after = counting_route::renders();
+
+    let acme2_again = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-tenant/1",
+        &[("x-test-tenant", "acme2")],
+    )
+    .await;
+    assert_eq!(acme2_again.body, acme2_first.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after,
+        "a repeat request for the same, matching tenant is a cache hit"
+    );
+
+    let globex2 = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-tenant/1",
+        &[("x-test-tenant", "globex2")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&globex2.body).contains("globex2"));
+    assert_eq!(
+        counting_route::renders(),
+        renders_after + 1,
+        "a different tenant is a genuine miss, correctly partitioned"
+    );
+}
+
+/// `AuthorizationRead`'s half of the parameterised rule: a route declaring
+/// `Tenant` variance whose handler drives its body from a per-user
+/// `Gate::allows` decision narrows for an `AuthorizationRead` reason, which
+/// requires `Principal` (the decision is per-user), not `Tenant`.
+#[tokio::test]
+#[serial_test::serial]
+async fn authorization_read_requires_the_principal_dimension_to_partition() {
+    ensure_round4_per_user_authz_gate();
+    let harness = boot_with_render_cache().await;
+
+    let admin = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-authz/1",
+        &[("x-test-tenant", "acme"), ("x-test-login", "admin")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&admin.body).contains("allowed=true"));
+
+    let guest = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-authz/1",
+        &[("x-test-tenant", "acme"), ("x-test-login", "guest")],
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&guest.body).contains("allowed=false"),
+        "a route declaring Tenant, not Principal, must never serve an admin's per-user \
+         authorization decision to a non-admin sharing the same tenant"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store"
+    );
+
+    let admin2_first = dispatch_get(
+        &harness,
+        "/principal-declared-reads-authz/1",
+        &[("x-test-login", "admin")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&admin2_first.body).contains("allowed=true"));
+    let renders_after = counting_route::renders();
+
+    let admin2_again = dispatch_get(
+        &harness,
+        "/principal-declared-reads-authz/1",
+        &[("x-test-login", "admin")],
+    )
+    .await;
+    assert_eq!(admin2_again.body, admin2_first.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after,
+        "a repeat request from the same admin is a cache hit"
+    );
+
+    let guest2 = dispatch_get(
+        &harness,
+        "/principal-declared-reads-authz/1",
+        &[("x-test-login", "guest2")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&guest2.body).contains("allowed=false"));
+    assert_eq!(
+        counting_route::renders(),
+        renders_after + 1,
+        "a different principal is a genuine miss, correctly partitioned"
+    );
+}
+
+/// Fix round 4, Leak B (Critical, proven). Same shape as round 3's
+/// `a_route_reading_identity_through_an_uninstrumented_accessor...` test,
+/// but the accessor is fully instrumented (via round 3's seam) and the
+/// leak is instead that classification re-read `Auth::id()` specifically -
+/// the default guard's own slot - to build the observed value, vetoing the
+/// observation for any identity resolved through a different guard.
+/// Verified failing (bob's render served alice's identity) against the
+/// pre-fix `Auth::id()` re-read by temporarily restoring it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_route_reading_identity_through_a_non_default_guard_never_leaks_across_identities() {
+    let harness = boot_with_render_cache().await;
+    let alice = dispatch_get(
+        &harness,
+        "/leaky-via-named-guard",
+        &[("x-test-named-login", "alice")],
+    )
+    .await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice.body).contains("alice"));
+
+    let bob = dispatch_get(
+        &harness,
+        "/leaky-via-named-guard",
+        &[("x-test-named-login", "bob")],
+    )
+    .await;
+    assert!(
+        !String::from_utf8_lossy(&bob.body).contains("alice"),
+        "a route with no declared variance must never leak one named-guard identity's \
+         body to another, even though Auth::id() (the default guard's own slot) never \
+         reflects either identity"
+    );
+    assert!(String::from_utf8_lossy(&bob.body).contains("bob"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store"
+    );
+}
+
+/// Fix round 4, Leak C (proven). `session()` records a session read;
+/// `session_mut` - the idiomatic way to read and touch session state in one
+/// call - did not, even though its closure can read whatever it also
+/// mutates. Verified failing (the second dispatch was an unwarranted cache
+/// hit, `renders()` staying at 1) against the pre-fix `session_mut` by
+/// temporarily removing its `observe_session_read()` call.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_mut_reads_are_observed_and_force_uncacheable() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/session-mut-reading", &[]).await;
+    dispatch_get(&harness, "/session-mut-reading", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a session_mut read must be observed and force Uncacheable, the same as session()"
     );
 }

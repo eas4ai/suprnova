@@ -325,8 +325,17 @@ impl Request {
     }
 
     /// Returns the tenant resolved by Live tenant middleware for this request.
+    ///
+    /// Records a tenant observation on every call (fix round 4), the same
+    /// way `Lang::locale()` records a locale observation: outside a
+    /// `Collector` scope this is a no-op cost, but a render that reads its
+    /// own tenant now correctly narrows to `PrivateCached` via
+    /// `ClassificationReason::TenantObserved` - before this,
+    /// `ObservedContext.tenant` was hard-coded `None` because nothing
+    /// produced this observation at all.
     #[must_use]
     pub fn live_tenant(&self) -> Option<&str> {
+        crate::render_cache::collector::observe_tenant_read();
         self.live_tenant.as_deref()
     }
 

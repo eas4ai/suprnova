@@ -75,6 +75,11 @@ const MAX_COLLECTED: usize = MAX_OBSERVATIONS - 1;
 pub struct CollectedContext {
     /// A principal was resolved or checked.
     pub principal_read: bool,
+    /// A tenant was resolved or checked. Fix round 4:
+    /// `Request::live_tenant()` records this on every call, the same way
+    /// `Lang::locale()` records a locale observation - `ObservedContext.tenant`
+    /// was previously always `None` because nothing produced this.
+    pub tenant_read: bool,
     /// A session value was read.
     pub session_read: bool,
     /// An authorization decision was evaluated.
@@ -260,6 +265,10 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
 /// The principal was resolved or checked.
 pub fn observe_principal_read() {
     with_state(|state| state.report.context.principal_read = true);
+}
+/// The tenant was resolved or checked.
+pub fn observe_tenant_read() {
+    with_state(|state| state.report.context.tenant_read = true);
 }
 /// A session value was read.
 pub fn observe_session_read() {
