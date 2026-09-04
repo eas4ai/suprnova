@@ -11,6 +11,7 @@
 //! framework test doesn't need the example-app crate's migration
 //! registry.
 
+use sea_orm::DatabaseBackend;
 use sea_orm_migration::MigrationName;
 use sea_orm_migration::prelude::*;
 use std::path::PathBuf;
@@ -314,6 +315,91 @@ async fn oversized_programmatic_lifetime_neither_panics_nor_mass_expires() {
             .is_some(),
         "the session must survive the gc pass"
     );
+}
+
+#[tokio::test]
+async fn oversized_lifetime_gc_skips_unrepresentable_database_threshold() {
+    // No sessions table: a successful result proves GC did not send its
+    // out-of-range date to the database, even on permissive SQLite.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(u64::MAX));
+    assert_eq!(
+        driver.gc().await.expect("no representable expiry cutoff"),
+        0
+    );
+
+    let normal = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    assert!(
+        normal.gc().await.is_err(),
+        "normal GC must still query storage"
+    );
+}
+
+async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(env: &str) {
+    let url = std::env::var(env).expect("explicit disposable database URL required");
+    let guard = TestContainer::fake();
+    let config = DatabaseConfig::builder()
+        .url(url)
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let database = DbConnection::connect(&config)
+        .await
+        .expect("connect test database");
+    let timestamp_type = match database.inner().get_database_backend() {
+        DatabaseBackend::MySql => "DATETIME",
+        _ => "TIMESTAMP",
+    };
+    // A connection-local table shadows any permanent table and is dropped
+    // automatically on disconnect. All driver calls use this one connection.
+    database
+        .inner()
+        .execute_unprepared(&format!(
+            "CREATE TEMPORARY TABLE sessions (id VARCHAR(255) PRIMARY KEY, \
+             user_id VARCHAR(255), payload TEXT NOT NULL, csrf_token VARCHAR(255) NOT NULL, \
+             last_activity {timestamp_type} NOT NULL)",
+        ))
+        .await
+        .expect("create isolated temporary sessions table");
+    TestContainer::singleton(database.clone());
+    let huge = DatabaseSessionDriver::new(Duration::from_secs(u64::MAX));
+    let normal = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    let session = SessionData::new("live-gc-session".into(), "csrf".into());
+    huge.write(&session).await.unwrap();
+    assert!(huge.read(&session.id).await.unwrap().is_some());
+    assert_eq!(
+        huge.gc()
+            .await
+            .expect("oversized GC must not encode a negative year"),
+        0
+    );
+    assert_eq!(normal.gc().await.unwrap(), 0);
+    assert!(normal.read(&session.id).await.unwrap().is_some());
+
+    database
+        .inner()
+        .execute_unprepared("UPDATE sessions SET last_activity = '2000-01-01 00:00:00'")
+        .await
+        .unwrap();
+    assert_eq!(huge.gc().await.unwrap(), 0);
+    assert!(huge.read(&session.id).await.unwrap().is_some());
+    assert_eq!(normal.gc().await.unwrap(), 1);
+    assert!(huge.read(&session.id).await.unwrap().is_none());
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_session_gc_handles_oversized_lifetime() {
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("MYSQL_TEST_URL").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_session_gc_handles_oversized_lifetime() {
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL").await;
 }
 
 #[tokio::test]

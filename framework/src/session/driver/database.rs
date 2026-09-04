@@ -1,6 +1,7 @@
 //! Database-backed session storage driver
 
 use async_trait::async_trait;
+use chrono::Datelike;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{QueryFilter, QuerySelect, Set, TransactionTrait};
@@ -300,14 +301,22 @@ impl SessionStore for DatabaseSessionDriver {
     async fn gc(&self) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 
-        // Underflow would mean "delete everything older than an
-        // unrepresentable past" - i.e. mass-expire every session on an
-        // arithmetic failure. Floor at `MIN` so a failed computation
-        // deletes nothing instead.
-        let threshold = chrono::Utc::now()
+        // A cutoff outside the database's date range must not be bound into
+        // SQL: chrono accepts negative years that MySQL cannot encode and
+        // dates older than PostgreSQL's timestamp range.
+        let Some(threshold) = chrono::Utc::now()
             .naive_utc()
             .checked_sub_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
-            .unwrap_or(chrono::NaiveDateTime::MIN);
+        else {
+            return Ok(0);
+        };
+        // Year 1000 is a conservative portable SQL datetime floor. Sessions
+        // written by this driver have modern activity timestamps, so an
+        // earlier cutoff has nothing to collect. Skip rather than moving
+        // the cutoff forward and risking premature expiry.
+        if threshold.year() < 1000 {
+            return Ok(0);
+        }
 
         let result = sessions::Entity::delete_many()
             .filter(sessions::Column::LastActivity.lt(threshold))
