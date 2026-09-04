@@ -240,3 +240,78 @@ fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
     );
     assert_eq!(vary_value(&VarianceDescriptor::new()), None);
 }
+
+/// Fix round 1 (R93/F2): `dead_after_ms` is `fresh_ms +
+/// max(stale_servable_ms, stale_on_error_ms)`, not `fresh_ms +
+/// stale_on_error_ms` - `FreshnessPolicy::new` does not require
+/// `stale_on_error_ms >= stale_servable_ms`, so a policy that declares the
+/// stale-servable window wider than the stale-on-error window must still
+/// use the stale-servable edge as the point of death. `evaluate_freshness`
+/// must share this exact arithmetic (not merely agree with it by
+/// coincidence), since a retention-based cleanup elsewhere in the system
+/// (a file-backed L1's sweep) is built directly on `dead_after_ms` and
+/// must never disagree with what this evaluator considers Dead.
+#[test]
+fn dead_after_ms_is_the_widest_stale_band_not_the_stale_on_error_band_alone() {
+    // The ordinary case: stale_on_error_ms is the wider band, so it alone
+    // determines the edge, same as `fresh_ms + stale_on_error_ms` would
+    // suggest.
+    let ordinary = FreshnessPolicy::new(60_000, 60_000, 120_000).expect("policy");
+    assert_eq!(ordinary.dead_after_ms(), 180_000);
+    assert_eq!(
+        evaluate_freshness(
+            &ordinary,
+            RepresentationClass::PublicShared,
+            0,
+            179_999,
+            None
+        ),
+        FreshnessState::StaleOnError,
+        "one millisecond before the Dead edge, still StaleOnError"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &ordinary,
+            RepresentationClass::PublicShared,
+            0,
+            180_000,
+            None
+        ),
+        FreshnessState::Dead,
+        "at the Dead edge exactly, Dead"
+    );
+
+    // The reviewer's exact case: FreshnessPolicy::new does NOT require
+    // stale_on_error_ms >= stale_servable_ms, and when the stale-servable
+    // window is the wider one, it alone determines when the entry is
+    // truly dead - `fresh_ms + stale_on_error_ms` (60_000) would be wrong
+    // here by a factor of two.
+    let inverted = FreshnessPolicy::new(60_000, 120_000, 0).expect("policy accepts this ordering");
+    assert_eq!(
+        inverted.dead_after_ms(),
+        180_000,
+        "the wider stale-servable window determines the Dead edge, not stale_on_error_ms"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &inverted,
+            RepresentationClass::PublicShared,
+            0,
+            60_000 + 60_000 - 1,
+            None
+        ),
+        FreshnessState::StaleServable,
+        "at fresh_ms + stale_servable_ms - 1 the entry is still on disk and StaleServable"
+    );
+    assert_eq!(
+        evaluate_freshness(
+            &inverted,
+            RepresentationClass::PublicShared,
+            0,
+            180_000,
+            None
+        ),
+        FreshnessState::Dead,
+        "at the true Dead edge (180_000, not 60_000), Dead"
+    );
+}

@@ -153,9 +153,12 @@ pub struct Harness {
     _conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
     _tempdir: tempfile::TempDir,
-    /// Held only for its `Drop` (removes the directory on disk) when
-    /// booted through [`boot_with_file_l1`]; `None` otherwise.
-    _l1_tempdir: Option<tempfile::TempDir>,
+    // No L1 tempdir field (fix round 1, R95/F12: an earlier version of
+    // this struct carried one that both `boot` match arms always left
+    // `None`, with a doc claiming otherwise). L1's directory is owned by
+    // the tempdir [`boot_with_file_l1`] returns directly to its caller,
+    // which must outlive the harness for the L1 directory to survive - the
+    // caller holds both bindings for exactly that reason.
 }
 
 /// Boots a fresh SQLite database with RenderCache installed, L1 disabled,
@@ -223,33 +226,43 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .layers(StorageLayers::l0_and_l1())
         .build()
         .expect("stale policy");
+    // Fix round 1 (R93/F2, F3): stale_servable_ms (120_000) wider than
+    // stale_on_error_ms (0) - the reviewer's exact case, and
+    // `FreshnessPolicy::new` accepts it. `fresh_ms + stale_on_error_ms`
+    // (the pre-fix-round formula) would give 60_000; the true Dead edge
+    // (`dead_after_ms`) is 180_000. Only this route's shape can catch
+    // `store_entry` reverting to the wrong formula, to `0`, or to
+    // `u64::MAX`, since an ordinary policy (`stale_on_error_ms >=
+    // stale_servable_ms`) gives the same answer either way.
+    let inverted_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 120_000, 0).expect("freshness"))
+        .layers(StorageLayers::l0_and_l1())
+        .build()
+        .expect("inverted policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
+    let router: Router = router.get("/inverted/{id}", stale_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
         .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
         .expect("attach private policy")
         .try_render_cache("/stale/{id}", GroupPolicy::from(stale_policy))
-        .expect("attach stale policy");
+        .expect("attach stale policy")
+        .try_render_cache("/inverted/{id}", GroupPolicy::from(inverted_policy))
+        .expect("attach inverted policy");
 
     let mut config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
-    let l1_tempdir = match l1_directory {
-        Some(directory) => {
-            config.l1 = L1Config::File {
-                directory,
-                max_bytes: 16 * 1024 * 1024,
-            };
-            None
-        }
-        None => {
-            config.l1 = L1Config::Disabled;
-            None
-        }
+    config.l1 = match l1_directory {
+        Some(directory) => L1Config::File {
+            directory,
+            max_bytes: 16 * 1024 * 1024,
+        },
+        None => L1Config::Disabled,
     };
 
     // Same ordering requirement `render_cache_middleware_support` documents
@@ -269,7 +282,6 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         _conn: conn,
         _guard: guard,
         _tempdir: tempdir,
-        _l1_tempdir: l1_tempdir,
     })
 }
 

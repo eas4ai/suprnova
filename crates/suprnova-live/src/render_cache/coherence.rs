@@ -40,14 +40,19 @@ pub fn evaluate_freshness(
     if class == RepresentationClass::PrivateCached {
         return FreshnessState::Dead;
     }
+    // Single source of truth for the Dead edge (see `dead_after_ms`'s own
+    // doc): checking it first, rather than falling through to `Dead` after
+    // two threshold comparisons, is what lets a retention-based cleanup
+    // (a file-backed L1's sweep) call the same function and never disagree
+    // with this evaluator about when an entry is truly dead.
+    if age >= policy.dead_after_ms() {
+        return FreshnessState::Dead;
+    }
     let past_fresh = age - policy.fresh_ms();
     if past_fresh < policy.stale_servable_ms() {
         return FreshnessState::StaleServable;
     }
-    if past_fresh < policy.stale_on_error_ms() {
-        return FreshnessState::StaleOnError;
-    }
-    FreshnessState::Dead
+    FreshnessState::StaleOnError
 }
 
 /// Whole seconds since publication, for the `Age` header.

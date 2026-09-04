@@ -62,7 +62,13 @@ async fn publication_is_atomic_and_visible_only_when_complete() {
     let key = key("/a");
     assert_eq!(
         store
-            .publish(&key, Bytes::from_static(b"entry-bytes"), fence(1), 1_000)
+            .publish(
+                &key,
+                Bytes::from_static(b"entry-bytes"),
+                fence(1),
+                1_000,
+                u64::MAX
+            )
             .await
             .expect("publish"),
         PublishOutcome::Published
@@ -82,7 +88,13 @@ async fn a_torn_or_foreign_file_is_a_miss_and_is_evicted() {
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let key = key("/a");
     store
-        .publish(&key, Bytes::from_static(b"entry-bytes"), fence(1), 1_000)
+        .publish(
+            &key,
+            Bytes::from_static(b"entry-bytes"),
+            fence(1),
+            1_000,
+            u64::MAX,
+        )
         .await
         .expect("publish");
     let path = store.path_for_test(&key);
@@ -101,14 +113,14 @@ async fn fences_and_byte_bounds_hold_across_the_directory() {
     let a = key("/a");
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![1_u8; 40]), fence(2), 1)
+            .publish(&a, Bytes::from(vec![1_u8; 40]), fence(2), 1, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Published
     );
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![2_u8; 40]), fence(1), 2)
+            .publish(&a, Bytes::from(vec![2_u8; 40]), fence(1), 2, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Fenced
@@ -133,7 +145,13 @@ async fn fences_and_byte_bounds_hold_across_the_directory() {
     );
     assert_eq!(
         store
-            .publish(&key("/b"), Bytes::from(vec![3_u8; 40]), fence(1), 3)
+            .publish(
+                &key("/b"),
+                Bytes::from(vec![3_u8; 40]),
+                fence(1),
+                3,
+                u64::MAX
+            )
             .await
             .expect("p"),
         PublishOutcome::Published,
@@ -149,7 +167,7 @@ async fn an_entry_exactly_at_the_byte_bound_publishes_and_one_byte_more_is_rejec
     let a = key("/a");
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![9_u8; 64]), fence(1), 1)
+            .publish(&a, Bytes::from(vec![9_u8; 64]), fence(1), 1, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Published,
@@ -161,7 +179,7 @@ async fn an_entry_exactly_at_the_byte_bound_publishes_and_one_byte_more_is_rejec
     let b = key("/b");
     assert_eq!(
         store
-            .publish(&b, Bytes::from(vec![9_u8; 65]), fence(1), 2)
+            .publish(&b, Bytes::from(vec![9_u8; 65]), fence(1), 2, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Rejected,
@@ -186,7 +204,7 @@ async fn a_single_flipped_byte_in_the_middle_of_a_valid_frame_is_a_miss_and_is_e
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish(&a, Bytes::from(vec![5_u8; 40]), fence(1), 1_000)
+        .publish(&a, Bytes::from(vec![5_u8; 40]), fence(1), 1_000, u64::MAX)
         .await
         .expect("publish");
     let path = store.path_for_test(&a);
@@ -215,7 +233,7 @@ async fn evict_removes_the_file_and_succeeds_when_there_is_nothing_to_remove() {
     assert!(store.get(&a).await.expect("get").is_none());
 
     store
-        .publish(&a, Bytes::from_static(b"payload"), fence(1), 1)
+        .publish(&a, Bytes::from_static(b"payload"), fence(1), 1, u64::MAX)
         .await
         .expect("publish");
     let path = store.path_for_test(&a);
@@ -239,11 +257,23 @@ async fn inspect_reports_entries_and_payload_bytes_held() {
     assert_eq!(empty.bytes, 0);
 
     store
-        .publish(&key("/a"), Bytes::from(vec![1_u8; 30]), fence(1), 1)
+        .publish(
+            &key("/a"),
+            Bytes::from(vec![1_u8; 30]),
+            fence(1),
+            1,
+            u64::MAX,
+        )
         .await
         .expect("publish a");
     store
-        .publish(&key("/b"), Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .publish(
+            &key("/b"),
+            Bytes::from(vec![2_u8; 20]),
+            fence(1),
+            2,
+            u64::MAX,
+        )
         .await
         .expect("publish b");
 
@@ -267,6 +297,7 @@ async fn reopening_the_store_recovers_previously_published_entries() {
                 Bytes::from_static(b"survives-a-restart"),
                 fence(3),
                 5_000,
+                u64::MAX,
             )
             .await
             .expect("publish");
@@ -289,7 +320,7 @@ async fn reopening_the_store_recovers_previously_published_entries() {
     // The recovered fence still gates future publications correctly.
     assert_eq!(
         reopened
-            .publish(&a, Bytes::from_static(b"stale"), fence(2), 6_000)
+            .publish(&a, Bytes::from_static(b"stale"), fence(2), 6_000, u64::MAX)
             .await
             .expect("publish"),
         PublishOutcome::Fenced,
@@ -304,7 +335,7 @@ async fn a_store_bounded_to_zero_bytes_admits_nothing() {
     let a = key("/a");
     assert_eq!(
         store
-            .publish(&a, Bytes::from_static(b"x"), fence(1), 1)
+            .publish(&a, Bytes::from_static(b"x"), fence(1), 1, u64::MAX)
             .await
             .expect("publish"),
         PublishOutcome::Rejected
@@ -314,7 +345,7 @@ async fn a_store_bounded_to_zero_bytes_admits_nothing() {
     // would admit this one even though the bound is zero.
     assert_eq!(
         store
-            .publish(&a, Bytes::new(), fence(1), 1)
+            .publish(&a, Bytes::new(), fence(1), 1, u64::MAX)
             .await
             .expect("publish"),
         PublishOutcome::Rejected,
@@ -331,14 +362,14 @@ async fn an_equal_fence_is_refused_and_leaves_the_entry_unchanged() {
     let a = key("/a");
     assert_eq!(
         store
-            .publish(&a, Bytes::from_static(b"first"), fence(5), 1)
+            .publish(&a, Bytes::from_static(b"first"), fence(5), 1, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Published
     );
     assert_eq!(
         store
-            .publish(&a, Bytes::from_static(b"second"), fence(5), 2)
+            .publish(&a, Bytes::from_static(b"second"), fence(5), 2, u64::MAX)
             .await
             .expect("p"),
         PublishOutcome::Fenced,
@@ -357,15 +388,15 @@ async fn growing_the_same_key_past_the_bound_evicts_others_but_never_itself() {
     let b = key("/b");
     let c = key("/c");
     store
-        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1, u64::MAX)
         .await
         .expect("publish a");
     store
-        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2, u64::MAX)
         .await
         .expect("publish b");
     store
-        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3, u64::MAX)
         .await
         .expect("publish c");
 
@@ -378,7 +409,7 @@ async fn growing_the_same_key_past_the_bound_evicts_others_but_never_itself() {
     // even though its own old published_at_ms is older than both.
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4, u64::MAX)
             .await
             .expect("publish a again"),
         PublishOutcome::Published
@@ -476,7 +507,7 @@ async fn an_evict_racing_a_publish_never_leaves_an_untracked_file() {
         let store = Arc::new(FileRenderStore::open(dir.path(), 1024 * 1024).expect("open"));
         let a = key("/a");
         store
-            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1)
+            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1, u64::MAX)
             .await
             .expect("seed publish");
 
@@ -492,7 +523,7 @@ async fn an_evict_racing_a_publish_never_leaves_an_untracked_file() {
             },
             async move {
                 let outcome = publish_store
-                    .publish(&publish_key, publish_bytes, fence(2), 2)
+                    .publish(&publish_key, publish_bytes, fence(2), 2, u64::MAX)
                     .await
                     .expect("publish");
                 assert_eq!(
@@ -545,7 +576,7 @@ async fn a_get_cleanup_racing_a_publish_never_destroys_the_republished_entry() {
         let store = Arc::new(FileRenderStore::open(dir.path(), 1024 * 1024).expect("open"));
         let a = key("/a");
         store
-            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1)
+            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1, u64::MAX)
             .await
             .expect("seed publish");
         // Corrupt the file the way an external actor would, so a
@@ -568,7 +599,7 @@ async fn a_get_cleanup_racing_a_publish_never_destroys_the_republished_entry() {
             },
             async move {
                 let outcome = publish_store
-                    .publish(&publish_key, publish_bytes, fence(2), 2)
+                    .publish(&publish_key, publish_bytes, fence(2), 2, u64::MAX)
                     .await
                     .expect("publish");
                 assert_eq!(
@@ -637,6 +668,7 @@ async fn a_directory_sync_failure_after_a_successful_rename_still_updates_the_ta
             Bytes::from_static(b"live-despite-a-sync-failure"),
             fence(1),
             1,
+            u64::MAX,
         )
         .await
         .expect("a directory sync failure is a durability warning, not a publish failure");
@@ -684,15 +716,15 @@ async fn a_victim_whose_removal_fails_stays_tracked_and_a_different_candidate_is
     let b = key("/b");
     let c = key("/c");
     store
-        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1, u64::MAX)
         .await
         .expect("publish a");
     store
-        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2, u64::MAX)
         .await
         .expect("publish b");
     store
-        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3, u64::MAX)
         .await
         .expect("publish c");
 
@@ -705,7 +737,7 @@ async fn a_victim_whose_removal_fails_stays_tracked_and_a_different_candidate_is
     // freed space it never actually gave back.
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4, u64::MAX)
             .await
             .expect("publish a again"),
         PublishOutcome::Published
@@ -741,15 +773,15 @@ async fn publish_is_rejected_and_changes_nothing_when_eviction_cannot_free_enoug
     let b = key("/b");
     let c = key("/c");
     store
-        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1)
+        .publish(&a, Bytes::from(vec![1_u8; 40]), fence(1), 1, u64::MAX)
         .await
         .expect("publish a");
     store
-        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2)
+        .publish(&b, Bytes::from(vec![2_u8; 20]), fence(1), 2, u64::MAX)
         .await
         .expect("publish b");
     store
-        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3)
+        .publish(&c, Bytes::from(vec![3_u8; 20]), fence(1), 3, u64::MAX)
         .await
         .expect("publish c");
 
@@ -760,7 +792,7 @@ async fn publish_is_rejected_and_changes_nothing_when_eviction_cannot_free_enoug
 
     assert_eq!(
         store
-            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4)
+            .publish(&a, Bytes::from(vec![4_u8; 70]), fence(2), 4, u64::MAX)
             .await
             .expect("publish a again"),
         PublishOutcome::Rejected,
@@ -805,7 +837,7 @@ async fn a_corrupted_entrys_tally_stays_intact_when_its_removal_fails() {
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish(&a, Bytes::from(vec![7_u8; 40]), fence(1), 1)
+        .publish(&a, Bytes::from(vec![7_u8; 40]), fence(1), 1, u64::MAX)
         .await
         .expect("publish");
 
@@ -863,47 +895,73 @@ async fn sweep_removes_an_entry_whose_retention_window_has_elapsed() {
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish_with_retention(&a, Bytes::from_static(b"stale"), fence(1), 1_000, 500)
+        .publish(&a, Bytes::from_static(b"stale"), fence(1), 1_000, 500)
         .await
         .expect("publish");
 
     assert_eq!(
-        store.sweep(1_000 + 499, 1).await.expect("sweep"),
+        store.sweep(1_000 + 499, 1).await.expect("sweep").removed,
         0,
         "one millisecond before the retention edge the entry is still alive"
     );
     assert_eq!(snrc_files(dir.path()).len(), 1);
 
+    let outcome = store.sweep(1_000 + 500, 1).await.expect("sweep");
     assert_eq!(
-        store.sweep(1_000 + 500, 1).await.expect("sweep"),
-        1,
-        "at published_at_ms + stale_on_error_ms exactly the entry is dead"
+        outcome.removed, 1,
+        "at published_at_ms + retention_ms exactly the entry is dead"
     );
+    assert!(!outcome.more_remain, "nothing else was dead");
     assert_eq!(snrc_files(dir.path()).len(), 0);
     let inspection = store.inspect().await.expect("inspect");
     assert_eq!(inspection.entries, 0);
     assert_eq!(inspection.bytes, 0);
 }
 
-/// A generic [`RenderStore::publish`] call (used by every test in this
-/// file besides the retention-aware ones) always frames `stale_on_error_ms`
-/// as zero, so `sweep` considers the entry dead at any `now_ms` at or past
-/// its `published_at_ms` - documenting the asymmetry the module doc and
-/// `publish_with_retention`'s own doc describe.
+/// `retention_ms` is an ordinary, honoured value, not a sentinel (fix
+/// round 1, R93/F1): an explicit `0` means the caller genuinely wants the
+/// entry dead the instant it is published, and `sweep` honours exactly
+/// that - it is `u64::MAX` that means "never age-swept", never `0`.
 #[tokio::test]
-async fn a_generically_published_entry_is_immediately_sweep_eligible() {
+async fn an_explicitly_zero_retention_entry_is_immediately_sweep_eligible() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish(&a, Bytes::from_static(b"generic"), fence(1), 1_000)
+        .publish(&a, Bytes::from_static(b"ephemeral"), fence(1), 1_000, 0)
         .await
         .expect("publish");
     assert_eq!(
-        store.sweep(1_000, 1).await.expect("sweep"),
+        store.sweep(1_000, 1).await.expect("sweep").removed,
         1,
-        "a zero-retention frame is dead from the moment it is published"
+        "an explicit zero retention is dead from the moment it is published"
     );
+}
+
+/// `u64::MAX` retention means "never age-swept": far in the future, the
+/// entry is still alive by retention, and only an epoch drop can remove it.
+#[tokio::test]
+async fn a_max_retention_entry_is_never_swept_by_age() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish(
+            &a,
+            Bytes::from_static(b"immortal"),
+            fence(1),
+            1_000,
+            u64::MAX,
+        )
+        .await
+        .expect("publish");
+    let far_future = u64::MAX - 1;
+    let outcome = store.sweep(far_future, 1).await.expect("sweep");
+    assert_eq!(
+        outcome.removed, 0,
+        "u64::MAX retention is never reached by age, no matter how far now_ms advances"
+    );
+    assert!(store.get(&a).await.expect("get").is_some());
 }
 
 /// An entry's fence epoch below the epoch `sweep` is given is dead
@@ -916,7 +974,7 @@ async fn sweep_removes_an_entry_from_an_older_epoch_even_within_its_retention_wi
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish_with_retention(
+        .publish(
             &a,
             Bytes::from_static(b"old-epoch"),
             fence(1),
@@ -927,12 +985,12 @@ async fn sweep_removes_an_entry_from_an_older_epoch_even_within_its_retention_wi
         .expect("publish");
 
     assert_eq!(
-        store.sweep(1_000, 1).await.expect("sweep"),
+        store.sweep(1_000, 1).await.expect("sweep").removed,
         0,
         "same epoch, and far from the retention edge"
     );
     assert_eq!(
-        store.sweep(1_000, 2).await.expect("sweep"),
+        store.sweep(1_000, 2).await.expect("sweep").removed,
         1,
         "the entry's fence epoch (1) is below the epoch just passed in (2)"
     );
@@ -964,7 +1022,7 @@ async fn a_sweep_removal_failure_leaves_the_tally_and_the_disk_agreeing() {
     let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
     let a = key("/a");
     store
-        .publish_with_retention(&a, Bytes::from(vec![9_u8; 20]), fence(1), 1_000, 500)
+        .publish(&a, Bytes::from(vec![9_u8; 20]), fence(1), 1_000, 500)
         .await
         .expect("publish");
 
@@ -984,13 +1042,13 @@ async fn a_sweep_removal_failure_leaves_the_tally_and_the_disk_agreeing() {
         return;
     }
 
-    let removed = store.sweep(1_000 + 500, 1).await.expect("sweep");
+    let blocked = store.sweep(1_000 + 500, 1).await.expect("sweep");
 
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
         .expect("restore permissions so the assertions below can read the directory");
 
     assert_eq!(
-        removed, 0,
+        blocked.removed, 0,
         "the removal failed, so nothing was actually removed"
     );
     let path = store.path_for_test(&a);
@@ -1006,4 +1064,61 @@ async fn a_sweep_removal_failure_leaves_the_tally_and_the_disk_agreeing() {
          failed removal leaves both the file and the tally entry in place"
     );
     assert_eq!(inspection.bytes, 20);
+
+    // F7 (fix round 1): `removed == 0` above is also what a sweep that
+    // selected nothing as dead would report, so it alone does not prove
+    // this entry was genuinely selected. With permissions restored, a
+    // second sweep must now remove exactly this entry, proving the first
+    // call's `removed == 0` really was a blocked removal of a dead entry,
+    // not an empty selection.
+    let unblocked = store.sweep(1_000 + 500, 1).await.expect("sweep");
+    assert_eq!(
+        unblocked.removed, 1,
+        "with permissions restored, the same entry the first call selected \
+         as dead is now actually removable"
+    );
+    assert!(!path.exists(), "the file is gone once removal can succeed");
+    assert_eq!(store.inspect().await.expect("inspect").entries, 0);
+}
+
+/// Fix round 1 (R94/F5, ported from the review's automatic-sweep probe):
+/// the every-256th-publication automatic sweep is bounded to the batch
+/// limit (64), not unbounded. With 256 entries all published at an
+/// explicit zero retention (immediately dead), the 256th publish's
+/// automatic sweep removes only 64 of them - the oldest by
+/// `published_at_ms`, though all 256 share one `published_at_ms` here so
+/// any 64 satisfy that - leaving 192 still tracked and dead. A caller-driven
+/// sweep then drains more of the backlog and reports whether any remains,
+/// which is exactly the "drains incrementally" contract `sweep`'s own doc
+/// describes.
+#[tokio::test]
+async fn the_automatic_every_256th_publication_sweep_is_bounded_to_the_batch_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 16 * 1024 * 1024).expect("open");
+    for n in 0..256_u64 {
+        let k = key(&format!("/auto/{n}"));
+        store
+            .publish(&k, Bytes::from(vec![1_u8; 8]), fence(1), 1_000, 0)
+            .await
+            .expect("publish");
+    }
+    let remaining_files = snrc_files(dir.path()).len();
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        remaining_files,
+        256 - 64,
+        "the 256th publish's automatic sweep removed exactly the batch \
+         limit, not every dead entry"
+    );
+    assert_eq!(inspection.entries, 256 - 64);
+
+    let outcome = store.sweep(1_000, 1).await.expect("sweep");
+    assert_eq!(
+        outcome.removed, 64,
+        "an explicit sweep drains another batch of the backlog"
+    );
+    assert!(
+        outcome.more_remain,
+        "128 of the original 256 dead entries are still tracked after two batches"
+    );
 }

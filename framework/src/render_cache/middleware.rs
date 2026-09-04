@@ -179,11 +179,13 @@ use suprnova_live::render_cache::{
     FailurePolicy, RenderCacheError, RenderCacheErrorKind, RepresentationClass,
 };
 
+use crate::Auth;
 use crate::database::DB;
 use crate::http::{HttpResponse, Request, Response};
+#[cfg(feature = "localization")]
+use crate::localization::Lang;
 use crate::middleware::{Middleware, Next};
 use crate::telemetry::metrics::Metrics;
-use crate::{Auth, Lang};
 
 use super::collector::{self, Collector};
 use super::config::RenderCacheConfig;
@@ -656,7 +658,22 @@ fn variance_descriptor(
     let mut variance = VarianceDescriptor::new();
     for dimension in policy.vary() {
         let value = match dimension {
-            VarianceDimension::Locale => DimensionValue::Public(Lang::locale().as_str()),
+            VarianceDimension::Locale => {
+                #[cfg(feature = "localization")]
+                let value = Lang::locale().as_str();
+                // R96: without `localization` there is no negotiated
+                // locale and nothing records locale material, so a route
+                // declaring `Locale` variance resolves to one fixed public
+                // value ("und", BCP 47 for "undetermined") rather than
+                // failing to compile. This is honest, not merely
+                // convenient: every request resolves the same value, so
+                // such a route partitions nothing on this dimension -
+                // there is genuinely no locale to vary on without the
+                // feature.
+                #[cfg(not(feature = "localization"))]
+                let value = "und".to_owned();
+                DimensionValue::Public(value)
+            }
             VarianceDimension::Principal => match Auth::id() {
                 Some(id) => DimensionValue::Private(PrivateMaterial::principal(
                     &runtime.keys,
@@ -756,6 +773,11 @@ async fn lookup(
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
                 Ok(entry) => {
+                    // L0 has no age-based expiry of its own (see
+                    // `MemoryRenderStore::publish`'s own doc); `u64::MAX`
+                    // is the trait's documented "never age-swept" value,
+                    // never `0`, which is now an ordinary, honoured
+                    // retention rather than a sentinel.
                     let _ = runtime
                         .l0
                         .publish(
@@ -763,6 +785,7 @@ async fn lookup(
                             stored.bytes.clone(),
                             stored.fence,
                             stored.published_at_ms,
+                            u64::MAX,
                         )
                         .await;
                     return Ok(Some((entry, stored, Layer::L1)));
@@ -1786,9 +1809,12 @@ async fn store_entry(
     let Ok(encoded) = encode(entry, &runtime.keys) else {
         return;
     };
+    // L0 has no age-based expiry of its own; an epoch advance clears it
+    // outright instead (`RenderCache::advance_epoch`). `u64::MAX` is the
+    // trait's documented "never age-swept" value.
     if let Ok(PublishOutcome::Published) = runtime
         .l0
-        .publish(&job.key, encoded.clone(), fence, now)
+        .publish(&job.key, encoded.clone(), fence, now, u64::MAX)
         .await
     {
         Metrics::counter(render_cache_telemetry::PUBLICATIONS).inc();
@@ -1796,20 +1822,21 @@ async fn store_entry(
     if policy.layers().l1()
         && let Some(l1) = &runtime.l1
     {
-        // The total time from publication after which this entry is dead
-        // by every freshness band (see
-        // `suprnova_live::render_cache::coherence::evaluate_freshness`),
-        // so `FileRenderStore::sweep` knows when the file is safe to
-        // remove. This is the one call site with a policy in scope to
-        // compute a real retention from; every other L1 caller (including
-        // `file_store.rs`'s own tests) uses the generic
-        // `RenderStore::publish`, which always frames zero.
-        let retention_ms = entry
-            .header()
-            .fresh_ms
-            .saturating_add(entry.header().stale_on_error_ms);
+        // The Dead edge (fix round 1, R93/F2): the single source of truth
+        // `coherence::evaluate_freshness` uses for its own Dead boundary,
+        // so `FileRenderStore::sweep` can never disagree with it about
+        // when this entry is truly dead. This is `fresh_ms +
+        // max(stale_servable_ms, stale_on_error_ms)`, not `fresh_ms +
+        // stale_on_error_ms` - the two stale bands are both measured from
+        // the end of the fresh interval, not cumulatively, and
+        // `FreshnessPolicy::new` does not require `stale_on_error_ms >=
+        // stale_servable_ms`. This is the one call site with a policy in
+        // scope to compute a real retention from; every other
+        // `RenderStore::publish` caller (including `file_store.rs`'s own
+        // tests) passes its own explicit value.
+        let retention_ms = policy.freshness().dead_after_ms();
         let _ = l1
-            .publish_with_retention(&job.key, encoded, fence, now, retention_ms)
+            .publish(&job.key, encoded, fence, now, retention_ms)
             .await;
     }
 }

@@ -19,11 +19,19 @@
 //! (this one) adds operator control: [`RenderCache::store_inspection`] and
 //! [`RenderCache::sweep`] alongside the epoch and body-free inspection
 //! operators Task 14/15's fix rounds already added, plus the hidden
-//! console commands in [`console`].
+//! console commands in [`console`]. Task 16's own fix round 1 (R93-R95)
+//! made retention a `RenderStore::publish` parameter bound to the Dead
+//! edge in [`suprnova_live::render_cache::FreshnessPolicy::dead_after_ms`],
+//! bounded [`file_store::FileRenderStore::sweep`] to a fixed number of
+//! candidates per call, made [`RenderCache::advance_epoch`] clear L0, and
+//! made the console commands honest about failure and the current epoch.
 
 pub mod collector;
 pub mod config;
-mod console;
+/// `pub` only so its `#[doc(hidden)]` `_for_test` report builders are
+/// reachable from integration tests outside this crate; it registers no
+/// public command API of its own (see its own module doc).
+pub mod console;
 pub mod file_store;
 pub mod ledger;
 pub mod live;
@@ -36,10 +44,10 @@ pub mod telemetry;
 pub mod testing;
 
 pub use config::{FailurePolicy, L0Limits, L1Config, RenderCacheConfig};
+pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
 pub use suprnova_live::render_cache::entry::EntryInspection;
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
-pub use suprnova_live::render_cache::store::StoreInspection;
 pub use suprnova_live::render_cache::{
     CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, PolicyPatch, QueryPolicy,
     RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass, SharedCachePolicy,
@@ -54,6 +62,25 @@ use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits, R
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 use crate::{FrameworkError, Router};
+
+/// L0 occupancy, bounds, and the current authority epoch. See
+/// [`RenderCache::store_inspection`]'s own doc for why the epoch travels
+/// with it: the engine's own
+/// [`suprnova_live::render_cache::store::StoreInspection`] has no concept
+/// of an authority epoch (it is a store-level fact shared by any
+/// [`suprnova_live::render_cache::store::RenderStore`] implementor,
+/// including a generic in-process test double with no ledger at all), so
+/// this framework-level type wraps it with the one framework-level fact
+/// (the ledger's current epoch) an operator needs alongside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoreInspection {
+    /// Entries held in L0.
+    pub entries: usize,
+    /// Bytes held in L0.
+    pub bytes: usize,
+    /// The current authority epoch.
+    pub epoch: u64,
+}
 
 /// The RenderCache facade: install, observe, inspect, and epoch control.
 pub struct RenderCache;
@@ -262,19 +289,35 @@ impl RenderCache {
 
     /// Emergency invalidation: advances the authority epoch, making every
     /// entry observed at the prior epoch unreachable at its next freshness
-    /// check.
+    /// check, and clears L0 immediately (fix round 1, R94/F11).
+    ///
+    /// L0 is cleared, not merely left to age out: every L0 key embeds the
+    /// epoch it was derived under
+    /// ([`suprnova_live::render_cache::key::RenderKey::derive`]), so the
+    /// instant this returns, every existing L0 entry is unreachable to any
+    /// future request - it names a key nothing can ever derive again. L0
+    /// is in-process memory with no filesystem to reconcile, so a full,
+    /// unconditional clear is both correct and free; unlike L1's
+    /// [`Self::sweep`], there is no bounded-work concern to balance against
+    /// an unbounded pause, since clearing a `BTreeMap` and a `VecDeque` is
+    /// not I/O. L1 is not cleared here - it still holds every pre-epoch
+    /// file until [`Self::sweep`] reclaims it, bounded per call; see that
+    /// method's own doc.
     ///
     /// # Errors
     ///
     /// Returns [`RenderCacheError`] when no runtime is installed or the
-    /// ledger's epoch update fails.
+    /// ledger's epoch update fails. L0 is cleared only after the ledger
+    /// update itself succeeds.
     pub async fn advance_epoch() -> Result<(), RenderCacheError> {
         let runtime = Self::runtime()
             .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
         // Fix round 2, item 7: uses the runtime's own ledger handle rather
         // than constructing an unconnected one, so a future ledger override
         // reaches the epoch-advance operator too. See `epoch_ledger`'s doc.
-        runtime.epoch_ledger.advance_epoch().await
+        runtime.epoch_ledger.advance_epoch().await?;
+        runtime.l0.clear();
+        Ok(())
     }
 
     /// Body-free inspection of a stored L0 entry by its encoded key text.
@@ -296,34 +339,49 @@ impl RenderCache {
         )?))
     }
 
-    /// L0 occupancy and bounds, for operator dashboards and the hidden
-    /// console commands. Never exposes a body or a raw key.
+    /// L0 occupancy, bounds, and the current authority epoch (fix round 1,
+    /// R95/F10) - the epoch an operator needs to judge whether an entry
+    /// [`Self::inspect`] shows (which carries its own, possibly older,
+    /// epoch) is still current. Never exposes a body or a raw key.
     ///
     /// # Errors
     ///
-    /// Returns [`RenderCacheError`] when no runtime is installed or the L0
-    /// provider fails.
+    /// Returns [`RenderCacheError`] when no runtime is installed, the L0
+    /// provider fails, or the ledger epoch read fails.
     pub async fn store_inspection() -> Result<StoreInspection, RenderCacheError> {
         let runtime = Self::runtime()
             .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
-        runtime.l0.inspect().await
+        let raw = runtime.l0.inspect().await?;
+        let epoch = runtime.ledger.epoch().await?;
+        Ok(StoreInspection {
+            entries: raw.entries,
+            bytes: raw.bytes,
+            epoch,
+        })
     }
 
     /// Removes on-disk L1 entries that are dead by retention or by epoch
     /// (see [`file_store::FileRenderStore::sweep`]); returns how many were
-    /// removed. A no-op returning `Ok(0)` when no L1 provider is
-    /// configured - disk hygiene has nothing to do in that case, not a
-    /// misconfiguration.
+    /// removed and whether more dead entries remain, bounded per call. A
+    /// no-op returning `Ok(SweepOutcome { removed: 0, more_remain: false
+    /// })` when no L1 provider is configured - disk hygiene has nothing to
+    /// do in that case, not a misconfiguration. L0's unreachable-by-epoch
+    /// entries are not this method's concern: [`Self::advance_epoch`]
+    /// clears them immediately, since L0 has no filesystem to bound the
+    /// work against (see that method's own doc).
     ///
     /// # Errors
     ///
     /// Returns [`RenderCacheError`] when no runtime is installed or the
     /// ledger epoch read fails.
-    pub async fn sweep() -> Result<usize, RenderCacheError> {
+    pub async fn sweep() -> Result<SweepOutcome, RenderCacheError> {
         let runtime = Self::runtime()
             .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
         let Some(l1) = runtime.l1.as_ref() else {
-            return Ok(0);
+            return Ok(SweepOutcome {
+                removed: 0,
+                more_remain: false,
+            });
         };
         let epoch = runtime.ledger.epoch().await?;
         l1.sweep(runtime.now_ms(), epoch).await

@@ -79,6 +79,31 @@ impl FreshnessPolicy {
     pub const fn stale_on_error_ms(&self) -> u64 {
         self.stale_on_error_ms
     }
+
+    /// Milliseconds after publication beyond which a representation under
+    /// this policy is `Dead` in every band - the single source of truth
+    /// [`super::coherence::evaluate_freshness`] and any retention-based
+    /// cleanup (a file-backed L1's sweep, for one) must agree on.
+    ///
+    /// This is **not** `fresh_ms + stale_on_error_ms`: the stale-servable
+    /// and stale-on-error windows are both measured from the same point -
+    /// the end of the fresh interval, not cumulatively - and this
+    /// constructor does not require `stale_on_error_ms >=
+    /// stale_servable_ms`. A policy may legally declare a wider
+    /// stale-servable window than its stale-on-error window (serve stale
+    /// content longer than it tolerates a failed rebuild), in which case
+    /// the stale-servable window alone determines when the representation
+    /// is truly dead. The correct edge is therefore
+    /// `fresh_ms + max(stale_servable_ms, stale_on_error_ms)`.
+    #[must_use]
+    pub const fn dead_after_ms(&self) -> u64 {
+        let widest_stale = if self.stale_servable_ms > self.stale_on_error_ms {
+            self.stale_servable_ms
+        } else {
+            self.stale_on_error_ms
+        };
+        self.fresh_ms.saturating_add(widest_stale)
+    }
 }
 
 /// Which storage layers a policy populates.

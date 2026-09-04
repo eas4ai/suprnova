@@ -69,12 +69,24 @@ pub trait RenderStore: Send + Sync {
     /// Returns the current entry for a key.
     async fn get(&self, key: &RenderKey) -> Result<Option<StoredEntry>, RenderCacheError>;
     /// Publishes atomically under a fence.
+    ///
+    /// `retention_ms` is a plain duration: the total milliseconds after
+    /// `now_ms` beyond which a provider that ages entries off disk (such as
+    /// a file-backed L1) may remove this one, regardless of its fence or
+    /// epoch. `u64::MAX` means "never age-swept" - the correct value for a
+    /// caller with no real retention to offer, such as an in-process store
+    /// with no age-based expiry of its own, or a generic caller with no
+    /// policy in scope. `0` is an ordinary, honoured value ("dead the
+    /// instant it is published"), not a sentinel; a provider that has no
+    /// concept of retention (an in-process LRU store, for example) is free
+    /// to ignore it entirely, since it changes nothing it evicts on.
     async fn publish(
         &self,
         key: &RenderKey,
         bytes: Bytes,
         fence: PublicationFence,
         now_ms: u64,
+        retention_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError>;
     /// Removes an entry.
     async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError>;
@@ -131,6 +143,23 @@ impl MemoryRenderStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Removes every entry, resetting occupancy to empty.
+    ///
+    /// Used for an emergency epoch advance: every key this store holds
+    /// embeds the epoch it was derived under (see
+    /// [`crate::render_cache::key::RenderKey::derive`]), so the instant the
+    /// authority epoch moves, every existing key is unreachable to an
+    /// ordinary lookup - it names a key no future request can ever derive
+    /// again. Unlike a file-backed store, there is no filesystem to
+    /// reconcile a partial clear against, so a full, unconditional clear is
+    /// both correct and free.
+    pub fn clear(&self) {
+        let mut state = self.lock_state();
+        state.entries.clear();
+        state.order.clear();
+        state.bytes = 0;
+    }
 }
 
 #[async_trait]
@@ -150,7 +179,13 @@ impl RenderStore for MemoryRenderStore {
         bytes: Bytes,
         fence: PublicationFence,
         now_ms: u64,
+        _retention_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
+        // This in-process store has no age-based expiry of its own - it
+        // only ever evicts under LRU pressure on insert (`while` loop
+        // below) or a full `clear()` (an epoch advance) - so retention is
+        // accepted, per the trait's own contract, and ignored rather than
+        // tracked for a sweep this store does not perform.
         if self.limits.max_entries == 0
             || self.limits.max_bytes == 0
             || bytes.len() > self.limits.max_bytes

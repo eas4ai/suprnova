@@ -19,6 +19,7 @@ mod render_cache_operations_support;
 use render_cache_operations_support::{
     boot_with_file_l1, boot_with_render_cache, clock, counting_route, dispatch_get,
 };
+use suprnova::render_cache::console::{epoch_advance_report_for_test, inspect_report_for_test};
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 
 #[tokio::test]
@@ -52,26 +53,20 @@ async fn an_epoch_advance_makes_every_existing_entry_unreachable() {
          path can distinguish this miss from any other"
     );
 
-    // `key_for_route_for_test` hardcodes `epoch: 1` (see its own doc at
-    // `key_input_for_test` in `middleware.rs`: "this test helper never
-    // advances the epoch, so every call ... always lands on the same key
-    // regardless of when it runs in a test") - it cannot recompute a
-    // post-advance key, and `RenderCache::inspect` is a raw store lookup
-    // by exact key with no freshness or epoch check of its own (see its
-    // own doc: "Body-free inspection of a stored L0 entry"). So `old_key`
-    // still names a real L0 entry after the advance - nothing removes it -
-    // and asserting `inspect(&old_key).is_none()` here would be asserting
-    // something false, not a stronger proof. The render-count assertion
-    // above is the proof this test can honestly make; see the report's
-    // Deviations section.
+    // Fix round 1 (R94/F11): `advance_epoch` now clears L0 outright, so
+    // the pre-advance entry is gone regardless of what key names it -
+    // `key_for_route_for_test` hardcoding `epoch: 1` (see its own doc at
+    // `key_input_for_test` in `middleware.rs`) no longer matters here: a
+    // cleared store has nothing under any key. Before this fix round,
+    // `old_key` still named a real, merely-unreachable-by-ordinary-lookup
+    // L0 entry after an advance (see the superseded round-1 report and its
+    // Deviations section); that is no longer true.
     assert!(
         RenderCache::inspect(&old_key)
             .await
             .expect("inspect")
-            .is_some(),
-        "the pre-advance entry is still physically present in L0 under its \
-         old key - advance_epoch never evicts L0 entries, it only changes \
-         what future lookups compute as the key for this route"
+            .is_none(),
+        "the pre-advance entry is gone: advance_epoch clears L0 outright"
     );
 }
 
@@ -114,16 +109,21 @@ async fn sweep_removes_dead_files_and_files_from_older_epochs() {
 
     // `/stale/{id}`'s policy is fresh 60_000, stale-servable 60_000,
     // stale-on-error 120_000 (see the support module); the middleware
-    // frames the L1 retention as fresh_ms + stale_on_error_ms = 180_000
+    // frames the L1 retention as `policy.freshness().dead_after_ms()` =
+    // `fresh_ms + max(stale_servable_ms, stale_on_error_ms)` = 180_000
     // (see `store_entry` in `middleware.rs` and
     // `coherence::evaluate_freshness`, which reaches `Dead` at exactly that
-    // age for a non-private class).
+    // age for a non-private class - this route's stale_on_error_ms is
+    // already the wider band, so this matches the pre-fix-round formula's
+    // number too; `sweep_the_dead_edge_uses_the_widest_stale_band_not_stale_on_error_alone`
+    // below is the test that only the correct formula can pass).
     clock(&harness).advance_ms(180_000 + 1);
+    let outcome = RenderCache::sweep().await.expect("sweep");
     assert_eq!(
-        RenderCache::sweep().await.expect("sweep"),
-        1,
+        outcome.removed, 1,
         "past its retention window the file is dead"
     );
+    assert!(!outcome.more_remain);
     assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
 
     dispatch_get(&harness, "/stale/1", &[]).await;
@@ -136,11 +136,172 @@ async fn sweep_removes_dead_files_and_files_from_older_epochs() {
 
     RenderCache::advance_epoch().await.expect("advance");
     assert_eq!(
-        RenderCache::sweep().await.expect("sweep"),
+        RenderCache::sweep().await.expect("sweep").removed,
         1,
         "the republished file's fence epoch now predates the ledger's \
          epoch, so sweep removes it even though its retention window has \
          not elapsed"
     );
     assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
+
+/// Fix round 1 (R93/F2, F3): pins `store_entry`'s retention to the
+/// *policy's* Dead edge, not to `0`, `u64::MAX`, or the pre-fix-round
+/// `fresh_ms + stale_on_error_ms` formula. `/inverted/{id}` declares
+/// `stale_servable_ms` (120_000) wider than `stale_on_error_ms` (0), a
+/// shape `FreshnessPolicy::new` explicitly permits; the old formula would
+/// give 60_000, `0` would sweep it immediately, and `u64::MAX` would never
+/// sweep it - only `fresh_ms + max(stale_servable_ms, stale_on_error_ms)`
+/// (180_000) gets both checks below right.
+#[tokio::test]
+#[serial_test::serial]
+async fn sweep_the_dead_edge_uses_the_widest_stale_band_not_stale_on_error_alone() {
+    let (harness, dir) = boot_with_file_l1().await;
+    dispatch_get(&harness, "/inverted/1", &[]).await;
+    assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 1);
+
+    // Past the old, wrong formula's edge (60_000) but nowhere near the
+    // true one (180_000): reverting `store_entry` to `fresh_ms +
+    // stale_on_error_ms`, or to a `0` retention, would already have this
+    // file swept by now.
+    clock(&harness).advance_ms(120_000);
+    let too_early = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(
+        too_early.removed, 0,
+        "at 120_000 elapsed the entry is still StaleServable, not Dead - a \
+         wrong or zero retention would have swept it already"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 1);
+
+    // Past the true Dead edge: reverting `store_entry` to `u64::MAX`
+    // (never age-swept) would leave this file alive forever.
+    clock(&harness).advance_ms(60_001);
+    let at_dead_edge = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(
+        at_dead_edge.removed, 1,
+        "at fresh_ms + max(stale_servable_ms, stale_on_error_ms) (180_000 \
+         elapsed) the entry is genuinely Dead"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
+
+/// Fix round 1 (R94/F11): an epoch advance clears L0 immediately rather
+/// than leaving unreachable entries to age out.
+#[tokio::test]
+#[serial_test::serial]
+async fn advance_epoch_clears_l0() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        RenderCache::store_inspection()
+            .await
+            .expect("store")
+            .entries,
+        1
+    );
+
+    RenderCache::advance_epoch().await.expect("advance");
+
+    let store = RenderCache::store_inspection().await.expect("store");
+    assert_eq!(store.entries, 0, "L0 is emptied by the epoch advance");
+    assert_eq!(store.bytes, 0);
+}
+
+/// Fix round 1 (R95/F4, ported from the review's console probe): both
+/// hidden commands are actually registered and actually hidden from
+/// `--help`, not merely present as source that nothing links in.
+#[test]
+fn both_console_commands_are_registered_and_hidden() {
+    for name in ["render-cache:epoch-advance", "render-cache:inspect"] {
+        let entry = suprnova::console::list()
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} is not registered"));
+        let command = (entry.clap_builder)();
+        assert!(command.is_hide_set(), "{name} must be hidden from --help");
+    }
+}
+
+/// Fix round 1 (R95/F4, F10): `render-cache:epoch-advance` runs end to end
+/// through the real console dispatcher and its printed report names the
+/// new epoch value, not just the word "advanced".
+#[tokio::test]
+#[serial_test::serial]
+async fn console_epoch_advance_reports_the_new_epoch_value() {
+    let _harness = boot_with_render_cache().await;
+
+    let report = epoch_advance_report_for_test()
+        .await
+        .expect("epoch advance succeeds with a runtime installed");
+    let epoch_now = RenderCache::store_inspection().await.expect("store").epoch;
+    assert!(
+        report.contains(&epoch_now.to_string()),
+        "the printed report must name the epoch it advanced to: {report:?}"
+    );
+
+    suprnova::console::dispatch_argv(vec![
+        "console".to_owned(),
+        "render-cache:epoch-advance".to_owned(),
+    ])
+    .await
+    .expect("the real command dispatcher runs the command and succeeds");
+}
+
+/// Fix round 1 (R95/F4, F10): `render-cache:inspect` runs end to end, its
+/// report is bounded and carries no raw identity or body, and it names the
+/// current epoch alongside the entry's own.
+#[tokio::test]
+#[serial_test::serial]
+async fn console_inspect_reports_metadata_and_current_epoch_bounded_and_body_free() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/private/1", &[("x-test-login", "user-7")]).await;
+    let key = RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("user-7"));
+
+    let report = inspect_report_for_test(&key)
+        .await
+        .expect("inspect succeeds for a real key");
+    assert!(report.len() < 512, "bounded text: {report}");
+    assert!(!report.contains("user-7"), "no raw identity: {report}");
+    assert!(!report.contains("<html"), "no body: {report}");
+    // `EntryInspection`'s own `Debug` output already contains the word
+    // "epoch" (its `epoch: u64` field), so asserting on that literal
+    // substring alone would pass whether or not this report also names
+    // the *current* ledger epoch - not what F10 actually added. Assert on
+    // the specific "current epoch: <value>" text instead, using a value
+    // read independently through `store_inspection`.
+    let current_epoch = RenderCache::store_inspection().await.expect("store").epoch;
+    assert!(
+        report.contains(&format!("current epoch: {current_epoch}")),
+        "the current epoch (distinct from the entry's own) is visible: {report}"
+    );
+
+    suprnova::console::dispatch_argv(vec![
+        "console".to_owned(),
+        "render-cache:inspect".to_owned(),
+        key,
+    ])
+    .await
+    .expect("the real command dispatcher runs the command and succeeds for a real key");
+}
+
+/// Fix round 1 (R95/F9, ported from the review's console probe):
+/// `render-cache:inspect` used to swallow every failure into a printed
+/// message and `Ok(())`, making an unparseable key indistinguishable from
+/// success at the exit code. It must now propagate, the way
+/// `render-cache:epoch-advance` always did.
+#[tokio::test]
+#[serial_test::serial]
+async fn console_inspect_propagates_failure_for_an_unparseable_key() {
+    let _harness = boot_with_render_cache().await;
+
+    let result = suprnova::console::dispatch_argv(vec![
+        "console".to_owned(),
+        "render-cache:inspect".to_owned(),
+        "not-a-key".to_owned(),
+    ])
+    .await;
+    assert!(
+        result.is_err(),
+        "an unparseable key must fail the command, not resolve Ok(())"
+    );
 }
