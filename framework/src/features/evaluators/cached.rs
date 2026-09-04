@@ -262,6 +262,7 @@ impl Evaluator for CachedEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_cache::collector::CollectedContext;
     use featureflag::context::Context;
     use featureflag::evaluator::with_default;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -343,28 +344,29 @@ mod tests {
         }
     }
 
-    /// What one `is_enabled` call records into a fresh collector, as
-    /// `(principal_material, tenant_material)`.
+    /// What one `is_enabled` call records into a fresh collector - the whole
+    /// context, so a test can assert on the bare `*_read` flags as well as on
+    /// the observed material.
     async fn observations_of(
         cached: &Arc<CachedEvaluator>,
         feature: &str,
-    ) -> (
-        std::collections::BTreeSet<String>,
-        std::collections::BTreeSet<String>,
-    ) {
+        build_context: impl FnOnce() -> Context,
+    ) -> CollectedContext {
         crate::render_cache::collector::Collector::scope(async {
             with_default(cached.clone(), || {
-                let ctx = featureflag::context! { user_id = "alice", team = "alpha" };
+                let ctx = build_context();
                 cached.is_enabled(feature, &ctx);
             });
-            let report =
-                crate::render_cache::collector::current_report().expect("a collector is active");
-            (
-                report.context.principal_material,
-                report.context.tenant_material,
-            )
+            crate::render_cache::collector::current_report()
+                .expect("a collector is active")
+                .context
         })
         .await
+    }
+
+    /// The identity-carrying context these tests replay through.
+    fn alice_of_alpha() -> Context {
+        featureflag::context! { user_id = "alice", team = "alpha" }
     }
 
     /// Fix round 6, Leak 4, as fix round 7 rebuilt it. A `CachedEvaluator`
@@ -385,7 +387,8 @@ mod tests {
         }));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 
-        let (principal, tenant) = observations_of(&cached, "flag").await;
+        let observed = observations_of(&cached, "flag", alice_of_alpha).await;
+        let (principal, tenant) = (observed.principal_material, observed.tenant_material);
         assert_eq!(inner.call_count(), 1, "the first call is a miss");
         assert!(
             principal.contains("alice") && tenant.contains("alpha"),
@@ -393,7 +396,8 @@ mod tests {
              {principal:?}, tenant {tenant:?}"
         );
 
-        let (principal, tenant) = observations_of(&cached, "flag").await;
+        let observed = observations_of(&cached, "flag", alice_of_alpha).await;
+        let (principal, tenant) = (observed.principal_material, observed.tenant_material);
         assert_eq!(
             inner.call_count(),
             1,
@@ -410,6 +414,58 @@ mod tests {
         );
     }
 
+    /// Fix round 8, finding 5, at the evaluator level. A hit whose captured
+    /// axes say "principal consulted" and whose context carries no
+    /// `UserIdField` must emit the same **bare read** the miss did. The miss
+    /// and the hit run in separate collector scopes, so the second scope's
+    /// report starts empty and `inner` is never reached (the call count
+    /// proves it): the flag can only be set because the hit replayed it.
+    ///
+    /// This is the seam the round's brief asked to check: the replay and the
+    /// miss both go through `fields::observe_identity`, the one function that
+    /// decides value-or-bare-read, so they cannot disagree about an absent
+    /// field.
+    #[tokio::test]
+    async fn a_cache_hit_replays_a_bare_read_when_the_context_carries_no_field() {
+        let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
+            principal: true,
+            tenant: true,
+        }));
+        let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
+
+        let observed = observations_of(&cached, "flag", Context::root).await;
+        assert_eq!(inner.call_count(), 1, "the first call is a miss");
+        assert!(
+            observed.principal_read && observed.tenant_read,
+            "the miss records both axes as read even with no field to name"
+        );
+        assert!(
+            observed.principal_material.is_empty() && observed.tenant_material.is_empty(),
+            "there is nothing to name - got principal {:?}, tenant {:?}",
+            observed.principal_material,
+            observed.tenant_material
+        );
+
+        let observed = observations_of(&cached, "flag", Context::root).await;
+        assert_eq!(
+            inner.call_count(),
+            1,
+            "the second call must be served from the cache, never reaching inner"
+        );
+        assert!(
+            observed.principal_read,
+            "a cache hit must replay the bare principal read the miss emitted, in a \
+             render that never touched the miss"
+        );
+        assert!(observed.tenant_read, "and the bare tenant read with it");
+        assert!(
+            observed.principal_material.is_empty() && observed.tenant_material.is_empty(),
+            "the replay names no value it does not have - got principal {:?}, tenant {:?}",
+            observed.principal_material,
+            observed.tenant_material
+        );
+    }
+
     /// The other direction, and the whole point of fix round 7's finding 2:
     /// a flag whose inner evaluation consulted no identity records nothing,
     /// on the miss or on any hit that follows it. Recording unconditionally
@@ -419,18 +475,30 @@ mod tests {
         let inner = Arc::new(ScopedEvaluator::new(IdentityScopes::default()));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 
-        let (principal, tenant) = observations_of(&cached, "flag").await;
+        let observed = observations_of(&cached, "flag", alice_of_alpha).await;
         assert!(
-            principal.is_empty() && tenant.is_empty(),
-            "got principal {principal:?}, tenant {tenant:?}"
+            observed.principal_material.is_empty() && observed.tenant_material.is_empty(),
+            "got principal {:?}, tenant {:?}",
+            observed.principal_material,
+            observed.tenant_material
+        );
+        assert!(
+            !observed.principal_read && !observed.tenant_read,
+            "not even a bare read: the inner evaluation consulted no axis"
         );
 
-        let (principal, tenant) = observations_of(&cached, "flag").await;
+        let observed = observations_of(&cached, "flag", alice_of_alpha).await;
         assert_eq!(inner.call_count(), 1, "the second call is a hit");
         assert!(
-            principal.is_empty() && tenant.is_empty(),
+            observed.principal_material.is_empty() && observed.tenant_material.is_empty(),
             "a hit on a globally scoped flag must record nothing either - got principal \
-             {principal:?}, tenant {tenant:?}"
+             {:?}, tenant {:?}",
+            observed.principal_material,
+            observed.tenant_material
+        );
+        assert!(
+            !observed.principal_read && !observed.tenant_read,
+            "and no bare read on the hit either"
         );
     }
 

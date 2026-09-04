@@ -505,7 +505,7 @@ impl MigratorTrait for InMemoryMigrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use crate::render_cache::collector::CollectedContext;
     use std::sync::Arc;
 
     /// Snapshot helper - peek at the in-memory map without going
@@ -519,24 +519,22 @@ mod tests {
         })
     }
 
-    /// Report what one `is_enabled` call recorded into a fresh collector.
-    /// Returns `(principal_material, tenant_material)`.
+    /// Report what one `is_enabled` call recorded into a fresh collector -
+    /// the whole context, so a test can assert on the bare `*_read` flags as
+    /// well as on the observed material.
     async fn observations_of(
         evaluator: &Arc<DatabaseEvaluator>,
         feature: &str,
         build_context: impl FnOnce() -> Context,
-    ) -> (BTreeSet<String>, BTreeSet<String>) {
+    ) -> CollectedContext {
         crate::render_cache::collector::Collector::scope(async {
             featureflag::evaluator::with_default(evaluator.clone(), || {
                 let ctx = build_context();
                 evaluator.is_enabled(feature, &ctx);
             });
-            let report =
-                crate::render_cache::collector::current_report().expect("a collector is active");
-            (
-                report.context.principal_material,
-                report.context.tenant_material,
-            )
+            crate::render_cache::collector::current_report()
+                .expect("a collector is active")
+                .context
         })
         .await
     }
@@ -571,10 +569,11 @@ mod tests {
             .await
             .expect("seed a team-scoped flag");
 
-        let (principal, tenant) = observations_of(&evaluator, "user-scoped-flag", || {
+        let observed = observations_of(&evaluator, "user-scoped-flag", || {
             featureflag::context! { user_id = "alice", team = "alpha" }
         })
         .await;
+        let (principal, tenant) = (observed.principal_material, observed.tenant_material);
         assert!(
             principal.contains("alice"),
             "a user-scoped flag read must record alice's id as an observed principal, \
@@ -585,10 +584,11 @@ mod tests {
             "a flag with no team rule must not record a tenant observation - got {tenant:?}"
         );
 
-        let (principal, tenant) = observations_of(&evaluator, "team-scoped-flag", || {
+        let observed = observations_of(&evaluator, "team-scoped-flag", || {
             featureflag::context! { user_id = "alice", team = "alpha" }
         })
         .await;
+        let (principal, tenant) = (observed.principal_material, observed.tenant_material);
         assert!(
             tenant.contains("alpha"),
             "a team-scoped flag read must record the team as an observed tenant - got {tenant:?}"
@@ -597,6 +597,68 @@ mod tests {
             principal.is_empty(),
             "a flag with no user rule must not record a principal observation - got \
              {principal:?}"
+        );
+    }
+
+    /// Fix round 8, finding 5. A reader who carries no field on a scoped
+    /// axis still depends on that axis: they get the fall-through answer,
+    /// which a reader who does carry one would not, so their page must not
+    /// be published under a key that reader also hits. Recording nothing at
+    /// all - which is what an `if let Some(field)` shape does - left the
+    /// class unnarrowed and published the fall-through body shared.
+    ///
+    /// The bare read is the right record rather than a synthetic value: it
+    /// sets the flag with an empty material set, which is exactly the
+    /// guard's empty-set path - an undeclared dimension declines, and a
+    /// declared one resolving `Anonymous` publishes in its own partition,
+    /// which every identity-less reader sees alike.
+    #[tokio::test]
+    async fn a_scoped_flag_read_by_a_reader_with_no_field_on_that_axis_records_a_bare_read() {
+        let evaluator = Arc::new(
+            DatabaseEvaluator::new_in_memory()
+                .await
+                .expect("in-memory evaluator"),
+        );
+        evaluator
+            .set_flag("user-scoped-flag", "user:alice", true)
+            .await
+            .expect("seed a user-scoped flag");
+        evaluator
+            .set_flag("team-scoped-flag", "team:alpha", true)
+            .await
+            .expect("seed a team-scoped flag");
+
+        let observed = observations_of(&evaluator, "user-scoped-flag", Context::root).await;
+        assert!(
+            observed.principal_read,
+            "an anonymous reader of a user-scoped flag must still record the principal \
+             axis as read"
+        );
+        assert!(
+            observed.principal_material.is_empty(),
+            "there is no id to record, and inventing one would compare against the key \
+             and decline for the wrong reason - got {:?}",
+            observed.principal_material
+        );
+        assert!(
+            !observed.tenant_read,
+            "the flag has no team rule, so the tenant axis is untouched"
+        );
+
+        let observed = observations_of(&evaluator, "team-scoped-flag", Context::root).await;
+        assert!(
+            observed.tenant_read,
+            "a teamless reader of a team-scoped flag must still record the tenant axis \
+             as read"
+        );
+        assert!(
+            observed.tenant_material.is_empty(),
+            "got {:?}",
+            observed.tenant_material
+        );
+        assert!(
+            !observed.principal_read,
+            "the flag has no user rule, so the principal axis is untouched"
         );
     }
 
@@ -633,20 +695,30 @@ mod tests {
             .await
             .expect("seed bob's override");
 
-        let (principal, tenant) = observations_of(&evaluator, "global-flag", || {
+        let observed = observations_of(&evaluator, "global-flag", || {
             featureflag::context! { user_id = "alice", team = "alpha" }
         })
         .await;
+        let (principal, tenant) = (
+            observed.principal_material.clone(),
+            observed.tenant_material.clone(),
+        );
         assert!(
             principal.is_empty() && tenant.is_empty(),
             "a globally scoped flag consults no identity, so reading it must record none - \
              got principal {principal:?}, tenant {tenant:?}"
         );
+        assert!(
+            !observed.principal_read && !observed.tenant_read,
+            "not even a bare read: fix round 8 records one only for an axis the flag is \
+             actually scoped by, so a global flag stays cacheable for every reader"
+        );
 
-        let (principal, _) = observations_of(&evaluator, "another-users-override-flag", || {
+        let principal = observations_of(&evaluator, "another-users-override-flag", || {
             featureflag::context! { user_id = "alice" }
         })
-        .await;
+        .await
+        .principal_material;
         assert!(
             principal.contains("alice"),
             "alice fell through to the global rule, but bob's override means her answer is \
@@ -666,10 +738,11 @@ mod tests {
                 .expect("in-memory evaluator"),
         );
 
-        let (principal, tenant) = observations_of(&evaluator, "no-such-flag", || {
+        let observed = observations_of(&evaluator, "no-such-flag", || {
             featureflag::context! { user_id = "alice", team = "alpha" }
         })
         .await;
+        let (principal, tenant) = (observed.principal_material, observed.tenant_material);
         assert!(
             principal.is_empty() && tenant.is_empty(),
             "got principal {principal:?}, tenant {tenant:?}"
@@ -692,10 +765,11 @@ mod tests {
             .await
             .expect("seed the global rule");
 
-        let (principal, _) = observations_of(&evaluator, "late-override-flag", || {
+        let principal = observations_of(&evaluator, "late-override-flag", || {
             featureflag::context! { user_id = "alice" }
         })
-        .await;
+        .await
+        .principal_material;
         assert!(
             principal.is_empty(),
             "while the flag is global-only it records nothing - got {principal:?}"
@@ -719,10 +793,11 @@ mod tests {
         .expect("insert bob's override out of band");
         evaluator.reload().await.expect("reload");
 
-        let (principal, _) = observations_of(&evaluator, "late-override-flag", || {
+        let principal = observations_of(&evaluator, "late-override-flag", || {
             featureflag::context! { user_id = "alice" }
         })
-        .await;
+        .await
+        .principal_material;
         assert!(
             principal.contains("alice"),
             "once the snapshot holds a user rule the flag is identity-dependent for \

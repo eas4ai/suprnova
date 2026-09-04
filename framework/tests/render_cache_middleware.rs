@@ -1751,3 +1751,143 @@ async fn a_locale_declared_route_still_caches_when_nothing_switches() {
          still be a cache hit on the second request"
     );
 }
+
+/// Fix round 8, finding 5. `observe_identity` used to record an axis only
+/// when the ambient context actually carried a field for it, so an
+/// **anonymous** reader of an identity-scoped flag recorded nothing at all:
+/// no value, and no bare read either. `classify` emitted no reason, the
+/// class was never narrowed, and the anonymous body published under a
+/// shared, principal-free key that bob - who has a `user:bob` override -
+/// then hit, bypassing his own override. Note the orientation: a per-user
+/// *restriction* (global `true`, `user:X false`) is bypassed the same way.
+///
+/// Verified failing by restoring the `if let Some(field)` shape to the
+/// principal arm of `fields::observe_identity`, so an absent `UserIdField`
+/// records nothing instead of `observe_principal_read()`.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_anonymous_reader_of_a_user_scoped_flag_never_publishes_a_shared_entry() {
+    let harness = boot_with_render_cache().await;
+
+    let anonymous = dispatch_get(&harness, "/reads-flag-with-another-users-override/1", &[]).await;
+    let anonymous_body = String::from_utf8_lossy(&anonymous.body).to_string();
+    let after_anonymous = counting_route::renders();
+    assert!(
+        anonymous_body.contains("enabled=false"),
+        "an anonymous reader falls through to the global rule - got {anonymous_body:?}"
+    );
+
+    let bob = dispatch_get(
+        &harness,
+        "/reads-flag-with-another-users-override/1",
+        &[("x-test-login", "bob")],
+    )
+    .await;
+    let bob_body = String::from_utf8_lossy(&bob.body).to_string();
+    assert!(
+        bob_body.contains("enabled=true"),
+        "bob has a per-user override and must never be served the anonymous reader's \
+         flag decision from cache - got {bob_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_anonymous + 1,
+        "bob must be a genuine miss: the anonymous render was never safe to publish \
+         under a key bob also hits"
+    );
+}
+
+/// The team half of the same hole (fix round 8, finding 5): a reader
+/// carrying no `TeamField` recorded nothing for a team-scoped flag, so the
+/// teamless body published shared and a reader in the scoped team hit it.
+/// This is fix round 7's finding 1 reached through the absent field instead
+/// of a different value.
+///
+/// Verified failing by restoring the `if let Some(field)` shape to the
+/// tenant arm of `fields::observe_identity`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_teamless_reader_of_a_team_scoped_flag_never_publishes_a_shared_entry() {
+    let harness = boot_with_render_cache().await;
+
+    let teamless = dispatch_get(&harness, "/reads-team-scoped-flag/1", &[]).await;
+    let teamless_body = String::from_utf8_lossy(&teamless.body).to_string();
+    let after_teamless = counting_route::renders();
+    assert!(teamless_body.contains("enabled=false"));
+
+    let alpha = dispatch_get(
+        &harness,
+        "/reads-team-scoped-flag/1",
+        &[("x-test-team", "alpha")],
+    )
+    .await;
+    let alpha_body = String::from_utf8_lossy(&alpha.body).to_string();
+    assert!(
+        alpha_body.contains("enabled=true"),
+        "team alpha must never be served the teamless reader's flag decision - got \
+         {alpha_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_teamless + 1,
+        "the team alpha request must be a genuine miss"
+    );
+}
+
+/// The same hole on a route that *does* declare `Principal`, which does not
+/// help because the axis the flag is scoped by is `Tenant` (fix round 8,
+/// finding 5). The bare tenant read the teamless reader now records lands on
+/// the guard's empty-set path with `Tenant` undeclared, so the route
+/// declines - the right answer, and the reason declaring the wrong dimension
+/// buys nothing.
+///
+/// Verified failing by restoring the `if let Some(field)` shape to the
+/// tenant arm of `fields::observe_identity`: the teamless render published,
+/// its repeat became a hit, and team alpha was served `enabled=false`.
+#[tokio::test]
+#[serial_test::serial]
+async fn declaring_principal_does_not_cover_a_flag_scoped_by_team() {
+    let harness = boot_with_render_cache().await;
+
+    let teamless = dispatch_get(
+        &harness,
+        "/principal-declared-reads-team-scoped-flag/1",
+        &[],
+    )
+    .await;
+    let teamless_body = String::from_utf8_lossy(&teamless.body).to_string();
+    assert!(teamless_body.contains("enabled=false"));
+    let after_teamless = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/principal-declared-reads-team-scoped-flag/1",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_teamless + 1,
+        "the route declares Principal, but the dimension the observed tenant read \
+         requires is Tenant, which it does not declare - so it must decline, even for \
+         two identical anonymous requests"
+    );
+    let after_repeat = counting_route::renders();
+
+    let alpha = dispatch_get(
+        &harness,
+        "/principal-declared-reads-team-scoped-flag/1",
+        &[("x-test-team", "alpha")],
+    )
+    .await;
+    let alpha_body = String::from_utf8_lossy(&alpha.body).to_string();
+    assert!(
+        alpha_body.contains("enabled=true"),
+        "team alpha must not be served the teamless body - got {alpha_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_repeat + 1,
+        "team alpha is a genuine miss"
+    );
+}

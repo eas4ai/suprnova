@@ -35,20 +35,27 @@
 //!   unlike a header read in general.
 //! - **Feature flags, only through identity, only through the two
 //!   evaluators this framework ships** (fix round 6, Leak 4; fix round 7,
-//!   findings 1 and 2): a middleware that resolves identity once, before
-//!   the render, and stashes it where `is_enabled!` reads it *ambiently*
-//!   during the render (the framework's own feature-flag middleware, whose
-//!   documented purpose is exactly this) observes nothing through any
-//!   instrumented accessor, so nothing narrowed. `DatabaseEvaluator` and
-//!   `CachedEvaluator` (see `crate::features::fields::observe_identity`)
-//!   now record the context's identity at the point `is_enabled!` actually
-//!   reads it: the user id as a principal observation when the flag has any
-//!   `user:`-scoped rule, and the team as a *tenant* observation when it has
-//!   any `team:`-scoped rule. The condition is a property of the flag, not
-//!   of which scope key matched this visitor, so a flag whose only override
-//!   belongs to another user still records the reader's own id. A flag with
-//!   only a global rule records nothing and stays cacheable for signed-in
-//!   visitors, which is correct: its answer does not depend on the reader.
+//!   findings 1 and 2; fix round 8, finding 5): a middleware that resolves
+//!   identity once, before the render, and stashes it where `is_enabled!`
+//!   reads it *ambiently* during the render (the framework's own
+//!   feature-flag middleware, whose documented purpose is exactly this)
+//!   observes nothing through any instrumented accessor, so nothing
+//!   narrowed. `DatabaseEvaluator` and `CachedEvaluator` (see
+//!   `crate::features::fields::observe_identity`) now record the context's
+//!   identity at the point `is_enabled!` actually reads it: the user id as a
+//!   principal observation when the flag has any `user:`-scoped rule, and
+//!   the team as a *tenant* observation when it has any `team:`-scoped rule.
+//!   The condition is a property of the flag, not of which scope key matched
+//!   this visitor, so a flag whose only override belongs to another user
+//!   still records that axis for every reader of it - the reader's own id
+//!   when the context carries one, and a bare read with no material when it
+//!   does not. Both matter: a reader who carries no id reaches the same
+//!   fall-through answer, so publishing their page under a key the
+//!   override's owner also hits would bypass that override, and the bare
+//!   read is what makes the empty-set path below decline for a route that
+//!   declares no such dimension. A flag with only a global rule records
+//!   nothing on either axis and stays cacheable for every visitor, signed in
+//!   or not, which is correct: its answer does not depend on the reader.
 //!   A custom `Evaluator` outside these two, an application-defined scope
 //!   key that is neither `user:` nor `team:`, or a decision that varies on
 //!   something other than the context's identity, is not covered - this

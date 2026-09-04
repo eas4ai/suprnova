@@ -128,7 +128,10 @@ impl TeamField {
 /// different reader would have been given a different answer: publishing
 /// that reader's page under a key the other reader also hits is the leak.
 /// Recording by *matched* scope key instead of by flag scope gets exactly
-/// that case wrong (fix round 7, finding 2).
+/// that case wrong (fix round 7, finding 2), and so does recording only when
+/// the reader happens to carry an id on the axis (fix round 8): a reader who
+/// carries none reaches the same fall-through answer alice does, and its page
+/// is no safer to publish under a shared key than hers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct IdentityScopes {
     /// The flag has at least one rule keyed by the context's user id, so a
@@ -217,6 +220,21 @@ thread_local! {
 /// team partitions: a team-scoped decision published under a key with no
 /// `Tenant` dimension is served to the next team.
 ///
+/// On a scoped axis whose field the context does **not** carry - an
+/// anonymous reader of a `user:`-scoped flag, a teamless reader of a
+/// `team:`-scoped one - this records the bare read
+/// ([`observe_principal_read`](crate::render_cache::collector::observe_principal_read),
+/// [`observe_tenant_read`](crate::render_cache::collector::observe_tenant_read))
+/// rather than nothing (fix round 8). Recording nothing was a leak: the
+/// reader still gets an answer that a reader *with* an id would not, so the
+/// class was never narrowed and the fall-through body published under a
+/// shared key that the identity-carrying reader then hit, bypassing their own
+/// override. A bare read lands on the guard's empty-set path, which is
+/// exactly right for it in both directions: a route that declares the
+/// dimension and resolves it `Anonymous` publishes the fall-through page in
+/// its own anonymous partition, which every identity-less reader sees alike,
+/// and a route that does not declare the dimension declines.
+///
 /// A custom [`Evaluator`](featureflag::evaluator::Evaluator) outside the two
 /// this framework ships remains outside what this can see, the same honest
 /// boundary as headers, `Config::get`, and any other undeclared read - see
@@ -230,19 +248,28 @@ pub(crate) fn observe_identity(scopes: IdentityScopes, context: &featureflag::co
     // the same axes as the miss even when this particular visitor has no id
     // on one of them.
     CAPTURED_IDENTITY_READS.with(|captured| captured.set(captured.get().merged(scopes)));
-    if scopes.principal
-        && let Some(field) = context
+    if scopes.principal {
+        match context
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
-    {
-        crate::render_cache::collector::observe_principal_value(field.as_str());
+        {
+            Some(field) => {
+                crate::render_cache::collector::observe_principal_value(field.as_str());
+            }
+            // Fix round 8: the bare read, never nothing. See this
+            // function's own doc for why the absent field is still a
+            // dependency on the axis.
+            None => crate::render_cache::collector::observe_principal_read(),
+        }
     }
-    if scopes.tenant
-        && let Some(field) = context
+    if scopes.tenant {
+        match context
             .iter()
             .find_map(|c| c.extensions().get::<TeamField>())
-    {
-        crate::render_cache::collector::observe_tenant_value(field.as_str());
+        {
+            Some(field) => crate::render_cache::collector::observe_tenant_value(field.as_str()),
+            None => crate::render_cache::collector::observe_tenant_read(),
+        }
     }
 }
 
