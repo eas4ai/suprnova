@@ -575,6 +575,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     exec.update_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::suprnova::render_cache::orm::after_model_write(self).await?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1217,7 +1218,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         ::suprnova::persist_via_seaorm(inner, c.inner()).await?
                     }
                 };
-                ::core::result::Result::Ok(<Self as ::core::convert::From<#module_name::Model>>::from(inserted))
+                let result = <Self as ::core::convert::From<#module_name::Model>>::from(inserted);
+                ::suprnova::render_cache::orm::after_model_write(&result).await?;
+                ::core::result::Result::Ok(result)
             }
         }
 

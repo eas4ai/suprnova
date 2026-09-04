@@ -56,6 +56,19 @@ where
         .map_err(|e| FrameworkError::database(e.to_string()))
 }
 
+/// The table name for an `EntityExtMut` write's render-cache advance.
+///
+/// `EntityExtMut`'s methods are generic over `Self: EntityTrait`, the raw
+/// SeaORM entity type - not Suprnova's `Model` trait, so there is no
+/// `M::TABLE` constant to reach. `EntityTrait: EntityName`, and
+/// `EntityName: Default` (entities are zero-sized marker structs), so a
+/// default-constructed instance's `table_name()` gives the same
+/// `&'static str` a `#[sea_orm(table_name = "...")]` attribute declares,
+/// with no query and no allocation.
+fn entity_table_name<E: EntityTrait>() -> &'static str {
+    <E as sea_orm::EntityName>::table_name(&E::default())
+}
+
 /// Trait providing Laravel-like read operations on SeaORM entities
 ///
 /// Implement this trait on your SeaORM Entity to get convenient static methods
@@ -393,13 +406,15 @@ where
     /// # Ok(()) }
     /// ```
     async fn insert_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        with_write_executor(|exec| async move {
+        let inserted = with_write_executor(|exec| async move {
             match exec {
                 ExecutorChoice::Tx(t, _) => model.insert(t.as_ref()).await,
                 ExecutorChoice::Pool(c, _) => model.insert(c.inner()).await,
             }
         })
-        .await
+        .await?;
+        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+        Ok(inserted)
     }
 
     /// Update an existing record
@@ -433,13 +448,15 @@ where
     /// # Ok(()) }
     /// ```
     async fn update_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        with_write_executor(|exec| async move {
+        let updated = with_write_executor(|exec| async move {
             match exec {
                 ExecutorChoice::Tx(t, _) => model.update(t.as_ref()).await,
                 ExecutorChoice::Pool(c, _) => model.update(c.inner()).await,
             }
         })
-        .await
+        .await?;
+        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+        Ok(updated)
     }
 
     /// Delete a record by primary key
@@ -479,6 +496,7 @@ where
             ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
         Ok(result.rows_affected)
     }
 
@@ -523,6 +541,7 @@ where
             ExecutorChoice::Pool(c, _) => model.save(c.inner()).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
         saved
             .try_into_model()
             .map_err(|e| FrameworkError::database(e.to_string()))

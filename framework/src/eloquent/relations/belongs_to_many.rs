@@ -379,7 +379,17 @@ where
                 )
                 .await
             }
-        }
+        }?;
+        // `resolve_write`'s first argument is hardcoded `None` above -
+        // this relation has no `with_tx`-style explicit override, only
+        // ambient `CURRENT_TX` or the pool, so the ambient-aware
+        // `after_bulk_write` (not an explicit-handle form) is always
+        // correct here. The pivot row's own key is composite
+        // (`pivot_foreign_key`, `pivot_related_key`), not a single value
+        // `DependencyIdentity::record` can address, so this advances the
+        // table only - over-invalidating a pivot table on every attach is
+        // the safe direction.
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
     }
 
     /// Delete pivot rows linking the parent to `related_id`. Mirrors
@@ -422,7 +432,11 @@ where
                 )
                 .await
             }
-        }
+        }?;
+        // Same reasoning as `attach_with`: no explicit-tx override on
+        // this relation, and the pivot row's composite key can't address
+        // `DependencyIdentity::record`, so the table identity is correct.
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
     }
 
     /// Replace the parent's full set of attached relations with the
@@ -600,6 +614,9 @@ where
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
             }
+        }
+        if !attach_set.is_empty() || !detach_set.is_empty() {
+            crate::render_cache::orm::after_bulk_write(&self.pivot_table).await?;
         }
         Ok(())
     }

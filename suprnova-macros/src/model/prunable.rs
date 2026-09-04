@@ -92,6 +92,7 @@ pub fn expand(item: TokenStream) -> Result<TokenStream> {
                     ))
                     .await
                     .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                ::suprnova::render_cache::orm::after_table_write(table).await?;
                 Ok(res.rows_affected())
             }
         }

@@ -92,16 +92,7 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    let mut identities = vec![
-        DependencyIdentity::try_table(M::TABLE)
-            .map_err(|_| FrameworkError::internal("table name out of bounds"))?,
-    ];
-    if let Some(record) =
-        super::collector::record_identity(M::TABLE, &model.primary_key_value_json())
-    {
-        identities.push(record);
-    }
-    Ok(identities)
+    row_identities(M::TABLE, &model.primary_key_value_json())
 }
 
 /// After a model row was written - `create`, `save`, `update`, `delete`,
@@ -191,4 +182,52 @@ pub async fn after_table_write(table: &str) -> Result<(), FrameworkError> {
 /// the broad authority every representation observes.
 pub async fn after_unknown_write() -> Result<(), FrameworkError> {
     advance(vec![DependencyIdentity::broad()]).await
+}
+
+/// The `Table` and `Record` identities for a write to one row of `table`
+/// identified by `key`, encoded through
+/// [`crate::render_cache::collector::record_identity`] like every other
+/// record identity in this module. Shared by [`after_row_write`] and
+/// [`after_row_write_with_handle`].
+fn row_identities(
+    table: &str,
+    key: &serde_json::Value,
+) -> Result<Vec<DependencyIdentity>, FrameworkError> {
+    let mut identities = vec![
+        DependencyIdentity::try_table(table)
+            .map_err(|_| FrameworkError::internal("table name out of bounds"))?,
+    ];
+    if let Some(record) = super::collector::record_identity(table, key) {
+        identities.push(record);
+    }
+    Ok(identities)
+}
+
+/// After a write to a specific row of a table that is not `Self` - the
+/// `#[model(touches = [...])]` parent-touch cascade
+/// (`Model::__touch_owners_via`), which `UPDATE`s a named parent table's
+/// timestamp column using the child's foreign-key value as the parent's
+/// primary key. Unlike [`after_model_write`], which is generic over a
+/// `Model`-bound type to reach `M::TABLE` and the row's own primary key,
+/// the touch cascade's target is type-erased (reached only through its
+/// `RelationEntry`, never hydrated - see `__touch_owners_via`'s own
+/// documentation), so there is no `Model` type to be generic over here:
+/// the table name and key arrive as plain arguments instead. Advances the
+/// parent's table and record generations.
+pub async fn after_row_write(table: &str, key: &serde_json::Value) -> Result<(), FrameworkError> {
+    advance(row_identities(table, key)?).await
+}
+
+/// Explicit-transaction form of [`after_row_write`] for
+/// `Model::touch_owners_with_tx`, the only `*_with_tx` function in the
+/// framework that executes SQL and, before this fix, advanced nothing -
+/// same defect shape as ruling R47, same fix: route through the explicit
+/// handle instead of the ambient task-local `touch_owners_with_tx`
+/// bypasses by design.
+pub async fn after_row_write_with_handle(
+    handle: &crate::database::transaction::TxHandle,
+    table: &str,
+    key: &serde_json::Value,
+) -> Result<(), FrameworkError> {
+    super::ledger::advance_via_handle(handle, &row_identities(table, key)?).await
 }

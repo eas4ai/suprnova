@@ -369,7 +369,12 @@ where
                 )
                 .await
             }
-        }
+        }?;
+        // No explicit-tx override on this relation (only ambient
+        // `CURRENT_TX` or the pool), and the pivot row's key is composite,
+        // not addressable by `DependencyIdentity::record` - the table
+        // identity is correct, matching `BelongsToMany::attach_with`.
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
     }
 
     /// Delete pivot rows linking this parent to `related_id`.
@@ -410,7 +415,8 @@ where
                 )
                 .await
             }
-        }
+        }?;
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
     }
 
     /// Replace the parent's full set of attached relations with the
@@ -567,6 +573,9 @@ where
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
             }
+        }
+        if !attach_set.is_empty() || !detach_set.is_empty() {
+            crate::render_cache::orm::after_bulk_write(&self.pivot_table).await?;
         }
         Ok(())
     }

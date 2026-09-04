@@ -171,6 +171,18 @@ pub fn observe_table_read(table: &str) {
 
 /// A record read by primary key bytes. See [`observe_table_read`] for the
 /// bound-failure behaviour.
+///
+/// `key` is used verbatim - this function does not encode it. If the
+/// caller's read observed a JSON-typed primary key value, encode it
+/// through [`record_identity`] first (or call
+/// [`observe_record_read_json`] directly) rather than hand-rolling the
+/// bytes: the write side always builds its identities through
+/// `record_identity`'s exact encoding (JSON `Display` form, quotes
+/// included for strings), and any other encoding here - trimming quotes,
+/// using a different number format, and so on - silently breaks
+/// record-level invalidation for that row, the same drift ruling R45
+/// fixed on the write side. This is the one remaining seam where
+/// application code can reintroduce it.
 pub fn observe_record_read(table: &str, key: &[u8]) {
     if !is_active() {
         return;

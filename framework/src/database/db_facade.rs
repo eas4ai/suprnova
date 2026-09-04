@@ -878,8 +878,8 @@ impl DB {
             crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
         // Emit QueryExecuted for unprepared statements as well - they
         // are still queries from the observer's perspective.
-        if super::events::is_dispatching() || !super::events::query_observation_active() {
-            return match &exec {
+        let ok = if super::events::is_dispatching() || !super::events::query_observation_active() {
+            match &exec {
                 crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                     t.execute_unprepared(sql).await
                 }
@@ -888,34 +888,39 @@ impl DB {
                 }
             }
             .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()));
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+        } else {
+            let conn_name = exec.connection_name().to_string();
+            let start = std::time::Instant::now();
+            let res = match &exec {
+                crate::database::transaction::ExecutorChoice::Tx(t, _) => {
+                    t.execute_unprepared(sql).await
+                }
+                crate::database::transaction::ExecutorChoice::Pool(c, _) => {
+                    c.inner().execute_unprepared(sql).await
+                }
+            };
+            let elapsed = start.elapsed();
+            let result_for_event: Result<(), String> = match &res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let event = super::events::QueryExecuted {
+                sql: sql.to_string(),
+                bindings: vec![],
+                time: elapsed,
+                connection_name: conn_name,
+                read_write_type: Some(super::events::ReadWriteType::Write),
+                result: result_for_event,
+            };
+            super::transaction::emit_query_executed(event).await;
+            res.map(|_| true)
+                .map_err(|e| FrameworkError::database(e.to_string()))?
+        };
+        if !is_select_statement(sql) {
+            crate::render_cache::orm::after_unknown_write().await?;
         }
-        let conn_name = exec.connection_name().to_string();
-        let start = std::time::Instant::now();
-        let res = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                t.execute_unprepared(sql).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                c.inner().execute_unprepared(sql).await
-            }
-        };
-        let elapsed = start.elapsed();
-        let result_for_event: Result<(), String> = match &res {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        let event = super::events::QueryExecuted {
-            sql: sql.to_string(),
-            bindings: vec![],
-            time: elapsed,
-            connection_name: conn_name,
-            read_write_type: Some(super::events::ReadWriteType::Write),
-            result: result_for_event,
-        };
-        super::transaction::emit_query_executed(event).await;
-        res.map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        Ok(ok)
     }
 
     /// Run a raw statement that produces a `rows_affected` result.
@@ -937,6 +942,7 @@ impl DB {
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_unknown_write().await?;
         Ok(result.rows_affected())
     }
 
@@ -996,10 +1002,15 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        exec.run(stmt)
+        let ok = exec
+            .run(stmt)
             .await
             .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        if !is_select_statement(sql) {
+            crate::render_cache::orm::after_unknown_write().await?;
+        }
+        Ok(ok)
     }
 
     /// Phase 10C T12 - `DB::affecting_statement` variant pinned to the
@@ -1023,6 +1034,7 @@ impl DB {
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_unknown_write().await?;
         Ok(result.rows_affected())
     }
 }

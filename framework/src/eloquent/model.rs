@@ -618,13 +618,19 @@ where
             Self::default_connection_name(),
         )
         .await?;
-        self.__touch_owners_via(&exec).await
+        self.__touch_owners_via(&exec, None).await
     }
 
     /// [`Self::touch_owners`] pinned to an explicit transaction handle.
     /// The `*_with_tx` shims bypass the `CURRENT_TX` task-local by
     /// design, so they can't rely on picking the transaction up
-    /// ambiently.
+    /// ambiently. This is also the only `*_with_tx` function in the
+    /// framework that executes SQL and, before fix2, advanced no
+    /// generation for it - the same defect shape ruling R47 fixed for the
+    /// model `_with_tx` shims, and the same fix: `__touch_owners_via`
+    /// takes the handle explicitly and routes each touch's advance
+    /// through it, rather than through the ambient task-local it
+    /// deliberately bypasses.
     async fn touch_owners_with_tx(
         &self,
         tx: &crate::database::Transaction,
@@ -633,7 +639,7 @@ where
             return Ok(());
         }
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
-        self.__touch_owners_via(&exec).await
+        self.__touch_owners_via(&exec, Some(&tx.handle())).await
     }
 
     /// The parent-touch cascade itself: one
@@ -645,6 +651,17 @@ where
     /// hydrated. That makes the cascade one level deep: Laravel
     /// recurses to grandparents by loading the parent model, and we
     /// trade that for not issuing a SELECT per touch.
+    ///
+    /// `#[model(touches = [...])]` exists precisely to bust a parent's
+    /// cached representation when a child write should invalidate it too;
+    /// each successful touch here advances the target table's and the
+    /// touched row's generations (`render_cache::orm::after_row_write`),
+    /// using the same foreign-key value already resolved for the `SET`
+    /// binding as the record identity's key - no second lookup needed.
+    /// `tx_handle` is `Some` only from [`Self::touch_owners_with_tx`],
+    /// whose ambient-task-local bypass means the advance must go through
+    /// the same explicit handle the row write did; see that method's
+    /// documentation.
     ///
     /// # Security
     ///
@@ -658,6 +675,7 @@ where
     async fn __touch_owners_via(
         &self,
         exec: &crate::database::transaction::ExecutorChoice,
+        tx_handle: Option<&crate::database::transaction::TxHandle>,
     ) -> Result<(), FrameworkError> {
         if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
             return Ok(());
@@ -723,6 +741,17 @@ where
             ))
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+            match tx_handle {
+                Some(handle) => {
+                    crate::render_cache::orm::after_row_write_with_handle(
+                        handle,
+                        entry.target_table,
+                        &key,
+                    )
+                    .await?
+                }
+                None => crate::render_cache::orm::after_row_write(entry.target_table, &key).await?,
+            }
         }
         Ok(())
     }
@@ -1110,6 +1139,7 @@ where
         ))
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write(self).await?;
         Ok(())
     }
 
