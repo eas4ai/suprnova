@@ -1,5 +1,9 @@
 //! File L1 publishes atomically, treats torn files as misses, bounds bytes
-//! at the exact edge, and recovers its tally across a reopen.
+//! at the exact edge, recovers its tally across a reopen, and keeps the
+//! tally consistent with the directory when an evict or a corruption
+//! cleanup races a publish for the same key.
+
+use std::sync::Arc;
 
 use bytes::Bytes;
 use suprnova::render_cache::file_store::FileRenderStore;
@@ -7,6 +11,7 @@ use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{KeyId, UnixMillis};
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::store::{PublicationFence, PublishOutcome, RenderStore};
+use tokio::sync::Barrier;
 
 fn keys_from(root: u8) -> SnapshotKeyRing {
     let active = KeyRecord::new(
@@ -107,6 +112,24 @@ async fn fences_and_byte_bounds_hold_across_the_directory() {
             .await
             .expect("p"),
         PublishOutcome::Fenced
+    );
+    // Re-read right here, before the eviction below has a chance to remove
+    // "/a" for an unrelated reason: a write-through-despite-fencing bug
+    // must be caught at the moment of the fenced refusal, not hidden by a
+    // later step that happens to make the entry disappear anyway.
+    let still_a = store
+        .get(&a)
+        .await
+        .expect("get")
+        .expect("a must survive a fenced publish");
+    assert_eq!(
+        still_a.bytes.as_ref(),
+        vec![1_u8; 40].as_slice(),
+        "a fenced publish must leave the existing bytes byte-for-byte unchanged"
+    );
+    assert_eq!(
+        still_a.fence.token, 2,
+        "the fence itself must be unchanged too"
     );
     assert_eq!(
         store
@@ -286,6 +309,276 @@ async fn a_store_bounded_to_zero_bytes_admits_nothing() {
             .expect("publish"),
         PublishOutcome::Rejected
     );
+    // The exact edge, not just a non-empty payload above it: `0 > 0` is
+    // false, so a size guard that only checks `payload_len > max_payload`
+    // would admit this one even though the bound is zero.
+    assert_eq!(
+        store
+            .publish(&a, Bytes::new(), fence(1), 1)
+            .await
+            .expect("publish"),
+        PublishOutcome::Rejected,
+        "a zero-byte bound must reject an empty payload too"
+    );
     assert!(store.get(&a).await.expect("get").is_none());
     assert!(snrc_files(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn an_equal_fence_is_refused_and_leaves_the_entry_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    assert_eq!(
+        store
+            .publish(&a, Bytes::from_static(b"first"), fence(5), 1)
+            .await
+            .expect("p"),
+        PublishOutcome::Published
+    );
+    assert_eq!(
+        store
+            .publish(&a, Bytes::from_static(b"second"), fence(5), 2)
+            .await
+            .expect("p"),
+        PublishOutcome::Fenced,
+        "an equal fence, same epoch and same token, must not supersede"
+    );
+    let hit = store.get(&a).await.expect("get").expect("hit");
+    assert_eq!(hit.bytes.as_ref(), b"first");
+    assert_eq!(hit.fence.token, 5);
+}
+
+#[tokio::test]
+async fn growing_the_same_key_never_evicts_a_different_entry_that_still_fits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 100).expect("open");
+    let a = key("/a");
+    let b = key("/b");
+    store
+        .publish(&a, Bytes::from(vec![1_u8; 60]), fence(1), 1)
+        .await
+        .expect("publish a");
+    store
+        .publish(&b, Bytes::from(vec![2_u8; 30]), fence(1), 2)
+        .await
+        .expect("publish b");
+
+    // Growing "/a" to 50 bytes still fits once its own old 60 bytes are
+    // freed (100 - 60 + 50 + 30 = 80 <= 100 available): "/b" must survive,
+    // and "/a" must not be evicted to make room for itself.
+    assert_eq!(
+        store
+            .publish(&a, Bytes::from(vec![3_u8; 50]), fence(2), 3)
+            .await
+            .expect("publish a again"),
+        PublishOutcome::Published
+    );
+
+    let hit_b = store
+        .get(&b)
+        .await
+        .expect("get b")
+        .expect("b must still be present");
+    assert_eq!(hit_b.bytes.len(), 30);
+    let hit_a = store
+        .get(&a)
+        .await
+        .expect("get a")
+        .expect("a must be present");
+    assert_eq!(hit_a.bytes.len(), 50);
+
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 2);
+    assert_eq!(inspection.bytes, 80);
+}
+
+#[tokio::test]
+async fn open_removes_a_pre_existing_torn_entry_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = key("/a");
+    let torn_path = dir.path().join(format!("{}.snrc", a.to_base64url()));
+    std::fs::write(&torn_path, b"not a valid frame at all").expect("plant a torn entry file");
+
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    assert!(
+        !torn_path.exists(),
+        "open removes a pre-existing torn entry file"
+    );
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+    assert!(store.get(&a).await.expect("get").is_none());
+}
+
+#[tokio::test]
+async fn open_removes_orphaned_temporary_files_left_by_a_crash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stray = dir.path().join("rk1.some-key-text.12345.7.tmp");
+    std::fs::write(&stray, b"leftover from a crash between write and rename")
+        .expect("plant a stray temporary file");
+
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    assert!(
+        !stray.exists(),
+        "open removes a temporary file left by a crash between write and rename"
+    );
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+}
+
+/// Aligns two tasks on a barrier and runs them concurrently, so the race
+/// under test starts from the same instant on every trial rather than
+/// depending on incidental scheduling.
+async fn race<F1, F2>(first: F1, second: F2)
+where
+    F1: std::future::Future<Output = ()> + Send + 'static,
+    F2: std::future::Future<Output = ()> + Send + 'static,
+{
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = barrier.clone();
+    let first_task = tokio::spawn(async move {
+        first_barrier.wait().await;
+        first.await;
+    });
+    let second_task = tokio::spawn(async move {
+        barrier.wait().await;
+        second.await;
+    });
+    first_task.await.expect("first task joins");
+    second_task.await.expect("second task joins");
+}
+
+/// An evict racing a publish for the same key is a normal event for a
+/// web-serving cache (an invalidation racing a slow rebuild). Repeated many
+/// times with a real multi-thread runtime so the interleaving that leaves a
+/// published file on disk untracked by the tally - reachable only when
+/// `evict` removes the file before taking the lock - gets a fair chance to
+/// occur on at least one trial if it still can. Reverting the `evict` fix
+/// (taking the lock only after `remove_file` again) reliably fails this
+/// test within the loop below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_evict_racing_a_publish_never_leaves_an_untracked_file() {
+    for seed in 0_u8..100 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FileRenderStore::open(dir.path(), 1024 * 1024).expect("open"));
+        let a = key("/a");
+        store
+            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1)
+            .await
+            .expect("seed publish");
+
+        let republished = vec![seed; 24];
+        let evict_store = store.clone();
+        let evict_key = a.clone();
+        let publish_store = store.clone();
+        let publish_key = a.clone();
+        let publish_bytes = Bytes::from(republished.clone());
+        race(
+            async move {
+                evict_store.evict(&evict_key).await.expect("evict");
+            },
+            async move {
+                let outcome = publish_store
+                    .publish(&publish_key, publish_bytes, fence(2), 2)
+                    .await
+                    .expect("publish");
+                assert_eq!(
+                    outcome,
+                    PublishOutcome::Published,
+                    "seed {seed}: a higher fence always publishes regardless of interleaving"
+                );
+            },
+        )
+        .await;
+
+        let hit = store.get(&a).await.expect("get");
+        let inspection = store.inspect().await.expect("inspect");
+        match hit {
+            Some(entry) => {
+                assert_eq!(
+                    entry.bytes.as_ref(),
+                    republished.as_slice(),
+                    "seed {seed}: a file genuinely on disk must be the republished one"
+                );
+                assert_eq!(
+                    inspection.entries, 1,
+                    "seed {seed}: a file genuinely on disk must be tracked"
+                );
+                assert_eq!(inspection.bytes, republished.len());
+            }
+            None => {
+                assert_eq!(
+                    inspection.entries, 0,
+                    "seed {seed}: no file on disk means nothing should be tracked either"
+                );
+                assert_eq!(inspection.bytes, 0);
+            }
+        }
+    }
+}
+
+/// The same race, aimed at `get`'s corruption-cleanup path instead of
+/// `evict`: a reader observes a corrupted file (as an external actor would
+/// leave one) at the same moment a legitimate publish is replacing it.
+/// Cleaning up by path alone on the strength of a read taken before any
+/// lock was held would delete the republished file; reverting to that
+/// shape (drop the second, lock-held re-read and re-decode in `get`, and
+/// unconditionally remove the path instead) reliably fails this test
+/// within the loop below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_get_cleanup_racing_a_publish_never_destroys_the_republished_entry() {
+    for seed in 0_u8..100 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FileRenderStore::open(dir.path(), 1024 * 1024).expect("open"));
+        let a = key("/a");
+        store
+            .publish(&a, Bytes::from_static(b"seed-bytes"), fence(1), 1)
+            .await
+            .expect("seed publish");
+        // Corrupt the file the way an external actor would, so a
+        // concurrent `get` takes the corruption-cleanup path.
+        let path = store.path_for_test(&a);
+        let mut bytes = std::fs::read(&path).expect("read the real frame");
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0x01;
+        std::fs::write(&path, &bytes).expect("write back one flipped byte");
+
+        let republished = vec![seed; 24];
+        let get_store = store.clone();
+        let get_key = a.clone();
+        let publish_store = store.clone();
+        let publish_key = a.clone();
+        let publish_bytes = Bytes::from(republished.clone());
+        race(
+            async move {
+                let _ = get_store.get(&get_key).await;
+            },
+            async move {
+                let outcome = publish_store
+                    .publish(&publish_key, publish_bytes, fence(2), 2)
+                    .await
+                    .expect("publish");
+                assert_eq!(
+                    outcome,
+                    PublishOutcome::Published,
+                    "seed {seed}: a higher fence always publishes even racing a corruption cleanup"
+                );
+            },
+        )
+        .await;
+
+        let hit = store
+            .get(&a)
+            .await
+            .expect("get")
+            .unwrap_or_else(|| panic!("seed {seed}: the republished entry must survive"));
+        assert_eq!(
+            hit.bytes.as_ref(),
+            republished.as_slice(),
+            "seed {seed}: a concurrent corruption cleanup must never destroy a fresh publish"
+        );
+        let inspection = store.inspect().await.expect("inspect");
+        assert_eq!(inspection.entries, 1);
+        assert_eq!(inspection.bytes, republished.len());
+    }
 }

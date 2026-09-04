@@ -1,9 +1,13 @@
 //! File-backed L1 [`RenderStore`]: one file per key under a directory the
 //! process owns, published atomically so a reader never observes a partial
-//! write. Entries survive a process restart; [`FileRenderStore::open`]
-//! rebuilds the in-memory byte tally by scanning the directory once, and
-//! every later publication keeps that tally in step with the directory so
-//! no publish or eviction ever needs to re-read the directory from disk.
+//! write. Entries survive a process restart, and a completed publication
+//! also survives a hard crash or power loss, since the directory entry
+//! created by its rename is itself synced before the call returns (see
+//! below). [`FileRenderStore::open`] rebuilds the in-memory byte tally by
+//! scanning the directory once, removing anything left behind by a
+//! publication that never completed, and every later publication keeps
+//! that tally in step with the directory so no publish or eviction ever
+//! needs to re-read the directory from disk.
 //!
 //! # File frame
 //!
@@ -27,12 +31,16 @@
 //! once entries already exist under it.
 //!
 //! Publication writes a temporary file (`<name>.<pid>.<token>.tmp`),
-//! `fsync`s it, then renames it over the target: a reader either sees the
-//! previous complete file or the new complete file, never a partial one.
-//! Any file that fails the frame check - wrong magic, a truncated or
-//! tampered body, a bad digest - is treated as a miss and removed, so a
-//! torn write from a crash between create and rename self-heals on the
-//! next read rather than living forever as a poisoned entry.
+//! `fsync`s it, renames it over the target, then `fsync`s the parent
+//! directory: a reader either sees the previous complete file or the new
+//! complete file, never a partial one, and the rename itself is not lost
+//! to a crash or power loss either. A process that dies between creating
+//! the temporary file and the rename leaves it behind with the `.tmp`
+//! suffix, never the entry extension; [`FileRenderStore::open`] removes
+//! any it finds. Any file that fails the frame check - wrong magic, a
+//! truncated or tampered body, a bad digest - is treated as a miss and
+//! removed, so a torn write self-heals on the next read rather than
+//! living forever as a poisoned entry.
 //!
 //! The byte bound (`max_bytes`, passed to [`FileRenderStore::open`])
 //! counts entry payload bytes, not the larger on-disk frame: sizing the
@@ -94,11 +102,12 @@ impl FileRenderStore {
     /// bounded to `max_bytes` of entry payload.
     ///
     /// Scans `directory` once, keeping every `.snrc` file whose frame
-    /// checks out and removing any that does not - a file left behind by a
-    /// crash between a temporary file's creation and its rename is not a
-    /// `.snrc` file yet, so it is left alone; a `.snrc` file that fails its
-    /// frame check is a torn publication and is cleaned up here rather
-    /// than waiting for a `get` that may never come.
+    /// checks out. A `.snrc` file that fails its frame check is a torn
+    /// publication and is removed here rather than waiting for a `get`
+    /// that may never come; a `.tmp` file is a temporary file left behind
+    /// by a crash between its creation and the rename that would have
+    /// made it a `.snrc` file, and is removed too, since it was never part
+    /// of any published entry.
     ///
     /// # Errors
     ///
@@ -119,7 +128,19 @@ impl FileRenderStore {
                 FrameworkError::from_external_with("reading the render cache L1 directory", err)
             })?;
             let path = dir_entry.path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("snrc") {
+            let extension = path.extension().and_then(std::ffi::OsStr::to_str);
+            if extension == Some("tmp") {
+                // A process that dies between a publish's temporary file
+                // and its rename leaves this behind. It was never part of
+                // any published entry - the in-call cleanup on write
+                // failure only runs when the call itself returns an error,
+                // never after a hard stop - so without this it would sit
+                // here consuming disk outside the tracked bound across
+                // every future restart.
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if extension != Some("snrc") {
                 continue;
             }
             let Some(name) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
@@ -192,24 +213,52 @@ impl RenderStore for FileRenderStore {
                 ));
             }
         };
-        match decode_frame(&Bytes::from(data)) {
-            Ok(frame) => Ok(Some(StoredEntry {
+        if let Ok(frame) = decode_frame(&Bytes::from(data)) {
+            return Ok(Some(StoredEntry {
                 bytes: frame.payload,
                 published_at_ms: frame.published_at_ms,
                 fence: frame.fence,
-            })),
-            Err(_) => {
-                // Any frame defect - wrong magic, a truncated body, a bad
-                // digest - makes this file a miss. It is also useless disk
-                // space and a stale tally entry, so both are cleaned up
-                // rather than left for a caller that may never evict.
-                let _ = tokio::fs::remove_file(&path).await;
-                let mut state = self.state.lock().await;
+            }));
+        }
+        // The read above happened before any lock was held, so a
+        // concurrent publish for this key may already have replaced what
+        // looked like a torn file with a valid one by the time cleanup
+        // gets here. Re-read under the lock before deleting anything:
+        // deleting by path alone on the strength of the earlier,
+        // now-possibly-stale read would risk destroying a publish that
+        // completed in between. (`evict`'s removal does not need this
+        // because it is unconditional by intent - the caller asked for
+        // this key gone regardless of what currently occupies it.)
+        let mut state = self.state.lock().await;
+        match tokio::fs::read(&path).await {
+            Ok(data) => match decode_frame(&Bytes::from(data)) {
+                Ok(frame) => Ok(Some(StoredEntry {
+                    bytes: frame.payload,
+                    published_at_ms: frame.published_at_ms,
+                    fence: frame.fence,
+                })),
+                Err(_) => {
+                    // Any frame defect - wrong magic, a truncated body, a
+                    // bad digest - makes this file a miss. It is also
+                    // useless disk space and a stale tally entry, so both
+                    // are cleaned up rather than left for a caller that
+                    // may never evict.
+                    let _ = tokio::fs::remove_file(&path).await;
+                    if let Some(removed) = state.entries.remove(&name) {
+                        state.total_bytes -= removed.payload_bytes;
+                    }
+                    Ok(None)
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(removed) = state.entries.remove(&name) {
                     state.total_bytes -= removed.payload_bytes;
                 }
                 Ok(None)
             }
+            Err(_) => Err(RenderCacheError::new(
+                RenderCacheErrorKind::ProviderUnavailable,
+            )),
         }
     }
 
@@ -226,7 +275,11 @@ impl RenderStore for FileRenderStore {
         // that field is rejected before anything else is touched, the same
         // as any other bound violation.
         let max_payload = self.max_bytes.min(u64::from(u32::MAX));
-        if payload_len > max_payload {
+        // `payload_len > max_payload` alone is not enough: a store bounded
+        // to zero bytes must reject an empty payload too, and `0 > 0` is
+        // false, matching the in-process sibling's `max_bytes == 0` guard
+        // in `crates/suprnova-live/src/render_cache/store.rs`.
+        if self.max_bytes == 0 || payload_len > max_payload {
             return Ok(PublishOutcome::Rejected);
         }
         let name = key.to_base64url();
@@ -284,6 +337,15 @@ impl RenderStore for FileRenderStore {
     async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
         let name = key.to_base64url();
         let path = self.path_for_name(&name);
+        // Held across the removal and the tally update, the same way
+        // `publish` holds it across its write and rename. Taking the lock
+        // only after removing the file let a concurrent publish for this
+        // key complete its own locked section (write, rename, tally
+        // insert) in between: this method would then take the lock and
+        // remove that fresh tally entry, leaving a file genuinely on disk
+        // that the tally says is absent, forever exempt from the byte
+        // bound.
+        let mut state = self.state.lock().await;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -293,7 +355,6 @@ impl RenderStore for FileRenderStore {
                 ));
             }
         }
-        let mut state = self.state.lock().await;
         if let Some(removed) = state.entries.remove(&name) {
             state.total_bytes -= removed.payload_bytes;
         }
@@ -400,9 +461,19 @@ fn decode_frame(bytes: &Bytes) -> Result<DecodedFrame, RenderCacheError> {
     })
 }
 
-/// Writes `framed` to `temp_path`, `fsync`s it, then renames it over
-/// `final_path`. Runs on a blocking thread: `File::create`, `write_all`,
-/// `sync_all`, and `rename` are all synchronous syscalls.
+/// Writes `framed` to `temp_path`, `fsync`s it, renames it over
+/// `final_path`, then `fsync`s the parent directory. Runs on a blocking
+/// thread: `File::create`, `write_all`, `sync_all`, `rename`, and opening
+/// the directory are all synchronous syscalls.
+///
+/// The rename alone makes the swap atomic - a reader never sees a torn
+/// file - but the directory entry it creates is not durable across a crash
+/// or power loss without also syncing the directory: without this, only a
+/// plain process kill (where the page cache survives) is covered. Mirrors
+/// `atomic_write_evidence` in
+/// `crates/suprnova-live/benches/upload_framework_budget.rs`, which opens
+/// the parent directory and calls `sync_all` immediately after its own
+/// rename for the same reason.
 async fn write_frame_atomically(
     temp_path: PathBuf,
     final_path: PathBuf,
@@ -414,7 +485,14 @@ async fn write_frame_atomically(
             file.write_all(&framed)?;
             file.sync_all()?;
             drop(file);
-            std::fs::rename(&temp_path, &final_path)
+            std::fs::rename(&temp_path, &final_path)?;
+            let parent = final_path.parent().ok_or_else(|| {
+                std::io::Error::other("render cache entry path has no parent directory")
+            })?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(parent)?
+                .sync_all()
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);
