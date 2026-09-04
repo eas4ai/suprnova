@@ -13,12 +13,17 @@
 //! advances the generation of what it changed. Task 13 added the
 //! file-backed L1 store. Task 14 added the middleware and
 //! [`RenderCache::install`], which assembles the runtime and puts the
-//! middleware on the router. Task 15 (this one) adds the Live integration
-//! in [`live`]: reading a seed promotion deadline out of a mounted document
-//! for `EntryHeader`, and declining identity-bound documents.
+//! middleware on the router. Task 15 adds the Live integration in
+//! [`live`]: reading a seed promotion deadline out of a mounted document
+//! for `EntryHeader`, and declining identity-bound documents. Task 16
+//! (this one) adds operator control: [`RenderCache::store_inspection`] and
+//! [`RenderCache::sweep`] alongside the epoch and body-free inspection
+//! operators Task 14/15's fix rounds already added, plus the hidden
+//! console commands in [`console`].
 
 pub mod collector;
 pub mod config;
+mod console;
 pub mod file_store;
 pub mod ledger;
 pub mod live;
@@ -34,6 +39,7 @@ pub use config::{FailurePolicy, L0Limits, L1Config, RenderCacheConfig};
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
 pub use suprnova_live::render_cache::entry::EntryInspection;
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
+pub use suprnova_live::render_cache::store::StoreInspection;
 pub use suprnova_live::render_cache::{
     CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, PolicyPatch, QueryPolicy,
     RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass, SharedCachePolicy,
@@ -288,6 +294,39 @@ impl RenderCache {
             &stored.bytes,
             &runtime.limits,
         )?))
+    }
+
+    /// L0 occupancy and bounds, for operator dashboards and the hidden
+    /// console commands. Never exposes a body or a raw key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderCacheError`] when no runtime is installed or the L0
+    /// provider fails.
+    pub async fn store_inspection() -> Result<StoreInspection, RenderCacheError> {
+        let runtime = Self::runtime()
+            .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        runtime.l0.inspect().await
+    }
+
+    /// Removes on-disk L1 entries that are dead by retention or by epoch
+    /// (see [`file_store::FileRenderStore::sweep`]); returns how many were
+    /// removed. A no-op returning `Ok(0)` when no L1 provider is
+    /// configured - disk hygiene has nothing to do in that case, not a
+    /// misconfiguration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderCacheError`] when no runtime is installed or the
+    /// ledger epoch read fails.
+    pub async fn sweep() -> Result<usize, RenderCacheError> {
+        let runtime = Self::runtime()
+            .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        let Some(l1) = runtime.l1.as_ref() else {
+            return Ok(0);
+        };
+        let epoch = runtime.ledger.epoch().await?;
+        l1.sweep(runtime.now_ms(), epoch).await
     }
 
     /// Test-only: the key text for a route with default variance and an

@@ -1796,7 +1796,21 @@ async fn store_entry(
     if policy.layers().l1()
         && let Some(l1) = &runtime.l1
     {
-        let _ = l1.publish(&job.key, encoded, fence, now).await;
+        // The total time from publication after which this entry is dead
+        // by every freshness band (see
+        // `suprnova_live::render_cache::coherence::evaluate_freshness`),
+        // so `FileRenderStore::sweep` knows when the file is safe to
+        // remove. This is the one call site with a policy in scope to
+        // compute a real retention from; every other L1 caller (including
+        // `file_store.rs`'s own tests) uses the generic
+        // `RenderStore::publish`, which always frames zero.
+        let retention_ms = entry
+            .header()
+            .fresh_ms
+            .saturating_add(entry.header().stale_on_error_ms);
+        let _ = l1
+            .publish_with_retention(&job.key, encoded, fence, now, retention_ms)
+            .await;
     }
 }
 

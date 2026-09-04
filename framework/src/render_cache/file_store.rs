@@ -28,10 +28,19 @@
 //! | entry bytes | entry length |
 //! | SHA-256 of everything before it | 32 |
 //!
-//! `stale_on_error_ms` is not yet read by this store; a later task's
-//! `sweep` reads it to decide whether a past-fresh entry is still
-//! servable. Storing it now means the on-disk frame does not change shape
-//! once entries already exist under it.
+//! `stale_on_error_ms` is the total milliseconds after `published_at_ms`
+//! beyond which an entry can never be served again by any freshness band
+//! (see [`suprnova_live::render_cache::coherence::evaluate_freshness`]:
+//! for a non-private class, `Dead` starts at `fresh_ms + stale_on_error_ms`
+//! past publication). [`FileRenderStore::sweep`] reads it, alongside each
+//! entry's fence epoch, to remove files that can never be served again -
+//! disk hygiene, not a correctness gate, since [`FileRenderStore::get`]
+//! re-evaluates freshness independently on every read regardless of
+//! whether sweep has run yet. [`RenderStore::publish`] (used generically,
+//! including by this file's own tests) always frames zero here, since a
+//! generic caller has no policy in scope to compute a real value from;
+//! [`FileRenderStore::publish_with_retention`] is the one real caller
+//! that does, and is what the middleware's L1 publish path uses.
 //!
 //! Publication writes a temporary file (`<name>.<pid>.<token>.tmp`),
 //! `fsync`s it, renames it over the target, then `fsync`s the parent
@@ -82,6 +91,11 @@ struct TrackedEntry {
     fence: PublicationFence,
     payload_bytes: u64,
     published_at_ms: u64,
+    /// Total milliseconds after `published_at_ms` beyond which this entry
+    /// is dead; see the module documentation. Mirrors the frame's own
+    /// field so [`FileRenderStore::sweep`] never needs to re-read a file
+    /// from disk to decide whether it is retired.
+    stale_on_error_ms: u64,
 }
 
 /// In-memory byte tally, guarded by an async mutex so a publish can hold it
@@ -98,6 +112,12 @@ pub struct FileRenderStore {
     directory: PathBuf,
     max_bytes: u64,
     state: AsyncMutex<TallyState>,
+    /// Publications since open, for the every-256th automatic [`Self::sweep`]
+    /// (see the module documentation). A plain atomic, not guarded by
+    /// `state`: each call's `fetch_add` returns a value no other call can
+    /// also observe, so exactly one call crosses each multiple-of-256
+    /// boundary regardless of concurrent publishers.
+    publish_count: std::sync::atomic::AtomicU64,
 }
 
 impl FileRenderStore {
@@ -162,6 +182,7 @@ impl FileRenderStore {
                             fence: frame.fence,
                             payload_bytes,
                             published_at_ms: frame.published_at_ms,
+                            stale_on_error_ms: frame.stale_on_error_ms,
                         },
                     );
                 }
@@ -177,6 +198,7 @@ impl FileRenderStore {
                 entries,
                 total_bytes,
             }),
+            publish_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -279,6 +301,131 @@ impl RenderStore for FileRenderStore {
         bytes: Bytes,
         fence: PublicationFence,
         now_ms: u64,
+    ) -> Result<PublishOutcome, RenderCacheError> {
+        // Zero: a generic caller (this trait method's every caller besides
+        // the middleware's L1 publish path, including this file's own
+        // tests) has no policy in scope to compute a real retention from.
+        // See [`Self::publish_with_retention`] and the module documentation.
+        self.publish_framed(key, bytes, fence, now_ms, 0).await
+    }
+
+    async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
+        let name = key.to_base64url();
+        let path = self.path_for_name(&name);
+        // Held across the removal and the tally update, the same way
+        // `publish` holds it across its write and rename. Taking the lock
+        // only after removing the file let a concurrent publish for this
+        // key complete its own locked section (write, rename, tally
+        // insert) in between: this method would then take the lock and
+        // remove that fresh tally entry, leaving a file genuinely on disk
+        // that the tally says is absent, forever exempt from the byte
+        // bound.
+        let mut state = self.state.lock().await;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(RenderCacheError::new(
+                    RenderCacheErrorKind::ProviderUnavailable,
+                ));
+            }
+        }
+        if let Some(removed) = state.entries.remove(&name) {
+            state.total_bytes -= removed.payload_bytes;
+        }
+        Ok(())
+    }
+
+    async fn inspect(&self) -> Result<StoreInspection, RenderCacheError> {
+        let state = self.state.lock().await;
+        Ok(StoreInspection {
+            entries: state.entries.len(),
+            bytes: usize::try_from(state.total_bytes).unwrap_or(usize::MAX),
+        })
+    }
+}
+
+impl FileRenderStore {
+    /// Publishes exactly like [`RenderStore::publish`], but frames a real
+    /// `stale_on_error_ms` (total milliseconds after `now_ms` beyond which
+    /// the entry is dead - see the module documentation) so [`Self::sweep`]
+    /// can later remove it once its retention window elapses. The
+    /// middleware's L1 publish path is the only caller with a route policy
+    /// in scope to compute this from
+    /// (`entry.header().fresh_ms + entry.header().stale_on_error_ms`);
+    /// every other caller, including this file's own tests, uses the
+    /// generic [`RenderStore::publish`], which always frames zero.
+    pub async fn publish_with_retention(
+        &self,
+        key: &RenderKey,
+        bytes: Bytes,
+        fence: PublicationFence,
+        now_ms: u64,
+        stale_on_error_ms: u64,
+    ) -> Result<PublishOutcome, RenderCacheError> {
+        self.publish_framed(key, bytes, fence, now_ms, stale_on_error_ms)
+            .await
+    }
+
+    /// Removes entries that are dead by retention
+    /// (`published_at_ms + stale_on_error_ms` has elapsed at `now_ms`) or
+    /// dead by epoch (the entry's fence epoch is below `epoch`, the current
+    /// ledger epoch). Returns how many files were removed.
+    ///
+    /// Disk hygiene, not a correctness gate: [`RenderStore::get`]
+    /// independently re-evaluates freshness on every read, so an entry
+    /// sweep has not yet reached is never served past what the
+    /// application's own freshness policy allows - see the module
+    /// documentation.
+    ///
+    /// Holds the tally lock across every removal and its matching tally
+    /// update, one entry at a time, the same discipline
+    /// [`RenderStore::publish`] and [`RenderStore::evict`] use: a file is
+    /// removed from disk, and only then - and only if that removal
+    /// actually succeeded or the file was already gone - is its tally
+    /// entry dropped. A removal that fails for a real reason leaves that
+    /// entry tracked and counted, exactly like `publish`'s own eviction
+    /// loop and `evict`, rather than letting the tally and the directory
+    /// disagree about what is still on disk.
+    ///
+    /// # Errors
+    ///
+    /// This method itself cannot fail; the `Result` matches the store's
+    /// other operations and leaves room for a future provider-level
+    /// failure without a signature change.
+    pub async fn sweep(&self, now_ms: u64, epoch: u64) -> Result<usize, RenderCacheError> {
+        let mut state = self.state.lock().await;
+        let dead: Vec<String> = state
+            .entries
+            .iter()
+            .filter(|(_, tracked)| {
+                now_ms.saturating_sub(tracked.published_at_ms) >= tracked.stale_on_error_ms
+                    || tracked.fence.epoch < epoch
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut removed = 0_usize;
+        for name in dead {
+            match tokio::fs::remove_file(self.path_for_name(&name)).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => continue,
+            }
+            if let Some(tracked) = state.entries.remove(&name) {
+                state.total_bytes -= tracked.payload_bytes;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    async fn publish_framed(
+        &self,
+        key: &RenderKey,
+        bytes: Bytes,
+        fence: PublicationFence,
+        now_ms: u64,
+        stale_on_error_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
         let payload_len = bytes.len() as u64;
         // The frame's entry-length field is a u32 regardless of how large
@@ -385,7 +532,7 @@ impl RenderStore for FileRenderStore {
                 return Ok(PublishOutcome::Rejected);
             }
         }
-        let framed = encode_frame(&fence, now_ms, 0, &bytes);
+        let framed = encode_frame(&fence, now_ms, stale_on_error_ms, &bytes);
         let final_path = self.path_for_name(&name);
         let temp_path = self.temp_path_for(&name, fence.token);
         match write_frame_atomically(temp_path, final_path, framed).await {
@@ -419,44 +566,27 @@ impl RenderStore for FileRenderStore {
                 fence,
                 payload_bytes: payload_len,
                 published_at_ms: now_ms,
+                stale_on_error_ms,
             },
         );
+        drop(state);
+        // Every 256th publication (across both the generic path and the
+        // retention-aware one) triggers a sweep using the epoch this very
+        // publication was fenced under - `key_input` reads the ledger
+        // epoch fresh on every dispatch (see `middleware.rs`'s own note on
+        // this), so `fence.epoch` here is exactly "the current ledger
+        // epoch" from this call's point of view. A publication must never
+        // fail because its own housekeeping sweep did, so any error is
+        // discarded; the lock above is already released, so this cannot
+        // deadlock against `sweep`'s own locking.
+        let count = self
+            .publish_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if count.is_multiple_of(256) {
+            let _ = self.sweep(now_ms, fence.epoch).await;
+        }
         Ok(PublishOutcome::Published)
-    }
-
-    async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
-        let name = key.to_base64url();
-        let path = self.path_for_name(&name);
-        // Held across the removal and the tally update, the same way
-        // `publish` holds it across its write and rename. Taking the lock
-        // only after removing the file let a concurrent publish for this
-        // key complete its own locked section (write, rename, tally
-        // insert) in between: this method would then take the lock and
-        // remove that fresh tally entry, leaving a file genuinely on disk
-        // that the tally says is absent, forever exempt from the byte
-        // bound.
-        let mut state = self.state.lock().await;
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                return Err(RenderCacheError::new(
-                    RenderCacheErrorKind::ProviderUnavailable,
-                ));
-            }
-        }
-        if let Some(removed) = state.entries.remove(&name) {
-            state.total_bytes -= removed.payload_bytes;
-        }
-        Ok(())
-    }
-
-    async fn inspect(&self) -> Result<StoreInspection, RenderCacheError> {
-        let state = self.state.lock().await;
-        Ok(StoreInspection {
-            entries: state.entries.len(),
-            bytes: usize::try_from(state.total_bytes).unwrap_or(usize::MAX),
-        })
     }
 }
 
@@ -465,12 +595,10 @@ impl RenderStore for FileRenderStore {
 struct DecodedFrame {
     fence: PublicationFence,
     published_at_ms: u64,
-    /// Read and verified by [`decode_frame`], but not yet surfaced through
-    /// [`RenderStore`]: a later task's `sweep` is the first reader.
-    #[allow(
-        dead_code,
-        reason = "carried through the frame now so the format never changes shape once entries exist; read starting with the sweep task"
-    )]
+    /// Read by [`FileRenderStore::open`]'s directory scan into
+    /// [`TrackedEntry::stale_on_error_ms`], which [`FileRenderStore::sweep`]
+    /// then reads to decide whether an entry's retention window has
+    /// elapsed.
     stale_on_error_ms: u64,
     payload: Bytes,
 }

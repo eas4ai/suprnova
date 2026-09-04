@@ -853,3 +853,157 @@ async fn a_corrupted_entrys_tally_stays_intact_when_its_removal_fails() {
     );
     assert_eq!(inspection.bytes, 40);
 }
+
+/// `publish_with_retention` frames a real `stale_on_error_ms`; `sweep`
+/// removes the file at, but not before, `published_at_ms +
+/// stale_on_error_ms`.
+#[tokio::test]
+async fn sweep_removes_an_entry_whose_retention_window_has_elapsed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish_with_retention(&a, Bytes::from_static(b"stale"), fence(1), 1_000, 500)
+        .await
+        .expect("publish");
+
+    assert_eq!(
+        store.sweep(1_000 + 499, 1).await.expect("sweep"),
+        0,
+        "one millisecond before the retention edge the entry is still alive"
+    );
+    assert_eq!(snrc_files(dir.path()).len(), 1);
+
+    assert_eq!(
+        store.sweep(1_000 + 500, 1).await.expect("sweep"),
+        1,
+        "at published_at_ms + stale_on_error_ms exactly the entry is dead"
+    );
+    assert_eq!(snrc_files(dir.path()).len(), 0);
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+    assert_eq!(inspection.bytes, 0);
+}
+
+/// A generic [`RenderStore::publish`] call (used by every test in this
+/// file besides the retention-aware ones) always frames `stale_on_error_ms`
+/// as zero, so `sweep` considers the entry dead at any `now_ms` at or past
+/// its `published_at_ms` - documenting the asymmetry the module doc and
+/// `publish_with_retention`'s own doc describe.
+#[tokio::test]
+async fn a_generically_published_entry_is_immediately_sweep_eligible() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish(&a, Bytes::from_static(b"generic"), fence(1), 1_000)
+        .await
+        .expect("publish");
+    assert_eq!(
+        store.sweep(1_000, 1).await.expect("sweep"),
+        1,
+        "a zero-retention frame is dead from the moment it is published"
+    );
+}
+
+/// An entry's fence epoch below the epoch `sweep` is given is dead
+/// regardless of how much of its retention window remains - an epoch
+/// advance must make L1 files unreachable promptly, not only once they
+/// would have expired anyway.
+#[tokio::test]
+async fn sweep_removes_an_entry_from_an_older_epoch_even_within_its_retention_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish_with_retention(
+            &a,
+            Bytes::from_static(b"old-epoch"),
+            fence(1),
+            1_000,
+            1_000_000,
+        )
+        .await
+        .expect("publish");
+
+    assert_eq!(
+        store.sweep(1_000, 1).await.expect("sweep"),
+        0,
+        "same epoch, and far from the retention edge"
+    );
+    assert_eq!(
+        store.sweep(1_000, 2).await.expect("sweep"),
+        1,
+        "the entry's fence epoch (1) is below the epoch just passed in (2)"
+    );
+}
+
+/// Proves `sweep`'s ordering requirement: a file must be removed from disk
+/// before its tally entry is dropped, the same discipline `publish` and
+/// `evict` use (see their own docs and this file's fix-round history).
+///
+/// Forces a removal failure with real permissions, the same technique as
+/// `a_corrupted_entrys_tally_stays_intact_when_its_removal_fails` above: a
+/// directory with no write permission still lets `sweep` read its own
+/// in-memory tally to decide what is dead (a pure in-memory operation), but
+/// cannot actually remove the file from it. With the correct order (delete
+/// first, drop the tally entry only once that succeeds), a failed deletion
+/// leaves both the file and the tally entry in place. Reordering to update
+/// the tally first and delete second would make this test observe
+/// `inspect().entries == 0` while the file is still physically present on
+/// disk - manually confirmed while writing this test by swapping the two
+/// statements at the end of `FileRenderStore::sweep`'s loop body, which
+/// turned this assertion red with `assertion `left == right` failed ...
+/// left: 0, right: 1`, then reverted.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sweep_removal_failure_leaves_the_tally_and_the_disk_agreeing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish_with_retention(&a, Bytes::from(vec![9_u8; 20]), fence(1), 1_000, 500)
+        .await
+        .expect("publish");
+
+    let probe = dir.path().join(".probe-remove");
+    std::fs::write(&probe, b"probe").expect("plant a disposable probe file");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+        .expect("restrict the directory to read and execute only");
+    if std::fs::remove_file(&probe).is_ok() {
+        // A process that ignores directory modes (running as root, or an
+        // exotic filesystem) cannot express this precondition at all.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore permissions");
+        eprintln!(
+            "skipping: this process can remove a file from a directory it has no \
+             write permission on, so a removal failure cannot be simulated"
+        );
+        return;
+    }
+
+    let removed = store.sweep(1_000 + 500, 1).await.expect("sweep");
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("restore permissions so the assertions below can read the directory");
+
+    assert_eq!(
+        removed, 0,
+        "the removal failed, so nothing was actually removed"
+    );
+    let path = store.path_for_test(&a);
+    assert!(
+        path.exists(),
+        "the file removal failed, so the file is still there"
+    );
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        inspection.entries, 1,
+        "the tally must still count an entry whose file removal failed - a \
+         correct sweep removes the file before updating the tally, so a \
+         failed removal leaves both the file and the tally entry in place"
+    );
+    assert_eq!(inspection.bytes, 20);
+}
