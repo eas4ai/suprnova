@@ -62,6 +62,7 @@
 //! semantics. Use [`Transaction::savepoint`] for nested behaviour.
 
 use crate::database::DB;
+use crate::database::identifier::canonical_savepoint_name;
 use crate::error::FrameworkError;
 use rand::RngExt;
 use sea_orm::{ConnectionTrait, DatabaseTransaction, TransactionTrait};
@@ -992,6 +993,8 @@ impl Transaction {
     /// that splices untrusted input gets a
     /// [`FrameworkError::bad_request`] instead of an injected
     /// statement. [`Self::rollback_to`] applies the same guard.
+    /// Names are case-insensitive. PostgreSQL also aliases names that share
+    /// their first 63 ASCII bytes; SQLite and MySQL retain all 64 bytes.
     ///
     /// Inside [`DB::transaction`] the call also marks the after-commit
     /// registry, so a later [`Self::rollback_to`] can discard the deferred
@@ -999,7 +1002,7 @@ impl Transaction {
     /// allowed: the inner savepoint shadows the outer one until it is rolled
     /// back, which is how every backend resolves it.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
-        let validated = super::identifier::validate_savepoint_name(name)?;
+        let validated = canonical_savepoint_name(name, self.backend())?;
         let sql = format!("SAVEPOINT {validated}");
         self.inner
             .execute_unprepared(&sql)
@@ -1010,7 +1013,7 @@ impl Transaction {
         // database never established would discard callbacks whose rows are
         // still there.
         if let Some(state) = self.registry.as_deref() {
-            super::after_commit::mark_savepoint(state, validated);
+            super::after_commit::mark_savepoint(state, &validated);
         }
         Ok(())
     }
@@ -1045,7 +1048,7 @@ impl Transaction {
     /// [`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned)
     /// goes to the cache store, and neither shipped store is database-backed.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
-        let validated = super::identifier::validate_savepoint_name(name)?;
+        let validated = canonical_savepoint_name(name, self.backend())?;
         let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
         self.inner
             .execute_unprepared(&sql)
@@ -1055,7 +1058,7 @@ impl Transaction {
         // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
         // rows in place, and callbacks discarded for it could not be recovered.
         if let Some(state) = self.registry.as_deref() {
-            match super::after_commit::rollback_to_savepoint(state, validated) {
+            match super::after_commit::rollback_to_savepoint(state, &validated) {
                 Some(compensations) => {
                     super::after_commit::run_rollback(compensations).await;
                 }

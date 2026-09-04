@@ -129,8 +129,8 @@ fn queue_on_current_transaction(
 /// searched from the top: whichever savepoint the database rolls back to is the
 /// one whose mark is used, and the registry can never disagree with the rows.
 pub(crate) struct SavepointMark {
-    /// The name the caller passed to `savepoint`, already validated as a SQL
-    /// identifier by the time it reaches here.
+    /// Validated, backend-canonical SQL identity, shared with the emitted
+    /// savepoint statement rather than the caller's original spelling.
     name: String,
     /// Length of the after-commit registry at the savepoint.
     after_commit_len: usize,

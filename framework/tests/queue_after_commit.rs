@@ -8,6 +8,7 @@
 //! *entire* push, and the rollback callback releases a unique job's lock).
 
 use chrono::Utc;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,200 @@ use suprnova::{
 use suprnova::{EventFacade, Listener};
 use tokio::sync::Notify;
 use tokio::time::timeout;
+
+#[derive(Serialize, Deserialize)]
+struct SavepointRowJob {
+    id: i32,
+}
+
+#[async_trait]
+impl Job for SavepointRowJob {
+    fn job_name() -> &'static str {
+        "savepoint-row"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+async fn savepoint_rows_match_jobs(
+    first: String,
+    second: Option<String>,
+    rollback: String,
+    expected: &[i32],
+) {
+    let driver = install_driver();
+    let connection = DB::connection().expect("test connection");
+    let backend = connection.inner().get_database_backend();
+    let table = format!("savepoint_rows_{}", uuid::Uuid::new_v4().simple());
+    connection
+        .inner()
+        .execute_unprepared(&format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+        .await
+        .expect("create owned table");
+    let tx_table = table.clone();
+    DB::transaction(move |tx| {
+        Box::pin(async move {
+            for id in 0..3 {
+                if id == 1 {
+                    tx.savepoint(&first).await?;
+                }
+                if id == 2 {
+                    if let Some(second) = &second {
+                        tx.savepoint(second).await?;
+                    } else {
+                        break;
+                    }
+                }
+                tx.query_all(Statement::from_string(
+                    backend,
+                    format!("INSERT INTO {tx_table} (id) VALUES ({id})"),
+                ))
+                .await?;
+                Queue::push(SavepointRowJob { id }).await?;
+            }
+            tx.rollback_to(&rollback).await?;
+            // ROLLBACK TO keeps its mark usable. Repeat through another spelling.
+            tx.query_all(Statement::from_string(
+                backend,
+                format!("INSERT INTO {tx_table} (id) VALUES (3)"),
+            ))
+            .await?;
+            Queue::push(SavepointRowJob { id: 3 }).await?;
+            tx.rollback_to(&rollback.to_ascii_uppercase()).await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("outer commit");
+    let rows: Vec<i32> = connection
+        .inner()
+        .query_all_raw(Statement::from_string(
+            backend,
+            format!("SELECT id FROM {table} ORDER BY id"),
+        ))
+        .await
+        .expect("committed rows")
+        .into_iter()
+        .map(|row| row.try_get("", "id").unwrap())
+        .collect();
+    let jobs: Vec<i32> = driver
+        .envelopes()
+        .into_iter()
+        .map(|env| {
+            serde_json::from_value::<SavepointRowJob>(env.payload)
+                .unwrap()
+                .id
+        })
+        .collect();
+    connection
+        .inner()
+        .execute_unprepared(&format!("DROP TABLE {table}"))
+        .await
+        .expect("drop owned table");
+    assert_eq!(rows, expected, "physical rollback boundary");
+    assert_eq!(jobs, expected, "deferred effects must match committed rows");
+}
+
+async fn savepoint_alias_suite() {
+    savepoint_rows_match_jobs("checkpoint".into(), None, "CHECKPOINT".into(), &[0]).await;
+    savepoint_rows_match_jobs(
+        "checkpoint".into(),
+        Some("CHECKPOINT".into()),
+        "checkpoint".into(),
+        &[0, 1],
+    )
+    .await;
+    let prefix = "a".repeat(63);
+    let postgres = DB::connection().unwrap().inner().get_database_backend() == DbBackend::Postgres;
+    savepoint_rows_match_jobs(
+        format!("{prefix}x"),
+        Some(format!("{prefix}y")),
+        format!("{prefix}x"),
+        if postgres { &[0, 1] } else { &[0] },
+    )
+    .await;
+    if postgres {
+        savepoint_rows_match_jobs(format!("{prefix}x"), None, prefix, &[0]).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn savepoint_aliases_sqlite_rows_and_jobs_agree() {
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    savepoint_alias_suite().await;
+}
+
+async fn live_savepoint_aliases(variable: &str, expected_backend: DbBackend) {
+    let url = std::env::var(variable).expect("explicit disposable database URL required");
+    let config = DatabaseConfig::builder()
+        .url(url)
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let connection = DbConnection::connect(&config)
+        .await
+        .expect("live test database");
+    assert_eq!(
+        connection.inner().get_database_backend(),
+        expected_backend,
+        "the live dialect test must use its intended backend"
+    );
+    TestContainer::scope(async move {
+        TestContainer::singleton(connection);
+        savepoint_alias_suite().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable PostgreSQL in PG_TEST_URL"]
+async fn savepoint_aliases_postgres_rows_and_jobs_agree() {
+    live_savepoint_aliases("PG_TEST_URL", DbBackend::Postgres).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL/MariaDB in MYSQL_TEST_URL"]
+async fn savepoint_aliases_mysql_rows_and_jobs_agree() {
+    live_savepoint_aliases("MYSQL_TEST_URL", DbBackend::MySql).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn savepoint_case_alias_releases_unique_job_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("checkpoint").await?;
+            assert!(
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "case-alias".into()
+                })
+                .await?
+            );
+            tx.rollback_to("CHECKPOINT").await?;
+            assert!(
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "case-alias".into()
+                })
+                .await?
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+    assert_eq!(driver.count(), 1);
+}
 
 #[derive(Default)]
 struct CompletionEventGate {

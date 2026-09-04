@@ -58,6 +58,8 @@ echo
 echo "==> cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored"
 cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-threads=1
 
+cargo test -p suprnova --test queue_after_commit savepoint_aliases_mysql_rows_and_jobs_agree -- --ignored --exact
+
 echo
 echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"
 workflow_out="$(cargo test -p suprnova --lib \
