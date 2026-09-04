@@ -24,13 +24,24 @@ use crate::{DB, FrameworkError};
 /// Advances `identities` inside the current ambient transaction, or opens
 /// one around just the advance when none is active.
 ///
+/// Returns `Ok(())` immediately, issuing no SQL at all, when no RenderCache
+/// runtime has been installed for this process
+/// (`super::is_installed`). This is the fix that makes an entire class of
+/// failure disappear rather than merely handling it: an application that
+/// never installs RenderCache - every existing application, and nearly
+/// every test database - now performs zero RenderCache SQL on any write,
+/// so a write can never be put at risk by a probe that was never issued.
+/// See fix1 item 1.
+///
 /// The common case - a write issued inside `DB::transaction`, or one whose
 /// caller already opened a transaction for it - takes the first branch:
 /// the advance joins that same transaction, so a caller rollback undoes it
 /// along with the row write. A write issued with no ambient transaction at
 /// all (a bare `model.save()`) still needs its advance to land as one
 /// atomic unit across every identity it touches, so the second branch
-/// opens a transaction for that alone.
+/// opens a transaction for that alone - and because nothing else rides on
+/// that throwaway transaction, it is the one case where a missing-table
+/// failure is safe to swallow; see [`super::ledger::advance_in_dedicated_transaction`].
 ///
 /// The second branch requires a primary connection: `DB::transaction`
 /// always opens against it, the same as the generation ledger's own reads
@@ -40,11 +51,10 @@ use crate::{DB, FrameworkError};
 /// has no primary pool at all - a supported, tested configuration (see
 /// `eloquent_eager_named_connection.rs`) - and a model write on one of
 /// those named connections must keep working exactly as it always has.
-/// RenderCache being pinned to a primary connection that does not exist
-/// here is no different from its schema not being migrated (see the
-/// parallel skip in `ledger::advance_through`): both mean there is nothing
-/// to advance against, not that the write itself should start failing.
 async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
+    if !super::is_installed() {
+        return Ok(());
+    }
     if in_transaction() {
         return super::ledger::advance_in_current_transaction(&identities).await;
     }
@@ -52,7 +62,7 @@ async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkErr
         return Ok(());
     }
     DB::transaction(move |_tx| {
-        Box::pin(async move { super::ledger::advance_in_current_transaction(&identities).await })
+        Box::pin(async move { super::ledger::advance_in_dedicated_transaction(&identities).await })
     })
     .await
 }
@@ -149,6 +159,25 @@ pub async fn after_bulk_write(table: &str) -> Result<(), FrameworkError> {
         |_| FrameworkError::internal("table name out of bounds"),
     )?])
     .await
+}
+
+/// Explicit-transaction-override form of [`after_bulk_write`] for
+/// `Builder::with_tx(&tx).update_all(..)` / `.delete_all(..)`.
+///
+/// `Builder::resolve_write` honours the builder's `tx_override` without
+/// installing the ambient `CURRENT_TX` task-local, so `in_transaction()`
+/// cannot see it and [`after_bulk_write`] would open a transaction of its
+/// own, separate from the caller's `tx` - the identical defect ruling R47
+/// fixed for the model `_with_tx` shims. Routing through the explicit
+/// handle instead keeps the advance in the same transaction as the bulk
+/// row write. See fix1 item 3.
+pub async fn after_bulk_write_with_handle(
+    handle: &crate::database::transaction::TxHandle,
+    table: &str,
+) -> Result<(), FrameworkError> {
+    let identity = DependencyIdentity::try_table(table)
+        .map_err(|_| FrameworkError::internal("table name out of bounds"))?;
+    super::ledger::advance_via_handle(handle, &[identity]).await
 }
 
 /// After a query-builder write on a known table (`DB::table(...).insert` /

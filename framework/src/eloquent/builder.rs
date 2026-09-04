@@ -4785,7 +4785,12 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_bulk_write(M::TABLE).await?;
+        match self.tx_override.as_ref() {
+            Some(handle) => {
+                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
+            }
+            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
+        }
         Ok(result.rows_affected())
     }
 
@@ -4808,7 +4813,12 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_bulk_write(M::TABLE).await?;
+        match self.tx_override.as_ref() {
+            Some(handle) => {
+                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
+            }
+            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
+        }
         Ok(result.rows_affected())
     }
 

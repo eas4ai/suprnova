@@ -490,6 +490,16 @@ impl ExecutorChoice {
         ExecutorChoice::Tx(tx.inner.clone(), tx.connection_name.clone())
     }
 
+    /// Build an executor that routes through an explicit query-builder
+    /// transaction override (`Builder::with_tx(&tx)` / `Model::*_with_tx`
+    /// pin `Builder`/`Model` operations to `tx.handle()`). Same shape as
+    /// [`Self::from_tx`], for callers that only have the cheap
+    /// [`TxHandle`] rather than the full [`Transaction`].
+    #[doc(hidden)]
+    pub fn from_handle(handle: &TxHandle) -> Self {
+        ExecutorChoice::Tx(handle.inner.clone(), handle.connection_name.clone())
+    }
+
     /// Get the active SeaORM database backend (Postgres / MySQL /
     /// SQLite). Threaded into the per-backend SQL renderers.
     #[doc(hidden)]

@@ -18,7 +18,7 @@ use suprnova_live::render_cache::generation::GenerationLedger;
 mod render_cache_support;
 use render_cache_support::{Post, Trashable, Widget, boot};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_model_save_advances_the_record_and_table_generations_atomically() {
     boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -72,7 +72,7 @@ async fn a_model_save_advances_the_record_and_table_generations_atomically() {
     assert_eq!(after_save.get(&record), Some(2));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn bulk_builder_and_unknown_raw_writes_collapse_to_broader_authority() {
     boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -144,7 +144,7 @@ async fn bulk_builder_and_unknown_raw_writes_collapse_to_broader_authority() {
 /// side that (incorrectly) stripped quotes would advance a *different*
 /// digest than the one a read observed, and record-level invalidation
 /// would silently never fire for this table.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_string_primary_key_advances_the_correctly_quoted_record_identity() {
     boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -182,7 +182,7 @@ async fn a_string_primary_key_advances_the_correctly_quoted_record_identity() {
 /// generates `delete` and `force_delete` overrides for a `soft_deletes`
 /// model, which equally bypass the `Model` trait defaults this task
 /// instruments in `model.rs` - this test exercises all three.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn soft_delete_delete_restore_and_force_delete_all_advance_the_row() {
     boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -259,7 +259,7 @@ async fn soft_delete_delete_restore_and_force_delete_all_advance_the_row() {
 /// doing that, `find`'s coarser read would go from "safe but wasteful" to
 /// "unsafe": a soft-delete model changed through `save_with_tx` would
 /// stop invalidating pages that depended on its table.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn with_tx_writes_advance_only_on_commit_never_on_rollback() {
     boot().await;
     let ledger = SqlGenerationLedger::new();
@@ -308,5 +308,70 @@ async fn with_tx_writes_advance_only_on_commit_never_on_rollback() {
         Some(2),
         "a rolled back _with_tx write must advance nothing - the generation must not move \
          independently of the transaction that rolled back the row write it describes"
+    );
+}
+
+/// fix1 item 3: `Builder::with_tx(&tx)` sets `tx_override`, which
+/// `resolve_write` honours without installing the ambient `CURRENT_TX`
+/// task-local - the identical defect ruling R47 fixed for the model
+/// `_with_tx` shims, still present on the bulk-write path. Before the fix,
+/// `M::query().with_tx(&tx).update_all(..)` would land its row write on
+/// the caller's explicit transaction while the advance opened a *separate*
+/// one, so this test's rollback half would have found the table
+/// generation advanced anyway - exactly the same discriminator the
+/// `with_tx_writes_advance_only_on_commit_never_on_rollback` test above
+/// uses for the model path.
+#[tokio::test]
+async fn with_tx_bulk_writes_advance_only_on_commit_never_on_rollback() {
+    boot().await;
+    let ledger = SqlGenerationLedger::new();
+    let table = DependencyIdentity::table("posts");
+
+    Post::create(attrs! { title: "a" }).await.expect("create");
+    assert_eq!(
+        ledger
+            .current(&[table.digest()])
+            .await
+            .expect("current")
+            .get(&table),
+        Some(1)
+    );
+
+    // Committed bulk write through an explicit builder transaction
+    // override: advances the table.
+    let tx = DB::begin_transaction().await.expect("begin");
+    Post::query()
+        .with_tx(&tx)
+        .update_all(attrs! { title: "b" })
+        .await
+        .expect("bulk with_tx");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        ledger
+            .current(&[table.digest()])
+            .await
+            .expect("current")
+            .get(&table),
+        Some(2),
+        "a committed with_tx bulk write must advance the table generation"
+    );
+
+    // Rolled-back bulk write through an explicit builder transaction
+    // override: advances nothing.
+    let tx = DB::begin_transaction().await.expect("begin");
+    Post::query()
+        .with_tx(&tx)
+        .update_all(attrs! { title: "c" })
+        .await
+        .expect("bulk with_tx");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(
+        ledger
+            .current(&[table.digest()])
+            .await
+            .expect("current")
+            .get(&table),
+        Some(2),
+        "a rolled back with_tx bulk write must advance nothing"
     );
 }

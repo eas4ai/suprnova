@@ -26,6 +26,7 @@ impl MigratorTrait for RenderCacheTestMigrator {
 }
 
 async fn boot() -> TestDatabase {
+    suprnova::render_cache::mark_installed();
     TestDatabase::fresh::<RenderCacheTestMigrator>()
         .await
         .expect("render cache migration should apply cleanly to a fresh SQLite database")
@@ -373,6 +374,7 @@ async fn reset_and_migrate(
         .await
         .expect("migration applies to the live database");
 
+    suprnova::render_cache::mark_installed();
     let guard = suprnova::testing::TestContainer::fake();
     suprnova::testing::TestContainer::singleton(suprnova::DbConnection::from_raw(conn));
     guard
@@ -582,4 +584,92 @@ async fn live_mysql_generation_ledger_advances_and_reads() {
     assert_eq!(ledger.epoch().await.unwrap(), 1);
     ledger.advance_epoch().await.unwrap();
     assert_eq!(ledger.epoch().await.unwrap(), 2);
+}
+
+/// fix1 item 1: on Postgres, a failed statement poisons the enclosing
+/// transaction, and `COMMIT` on a poisoned transaction returns the
+/// ROLLBACK tag without raising - so `tx.commit()` reports `Ok` even
+/// though the whole transaction actually rolled back. Before the fix, a
+/// missing `suprnova_render_epochs` table was swallowed unconditionally,
+/// which - inside a caller's own `DB::transaction`, against a database
+/// that never ran the RenderCache migration - meant the row write above
+/// would appear to succeed while silently being discarded.
+///
+/// SQLite and MySQL do not abort the enclosing transaction on a statement
+/// error, so this failure mode is invisible to both: only a real Postgres
+/// server proves it. This test deliberately does NOT run the migration -
+/// it drops the three `suprnova_render_*` tables (and its own probe
+/// table) if they linger, so this database has no RenderCache schema at
+/// all, then marks a RenderCache runtime installed so the write side's
+/// gate opens and the probe is actually attempted.
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_a_write_inside_a_transaction_on_an_unmigrated_database_fails_loudly() {
+    use sea_orm::ConnectionTrait;
+
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+
+    for table in [
+        "suprnova_render_epochs",
+        "suprnova_render_generation_log",
+        "suprnova_render_generations",
+        "live_pg_unmigrated_probe",
+    ] {
+        let _ = conn
+            .execute_raw(sea_orm::Statement::from_string(
+                conn.get_database_backend(),
+                format!("DROP TABLE IF EXISTS {table}"),
+            ))
+            .await;
+    }
+    conn.execute_raw(sea_orm::Statement::from_string(
+        conn.get_database_backend(),
+        "CREATE TABLE live_pg_unmigrated_probe (id INT PRIMARY KEY)".to_owned(),
+    ))
+    .await
+    .expect("create probe table");
+
+    let guard = suprnova::testing::TestContainer::fake();
+    suprnova::testing::TestContainer::singleton(suprnova::DbConnection::from_raw(conn));
+    suprnova::render_cache::mark_installed();
+
+    // A real row write, through the exact production path (`DB::statement`,
+    // which every non-`SELECT` raw statement routes render-cache
+    // advancement through) - not a direct call into the ledger. If the
+    // missing-table failure were swallowed here, this closure would return
+    // `Ok`, `DB::transaction` would issue `COMMIT`, and Postgres would
+    // silently roll back everything while reporting success.
+    let result: Result<(), FrameworkError> = DB::transaction(|_tx| {
+        Box::pin(async move {
+            DB::statement(
+                "INSERT INTO live_pg_unmigrated_probe (id) VALUES (1)",
+                vec![],
+            )
+            .await?;
+            Ok(())
+        })
+    })
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a missing-table failure inside the caller's transaction must propagate, not be \
+         swallowed - on Postgres, swallowing it lets a later commit() on the poisoned \
+         transaction report success while silently discarding the row write"
+    );
+
+    let rows: i64 = DB::scalar("SELECT COUNT(*) FROM live_pg_unmigrated_probe", vec![])
+        .await
+        .expect("count");
+    assert_eq!(
+        rows, 0,
+        "the whole transaction must have actually rolled back - the row write must not have \
+         silently committed"
+    );
+
+    drop(guard);
 }

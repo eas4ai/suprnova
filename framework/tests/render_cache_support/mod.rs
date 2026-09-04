@@ -60,18 +60,24 @@ impl MigratorTrait for RenderCacheOrmMigrator {
 }
 
 /// Boots a fresh in-memory SQLite database with the RenderCache migration
-/// and the `posts` / `trashables` / `widgets` tables.
+/// and the `posts` / `trashables` / `widgets` tables, and marks a
+/// RenderCache runtime installed for this process so the write side's gate
+/// (`render_cache::is_installed`) opens.
 ///
 /// Every test in `render_cache_orm.rs` calls this without binding the
 /// result (`boot().await;`), matching the shape every test in this suite
 /// needs: the returned `TestDatabase` (and the `TestContainerGuard`
 /// registration inside it) must outlive that statement for `DB::connection()`
 /// to find it for the rest of the test. Leaking it is deliberate, not an
-/// oversight: `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`
-/// builds a fresh tokio runtime - and fresh worker OS threads - per test
-/// function, so nothing registered here is shared with, or needs cleaning
-/// up before, any other test.
+/// oversight: each `#[tokio::test]` function builds and tears down its own
+/// tokio runtime, so nothing registered here is shared with, or needs
+/// cleaning up before, any other test. Tests use the default (single
+/// worker thread) flavour deliberately - `TestContainer::fake()` writes a
+/// thread-local, and a multi-thread runtime can migrate a future between
+/// worker threads between polls, which would make that registration
+/// invisible to whichever thread resumes the test.
 pub async fn boot() {
+    suprnova::render_cache::mark_installed();
     let db = TestDatabase::fresh::<RenderCacheOrmMigrator>()
         .await
         .expect("render cache migration should apply cleanly to a fresh SQLite database");

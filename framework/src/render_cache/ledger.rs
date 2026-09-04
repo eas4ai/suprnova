@@ -10,7 +10,7 @@ use suprnova_live::render_cache::generation::{
 };
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
-use crate::database::transaction::ExecutorChoice;
+use crate::database::transaction::{ExecutorChoice, TxHandle};
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
 /// Hex-encodes an identity's digest for the `identity` column. Every value
@@ -23,26 +23,36 @@ fn identity_column(identity: &DependencyIdentity) -> String {
     hex::encode(identity.digest())
 }
 
-/// True when `error` looks like "this table does not exist" rather than a
-/// real database failure.
+/// True when `error` looks like "the `suprnova_render_epochs` table does
+/// not exist" rather than any other database failure.
 ///
 /// SeaORM does not expose a typed "table missing" variant - every driver
 /// surfaces it as an opaque `DbErr::Query` / `DbErr::Exec` wrapping a
-/// backend-specific message, so this matches on the phrasing each backend
-/// is known to use: SQLite's `no such table`, Postgres's `relation ... does
-/// not exist`, and MySQL's `Table '...' doesn't exist`. The same
-/// string-matching technique is already used elsewhere in this codebase
-/// (`vector/qdrant.rs`) for the same class of "the resource I expect isn't
-/// there" signal. Scoped to callers that already know the failing
-/// statement names one of the three `suprnova_render_*` tables, so a false
-/// positive here would have to be some other error that happens to share
-/// this exact phrasing against the exact same query - not a realistic risk
-/// in practice.
+/// backend-specific message. Requires BOTH the table's own name and one of
+/// the phrasings each backend is known to use for a missing table:
+/// SQLite's `no such table: suprnova_render_epochs`, Postgres's `relation
+/// "suprnova_render_epochs" does not exist`, and MySQL's `Table
+/// '...suprnova_render_epochs' doesn't exist`.
+///
+/// The table name is required, not optional: `does not exist` alone is far
+/// broader than "this table is missing". It also matches a half-applied
+/// migration (`column "epoch" does not exist`, where invalidation should
+/// fail loudly, not skip silently), PgBouncer's transaction-pooling
+/// failure (`prepared statement "sqlx_s_3" does not exist`, a transient
+/// infrastructure fault, not a permanent "not installed"), a wrong
+/// `search_path` in a schema-per-tenant deployment naming some other
+/// relation, and MySQL's 1305 `SAVEPOINT ... does not exist`. None of
+/// those name `suprnova_render_epochs`, so requiring it excludes all of
+/// them while still matching every backend's real missing-table message.
+/// The same string-matching technique (minus this table-name requirement)
+/// is used elsewhere in this codebase (`vector/qdrant.rs`) for the same
+/// class of "the resource I expect isn't there" signal.
 fn is_missing_table_error(error: &sea_orm::DbErr) -> bool {
     let message = error.to_string();
-    message.contains("no such table")
-        || message.contains("does not exist")
-        || message.contains("doesn't exist")
+    message.contains("suprnova_render_epochs")
+        && (message.contains("no such table")
+            || message.contains("does not exist")
+            || message.contains("doesn't exist"))
 }
 
 /// Collapses a database failure into the one closed provider kind
@@ -147,7 +157,49 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 /// circular wait can never form. Proven live against Postgres: see
 /// `live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock` in
 /// `framework/tests/render_cache_ledger.rs`.
+///
+/// Returns `Ok(())` immediately, issuing no SQL at all, when no RenderCache
+/// runtime has been installed for this process (`super::is_installed`) -
+/// see the module-level flag's own documentation for why probing is
+/// unconditionally unsafe rather than merely unnecessary.
+///
+/// A missing-table failure on the probe below always propagates here
+/// rather than being swallowed: `Transaction::current()` is the ambient
+/// transaction the *caller* opened with `DB::transaction`, which may hold
+/// other writes. On Postgres a failed statement poisons the whole
+/// transaction, and `COMMIT` on a poisoned transaction returns the
+/// ROLLBACK tag without raising - so swallowing here would let the
+/// caller's later `commit()` report success while silently discarding
+/// everything it wrote. See fix1 item 1. The no-ambient-transaction
+/// fallback (`orm::advance` opening a transaction solely to hold this
+/// advance, with nothing else riding on it) uses this crate's own
+/// `advance_in_dedicated_transaction` instead, which is safe to swallow
+/// in.
 pub async fn advance_in_current_transaction(
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    if !super::is_installed() || identities.is_empty() {
+        return Ok(());
+    }
+    let tx = Transaction::current().ok_or_else(|| {
+        FrameworkError::internal("RenderCache generation advance requires the owning transaction")
+    })?;
+    advance_through(
+        &ExecutorChoice::from_tx(&tx),
+        identities,
+        MissingTablePolicy::Propagate,
+    )
+    .await
+}
+
+/// Advances `identities` inside a transaction that `orm::advance`'s
+/// no-ambient-transaction fallback opened solely to hold this advance -
+/// nothing else rides on it, so a missing-table failure is safe to treat
+/// as "RenderCache is not installed against this specific database" and
+/// skip, the same reasoning [`advance_in_current_transaction`] documents
+/// for why it must NOT do the same. `pub(crate)`: this is `orm::advance`'s
+/// own implementation detail, not a second public entry point.
+pub(crate) async fn advance_in_dedicated_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
     if identities.is_empty() {
@@ -156,13 +208,34 @@ pub async fn advance_in_current_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
+    advance_through(
+        &ExecutorChoice::from_tx(&tx),
+        identities,
+        MissingTablePolicy::Skip,
+    )
+    .await
 }
 
-/// The upsert-and-log body shared by [`advance_in_current_transaction`]
-/// (the ambient `CURRENT_TX` form) and [`advance_via_tx`] (the explicit
-/// `&Transaction` form the `Model::*_with_tx` shims need - see ruling
-/// R47): each identity's generation row upserted and its change-log row
+/// Whether [`advance_through`] propagates or swallows a missing-table
+/// failure on its epoch probe. See [`advance_in_current_transaction`] and
+/// [`advance_in_dedicated_transaction`] for which case is which and why.
+#[derive(Clone, Copy)]
+enum MissingTablePolicy {
+    /// The ambient transaction is the caller's own; swallowing would risk
+    /// converting a poisoned transaction into a silent rollback reported
+    /// as success.
+    Propagate,
+    /// The transaction holds nothing but this advance; a missing table
+    /// means RenderCache is not installed here, and there is nothing else
+    /// in the transaction that swallowing the error could put at risk.
+    Skip,
+}
+
+/// The upsert-and-log body shared by [`advance_in_current_transaction`],
+/// [`advance_in_dedicated_transaction`], and [`advance_via_handle`] (the
+/// explicit-transaction form the `Model::*_with_tx` shims and
+/// `Builder::with_tx` bulk writes need - see rulings R47 and fix1 item 3):
+/// each identity's generation row upserted and its change-log row
 /// appended, in ascending digest order.
 ///
 /// Issues every statement directly through `exec` - never through the
@@ -175,6 +248,7 @@ pub async fn advance_in_current_transaction(
 async fn advance_through(
     exec: &ExecutorChoice,
     identities: &[DependencyIdentity],
+    on_missing_table: MissingTablePolicy,
 ) -> Result<(), FrameworkError> {
     if identities.is_empty() {
         return Ok(());
@@ -189,20 +263,12 @@ async fn advance_through(
         .await
     {
         Ok(row) => row,
-        // The three `suprnova_render_*` tables land in one migration, so a
-        // missing `suprnova_render_epochs` means none of them exist: this
-        // database has never run `render_cache::migration::Migration`, most
-        // likely because the application (or, overwhelmingly, a test
-        // database built without it) does not use RenderCache at all.
-        // "Live is complete without it" (see the module documentation)
-        // extends to every write path this module instruments: a model
-        // save must keep working exactly as it always has when the
-        // generation ledger's own schema was never installed, the same way
-        // any other write on an unmigrated table would simply not exist
-        // yet rather than becoming mandatory infrastructure everyone pays
-        // for. Every other database failure - a real connectivity problem,
-        // a permissions error - still propagates.
-        Err(e) if is_missing_table_error(&e) => return Ok(()),
+        Err(e)
+            if matches!(on_missing_table, MissingTablePolicy::Skip)
+                && is_missing_table_error(&e) =>
+        {
+            return Ok(());
+        }
         Err(e) => return Err(FrameworkError::database(e.to_string())),
     }
     .ok_or_else(|| {
@@ -266,8 +332,8 @@ async fn advance_through(
     Ok(())
 }
 
-/// Advances `identities` through an explicit transaction handle instead of
-/// the ambient `CURRENT_TX` task-local `advance_in_current_transaction`
+/// Advances `identities` through an explicit transaction instead of the
+/// ambient `CURRENT_TX` task-local `advance_in_current_transaction`
 /// consults.
 ///
 /// The `Model::*_with_tx` shims (`save_with_tx`, `update_with_tx`,
@@ -281,14 +347,49 @@ async fn advance_through(
 /// write while that separately-committed advance stood. This function
 /// closes that gap by taking the transaction explicitly. See ruling R47.
 ///
-/// Mirrors [`advance_in_current_transaction`] statement-for-statement
-/// (same upsert, same lock ordering, same append-only log row per
-/// identity), substituting `tx`'s executor for the ambient one.
+/// Delegates to [`advance_via_handle`], which is what actually issues SQL;
+/// see it for the install gate and the missing-table propagation rule
+/// (same as [`advance_in_current_transaction`]: this is always the
+/// caller's own transaction, never a throwaway one, so a missing-table
+/// failure always propagates).
 pub async fn advance_via_tx(
     tx: &Transaction,
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
-    advance_through(&ExecutorChoice::from_tx(tx), identities).await
+    advance_via_handle(&tx.handle(), identities).await
+}
+
+/// Advances `identities` through an explicit query-builder transaction
+/// override (`Builder::with_tx(&tx)`).
+///
+/// `Builder::resolve_write` honours `Builder::tx_override` (set by
+/// `with_tx`) without installing the ambient `CURRENT_TX` task-local -
+/// `in_transaction()` cannot see it, so `M::query().with_tx(&tx).update_all(..)`
+/// would otherwise land its row write on the caller's explicit transaction
+/// while the advance opened a separate one: the advance could then commit
+/// independently of a bulk write that later rolls back, and it takes a
+/// second pooled connection while the caller holds the only one on a
+/// single-connection test database. The identical defect ruling R47 fixed
+/// for the model `_with_tx` shims; see fix1 item 3.
+///
+/// Also the function [`advance_via_tx`] delegates to, since a
+/// [`Transaction`] converts cheaply to a [`TxHandle`] via
+/// [`Transaction::handle`] and both cases need identical treatment: gate
+/// on this crate's `render_cache::is_installed`, then never swallow a
+/// missing-table failure (this is always the caller's own transaction).
+pub async fn advance_via_handle(
+    handle: &TxHandle,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    if !super::is_installed() {
+        return Ok(());
+    }
+    advance_through(
+        &ExecutorChoice::from_handle(handle),
+        identities,
+        MissingTablePolicy::Propagate,
+    )
+    .await
 }
 
 /// The application-database generation authority: a [`GenerationLedger`]

@@ -34,3 +34,35 @@ pub use suprnova_live::render_cache::{
 
 /// The RenderCache facade: install, observe, inspect, and epoch control.
 pub struct RenderCache;
+
+/// Whether a RenderCache runtime has been installed for this process.
+///
+/// Starts `false`. An application that never installs RenderCache -
+/// every existing application, and nearly every test database - must pay
+/// zero RenderCache SQL on any write, not even a probe. Probing
+/// unconditionally is unsafe: on Postgres, a failed statement poisons the
+/// enclosing transaction, and `COMMIT` on a poisoned transaction returns
+/// the ROLLBACK tag without raising, so a caller inside `DB::transaction`
+/// on an unmigrated database would see its own write silently discarded
+/// while being told it succeeded. See `orm::advance` and
+/// `ledger::advance_in_current_transaction`, which both consult
+/// [`is_installed`] before issuing any SQL.
+static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once a RenderCache runtime has been installed for this process.
+#[must_use]
+pub(crate) fn is_installed() -> bool {
+    INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Marks a RenderCache runtime as installed for this process, opening the
+/// write side's gate.
+///
+/// Called by `RenderCache::install` (a later task in this iteration).
+/// Test setup that boots the RenderCache migration directly - without a
+/// running `install` to call yet - calls this too; there is no other way
+/// today to open the gate. Not part of the public contract: doc-hidden.
+#[doc(hidden)]
+pub fn mark_installed() {
+    INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
