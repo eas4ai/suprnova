@@ -782,3 +782,74 @@ async fn publish_is_rejected_and_changes_nothing_when_eviction_cannot_free_enoug
     );
     assert_eq!(inspection.bytes, 80);
 }
+
+/// A corrupted entry's tally slot must not be dropped when its removal
+/// fails for a real reason: the file leaks outside the tracked bound
+/// forever otherwise, even though it can never again be served (it has
+/// already failed decode).
+///
+/// Forces the failure with real permissions, the same technique as the
+/// directory-sync test above: the directory is set to read and execute
+/// only (no write), so `get` can still open and read the corrupted file by
+/// name, but removing it needs write permission on the directory, which
+/// this does not grant. The precondition is probed on a disposable file
+/// rather than the one under test, so an unexpected success (root, or an
+/// exotic filesystem) never destroys the fixture before the real
+/// assertions run.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_corrupted_entrys_tally_stays_intact_when_its_removal_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 1024 * 1024).expect("open");
+    let a = key("/a");
+    store
+        .publish(&a, Bytes::from(vec![7_u8; 40]), fence(1), 1)
+        .await
+        .expect("publish");
+
+    // Corrupt the trailing digest in place, the way an external actor
+    // would: the file stays readable, but decoding it will always fail.
+    let path = store.path_for_test(&a);
+    let mut bytes = std::fs::read(&path).expect("read the real frame");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    std::fs::write(&path, &bytes).expect("write back a corrupted trailing digest");
+
+    let probe = dir.path().join(".probe-remove");
+    std::fs::write(&probe, b"probe").expect("plant a disposable probe file");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+        .expect("restrict the directory to read and execute only");
+    if std::fs::remove_file(&probe).is_ok() {
+        // A process that ignores directory modes (running as root, or an
+        // exotic filesystem) cannot express this precondition at all.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore permissions");
+        eprintln!(
+            "skipping: this process can remove a file from a directory it has no \
+             write permission on, so a removal failure cannot be simulated"
+        );
+        return;
+    }
+
+    let hit = store
+        .get(&a)
+        .await
+        .expect("a corrupted entry is a miss, not an error");
+    assert!(hit.is_none());
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("restore permissions so the assertions below can read the directory");
+
+    assert!(
+        path.exists(),
+        "the removal failed, so the file is still there"
+    );
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(
+        inspection.entries, 1,
+        "a removal that fails for a real reason must not drop the tally entry"
+    );
+    assert_eq!(inspection.bytes, 40);
+}

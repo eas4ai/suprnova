@@ -242,11 +242,19 @@ impl RenderStore for FileRenderStore {
                 })),
                 Err(_) => {
                     // Any frame defect - wrong magic, a truncated body, a
-                    // bad digest - makes this file a miss. It is also
-                    // useless disk space and a stale tally entry, so both
-                    // are cleaned up rather than left for a caller that
-                    // may never evict.
-                    let _ = tokio::fs::remove_file(&path).await;
+                    // bad digest - makes this file a miss either way: a
+                    // file that fails decode can never be served. Mirrors
+                    // `evict` for the cleanup itself: drop the tally entry
+                    // only when the removal succeeded or the file was
+                    // already absent. A real removal failure leaves the
+                    // tally entry intact, so the entry stays counted
+                    // rather than leaking disk outside the tracked bound
+                    // forever.
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Ok(None),
+                    }
                     if let Some(removed) = state.entries.remove(&name) {
                         state.total_bytes -= removed.payload_bytes;
                     }
@@ -302,14 +310,41 @@ impl RenderStore for FileRenderStore {
             .get(&name)
             .map_or(0, |entry| entry.payload_bytes);
         if state.total_bytes - existing_len + payload_len > self.max_bytes {
-            let mut others: Vec<(String, u64)> = state
+            let mut others: Vec<(String, u64, u64)> = state
                 .entries
                 .iter()
                 .filter(|(candidate, _)| **candidate != name)
-                .map(|(candidate, entry)| (candidate.clone(), entry.published_at_ms))
+                .map(|(candidate, entry)| {
+                    (
+                        candidate.clone(),
+                        entry.published_at_ms,
+                        entry.payload_bytes,
+                    )
+                })
                 .collect();
-            others.sort_by_key(|&(_, published_at_ms)| published_at_ms);
-            for (victim, _) in others {
+            others.sort_by_key(|&(_, published_at_ms, _)| published_at_ms);
+
+            // A cheap pre-check before touching anything: if evicting
+            // every eligible candidate still could not free enough room,
+            // no combination can, so decline immediately rather than
+            // deleting real files only to discover the same thing
+            // afterwards. `total_evictable` is exactly
+            // `state.total_bytes - existing_len` by construction (it sums
+            // every entry this method just excluded from that
+            // subtraction), so this condition reduces to `payload_len >
+            // self.max_bytes`, already ruled out by the guard at the top
+            // of this method - unreachable today, but cheap, and it keeps
+            // the "a bound too small for the entry regardless of what is
+            // evicted" invariant explicit at the point where eviction
+            // actually happens rather than resting on a proof tied to a
+            // guard many lines away that could silently stop holding if
+            // that guard's arithmetic ever changes.
+            let total_evictable: u64 = others.iter().map(|&(_, _, bytes)| bytes).sum();
+            if state.total_bytes - existing_len + payload_len - total_evictable > self.max_bytes {
+                return Ok(PublishOutcome::Rejected);
+            }
+
+            for (victim, _, _) in others {
                 if state.total_bytes - existing_len + payload_len <= self.max_bytes {
                     break;
                 }
@@ -332,12 +367,21 @@ impl RenderStore for FileRenderStore {
                 }
             }
             if state.total_bytes - existing_len + payload_len > self.max_bytes {
-                // Eviction could not free enough room - at least one
-                // victim's removal failed for a real reason and was left
-                // in place. Publishing an entry the store cannot actually
-                // hold within its bound is worse than declining, the same
-                // fail-closed shape the oversized-payload guard above
-                // already uses.
+                // The pre-check above found enough room theoretically
+                // achievable, but eviction still could not free it: at
+                // least one candidate's removal failed for a real reason
+                // partway through the loop, after others had already been
+                // genuinely evicted. This is a documented limitation, not
+                // the disk-versus-tally divergence fixed elsewhere in this
+                // file - the tally still accurately reflects what is
+                // actually on disk, it is just smaller than it was a
+                // moment ago. Rolling those evictions back, or staging
+                // them through temporary names so they could be, is more
+                // machinery than this tier's design calls for: a
+                // filesystem error during eviction can leave the store
+                // holding fewer entries than before while still declining
+                // the publication that triggered it, which is a degraded
+                // but consistent state rather than a divergence.
                 return Ok(PublishOutcome::Rejected);
             }
         }
