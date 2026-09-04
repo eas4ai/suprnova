@@ -1,0 +1,500 @@
+//! File-backed L1 [`RenderStore`]: one file per key under a directory the
+//! process owns, published atomically so a reader never observes a partial
+//! write. Entries survive a process restart; [`FileRenderStore::open`]
+//! rebuilds the in-memory byte tally by scanning the directory once, and
+//! every later publication keeps that tally in step with the directory so
+//! no publish or eviction ever needs to re-read the directory from disk.
+//!
+//! # File frame
+//!
+//! Each `<key.to_base64url()>.snrc` file holds one frame:
+//!
+//! | Field | Bytes |
+//! |---|---|
+//! | magic `SNRF` | 4 |
+//! | fence epoch | 8 |
+//! | fence token | 8 |
+//! | fence generation digest | 32 |
+//! | published_at_ms | 8 |
+//! | stale_on_error_ms | 8 |
+//! | entry length | 4 |
+//! | entry bytes | entry length |
+//! | SHA-256 of everything before it | 32 |
+//!
+//! `stale_on_error_ms` is not yet read by this store; a later task's
+//! `sweep` reads it to decide whether a past-fresh entry is still
+//! servable. Storing it now means the on-disk frame does not change shape
+//! once entries already exist under it.
+//!
+//! Publication writes a temporary file (`<name>.<pid>.<token>.tmp`),
+//! `fsync`s it, then renames it over the target: a reader either sees the
+//! previous complete file or the new complete file, never a partial one.
+//! Any file that fails the frame check - wrong magic, a truncated or
+//! tampered body, a bad digest - is treated as a miss and removed, so a
+//! torn write from a crash between create and rename self-heals on the
+//! next read rather than living forever as a poisoned entry.
+//!
+//! The byte bound (`max_bytes`, passed to [`FileRenderStore::open`])
+//! counts entry payload bytes, not the larger on-disk frame: sizing the
+//! bound on what the caller actually asked to cache keeps it meaningful
+//! even if the frame's fixed overhead changes later.
+
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use sha2::{Digest as _, Sha256};
+use suprnova_live::render_cache::key::RenderKey;
+use suprnova_live::render_cache::store::{
+    PublicationFence, PublishOutcome, RenderStore, StoreInspection, StoredEntry,
+};
+use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
+use tokio::sync::Mutex as AsyncMutex;
+
+use crate::FrameworkError;
+
+const MAGIC: &[u8; 4] = b"SNRF";
+const FENCE_DIGEST_LEN: usize = 32;
+const TRAILING_DIGEST_LEN: usize = 32;
+/// Bytes of frame overhead before the entry bytes: magic (4) + fence epoch
+/// (8) + fence token (8) + fence generation digest (32) + published_at_ms
+/// (8) + stale_on_error_ms (8) + entry length (4).
+const FRAME_HEADER_LEN: usize = 4 + 8 + 8 + FENCE_DIGEST_LEN + 8 + 8 + 4;
+
+/// One key's tracked disk footprint, kept in memory so [`FileRenderStore`]
+/// can compare fences and enforce the byte bound without reading a file
+/// back from disk on every call. Kept in step with the directory by every
+/// method that changes what is stored.
+struct TrackedEntry {
+    fence: PublicationFence,
+    payload_bytes: u64,
+    published_at_ms: u64,
+}
+
+/// In-memory byte tally, guarded by an async mutex so a publish can hold it
+/// across the `fsync` and rename it performs.
+struct TallyState {
+    /// Keyed by `key.to_base64url()`, which is also the file stem.
+    entries: BTreeMap<String, TrackedEntry>,
+    total_bytes: u64,
+}
+
+/// File-backed L1 store. See the module documentation for the on-disk frame
+/// and the atomicity guarantee.
+pub struct FileRenderStore {
+    directory: PathBuf,
+    max_bytes: u64,
+    state: AsyncMutex<TallyState>,
+}
+
+impl FileRenderStore {
+    /// Opens (creating if needed) a file store rooted at `directory`,
+    /// bounded to `max_bytes` of entry payload.
+    ///
+    /// Scans `directory` once, keeping every `.snrc` file whose frame
+    /// checks out and removing any that does not - a file left behind by a
+    /// crash between a temporary file's creation and its rename is not a
+    /// `.snrc` file yet, so it is left alone; a `.snrc` file that fails its
+    /// frame check is a torn publication and is cleaned up here rather
+    /// than waiting for a `get` that may never come.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `directory` cannot be created or
+    /// listed.
+    pub fn open(directory: impl AsRef<Path>, max_bytes: u64) -> Result<Self, FrameworkError> {
+        let directory = directory.as_ref().to_path_buf();
+        std::fs::create_dir_all(&directory).map_err(|err| {
+            FrameworkError::from_external_with("creating the render cache L1 directory", err)
+        })?;
+        let mut entries = BTreeMap::new();
+        let mut total_bytes: u64 = 0;
+        let read_dir = std::fs::read_dir(&directory).map_err(|err| {
+            FrameworkError::from_external_with("reading the render cache L1 directory", err)
+        })?;
+        for dir_entry in read_dir {
+            let dir_entry = dir_entry.map_err(|err| {
+                FrameworkError::from_external_with("reading the render cache L1 directory", err)
+            })?;
+            let path = dir_entry.path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("snrc") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                continue;
+            };
+            let Ok(data) = std::fs::read(&path) else {
+                continue;
+            };
+            match decode_frame(&Bytes::from(data)) {
+                Ok(frame) => {
+                    let payload_bytes = frame.payload.len() as u64;
+                    total_bytes += payload_bytes;
+                    entries.insert(
+                        name.to_owned(),
+                        TrackedEntry {
+                            fence: frame.fence,
+                            payload_bytes,
+                            published_at_ms: frame.published_at_ms,
+                        },
+                    );
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        Ok(Self {
+            directory,
+            max_bytes,
+            state: AsyncMutex::new(TallyState {
+                entries,
+                total_bytes,
+            }),
+        })
+    }
+
+    fn path_for_name(&self, name: &str) -> PathBuf {
+        self.directory.join(format!("{name}.snrc"))
+    }
+
+    fn path_for(&self, key: &RenderKey) -> PathBuf {
+        self.path_for_name(&key.to_base64url())
+    }
+
+    fn temp_path_for(&self, name: &str, token: u64) -> PathBuf {
+        self.directory
+            .join(format!("{name}.{}.{token}.tmp", std::process::id()))
+    }
+
+    /// The path a key would be stored at, for tests that reach past the
+    /// [`RenderStore`] contract to corrupt a file directly.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn path_for_test(&self, key: &RenderKey) -> PathBuf {
+        self.path_for(key)
+    }
+}
+
+#[async_trait]
+impl RenderStore for FileRenderStore {
+    async fn get(&self, key: &RenderKey) -> Result<Option<StoredEntry>, RenderCacheError> {
+        let name = key.to_base64url();
+        let path = self.path_for_name(&name);
+        let data = match tokio::fs::read(&path).await {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(RenderCacheError::new(
+                    RenderCacheErrorKind::ProviderUnavailable,
+                ));
+            }
+        };
+        match decode_frame(&Bytes::from(data)) {
+            Ok(frame) => Ok(Some(StoredEntry {
+                bytes: frame.payload,
+                published_at_ms: frame.published_at_ms,
+                fence: frame.fence,
+            })),
+            Err(_) => {
+                // Any frame defect - wrong magic, a truncated body, a bad
+                // digest - makes this file a miss. It is also useless disk
+                // space and a stale tally entry, so both are cleaned up
+                // rather than left for a caller that may never evict.
+                let _ = tokio::fs::remove_file(&path).await;
+                let mut state = self.state.lock().await;
+                if let Some(removed) = state.entries.remove(&name) {
+                    state.total_bytes -= removed.payload_bytes;
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    async fn publish(
+        &self,
+        key: &RenderKey,
+        bytes: Bytes,
+        fence: PublicationFence,
+        now_ms: u64,
+    ) -> Result<PublishOutcome, RenderCacheError> {
+        let payload_len = bytes.len() as u64;
+        // The frame's entry-length field is a u32 regardless of how large
+        // `max_bytes` is configured, so an entry that could never fit in
+        // that field is rejected before anything else is touched, the same
+        // as any other bound violation.
+        let max_payload = self.max_bytes.min(u64::from(u32::MAX));
+        if payload_len > max_payload {
+            return Ok(PublishOutcome::Rejected);
+        }
+        let name = key.to_base64url();
+        let mut state = self.state.lock().await;
+        if let Some(existing) = state.entries.get(&name)
+            && !fence.supersedes(&existing.fence)
+        {
+            return Ok(PublishOutcome::Fenced);
+        }
+        // The entry being replaced (if any) is not removed from the tally
+        // yet: its file is untouched on disk until the write below
+        // succeeds, so the tally keeps counting it until then. A write
+        // failure must leave both the disk and the tally exactly as they
+        // were for this key.
+        let existing_len = state
+            .entries
+            .get(&name)
+            .map_or(0, |entry| entry.payload_bytes);
+        if state.total_bytes - existing_len + payload_len > self.max_bytes {
+            let mut others: Vec<(String, u64)> = state
+                .entries
+                .iter()
+                .filter(|(candidate, _)| **candidate != name)
+                .map(|(candidate, entry)| (candidate.clone(), entry.published_at_ms))
+                .collect();
+            others.sort_by_key(|&(_, published_at_ms)| published_at_ms);
+            for (victim, _) in others {
+                if state.total_bytes - existing_len + payload_len <= self.max_bytes {
+                    break;
+                }
+                if let Some(removed) = state.entries.remove(&victim) {
+                    state.total_bytes -= removed.payload_bytes;
+                    let _ = tokio::fs::remove_file(self.path_for_name(&victim)).await;
+                }
+            }
+        }
+        let framed = encode_frame(&fence, now_ms, 0, &bytes);
+        let final_path = self.path_for_name(&name);
+        let temp_path = self.temp_path_for(&name, fence.token);
+        write_frame_atomically(temp_path, final_path, framed)
+            .await
+            .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        state.total_bytes = state.total_bytes - existing_len + payload_len;
+        state.entries.insert(
+            name,
+            TrackedEntry {
+                fence,
+                payload_bytes: payload_len,
+                published_at_ms: now_ms,
+            },
+        );
+        Ok(PublishOutcome::Published)
+    }
+
+    async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
+        let name = key.to_base64url();
+        let path = self.path_for_name(&name);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(RenderCacheError::new(
+                    RenderCacheErrorKind::ProviderUnavailable,
+                ));
+            }
+        }
+        let mut state = self.state.lock().await;
+        if let Some(removed) = state.entries.remove(&name) {
+            state.total_bytes -= removed.payload_bytes;
+        }
+        Ok(())
+    }
+
+    async fn inspect(&self) -> Result<StoreInspection, RenderCacheError> {
+        let state = self.state.lock().await;
+        Ok(StoreInspection {
+            entries: state.entries.len(),
+            bytes: usize::try_from(state.total_bytes).unwrap_or(usize::MAX),
+        })
+    }
+}
+
+/// A decoded frame's fields, ready to become a [`StoredEntry`] (the caller
+/// picks which fields the public contract carries forward).
+struct DecodedFrame {
+    fence: PublicationFence,
+    published_at_ms: u64,
+    /// Read and verified by [`decode_frame`], but not yet surfaced through
+    /// [`RenderStore`]: a later task's `sweep` is the first reader.
+    #[allow(
+        dead_code,
+        reason = "carried through the frame now so the format never changes shape once entries exist; read starting with the sweep task"
+    )]
+    stale_on_error_ms: u64,
+    payload: Bytes,
+}
+
+/// Encodes one frame. See the module documentation for the byte layout.
+fn encode_frame(
+    fence: &PublicationFence,
+    published_at_ms: u64,
+    stale_on_error_ms: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEADER_LEN + payload.len() + TRAILING_DIGEST_LEN);
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&fence.epoch.to_be_bytes());
+    out.extend_from_slice(&fence.token.to_be_bytes());
+    out.extend_from_slice(&fence.generation_digest);
+    out.extend_from_slice(&published_at_ms.to_be_bytes());
+    out.extend_from_slice(&stale_on_error_ms.to_be_bytes());
+    // `publish` rejects any payload above `u32::MAX` before this is ever
+    // reached, so the length always fits.
+    let entry_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&entry_len.to_be_bytes());
+    out.extend_from_slice(payload);
+    let digest: [u8; TRAILING_DIGEST_LEN] = Sha256::digest(&out).into();
+    out.extend_from_slice(&digest);
+    out
+}
+
+fn read_u64(bytes: &[u8], at: usize) -> Result<u64, RenderCacheError> {
+    let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
+    let slice = bytes.get(at..at + 8).ok_or_else(invalid)?;
+    Ok(u64::from_be_bytes(slice.try_into().map_err(|_| invalid())?))
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Result<u32, RenderCacheError> {
+    let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
+    let slice = bytes.get(at..at + 4).ok_or_else(invalid)?;
+    Ok(u32::from_be_bytes(slice.try_into().map_err(|_| invalid())?))
+}
+
+/// Decodes and verifies one frame; any structural or integrity defect is
+/// [`RenderCacheErrorKind::EntryInvalid`], which every call site in this
+/// module treats as a miss and a reason to remove the file.
+fn decode_frame(bytes: &Bytes) -> Result<DecodedFrame, RenderCacheError> {
+    let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
+    if bytes.len() < FRAME_HEADER_LEN + TRAILING_DIGEST_LEN || &bytes[..4] != MAGIC {
+        return Err(invalid());
+    }
+    let (payload_section, trailing_digest) = bytes.split_at(bytes.len() - TRAILING_DIGEST_LEN);
+    let expected: [u8; TRAILING_DIGEST_LEN] = Sha256::digest(payload_section).into();
+    if expected != trailing_digest {
+        return Err(invalid());
+    }
+    let epoch = read_u64(bytes, 4)?;
+    let token = read_u64(bytes, 12)?;
+    let generation_digest: [u8; FENCE_DIGEST_LEN] = bytes
+        .get(20..20 + FENCE_DIGEST_LEN)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let published_at_ms = read_u64(bytes, 20 + FENCE_DIGEST_LEN)?;
+    let stale_on_error_ms = read_u64(bytes, 28 + FENCE_DIGEST_LEN)?;
+    let entry_len = read_u32(bytes, 36 + FENCE_DIGEST_LEN)? as usize;
+    let payload_start = FRAME_HEADER_LEN;
+    let payload_end = payload_start.checked_add(entry_len).ok_or_else(invalid)?;
+    if payload_end != payload_section.len() {
+        return Err(invalid());
+    }
+    Ok(DecodedFrame {
+        fence: PublicationFence {
+            epoch,
+            token,
+            generation_digest,
+        },
+        published_at_ms,
+        stale_on_error_ms,
+        payload: bytes.slice(payload_start..payload_end),
+    })
+}
+
+/// Writes `framed` to `temp_path`, `fsync`s it, then renames it over
+/// `final_path`. Runs on a blocking thread: `File::create`, `write_all`,
+/// `sync_all`, and `rename` are all synchronous syscalls.
+async fn write_frame_atomically(
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    framed: Vec<u8>,
+) -> std::io::Result<()> {
+    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let result = (|| {
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(&framed)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp_path, &final_path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        result
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_err) => Err(std::io::Error::other(join_err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_round_trip_preserves_every_field_including_stale_on_error_ms() {
+        let fence = PublicationFence {
+            epoch: 7,
+            token: 42,
+            generation_digest: [9_u8; 32],
+        };
+        let payload = b"a payload that is not empty".to_vec();
+        let framed = encode_frame(&fence, 1_234_567, 60_000, &payload);
+        let decoded = decode_frame(&Bytes::from(framed)).expect("a well-formed frame decodes");
+        assert_eq!(decoded.fence, fence, "every fence field round-trips");
+        assert_eq!(decoded.published_at_ms, 1_234_567);
+        assert_eq!(
+            decoded.stale_on_error_ms, 60_000,
+            "stale_on_error_ms round-trips even though no reader consumes it yet"
+        );
+        assert_eq!(decoded.payload.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn an_empty_payload_and_all_zero_fields_also_round_trip() {
+        let fence = PublicationFence {
+            epoch: 0,
+            token: 0,
+            generation_digest: [0_u8; 32],
+        };
+        let framed = encode_frame(&fence, 0, 0, b"");
+        let decoded = decode_frame(&Bytes::from(framed)).expect("an empty payload still decodes");
+        assert_eq!(decoded.payload.len(), 0);
+    }
+
+    #[test]
+    fn a_flipped_byte_anywhere_in_the_frame_fails_the_integrity_check() {
+        let fence = PublicationFence {
+            epoch: 1,
+            token: 1,
+            generation_digest: [3_u8; 32],
+        };
+        let template = encode_frame(&fence, 1_000, 5_000, b"payload-bytes-here");
+        for at in 0..template.len() {
+            let mut framed = template.clone();
+            framed[at] ^= 0xFF;
+            assert!(
+                decode_frame(&Bytes::from(framed)).is_err(),
+                "flipping byte {at} of {} must fail the frame check",
+                template.len()
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_magic_and_truncated_frames_are_rejected() {
+        let fence = PublicationFence {
+            epoch: 1,
+            token: 1,
+            generation_digest: [1_u8; 32],
+        };
+        let mut framed = encode_frame(&fence, 1, 1, b"x");
+        framed[0] = b'X';
+        assert!(decode_frame(&Bytes::from(framed)).is_err(), "wrong magic");
+        assert!(
+            decode_frame(&Bytes::from_static(b"short")).is_err(),
+            "too short to hold a frame"
+        );
+    }
+}
