@@ -139,11 +139,9 @@ impl Drop for AbortOnDrop {
 /// heartbeat. The interval is `max(lock_timeout / 2, 1s)` so very small
 /// timeouts still produce sane tick rates instead of busy-looping.
 ///
-/// The first tick fires immediately at spawn: the claim-to-first-refresh
-/// window (claim latency plus scheduling) must never be unguarded, and an
-/// immediate refresh of a just-set lease is harmless - it re-extends from
-/// now. Skipping it is what left short leases reclaimable before their
-/// first heartbeat.
+/// The first tick fires immediately. Admission separately awaits an owned
+/// refresh before user code starts; spawning this task alone does not close
+/// the claim-to-first-refresh window.
 ///
 /// `worker_id` and `attempts` are the fencing token from the claim that
 /// started this run - threaded through to `store::refresh_lock` so a
@@ -431,6 +429,15 @@ async fn process_claimed_workflow(
     };
 
     let lock_timeout = Duration::from_secs(config.lock_timeout_secs);
+    // The claim can arrive after its lease expires or another worker takes
+    // ownership. Await admission before any user code, not only inside steps.
+    store::refresh_lock_owned(
+        claimed.id,
+        lock_timeout,
+        &claimed.worker_id,
+        claimed.attempts,
+    )
+    .await?;
     let ctx = WorkflowContext::new(
         claimed.id,
         lock_timeout,
@@ -558,6 +565,92 @@ mod tests {
     static FLAKY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static CACHE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static INPUT_MISMATCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ADMISSION_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[workflow]
+    async fn admission_workflow() -> Result<i32, FrameworkError> {
+        ADMISSION_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+
+    #[tokio::test]
+    async fn superseded_claim_does_not_enter_workflow_body() {
+        let _db = setup_db().await;
+        ADMISSION_CALLS.store(0, Ordering::SeqCst);
+        let name = format!("{}::admission_workflow", module_path!());
+        let handle = store::insert_workflow(&name, "null", 3).await.unwrap();
+        let stale = store::mark_running(handle.id(), "worker-a", Duration::from_secs(2))
+            .await
+            .unwrap();
+        let current = store::mark_running(handle.id(), "worker-b", Duration::from_secs(2))
+            .await
+            .unwrap();
+        let config = Arc::new(WorkflowConfig {
+            lock_timeout_secs: config::MIN_LOCK_TIMEOUT_SECS,
+            ..WorkflowConfig::from_env()
+        });
+
+        let result = process_claimed_workflow(stale, config.clone()).await;
+        assert_eq!(ADMISSION_CALLS.load(Ordering::SeqCst), 0);
+        let error = result.expect_err("a superseded claim must fail before entering user code");
+        assert!(error.to_string().contains("lease lost"));
+
+        process_claimed_workflow(current, config).await.unwrap();
+        assert_eq!(ADMISSION_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store::get_workflow_status(handle.id()).await.unwrap(),
+            WorkflowStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Postgres at PG_TEST_URL"]
+    async fn test_postgres_refresh_uses_server_clock() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use chrono::{Duration as ChronoDuration, Utc};
+
+        let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
+        let _guard = TestContainer::fake();
+        let db_config = DatabaseConfig::builder()
+            .url(url)
+            .max_connections(2)
+            .build();
+        let conn = DbConnection::connect(&db_config).await.unwrap();
+        recreate_postgres_workflow_tables(&conn).await;
+        TestContainer::singleton(conn);
+        store::insert_workflow("clock-probe", "[]", 3)
+            .await
+            .unwrap();
+        let config = WorkflowConfig {
+            lock_timeout_secs: config::MIN_LOCK_TIMEOUT_SECS,
+            ..WorkflowConfig::from_env()
+        };
+        let claim = store::claim_next_workflow("worker-a", &config)
+            .await
+            .unwrap()
+            .unwrap();
+        let slow_client_clock = Utc::now().naive_utc() - ChronoDuration::hours(1);
+        assert!(
+            store::refresh_lock_if_owned_at(
+                claim.id,
+                Duration::from_secs(config.lock_timeout_secs),
+                &claim.worker_id,
+                claim.attempts,
+                slow_client_clock,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            store::claim_next_workflow("worker-b", &config)
+                .await
+                .unwrap()
+                .is_none(),
+            "a worker clock behind the database must not expire a refreshed lease"
+        );
+    }
 
     #[workflow_step]
     async fn always_step() -> Result<i32, FrameworkError> {

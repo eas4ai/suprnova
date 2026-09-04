@@ -10,12 +10,9 @@ pub const MIN_CONCURRENCY: usize = 1;
 
 /// Minimum allowed workflow lease duration in seconds.
 ///
-/// The heartbeat refreshes at `max(lock_timeout / 2, 1s)`, so a lease
-/// below 2s is due for its first refresh at or after its own expiry:
-/// any claim latency or scheduling jitter opens a reclaim window another
-/// worker can walk through while the first worker is already executing
-/// effects. Two seconds is the smallest lease whose first refresh still
-/// lands with margin.
+/// Periodic heartbeats run at `max(lock_timeout / 2, 1s)`. A one-second
+/// lease leaves no margin between renewals. Two seconds leaves a margin
+/// under normal scheduling; admission separately refreshes before user code.
 pub const MIN_LOCK_TIMEOUT_SECS: u64 = 2;
 
 /// Minimum allowed `max_attempts`. A value below 1 prevents any attempt
