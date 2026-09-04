@@ -49,13 +49,9 @@ fn add_render_cache(router: Router) -> Result<Router, FrameworkError> {
     router.try_render_cache_group(
         "/blog",
         RenderCachePolicy::builder(RepresentationClass::PublicShared)
-            .freshness(
-                FreshnessPolicy::new(300_000, 60_000, 300_000)
-                    .map_err(FrameworkError::from_external)?,
-            )
+            .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
             .shared(SharedCachePolicy::SMaxAge { seconds: 300 })
-            .build()
-            .map_err(FrameworkError::from_external)?,
+            .build()?,
     )
 }
 ```
@@ -206,7 +202,7 @@ pub async fn index() -> Response {
 registered and opted in:
 
 ```rust
-use suprnova::{FrameworkError, get, routes};
+use suprnova::{get, routes};
 use suprnova::render_cache::{FreshnessPolicy, RenderCachePolicy, RepresentationClass, SharedCachePolicy};
 
 routes! {
@@ -216,10 +212,9 @@ routes! {
 router.try_render_cache(
     "/blog",
     RenderCachePolicy::builder(RepresentationClass::PublicShared)
-        .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000).map_err(FrameworkError::from_external)?)
+        .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
         .shared(SharedCachePolicy::SMaxAge { seconds: 300 })
-        .build()
-        .map_err(FrameworkError::from_external)?,
+        .build()?,
 )?;
 ```
 
