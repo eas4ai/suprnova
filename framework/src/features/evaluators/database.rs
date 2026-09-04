@@ -321,6 +321,11 @@ impl DatabaseEvaluator {
 
 impl Evaluator for DatabaseEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
+        // Fix round 6, Leak 4: record the context's resolved user id (if
+        // any) as a render-cache principal observation, at the read that
+        // actually runs during the render - see
+        // `crate::features::fields::observe_context_principal`'s own doc.
+        crate::features::fields::observe_context_principal(context);
         // Domain 17 audit D17-A - was
         // `lock::read(...).expect("DatabaseEvaluator flags RwLock poisoned")`.
         // `is_enabled` is the HOT PATH - every feature-flag check
@@ -423,6 +428,49 @@ mod tests {
             .read()
             .ok()
             .and_then(|g| g.get(&(name.to_string(), scope_key.to_string())).copied())
+    }
+
+    /// Fix round 6, Leak 4. `FeatureMiddleware` resolves identity once, via
+    /// `Auth::id()`, before the render begins, and stashes it in exactly
+    /// this shape of context; `is_enabled!` then reads it *during* the
+    /// render, ambiently, without touching `Auth::id()` or any other
+    /// `render_cache`-instrumented accessor again. Before this round,
+    /// nothing observed that read at all, so a user-scoped flag decision
+    /// never narrowed the class - proven at the unit level here (no HTTP
+    /// harness needed) because it exercises the exact production seam a
+    /// real request would: `DatabaseEvaluator::is_enabled` itself.
+    ///
+    /// Verified failing against the pre-fix code by temporarily removing
+    /// the `observe_context_principal` call from `is_enabled`: the
+    /// `principal_material` assertion below failed with an empty set.
+    #[tokio::test]
+    async fn a_flag_read_through_a_user_scoped_context_records_a_principal_observation() {
+        let evaluator = Arc::new(
+            DatabaseEvaluator::new_in_memory()
+                .await
+                .expect("in-memory evaluator"),
+        );
+        evaluator
+            .set_flag("round6-leak4-flag", "user:alice", true)
+            .await
+            .expect("seed a user-scoped flag");
+
+        crate::render_cache::collector::Collector::scope(async {
+            featureflag::evaluator::with_default(evaluator.clone(), || {
+                let ctx = featureflag::context! { user_id = "alice" };
+                let enabled = evaluator.is_enabled("round6-leak4-flag", &ctx);
+                assert_eq!(enabled, Some(true), "the seeded flag resolves for alice");
+            });
+            let report =
+                crate::render_cache::collector::current_report().expect("a collector is active");
+            assert!(
+                report.context.principal_material.contains("alice"),
+                "the flag read must record alice's id as an observed principal, \
+                 the same as any other identity-revealing accessor - got {:?}",
+                report.context.principal_material
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

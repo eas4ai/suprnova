@@ -1134,3 +1134,145 @@ async fn cookie_reads_are_observed_and_force_uncacheable() {
         "a cookie read must be observed and force Uncacheable, the same as a session read"
     );
 }
+
+// ---------------------------------------------------------------------
+// Fix round 6: round 5 split the reconciliation mechanism - re-derive
+// Locale, record Principal/Tenant in a single last-write slot - and both
+// halves of that split were themselves proxies. Re-derivation cannot see a
+// scope that has already popped (the first two tests below); a single slot
+// cannot represent more than one observed value (the third). The fourth
+// test is a different shape entirely: nothing is observed at all. All four
+// are proven failing against the pre-fix code first, per the instruction.
+// ---------------------------------------------------------------------
+
+/// Fix round 6, Leak 1 (proven). A handler rendering inside `scope_locale` -
+/// the framework's own documented, supported API - whose nested scope pops
+/// before this handler itself returns, let alone before the guard runs.
+/// Distinct from round 5's `locale_switching_handler` test: that handler
+/// mutated the *same*, still-active outer scope via `Lang::set_locale` - no
+/// nested scope ever popped, which is incidentally why round 5's
+/// post-render re-read happened to catch it. This one pops, and round 5's
+/// re-read could not have seen it.
+///
+/// Verified failing against the pre-fix guard by temporarily restoring a
+/// post-render `Lang::locale()` re-read in place of the recorded
+/// `locale_material` set: the second dispatch was an unwarranted cache hit
+/// (`renders()` staying at 1).
+#[tokio::test]
+#[serial_test::serial]
+async fn a_nested_scope_locale_render_never_publishes_under_the_outer_locales_key() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/nested-scope-locale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&first.body).contains("locale=fr"));
+
+    dispatch_get(&harness, "/nested-scope-locale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a render inside a nested scope_locale must never be stored under the outer, \
+         pre-switch locale's key - a hit here would mean the nested switch was silently \
+         ignored"
+    );
+}
+
+/// Fix round 6, Leak 1, second reproduction (proven): the same leak via a
+/// different mechanism, named explicitly in the review - a locale
+/// established by a middleware positioned *after* `RenderCache::install`
+/// ("the only position a per-route locale middleware can occupy"), rather
+/// than a nested scope inside the handler itself.
+///
+/// Verified failing against the pre-fix guard the same way as the
+/// nested-scope test above.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_locale_set_by_a_middleware_after_install_never_publishes_under_the_earlier_locales_key()
+{
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/late-locale/1", &[("x-test-late-locale", "1")]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&first.body).contains("locale=fr"));
+
+    dispatch_get(&harness, "/late-locale/1", &[("x-test-late-locale", "1")]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a locale set after RenderCacheMiddleware in the chain must never be stored \
+         under the key derived before that middleware ran"
+    );
+}
+
+/// Fix round 6, Leak 3 (proven, cross-identity). A handler reads a named
+/// guard's identity to build the body, then separately touches the default
+/// accessor for an unrelated check - the shape round 5's single last-write
+/// slot could not survive. Two dispatches share the *same* default-guard
+/// login ("shared-default", so the key - always built from the default
+/// identity alone, see `variance_descriptor`'s `Principal` arm - is
+/// identical both times) but *different* named-guard identities.
+///
+/// Verified failing against the pre-fix single-slot guard by temporarily
+/// restoring an `Option<String>` for `principal_material` (overwritten by
+/// the later `Auth::id()` touch): bob's response contained alice's
+/// identity and `renders()` stayed at 1.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_named_guard_identity_overwritten_by_a_later_default_touch_never_leaks_across_identities()
+{
+    let harness = boot_with_render_cache().await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/named-guard-then-default/1",
+        &[
+            ("x-test-login", "shared-default"),
+            ("x-test-named-login", "alice"),
+        ],
+    )
+    .await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice.body).contains("alice"));
+
+    let bob = dispatch_get(
+        &harness,
+        "/named-guard-then-default/1",
+        &[
+            ("x-test-login", "shared-default"),
+            ("x-test-named-login", "bob"),
+        ],
+    )
+    .await;
+    assert!(
+        !String::from_utf8_lossy(&bob.body).contains("alice"),
+        "a shared default-guard identity must never let two different named-guard \
+         identities collide on the same cached representation"
+    );
+    assert!(String::from_utf8_lossy(&bob.body).contains("bob"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store: the key was fixed to the shared default \
+         identity while the render also observed a different, unrecorded-under-round-5 \
+         named-guard identity"
+    );
+}
+
+/// Fix round 6, item 5. The engine no longer rejects `FeatureVersion` at
+/// policy build time (that rejection moved to the host's own
+/// `variance_descriptor`, since "this host has no producer" is a fact
+/// about the host, not the engine); this route's policy therefore builds
+/// successfully, but every request against it must bypass the cache
+/// entirely rather than publish a key that silently omits the declared
+/// dimension.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_route_declaring_feature_version_always_bypasses_the_cache() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/feature-version-declared/1", &[]).await;
+    dispatch_get(&harness, "/feature-version-declared/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a route declaring a dimension this host cannot produce must bypass the cache \
+         on every request, never publish a key that omits it"
+    );
+}

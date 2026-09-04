@@ -106,7 +106,23 @@ fn an_observed_private_read_downgrades_a_shared_policy_and_never_upgrades() {
 
 #[test]
 fn patches_apply_deterministically_and_can_only_narrow_the_class() {
-    let group = public_policy();
+    // Fix round 6: the engine's `PrivateCached`-empty-variance rule was
+    // tightened from "some dimension declared" to "an identity-bearing
+    // dimension declared" (see `validate`'s own doc), so narrowing
+    // `public_policy()` (which declares only `Locale`) to `PrivateCached`
+    // now needs an identity-bearing dimension too, even though this test is
+    // about patch narrowing, not variance. Built locally rather than added
+    // to `public_policy()` itself, so the other tests sharing that helper
+    // are unaffected.
+    let group = public_policy()
+        .apply(
+            &PolicyPatch::default().vary(
+                [VarianceDimension::Locale, VarianceDimension::Principal]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .expect("adding an identity-bearing dimension");
     let route = group
         .apply(&PolicyPatch::default().class(RepresentationClass::PrivateCached))
         .expect("narrowing patch");
@@ -157,6 +173,49 @@ fn apply_rejects_a_query_patch_beyond_the_declared_bound() {
     assert!(
         group.apply(&patch).is_err(),
         "more than the declared bound is rejected"
+    );
+}
+
+// Fix round 6: neither of round 5's new engine rules had a direct test.
+// This is the one that stayed in the engine (the other, "FeatureVersion /
+// ConfigVersion / Application have no producer here," moved to the host's
+// own `variance_descriptor`, since that fact is about the host, not this
+// crate).
+#[test]
+fn private_cached_with_no_identity_bearing_dimension_is_rejected() {
+    assert!(
+        RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+            .build()
+            .is_err(),
+        "no declared variance at all must be rejected"
+    );
+    // Fix round 6: round 5's rule checked mere non-emptiness, so a
+    // `PrivateCached` policy declaring only a dimension that never resolves
+    // to `DimensionValue::Private` - `Media`, say - still built, promising
+    // one representation per private key material set while declaring no
+    // dimension that could ever hold one. The fixed rule checks for a
+    // dimension that can actually hold private material, not just any
+    // dimension.
+    assert!(
+        RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+            .vary(VarianceDimension::Media)
+            .build()
+            .is_err(),
+        "a declared dimension that never resolves to private material must still be rejected"
+    );
+    assert!(
+        RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+            .vary(VarianceDimension::Principal)
+            .build()
+            .is_ok(),
+        "Principal can hold private material and must be accepted"
+    );
+    assert!(
+        RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .is_ok(),
+        "Tenant can hold private material and must be accepted"
     );
 }
 

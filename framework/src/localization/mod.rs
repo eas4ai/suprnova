@@ -210,18 +210,25 @@ impl Lang {
     /// then the configured default locale. Never panics - a malformed
     /// env default falls back to the hard-coded `en`.
     pub fn locale() -> Locale {
+        let locale = if let Ok(l) =
+            CURRENT_LOCALE.try_with(|lock| lock.read().unwrap_or_else(|e| e.into_inner()).clone())
+        {
+            l
+        } else if let Some(l) = global_locale() {
+            l
+        } else {
+            resolved_config().default_locale
+        };
         crate::render_cache::collector::observe(
             suprnova_live::render_cache::generation::DependencyIdentity::Locale,
         );
-        if let Ok(l) =
-            CURRENT_LOCALE.try_with(|lock| lock.read().unwrap_or_else(|e| e.into_inner()).clone())
-        {
-            return l;
-        }
-        if let Some(l) = global_locale() {
-            return l;
-        }
-        resolved_config().default_locale
+        // Fix round 6: record the concrete value at the point of every read,
+        // not just that a read happened - see
+        // `crate::render_cache::collector::CollectedContext::locale_material`'s
+        // own doc for why a post-render re-read of this same task-local
+        // (round 5's approach) cannot substitute for this.
+        crate::render_cache::collector::observe_locale_value(&locale.as_str());
+        locale
     }
 
     /// Set the current locale. Inside a [`scope_locale`]d future (a

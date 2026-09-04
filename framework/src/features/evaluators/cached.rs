@@ -165,6 +165,13 @@ impl FeatureSync for CachedEvaluator {
 
 impl Evaluator for CachedEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
+        // Fix round 6, Leak 4: record the context's resolved user id (if
+        // any) as a render-cache principal observation, unconditionally -
+        // including a cache hit that never reaches `self.inner`, since a
+        // cached answer for a user-scoped flag is exactly as
+        // identity-dependent as a fresh one. See
+        // `crate::features::fields::observe_context_principal`'s own doc.
+        crate::features::fields::observe_context_principal(context);
         // TTL=0 short-circuits the cache entirely. Avoids the
         // insert+evict churn that would otherwise dominate when the
         // caller doesn't want caching.
@@ -264,6 +271,46 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.return_value
         }
+    }
+
+    /// Fix round 6, Leak 4: a `CachedEvaluator` cache *hit* never reaches
+    /// `self.inner`, so instrumenting only `DatabaseEvaluator::is_enabled`
+    /// would miss every repeated flag check after the first - and a
+    /// user-scoped flag's cached answer is exactly as identity-dependent
+    /// as a fresh one. This proves the cached path records the observation
+    /// too, on both the miss (first call) and the hit (second).
+    ///
+    /// Verified failing against the pre-fix code by temporarily removing
+    /// the `observe_context_principal` call from this evaluator's own
+    /// `is_enabled`: the assertion after the cache-hit call failed because
+    /// nothing had recorded alice's id for that call.
+    #[tokio::test]
+    async fn a_cache_hit_still_records_a_principal_observation() {
+        // `TranslatingEvaluator`, not `CountingEvaluator`: the point of this
+        // test is the `UserIdField` extension the context carries, which
+        // only a real `on_new_context` implementation populates -
+        // `CountingEvaluator` has none (the trait's default no-op), so a
+        // context built under it would never carry an id to observe.
+        let cached = Arc::new(CachedEvaluator::new(
+            Arc::new(TranslatingEvaluator),
+            Duration::from_secs(60),
+        ));
+
+        crate::render_cache::collector::Collector::scope(async {
+            featureflag::evaluator::with_default(cached.clone(), || {
+                let ctx = ctx_for_user(1);
+                cached.is_enabled("flag", &ctx); // miss
+                cached.is_enabled("flag", &ctx); // hit
+            });
+            let report =
+                crate::render_cache::collector::current_report().expect("a collector is active");
+            assert!(
+                report.context.principal_material.contains("user-1"),
+                "both the miss and the cache hit must record the observed principal - got {:?}",
+                report.context.principal_material
+            );
+        })
+        .await;
     }
 
     #[test]

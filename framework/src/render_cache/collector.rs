@@ -22,6 +22,7 @@
 //!   over-invalidates, which is safe; tenancy is handled at the key level
 //!   through the Tenant variance dimension, not here.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -73,29 +74,63 @@ const MAX_COLLECTED: usize = MAX_OBSERVATIONS - 1;
 /// Context flags the collector accumulates.
 ///
 /// No longer `Copy` as of fix round 5: `principal_material`/`tenant_material`
-/// carry an owned `String`.
+/// carry owned `String`s.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectedContext {
     /// A principal was resolved or checked.
     pub principal_read: bool,
-    /// The internal id of the principal the render actually observed, if an
-    /// accessor returned one. Fix round 5: re-deriving `Auth::id()` after
-    /// the render cannot catch a principal read through a *different*
-    /// accessor (a named, non-default guard) - the render never touched
-    /// `Auth::id()` at all, before or after. Recording the value at the
-    /// point it was actually read, regardless of which accessor produced
-    /// it, is the only way to compare what the render used against what
-    /// the key partitioned by for these two dimensions. The most recently
-    /// observed value wins if more than one accessor was read.
-    pub principal_material: Option<String>,
+    /// Every distinct principal id the render actually observed, across
+    /// every accessor that touched one.
+    ///
+    /// Fix round 5 recorded only the most recent value, in a single
+    /// `Option<String>` slot; fix round 6 replaced that with a set after the
+    /// reviewer proved the collapse itself was a leak: a handler that reads
+    /// a named guard's identity to build the body, then separately touches
+    /// the default accessor (`Auth::id()`, say, for an unrelated check),
+    /// recorded only the second value, and the guard compared that second
+    /// value against the key - passing, because the key and the *last*
+    /// observation happened to agree, even though the *body* was built from
+    /// a different, unrecorded one. A representation can only be published
+    /// under one key, so if the render observed two different principal
+    /// values in the same request, the key cannot represent both correctly.
+    /// The guard declines on any member of this set disagreeing with the
+    /// key, not just the last one written. Re-deriving `Auth::id()` after
+    /// the render (round 4's approach, before round 5 removed it) cannot
+    /// substitute for this: it only ever sees the *default* guard's slot,
+    /// never a named one, so a read through any other accessor stays
+    /// invisible before or after the render.
+    pub principal_material: BTreeSet<String>,
     /// A tenant was resolved or checked. Fix round 4:
     /// `Request::live_tenant()` records this on every call, the same way
     /// `Lang::locale()` records a locale observation - `ObservedContext.tenant`
     /// was previously always `None` because nothing produced this.
     pub tenant_read: bool,
-    /// The tenant id the render actually observed. See `principal_material`'s
-    /// own doc; the same reasoning applies; fix round 5.
-    pub tenant_material: Option<String>,
+    /// Every distinct tenant id the render actually observed. See
+    /// `principal_material`'s own doc; the same reasoning applies.
+    pub tenant_material: BTreeSet<String>,
+    /// Every distinct locale value [`crate::Lang::locale`] returned during
+    /// the render, recorded at the same observation point that already
+    /// emits a [`DependencyIdentity::Locale`] dependency (fix round 6).
+    ///
+    /// Round 5 instead re-read `Lang::locale()` a second time, after the
+    /// render, reasoning that the task-local was "still installed" then.
+    /// That is only true for the outer scope: a handler that renders inside
+    /// [`crate::scope_locale`] (the framework's own documented, supported
+    /// API for a mid-render locale switch) has its nested scope pop the
+    /// instant that future resolves, before the guard ever gets to re-read
+    /// it - so the re-read silently saw the *outer*, pre-switch locale
+    /// again, the same value the key was already built from, and always
+    /// agreed with it. The same gap reproduces without any nested-scope API
+    /// at all: a per-route locale middleware installed after
+    /// [`super::RenderCache::install`] (the only position such a middleware
+    /// can occupy, since `install` appends) also sets the task-local before
+    /// the handler runs and it, too, is scoped no wider than that
+    /// middleware's own `next(request)` call - gone by the time a
+    /// post-render re-read outside it would look. Recording every observed
+    /// value at the moment `Lang::locale()` is actually called, the same
+    /// mechanism already used for identity, closes both: there is no
+    /// "after the render" read to get wrong.
+    pub locale_material: BTreeSet<String>,
     /// A session value was read.
     pub session_read: bool,
     /// An authorization decision was evaluated.
@@ -283,13 +318,18 @@ pub fn observe_principal_read() {
     with_state(|state| state.report.context.principal_read = true);
 }
 /// The principal was resolved to a concrete value. Fix round 5: records
-/// what was actually read, not merely that something was - see
-/// `CollectedContext::principal_material`'s own doc for why this exists
-/// alongside the boolean flag.
+/// what was actually read, not merely that something was; fix round 6:
+/// added to the observed *set* rather than overwriting a single slot - see
+/// `CollectedContext::principal_material`'s own doc for why the collapse
+/// itself was a leak.
 pub fn observe_principal_value(id: &str) {
     with_state(|state| {
         state.report.context.principal_read = true;
-        state.report.context.principal_material = Some(id.to_owned());
+        state
+            .report
+            .context
+            .principal_material
+            .insert(id.to_owned());
     });
 }
 /// The tenant was resolved or checked.
@@ -301,7 +341,22 @@ pub fn observe_tenant_read() {
 pub fn observe_tenant_value(id: &str) {
     with_state(|state| {
         state.report.context.tenant_read = true;
-        state.report.context.tenant_material = Some(id.to_owned());
+        state.report.context.tenant_material.insert(id.to_owned());
+    });
+}
+/// The locale was resolved to a concrete value, at the same
+/// [`crate::Lang::locale`] call that already emits a
+/// [`DependencyIdentity::Locale`] dependency. Fix round 6: see
+/// `CollectedContext::locale_material`'s own doc for why re-deriving the
+/// locale after the render (round 5's approach) cannot substitute for
+/// recording it at the point of every read.
+pub fn observe_locale_value(locale: &str) {
+    with_state(|state| {
+        state
+            .report
+            .context
+            .locale_material
+            .insert(locale.to_owned());
     });
 }
 /// A session value was read.

@@ -116,7 +116,12 @@ impl RenderCache {
     /// this middleware lands after them in the chain, not before. Calling
     /// it first would make every request collapse onto the default locale
     /// and see no principal, silently over-sharing exactly the kind of
-    /// entry [`middleware::key_omits_observed_privacy`] exists to catch.
+    /// entry `middleware::key_used_different_values_than_the_render_saw`
+    /// exists to catch (that guard is private, so this is a plain code
+    /// span, not a doc link; its name has changed twice since this note
+    /// was written - fix round 3's `key_omits_observed_privacy`, fix
+    /// round 4's `key_omits_the_dimension_each_reason_requires`, fix
+    /// round 6's current name - keep this reference current).
     ///
     /// An earlier version of this note claimed that check's failure mode
     /// was reduced rendering rather than a privacy leak. That was true only
@@ -148,7 +153,7 @@ impl RenderCache {
     ///   migration, rather than every request failing later against a
     ///   missing table;
     /// - the Live key material this process was configured with cannot be
-    ///   read (see [`crate::live`]'s own boot error for the underlying
+    ///   read (see [`mod@crate::live`]'s own boot error for the underlying
     ///   cause - a missing or malformed application key);
     /// - the configured L1 directory cannot be created or listed.
     ///

@@ -96,6 +96,41 @@ impl UserIdField {
     }
 }
 
+/// Records the context's resolved user id, if any, as a render-cache
+/// principal observation (fix round 6, Leak 4).
+///
+/// `FeatureMiddleware` resolves the identity once (via the instrumented
+/// [`Auth::id`](crate::Auth::id)) and opens a featureflag
+/// [`Context`](featureflag::context::Context) scoped to it *before* the
+/// render begins, so that resolution happens outside the RenderCache
+/// collector's window entirely; the render then
+/// reads `is_enabled!` any number of times, each time consulting the
+/// ambient thread-local context rather than touching `Auth::id()` (or any
+/// other instrumented accessor) again. Nothing observed the identity that
+/// actually shaped the flag decision, so nothing narrowed and the guard had
+/// nothing to compare - a real leak, not a hypothetical one, since
+/// user-scoped flags are the documented purpose of this middleware and the
+/// reference application installs it.
+///
+/// The fix instruments the read, not the resolution: every evaluator this
+/// framework ships (`DatabaseEvaluator`, `CachedEvaluator`) calls this at
+/// the top of its own `is_enabled`, which runs *during* the render, inside
+/// the collector's window, every single time `is_enabled!` is evaluated -
+/// including a `CachedEvaluator` cache hit that never reaches its inner
+/// evaluator, since a cached answer for a user-scoped flag is exactly as
+/// dependent on that user's identity as a fresh one. A custom [`Evaluator`](featureflag::evaluator::Evaluator)
+/// outside these two remains outside what this can see, the same honest
+/// boundary as headers, `Config::get`, and any other undeclared read - see
+/// `crate::render_cache::middleware`'s own module doc.
+pub(crate) fn observe_context_principal(context: &featureflag::context::Context) {
+    if let Some(field) = context
+        .iter()
+        .find_map(|c| c.extensions().get::<UserIdField>())
+    {
+        crate::render_cache::collector::observe_principal_value(field.as_str());
+    }
+}
+
 /// Team / organization the user belongs to in the feature-flag context.
 ///
 /// Set from the `team` field of [`context!`](featureflag::context!)

@@ -8,6 +8,39 @@
 //! single shared `FAKE` store means nested `Event::fake()` on one task is
 //! unsupported (it would deadlock on the serializer) - fake exactly once
 //! per test.
+//!
+//! # Scoped to the installing thread (fix round 6)
+//!
+//! `FAKE_SERIAL` only serializes tests that *themselves* call
+//! `Event::fake()`/`fake_only`/`fake_except` against each other - it does
+//! nothing to serialize against a test that dispatches events without ever
+//! faking them, and `cargo test`'s default parallel scheduling runs many
+//! such tests as separate OS threads in the same process at the same time.
+//! Before this fix, `is_active` and `record_listener` matched *any* caller
+//! the instant one test's fake was installed: a concurrently running,
+//! completely unrelated test's own event dispatch - for example a database
+//! transaction that fires `TransactionBeginning`/`TransactionCommitted`
+//! because *this* test separately registered a listener for it (see
+//! `FakeStore::owner`'s own doc for why that registration is itself
+//! process-wide and unavoidable) - would be swept into the fake-holding
+//! test's recorded-events store, corrupting an `assert_not_dispatched` that
+//! has nothing to do with it. Measured at roughly one in eleven full
+//! library test runs for exactly this shape
+//! (`live::ports::transaction::tests::begin_then_commit_emits_no_transaction_lifecycle_events`,
+//! added in this task's fix round 2).
+//!
+//! `FakeStore::owner` records which OS thread installed the currently
+//! active fake; `owned_by_current_thread` gates every read and write of it
+//! on the *calling* thread matching that owner, so a dispatch from a
+//! different thread falls through to the real dispatcher (which may still
+//! invoke a listener this fake's owning test registered - harmless, since
+//! that listener is a test no-op - but never records into this fake's
+//! store). See `FakeStore::owner`'s own doc for why a thread, not a tokio
+//! task, is the right unit here. Serialising the flaky test against every
+//! other transaction-touching test in the crate was considered and
+//! rejected: that set cannot be enumerated reliably, and a serial
+//! annotation only serializes against other tests carrying the same
+//! annotation, not against the whole suite.
 
 use super::Event;
 use std::any::{Any, TypeId};
@@ -34,6 +67,43 @@ struct FakeStore {
     /// then call `assert_listening::<E, L>()` to confirm the registration
     /// happened.
     listening: HashSet<(TypeId, &'static str)>,
+    /// The OS thread that installed this fake, captured at install time.
+    /// Fix round 6: gates [`is_active`], [`fake_installed`], and
+    /// [`record_listener`] so a dispatch or listener registration from a
+    /// *different*, concurrently running test never gets swept into this
+    /// fake's records - see the module doc's "Scoped to the installing
+    /// thread" section.
+    ///
+    /// An OS thread, not a [`tokio::task::Id`]: `#[tokio::test]`'s own
+    /// generated body runs the test as the *root* future passed to
+    /// `Runtime::block_on`, which tokio does not track as a spawned task at
+    /// all - `tokio::task::try_id()` returns `None` for exactly the call
+    /// site every one of these tests makes it from, so a task-id key could
+    /// never distinguish one test's install from another's own top-level
+    /// dispatch. `cargo test`'s default parallel runner instead gives each
+    /// test function its own OS thread, and every crate-observed
+    /// `#[tokio::test]` here uses the default current-thread runtime
+    /// flavor (this codebase's own established convention - see
+    /// `render_cache_middleware.rs`'s note on why), which never migrates a
+    /// task's poll to a different thread mid-flight. A `tokio::spawn`ed
+    /// sub-task started *from inside* a test still runs on that same
+    /// current-thread runtime's one OS thread, so it is correctly seen as
+    /// "the same test," preserving any existing pattern that fakes and then
+    /// spawns within one test. This only becomes imprecise for a test that
+    /// opts into `flavor = "multi_thread"` while also faking events - no
+    /// test in this crate does both today (checked directly, not assumed).
+    owner: Option<std::thread::ThreadId>,
+}
+
+/// Whether the calling thread is the one that installed `owner`'s fake.
+/// `None` (no fake installed yet, or this is being asked about a
+/// not-yet-observed state) falls back to matching unconditionally - the
+/// pre-round-6 behavior - rather than silently disabling the fake.
+fn owned_by_current_thread(owner: Option<std::thread::ThreadId>) -> bool {
+    match owner {
+        Some(installed_by) => installed_by == std::thread::current().id(),
+        None => true,
+    }
 }
 
 #[derive(Default)]
@@ -76,6 +146,9 @@ pub(crate) fn is_active<E: Event>() -> bool {
     let Some(store) = guard.as_ref() else {
         return false;
     };
+    if !owned_by_current_thread(store.owner) {
+        return false;
+    }
     match &store.mode {
         FakeMode::All => true,
         FakeMode::Only(set) => set.contains(E::event_name()),
@@ -87,7 +160,9 @@ pub(crate) fn is_active<E: Event>() -> bool {
 /// of `fake_only` / `fake_except` filtering). Used by `Event::push` to skip
 /// recording - Laravel's `EventFake::push` is a deliberate no-op.
 pub(crate) fn fake_installed() -> bool {
-    lock_fake().is_some()
+    lock_fake()
+        .as_ref()
+        .is_some_and(|store| owned_by_current_thread(store.owner))
 }
 
 pub(crate) fn record<E: Event>(event: E) {
@@ -106,7 +181,9 @@ pub(crate) fn record<E: Event>(event: E) {
 }
 
 pub(crate) fn record_listener<E: Event, L: 'static>() {
-    if let Some(store) = lock_fake().as_mut() {
+    if let Some(store) = lock_fake().as_mut()
+        && owned_by_current_thread(store.owner)
+    {
         store.listening.insert((TypeId::of::<L>(), E::event_name()));
     }
 }
@@ -120,7 +197,10 @@ pub(crate) fn record_listener<E: Event, L: 'static>() {
 /// `Event::fake()`.)
 pub fn install_fake() -> EventFakeGuard {
     let serial = FAKE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    *lock_fake() = Some(FakeStore::default());
+    *lock_fake() = Some(FakeStore {
+        owner: Some(std::thread::current().id()),
+        ..FakeStore::default()
+    });
     EventFakeGuard { _serial: serial }
 }
 
@@ -131,6 +211,7 @@ pub fn install_fake_only(names: &[&'static str]) -> EventFakeGuard {
     let serial = FAKE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let store = FakeStore {
         mode: FakeMode::Only(names.iter().copied().collect()),
+        owner: Some(std::thread::current().id()),
         ..FakeStore::default()
     };
     *lock_fake() = Some(store);
@@ -144,6 +225,7 @@ pub fn install_fake_except(names: &[&'static str]) -> EventFakeGuard {
     let serial = FAKE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let store = FakeStore {
         mode: FakeMode::Except(names.iter().copied().collect()),
+        owner: Some(std::thread::current().id()),
         ..FakeStore::default()
     };
     *lock_fake() = Some(store);
@@ -352,6 +434,62 @@ mod tests {
         assert_dispatched::<Noted>(|e| e.note == "hi");
         assert_dispatched::<Noted>(|e| e.note == "bye");
         assert_not_dispatched::<Noted>(|e| e.note == "nope");
+    }
+
+    // ----- fix round 6: the fake is scoped to the installing thread --------
+
+    #[derive(Debug, Clone)]
+    struct RaceEvent;
+    impl crate::events::Event for RaceEvent {
+        fn event_name() -> &'static str {
+            "RaceEvent"
+        }
+    }
+
+    /// Deterministic reproduction of the leak the reviewer measured at
+    /// roughly one in eleven full library test runs: a fake installed by
+    /// this test must not record a dispatch made from a genuinely
+    /// different OS thread - `cargo test`'s default parallel runner gives
+    /// each `#[tokio::test]` function its own thread and its own
+    /// current-thread tokio runtime, which is exactly what the spawned
+    /// `std::thread` below recreates. A plain `tokio::spawn` would NOT
+    /// reproduce this: a sub-task spawned from inside a current-thread
+    /// runtime still runs on that same one OS thread, and
+    /// `tokio::task::try_id()` returns `None` for the untracked root
+    /// future `#[tokio::test]`'s own body runs as anyway (see
+    /// `FakeStore::owner`'s own doc) - neither would distinguish two
+    /// separate test functions from each other, which is the actual shape
+    /// of the bug.
+    ///
+    /// Verified failing against the pre-fix code: temporarily changing
+    /// `owned_by_current_thread` to always return `true` (the behavior
+    /// before this field existed) makes this test fail with "expected no
+    /// matching RaceEvent to be dispatched, found 1" - confirming this is a
+    /// real discriminating regression test, not one that would pass either
+    /// way.
+    #[tokio::test]
+    async fn a_fake_never_records_a_dispatch_from_a_different_thread() {
+        let _guard = EventFacade::fake();
+
+        // A genuinely different OS thread running its own current-thread
+        // runtime, exactly like a concurrently scheduled `#[tokio::test]`
+        // function - never installs a fake of its own, and dispatches on
+        // the bare global facade, exactly like an application's own event
+        // dispatch would from inside an unrelated test.
+        let other_thread = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("building a current-thread runtime for the other thread");
+            rt.block_on(async {
+                EventFacade::dispatch(RaceEvent).await.unwrap();
+            });
+        });
+        other_thread
+            .join()
+            .expect("the other thread's dispatch completed without panicking");
+
+        assert_not_dispatched::<RaceEvent>(|_| true);
     }
 
     #[tokio::test]

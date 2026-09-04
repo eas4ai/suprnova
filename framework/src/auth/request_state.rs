@@ -252,8 +252,24 @@ pub(crate) fn clear_all_authentication() {
 }
 
 /// Whether one named session guard already resolved a user instance.
+///
+/// Fix round 6: also records the resolved id as principal material when one
+/// is present, not just the boolean flag - a handler that branches its body
+/// on `has_guard_user` alone (never calling an id-returning accessor) used
+/// to leave the guard with only the type-only floor check to fall back on.
 pub(crate) fn has_guard_user(guard_name: &str) -> bool {
-    read_state(|state| state.guard_users.contains_key(guard_name)).unwrap_or(false)
+    let (has, material) = read_state(|state| {
+        let id = state
+            .guard_users
+            .get(guard_name)
+            .map(|user| user.get_auth_identifier());
+        (id.is_some(), id)
+    })
+    .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    has
 }
 
 /// Mark whether one guard was hydrated from a remember carrier.
@@ -273,8 +289,24 @@ pub(crate) fn set_guard_via_remember(guard_name: &str, value: bool) {
 }
 
 /// Whether one guard was hydrated from a remember carrier this request.
+///
+/// Fix round 6: also records that guard's resolved id as principal material
+/// when one is known, the same reasoning as `has_guard_user`.
 pub(crate) fn guard_via_remember(guard_name: &str) -> bool {
-    read_state(|state| state.remembered_guards.contains(guard_name)).unwrap_or(false)
+    let (remembered, material) = read_state(|state| {
+        let remembered = state.remembered_guards.contains(guard_name);
+        let id = state
+            .guard_users
+            .get(guard_name)
+            .map(|user| user.get_auth_identifier())
+            .or_else(|| state.guard_user_ids.get(guard_name).cloned());
+        (remembered, id)
+    })
+    .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    remembered
 }
 
 /// Record the guard and non-secret selector carried by the browser.
@@ -310,10 +342,15 @@ pub(crate) fn set_verified_active_remember_carrier(
 }
 
 /// Return the verified owner and selector for one retryable rotated carrier.
+///
+/// Fix round 6: records the returned owner as principal material - this
+/// accessor already reveals a concrete id, unlike most of the flag-only
+/// ones nearby, so there is no reason to fall back to the type-only floor
+/// check for it.
 pub(crate) fn verified_active_remember_carrier_for_guard(
     guard_name: &str,
 ) -> Option<(String, String)> {
-    read_state(|state| {
+    let result = read_state(|state| {
         state
             .active_remember_carrier
             .as_ref()
@@ -325,51 +362,103 @@ pub(crate) fn verified_active_remember_carrier_for_guard(
                     .map(|owner| (owner.clone(), carrier.selector.clone()))
             })
     })
-    .flatten()
+    .flatten();
+    if let Some((owner, _)) = &result {
+        crate::render_cache::collector::observe_principal_value(owner);
+    }
+    result
 }
 
 /// Return the active carrier's guard and non-secret selector.
+///
+/// Fix round 6: the selector alone reveals no identity, but the carrier's
+/// guard name does let this peek at that guard's already-resolved id (if
+/// any) and record it as principal material, the same reasoning as
+/// `has_guard_user`.
 pub(crate) fn active_remember_carrier() -> Option<(String, String)> {
-    read_state(|state| {
-        state
+    let (result, material) = read_state(|state| {
+        let result = state
             .active_remember_carrier
             .as_ref()
-            .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()))
+            .map(|carrier| (carrier.guard.clone(), carrier.selector.clone()));
+        let material = result.as_ref().and_then(|(guard, _)| {
+            state
+                .guard_users
+                .get(guard)
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| state.guard_user_ids.get(guard).cloned())
+        });
+        (result, material)
     })
-    .flatten()
+    .unwrap_or((None, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    result
 }
 
 /// Return the active carrier selector when it belongs to one guard.
+///
+/// Fix round 6: see `active_remember_carrier`'s own doc; the same
+/// reasoning applies to the already-named guard.
 pub(crate) fn active_remember_selector_for_guard(guard_name: &str) -> Option<String> {
-    read_state(|state| {
-        state
+    let (result, material) = read_state(|state| {
+        let result = state
             .active_remember_carrier
             .as_ref()
             .filter(|carrier| carrier.guard == guard_name)
-            .map(|carrier| carrier.selector.clone())
+            .map(|carrier| carrier.selector.clone());
+        let material = result.as_ref().and_then(|_| {
+            state
+                .guard_users
+                .get(guard_name)
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| state.guard_user_ids.get(guard_name).cloned())
+        });
+        (result, material)
     })
-    .flatten()
+    .unwrap_or((None, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    result
 }
 
 /// Forget the active carrier only when both its guard and selector match.
+///
+/// Fix round 6: also records that guard's already-resolved id as principal
+/// material when one is known, the same reasoning as `has_guard_user`.
 pub(crate) fn take_active_remember_carrier(guard_name: &str, selector: &str) -> bool {
     // Read-and-clear, not a pure read, so it cannot go through `read_state`
     // (which only hands out `&AuthRequestState`); instrumented explicitly
     // here instead - still the same seam, `AUTH_STATE` itself.
     crate::render_cache::collector::observe_principal_read();
-    AUTH_STATE
+    let (matches, material) = AUTH_STATE
         .try_with(|state| {
             let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
             let matches = state
                 .active_remember_carrier
                 .as_ref()
                 .is_some_and(|carrier| carrier.guard == guard_name && carrier.selector == selector);
+            let material = if matches {
+                state
+                    .guard_users
+                    .get(guard_name)
+                    .map(|user| user.get_auth_identifier())
+                    .or_else(|| state.guard_user_ids.get(guard_name).cloned())
+            } else {
+                None
+            };
             if matches {
                 state.active_remember_carrier = None;
             }
-            matches
+            (matches, material)
         })
-        .unwrap_or(false)
+        .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    matches
 }
 
 /// Forget whichever inbound or outbound remember carrier is active.
@@ -467,8 +556,22 @@ pub(crate) fn bearer_user() -> Option<Arc<dyn Authenticatable>> {
 }
 
 /// Whether a bearer user has already been resolved for this request.
+///
+/// Fix round 6: also records the resolved id as principal material when
+/// one is present, the same reasoning as `has_guard_user`.
 pub(crate) fn has_bearer_user() -> bool {
-    read_state(|state| state.bearer_user.is_some()).unwrap_or(false)
+    let (has, material) = read_state(|state| {
+        let id = state
+            .bearer_user
+            .as_ref()
+            .map(|user| user.get_auth_identifier());
+        (id.is_some(), id)
+    })
+    .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    has
 }
 
 /// The current request user's identifier, if one is known.
@@ -504,14 +607,43 @@ pub(crate) fn clear_current_user() {
 
 /// Whether a user instance has been resolved for this request - without
 /// triggering provider resolution. Backs [`Guard::has_user`](super::Guard::has_user).
+///
+/// Fix round 6: also records the resolved id as principal material when
+/// one is present, the same reasoning as `has_guard_user`.
 pub(crate) fn has_current_user() -> bool {
-    read_state(|state| state.current_user.is_some()).unwrap_or(false)
+    let (has, material) = read_state(|state| {
+        let id = state
+            .current_user
+            .as_ref()
+            .map(|user| user.get_auth_identifier());
+        (id.is_some(), id)
+    })
+    .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    has
 }
 
 /// Whether the current user came from a remember-me cookie this request.
 /// Backs [`StatefulGuard::via_remember`](super::StatefulGuard::via_remember).
+///
+/// Fix round 6: also records the default guard's resolved id as principal
+/// material when one is known, the same reasoning as `has_guard_user`.
 pub(crate) fn via_remember() -> bool {
-    read_state(|state| state.via_remember).unwrap_or(false)
+    let (via, material) = read_state(|state| {
+        let id = state
+            .current_user
+            .as_ref()
+            .map(|user| user.get_auth_identifier())
+            .or_else(|| state.current_user_id.clone());
+        (state.via_remember, id)
+    })
+    .unwrap_or((false, None));
+    if let Some(id) = &material {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    via
 }
 
 /// Test-only: run `fut` with a fresh request-scoped auth state.

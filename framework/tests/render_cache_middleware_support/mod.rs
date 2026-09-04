@@ -148,6 +148,37 @@ impl suprnova::Middleware for ImpersonationMiddleware {
     }
 }
 
+/// Fix round 6, Leak 1, second reproduction: stands in for a per-route
+/// locale middleware, which the framework's own review named as "the only
+/// position such a middleware can occupy" - a per-route middleware always
+/// composes closer to the handler than any global middleware, so it always
+/// runs after `RenderCacheMiddleware` regardless of registration order,
+/// the same reasoning [`ImpersonationMiddleware`] above already
+/// establishes for identity. Gated on `x-test-late-locale` (rather than
+/// applying unconditionally, the way a real per-route middleware would be
+/// scoped to its one route) so every other test's own locale expectations
+/// (`TestLocaleMiddleware`'s outer `"en"`) are unaffected. `scope_locale`d
+/// around only this middleware's own `next(request)` call, so the nested
+/// scope pops the instant the handler returns - before
+/// `RenderCacheMiddleware`'s own post-render guard check ever runs, which
+/// is exactly what defeated round 5's post-render re-read of the same
+/// task-local.
+pub struct LateLocaleMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for LateLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if request.header("x-test-late-locale").is_none() {
+            return next(request).await;
+        }
+        scope_locale(
+            Locale::parse("fr").expect("fr is a valid locale"),
+            next(request),
+        )
+        .await
+    }
+}
+
 /// A `UserProvider` whose `retrieve_by_id` is never actually exercised in
 /// the fix round 4 Leak B reproduction: the test sets the named guard's
 /// user directly via `set_user`, which the guard's own per-request cache
@@ -502,6 +533,42 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("cookie reading policy");
+    // Fix round 6, Leak 1 (both reproductions): declares Locale correctly,
+    // the same shape as `locale_declared_switches_policy` above - the point
+    // is that a *nested*, popped `scope_locale` (or a locale established
+    // by a middleware positioned after `RenderCacheMiddleware`) must still
+    // be caught, which round 5's re-derivation could not do.
+    let nested_scope_locale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Locale)
+        .build()
+        .expect("nested scope locale policy");
+    let late_locale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Locale)
+        .build()
+        .expect("late locale policy");
+    // Fix round 6, Leak 3: declares Principal - the point is that the key
+    // (always built from the *default* guard's identity, see
+    // `variance_descriptor`) must still be declined when the render also
+    // observed a *different* identity through a named guard, even though
+    // the default identity alone would resolve to a matching private value.
+    let named_guard_then_default_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("named guard then default policy");
+    // Fix round 6, item 5: `FeatureVersion` has no producer on this host;
+    // `RenderCachePolicy::builder` now accepts declaring it (the rejection
+    // moved to `variance_descriptor`, see its own doc), so this route
+    // exercises the moved rejection rather than a build-time failure.
+    let feature_version_declared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::FeatureVersion)
+            .build()
+            .expect("a host-neutral policy may declare FeatureVersion; only this host rejects it");
     // Fix round 4: one pair of policies per classification reason - the
     // wrong dimension declared for that reason, and the matching one -
     // parameterising the leak shape instead of pinning it to one remembered
@@ -611,6 +678,22 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         )
         .into();
     let router: Router = router.get("/cookie-reading", cookie_reading_handler).into();
+    let router: Router = router
+        .get("/nested-scope-locale/{id}", nested_scope_locale_handler)
+        .into();
+    let router: Router = router.get("/late-locale/{id}", late_locale_handler).into();
+    let router: Router = router
+        .get(
+            "/named-guard-then-default/{id}",
+            reads_named_guard_then_touches_default_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/feature-version-declared/{id}",
+            feature_version_declared_handler,
+        )
+        .into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -686,7 +769,24 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         )
         .expect("attach locale declared switches policy")
         .try_render_cache("/cookie-reading", GroupPolicy::from(cookie_reading_policy))
-        .expect("attach cookie reading policy");
+        .expect("attach cookie reading policy")
+        .try_render_cache(
+            "/nested-scope-locale/{id}",
+            GroupPolicy::from(nested_scope_locale_policy),
+        )
+        .expect("attach nested scope locale policy")
+        .try_render_cache("/late-locale/{id}", GroupPolicy::from(late_locale_policy))
+        .expect("attach late locale policy")
+        .try_render_cache(
+            "/named-guard-then-default/{id}",
+            GroupPolicy::from(named_guard_then_default_policy),
+        )
+        .expect("attach named guard then default policy")
+        .try_render_cache(
+            "/feature-version-declared/{id}",
+            GroupPolicy::from(feature_version_declared_policy),
+        )
+        .expect("attach feature version declared policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -748,6 +848,10 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     // framework explicitly supports and which necessarily runs closer to
     // the handler than a middleware registered globally before install.
     suprnova::middleware::register_global_middleware(ImpersonationMiddleware);
+    // Fix round 6, Leak 1 (second reproduction): same "after install"
+    // reasoning as `ImpersonationMiddleware` immediately above, standing in
+    // for a per-route locale middleware this time.
+    suprnova::middleware::register_global_middleware(LateLocaleMiddleware);
 
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 
@@ -1003,6 +1107,75 @@ async fn locale_switching_handler(_request: Request) -> Response {
     Ok(HttpResponse::html(format!(
         "locale render {n} before={before} after={after}"
     )))
+}
+
+/// Fix round 6, Leak 1 (proven, nested `scope_locale`). The key is derived
+/// while the outer `TestLocaleMiddleware` scope (`"en"`) is the only one
+/// active; this handler then renders its whole body inside a *nested*
+/// `scope_locale` - the framework's own documented, supported API for a
+/// mid-render locale switch - and that nested scope pops the instant its
+/// future resolves, before this handler itself returns. Round 5's guard
+/// re-read `Lang::locale()` after the render, by which point only the
+/// outer, pre-switch scope was left to see - always agreeing with the key.
+async fn nested_scope_locale_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let body = scope_locale(Locale::parse("fr").expect("fr is a valid locale"), async {
+        format!("nested-scope render {n} locale={}", Lang::locale().as_str())
+    })
+    .await;
+    Ok(HttpResponse::html(body))
+}
+
+/// Fix round 6, Leak 1, second reproduction (proven). Reads `Lang::locale()`
+/// plainly; [`LateLocaleMiddleware`] (registered after `RenderCache::install`,
+/// gated on `x-test-late-locale`) is what actually supplies the switched
+/// locale, in a scope that pops before this middleware's own `next(request)`
+/// call - and therefore before `RenderCacheMiddleware`'s post-render
+/// guard - returns.
+async fn late_locale_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let locale = Lang::locale().as_str();
+    Ok(HttpResponse::html(format!(
+        "late-locale render {n} locale={locale}"
+    )))
+}
+
+/// Fix round 6, Leak 3 (proven, cross-identity). Reads the named,
+/// non-default guard's identity to build the body, then separately touches
+/// the default accessor for an unrelated check whose result the body does
+/// not use - the shape round 5's single last-write slot could not survive:
+/// the second read overwrote the first's recorded material, so the guard
+/// compared only the default identity (which `variance_descriptor`'s
+/// `Principal` arm always builds the key from) against itself and always
+/// passed, even though the *body* came from a different, unrecorded
+/// named-guard identity.
+async fn reads_named_guard_then_touches_default_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let named_identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    // An unrelated later touch of the default accessor - an audit or
+    // feature check, say - whose own result the body does not use.
+    let _ = Auth::id();
+    Ok(HttpResponse::html(format!(
+        "named-then-default render for {named_identity}"
+    )))
+}
+
+/// Fix round 6, item 5 (engine rule moved to the host): the key's own doc
+/// on `variance_descriptor` explains why this dimension is rejected here
+/// rather than at policy build time. The handler itself is unremarkable;
+/// the point under test is that the route never gets cached at all.
+async fn feature_version_declared_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("feature-version render {n}")))
 }
 
 async fn sets_cookie_handler(_request: Request) -> Response {

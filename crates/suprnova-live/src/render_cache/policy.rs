@@ -329,27 +329,32 @@ impl RenderCachePolicy {
         {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
-        // Fix round 5: `FeatureVersion`, `ConfigVersion`, and `Application`
-        // variance have no producer anywhere in the host that builds a
-        // variance descriptor from them - declaring one silently declared
-        // nothing, with no warning. Rejected here rather than honored,
-        // since there is no producer to honor them with; a host that adds
-        // one later can lift this restriction alongside it.
-        if self.vary.iter().any(|dimension| {
-            matches!(
-                dimension,
-                VarianceDimension::FeatureVersion
-                    | VarianceDimension::ConfigVersion
-                    | VarianceDimension::Application(_)
-            )
-        }) {
-            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
-        }
-        // Fix round 5: `PrivateCached` with no declared variance promises
-        // one representation per private key material set while declaring
-        // no dimension that could ever hold private material - every
-        // visitor would share the one "private" entry.
-        if self.class == RepresentationClass::PrivateCached && self.vary.is_empty() {
+        // Fix round 5 rejected `FeatureVersion`, `ConfigVersion`, and
+        // `Application` here on the grounds that no host had a producer for
+        // them. Fix round 6 moved that rejection to the host's own
+        // `variance_descriptor` (see its doc): whether a producer exists is
+        // a fact about one host's implementation, not about this
+        // host-neutral crate's own extension point, and refusing it here
+        // made the engine learn about the host to justify the refusal.
+        //
+        // Fix round 5's `PrivateCached`-with-empty-variance rule is fixed in
+        // place rather than moved: checking mere non-emptiness let a
+        // `PrivateCached` policy that declares only, say, `Media` still
+        // build - `Media` never resolves to `DimensionValue::Private`
+        // regardless of host, so every visitor would still share the one
+        // "private" entry. Only `Principal` and `Tenant` are documented as
+        // opaque private material (see their own variants' doc on
+        // [`VarianceDimension`]); that is intrinsic to the dimension's own
+        // definition, not a fact any one host could differ on, so the check
+        // stays here.
+        if self.class == RepresentationClass::PrivateCached
+            && !self.vary.iter().any(|dimension| {
+                matches!(
+                    dimension,
+                    VarianceDimension::Principal | VarianceDimension::Tenant
+                )
+            })
+        {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
         Ok(())
