@@ -180,12 +180,14 @@ impl RenderCache {
                 max_waiters: 128,
             }))
         });
+        let epoch_ledger = ledger::SqlGenerationLedger::new();
         let runtime = Arc::new(RenderCacheRuntime {
             config,
             table,
             l0,
             l1,
-            ledger: Arc::new(ledger::SqlGenerationLedger::new()),
+            ledger: Arc::new(epoch_ledger),
+            epoch_ledger,
             coordinator,
             keys,
             clock,
@@ -237,12 +239,12 @@ impl RenderCache {
     /// Returns [`RenderCacheError`] when no runtime is installed or the
     /// ledger's epoch update fails.
     pub async fn advance_epoch() -> Result<(), RenderCacheError> {
-        if Self::runtime().is_none() {
-            return Err(RenderCacheError::new(
-                RenderCacheErrorKind::ProviderUnavailable,
-            ));
-        }
-        ledger::SqlGenerationLedger::new().advance_epoch().await
+        let runtime = Self::runtime()
+            .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        // Fix round 2, item 7: uses the runtime's own ledger handle rather
+        // than constructing an unconnected one, so a future ledger override
+        // reaches the epoch-advance operator too. See `epoch_ledger`'s doc.
+        runtime.epoch_ledger.advance_epoch().await
     }
 
     /// Body-free inspection of a stored L0 entry by its encoded key text.
@@ -287,5 +289,51 @@ impl RenderCache {
     pub async fn inspect_route_for_test(pattern: &str) -> Option<EntryInspection> {
         let key = Self::key_for_route_for_test(pattern, &[], None);
         Self::inspect(&key).await.expect("inspect")
+    }
+
+    /// Test-only: L1 inspection of a route by pattern, params, and an
+    /// optional login - the L1 counterpart of [`Self::inspect_route_for_test`]
+    /// and [`Self::key_for_route_for_test`]. Added for fix round 2, item 5:
+    /// nothing could inspect the file-backed tier directly by key before
+    /// this, so no test could tell L0 and L1 state apart.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no runtime is installed, no L1 provider is configured, the
+    /// route has no effective policy, the L1 read fails, or a found entry
+    /// fails to decode.
+    #[doc(hidden)]
+    pub async fn inspect_l1_for_test(
+        pattern: &str,
+        params: &[(&str, &str)],
+        login: Option<&str>,
+    ) -> Option<EntryInspection> {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        let l1 = runtime.l1.as_ref().expect("L1 configured");
+        let policy = runtime.table.effective_policy(pattern).expect("policy");
+        let input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
+        let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
+            .expect("key");
+        let stored = l1.get(&key).await.expect("l1 get")?;
+        Some(suprnova_live::render_cache::inspect(&stored.bytes, &runtime.limits).expect("inspect"))
+    }
+
+    /// Test-only: the number of entries currently held in the
+    /// [`CoherenceMode::Lease`] validation-lease map. Added for fix round 2,
+    /// item 6, to observe the map's bound from outside the crate: nothing
+    /// else exposes `RenderCacheRuntime::leases`'s size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no runtime is installed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lease_count_for_test() -> usize {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        runtime
+            .leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }

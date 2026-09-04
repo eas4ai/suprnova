@@ -25,10 +25,55 @@ use suprnova::{StatusCode, async_trait};
 
 mod render_cache_middleware_support;
 use render_cache_middleware_support::{
-    advance_posts, boot_with_render_cache,
+    advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     dispatch_get, dispatch_head,
 };
+
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_on_error_serves_stale_when_the_foreground_rebuild_fails() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+
+    // `/stale/{id}`'s policy is fresh 60_000, stale-servable 60_000,
+    // stale-on-error 120_000 (see the harness). age 130_000 gives
+    // past_fresh = 70_000, which lands inside [stale_servable_ms (60_000),
+    // stale_on_error_ms (120_000)): the StaleOnError band, not the
+    // StaleServable band the other stale test exercises.
+    clock(&harness).advance_ms(130_000);
+    counting_route::fail_next_render(&harness);
+    let served = dispatch_get(&harness, "/stale/1", &[]).await;
+
+    // Fix round 2, item 3, proven to discriminate: before the fix, this
+    // branch only treated a `ProviderFailure` (a failure before the handler
+    // ran) as a reason to fall back to the stale entry; a handler that ran
+    // and returned a 500 - the failure mode stale-on-error is documented
+    // and named for - passed straight through as an ordinary response.
+    // Reverting the `serve` fix and re-running this test, the assertion
+    // below failed with `served.status == 500`.
+    assert_eq!(
+        served.status,
+        StatusCode::OK,
+        "a handler-level failure inside the stale-on-error window must still \
+         serve the stale entry, not the failure"
+    );
+    assert_eq!(
+        served.header("warning"),
+        Some("110 - \"Response is Stale\"")
+    );
+    assert_eq!(
+        served.body, first.body,
+        "the served body is the stale entry's, not a fresh render's"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the foreground rebuild attempt still ran once and failed"
+    );
+}
 
 #[tokio::test]
 #[serial_test::serial]
@@ -47,13 +92,21 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     assert_eq!(counting_route::renders(), 1, "a hit runs no handler");
     assert_eq!(second.header("age"), Some("0"));
 
+    // Fix round 2, item 7: the empty-body checks that used to follow each of
+    // these two assertions were vacuous, proven by the reviewer - they pass
+    // even with the middleware's own body suppression removed, because the
+    // server strips the body for `HEAD` and the protocol suppresses it for
+    // `304` regardless of what this middleware puts in the response body.
+    // Isolating which layer actually did the suppression is not observable
+    // through a full HTTP dispatch, so they are dropped rather than left
+    // looking like coverage; the status and header assertions here (and
+    // `renders()` staying at 1 below) still prove the middleware treated
+    // both as hits, which is what this test is actually about.
     let conditional = dispatch_get(&harness, "/cached/1", &[("if-none-match", &etag)]).await;
     assert_eq!(conditional.status, StatusCode::NOT_MODIFIED);
-    assert!(conditional.body.is_empty());
 
     let head = dispatch_head(&harness, "/cached/1").await;
     assert_eq!(head.status, StatusCode::OK);
-    assert!(head.body.is_empty());
     assert_eq!(counting_route::renders(), 1);
 }
 
@@ -345,5 +398,189 @@ async fn a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh() {
         3,
         "the leader's discarded attempt (2) plus the waiter's own fresh re-render (3) - a \
          waiter that trusted the wait alone would leave this at 2"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stale_principal_route_never_spawns_a_background_rebuild() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(
+        &harness,
+        "/stale-principal/1",
+        &[("x-test-login", "user-7")],
+    )
+    .await;
+    assert_eq!(counting_route::renders(), 1);
+
+    // past_fresh = 70_000 - 60_000 = 10_000, inside the StaleServable band
+    // [0, stale_servable_ms (60_000)).
+    clock(&harness).advance_ms(70_000);
+    let stale = dispatch_get(
+        &harness,
+        "/stale-principal/1",
+        &[("x-test-login", "user-7")],
+    )
+    .await;
+    assert_eq!(stale.header("warning"), Some("110 - \"Response is Stale\""));
+
+    // Fix round 2, item 4, proven to discriminate: before the fix, this
+    // route's declared `Principal` variance did not stop a background
+    // rebuild from spawning. That rebuild runs with no task-local identity
+    // at all (`Auth::id()` returns `None` inside the spawned task
+    // regardless of who made the original request), so it renders
+    // anonymously and would publish that anonymous render under this
+    // specific principal's already-derived key -
+    // `key_omits_observed_privacy` does not catch this shape, since it
+    // only flags an *observed* identity the key does not declare, not a
+    // *declared* dimension the render failed to observe. Reverting the
+    // `serve` fix and re-running this test, `renders()` reliably reached 2
+    // immediately after the stale dispatch above - the same "the
+    // background rebuild only awaits a local SQLite read, so it reliably
+    // finishes first" timing `stale_service_is_policy_driven_bounded_and_never_private`
+    // above already relies on. With the fix, no task is ever spawned for a
+    // `Principal`-varying route, so this is not a race: nothing could
+    // increment `renders()` a second time no matter how long this waited.
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "a Principal-varying route must not spawn a background rebuild"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn l1_participates_with_promotion_and_dual_publish() {
+    let harness = boot_with_render_cache_and_l1_for_test().await;
+
+    // A miss populates both tiers.
+    dispatch_get(&harness, "/l1-cached/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+    let key1 = RenderCache::key_for_route_for_test("/l1-cached/{id}", &[("id", "1")], None);
+    assert!(
+        RenderCache::inspect(&key1)
+            .await
+            .expect("inspect l0")
+            .is_some(),
+        "a fresh publish reaches L0"
+    );
+    assert!(
+        RenderCache::inspect_l1_for_test("/l1-cached/{id}", &[("id", "1")], None)
+            .await
+            .is_some(),
+        "a fresh publish reaches L1 too - a dual publish, not L0-only"
+    );
+
+    // A second key's publish evicts the first from L0 (this harness's L0 is
+    // capped at a single entry) but not from L1 (sized generously).
+    dispatch_get(&harness, "/l1-cached/2", &[]).await;
+    assert_eq!(counting_route::renders(), 2);
+    assert!(
+        RenderCache::inspect(&key1)
+            .await
+            .expect("inspect l0")
+            .is_none(),
+        "L0's single-entry capacity evicted the first key"
+    );
+    assert!(
+        RenderCache::inspect_l1_for_test("/l1-cached/{id}", &[("id", "1")], None)
+            .await
+            .is_some(),
+        "L1 still holds the first key: an L0 eviction is not an L1 eviction"
+    );
+
+    // The next request for the evicted key is served from L1 - not
+    // re-rendered - and promoted back into L0.
+    let promoted = dispatch_get(&harness, "/l1-cached/1", &[]).await;
+    assert_eq!(promoted.status, StatusCode::OK);
+    assert!(promoted.header("etag").is_some());
+    assert_eq!(counting_route::renders(), 2, "an L1 hit runs no handler");
+    assert!(
+        RenderCache::inspect(&key1)
+            .await
+            .expect("inspect l0")
+            .is_some(),
+        "an L1 hit is promoted back into L0"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_bump() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first request renders and publishes"
+    );
+
+    // Grants the lease: this hit's `coherence` check finds no existing
+    // lease yet, so it rereads the authority once and, finding it
+    // coherent, grants one.
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+
+    // Trusts the just-granted lease: this hit's `coherence` check skips the
+    // authority reread entirely.
+    let leased_hit = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+    assert!(leased_hit.header("etag").is_some());
+
+    // Fix round 2, item 6: this asserts the observable guarantee the review
+    // asked for - an emergency epoch advance reaches a lease-mode route
+    // immediately, not after the lease's own `max_age_ms` expires - but it
+    // is *not* a discriminating test for a `coherence`-level epoch check,
+    // and this codebase does not have one. Investigated, not assumed:
+    // `RenderKey::derive` bakes the epoch into the lookup key itself, and
+    // `key_input` re-derives that key from a freshly read epoch on every
+    // dispatch, before `coherence` (lease mode or not) ever runs. So the
+    // epoch bump below changes the lookup key for `/leased/1`, and the
+    // previously-published entry becomes unreachable by ordinary lookup on
+    // the request below - an ordinary cache miss, which renders
+    // immediately regardless of coherence mode. This test passes
+    // identically whether or not `coherence`'s lease branch consults the
+    // epoch (confirmed: it still passed with that consultation removed),
+    // because the key mismatch already guarantees the outcome. See
+    // `coherence`'s own comment for the fuller reasoning and its scope.
+    RenderCache::advance_epoch().await.expect("advance epoch");
+    let after_bump = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(after_bump.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "an emergency epoch advance must reach a lease-mode route immediately, not wait out \
+         the lease"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_lease_grant_sweeps_every_expired_lease_first() {
+    let harness = boot_with_render_cache().await;
+    for id in 1..=3 {
+        let path = format!("/leased/{id}");
+        dispatch_get(&harness, &path, &[]).await; // miss: renders and publishes
+        dispatch_get(&harness, &path, &[]).await; // hit: grants a lease
+    }
+    assert_eq!(RenderCache::lease_count_for_test(), 3);
+
+    // Past `max_age_ms` (60_000) for every lease granted above.
+    clock(&harness).advance_ms(61_000);
+
+    // Fix round 2, item 6, proven to discriminate: before the fix, the
+    // lease map was insert-only, so the three now-expired leases above
+    // would stay in the map for the process lifetime - a lease-mode route
+    // keyed by an ever-growing identifier (a principal, a query value)
+    // grows it without bound. Reverting just the `leases.retain(...)` sweep
+    // line and re-running this test, `lease_count_for_test()` read 4 below,
+    // not 1: the three expired leases were never removed.
+    dispatch_get(&harness, "/leased/4", &[]).await; // miss: renders and publishes
+    dispatch_get(&harness, "/leased/4", &[]).await; // hit: grants a lease,
+    // opportunistically sweeping every already-expired lease first.
+    assert_eq!(
+        RenderCache::lease_count_for_test(),
+        1,
+        "granting a new lease must sweep every already-expired one first"
     );
 }

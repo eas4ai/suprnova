@@ -25,20 +25,38 @@
 //!   multi-tenant application to `PrivateCached`, regardless of whether it
 //!   declared `Tenant` variance - `Tenant` variance stays available and
 //!   correct at the key-derivation step, opted into per route.
-//! - **Background rebuild's synthetic request.** The stale-service
-//!   background rebuild reruns the original `Request` value rather than a
-//!   freshly built one with cookies stripped: this codebase's `Request`
-//!   has no public constructor from parts plus a hyper request the way
-//!   this would need, and building one is a change to `http::request`,
-//!   not to this middleware. If the background render happens to observe a
-//!   principal from the carried cookie on a route that never declared
-//!   `Principal` variance, [`key_omits_observed_privacy`] declines to
-//!   store the result - narrowing the served class alone would not be
-//!   enough, since narrowing never repartitions the key that was already
-//!   derived before the render ran (see that function's own doc). So this
-//!   is a possible wasted or misdirected rebuild, not a correctness or
-//!   security defect - flagged here rather than silently matched to the
-//!   ideal.
+//! - **Background rebuild's ambient context (fix round 2, item 4).** A
+//!   stale-servable background rebuild runs on a `tokio::spawn`ed task, and
+//!   task-locals do not cross a spawn. `Lang`'s negotiated locale and
+//!   `Auth`'s request-scoped identity are both task-local
+//!   (`tokio::task_local!`-backed), so a background render for a route that
+//!   declares `Locale` or `Principal` variance would compute a *different*
+//!   variance than the one the key it is about to publish under was already
+//!   derived from: a locale-varying route's background rebuild would render
+//!   the default locale's content and publish it under another locale's
+//!   key, and a principal-varying route's background rebuild would render
+//!   anonymously and publish under a specific principal's key - a real
+//!   content-identity mismatch, not merely a wasted render. (An earlier
+//!   draft of this note called this "a possible wasted or misdirected
+//!   rebuild, not a correctness or security defect," reasoning that
+//!   [`key_omits_observed_privacy`]'s narrowing would decline the store;
+//!   round 1 of this task's review established that narrowing never
+//!   repartitions an already-derived key, so that justification does not
+//!   hold, and the gap is broader than the cookie-carried case it was
+//!   framed around - the fix below is the actual guard.)
+//!
+//!   The fix: [`RenderCacheMiddleware::serve`] does not spawn a background
+//!   rebuild at all for a route whose policy declares `Locale` or
+//!   `Principal` variance (see `variance_depends_on_ambient_context`); such
+//!   a route still serves its stale-servable entry immediately - the
+//!   "never blocks" guarantee is unaffected - it just does not also try to
+//!   refresh it in the background. The entry only refreshes once it goes
+//!   Dead and the next request renders it in the foreground, where the
+//!   ambient context is the real request's own. `Tenant` variance needs no
+//!   such guard: `Request::live_tenant()` reads a field set on the `Request`
+//!   value itself, not a task-local, so it survives the moved `Request`
+//!   the spawn carries. A request id is also lost across the spawn - log
+//!   correlation only, not a cache-key concern, so it is not guarded here.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -132,15 +150,34 @@ pub struct RenderCacheRuntime {
     pub(crate) l0: MemoryRenderStore,
     pub(crate) l1: Option<FileRenderStore>,
     pub(crate) ledger: Arc<dyn GenerationLedger>,
+    /// The same authority [`ledger::SqlGenerationLedger`] wrapped in
+    /// `ledger` above, kept as its concrete type because
+    /// [`ledger::SqlGenerationLedger::advance_epoch`] is not part of the
+    /// [`GenerationLedger`] trait (it is an emergency operator tool, not a
+    /// per-request read or write) and so cannot be reached through the
+    /// trait object. [`super::RenderCache::advance_epoch`] calls this field
+    /// rather than constructing a fresh `SqlGenerationLedger` of its own -
+    /// see fix round 2, item 7 - so a future ledger override reaches this
+    /// operator too. `SqlGenerationLedger` is zero-sized and `Copy`, so
+    /// keeping both this and `ledger` costs nothing.
+    pub(crate) epoch_ledger: super::ledger::SqlGenerationLedger,
     pub(crate) coordinator: Arc<dyn RebuildCoordinator>,
     pub(crate) keys: SnapshotKeyRing,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) limits: EntryLimits,
-    /// Bounded local validation leases for [`CoherenceMode::Lease`] routes,
-    /// keyed by the entry's lookup key. Bounded in practice, not in code: a
-    /// key that stops being requested stops being touched here, so the map
-    /// only ever holds as many entries as there are distinct lease-mode
-    /// keys actually in active use.
+    /// Local validation leases for [`CoherenceMode::Lease`] routes, keyed by
+    /// the entry's lookup key.
+    ///
+    /// Bounded by opportunistic cleanup, not by a background sweep: every
+    /// [`coherence`] call that inserts a fresh lease first evicts every
+    /// entry whose lease has already expired (see the insert site), so the
+    /// map holds at most one entry per distinct lease-mode key that has been
+    /// requested within the last `max_age_ms` - not, as an earlier version
+    /// of this comment claimed, an unbounded one held for the process
+    /// lifetime (fix round 2, item 6). An entry whose underlying L0/L1 store
+    /// entry was evicted separately is not proactively removed from here;
+    /// it is inert (coherence is only ever consulted after a store hit) and
+    /// is swept the same way once its lease's own timer expires.
     pub(crate) leases: Mutex<BTreeMap<RenderKey, ValidationLease>>,
 }
 
@@ -340,24 +377,62 @@ impl RenderCacheMiddleware {
                     now,
                     warning_header(state),
                 );
-                self.spawn_background_rebuild(request, next, key, policy.clone(), epoch, variance);
+                // Fix round 2, item 4: a route whose variance depends on
+                // ambient (task-local) context does not get a background
+                // rebuild - see the module doc's "Background rebuild's
+                // ambient context" note for why. The stale entry is still
+                // served immediately either way; only the background
+                // refresh is skipped.
+                if !variance_depends_on_ambient_context(policy) {
+                    self.spawn_background_rebuild(
+                        request,
+                        next,
+                        key,
+                        policy.clone(),
+                        epoch,
+                        variance,
+                    );
+                }
                 Ok(response)
             }
             FreshnessState::StaleOnError => {
                 LookupOutcome::Miss.record();
-                match render_and_publish(&self.runtime, request, next, key, policy, epoch, variance)
-                    .await
-                {
-                    Ok(response) => Ok(response),
-                    Err(ProviderFailure(request, _next)) => Ok(respond_hit(
-                        &request,
-                        policy,
-                        &entry,
-                        stored.published_at_ms,
-                        now,
-                        warning_header(FreshnessState::StaleOnError),
-                    )),
+                // Captured before `request` moves into the rebuild attempt,
+                // so a fallback to the stale entry (below) does not need the
+                // request back - matching `lead_render`'s own capture.
+                let method = request.method().as_str().to_owned();
+                let if_none_match = request.header("if-none-match").map(str::to_owned);
+                let outcome =
+                    render_and_publish(&self.runtime, request, next, key, policy, epoch, variance)
+                        .await;
+                // Stale-on-error exists for a foreground rebuild that fails,
+                // not only for a provider failure before the handler ran: a
+                // handler that itself returns an error or a 5xx status is an
+                // ordinary `Response` to `render_and_publish`, so that case
+                // must be detected here too rather than passed through. See
+                // fix round 2, item 3.
+                let rebuild_failed = match &outcome {
+                    Ok(response) => {
+                        let status = match response {
+                            Ok(http) | Err(http) => http.status_code(),
+                        };
+                        status >= 500
+                    }
+                    Err(ProviderFailure(..)) => true,
+                };
+                if !rebuild_failed {
+                    return outcome;
                 }
+                LookupOutcome::Stale.record();
+                Ok(conditional_response(
+                    &method,
+                    if_none_match.as_deref(),
+                    policy,
+                    &entry,
+                    stored.published_at_ms,
+                    now,
+                    warning_header(FreshnessState::StaleOnError),
+                ))
             }
             FreshnessState::Dead => {
                 LookupOutcome::Miss.record();
@@ -400,6 +475,21 @@ fn declared_query_ok(request: &Request, policy: &RenderCachePolicy) -> bool {
         .query_params()
         .keys()
         .all(|name| declared.contains(name))
+}
+
+/// Whether `policy`'s declared variance depends on state that is task-local
+/// rather than carried on the `Request` value itself - `Locale`
+/// (`Lang::locale()`) or `Principal` (`Auth::id()`), both
+/// `tokio::task_local!`-backed. A `tokio::spawn`ed task does not inherit
+/// task-locals, so a background rebuild for one of these routes would
+/// compute a different variance than the key it is about to publish under.
+/// See the module doc's "Background rebuild's ambient context" note (fix
+/// round 2, item 4). `Tenant` is deliberately excluded: `Request::live_tenant`
+/// reads a field on the moved `Request`, not a task-local, so it is safe
+/// across the spawn.
+fn variance_depends_on_ambient_context(policy: &RenderCachePolicy) -> bool {
+    policy.vary().contains(&VarianceDimension::Locale)
+        || policy.vary().contains(&VarianceDimension::Principal)
 }
 
 /// A purpose-separated digest of a registered route pattern. See
@@ -556,16 +646,42 @@ async fn coherence(
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .is_some_and(|lease| lease.valid_at(now));
+        // Fix round 2, item 6: a valid lease reports Coherent without
+        // itself consulting the epoch. The review's stated concern was that
+        // this leaves an emergency `RenderCache::advance_epoch` unable to
+        // reach a lease-mode route until the lease expires naturally, which
+        // could be as long as `max_age_ms`. Investigated rather than
+        // assumed: `RenderKey::derive` bakes the epoch into the lookup key
+        // itself (`feed(10, &input.epoch.to_be_bytes())` in
+        // `suprnova_live::render_cache::key`), and `key_input` always
+        // derives that key from a freshly read epoch on every dispatch, in
+        // `serve`, before `coherence` (or any coherence mode) ever runs. So
+        // an epoch bump changes the lookup key for every route - lease mode
+        // included - making the previously-published entry unreachable by
+        // ordinary lookup on the very next request: a ordinary cache miss,
+        // which renders immediately, not a "Moved" result this function
+        // would need to detect. An explicit epoch comparison here would
+        // therefore check a condition (`header.epoch` disagreeing with the
+        // current epoch on a *found* entry) that cannot occur through this
+        // host's own key derivation, so this documents the finding - the
+        // narrower of the review's two offered fixes - rather than adding a
+        // comparison with no reachable path to prove or exercise. This
+        // reasoning is specific to this host: it would need re-establishing
+        // before anyone changes `RenderKey::derive` to stop keying on epoch,
+        // or introduces a lookup path that does not call `key_input` fresh
+        // per request.
         if leased {
             return Ok(Coherence::Coherent);
         }
         let result = authority_coherence(runtime, header).await?;
         if result == Coherence::Coherent {
-            runtime
-                .leases
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key.clone(), ValidationLease::grant(now, max_age_ms));
+            let mut leases = runtime.leases.lock().unwrap_or_else(|e| e.into_inner());
+            // Fix round 2, item 6: opportunistic cleanup on every insert
+            // bounds this map to distinct lease-mode keys requested within
+            // the last `max_age_ms`, rather than every key ever seen for
+            // the life of the process - see the field's own doc.
+            leases.retain(|_, existing| existing.valid_at(now));
+            leases.insert(key.clone(), ValidationLease::grant(now, max_age_ms));
         }
         return Ok(result);
     }
@@ -901,18 +1017,57 @@ async fn lead_render(
     };
     store_entry(runtime, &lease, policy, &job, &entry, &observed, now).await;
     let _ = runtime.coordinator.release(lease).await;
-    // The client that triggered this render sees the same headers a
-    // subsequent hit would: an entry the middleware just proved safe to
-    // store is, by construction, safe to serve with its validators too.
-    conditional_response(
-        &method,
-        if_none_match.as_deref(),
-        policy,
-        &entry,
-        now,
-        now,
-        None,
-    )
+    // The client that triggered this render gets its own response back -
+    // only the cache validators this middleware adds are attached, rather
+    // than a response reconstructed from the stored entry. Reconstructing
+    // is unavoidable for a later hit (the original response object no
+    // longer exists by then), but here it is gratuitous: the entry's
+    // headers are already filtered to the small replayable allowlist (see
+    // `build_entry`), so reconstructing on the render itself would silently
+    // drop any handler-set header outside that allowlist even on the very
+    // request that produced it. See fix round 2, item 2.
+    finish_fresh_render(response, if_none_match.as_deref(), policy, &entry)
+}
+
+/// The fresh-render counterpart of [`conditional_response`]: serves the
+/// handler's own response, untouched, with the cache validators (`ETag`,
+/// `Cache-Control`, `Vary`, `Age`) attached - or a body-free 304 when the
+/// request's `If-None-Match` already matches what was just rendered. Unlike
+/// `conditional_response`, this never reconstructs the body or the
+/// non-validator headers from `entry`: for the render that produced `entry`,
+/// the handler's own response is the authoritative one. `replace_header` is
+/// used for each validator so a value the handler already set (a
+/// `Cache-Control` of its own, say) is superseded rather than duplicated.
+/// Age is always `0`: this response and `entry` were published from the same
+/// instant. Body suppression for `HEAD` is not this function's job - the
+/// server strips the body for `HEAD` regardless (see fix round 2, item 7),
+/// the same way it would for any handler's response with no cache in play.
+fn finish_fresh_render(
+    response: HttpResponse,
+    if_none_match: Option<&str>,
+    policy: &RenderCachePolicy,
+    entry: &CompleteEntry,
+) -> Response {
+    let header = entry.header();
+    let not_modified = matches!(
+        evaluate_conditional(if_none_match, entry.validator()),
+        ConditionalOutcome::NotModified
+    );
+    let mut out = if not_modified {
+        HttpResponse::new().status(304)
+    } else {
+        response
+    };
+    out = out.replace_header("ETag", entry.validator().etag());
+    out = out.replace_header(
+        "Cache-Control",
+        cache_control_value(header.class, policy.shared(), &policy.freshness(), None),
+    );
+    if let Some(vary) = vary_value(&header.variance) {
+        out = out.replace_header("Vary", vary);
+    }
+    out = out.replace_header("Age", "0");
+    Ok(out)
 }
 
 /// Whether the render observed something private, or a locale, that the

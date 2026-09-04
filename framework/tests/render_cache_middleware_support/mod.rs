@@ -183,6 +183,9 @@ pub struct Harness {
     _conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
     _tempdir: tempfile::TempDir,
+    /// Held only for its `Drop` (removes the directory on disk); `None`
+    /// unless booted through [`boot_with_render_cache_and_l1_for_test`].
+    _l1_tempdir: Option<tempfile::TempDir>,
 }
 
 /// Boots a fresh SQLite database with WAL journaling, installs RenderCache,
@@ -218,7 +221,7 @@ pub struct Harness {
 /// transaction began and never blocks a writer, and a writer never blocks
 /// a reader. That is exactly the isolation the render's read view needs.
 pub async fn boot_with_render_cache() -> Arc<Harness> {
-    boot(true).await
+    boot(true, false).await
 }
 
 /// Test-only for the fix round 1, item 2 regression test: boots exactly
@@ -230,10 +233,23 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
 /// already registered its own middleware" without also fighting this
 /// harness's own test-isolation clear.
 pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
-    boot(false).await
+    boot(false, false).await
 }
 
-async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
+/// Test-only for fix round 2, item 5: boots exactly like
+/// [`boot_with_render_cache`], except the runtime is configured with a real
+/// file-backed L1 provider (a fresh temp directory) and an L0 capped at a
+/// single entry, so a second publish deterministically evicts the first from
+/// L0 while L1 - sized generously - keeps both. `/l1-cached/{id}` is the only
+/// route registered with `StorageLayers::l0_and_l1()`; every other route in
+/// this harness stays L0-only, matching every other test in this file, so
+/// this is the first and only place L1 actually runs together with the
+/// middleware.
+pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
+    boot(true, true).await
+}
+
+async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
@@ -311,6 +327,40 @@ async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("leaky policy");
+    // Fix round 2, item 4: `Principal` variance with real stale windows.
+    // Deliberately `PublicShared`, not `PrivateCached` like `/private/{id}`
+    // above: `evaluate_freshness` never serves a `PrivateCached` entry
+    // stale at all (see `stale_service_is_policy_driven_bounded_and_never_private`),
+    // which would make this route unable to reach StaleServable and so
+    // unable to exercise the background-rebuild skip this policy exists to
+    // test. Paired with `cached_handler` below rather than `private_handler`:
+    // a handler that itself reads `Auth::id()` would make `classify` narrow
+    // the *served* class to `PrivateCached` regardless of what this policy
+    // declares (see `variance::classify`), defeating the point of choosing
+    // `PublicShared` here. Declaring `Principal` variance is enough on its
+    // own to make `key_input` derive an identity-scoped key - the render
+    // itself does not need to read the identity for that to happen.
+    let stale_principal_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("stale principal policy");
+    // Fix round 2, item 6: the only route in this harness using
+    // `CoherenceMode::Lease` rather than the default `Authority`.
+    let leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
+        .build()
+        .expect("leased policy");
+    // Fix round 2, item 5: the only route in this harness declaring
+    // `StorageLayers::l0_and_l1()` - every other policy above defaults to
+    // L0-only, so this is the one that actually exercises L1 together with
+    // the middleware when booted through `boot_with_render_cache_and_l1_for_test`.
+    let l1_cached_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
+        .build()
+        .expect("l1 cached policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
@@ -318,6 +368,9 @@ async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router.get("/leaky", leaky_handler).into();
+    let router: Router = router.get("/stale-principal/{id}", cached_handler).into();
+    let router: Router = router.get("/leased/{id}", cached_handler).into();
+    let router: Router = router.get("/l1-cached/{id}", cached_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -330,14 +383,37 @@ async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache("/leaky", GroupPolicy::from(leaky_policy))
-        .expect("attach leaky policy");
+        .expect("attach leaky policy")
+        .try_render_cache(
+            "/stale-principal/{id}",
+            GroupPolicy::from(stale_principal_policy),
+        )
+        .expect("attach stale principal policy")
+        .try_render_cache("/leased/{id}", GroupPolicy::from(leased_policy))
+        .expect("attach leased policy")
+        .try_render_cache("/l1-cached/{id}", GroupPolicy::from(l1_cached_policy))
+        .expect("attach l1 cached policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;
     config.enabled = true;
-    config.l1 = suprnova::render_cache::L1Config::Disabled;
+    let l1_tempdir = if l1_enabled {
+        let dir = tempfile::tempdir().expect("l1 tempdir");
+        config.l1 = suprnova::render_cache::L1Config::File {
+            directory: dir.path().to_path_buf(),
+            max_bytes: 16 * 1024 * 1024,
+        };
+        // Forces a second publish to evict the first from L0 (see this
+        // function's own doc), while L1's byte budget above comfortably
+        // holds both of this suite's tiny bodies.
+        config.l0.max_entries = 1;
+        Some(dir)
+    } else {
+        config.l1 = suprnova::render_cache::L1Config::Disabled;
+        None
+    };
 
     // Fix round 1, item 3: register the identity-establishing middleware
     // globally, and do it *before* `RenderCache::install`, so the ordering
@@ -367,6 +443,7 @@ async fn boot(clear_global_middleware: bool) -> Arc<Harness> {
         _conn: conn,
         _guard: guard,
         _tempdir: tempdir,
+        _l1_tempdir: l1_tempdir,
     })
 }
 
@@ -408,6 +485,9 @@ async fn cached_handler(request: Request) -> Response {
 
 async fn stale_handler(request: Request) -> Response {
     counting_route::on_render_start().await;
+    if counting_route::should_fail_next_render() {
+        return Ok(HttpResponse::text("boom").status(500));
+    }
     let id: i64 = request
         .param("id")
         .ok()
@@ -469,6 +549,7 @@ pub mod counting_route {
     static HOLD_NEXT: AtomicBool = AtomicBool::new(false);
     static RELEASE_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
     static WRITE_DURING_NEXT: AtomicBool = AtomicBool::new(false);
+    static FAIL_NEXT: AtomicBool = AtomicBool::new(false);
 
     fn rendering_notify() -> &'static tokio::sync::Notify {
         RENDERING_NOTIFY.get_or_init(tokio::sync::Notify::new)
@@ -483,6 +564,21 @@ pub mod counting_route {
         RENDER_STARTED.store(0, Ordering::SeqCst);
         HOLD_NEXT.store(false, Ordering::SeqCst);
         WRITE_DURING_NEXT.store(false, Ordering::SeqCst);
+        FAIL_NEXT.store(false, Ordering::SeqCst);
+    }
+
+    /// Arms the next render to return a 500 instead of its ordinary body -
+    /// the shape a handler-level failure takes, as opposed to a provider
+    /// failure before the handler ever runs. Used to exercise
+    /// stale-on-error for the failure mode it is actually named for. See
+    /// fix round 2, item 3.
+    pub fn fail_next_render(_harness: &super::Harness) {
+        FAIL_NEXT.store(true, Ordering::SeqCst);
+    }
+
+    /// Consumes the arm-once flag set by [`fail_next_render`].
+    pub(crate) fn should_fail_next_render() -> bool {
+        FAIL_NEXT.swap(false, Ordering::SeqCst)
     }
 
     /// Total number of times a mock handler in this file has actually run.

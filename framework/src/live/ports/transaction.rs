@@ -34,6 +34,48 @@
 //! an accurate reflection of what was already true: this handle never
 //! gated any actual write.
 //!
+//! # The probe must not go through `DB::begin_transaction` (fix round 2, item 1)
+//!
+//! The first version of this fix implemented the probe as
+//! `DB::begin_transaction()` followed by `Transaction::rollback()`. Both of
+//! those emit a framework transaction event - `TransactionBeginning` and
+//! `TransactionRolledBack` - as an unconditional side effect of the call.
+//! Since this probe now runs, and releases, on every `begin`, every action
+//! with a Required transaction policy fired that pair, and never a
+//! `TransactionCommitted`, regardless of whether the action succeeded. An
+//! application listening on those events for audit or metrics logging would
+//! see a rollback recorded for every Live action, including ones that
+//! completed normally - the events asserted something that did not happen.
+//!
+//! The fix below probes through `DB::connection()` and sea_orm's own
+//! `TransactionTrait` directly, never through `DB::begin_transaction` or
+//! `crate::database::Transaction`. That still opens and rolls back a real
+//! database transaction - so a database that cannot begin one still fails
+//! `TransactionBegin` immediately, exactly as before - but it does not pass
+//! through the framework's event-emitting wrapper, so it emits nothing.
+//!
+//! # What a Required policy does and does not guarantee today
+//!
+//! Because `begin` only probes and releases, and `commit`/`rollback` on the
+//! returned handle do nothing, a "Required" transaction policy on a Live
+//! action does not currently give that action atomicity: nothing rolls back
+//! the action's own writes if a later step in the same action fails. Each
+//! ORM write the action makes still commits on its own, autonomously, the
+//! moment it runs, exactly as it would with no transaction policy at all.
+//! This was already true before this fix (see the ruling above); this fix
+//! only stops that fact from also corrupting the transaction event stream.
+//!
+//! The real fix, for whoever picks this up, is for `begin` to open a real
+//! transaction and install it as the ambient `CURRENT_TX` task-local (the
+//! same mechanism `DB::transaction` uses), so that the ordinary
+//! `DB::connection()` path an action's writes already go through joins that
+//! transaction instead of resolving a fresh, autocommitting connection. That
+//! is a bigger change - it reintroduces the single-connection-pool deadlock
+//! risk this module's history describes unless it is paired with a way to
+//! keep `RenderCache`'s write instrumentation from needing a second
+//! connection while the action's transaction is open - so it is left as a
+//! documented gap rather than attempted here.
+//!
 //! Deferring `RenderCache`'s advance until this handle's `commit`/`rollback`
 //! resolves (the shape the payments hydration deadlock fix used - see
 //! `payments::webhook_route::advance_touched_mirror_tables`) is NOT the
@@ -76,9 +118,22 @@ impl TransactionPort for SuprnovaTransactionPort {
     /// database that is down still fails the action's `TransactionBegin`
     /// phase immediately, exactly as before this fix - then releases it
     /// before returning instead of holding it open. See the module doc.
+    ///
+    /// This probes through sea_orm's own `TransactionTrait` on the raw
+    /// connection, not through `DB::begin_transaction`/`Transaction`: those
+    /// emit `TransactionBeginning`/`TransactionRolledBack` framework events
+    /// as a side effect, which would misrepresent every successful action as
+    /// one that rolled back. See "The probe must not go through
+    /// `DB::begin_transaction`" above.
     fn begin(&self) -> LiveFuture<'_, Result<Box<dyn HostTransaction>, HostError>> {
         Box::pin(async {
-            let probe = crate::database::DB::begin_transaction()
+            use sea_orm::TransactionTrait as _;
+
+            let conn = crate::database::DB::connection()
+                .map_err(|_| HostError::new(HostErrorKind::Begin))?;
+            let probe = conn
+                .inner()
+                .begin()
                 .await
                 .map_err(|_| HostError::new(HostErrorKind::Begin))?;
             probe
@@ -92,6 +147,7 @@ impl TransactionPort for SuprnovaTransactionPort {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -99,8 +155,14 @@ mod tests {
     use suprnova_live::render_cache::generation::{DependencyIdentity, GenerationLedger as _};
 
     use super::SuprnovaTransactionPort;
+    use crate::database::events::{
+        TransactionBeginning, TransactionCommitted, TransactionRolledBack,
+    };
+    use crate::events::Listener;
+    use crate::events::testing::assert_not_dispatched;
     use crate::render_cache::ledger::SqlGenerationLedger;
     use crate::testing::TestDatabase;
+    use crate::{EventFacade, FrameworkError};
 
     struct Migrator;
 
@@ -197,5 +259,70 @@ mod tests {
             Some(0),
             "an empty probe transaction must not advance the broad authority"
         );
+    }
+
+    /// A no-op listener whose only job is to make `EventFacade::has_listeners`
+    /// return true for the transaction lifecycle events, so `emit_tx_event`'s
+    /// own no-listeners short-circuit does not skip the dispatch before the
+    /// fake ever sees it. `EventFacade::fake()` intercepts the dispatch this
+    /// listener would otherwise receive and records it instead.
+    struct NoOpListener;
+
+    #[async_trait::async_trait]
+    impl Listener<TransactionBeginning> for NoOpListener {
+        async fn handle(&self, _event: &TransactionBeginning) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Listener<TransactionCommitted> for NoOpListener {
+        async fn handle(&self, _event: &TransactionCommitted) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Listener<TransactionRolledBack> for NoOpListener {
+        async fn handle(&self, _event: &TransactionRolledBack) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    /// Fix round 2, item 1, proven to discriminate: before the fix, `begin`
+    /// probed through `DB::begin_transaction()` and `Transaction::rollback()`,
+    /// which fire `TransactionBeginning` and `TransactionRolledBack`
+    /// unconditionally, so this test failed against the pre-fix code (both
+    /// events were recorded, and `TransactionCommitted` was never reachable at
+    /// all since the returned handle's own `commit` never touched the
+    /// database). Confirmed by temporarily restoring the old
+    /// `DB::begin_transaction`/`probe.rollback()` body and re-running: the
+    /// `assert_not_dispatched` calls below failed with the events present, as
+    /// expected. With the fix, `begin` probes through sea_orm's
+    /// `TransactionTrait` directly, which never touches
+    /// `crate::database::events`, so a full begin-then-commit lifecycle - the
+    /// shape a successful Required-transaction action takes - emits none of
+    /// the three transaction lifecycle events.
+    #[tokio::test]
+    async fn begin_then_commit_emits_no_transaction_lifecycle_events() {
+        let _db = TestDatabase::fresh::<Migrator>()
+            .await
+            .expect("render cache migration applies");
+        let _fake = EventFacade::fake();
+        EventFacade::listen::<TransactionBeginning, NoOpListener>(Arc::new(NoOpListener)).await;
+        EventFacade::listen::<TransactionCommitted, NoOpListener>(Arc::new(NoOpListener)).await;
+        EventFacade::listen::<TransactionRolledBack, NoOpListener>(Arc::new(NoOpListener)).await;
+
+        let port = SuprnovaTransactionPort;
+        let handle = port.begin().await.expect("begin");
+        handle.commit().await.expect("commit");
+
+        assert_not_dispatched::<TransactionBeginning>(|_| true);
+        assert_not_dispatched::<TransactionCommitted>(|_| true);
+        assert_not_dispatched::<TransactionRolledBack>(|_| true);
+
+        EventFacade::forget::<TransactionBeginning>();
+        EventFacade::forget::<TransactionCommitted>();
+        EventFacade::forget::<TransactionRolledBack>();
     }
 }
