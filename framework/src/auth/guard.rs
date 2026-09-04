@@ -701,7 +701,7 @@ impl Auth {
 
     /// Get the currently authenticated user
     ///
-    /// Returns `None` if not authenticated or if no `UserProvider` is registered.
+    /// Returns `None` if not authenticated or the provider cannot find the user.
     ///
     /// # Example
     ///
@@ -717,7 +717,8 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// Returns an error if no `UserProvider` is registered in the container.
+    /// Returns an error if the configured guard or provider cannot be resolved,
+    /// or if the provider fails while retrieving the user.
     /// Make sure to register a `UserProvider` in your `bootstrap.rs`:
     ///
     /// ```rust,no_run
@@ -728,11 +729,10 @@ impl Auth {
         // Named-guard system when configured: the default guard checks the
         // request-scoped cache, resolves through the AuthManager's provider, and
         // caches the result - so this stays consistent with `Auth::attempt` /
-        // `Auth::guard("web").user()`. `default_guard()` resolves the provider
-        // eagerly, so a registered-but-providerless AuthManager returns `Err`
-        // here and falls through to the legacy branch rather than half-resolving.
-        if let Ok(guard) = Self::default_guard() {
-            return guard.user().await;
+        // `Auth::guard("web").user()`. A configured manager is authoritative:
+        // guard/provider resolution errors must not fall back to legacy auth.
+        if let Some(manager) = App::get::<AuthManager>() {
+            return manager.default_guard()?.user().await;
         }
 
         // Legacy fallback (no AuthManager): the request-scoped cache first (so
@@ -762,15 +762,19 @@ impl Auth {
 
     /// Whether `err` is the "no user provider configured" error from the
     /// [`user`](Self::user) legacy fallback: a persisted identity exists but
-    /// no provider is bound to resolve it against. The auth middleware uses
+    /// no manager or provider is bound to resolve it against. Error text alone
+    /// is insufficient: a registered provider can return the same message.
+    /// The auth middleware uses
     /// this to preserve the providerless `login_id`-only fast path while
     /// still failing closed on genuine provider failures.
     pub(crate) fn is_missing_provider(err: &crate::error::FrameworkError) -> bool {
-        matches!(
-            err,
-            crate::error::FrameworkError::Internal { message }
-            if message.starts_with("No user provider configured")
-        )
+        App::get::<AuthManager>().is_none()
+            && App::make::<dyn UserProvider>().is_none()
+            && matches!(
+                err,
+                crate::error::FrameworkError::Internal { message }
+                if message.starts_with("No user provider configured")
+            )
     }
 
     /// Get the currently authenticated user, or fail with an unauthorised
