@@ -1970,8 +1970,24 @@ pub mod race_points {
 
     /// Arms `point` to run `hook` exactly once, the next time it fires.
     /// Replaces any hook already armed there.
+    ///
+    /// Fix round 2, N1: the hook write and the `armed` store are one
+    /// critical section (both happen while `slot` is still locked), the
+    /// same as [`disarm`] and [`fire`] below. Storing `armed` outside the
+    /// lock (as an earlier version of this module did) let the two race
+    /// points' state disagree under interleaving: `fire` could `take()` the
+    /// hook and release the lock, an `arm` on another thread could then
+    /// lock, write a new hook, and set `armed` true, and only *then* would
+    /// `fire`'s own deferred `armed.store(false)` run - clobbering the new
+    /// arm's `true` back to `false` while its hook sat in the `Mutex` as
+    /// `Some(..)`. That hook would never fire; the symptom is a barrier
+    /// that hangs forever waiting for a race that silently never happened.
+    /// Keeping the flag and the hook inside one lock makes that
+    /// interleaving impossible: whichever of `arm`/`disarm`/`fire` gets the
+    /// lock next always sees (and leaves) a consistent pair.
     pub fn arm(point: &'static RacePoint, hook: Hook) {
-        *point.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+        let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(hook);
         point.armed.store(true, Ordering::Relaxed);
     }
 
@@ -1981,20 +1997,31 @@ pub mod race_points {
     /// return before reaching it, so an arm a test made but that path never
     /// consumed would otherwise leak into whichever test runs next in the
     /// same process. Test-only cleanup; production code never calls this.
+    /// Fix round 2, N1: flag and hook clear inside the same critical
+    /// section - see [`arm`]'s own doc for why that matters.
     pub fn disarm(point: &'static RacePoint) {
+        let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
         point.armed.store(false, Ordering::Relaxed);
-        *point.hook.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Fires `point` if a hook is armed there, consuming the arm; a no-op
     /// otherwise. The relaxed load of `armed` is the only cost an ordinary,
-    /// unarmed request pays - it never reaches the mutex.
+    /// unarmed request pays - it never reaches the mutex. Once that fast
+    /// path decides to look further, the `take()` and the `armed` store
+    /// that consume the arm run inside one critical section (fix round 2,
+    /// N1; see [`arm`]'s own doc), so an `arm` racing this call can never
+    /// land its hook in the gap between them.
     pub(crate) async fn fire(point: &'static RacePoint) {
         if !point.armed.load(Ordering::Relaxed) {
             return;
         }
-        let hook = point.hook.lock().unwrap_or_else(|e| e.into_inner()).take();
-        point.armed.store(false, Ordering::Relaxed);
+        let hook = {
+            let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+            let hook = slot.take();
+            point.armed.store(false, Ordering::Relaxed);
+            hook
+        };
         if let Some(hook) = hook {
             hook().await;
         }
