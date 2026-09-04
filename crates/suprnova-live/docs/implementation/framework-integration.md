@@ -144,6 +144,16 @@ bootstrap so the server, workers, and the console tooling helper all see them:
 declared mount, and finalize the mount catalog before the first request; a
 mount declared after that point is rejected at startup.
 
+RenderCache is a separate opt-in provider, not part of the runtime above: an
+application that wants it opts routes and groups in with
+`Router::try_render_cache`/`try_render_cache_group` and then finishes
+installation with one line, `RenderCache::install(router,
+RenderCacheConfig::from_env())`, after every middleware registration that
+establishes request-scoped locale or identity. See
+[RenderCache](render-cache.md) for the full contract: the middleware's
+request flow, the classification and coherence rules, the file-backed L1
+store, the environment variables, and what this build leaves out.
+
 ## Failure contracts
 
 - A request missing any strict-policy fact is rejected by the trusted context
