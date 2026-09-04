@@ -27,7 +27,8 @@ mod render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
-    dispatch_get, dispatch_head, ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
+    dispatch_get, dispatch_head, ensure_per_tenant_authz_gate, ensure_round3_authz_gate,
+    ensure_round4_per_user_authz_gate,
 };
 
 #[tokio::test]
@@ -1274,5 +1275,479 @@ async fn a_route_declaring_feature_version_always_bypasses_the_cache() {
         2,
         "a route declaring a dimension this host cannot produce must bypass the cache \
          on every request, never publish a key that omits it"
+    );
+}
+
+/// Fix round 7, finding 1. `FeatureMiddleware` and `DatabaseEvaluator`, both
+/// shipped by the framework, with the team taken from a header through the
+/// shipped `with_team_from_header` helper. The body is driven entirely by a
+/// **team-scoped** flag read ambiently during the render.
+///
+/// Before this round, `fields.rs` extracted `UserIdField` and nothing else,
+/// so a team-scoped decision recorded no observation at all, narrowed
+/// nothing, and the render published under a key with no `Tenant` dimension
+/// that the next team then hit. Verified failing by removing the
+/// `if scopes.tenant` arm from `crate::features::fields::observe_identity`:
+/// team beta was served `enabled=true` from team alpha's entry with the
+/// render count unchanged.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_team_scoped_feature_flag_never_crosses_teams() {
+    let harness = boot_with_render_cache().await;
+
+    let alpha = dispatch_get(
+        &harness,
+        "/reads-team-scoped-flag/1",
+        &[("x-test-team", "alpha")],
+    )
+    .await;
+    let alpha_body = String::from_utf8_lossy(&alpha.body).to_string();
+    let renders_after_alpha = counting_route::renders();
+
+    let beta = dispatch_get(
+        &harness,
+        "/reads-team-scoped-flag/1",
+        &[("x-test-team", "beta")],
+    )
+    .await;
+    let beta_body = String::from_utf8_lossy(&beta.body).to_string();
+
+    assert!(
+        alpha_body.contains("enabled=true"),
+        "the team-scoped flag must be on for team alpha - got {alpha_body:?}"
+    );
+    assert!(
+        beta_body.contains("enabled=false"),
+        "team beta must never be served team alpha's flag decision - got {beta_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_alpha + 1,
+        "team beta must be a genuine miss, not a hit on team alpha's entry"
+    );
+}
+
+/// The same team-scoped flag on a route that correctly declares, and is
+/// correctly keyed by, `Principal`, with one signed-in user. The key is
+/// genuine and right; only the team axis was invisible. Same discriminating
+/// line as the test above.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_team_scoped_feature_flag_never_crosses_teams_behind_one_principal() {
+    let harness = boot_with_render_cache().await;
+
+    let alpha = dispatch_get(
+        &harness,
+        "/principal-declared-reads-team-scoped-flag/1",
+        &[("x-test-login", "alice"), ("x-test-team", "alpha")],
+    )
+    .await;
+    let alpha_body = String::from_utf8_lossy(&alpha.body).to_string();
+    let renders_after_alpha = counting_route::renders();
+
+    let beta = dispatch_get(
+        &harness,
+        "/principal-declared-reads-team-scoped-flag/1",
+        &[("x-test-login", "alice"), ("x-test-team", "beta")],
+    )
+    .await;
+    let beta_body = String::from_utf8_lossy(&beta.body).to_string();
+
+    assert!(alpha_body.contains("enabled=true"));
+    assert!(
+        beta_body.contains("enabled=false"),
+        "one principal's team-alpha body must never be served for team beta - got {beta_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_alpha + 1,
+        "a route keyed only by Principal cannot represent two teams, so the second team \
+         must be a genuine miss"
+    );
+}
+
+/// Fix round 6, Leak 4, over real HTTP. A **user-scoped** flag read on a
+/// route that declares nothing must never publish at all: not for a repeat
+/// from the same visitor, and not across visitors.
+///
+/// Verified failing by removing the `if scopes.principal` arm from
+/// `crate::features::fields::observe_identity`: alice's second request was a
+/// hit (render count unchanged) and bob was then served `enabled=true`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_user_scoped_feature_flag_never_publishes_a_shared_entry() {
+    let harness = boot_with_render_cache().await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/reads-user-scoped-flag/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    let alice_body = String::from_utf8_lossy(&alice.body).to_string();
+    let renders_after_alice = counting_route::renders();
+    assert!(
+        alice_body.contains("enabled=true"),
+        "the user-scoped flag must be on for alice - got {alice_body:?}"
+    );
+
+    dispatch_get(
+        &harness,
+        "/reads-user-scoped-flag/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_alice + 1,
+        "the entry is not safe to publish even for alice herself: the route declares no \
+         Principal dimension, so the key she would hit is the key everyone hits"
+    );
+
+    let bob = dispatch_get(
+        &harness,
+        "/reads-user-scoped-flag/1",
+        &[("x-test-login", "bob")],
+    )
+    .await;
+    let bob_body = String::from_utf8_lossy(&bob.body).to_string();
+    assert!(
+        bob_body.contains("enabled=false"),
+        "bob must never be served alice's flag decision - got {bob_body:?}"
+    );
+    assert_eq!(counting_route::renders(), renders_after_alice + 2);
+}
+
+/// Fix round 7, finding 2. A **globally** scoped flag's answer does not
+/// depend on who is reading it, so reading one must cost the cache nothing -
+/// including for a signed-in visitor, whose id `FeatureMiddleware` puts in
+/// the ambient context regardless.
+///
+/// Round 6 recorded that id at the top of `is_enabled`, before the evaluator
+/// had decided anything, which disabled the cache for every signed-in
+/// visitor of every page reading any flag in an application that installs
+/// `FeatureMiddleware` globally - the reference application does. Verified
+/// failing by restoring the unconditional call: alice's second request
+/// rendered again instead of hitting.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_globally_scoped_feature_flag_still_caches_for_a_signed_in_visitor() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/reads-global-flag/1", &[]).await;
+    let after_first_anonymous = counting_route::renders();
+    dispatch_get(&harness, "/reads-global-flag/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first_anonymous,
+        "an anonymous repeat on a shared route reading a global flag is a cache hit"
+    );
+
+    let alice = dispatch_get(
+        &harness,
+        "/reads-global-flag/2",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&alice.body).contains("enabled=true"));
+    let after_first_alice = counting_route::renders();
+    dispatch_get(
+        &harness,
+        "/reads-global-flag/2",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first_alice,
+        "a signed-in repeat must be a cache hit too: the flag is global, so the body does \
+         not depend on who is asking"
+    );
+}
+
+/// Fix round 7, finding 2, the half a naive fix gets wrong. The flag's only
+/// identity rule is `user:bob`; alice falls through to the global rule, so
+/// no `user:` key matched for her. Her answer is still a function of who she
+/// is - bob's differs - so her page must not be published under a key bob
+/// would hit.
+///
+/// This is what "record by flag scope, not by matched key" buys. Verified
+/// failing by narrowing `Snapshot::record_scope` to only record a scope for
+/// the reader whose key matched (recording `IdentityScopes::default()`
+/// whenever the resolved scope key was the global one): alice's second
+/// request became a hit, and bob was then served her body.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_flag_scoped_to_another_user_still_declines_for_everyone_else() {
+    let harness = boot_with_render_cache().await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/reads-flag-with-another-users-override/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&alice.body).contains("enabled=false"),
+        "alice falls through to the global rule, which is off"
+    );
+    let after_first_alice = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/reads-flag-with-another-users-override/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first_alice + 1,
+        "alice's page must never be published under a key bob hits, even though the rule \
+         that answered her was the global one"
+    );
+
+    let bob = dispatch_get(
+        &harness,
+        "/reads-flag-with-another-users-override/1",
+        &[("x-test-login", "bob")],
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&bob.body).contains("enabled=true"),
+        "bob's own override is on, which is exactly why alice's page is not his"
+    );
+}
+
+/// `Request::auth_user_id()` is a public identity accessor with no collector
+/// instrumentation at all. The sixth review measured that it carries no
+/// identity on the ordinary HTTP path - the only `with_auth_user_id` call
+/// site is the WebSocket-upgrade terminator - so it is not a leak today.
+/// This keeps that measurement standing: if a future change stamps the
+/// identity on the HTTP path, this fails instead of leaking silently.
+#[tokio::test]
+#[serial_test::serial]
+async fn request_auth_user_id_carries_no_identity_on_the_http_path() {
+    let harness = boot_with_render_cache().await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/reads-auth-user-id-accessor/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    let alice_body = String::from_utf8_lossy(&alice.body).to_string();
+    assert!(
+        alice_body.contains("identity=none"),
+        "if this is not `none`, Request::auth_user_id carries a real identity through an \
+         accessor with no instrumentation at all, and this route caches it for everyone - \
+         got {alice_body:?}"
+    );
+}
+
+/// Fix round 7, finding 4, the documented limitation and its documented
+/// remedy (see the middleware module doc's honest-boundary section).
+/// `Gate::allows` records that a decision happened, never what it consulted,
+/// so `AuthorizationRead` requires the `Principal` dimension even when the
+/// gate is genuinely per-tenant. A route keyed by `Tenant` alone therefore
+/// never caches; the same handler on a route that declares `Principal` as
+/// well does, and stays partitioned by both.
+///
+/// This asserts the ruled behaviour rather than arguing with it: the guard
+/// cannot tell a per-tenant gate from a per-user one, and treating every
+/// decision as per-user is the safe default. Verified discriminating by
+/// removing `VarianceDimension::Principal` from
+/// `tenant_and_principal_declared_policy` in the support module: the second
+/// half's repeat stopped being a hit.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_per_tenant_authorization_decision_caches_only_when_principal_is_declared_too() {
+    let harness = boot_with_render_cache().await;
+    ensure_per_tenant_authz_gate();
+
+    let first = dispatch_get(
+        &harness,
+        "/tenant-declared-reads-per-tenant-authz/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&first.body).contains("allowed=true"));
+    let after_first = counting_route::renders();
+    dispatch_get(
+        &harness,
+        "/tenant-declared-reads-per-tenant-authz/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "a route keyed by Tenant alone cannot satisfy AuthorizationRead's Principal \
+         requirement, so it never publishes - the stated limitation"
+    );
+
+    let acme = dispatch_get(
+        &harness,
+        "/tenant-and-principal-declared-reads-per-tenant-authz/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    let acme_body = String::from_utf8_lossy(&acme.body).to_string();
+    assert!(acme_body.contains("tenant=acme"));
+    let after_acme = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/tenant-and-principal-declared-reads-per-tenant-authz/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_acme,
+        "declaring Principal alongside Tenant is the documented remedy: the repeat is a hit"
+    );
+
+    let globex = dispatch_get(
+        &harness,
+        "/tenant-and-principal-declared-reads-per-tenant-authz/1",
+        &[("x-test-tenant", "globex")],
+    )
+    .await;
+    let globex_body = String::from_utf8_lossy(&globex.body).to_string();
+    assert!(
+        !globex_body.contains("tenant=acme"),
+        "globex must never be served acme's authorized body - got {globex_body:?}"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_acme + 1,
+        "the remedy still partitions by tenant: globex is a genuine miss"
+    );
+}
+
+/// Fix round 7, finding 3, both arms of the guard's empty-set path. A
+/// dimension whose required reason fired with no concrete value observed has
+/// nothing to compare, so the check falls back to what the key says.
+///
+/// Positive: a fully anonymous request to a route declaring `Tenant` and
+/// `Principal` whose render evaluates an authorization decision and reads
+/// the tenant. `AuthorizationRead` requires `Principal` and observes no id;
+/// `TenantObserved` fires with no tenant. Both key values are
+/// `DimensionValue::Anonymous` - the render asked and found none, the key
+/// says none, which is agreement - so the entry publishes and the repeat is
+/// a hit. Before this round the path accepted only `Private(_)`, and
+/// anonymous traffic, normally the bulk of what a render cache exists to
+/// serve, was never cached on any route whose render touches auth.
+///
+/// Negative, which must survive: the same handler on a route that declares
+/// `Tenant` only. `AuthorizationRead`'s `Principal` is undeclared, so it
+/// still declines - otherwise the route would publish an anonymous page
+/// under a key every signed-in visitor also hits.
+///
+/// Verified failing by reverting the empty-set match in
+/// `key_used_different_values_than_the_render_saw` to
+/// `Some(DimensionValue::Private(_))`: the positive half's repeat rendered
+/// again. Verified the negative discriminates by widening the same match to
+/// accept `None` as well: the negative half's repeat became a hit.
+#[tokio::test]
+#[serial_test::serial]
+async fn anonymous_traffic_caches_where_the_key_declares_the_dimension_and_not_otherwise() {
+    let harness = boot_with_render_cache().await;
+    ensure_per_tenant_authz_gate();
+
+    dispatch_get(
+        &harness,
+        "/tenant-and-principal-declared-reads-per-tenant-authz/1",
+        &[],
+    )
+    .await;
+    let after_first = counting_route::renders();
+    dispatch_get(
+        &harness,
+        "/tenant-and-principal-declared-reads-per-tenant-authz/1",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "an anonymous repeat on a route that declares both dimensions its render \
+         narrowed on is a cache hit: every key value says Anonymous and every observed \
+         set is empty, which agrees"
+    );
+
+    dispatch_get(&harness, "/tenant-declared-reads-per-tenant-authz/1", &[]).await;
+    let after_first_undeclared = counting_route::renders();
+    dispatch_get(&harness, "/tenant-declared-reads-per-tenant-authz/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first_undeclared + 1,
+        "an empty observed set for an *undeclared* dimension must still decline: the key \
+         this anonymous render would publish under is the key a signed-in visitor hits"
+    );
+}
+
+/// The limitation the empty-set fix does not reach, asserted so it is a
+/// recorded fact rather than a surprise (see the middleware module doc's
+/// honest-boundary section). `Auth::id()` resolves an anonymous request by
+/// falling through to `session()`, which records a *session* read, and
+/// `classify` narrows any session read straight to `Uncacheable` - before
+/// this guard ever runs. So an anonymous visitor of a route whose render
+/// calls `Auth::id()` still never caches, whatever the key says.
+///
+/// Measured, not assumed: removing the `.or_else(|| session()...)` fallback
+/// from `crate::session::middleware::auth_user_id` makes the first repeat
+/// below a hit, with no other change - which is also the proof that the
+/// empty-set fix is what stands behind it once the session read is out of
+/// the way. That change is a much larger widening than fix round 7 was
+/// scoped to make, so it is reported rather than taken.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_anonymous_render_that_resolves_identity_through_the_session_stays_uncacheable() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/private/1", &[]).await;
+    let after_first_anonymous = counting_route::renders();
+    dispatch_get(&harness, "/private/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first_anonymous + 1,
+        "anonymous identity resolution reads the session, and a session read is \
+         Uncacheable - the empty-set path is never reached"
+    );
+
+    dispatch_get(&harness, "/private/2", &[("x-test-login", "alice")]).await;
+    let after_first_alice = counting_route::renders();
+    let alice = dispatch_get(&harness, "/private/2", &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        after_first_alice,
+        "a signed-in visitor resolves through request state, never touching the session, \
+         so the same route does cache for them"
+    );
+}
+
+/// The positive control for the whole `Locale` axis, which the sixth review
+/// found missing: every other locale test in this file asserts
+/// `renders() == 2`, so if the `locale_material`-against-key comparison ever
+/// disagreed spuriously, `Locale`-declared routes would silently never cache
+/// and no test would notice. Verified discriminating by making that
+/// comparison always return `true`: this test then failed while every other
+/// locale test still passed.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_locale_declared_route_still_caches_when_nothing_switches() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/late-locale/1", &[]).await;
+    assert!(String::from_utf8_lossy(&first.body).contains("locale=en"));
+    let after_first = counting_route::renders();
+    dispatch_get(&harness, "/late-locale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "a Locale-declared route whose render observes exactly the key's locale must \
+         still be a cache hit on the second request"
     );
 }

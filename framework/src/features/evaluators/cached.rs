@@ -45,7 +45,9 @@
 //! v1 since flag changes are operator-initiated, infrequent, and
 //! already bounded by the TTL.
 
-use crate::features::fields::{TeamField, UserIdField};
+use crate::features::fields::{
+    IdentityScopes, TeamField, UserIdField, capturing_identity_reads, observe_identity,
+};
 use crate::features::sync::FeatureSync;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -87,6 +89,17 @@ pub struct CachedEvaluator {
 struct CacheEntry {
     value: Option<bool>,
     inserted_at: Instant,
+    /// Which identity axes the inner evaluation that produced this entry
+    /// consulted, replayed on every hit that serves it (fix round 7,
+    /// finding 2).
+    ///
+    /// A hit never reaches `inner`, so it can never learn the flag's scope
+    /// for itself; it has to be told. Two bits rather than the observed
+    /// values themselves because this entry's own cache key already
+    /// contains the `(user, team)` it was stored under, so any context that
+    /// can hit it carries the same identity the miss saw - the values are
+    /// re-derivable from the context, the *scopes* are not.
+    identity: IdentityScopes,
 }
 
 impl CachedEvaluator {
@@ -165,16 +178,10 @@ impl FeatureSync for CachedEvaluator {
 
 impl Evaluator for CachedEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
-        // Fix round 6, Leak 4: record the context's resolved user id (if
-        // any) as a render-cache principal observation, unconditionally -
-        // including a cache hit that never reaches `self.inner`, since a
-        // cached answer for a user-scoped flag is exactly as
-        // identity-dependent as a fresh one. See
-        // `crate::features::fields::observe_context_principal`'s own doc.
-        crate::features::fields::observe_context_principal(context);
         // TTL=0 short-circuits the cache entirely. Avoids the
         // insert+evict churn that would otherwise dominate when the
-        // caller doesn't want caching.
+        // caller doesn't want caching. Nothing is stored, so nothing has to
+        // be replayed later: `inner` does its own observing.
         if self.ttl.is_zero() {
             return self.inner.is_enabled(feature, context);
         }
@@ -182,9 +189,20 @@ impl Evaluator for CachedEvaluator {
         let key = Self::cache_key(feature, context);
 
         // Fast path: live entry.
-        if let Some(entry) = self.cache.get(&key)
-            && entry.inserted_at.elapsed() < self.ttl
+        if let Some(found) = self.cache.get(&key)
+            && found.inserted_at.elapsed() < self.ttl
         {
+            let entry = *found;
+            // Released before the replay below: nothing in `observe_identity`
+            // touches this map today, and holding a shard guard across a
+            // call into another module is how that stops being true.
+            drop(found);
+            // Fix round 6, Leak 4, narrowed by fix round 7: a cached answer
+            // for a scoped flag is exactly as identity-dependent as a fresh
+            // one, and this hit never reaches `self.inner`, so it replays
+            // the axes the miss's own evaluation consulted. See
+            // `crate::features::fields::observe_identity`'s own doc.
+            observe_identity(entry.identity, context);
             return entry.value;
         }
 
@@ -192,13 +210,23 @@ impl Evaluator for CachedEvaluator {
         // store None values too: "feature not configured" is itself
         // a stable answer worth caching to avoid re-walking the
         // scope chain on every request.
-        let value = self.inner.is_enabled(feature, context);
+        //
+        // The capture is what makes the replay above exact. It records what
+        // this evaluation *asked* to observe, not what the render-cache
+        // collector's sets gained across the call: an earlier accessor in
+        // the same render may already hold the same value, and the miss may
+        // happen with no collector active at all, and either would make a
+        // difference-based record store nothing where the flag genuinely is
+        // identity-dependent.
+        let (value, identity) =
+            capturing_identity_reads(|| self.inner.is_enabled(feature, context));
         let now = Instant::now();
         self.cache.insert(
             key,
             CacheEntry {
                 value,
                 inserted_at: now,
+                identity,
             },
         );
 
@@ -273,44 +301,137 @@ mod tests {
         }
     }
 
-    /// Fix round 6, Leak 4: a `CachedEvaluator` cache *hit* never reaches
-    /// `self.inner`, so instrumenting only `DatabaseEvaluator::is_enabled`
-    /// would miss every repeated flag check after the first - and a
-    /// user-scoped flag's cached answer is exactly as identity-dependent
-    /// as a fresh one. This proves the cached path records the observation
-    /// too, on both the miss (first call) and the hit (second).
-    ///
-    /// Verified failing against the pre-fix code by temporarily removing
-    /// the `observe_context_principal` call from this evaluator's own
-    /// `is_enabled`: the assertion after the cache-hit call failed because
-    /// nothing had recorded alice's id for that call.
-    #[tokio::test]
-    async fn a_cache_hit_still_records_a_principal_observation() {
-        // `TranslatingEvaluator`, not `CountingEvaluator`: the point of this
-        // test is the `UserIdField` extension the context carries, which
-        // only a real `on_new_context` implementation populates -
-        // `CountingEvaluator` has none (the trait's default no-op), so a
-        // context built under it would never carry an id to observe.
-        let cached = Arc::new(CachedEvaluator::new(
-            Arc::new(TranslatingEvaluator),
-            Duration::from_secs(60),
-        ));
+    /// Inner evaluator that observes a fixed set of identity axes, the way
+    /// [`DatabaseEvaluator`](super::super::database::DatabaseEvaluator) does
+    /// for a flag with rules at those scopes, and counts how many times it
+    /// was actually reached.
+    struct ScopedEvaluator {
+        scopes: IdentityScopes,
+        calls: AtomicU32,
+    }
 
+    impl ScopedEvaluator {
+        fn new(scopes: IdentityScopes) -> Self {
+            Self {
+                scopes,
+                calls: AtomicU32::new(0),
+            }
+        }
+        fn call_count(&self) -> u32 {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Evaluator for ScopedEvaluator {
+        fn is_enabled(&self, _feature: &str, context: &Context) -> Option<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            crate::features::fields::observe_identity(self.scopes, context);
+            Some(true)
+        }
+
+        fn on_new_context(
+            &self,
+            mut context: featureflag::context::ContextRef<'_>,
+            fields: featureflag::fields::Fields<'_>,
+        ) {
+            if let Some(id) = fields.get("user_id").and_then(|v| v.as_str()) {
+                context.extensions_mut().insert(UserIdField(id.to_string()));
+            }
+            if let Some(team) = fields.get("team").and_then(|v| v.as_str()) {
+                context.extensions_mut().insert(TeamField(team.to_string()));
+            }
+        }
+    }
+
+    /// What one `is_enabled` call records into a fresh collector, as
+    /// `(principal_material, tenant_material)`.
+    async fn observations_of(
+        cached: &Arc<CachedEvaluator>,
+        feature: &str,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
         crate::render_cache::collector::Collector::scope(async {
-            featureflag::evaluator::with_default(cached.clone(), || {
-                let ctx = ctx_for_user(1);
-                cached.is_enabled("flag", &ctx); // miss
-                cached.is_enabled("flag", &ctx); // hit
+            with_default(cached.clone(), || {
+                let ctx = featureflag::context! { user_id = "alice", team = "alpha" };
+                cached.is_enabled(feature, &ctx);
             });
             let report =
                 crate::render_cache::collector::current_report().expect("a collector is active");
-            assert!(
-                report.context.principal_material.contains("user-1"),
-                "both the miss and the cache hit must record the observed principal - got {:?}",
-                report.context.principal_material
-            );
+            (
+                report.context.principal_material,
+                report.context.tenant_material,
+            )
         })
-        .await;
+        .await
+    }
+
+    /// Fix round 6, Leak 4, as fix round 7 rebuilt it. A `CachedEvaluator`
+    /// cache *hit* never reaches `self.inner`, so instrumenting only
+    /// `DatabaseEvaluator::is_enabled` would miss every repeated flag check
+    /// after the first - and a scoped flag's cached answer is exactly as
+    /// identity-dependent as a fresh one.
+    ///
+    /// The miss and the hit run inside **separate collector scopes**, which
+    /// is what makes this prove the hit path rather than the miss path: the
+    /// second scope's report starts empty, `inner` is never reached (the
+    /// call count proves it), and the values still have to be there.
+    #[tokio::test]
+    async fn a_cache_hit_replays_the_identity_axes_the_miss_consulted() {
+        let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
+            principal: true,
+            tenant: true,
+        }));
+        let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
+
+        let (principal, tenant) = observations_of(&cached, "flag").await;
+        assert_eq!(inner.call_count(), 1, "the first call is a miss");
+        assert!(
+            principal.contains("alice") && tenant.contains("alpha"),
+            "the miss records what the inner evaluation consulted - got principal \
+             {principal:?}, tenant {tenant:?}"
+        );
+
+        let (principal, tenant) = observations_of(&cached, "flag").await;
+        assert_eq!(
+            inner.call_count(),
+            1,
+            "the second call must be served from the cache, never reaching inner"
+        );
+        assert!(
+            principal.contains("alice"),
+            "a cache hit must replay the principal axis the miss consulted, in a render \
+             that never touched the miss - got {principal:?}"
+        );
+        assert!(
+            tenant.contains("alpha"),
+            "a cache hit must replay the tenant axis the miss consulted - got {tenant:?}"
+        );
+    }
+
+    /// The other direction, and the whole point of fix round 7's finding 2:
+    /// a flag whose inner evaluation consulted no identity records nothing,
+    /// on the miss or on any hit that follows it. Recording unconditionally
+    /// is what made every page uncacheable for every signed-in visitor.
+    #[tokio::test]
+    async fn a_cache_hit_replays_nothing_when_the_miss_consulted_no_identity() {
+        let inner = Arc::new(ScopedEvaluator::new(IdentityScopes::default()));
+        let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
+
+        let (principal, tenant) = observations_of(&cached, "flag").await;
+        assert!(
+            principal.is_empty() && tenant.is_empty(),
+            "got principal {principal:?}, tenant {tenant:?}"
+        );
+
+        let (principal, tenant) = observations_of(&cached, "flag").await;
+        assert_eq!(inner.call_count(), 1, "the second call is a hit");
+        assert!(
+            principal.is_empty() && tenant.is_empty(),
+            "a hit on a globally scoped flag must record nothing either - got principal \
+             {principal:?}, tenant {tenant:?}"
+        );
     }
 
     #[test]

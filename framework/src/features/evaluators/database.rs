@@ -58,7 +58,7 @@ use crate::error::FrameworkError;
 use crate::features::entity::{
     self as features_entity, ActiveModel as FeatureActive, Entity as FeatureEntity,
 };
-use crate::features::fields::{TeamField, UserIdField};
+use crate::features::fields::{IdentityScopes, TeamField, UserIdField};
 use crate::features::migrations::CreateFeaturesTable;
 use crate::features::sync::FeatureSync;
 use crate::lock;
@@ -84,7 +84,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// global default for that flag.
 pub struct DatabaseEvaluator {
     conn: DatabaseConnection,
-    flags: RwLock<HashMap<(String, String), bool>>,
+    snapshot: RwLock<Snapshot>,
     /// Monotonic write counter - bumped under the snapshot write lock
     /// every time [`Self::set_flag`] commits a single-key update.
     ///
@@ -98,6 +98,85 @@ pub struct DatabaseEvaluator {
     /// advanced, the replacement is abandoned and the just-completed
     /// `set_flag`'s in-memory edit stands.
     write_counter: AtomicU64,
+}
+
+/// Scope-key prefix the framework reserves for a rule keyed by the
+/// context's [`UserIdField`]. Shared by [`DatabaseEvaluator::scope_keys_for`],
+/// which builds the lookup key, and [`Snapshot::record_scope`], which
+/// classifies a stored row - the two must agree or a `user:`-scoped flag
+/// would be looked up without being recorded as identity-dependent.
+const USER_SCOPE_PREFIX: &str = "user:";
+
+/// Scope-key prefix reserved for a rule keyed by the context's
+/// [`TeamField`]. See [`USER_SCOPE_PREFIX`].
+const TEAM_SCOPE_PREFIX: &str = "team:";
+
+/// The in-memory read snapshot: the flag map, plus which identity scopes
+/// each feature has any rule at, computed alongside it.
+///
+/// The two live in one payload behind one `RwLock` deliberately (fix round
+/// 7, finding 2). The render-cache observation in [`Evaluator::is_enabled`]
+/// has to answer "does this flag have any rule at an identity scope" for
+/// exactly the flag map the lookup then reads; holding the answer in a
+/// separate lock, or recomputing it from a separately-taken guard, would let
+/// a concurrent `set_flag` or `reload` land between the two and record the
+/// scopes of a snapshot that is not the one the decision came from.
+#[derive(Default)]
+struct Snapshot {
+    /// `(name, scope_key) -> enabled`. An empty `scope_key` is the global
+    /// default for that flag.
+    flags: HashMap<(String, String), bool>,
+    /// Per feature name, which identity axes it has at least one rule at.
+    /// Absent from the map means neither axis - a globally scoped flag, or
+    /// one this snapshot does not hold at all.
+    identity: HashMap<String, IdentityScopes>,
+}
+
+impl Snapshot {
+    /// Build a snapshot from a freshly-selected flag map, deriving the
+    /// identity-scope record from the same rows.
+    fn from_flags(flags: HashMap<(String, String), bool>) -> Self {
+        let mut me = Self {
+            flags: HashMap::new(),
+            identity: HashMap::with_capacity(flags.len()),
+        };
+        for (name, scope_key) in flags.keys() {
+            me.record_scope(name, scope_key);
+        }
+        me.flags = flags;
+        me
+    }
+
+    /// Apply one single-key update, keeping the identity-scope record in
+    /// step. Only ever adds an axis: a scope key is never removed by
+    /// `set_flag` (it upserts), and a genuine deletion goes through a full
+    /// [`DatabaseEvaluator::reload`], which rebuilds this from scratch.
+    fn insert(&mut self, name: String, scope_key: String, enabled: bool) {
+        self.record_scope(&name, &scope_key);
+        self.flags.insert((name, scope_key), enabled);
+    }
+
+    /// Note that `name` has a rule at whichever identity scope `scope_key`
+    /// names, if any. An application-defined scope key that is neither
+    /// `user:` nor `team:` records nothing: this framework has no way to
+    /// tell which dimension it partitions, so it is outside what the
+    /// render-cache guard can see (the same honest boundary as a custom
+    /// evaluator - see `crate::render_cache::middleware`'s module doc).
+    fn record_scope(&mut self, name: &str, scope_key: &str) {
+        let principal = scope_key.starts_with(USER_SCOPE_PREFIX);
+        let tenant = scope_key.starts_with(TEAM_SCOPE_PREFIX);
+        if !principal && !tenant {
+            return;
+        }
+        let entry = self.identity.entry(name.to_owned()).or_default();
+        entry.principal |= principal;
+        entry.tenant |= tenant;
+    }
+
+    /// Which identity axes a read of `feature` depends on.
+    fn identity_scopes(&self, feature: &str) -> IdentityScopes {
+        self.identity.get(feature).copied().unwrap_or_default()
+    }
 }
 
 impl DatabaseEvaluator {
@@ -117,7 +196,7 @@ impl DatabaseEvaluator {
         let conn = DB::get()?;
         let me = Self {
             conn: conn.inner().clone(),
-            flags: RwLock::new(HashMap::new()),
+            snapshot: RwLock::new(Snapshot::default()),
             write_counter: AtomicU64::new(0),
         };
         me.reload().await?;
@@ -153,7 +232,7 @@ impl DatabaseEvaluator {
 
         Ok(Self {
             conn,
-            flags: RwLock::new(HashMap::new()),
+            snapshot: RwLock::new(Snapshot::default()),
             write_counter: AtomicU64::new(0),
         })
     }
@@ -190,7 +269,7 @@ impl DatabaseEvaluator {
             next.insert((row.name, row.scope_key), row.enabled);
         }
 
-        let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
+        let mut store = lock::write(&self.snapshot, "feature-flag snapshot")?;
         // Re-read under the write lock - `set_flag` bumps the counter
         // *while holding the same write lock*, so a value-unchanged
         // re-read here proves no concurrent single-key update slipped
@@ -198,7 +277,7 @@ impl DatabaseEvaluator {
         // the post-`set_flag` snapshot.
         let counter_after = self.write_counter.load(Ordering::SeqCst);
         if counter_after == counter_before {
-            *store = next;
+            *store = Snapshot::from_flags(next);
         } else {
             tracing::debug!(
                 from = counter_before,
@@ -276,8 +355,8 @@ impl DatabaseEvaluator {
         // step sees this update - guarantees that a reload running
         // alongside a set_flag never reverts the just-flipped value.
         {
-            let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
-            store.insert((name.to_string(), scope_key.to_string()), enabled);
+            let mut store = lock::write(&self.snapshot, "feature-flag snapshot")?;
+            store.insert(name.to_string(), scope_key.to_string(), enabled);
             self.write_counter.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -305,13 +384,13 @@ impl DatabaseEvaluator {
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
         {
-            keys.push(format!("user:{}", field.as_str()));
+            keys.push(format!("{USER_SCOPE_PREFIX}{}", field.as_str()));
         }
         if let Some(field) = context
             .iter()
             .find_map(|c| c.extensions().get::<TeamField>())
         {
-            keys.push(format!("team:{}", field.as_str()));
+            keys.push(format!("{TEAM_SCOPE_PREFIX}{}", field.as_str()));
         }
 
         keys.push(String::new());
@@ -321,11 +400,6 @@ impl DatabaseEvaluator {
 
 impl Evaluator for DatabaseEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
-        // Fix round 6, Leak 4: record the context's resolved user id (if
-        // any) as a render-cache principal observation, at the read that
-        // actually runs during the render - see
-        // `crate::features::fields::observe_context_principal`'s own doc.
-        crate::features::fields::observe_context_principal(context);
         // Domain 17 audit D17-A - was
         // `lock::read(...).expect("DatabaseEvaluator flags RwLock poisoned")`.
         // `is_enabled` is the HOT PATH - every feature-flag check
@@ -333,7 +407,7 @@ impl Evaluator for DatabaseEvaluator {
         // caller's composite evaluator falls through to the next
         // backend / disabled default; an error log surfaces the poison
         // for ops. Safer than panicking every flag check.
-        let store = match lock::read(&self.flags, "feature-flag snapshot") {
+        let store = match lock::read(&self.snapshot, "feature-flag snapshot") {
             Ok(s) => s,
             Err(_) => {
                 tracing::error!(
@@ -345,8 +419,21 @@ impl Evaluator for DatabaseEvaluator {
             }
         };
 
+        // Fix round 6, Leak 4, narrowed by fix round 7: record the
+        // context's identity as a render-cache observation, at the read
+        // that actually runs during the render, but only on the axes this
+        // *flag* has a rule at. Round 6 recorded the user id at every flag
+        // read, before the snapshot was even consulted, which made every
+        // page uncacheable for every signed-in visitor of an application
+        // that installs `FeatureMiddleware` globally - the reference
+        // application does. Read from the same guard the lookup below uses,
+        // so the scope record and the flag map can never disagree about
+        // what this snapshot holds. See
+        // `crate::features::fields::observe_identity`'s own doc.
+        crate::features::fields::observe_identity(store.identity_scopes(feature), context);
+
         for key in self.scope_keys_for(context) {
-            if let Some(enabled) = store.get(&(feature.to_string(), key)) {
+            if let Some(enabled) = store.flags.get(&(feature.to_string(), key)) {
                 return Some(*enabled);
             }
         }
@@ -418,59 +505,229 @@ impl MigratorTrait for InMemoryMigrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     /// Snapshot helper - peek at the in-memory map without going
     /// through the public `is_enabled` path so the test can assert on
     /// the (name, scope_key) key directly.
     fn snapshot_value(eval: &DatabaseEvaluator, name: &str, scope_key: &str) -> Option<bool> {
-        eval.flags
-            .read()
-            .ok()
-            .and_then(|g| g.get(&(name.to_string(), scope_key.to_string())).copied())
+        eval.snapshot.read().ok().and_then(|g| {
+            g.flags
+                .get(&(name.to_string(), scope_key.to_string()))
+                .copied()
+        })
+    }
+
+    /// Report what one `is_enabled` call recorded into a fresh collector.
+    /// Returns `(principal_material, tenant_material)`.
+    async fn observations_of(
+        evaluator: &Arc<DatabaseEvaluator>,
+        feature: &str,
+        build_context: impl FnOnce() -> Context,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        crate::render_cache::collector::Collector::scope(async {
+            featureflag::evaluator::with_default(evaluator.clone(), || {
+                let ctx = build_context();
+                evaluator.is_enabled(feature, &ctx);
+            });
+            let report =
+                crate::render_cache::collector::current_report().expect("a collector is active");
+            (
+                report.context.principal_material,
+                report.context.tenant_material,
+            )
+        })
+        .await
     }
 
     /// Fix round 6, Leak 4. `FeatureMiddleware` resolves identity once, via
     /// `Auth::id()`, before the render begins, and stashes it in exactly
     /// this shape of context; `is_enabled!` then reads it *during* the
     /// render, ambiently, without touching `Auth::id()` or any other
-    /// `render_cache`-instrumented accessor again. Before this round,
+    /// `render_cache`-instrumented accessor again. Before that round,
     /// nothing observed that read at all, so a user-scoped flag decision
     /// never narrowed the class - proven at the unit level here (no HTTP
     /// harness needed) because it exercises the exact production seam a
     /// real request would: `DatabaseEvaluator::is_enabled` itself.
     ///
-    /// Verified failing against the pre-fix code by temporarily removing
-    /// the `observe_context_principal` call from `is_enabled`: the
-    /// `principal_material` assertion below failed with an empty set.
+    /// Fix round 7, finding 1 adds the team half: a `team:`-scoped decision
+    /// records a *tenant* observation, which is the dimension a team
+    /// partitions. Before that, a team-scoped flag recorded nothing and its
+    /// render published under a key the next team hit.
     #[tokio::test]
-    async fn a_flag_read_through_a_user_scoped_context_records_a_principal_observation() {
+    async fn a_scoped_flag_read_records_an_observation_on_the_axis_it_is_scoped_by() {
         let evaluator = Arc::new(
             DatabaseEvaluator::new_in_memory()
                 .await
                 .expect("in-memory evaluator"),
         );
         evaluator
-            .set_flag("round6-leak4-flag", "user:alice", true)
+            .set_flag("user-scoped-flag", "user:alice", true)
             .await
             .expect("seed a user-scoped flag");
+        evaluator
+            .set_flag("team-scoped-flag", "team:alpha", true)
+            .await
+            .expect("seed a team-scoped flag");
 
-        crate::render_cache::collector::Collector::scope(async {
-            featureflag::evaluator::with_default(evaluator.clone(), || {
-                let ctx = featureflag::context! { user_id = "alice" };
-                let enabled = evaluator.is_enabled("round6-leak4-flag", &ctx);
-                assert_eq!(enabled, Some(true), "the seeded flag resolves for alice");
-            });
-            let report =
-                crate::render_cache::collector::current_report().expect("a collector is active");
-            assert!(
-                report.context.principal_material.contains("alice"),
-                "the flag read must record alice's id as an observed principal, \
-                 the same as any other identity-revealing accessor - got {:?}",
-                report.context.principal_material
-            );
+        let (principal, tenant) = observations_of(&evaluator, "user-scoped-flag", || {
+            featureflag::context! { user_id = "alice", team = "alpha" }
         })
         .await;
+        assert!(
+            principal.contains("alice"),
+            "a user-scoped flag read must record alice's id as an observed principal, \
+             the same as any other identity-revealing accessor - got {principal:?}"
+        );
+        assert!(
+            tenant.is_empty(),
+            "a flag with no team rule must not record a tenant observation - got {tenant:?}"
+        );
+
+        let (principal, tenant) = observations_of(&evaluator, "team-scoped-flag", || {
+            featureflag::context! { user_id = "alice", team = "alpha" }
+        })
+        .await;
+        assert!(
+            tenant.contains("alpha"),
+            "a team-scoped flag read must record the team as an observed tenant - got {tenant:?}"
+        );
+        assert!(
+            principal.is_empty(),
+            "a flag with no user rule must not record a principal observation - got \
+             {principal:?}"
+        );
+    }
+
+    /// Fix round 7, finding 2. A globally scoped flag's answer does not
+    /// depend on who is reading it, so reading it must record nothing at
+    /// all - round 6 recorded the ambient user id at every flag read, which
+    /// made every page of an application that installs `FeatureMiddleware`
+    /// globally uncacheable for every signed-in visitor.
+    ///
+    /// The second half is the case a naive fix gets wrong: a flag whose only
+    /// identity rule belongs to *another* user still depends on identity for
+    /// everybody, because alice falling through to the global rule and bob
+    /// hitting his own override get different answers, so alice's page must
+    /// not be published under a key bob would hit. Recording by *matched*
+    /// scope key would record nothing for alice; recording by *flag* scope
+    /// records her id.
+    #[tokio::test]
+    async fn identity_is_recorded_by_flag_scope_not_by_the_scope_key_that_matched() {
+        let evaluator = Arc::new(
+            DatabaseEvaluator::new_in_memory()
+                .await
+                .expect("in-memory evaluator"),
+        );
+        evaluator
+            .set_flag("global-flag", "", true)
+            .await
+            .expect("seed a globally scoped flag");
+        evaluator
+            .set_flag("another-users-override-flag", "", false)
+            .await
+            .expect("seed the global rule");
+        evaluator
+            .set_flag("another-users-override-flag", "user:bob", true)
+            .await
+            .expect("seed bob's override");
+
+        let (principal, tenant) = observations_of(&evaluator, "global-flag", || {
+            featureflag::context! { user_id = "alice", team = "alpha" }
+        })
+        .await;
+        assert!(
+            principal.is_empty() && tenant.is_empty(),
+            "a globally scoped flag consults no identity, so reading it must record none - \
+             got principal {principal:?}, tenant {tenant:?}"
+        );
+
+        let (principal, _) = observations_of(&evaluator, "another-users-override-flag", || {
+            featureflag::context! { user_id = "alice" }
+        })
+        .await;
+        assert!(
+            principal.contains("alice"),
+            "alice fell through to the global rule, but bob's override means her answer is \
+             still a function of who she is - her id must be recorded so her page is never \
+             published under a key bob hits - got {principal:?}"
+        );
+    }
+
+    /// A flag absent from the snapshot entirely must not record an
+    /// observation either: there is no rule at any scope, so there is
+    /// nothing for identity to change.
+    #[tokio::test]
+    async fn an_unknown_flag_records_no_observation() {
+        let evaluator = Arc::new(
+            DatabaseEvaluator::new_in_memory()
+                .await
+                .expect("in-memory evaluator"),
+        );
+
+        let (principal, tenant) = observations_of(&evaluator, "no-such-flag", || {
+            featureflag::context! { user_id = "alice", team = "alpha" }
+        })
+        .await;
+        assert!(
+            principal.is_empty() && tenant.is_empty(),
+            "got principal {principal:?}, tenant {tenant:?}"
+        );
+    }
+
+    /// A `reload` rebuilds the identity-scope record from the rows it
+    /// selected, so a `user:` rule added out of band starts being recorded
+    /// once the snapshot picks it up - and the record can never describe a
+    /// different snapshot than the one the lookup reads.
+    #[tokio::test]
+    async fn reload_rebuilds_the_identity_scope_record() {
+        let evaluator = Arc::new(
+            DatabaseEvaluator::new_in_memory()
+                .await
+                .expect("in-memory evaluator"),
+        );
+        evaluator
+            .set_flag("late-override-flag", "", true)
+            .await
+            .expect("seed the global rule");
+
+        let (principal, _) = observations_of(&evaluator, "late-override-flag", || {
+            featureflag::context! { user_id = "alice" }
+        })
+        .await;
+        assert!(
+            principal.is_empty(),
+            "while the flag is global-only it records nothing - got {principal:?}"
+        );
+
+        // Out of band, the way another process flipping a row would be:
+        // straight into the table, then a reload.
+        let now = Utc::now().to_rfc3339();
+        FeatureEntity::insert(FeatureActive {
+            name: Set("late-override-flag".to_string()),
+            scope_key: Set("user:bob".to_string()),
+            enabled: Set(false),
+            description: Set(None),
+            updated_by: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(&evaluator.conn)
+        .await
+        .expect("insert bob's override out of band");
+        evaluator.reload().await.expect("reload");
+
+        let (principal, _) = observations_of(&evaluator, "late-override-flag", || {
+            featureflag::context! { user_id = "alice" }
+        })
+        .await;
+        assert!(
+            principal.contains("alice"),
+            "once the snapshot holds a user rule the flag is identity-dependent for \
+             everyone - got {principal:?}"
+        );
     }
 
     #[tokio::test]
@@ -519,10 +776,10 @@ mod tests {
         // re-read the counter, and only replace if unchanged. The
         // counter advanced, so replacement must be abandoned.
         {
-            let mut store = lock::write(&eval.flags, "feature-flag snapshot").unwrap();
+            let mut store = lock::write(&eval.snapshot, "feature-flag snapshot").unwrap();
             let counter_after = eval.write_counter.load(Ordering::SeqCst);
             if counter_after == counter_before {
-                *store = next;
+                *store = Snapshot::from_flags(next);
             }
         }
 

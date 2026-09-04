@@ -34,19 +34,52 @@
 //!   nature (the type's own documentation example reads a session cookie),
 //!   unlike a header read in general.
 //! - **Feature flags, only through identity, only through the two
-//!   evaluators this framework ships** (fix round 6, Leak 4): a middleware
-//!   that resolves identity once, before the render, and stashes it where
-//!   `is_enabled!` reads it *ambiently* during the render (the framework's
-//!   own feature-flag middleware, whose documented purpose is exactly this)
-//!   observes nothing through any instrumented accessor, so nothing
-//!   narrowed. `DatabaseEvaluator` and `CachedEvaluator` (see
-//!   `crate::features::fields::observe_context_principal`) now record the
-//!   context's resolved user id as a principal observation at the point
-//!   `is_enabled!` actually reads it, closing that specific gap. A custom
-//!   `Evaluator` outside these two, or a flag decision that never resolves
-//!   through the `user_id` context field at all (a global flag, a
-//!   team-only flag), is not covered - the fix observes *identity*, not the
-//!   flag's own name or value.
+//!   evaluators this framework ships** (fix round 6, Leak 4; fix round 7,
+//!   findings 1 and 2): a middleware that resolves identity once, before
+//!   the render, and stashes it where `is_enabled!` reads it *ambiently*
+//!   during the render (the framework's own feature-flag middleware, whose
+//!   documented purpose is exactly this) observes nothing through any
+//!   instrumented accessor, so nothing narrowed. `DatabaseEvaluator` and
+//!   `CachedEvaluator` (see `crate::features::fields::observe_identity`)
+//!   now record the context's identity at the point `is_enabled!` actually
+//!   reads it: the user id as a principal observation when the flag has any
+//!   `user:`-scoped rule, and the team as a *tenant* observation when it has
+//!   any `team:`-scoped rule. The condition is a property of the flag, not
+//!   of which scope key matched this visitor, so a flag whose only override
+//!   belongs to another user still records the reader's own id. A flag with
+//!   only a global rule records nothing and stays cacheable for signed-in
+//!   visitors, which is correct: its answer does not depend on the reader.
+//!   A custom `Evaluator` outside these two, an application-defined scope
+//!   key that is neither `user:` nor `team:`, or a decision that varies on
+//!   something other than the context's identity, is not covered - this
+//!   observes *identity*, not the flag's own name or value.
+//! - **Anonymous identity resolution reads the session, which is
+//!   `Uncacheable`.** `Auth::id()` resolves through request state first and
+//!   falls back to `session()`, which records a session read; `classify`
+//!   narrows any session read straight to `Uncacheable`. So an anonymous
+//!   visitor of a route whose render calls `Auth::id()` never caches, even
+//!   though its key correctly says `Anonymous` and the guard's empty-set
+//!   path (below) would now accept it - the class decision happens first.
+//!   A signed-in visitor resolves through request state and never reaches
+//!   the fallback, so the same route does cache for them. Recording that
+//!   fallback as an identity read rather than a session read would fix it
+//!   and is measurably the only thing standing in the way, but it turns
+//!   every session-authenticated render from `Uncacheable` into
+//!   `PrivateCached`, which is a far larger widening than fix round 7 was
+//!   scoped to make. Parked, deliberately, with the measurement recorded in
+//!   `an_anonymous_render_that_resolves_identity_through_the_session_stays_uncacheable`.
+//! - **Authorization decisions are always treated as per-principal.**
+//!   `Gate::allows` records that a decision was evaluated, never what the
+//!   decision consulted, so `AuthorizationRead` requires the `Principal`
+//!   dimension unconditionally. A route keyed only by `Tenant` whose gate is
+//!   genuinely per-tenant therefore never caches, even though it is safe -
+//!   proven functional, not a leak, by the sixth review. This is deliberate
+//!   and fails closed: nothing here can tell a per-tenant gate from a
+//!   per-user one, and treating every decision as per-user is the only safe
+//!   default. The remedy is for such a route to declare `Principal`
+//!   alongside `Tenant`, which partitions by both and does cache. Parked for
+//!   a later iteration: having `Gate` record the identity it consulted would
+//!   let the value comparison decide instead of the mapping.
 //!
 //! A route handler that branches its output on a header or a config value -
 //! without also declaring the corresponding variance - is outside what this
@@ -1270,8 +1303,10 @@ fn finish_fresh_render(
 ///   whose documented purpose is exactly this - never touches an
 ///   instrumented accessor during the render, so no reason fires and this
 ///   guard has nothing to compare. See the fixed read at
-///   `crate::features::fields::observe_context_principal`, called from
-///   inside the render this time, not the resolution outside it.
+///   `crate::features::fields::observe_identity`, called from inside the
+///   render this time, not the resolution outside it - and, since fix round
+///   7, on the team axis as well as the user one, and only for a flag that
+///   actually has a rule at that axis.
 ///
 /// The fix, per the reviewer's diagnosis: **record the set of every value
 /// observed for a dimension, and require every member to equal the key's
@@ -1291,18 +1326,43 @@ fn finish_fresh_render(
 /// dimension's *entire observed set* is compared against the key's material
 /// for it - `PrincipalObserved` and `AuthorizationRead` (the decision is
 /// per-user, whatever it inspects) require `Principal`; `TenantObserved`
-/// requires `Tenant`. When the set is empty (a boolean-only read, such as
-/// `has_current_user`, that could not itself resolve a concrete id - now
-/// rare after fix round 6 taught nine such accessors to record material
-/// wherever the underlying state actually holds one, but not eliminable in
-/// general), this falls back to round 4's rule - the key must at least name
-/// *some* private value for the required dimension - as the floor, not the
-/// only check. `SessionValueRead`, `SecretContextRead`, and
+/// requires `Tenant`. `SessionValueRead`, `SecretContextRead`, and
 /// `UndeclaredContext` narrow to `Uncacheable` unconditionally inside
 /// `classify` (`Uncacheable` is `RepresentationClass`'s maximum variant, so
 /// `narrowest` always yields it), which the caller already declines before
 /// reaching this guard - asserted here, in debug builds, rather than merely
 /// relied upon.
+///
+/// # The empty-set path, and why both of its arms are safe
+///
+/// The set for a required dimension is empty when the render asked for that
+/// dimension and no concrete value came back, so there is no value to
+/// compare and the check falls back to asking what the *key* says. This is
+/// the normal path, not a rare one: every anonymous visitor of every route
+/// whose render touches `Auth::id()` reaches it, because an anonymous
+/// resolution records the read with no material at all. (An earlier draft
+/// of this doc called the path "now rare after fix round 6"; the sixth
+/// review measured otherwise, and fix round 7 corrects both the claim and
+/// the behaviour.)
+///
+/// Two key values continue, and both are agreement rather than absence:
+///
+/// - `Private(_)`: the key already partitions by a concrete identity that
+///   this particular read did not name - the round 4 floor, unchanged.
+/// - `Anonymous`: the render asked for an identity and found none, and the
+///   key says none. Partitioning still holds, because a signed-in visitor
+///   derives a `Private(_)` key and never reaches this entry.
+///
+/// An *undeclared* dimension still declines, because a route that checks
+/// identity without declaring `Principal` would otherwise publish one
+/// visitor's page under a key every other visitor hits.
+///
+/// Weakening this branch cannot admit a store that a value comparison would
+/// have declined - the sixth review's argument, in one sentence: the branch
+/// fires exactly when no value was observed for the dimension, which is
+/// exactly when no stronger check is derivable from the report, so every
+/// leak that passes through it is caused by the missing observation, never
+/// by the fallback's weakness.
 ///
 /// `Locale` is compared the same way, unconditionally (it is not a
 /// `ClassificationReason` - locale is a content-variance concern, not a
@@ -1368,7 +1428,12 @@ fn key_used_different_values_than_the_render_saw(
             }
         };
         if observed_ids.is_empty() {
-            if !matches!(declared.get(&required), Some(DimensionValue::Private(_))) {
+            // Fix round 7, finding 3: `Anonymous` continues alongside
+            // `Private(_)`. See this function's own doc for both arms.
+            if !matches!(
+                declared.get(&required),
+                Some(DimensionValue::Private(_) | DimensionValue::Anonymous)
+            ) {
                 return true;
             }
             continue;

@@ -694,6 +694,80 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
             feature_version_declared_handler,
         )
         .into();
+    // Fix round 7: the feature-flag and per-tenant-authorization routes.
+    // `no_variance_policy` is deliberately shared by every flag route -
+    // the question each of them asks is whether reading a flag of a given
+    // scope costs the cache a route that declares nothing, which is the
+    // shape the reference application's pages have.
+    let no_variance_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("no variance policy");
+    let principal_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("principal declared policy");
+    let tenant_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Tenant)
+        .build()
+        .expect("tenant declared policy");
+    // Fix round 7, finding 4: the documented remedy for a per-tenant gate -
+    // declare `Principal` alongside `Tenant` and the route partitions by
+    // both.
+    let tenant_and_principal_declared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("tenant and principal declared policy");
+    let router: Router = router
+        .get(
+            "/reads-team-scoped-flag/{id}",
+            reads_team_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-team-scoped-flag/{id}",
+            reads_team_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-user-scoped-flag/{id}",
+            reads_user_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get("/reads-global-flag/{id}", reads_global_flag_handler)
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-flag-with-another-users-override/{id}",
+            reads_flag_with_another_users_override_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-auth-user-id-accessor/{id}",
+            reads_auth_user_id_accessor_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-per-tenant-authz/{id}",
+            reads_tenant_authz_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-and-principal-declared-reads-per-tenant-authz/{id}",
+            reads_tenant_authz_handler,
+        )
+        .into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -747,7 +821,7 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
             "/tenant-declared-reads-authz/{id}",
             GroupPolicy::from(tenant_declared_reads_authz_policy),
         )
-        .expect("attach tenant declared reads authz policy")
+        .expect("attach tenant declared reads per-tenant authz policy")
         .try_render_cache(
             "/principal-declared-reads-authz/{id}",
             GroupPolicy::from(principal_declared_reads_authz_policy),
@@ -786,7 +860,47 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
             "/feature-version-declared/{id}",
             GroupPolicy::from(feature_version_declared_policy),
         )
-        .expect("attach feature version declared policy");
+        .expect("attach feature version declared policy")
+        .try_render_cache(
+            "/reads-team-scoped-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads team scoped flag policy")
+        .try_render_cache(
+            "/principal-declared-reads-team-scoped-flag/{id}",
+            GroupPolicy::from(principal_declared_policy),
+        )
+        .expect("attach principal declared reads team scoped flag policy")
+        .try_render_cache(
+            "/reads-user-scoped-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads user scoped flag policy")
+        .try_render_cache(
+            "/reads-global-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads global flag policy")
+        .try_render_cache(
+            "/reads-flag-with-another-users-override/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads flag with another users override policy")
+        .try_render_cache(
+            "/reads-auth-user-id-accessor/{id}",
+            GroupPolicy::from(no_variance_policy),
+        )
+        .expect("attach reads auth user id accessor policy")
+        .try_render_cache(
+            "/tenant-declared-reads-per-tenant-authz/{id}",
+            GroupPolicy::from(tenant_declared_policy),
+        )
+        .expect("attach tenant declared reads per-tenant authz policy")
+        .try_render_cache(
+            "/tenant-and-principal-declared-reads-per-tenant-authz/{id}",
+            GroupPolicy::from(tenant_and_principal_declared_policy),
+        )
+        .expect("attach tenant and principal declared reads authz policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -837,6 +951,20 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     // as `LoginHeader` above - `RenderCacheMiddleware` reads `Lang::locale()`
     // while building declared `Locale` variance.
     suprnova::middleware::register_global_middleware(TestLocaleMiddleware);
+    // Fix round 7: the framework's own feature middleware, in the only
+    // position it can occupy for `Auth::id()` to be resolved (after
+    // `LoginHeader`) and for `is_enabled!` to be read inside the render
+    // (before `RenderCache::install`) - the same position
+    // `app/src/bootstrap.rs` puts it in. Team from a header, which
+    // `with_team_from_header` is the shipped helper for. It is registered
+    // for *every* test in this binary, not only the flag ones, so that a
+    // future change which makes an ambient feature-flag context cost the
+    // cache something shows up in the whole suite rather than in one
+    // corner of it.
+    install_feature_evaluator().await;
+    suprnova::middleware::register_global_middleware(
+        suprnova::features::FeatureMiddleware::new().with_team_from_header("x-test-team"),
+    );
     let router = RenderCache::install(router, config)
         .await
         .expect("install render cache");
@@ -1176,6 +1304,154 @@ async fn feature_version_declared_handler(_request: Request) -> Response {
     counting_route::on_render_start().await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("feature-version render {n}")))
+}
+
+/// The framework's own [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator),
+/// installed as featureflag's process-global default the way
+/// `features::bootstrap_database_cached` does in a real application - which
+/// is what `install_evaluator` / `set_global_default` is for, and why these
+/// tests can drive `is_enabled!` over real HTTP rather than only at the unit
+/// level: unlike `featureflag::evaluator::with_default`, the global default
+/// is not a synchronous scope and survives every await point in a request.
+static FEATURE_EVALUATOR: tokio::sync::OnceCell<Arc<suprnova::features::DatabaseEvaluator>> =
+    tokio::sync::OnceCell::const_new();
+
+/// Seeds the four flags these tests read and installs the evaluator
+/// process-globally, exactly once per test process.
+///
+/// The four cover the whole scope matrix fix round 7 turns on:
+/// `user-scoped-flag` has a rule at the reader's own identity;
+/// `team-scoped-flag` at the reader's team; `global-flag` at neither; and
+/// `another-users-override-flag` has a rule at *someone else's* identity
+/// plus a global rule, which is the case that distinguishes "record by flag
+/// scope" from "record by the scope key that matched this reader".
+async fn install_feature_evaluator() {
+    FEATURE_EVALUATOR
+        .get_or_init(|| async {
+            let evaluator = Arc::new(
+                suprnova::features::DatabaseEvaluator::new_in_memory()
+                    .await
+                    .expect("in-memory feature evaluator"),
+            );
+            evaluator
+                .set_flag("user-scoped-flag", "user:alice", true)
+                .await
+                .expect("seed the user-scoped flag");
+            evaluator
+                .set_flag("team-scoped-flag", "team:alpha", true)
+                .await
+                .expect("seed the team-scoped flag");
+            evaluator
+                .set_flag("global-flag", "", true)
+                .await
+                .expect("seed the globally scoped flag");
+            evaluator
+                .set_flag("another-users-override-flag", "", false)
+                .await
+                .expect("seed the global rule of the override flag");
+            evaluator
+                .set_flag("another-users-override-flag", "user:bob", true)
+                .await
+                .expect("seed bob's override");
+            suprnova::features::install_evaluator(evaluator.clone());
+            evaluator
+        })
+        .await;
+}
+
+/// Fix round 7, finding 1: the body is driven entirely by a **team-scoped**
+/// feature flag read ambiently through `is_enabled!`. `FeatureMiddleware`
+/// resolved the team before the render began, so nothing the render itself
+/// touches is an instrumented accessor - the evaluator's own read is the
+/// only place the dependency can be seen.
+async fn reads_team_scoped_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("team-scoped-flag", false);
+    Ok(HttpResponse::html(format!(
+        "team-scoped-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// The user-scoped half of the same shape (fix round 6, Leak 4), driven
+/// over real HTTP through the shipped middleware and evaluator.
+async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("user-scoped-flag", false);
+    Ok(HttpResponse::html(format!(
+        "user-scoped-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Fix round 7, finding 2: a **globally** scoped flag - the same answer for
+/// every visitor, no identity in the decision. Reading it must cost the
+/// cache nothing, even for a signed-in visitor whose id `FeatureMiddleware`
+/// has put in the ambient context.
+async fn reads_global_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("global-flag", false);
+    Ok(HttpResponse::html(format!(
+        "global-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Fix round 7, finding 2, the case a naive fix gets wrong: the flag's only
+/// identity rule belongs to bob, so alice falls through to the global rule.
+/// Her answer is still a function of who she is - bob's would differ - so
+/// her page must not be published under a key bob hits.
+async fn reads_flag_with_another_users_override_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("another-users-override-flag", false);
+    Ok(HttpResponse::html(format!(
+        "another-users-override-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Reads the identity through `Request::auth_user_id()`, a public accessor
+/// with no collector instrumentation at all. The sixth review measured this
+/// and found it carries no identity on the ordinary HTTP path (the only
+/// `with_auth_user_id` call site is the WebSocket-upgrade terminator); this
+/// route keeps that measurement standing, so a future change that stamps it
+/// on the HTTP path fails here rather than leaking silently.
+async fn reads_auth_user_id_accessor_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let identity = request.auth_user_id().unwrap_or("none").to_owned();
+    Ok(HttpResponse::html(format!(
+        "auth-user-id-accessor render {n} identity={identity}"
+    )))
+}
+
+/// A **per-tenant** authorization gate, not a per-user one.
+const PER_TENANT_AUTHZ_GATE: &str = "per-tenant-authz-gate";
+
+/// Registers [`PER_TENANT_AUTHZ_GATE`] once per process.
+pub fn ensure_per_tenant_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<String, bool>(
+            PER_TENANT_AUTHZ_GATE,
+            |tenant: &String, _resource| tenant == "acme",
+        );
+    });
+}
+
+/// Fix round 7, finding 4: a body built from a per-tenant authorization
+/// decision. `AuthorizationRead` maps to `Principal` unconditionally, so
+/// this caches only on the route that declares `Principal` alongside
+/// `Tenant`, never on the one keyed by `Tenant` alone - the documented
+/// limitation and its documented remedy, both driven by this one handler.
+async fn reads_tenant_authz_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    let allowed = suprnova::Gate::allows::<String, bool>(PER_TENANT_AUTHZ_GATE, &tenant, &true);
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "tenant-authz render {n} tenant={tenant} allowed={allowed}"
+    )))
 }
 
 async fn sets_cookie_handler(_request: Request) -> Response {
