@@ -8,6 +8,43 @@
 //! out complete and eligible, publishes a new entry for the next request
 //! to hit.
 //!
+//! # The honest boundary of what this guards against (fix round 5)
+//!
+//! [`key_used_different_values_than_the_render_saw`] declines to store a
+//! render whose observed principal, tenant, or locale differs from the
+//! value the key was built from. It can only decline based on what the
+//! collector actually recorded. Three categories of read produce **no**
+//! [`suprnova_live::render_cache::variance::ClassificationReason`] at all,
+//! so nothing narrows the class and this guard has nothing to compare:
+//!
+//! - **Headers**, read through [`crate::http::Request::header`] and
+//!   friends. Deliberately *not* instrumented: every request reads some
+//!   header for some purpose, so recording every read would decline every
+//!   response - a different way of shipping nothing, not a guard.
+//! - **Configuration**, read through `Config::get::<T>()`. No producer
+//!   exists (see `collector`'s own module doc): `Config::get` returns
+//!   whole typed structs, so a read that touches secret configuration is
+//!   indistinguishable at that seam from one that does not.
+//! - **Feature flags**. Same shape, same absence of a producer.
+//!
+//! Cookies are the one exception in this list: [`crate::http::Request::cookies`]
+//! (and [`crate::http::Request::cookie`], which delegates to it) *are*
+//! instrumented, as a session read - cookies carry private material by
+//! nature (the type's own documentation example reads a session cookie),
+//! unlike a header read in general.
+//!
+//! A route handler that branches its output on a header, a config value, or
+//! a feature flag - without also declaring the corresponding variance - is
+//! outside what this middleware can protect on its own.
+//! [`crate::render_cache::collector::observe_undeclared`] exists for
+//! exactly this: an application or a future adapter that knows it read
+//! something undeclared can call it explicitly, and `classify` already
+//! narrows to `Uncacheable` for it - but nothing calls it automatically for
+//! header, config, or feature reads today. Do not read the guard's presence
+//! as protection for these; it is not, and pretending otherwise is exactly
+//! the shape that let three earlier rounds of this task's review each find
+//! a different unguarded seam.
+//!
 //! # Deliberately out of scope for this task
 //!
 //! - **Seed promotion deadlines.** `EntryHeader::seed_deadline_ms` is
@@ -29,7 +66,7 @@
 //!   content-identity mismatch, not merely a wasted render. (An earlier
 //!   draft of this note called this "a possible wasted or misdirected
 //!   rebuild, not a correctness or security defect," reasoning that
-//!   [`key_omits_observed_privacy`]'s narrowing would decline the store;
+//!   [`key_used_different_values_than_the_render_saw`]'s narrowing would decline the store;
 //!   round 1 of this task's review established that narrowing never
 //!   repartitions an already-derived key, so that justification does not
 //!   hold, and the gap is broader than the cookie-carried case it was
@@ -83,7 +120,7 @@ use suprnova_live::render_cache::variance::{
     ClassificationOutcome, ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial,
     VarianceDescriptor, VarianceDimension, classify,
 };
-use suprnova_live::render_cache::{FailurePolicy, RepresentationClass};
+use suprnova_live::render_cache::{FailurePolicy, RenderCacheError, RepresentationClass};
 
 use crate::database::DB;
 use crate::http::{HttpResponse, Request, Response};
@@ -321,7 +358,14 @@ impl RenderCacheMiddleware {
             Ok(epoch) => epoch,
             Err(_) => return Err(ProviderFailure(request, next)),
         };
-        let input = key_input(runtime, &request, pattern, policy, epoch);
+        let Ok(input) = key_input(runtime, &request, pattern, policy, epoch) else {
+            // Fix round 5: a dimension's value could not be declared (see
+            // `variance_descriptor`'s own doc) - bypass uncached rather
+            // than publish a key that does not actually reflect what the
+            // route declared.
+            LookupOutcome::Bypass.record();
+            return Ok(next(request).await);
+        };
         let variance = input.variance.clone();
         let Ok(key) = RenderKey::derive(&input, &runtime.keys) else {
             LookupOutcome::Bypass.record();
@@ -522,11 +566,24 @@ fn route_identity(pattern: &str) -> RouteIdentity {
 
 /// Builds the declared variance descriptor for a route's policy, reading
 /// only what the policy actually declared - never more.
+///
+/// # Errors
+///
+/// Fails when a dimension's resolved value cannot be declared - most
+/// reachably, `Host`'s value coming from `request.http_host()`, which is
+/// attacker-controlled and can exceed the bound `declare` enforces on a
+/// `Public` value. Fix round 5: the caller used to discard this with
+/// `let _ = ...`, silently dropping the dimension from the key even though
+/// the route declared it - a route that declares `Host` would then key
+/// every request the same regardless of host, the same shape of silent
+/// mis-key this task's review has repeatedly found. Propagated to the
+/// caller instead, which bypasses uncached rather than publish a key that
+/// does not actually reflect what it claims to.
 fn variance_descriptor(
     runtime: &RenderCacheRuntime,
     request: &Request,
     policy: &RenderCachePolicy,
-) -> VarianceDescriptor {
+) -> Result<VarianceDescriptor, RenderCacheError> {
     let mut variance = VarianceDescriptor::new();
     for dimension in policy.vary() {
         let value = match dimension {
@@ -557,26 +614,33 @@ fn variance_descriptor(
             VarianceDimension::FeatureVersion
             | VarianceDimension::ConfigVersion
             | VarianceDimension::Application(_) => {
-                // No producer yet for these (see collector.rs's module
-                // doc); declaring one here would spend the bound for a
-                // value that never changes.
+                // Unreachable for a validated policy as of fix round 5:
+                // `RenderCachePolicy::validate` now rejects these at build
+                // time (see its own doc) rather than accepting a dimension
+                // this host has no producer for. Kept as a defensive
+                // no-op, not a silent success, for a policy that somehow
+                // bypassed that validation.
                 continue;
             }
         };
-        let _ = variance.declare(dimension.clone(), value);
+        variance.declare(dimension.clone(), value)?;
     }
-    variance
+    Ok(variance)
 }
 
 /// Builds the lookup key input for `request` against `policy`. Callers
 /// must have already confirmed [`declared_query_ok`].
+///
+/// # Errors
+///
+/// Propagates [`variance_descriptor`]'s error - see its own doc.
 fn key_input(
     runtime: &RenderCacheRuntime,
     request: &Request,
     pattern: &str,
     policy: &RenderCachePolicy,
     epoch: u64,
-) -> RenderKeyInput {
+) -> Result<RenderKeyInput, RenderCacheError> {
     let declared = policy.query().declared_names();
     let query: BTreeMap<String, String> = request
         .query_params()
@@ -589,7 +653,7 @@ fn key_input(
     } else {
         None
     };
-    RenderKeyInput {
+    Ok(RenderKeyInput {
         route: route_identity(pattern),
         route_pattern: pattern.to_owned(),
         params,
@@ -600,8 +664,8 @@ fn key_input(
         build: BuildId::parse(&runtime.config.build_id)
             .unwrap_or_else(|_| BuildId::parse("default").expect("'default' is a valid build id")),
         epoch,
-        variance: variance_descriptor(runtime, request, policy),
-    }
+        variance: variance_descriptor(runtime, request, policy)?,
+    })
 }
 
 /// Reads a key from L0, then L1 (promoting a decodable L1 hit to L0). A
@@ -996,33 +1060,38 @@ async fn lead_render(
         return Ok(response);
     };
     // Fix round 4, Leak B: classification is driven by what the collector
-    // observed, never by re-reading an accessor. The previous version
-    // re-read `Auth::id()` here to build `principal`'s value, which is the
-    // *default guard's* slot specifically - a render that established
-    // identity through a named, non-default `SessionGuard` (or any other
-    // accessor that is not `Auth::id()`) set `principal_read` via the round
-    // 3 seam, then had that observation vetoed by this second, independent
-    // read returning `None`. `classify` only ever tests `.is_some()` on
-    // these fields (never the value itself - the value is needed only for
-    // key derivation, which `variance_descriptor` already performs, reading
-    // the request's own resolved identity at the point that matters), so
-    // the sentinel material below carries no identity of its own; it exists
-    // only to satisfy `ObservedContext`'s typed `Option<PrivateMaterial>`
-    // fields from a boolean flag without depending on any specific accessor
-    // returning a value right now.
+    // observed, never by re-reading an accessor - the previous version
+    // re-read `Auth::id()` here, which is the *default guard's* slot
+    // specifically, and had the observation vetoed whenever identity was
+    // resolved through any other accessor. `classify` only ever tests
+    // `.is_some()` on these fields, never the value itself, so a sentinel
+    // stood in for the value round 4 did not yet record. Fix round 5:
+    // `principal_material`/`tenant_material` now carry the value an
+    // accessor actually returned (see their own doc), so this uses the
+    // real material when one was recorded, falling back to a sentinel only
+    // for a boolean-only read (`has_current_user`, say) that revealed that
+    // *something* was checked without revealing a concrete value.
     const SENTINEL_OBSERVED_LABEL: &str = "observed";
     let observed_context = ObservedContext {
-        principal: report
-            .context
-            .principal_read
-            .then(|| PrivateMaterial::principal(&runtime.keys, SENTINEL_OBSERVED_LABEL, 0)),
+        principal: report.context.principal_read.then(|| {
+            let id = report
+                .context
+                .principal_material
+                .as_deref()
+                .unwrap_or(SENTINEL_OBSERVED_LABEL);
+            PrivateMaterial::principal(&runtime.keys, id, collector::permission_version())
+        }),
         // Fix round 4: previously hard-coded `None` because nothing
         // produced this observation. `Request::live_tenant()` now records
         // one on every call (see its own doc).
-        tenant: report
-            .context
-            .tenant_read
-            .then(|| PrivateMaterial::tenant(&runtime.keys, SENTINEL_OBSERVED_LABEL)),
+        tenant: report.context.tenant_read.then(|| {
+            let id = report
+                .context
+                .tenant_material
+                .as_deref()
+                .unwrap_or(SENTINEL_OBSERVED_LABEL);
+            PrivateMaterial::tenant(&runtime.keys, id)
+        }),
         session_read: report.context.session_read,
         authorization_read: report.context.authorization_read,
         secret_context_read: report.context.secret_context_read,
@@ -1034,7 +1103,7 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    if key_omits_the_dimension_each_reason_requires(&job, &classification, &report) {
+    if key_used_different_values_than_the_render_saw(&job, &classification, &report, runtime) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1114,76 +1183,120 @@ fn finish_fresh_render(
     Ok(out)
 }
 
-/// Whether the key fails to partition by the specific dimension each
-/// classification reason names, or by an observed locale the key does not
-/// account for.
+/// Whether the render's own observations diverge from the values the key
+/// was already built from, or an observed locale the key does not account
+/// for at all.
 ///
-/// # Round 3's guard asked the wrong question (fix round 4, Leak A)
+/// # Compare values, not properties (fix round 5)
 ///
-/// Round 3 checked whether *some* dimension in the key resolved private,
-/// whenever the class narrowed to `PrivateCached` - not whether the
-/// dimension that narrowed the class is the one that partitions. The
-/// reviewer proved this wrong on a route declaring `Tenant` variance whose
-/// handler reads an identity: the render narrows for a `PrincipalObserved`
-/// reason, and the guard passed because `Tenant` happened to be private -
-/// the key partitions by tenant, not by principal, and every user inside
-/// that tenant received the same cached page. That is the ordinary
-/// multi-tenant shape, not a contrivance.
+/// Rounds 1, 3, and 4 each reconciled two independently computed things -
+/// what the render read and what the key partitioned by - through a proxy:
+/// "material is present" (round 1), "the dimension is declared" (round 3),
+/// "the named dimension's value has type `Private`" (round 4). Each proxy
+/// closed the previous gap and left the next one standing, because none of
+/// them checked that the *value* the render saw is the *value* the key was
+/// built from - only some property of it.
 ///
-/// The fix uses what [`classify`] already computes and previously
-/// discarded: [`ClassificationOutcome::reasons`] names exactly which
-/// dimension would have to partition for each narrowing to be safe. The
-/// rule is now: for every reason in `reasons`, its own named dimension -
-/// not merely some dimension - must resolve to `DimensionValue::Private`.
-/// `PrincipalObserved` requires `Principal`; `TenantObserved` requires
-/// `Tenant`; `AuthorizationRead` requires `Principal` (the decision is
-/// per-user, whatever it inspects); `SessionValueRead`, `SecretContextRead`,
-/// and `UndeclaredContext` narrow to `Uncacheable` unconditionally inside
-/// `classify` (`Uncacheable` is `RepresentationClass`'s maximum variant, so
-/// `narrowest` always yields it), which the caller already declines before
-/// reaching this guard - asserted here, in debug builds, rather than merely
-/// relied upon. This makes Leak A impossible by construction: a route
-/// declaring the wrong dimension for the reason that actually narrowed it
-/// now fails exactly the same way a route declaring nothing does. A reason
-/// added to the engine later fails closed (no matching arm, added as this
-/// function is extended) instead of silently passing through a check that
-/// only asked "is anything private."
+/// The reviewer broke round 4 twice on exactly that gap, proven over real
+/// HTTP:
 ///
-/// # Declared is not partitioning (carried over from fix round 3, item 3)
+/// - Because [`super::RenderCache::install`] appends to the global
+///   middleware registry, this middleware derives the key before any route
+///   middleware runs. A per-route impersonation middleware - which the
+///   framework explicitly supports - sets the real identity *after* key
+///   derivation. `Principal` resolved to a genuinely private value (the
+///   impersonator's own), round 4's guard passed because that value's
+///   *type* was private, and impersonating one user served another user's
+///   cached page.
+/// - A second reproduction needed no impersonation at all: a render that
+///   resolves identity through a named, non-default `SessionGuard` never
+///   touches `Auth::id()` before or after the render, so round 4's guard
+///   (built on `ObservedContext.principal`, itself keyed off whether
+///   *any* accessor was read) still saw a private value at the *declared*
+///   dimension and passed.
 ///
-/// [`variance_descriptor`] declares `Principal` as `DimensionValue::Anonymous`
-/// when no identity is visible at key-derivation time - present in the map,
-/// but not a partition. Requiring a *resolved* `DimensionValue::Private`
-/// (not merely a present key) still catches this: `Anonymous` and an absent
-/// dimension are both "does not partition."
+/// A third, related shape - a handler calling `Lang::set_locale` mid-render
+/// (which the framework documents as supported), rendering in the new
+/// locale while the key was already built from the old one - is the same
+/// class of bug: the value changed after the key was fixed, and nothing
+/// checked.
 ///
-/// # Locale, unchanged
+/// The fix compares values directly instead of adding a fourth proxy:
 ///
-/// The locale check below predates round 3 and is orthogonal to `classify`,
+/// - **`Locale`** is re-derived by calling `Lang::locale()` again, here,
+///   after the render. `Lang`'s locale is a task-local, so this needs no
+///   request object and correctly sees a mid-render `set_locale` call - the
+///   task-local is still installed after the render returns, it is simply
+///   read again.
+/// - **`Principal` and `Tenant`** cannot be re-derived the same way: the
+///   render may have resolved either through an accessor this middleware's
+///   own `variance_descriptor` never calls (a named guard, for `Principal`),
+///   and the `Request` value itself no longer exists by the time this runs
+///   (it was moved into the handler - see [`lead_render`]'s own capture of
+///   `method`/`if_none_match` before the render, for the same reason). So
+///   [`CollectedContext::principal_material`]/`tenant_material` carry the
+///   actual value the accessor returned, recorded at the point it was read
+///   (fix round 5), and this compares *that* against the key's own material
+///   for the dimension [`ClassificationOutcome::reasons`] names -
+///   `PrincipalObserved` and `AuthorizationRead` (the decision is per-user,
+///   whatever it inspects) both require `Principal`; `TenantObserved`
+///   requires `Tenant`. Between the two mechanisms, every reason either has
+///   a value to compare or declines: when no accessor recorded a concrete
+///   value for a reason (a boolean-only check like `has_current_user`, or
+///   an authorization decision that inspected something other than an
+///   identity string), this falls back to round 4's rule - the key must at
+///   least name a *some* private value for the required dimension - as the
+///   floor, not the only check.
+/// - **`SessionValueRead`, `SecretContextRead`, `UndeclaredContext`** narrow
+///   to `Uncacheable` unconditionally inside `classify` (`Uncacheable` is
+///   `RepresentationClass`'s maximum variant, so `narrowest` always yields
+///   it), which the caller already declines before reaching this guard -
+///   asserted here, in debug builds, rather than merely relied upon.
+///
+/// This is also simpler than round 4's version: one comparison per
+/// dimension instead of a growing set of properties to check, and a reason
+/// the engine adds later without a matching arm here fails to compile
+/// rather than silently passing.
+///
+/// # What this cannot see
+///
+/// See the module doc's "The honest boundary" section: a header, config, or
+/// feature-flag read produces no `ClassificationReason` at all, so there is
+/// nothing here to compare against. This guard is not a substitute for a
+/// route correctly declaring its own variance.
+///
+/// # Locale declared nowhere, unchanged
+///
+/// The last check below predates round 3 and is orthogonal to `classify`,
 /// which has no locale-narrowing reason at all (locale is a content-variance
 /// concern, not a `RepresentationClass` privacy concern): a route that
-/// renders translated content without declaring `Locale` variance would
-/// otherwise cache one language for everyone. See ruling on this task's fix
-/// round 1, item 1, for its original introduction.
-fn key_omits_the_dimension_each_reason_requires(
+/// renders translated content without declaring `Locale` variance at all
+/// would otherwise cache one language for everyone. See ruling on this
+/// task's fix round 1, item 1, for its original introduction.
+fn key_used_different_values_than_the_render_saw(
     job: &RenderJob,
     classification: &ClassificationOutcome,
     report: &super::collector::CollectorReport,
+    runtime: &RenderCacheRuntime,
 ) -> bool {
     let declared = job.variance.dimensions();
-    let resolves_private = |dimension: VarianceDimension| {
-        matches!(declared.get(&dimension), Some(DimensionValue::Private(_)))
-    };
+
+    if let Some(key_value) = declared.get(&VarianceDimension::Locale) {
+        let current = DimensionValue::Public(Lang::locale().as_str());
+        if &current != key_value {
+            return true;
+        }
+    }
+
     for reason in &classification.reasons {
-        let required = match reason {
-            ClassificationReason::PrincipalObserved => VarianceDimension::Principal,
-            ClassificationReason::TenantObserved => VarianceDimension::Tenant,
-            // Per-user by construction: an authorization decision that
-            // varies by anything other than the caller's own identity is
-            // not something this engine can name a dimension for, so the
-            // dimension that must partition is the one the decision is
-            // about - the principal.
-            ClassificationReason::AuthorizationRead => VarianceDimension::Principal,
+        let (required, observed_id) = match reason {
+            ClassificationReason::PrincipalObserved | ClassificationReason::AuthorizationRead => (
+                VarianceDimension::Principal,
+                &report.context.principal_material,
+            ),
+            ClassificationReason::TenantObserved => {
+                (VarianceDimension::Tenant, &report.context.tenant_material)
+            }
             ClassificationReason::SessionValueRead
             | ClassificationReason::SecretContextRead
             | ClassificationReason::UndeclaredContext => {
@@ -1196,10 +1309,28 @@ fn key_omits_the_dimension_each_reason_requires(
                 return true;
             }
         };
-        if !resolves_private(required) {
+        let Some(observed_id) = observed_id else {
+            if !matches!(declared.get(&required), Some(DimensionValue::Private(_))) {
+                return true;
+            }
+            continue;
+        };
+        let expected = match required {
+            VarianceDimension::Principal => DimensionValue::Private(PrivateMaterial::principal(
+                &runtime.keys,
+                observed_id,
+                collector::permission_version(),
+            )),
+            VarianceDimension::Tenant => {
+                DimensionValue::Private(PrivateMaterial::tenant(&runtime.keys, observed_id))
+            }
+            _ => unreachable!("only Principal and Tenant reasons reach this match"),
+        };
+        if declared.get(&required) != Some(&expected) {
             return true;
         }
     }
+
     let locale_observed = report.storable().is_some_and(|identities| {
         identities
             .iter()

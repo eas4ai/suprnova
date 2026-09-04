@@ -2,7 +2,7 @@
 //! then the longest group prefix; patches narrow; duplicates fail.
 
 use suprnova::render_cache::{
-    FreshnessPolicy, PolicyPatch, RenderCachePolicy, RepresentationClass,
+    FreshnessPolicy, PolicyPatch, RenderCachePolicy, RepresentationClass, VarianceDimension,
 };
 use suprnova::{HttpResponse, Request, Router};
 
@@ -13,6 +13,13 @@ async fn ok(_request: Request) -> suprnova::Response {
 fn public() -> RenderCachePolicy {
     RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        // Fix round 5: this file's exact_route_policy_wins... test narrows
+        // this policy to PrivateCached with a group patch; PrivateCached
+        // with no declared variance is now rejected at build time (see
+        // `RenderCachePolicy::validate`'s own doc), so a dimension must be
+        // declared here even though this file's assertions are about
+        // freshness and class resolution, not variance.
+        .vary(VarianceDimension::Principal)
         .build()
         .expect("policy")
 }
@@ -70,6 +77,7 @@ fn private_group_router() -> Router {
         .try_render_cache_group(
             "/",
             RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+                .vary(VarianceDimension::Principal)
                 .build()
                 .expect("p"),
         )

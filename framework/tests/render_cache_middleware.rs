@@ -1025,3 +1025,112 @@ async fn session_mut_reads_are_observed_and_force_uncacheable() {
         "a session_mut read must be observed and force Uncacheable, the same as session()"
     );
 }
+
+// ---------------------------------------------------------------------
+// Fix round 5: rounds 1, 3, and 4 each reconciled what the render observed
+// against what the key partitioned by through a proxy - presence, then
+// declared-dimension, then value-type - and each proxy closed the previous
+// gap while leaving the next one standing. These three tests reproduce the
+// round 5 review's three proven leaks directly: same, correct declaration,
+// different value - the axis round 4's parameterised tests above did not
+// attack (those vary the *declared* dimension while holding the read
+// fixed). All three are proven failing against the pre-fix code below,
+// per the instruction to reproduce before fixing.
+// ---------------------------------------------------------------------
+
+/// Fix round 5, Leak 1, first reproduction (Critical, proven over real
+/// HTTP). Because `RenderCache::install` appends to the global middleware
+/// registry, this middleware derives the key before any route middleware
+/// runs. `ImpersonationMiddleware` is registered *after* `install` (see
+/// the harness's own comment at that registration site), so it runs after
+/// the key has already been derived from `LoginHeader`'s identity (the
+/// impersonator's own) - the handler then reads `Auth::id()` and sees
+/// whichever identity `ImpersonationMiddleware` set instead. Verified
+/// failing (bob's target received alice's target's rendered body, render
+/// count staying at 1) against the pre-fix guard by temporarily restoring
+/// round 4's "the named dimension's value has type Private" check in place
+/// of the value comparison.
+#[tokio::test]
+#[serial_test::serial]
+async fn impersonation_after_key_derivation_never_serves_the_impersonators_page() {
+    let harness = boot_with_render_cache().await;
+
+    let alice_target = dispatch_get(
+        &harness,
+        "/principal-declared-reads-principal/1",
+        &[
+            ("x-test-login", "impersonator"),
+            ("x-test-impersonate", "alice"),
+        ],
+    )
+    .await;
+    assert_eq!(alice_target.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&alice_target.body).contains("alice"));
+
+    let bob_target = dispatch_get(
+        &harness,
+        "/principal-declared-reads-principal/1",
+        &[
+            ("x-test-login", "impersonator"),
+            ("x-test-impersonate", "bob"),
+        ],
+    )
+    .await;
+    assert!(
+        !String::from_utf8_lossy(&bob_target.body).contains("alice"),
+        "impersonating one user must never serve the page rendered while impersonating a \
+         different user, even though the key was derived from the same impersonator's own \
+         identity both times"
+    );
+    assert!(String::from_utf8_lossy(&bob_target.body).contains("bob"));
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "neither render was ever safe to store: the key was fixed to the impersonator \
+         before the impersonation middleware - which runs after key derivation - ever ran"
+    );
+}
+
+/// Fix round 5, Leak 3 (Critical, proven). `Lang::set_locale`, mid-render,
+/// is documented as supported; the key was already derived from
+/// `Lang::locale()`'s pre-render value. Verified failing (the second
+/// dispatch was an unwarranted cache hit under the old locale's key,
+/// `renders()` staying at 1) against the pre-fix guard by temporarily
+/// removing the locale re-derivation check.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_mid_render_locale_switch_never_publishes_under_the_old_locales_key() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/locale-declared-switches-mid-render/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&first.body).contains("before=en"));
+    assert!(String::from_utf8_lossy(&first.body).contains("after=fr"));
+
+    dispatch_get(&harness, "/locale-declared-switches-mid-render/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a render that switches locale mid-render must never be stored under the key \
+         built from the locale it started with - a hit here would mean the switch was \
+         silently ignored and the old locale's cached page kept being served"
+    );
+}
+
+/// Fix round 5, Leak 2. Cookies carry private material by nature but
+/// produce no `ClassificationReason` on their own; `Request::cookies` (and
+/// `Request::cookie`, which delegates to it) now records a session read.
+/// Verified failing (the second dispatch was an unwarranted cache hit,
+/// `renders()` staying at 1) against the pre-fix `cookies()` by temporarily
+/// removing its `observe_session_read()` call.
+#[tokio::test]
+#[serial_test::serial]
+async fn cookie_reads_are_observed_and_force_uncacheable() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/cookie-reading", &[]).await;
+    dispatch_get(&harness, "/cookie-reading", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a cookie read must be observed and force Uncacheable, the same as a session read"
+    );
+}

@@ -142,7 +142,11 @@ pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
 
 /// The user resolved for this request, if any.
 pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
-    read_state(|state| state.current_user.clone()).flatten()
+    let user = read_state(|state| state.current_user.clone()).flatten();
+    if let Some(user) = &user {
+        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+    }
+    user
 }
 
 fn is_default_guard(guard: &str) -> bool {
@@ -170,7 +174,11 @@ pub(crate) fn set_guard_user(guard_name: &str, user: Arc<dyn Authenticatable>) {
 
 /// Return the user cached for one named session guard.
 pub(crate) fn guard_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
-    read_state(|state| state.guard_users.get(guard_name).cloned()).flatten()
+    let user = read_state(|state| state.guard_users.get(guard_name).cloned()).flatten();
+    if let Some(user) = &user {
+        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+    }
+    user
 }
 
 /// Record an identifier for one named session guard.
@@ -204,14 +212,18 @@ pub(crate) fn set_guard_user_id(guard_name: &str, user_id: impl Into<String>) {
 
 /// Return the identifier known for one named session guard.
 pub(crate) fn guard_user_id(guard_name: &str) -> Option<String> {
-    read_state(|state| {
+    let id = read_state(|state| {
         state
             .guard_users
             .get(guard_name)
             .map(|user| user.get_auth_identifier())
             .or_else(|| state.guard_user_ids.get(guard_name).cloned())
     })
-    .flatten()
+    .flatten();
+    if let Some(id) = &id {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    id
 }
 
 /// Clear one named session guard without touching sibling guards.
@@ -423,7 +435,11 @@ pub(crate) fn set_bearer_user_id(id: impl Into<String>) {
 
 /// The identifier validated from a bearer token, if any.
 pub(crate) fn bearer_user_id() -> Option<String> {
-    read_state(|state| state.bearer_user_id.clone()).flatten()
+    let id = read_state(|state| state.bearer_user_id.clone()).flatten();
+    if let Some(id) = &id {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    id
 }
 
 /// Cache a user resolved specifically through bearer authentication.
@@ -443,7 +459,11 @@ pub(crate) fn set_bearer_user(user: Arc<dyn Authenticatable>) {
 
 /// The user resolved specifically through bearer authentication, if any.
 pub(crate) fn bearer_user() -> Option<Arc<dyn Authenticatable>> {
-    read_state(|state| state.bearer_user.clone()).flatten()
+    let user = read_state(|state| state.bearer_user.clone()).flatten();
+    if let Some(user) = &user {
+        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+    }
+    user
 }
 
 /// Whether a bearer user has already been resolved for this request.
@@ -457,14 +477,18 @@ pub(crate) fn has_bearer_user() -> bool {
 /// both are present the resolved user is the more authoritative value
 /// (it came from the provider, not from a token payload).
 pub(crate) fn current_user_id() -> Option<String> {
-    read_state(|state| {
+    let id = read_state(|state| {
         state
             .current_user
             .as_ref()
             .map(|user| user.get_auth_identifier())
             .or_else(|| state.current_user_id.clone())
     })
-    .flatten()
+    .flatten();
+    if let Some(id) = &id {
+        crate::render_cache::collector::observe_principal_value(id);
+    }
+    id
 }
 
 /// Clear the resolved request user (used by `logout`).

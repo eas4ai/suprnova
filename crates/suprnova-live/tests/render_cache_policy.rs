@@ -112,6 +112,11 @@ fn patches_apply_deterministically_and_can_only_narrow_the_class() {
         .expect("narrowing patch");
     assert_eq!(route.class(), RepresentationClass::PrivateCached);
     let widening = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        // Fix round 5: `PrivateCached` with no declared variance is
+        // rejected at build time (see `validate`'s own doc), so this needs
+        // a dimension declared even though this test is about patch
+        // narrowing, not variance.
+        .vary(VarianceDimension::Principal)
         .build()
         .expect("private")
         .apply(&PolicyPatch::default().class(RepresentationClass::PublicShared));

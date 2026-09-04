@@ -71,15 +71,31 @@ pub(crate) fn bump_permission_version() {
 const MAX_COLLECTED: usize = MAX_OBSERVATIONS - 1;
 
 /// Context flags the collector accumulates.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// No longer `Copy` as of fix round 5: `principal_material`/`tenant_material`
+/// carry an owned `String`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectedContext {
     /// A principal was resolved or checked.
     pub principal_read: bool,
+    /// The internal id of the principal the render actually observed, if an
+    /// accessor returned one. Fix round 5: re-deriving `Auth::id()` after
+    /// the render cannot catch a principal read through a *different*
+    /// accessor (a named, non-default guard) - the render never touched
+    /// `Auth::id()` at all, before or after. Recording the value at the
+    /// point it was actually read, regardless of which accessor produced
+    /// it, is the only way to compare what the render used against what
+    /// the key partitioned by for these two dimensions. The most recently
+    /// observed value wins if more than one accessor was read.
+    pub principal_material: Option<String>,
     /// A tenant was resolved or checked. Fix round 4:
     /// `Request::live_tenant()` records this on every call, the same way
     /// `Lang::locale()` records a locale observation - `ObservedContext.tenant`
     /// was previously always `None` because nothing produced this.
     pub tenant_read: bool,
+    /// The tenant id the render actually observed. See `principal_material`'s
+    /// own doc; the same reasoning applies; fix round 5.
+    pub tenant_material: Option<String>,
     /// A session value was read.
     pub session_read: bool,
     /// An authorization decision was evaluated.
@@ -266,9 +282,27 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
 pub fn observe_principal_read() {
     with_state(|state| state.report.context.principal_read = true);
 }
+/// The principal was resolved to a concrete value. Fix round 5: records
+/// what was actually read, not merely that something was - see
+/// `CollectedContext::principal_material`'s own doc for why this exists
+/// alongside the boolean flag.
+pub fn observe_principal_value(id: &str) {
+    with_state(|state| {
+        state.report.context.principal_read = true;
+        state.report.context.principal_material = Some(id.to_owned());
+    });
+}
 /// The tenant was resolved or checked.
 pub fn observe_tenant_read() {
     with_state(|state| state.report.context.tenant_read = true);
+}
+/// The tenant was resolved to a concrete value. Fix round 5: see
+/// `observe_principal_value`'s own doc; the same reasoning applies.
+pub fn observe_tenant_value(id: &str) {
+    with_state(|state| {
+        state.report.context.tenant_read = true;
+        state.report.context.tenant_material = Some(id.to_owned());
+    });
 }
 /// A session value was read.
 pub fn observe_session_read() {

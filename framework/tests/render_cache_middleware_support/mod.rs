@@ -26,8 +26,9 @@ use suprnova::render_cache::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    App, Auth, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
+    App, Auth, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse, Lang, Locale,
     MiddlewareRegistry, Model, Next, Request, Response, Router, attrs, handle_request,
+    scope_locale,
 };
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
@@ -106,6 +107,44 @@ pub struct TestTenantResolver;
 impl suprnova::live::LiveTenantResolver for TestTenantResolver {
     async fn resolve(&self, request: &Request) -> Result<Option<String>, FrameworkError> {
         Ok(request.header("x-test-tenant").map(str::to_owned))
+    }
+}
+
+/// Installs a per-request locale scope starting at `"en"`, the same job
+/// the real `LocaleMiddleware` does (via `scope_locale`) once a translator
+/// is bound - this harness has none, so it calls `scope_locale` directly
+/// instead, matching that function's own doc ("tests... can use it
+/// directly"). Registered before `RenderCache::install`, for the same
+/// ordering reason as `LoginHeader`.
+pub struct TestLocaleMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for TestLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        scope_locale(
+            Locale::parse("en").expect("en is a valid locale"),
+            next(request),
+        )
+        .await
+    }
+}
+
+/// Fix round 5, Leak 1 (first reproduction): stands in for a per-route
+/// impersonation middleware, which the framework explicitly supports.
+/// Registered *after* `RenderCache::install` (see [`boot`]'s own comment at
+/// the registration site), so it runs after `RenderCacheMiddleware` in the
+/// chain and therefore after the key has already been derived from
+/// whatever `LoginHeader` established - exactly the shape the reviewer
+/// proved over real HTTP.
+pub struct ImpersonationMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for ImpersonationMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(target) = request.header("x-test-impersonate") {
+            Auth::set_user(Arc::new(Principal(target.to_owned())));
+        }
+        next(request).await
     }
 }
 
@@ -448,6 +487,21 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("session mut reading policy");
+    // Fix round 5, Leak 3: declares Locale correctly - the point is that a
+    // mid-render `Lang::set_locale` call must still be caught even though
+    // the declared dimension matches what a render *usually* uses.
+    let locale_declared_switches_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Locale)
+            .build()
+            .expect("locale declared switches policy");
+    // Fix round 5, Leak 2: no declared variance; the point is that a
+    // cookie read alone must force Uncacheable.
+    let cookie_reading_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("cookie reading policy");
     // Fix round 4: one pair of policies per classification reason - the
     // wrong dimension declared for that reason, and the matching one -
     // parameterising the leak shape instead of pinning it to one remembered
@@ -550,6 +604,13 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     let router: Router = router
         .get("/session-mut-reading", session_mut_reading_handler)
         .into();
+    let router: Router = router
+        .get(
+            "/locale-declared-switches-mid-render/{id}",
+            locale_switching_handler,
+        )
+        .into();
+    let router: Router = router.get("/cookie-reading", cookie_reading_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
         .expect("attach cached policy")
@@ -618,7 +679,14 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
             "/session-mut-reading",
             GroupPolicy::from(session_mut_reading_policy),
         )
-        .expect("attach session mut reading policy");
+        .expect("attach session mut reading policy")
+        .try_render_cache(
+            "/locale-declared-switches-mid-render/{id}",
+            GroupPolicy::from(locale_declared_switches_policy),
+        )
+        .expect("attach locale declared switches policy")
+        .try_render_cache("/cookie-reading", GroupPolicy::from(cookie_reading_policy))
+        .expect("attach cookie reading policy");
 
     let config = RenderCacheConfig::from_env()
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
@@ -665,9 +733,21 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
         Arc::new(TestTenantResolver),
     ));
+    // Fix round 5: the per-request locale scope, same ordering requirement
+    // as `LoginHeader` above - `RenderCacheMiddleware` reads `Lang::locale()`
+    // while building declared `Locale` variance.
+    suprnova::middleware::register_global_middleware(TestLocaleMiddleware);
     let router = RenderCache::install(router, config)
         .await
         .expect("install render cache");
+    // Fix round 5, Leak 1 (first reproduction): registered *after*
+    // `RenderCache::install`, so it runs *after* `RenderCacheMiddleware` in
+    // the chain - `register_global_middleware` appends (see `install`'s own
+    // doc), it never inserts at a fixed position. This is what makes it a
+    // faithful stand-in for a per-route impersonation middleware, which the
+    // framework explicitly supports and which necessarily runs closer to
+    // the handler than a middleware registered globally before install.
+    suprnova::middleware::register_global_middleware(ImpersonationMiddleware);
 
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 
@@ -897,6 +977,32 @@ async fn session_mut_reading_handler(_request: Request) -> Response {
     let _ = suprnova::session::session_mut(|session| session.get::<String>("anything"));
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("session-mut render {n}")))
+}
+
+/// Fix round 5, Leak 2: reads a cookie and nothing else. Cookies produce no
+/// `ClassificationReason` on their own; `Request::cookies` (which
+/// `Request::cookie` delegates to) now records a session read instead,
+/// treating a cookie read the same as a session read.
+async fn cookie_reading_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = request.cookie("session");
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("cookie render {n}")))
+}
+
+/// Fix round 5, Leak 3 (proven): the key is derived from `Lang::locale()`
+/// before this handler runs; this then calls `Lang::set_locale`, which the
+/// framework documents as supported mid-request, and renders in the new
+/// locale. The key was already fixed at the old one.
+async fn locale_switching_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let before = Lang::locale().as_str().to_owned();
+    Lang::set_locale(Locale::parse("fr").expect("fr is a valid locale"));
+    let after = Lang::locale().as_str().to_owned();
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "locale render {n} before={before} after={after}"
+    )))
 }
 
 async fn sets_cookie_handler(_request: Request) -> Response {

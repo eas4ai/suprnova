@@ -333,9 +333,17 @@ impl Request {
     /// `ClassificationReason::TenantObserved` - before this,
     /// `ObservedContext.tenant` was hard-coded `None` because nothing
     /// produced this observation at all.
+    ///
+    /// Also records the resolved value itself when present (fix round 5):
+    /// the key's own `Tenant` dimension is derived from this same field at
+    /// a different point in the request, and the post-render guard compares
+    /// the two directly rather than merely checking that a tenant was read.
     #[must_use]
     pub fn live_tenant(&self) -> Option<&str> {
         crate::render_cache::collector::observe_tenant_read();
+        if let Some(tenant) = self.live_tenant.as_deref() {
+            crate::render_cache::collector::observe_tenant_value(tenant);
+        }
         self.live_tenant.as_deref()
     }
 
@@ -452,6 +460,13 @@ impl Request {
     /// # }
     /// ```
     pub fn cookies(&self) -> HashMap<String, String> {
+        // Fix round 5, Leak 2: cookies carry private material by nature
+        // (the doc example above reads a session cookie), and produce no
+        // `ClassificationReason` on their own the way `session()` does -
+        // treated the same as a session read so a render whose output
+        // depends on a cookie is not stored as if it depended on nothing.
+        // `cookie()` delegates here, so this covers both.
+        crate::render_cache::collector::observe_session_read();
         self.header("Cookie").map(parse_cookies).unwrap_or_default()
     }
 

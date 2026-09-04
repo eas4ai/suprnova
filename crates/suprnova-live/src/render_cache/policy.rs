@@ -329,6 +329,29 @@ impl RenderCachePolicy {
         {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
+        // Fix round 5: `FeatureVersion`, `ConfigVersion`, and `Application`
+        // variance have no producer anywhere in the host that builds a
+        // variance descriptor from them - declaring one silently declared
+        // nothing, with no warning. Rejected here rather than honored,
+        // since there is no producer to honor them with; a host that adds
+        // one later can lift this restriction alongside it.
+        if self.vary.iter().any(|dimension| {
+            matches!(
+                dimension,
+                VarianceDimension::FeatureVersion
+                    | VarianceDimension::ConfigVersion
+                    | VarianceDimension::Application(_)
+            )
+        }) {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
+        // Fix round 5: `PrivateCached` with no declared variance promises
+        // one representation per private key material set while declaring
+        // no dimension that could ever hold private material - every
+        // visitor would share the one "private" entry.
+        if self.class == RepresentationClass::PrivateCached && self.vary.is_empty() {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
         Ok(())
     }
 
