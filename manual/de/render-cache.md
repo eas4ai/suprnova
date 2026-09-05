@@ -226,10 +226,10 @@ damit das, was es gelesen hat, und die Generationen, die es aufgezeichnet
 hat, übereinstimmen; der Handler einer gecachten Route, der eine Zeile
 aktualisiert, die eine andere Transaktion verändert hat, nachdem das
 Rendering begonnen hat, erhält einen Serialisierungsfehler. Gestalten Sie
-gecachte Routen als Lesepfade. Ein Handler, der innerhalb dieser Transaktion
-schreibt, erhöht weiterhin Generationen, konkurriert dabei aber mit
-gleichzeitigen Schreibern um dieselben Zeilen und kann den oben genannten
-Serialisierungsfehler erhalten.
+gecachte Routen als Lesepfade. Ein Handler, der innerhalb der
+Render-Transaktion schreibt, erhöht weiterhin Generationen, konkurriert
+dabei aber mit gleichzeitigen Schreibern um dieselben Zeilen und kann den
+oben genannten Serialisierungsfehler erhalten.
 
 Ein Schreibzugriff, der außerhalb jeder Transaktion erfolgt (`model.save()`
 für sich allein), committet zuerst und erhöht seine Generationen in einer
