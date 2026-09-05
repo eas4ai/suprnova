@@ -87,8 +87,14 @@ jobs:
           brew install pkg-config libpq
           brew link --force libpq
 
-      - name: cargo test --workspace
-        run: cargo test --workspace --no-fail-fast
+      - name: Install nextest
+        run: cargo install cargo-nextest --locked
+
+      - name: Workspace tests
+        run: cargo nextest run --workspace --no-fail-fast
+
+      - name: Workspace doctests
+        run: cargo test --workspace --doc --no-fail-fast
 
   # Exercise the opt-in features so feature-gated code can't silently
   # rot.
