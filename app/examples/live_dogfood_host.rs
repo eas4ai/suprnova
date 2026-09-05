@@ -3,9 +3,10 @@
 //! The Playwright suite in `crates/suprnova-live/browser` starts this binary
 //! and drives the dogfood routes exactly as a deployment would: the
 //! production global middleware stack from `bootstrap::register_http_stack`,
-//! the guarded reserved Live routes from `app::live::routes`, an in-memory
-//! database with the application's migrations, and one demo user the browser
-//! signs in as through `/live/demo-login`.
+//! the guarded reserved Live routes and the RenderCache middleware from
+//! `app::live::routes_with_render_cache`, an in-memory database with the
+//! application's migrations, and one demo user the browser signs in as
+//! through `/live/demo-login`.
 
 use std::sync::Arc;
 
@@ -81,6 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(HttpResponse::text("posted"))
         })
         .into();
-    let router = app::live::routes(router)?;
+    let router = app::live::routes_with_render_cache(router).await?;
     Server::new(router).host("127.0.0.1").port(port).run().await
 }

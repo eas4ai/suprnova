@@ -69,6 +69,49 @@ fn http_stack_once() {
     STACK.get_or_init(app::bootstrap::register_http_stack);
 }
 
+/// A true render count for the RenderCache dogfood proof.
+///
+/// The counting middleware is registered globally *after*
+/// `RenderCache::install`, so it sits closer to the handler than
+/// `RenderCacheMiddleware` does - `register_global_middleware` appends, it
+/// never inserts at a fixed position (see its own doc). A request the cache
+/// answers from a stored entry returns before calling `next`, so it never
+/// reaches this middleware at all. The difference between two readings of
+/// [`render_counter::renders`] is therefore the number of renders the cache
+/// did not avoid, not a proxy for it: identical response bytes, an `Age`
+/// header, or an unchanged publication time each have honest non-cache
+/// explanations, and this does not.
+///
+/// Registration is idempotent per middleware type, so one call per
+/// `setup_app` leaves exactly one registered for the whole test binary.
+pub mod render_counter {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use suprnova::{Middleware, Next, Request, Response, async_trait};
+
+    static RENDERS: AtomicU64 = AtomicU64::new(0);
+
+    struct RenderCounter;
+
+    #[async_trait]
+    impl Middleware for RenderCounter {
+        async fn handle(&self, request: Request, next: Next) -> Response {
+            RENDERS.fetch_add(1, Ordering::SeqCst);
+            next(request).await
+        }
+    }
+
+    /// Registers the counting middleware. Idempotent per process.
+    pub fn register() {
+        suprnova::middleware::register_global_middleware(RenderCounter);
+    }
+
+    /// Requests `RenderCacheMiddleware` has forwarded to a handler so far.
+    pub fn renders() -> u64 {
+        RENDERS.load(Ordering::SeqCst)
+    }
+}
+
 pub async fn setup_app(accepts: usize) -> TestApp {
     let lock = TEST_LOCK.lock().await;
     suprnova::Crypt::init(EncryptionKey::generate());
@@ -92,11 +135,21 @@ pub async fn setup_app(accepts: usize) -> TestApp {
     let session_store: Arc<DatabaseSessionDriver> =
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
 
-    let router = app::live::routes(app::routes::register()).expect("install Live routes");
+    // Before the routes, not after: `RenderCache::install` appends itself to
+    // the global middleware chain, so the session, locale, and feature
+    // middleware this registers have to already be there for the cache
+    // middleware to land after them, exactly as a deployment orders them.
+    http_stack_once();
+    let router = app::live::routes_with_render_cache(app::routes::register())
+        .await
+        .expect("install Live routes and the RenderCache middleware");
+    // After the install, so it runs closer to the handler than
+    // `RenderCacheMiddleware` and therefore only on requests the cache
+    // actually forwards. See `render_counter`'s own doc.
+    render_counter::register();
     let runtime = prepare_live_router_for_test(&router).expect("prepare Live runtime");
     App::singleton(runtime.clone());
     let router = Arc::new(router);
-    http_stack_once();
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

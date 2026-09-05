@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware, RegistryError};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
+use suprnova::render_cache::{
+    FreshnessPolicy, RenderCache, RenderCacheConfig, RenderCachePolicy, RepresentationClass,
+};
 use suprnova::{
     AuthMiddleware, BackendErrorPolicy, FrameworkError, RateLimitMiddleware, RateLimiterDriver,
     Request, Router, SlidingWindowConfig, container::App,
@@ -165,5 +168,46 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
             async move { pages::public(request, &mounts).await }
         })
         .into();
-    router.try_live_mount(&public.counter)
+    let router = router.try_live_mount(&public.counter)?;
+
+    // The public document is the one route here whose representation is the
+    // same for every visitor: its template reads no translation, no feature
+    // flag, and no session, and its single island is a public seed rather
+    // than an identity-bound instance. So it declares `PublicShared` and no
+    // variance beyond the default. Freshness is five minutes with a minute
+    // of stale service and five minutes of stale-on-error; the seed's own
+    // promotion deadline bounds the served `max-age` underneath that. A
+    // signed-in visitor is served the same stored representation, which is
+    // correct for this route and is exactly what `PublicShared` means; a
+    // render that ever did observe an identity would be declined from
+    // storage rather than published, so the declaration cannot become a
+    // leak by drift.
+    router.try_render_cache(
+        PUBLIC_PATH,
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
+            .build()?,
+    )
+}
+
+/// [`routes`] followed by the RenderCache middleware, for a caller that can
+/// await.
+///
+/// Separate from [`routes`] rather than the last line of it, because
+/// `RenderCache::install` is `async` (it probes for the generation ledger's
+/// tables before assembling a runtime) while `Application::try_routes` takes
+/// a synchronous `FnOnce() -> Result<Router, FrameworkError>`. A caller that
+/// already has a runtime - the browser scenario's server in
+/// `examples/live_dogfood_host.rs`, and the Live test harness - uses this;
+/// `cmd/main.rs` still calls [`routes`] alone, so the `suprnova serve`
+/// binary registers the route policy but no middleware and every request
+/// renders as before.
+///
+/// Ordering matters and is the caller's responsibility:
+/// `register_global_middleware` appends, so this must run *after*
+/// `bootstrap::register_http_stack`, whose session, locale, and feature
+/// middleware establish the request-scoped state the cache middleware reads
+/// while building a lookup key.
+pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
+    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()).await
 }
