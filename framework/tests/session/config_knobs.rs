@@ -140,7 +140,7 @@ impl Drop for EnvGuard {
 #[test]
 #[serial_test::serial]
 fn oversized_session_lifetime_clamps_instead_of_overflowing() {
-    let _env = crate::env_lock::lock_env();
+    let _env_lock = crate::env_lock::lock_env();
     let _env = EnvGuard::set(&[("SESSION_LIFETIME", u64::MAX.to_string())]);
     let cfg = SessionConfig::from_env();
     // Minute-granularity clamp: the minute bound times sixty (the lost
@@ -162,7 +162,7 @@ fn oversized_session_lifetime_clamps_instead_of_overflowing() {
 #[test]
 #[serial_test::serial]
 fn oversized_remember_lifetime_clamps_instead_of_overflowing() {
-    let _env = crate::env_lock::lock_env();
+    let _env_lock = crate::env_lock::lock_env();
     let _env = EnvGuard::set(&[("REMEMBER_LIFETIME", u64::MAX.to_string())]);
     let cfg = SessionConfig::from_env();
     let expected = suprnova::session::MAX_SESSION_LIFETIME_MINUTES.saturating_mul(60);

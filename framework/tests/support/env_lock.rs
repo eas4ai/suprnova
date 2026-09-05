@@ -16,7 +16,7 @@ static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 /// [`lock_env_async`].
 #[allow(
     dead_code,
-    reason = "this file is shared via #[path] across every test binary; a binary whose tests are all async never calls the sync entry point"
+    reason = "this file is shared via #[path] across the test binaries that declare it; a binary whose tests are all async never calls the sync entry point"
 )]
 pub fn lock_env() -> MutexGuard<'static, ()> {
     ENV_LOCK.blocking_lock()
@@ -26,7 +26,7 @@ pub fn lock_env() -> MutexGuard<'static, ()> {
 /// first statement, so the guard covers every await in the body.
 #[allow(
     dead_code,
-    reason = "this file is shared via #[path] across every test binary; a binary whose tests are all sync never calls the async entry point"
+    reason = "this file is shared via #[path] across the test binaries that declare it; a binary whose tests are all sync never calls the async entry point"
 )]
 pub async fn lock_env_async() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().await
