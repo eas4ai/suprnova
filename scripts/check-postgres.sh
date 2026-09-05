@@ -140,7 +140,8 @@ render_cache_pg_out="$(cargo test -p suprnova --test render_cache_ledger -- --ig
 echo "$render_cache_pg_out"
 for render_cache_pg_test in \
     live_postgres_generation_ledger_advances_and_reads \
-    live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock; do
+    live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock \
+    live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current; do
     if ! grep -qE "^test ${render_cache_pg_test} \.\.\. ok" <<<"$render_cache_pg_out"; then
         echo "check-postgres: ${render_cache_pg_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
