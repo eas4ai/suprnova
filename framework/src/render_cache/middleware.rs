@@ -87,6 +87,15 @@
 //!   alongside `Tenant`, which partitions by both and does cache. Parked for
 //!   a later iteration: having `Gate` record the identity it consulted would
 //!   let the value comparison decide instead of the mapping.
+//! - **Eloquent global scopes are not instrumented.** A registered
+//!   [`crate::eloquent::scopes::GlobalScope`] runs inside every
+//!   `Model::query` call, and its own registration doc invites the scope to
+//!   read per-request state such as the current tenant id out of a
+//!   thread-local, a `tokio::task_local!`, or an atomic, none of which this
+//!   collector observes; a tenant-scoped global scope therefore partitions
+//!   what the render reads without recording a `Tenant` observation, so the
+//!   remedy is to declare `Tenant` variance on every route whose models
+//!   carry one.
 //!
 //! A route handler that branches its output on a header or a config value -
 //! without also declaring the corresponding variance - is outside what this

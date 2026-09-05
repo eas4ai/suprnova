@@ -4,6 +4,168 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-04 -- RenderCache Tier 0 foundation
+
+Suprnova now carries a render cache for Complete representations. The plan ran
+as nineteen tasks on `iteration-005-live-integration` from `c2aac7a7`, each one
+reviewed and fixed before the next started. Their commit subjects, oldest
+first, are the record of what was built:
+
+```
+feat(render-cache): add route policy, patches, and response eligibility
+fix(render-cache): enforce patch bounds through apply as well as build
+feat(render-cache): add variance dimensions and privacy classification
+fix(render-cache): reject duplicate variance declarations before mutating, redact private material debug output, and drop the test-only key-ring constructor
+feat(render-cache): derive canonical bounded lookup keys
+fix(render-cache): key digest identity independent of dimensions
+feat(render-cache): add the versioned Complete entry codec with integrity
+fix(render-cache): serialize variance dimensions by their canonical name
+fix(render-cache): hex-encode generation keys and revalidate decoded headers
+fix(render-cache): reject uppercase and mixed-case generation keys
+test(render-cache): cover the wrong-length and non-hex generation key paths
+feat(render-cache): add the RenderStore contract and immutable L0 store
+fix(render-cache): fail closed on a zero-bounded L0 store
+feat(render-cache): add dependency identities, generation sets, and the ledger contract
+fix(render-cache): align the observation bound and add bounded config/feature identities
+test(render-cache): cover epoch mismatch, record key bounds, and query class bounds
+feat(render-cache): add coherence intervals, leases, and HTTP cache metadata
+test(render-cache): pin freshness transition boundaries and document shell-stitched default
+feat(render-cache): add fenced in-process rebuild coordination
+fix(render-cache): box the leader lease and cover the waiter wakeup
+feat(render-cache): register route and group policies on the router
+fix(render-cache): drop the test suppression and pin full-policy override
+feat(render-cache): add the request-scoped dependency collector
+fix(render-cache): observe every read seam and bound the collector report
+fix(render-cache): observe authorization reads on the raw gate paths
+feat(render-cache): add the database generation ledger and its migration
+fix(render-cache): read generations from the primary and order advances
+feat(render-cache): advance generations from every supported write path
+fix(render-cache): gate write instrumentation and keep advances in the caller transaction
+feat(render-cache): advance generations from the remaining write paths
+feat(render-cache): add the atomic file L1 store
+feat(render-cache): close the raw persist and payments write gaps
+fix(render-cache): serialise file store eviction and harden publication durability
+test(render-cache): assert the payments and raw entity write paths advance
+fix(render-cache): reconcile the file store tally when the directory sync fails
+fix(render-cache): advance payments generations after the hydration transaction commits
+fix(render-cache): remove the evicted file before dropping it from the tally
+fix(render-cache): reject before evicting and keep the tally honest on cleanup
+feat(render-cache): serve proven Complete representations through one middleware
+fix(render-cache): key by observed privacy and stop clearing global middleware
+fix(render-cache): honest transaction events, real stale-on-error, and L1 coverage
+fix(render-cache): observe every identity read and key by the narrowed class
+fix(render-cache): require the dimension each narrowing reason names
+fix(render-cache): decline when the render did not use the key's values
+fix(render-cache): compare every observed value against the key
+fix(render-cache): observe flag identity by scope and admit anonymous keys
+fix(render-cache): record a bare read for a scoped axis with no field
+feat(render-cache): keep public-seed Live documents Complete until the seed deadline
+fix(render-cache): decline reason-less private classes and record Live mount facts at mount
+fix(render-cache): scope the unreasoned-private-class invariant to narrowed classes only
+fix(render-cache): strip a classification copy in the test seam, never the real outcome
+feat(render-cache): add L1 sweep, store inspection, and hidden console commands
+test(render-cache): prove every write window is caught before a stale serve
+fix(render-cache): bind L1 retention to the policy dead edge, bound sweep, clear L0 on epoch advance, and harden the console commands
+test(render-cache): prove no private material crosses visitors, locales, or tenants
+docs(render-cache): document the RenderCache Tier 0 foundation for implementers and application authors
+test(render-cache): prove races against production, not the test's own hooks
+docs(render-cache): use bare ? in the manual's route examples now that RenderCacheError converts to FrameworkError
+fix(render-cache): make the Dead edge class-aware, stop printing a false epoch on ledger failure, and fix stale docs
+docs(manual): translate the RenderCache chapter into the six locales and stamp the lock
+fix(render-cache): close the arm/fire flag-hook interleaving window
+test(render-cache): give every privacy leak test its own positive control
+```
+
+### What this closing checkpoint added
+
+`RenderCacheError` now converts into `FrameworkError` as an `Internal`
+category through the same shape the other Live subsystem conversions use, so
+a route builder that declares a policy propagates with a bare `?`; the
+message is the engine's own closed `render_cache_*` token and never key
+material. The middleware's honest-boundary section now names Eloquent global
+scopes as an uninstrumented seam, with declaring `Tenant` on affected routes
+as the remedy. Two further decisions were captured rather than built, in
+`docs/specs/suprnova-live/iterations/next/`: a bounded `reason` on the
+declined lookup outcome, and global-scope tenant observation. The existing
+capture on authorization reads now also names the wider class of public,
+uninstrumented accessors onto the authenticated identity and the single
+tripwire that is its only present coverage.
+
+### The dogfood route and its proof
+
+`app::live::routes` declares a `PublicShared` policy on `/live/public` with a
+five-minute fresh interval, one minute of stale service, and five minutes of
+stale-on-error; the public seed's own 24-hour promotion deadline bounds the
+served `max-age` underneath it. `app/tests/live_render_cache.rs` proves the
+route actually caches rather than merely responding: a counting middleware
+registered after `RenderCache::install` sits closer to the handler than
+`RenderCacheMiddleware`, so a served entry never reaches it, and the second
+anonymous GET raises the render count by zero while `store_inspection`
+reports one stored entry and `inspect_route_for_test` finds it under the
+route's own lookup key, at the undemoted `PublicShared` class. The cached
+document's seed still promotes, and a conditional request on the served
+validator answers 304 from the same entry. The three-engine Playwright
+dogfood suite exercises the same route through the real server.
+
+### The middleware install is not on the server binary
+
+`RenderCache::install` is `async`, because it probes for the generation
+ledger's tables before assembling a runtime, while `Application::try_routes`
+takes a synchronous `FnOnce() -> Result<Router, FrameworkError>` and
+`Server::try_from_config_with_routes` calls it synchronously. There is no
+asynchronous route-construction hook, so the install cannot be the last line
+of `app::live::routes`. It lives in `app::live::routes_with_render_cache`
+instead, which the browser scenario's server and the Live test harness call
+and `app/cmd/main.rs` does not: `suprnova serve` registers the route policy
+and renders every request as before. The same gap blocks the CLI scaffold,
+whose generated `routes` is synchronous and reached through the same
+`try_routes` call, so the generated application declares no cache. Closing
+this needs an asynchronous route hook on `Application` and `Server`, or an
+install that defers the ledger probe; both are framework API decisions
+outside this plan.
+
+### Commands that ran for this checkpoint
+
+```
+CARGO_INCREMENTAL=0 cargo check -p suprnova --lib
+CARGO_INCREMENTAL=0 cargo check -p suprnova --lib --tests
+CARGO_INCREMENTAL=0 cargo check -p suprnova --no-default-features
+CARGO_INCREMENTAL=0 cargo check -p app --all-targets
+CARGO_INCREMENTAL=0 cargo test -p suprnova --lib render_cache_error_bridge
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_middleware
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_live
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_races
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_privacy
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_operations
+CARGO_INCREMENTAL=0 cargo test -p suprnova --features database-sqlite --test render_cache_file_store
+CARGO_INCREMENTAL=0 cargo test -p app --test live_render_cache
+CARGO_INCREMENTAL=0 cargo test -p app --test live_dogfood --test live_async_dogfood --test live_upload_reacquire
+CARGO_INCREMENTAL=0 cargo test -p suprnova-cli --test live_generated_app
+npx playwright test e2e/app-dogfood.spec.ts --project=chromium
+node scripts/check-specs.mjs
+node scripts/check-implementation-docs.mjs
+tests/documentation_contract.sh
+python3 scripts/check-manual-structure.py
+scripts/check-prose-dashes.sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 crates/suprnova-live/scripts/gate.sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 scripts/gate.sh
+```
+
+Both gates ran detached with their exit codes captured; the two run logs and
+the repository gate runner's own run identifier are recorded in the task
+report alongside the counts, because a ledger edit naming them would change
+the tree the gates had just covered.
+
+### A full-tier failure inherited from the branch point
+
+`scripts/check-feature-matrix.sh`, the `feature-matrix` step in the
+repository gate's `full` tier only, fails at `c2aac7a7` with four
+`Request::for_test_with_headers` errors in `live/async_transport.rs` under
+`--no-default-features --features
+database-sqlite,database-postgres,broadcasting-fanout --tests`; those predate
+this branch, neither gate run for this checkpoint is the full tier, and they
+are not this plan's to fix.
+
 ## 2026-09-03 -- Framework-integration qualification gate
 
 Plan Task 11 ran the focused static and test gates, the Live crate's own gate

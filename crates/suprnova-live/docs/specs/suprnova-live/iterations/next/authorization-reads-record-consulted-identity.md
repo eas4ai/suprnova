@@ -22,7 +22,13 @@ it actually consulted while evaluating a decision, as material comparable
 the same way every other identity read already is. The value guard could
 then compare an authorization decision's own resolved subject against the
 key's declared variance instead of assuming `Principal` unconditionally,
-letting a genuinely per-tenant gate cache under `Tenant` alone.
+letting a genuinely per-tenant gate cache under `Tenant` alone. The wider
+gap this sits inside is the whole class of public, uninstrumented accessors
+onto the authenticated identity, of which `Request::auth_user_id` is one
+member, and the only coverage that class has today is the single tripwire
+`the_uninstrumented_request_accessor_carries_no_identity_and_no_body_crosses`,
+which measures that one accessor rather than proving anything about the
+class.
 
 ## Acceptance criteria
 
