@@ -1663,3 +1663,76 @@ impl From<opendal::Error> for FrameworkError {
         }
     }
 }
+
+// Implement From<RenderCacheError> so a route builder that declares a
+// RenderCache policy (`FreshnessPolicy::new(..)?`, `..build()?`) propagates
+// through `?` in application route registration, which already returns
+// `FrameworkError`. Ruling R101.
+//
+// The category matches the other Live subsystem conversions
+// (`From<ToolingError>`, `From<LiveDocumentError>`): a contract violation
+// reported by the engine is an internal fault of the application's own
+// declaration, not a client error, so it is `Internal` and carries the
+// framework's 500. The message names the violated contract through
+// `RenderCacheError`'s own closed `Display` (one of seven fixed
+// `render_cache_*` tokens) and nothing else: no key text, no digest, no
+// stored bytes, and no identity ever reaches it.
+impl From<suprnova_live::render_cache::RenderCacheError> for FrameworkError {
+    fn from(error: suprnova_live::render_cache::RenderCacheError) -> Self {
+        Self::internal(format!("RenderCache contract violated: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod render_cache_error_bridge_tests {
+    use super::*;
+    use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
+
+    #[test]
+    fn a_render_cache_error_converts_to_the_internal_category() {
+        let error =
+            FrameworkError::from(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        assert_eq!(error.status_code(), 500);
+        match error {
+            FrameworkError::Internal { message } => {
+                assert!(
+                    message.contains("render_cache_policy_invalid"),
+                    "the message names the violated contract: {message}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_kind_converts_through_question_mark_without_leaking_material() {
+        fn inner(kind: RenderCacheErrorKind) -> Result<(), RenderCacheError> {
+            Err(RenderCacheError::new(kind))
+        }
+        fn outer(kind: RenderCacheErrorKind) -> Result<(), FrameworkError> {
+            inner(kind)?;
+            Ok(())
+        }
+        for kind in [
+            RenderCacheErrorKind::PolicyInvalid,
+            RenderCacheErrorKind::VarianceInvalid,
+            RenderCacheErrorKind::KeyInvalid,
+            RenderCacheErrorKind::EntryInvalid,
+            RenderCacheErrorKind::EntryUnsupported,
+            RenderCacheErrorKind::ProviderUnavailable,
+            RenderCacheErrorKind::PublicationFenced,
+        ] {
+            let error = outer(kind).expect_err("the kind converts");
+            assert_eq!(error.status_code(), 500);
+            let message = error.to_string();
+            assert!(
+                message.starts_with("Internal server error: RenderCache contract violated: "),
+                "{message}"
+            );
+            assert!(
+                message.ends_with(&RenderCacheError::new(kind).to_string()),
+                "the closed kind token is the whole detail: {message}"
+            );
+        }
+    }
+}
