@@ -256,6 +256,27 @@ struct WaiterTrackingCoordinator {
     inner: LocalRebuildCoordinator,
     waiting: AtomicU64,
     waiting_notify: tokio::sync::Notify,
+    /// Task 17: how many admitted leads (foreground or background) have
+    /// finished their whole publish-decision pipeline and released their
+    /// lease back to the coordinator - regardless of whether they actually
+    /// published. `lead_render` calls `release` on every return path
+    /// immediately after that path's own publish decision (a decline, a
+    /// discard as moved, or `store_entry`'s write); on the one path that
+    /// does publish, `finish_fresh_render` still runs *after* `release` to
+    /// build the client-visible response, so `release` is not literally the
+    /// last thing that path does, but the store write it counts is already
+    /// applied by the time `release` fires. So this is the one signal that
+    /// is true exactly when a render's outcome (published, declined, or
+    /// discarded as moved) is already final and observable in the store,
+    /// which a background rebuild's own start alone cannot prove:
+    /// `spawn_background_rebuild` fires it in a detached `tokio::spawn`, so
+    /// a client dispatch that merely served the stale entry returns long
+    /// before the rebuild it kicked off has necessarily finished.
+    released: AtomicU64,
+    /// Paired with `released` the same way `waiting_notify` is paired with
+    /// `waiting`: race-free "enable-then-check" (see [`counting_route::wait_until_rendering_count`]'s
+    /// own doc for why the capture-then-check order matters).
+    released_notify: tokio::sync::Notify,
 }
 
 impl WaiterTrackingCoordinator {
@@ -264,6 +285,8 @@ impl WaiterTrackingCoordinator {
             inner: LocalRebuildCoordinator::new(limits),
             waiting: AtomicU64::new(0),
             waiting_notify: tokio::sync::Notify::new(),
+            released: AtomicU64::new(0),
+            released_notify: tokio::sync::Notify::new(),
         }
     }
 }
@@ -293,7 +316,10 @@ impl RebuildCoordinator for WaiterTrackingCoordinator {
     }
 
     async fn release(&self, lease: RebuildLease) -> Result<(), RenderCacheError> {
-        self.inner.release(lease).await
+        let result = self.inner.release(lease).await;
+        self.released.fetch_add(1, Ordering::SeqCst);
+        self.released_notify.notify_waiters();
+        result
     }
 }
 
@@ -381,6 +407,12 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
     counting_route::reset();
+    // Fix round 1, F4: disarms any race point a previous test in this same
+    // binary armed but never fired (see `race::reset`'s own doc). Gated the
+    // same as `race` itself: `race_points` only exists in the library under
+    // the `testing` feature, so this call must not exist without it either.
+    #[cfg(feature = "testing")]
+    race::reset();
     if clear_global_middleware {
         suprnova::middleware::clear_global_middleware_for_test();
     }
@@ -1008,14 +1040,24 @@ pub fn ledger() -> suprnova::render_cache::ledger::SqlGenerationLedger {
 /// Advances the `posts` table's generation directly, through the ORM path,
 /// independent of any render.
 pub async fn advance_posts(_harness: &Harness) {
-    suprnova::DB::transaction(|_tx| {
+    create_extra_post("advanced").await;
+}
+
+/// Creates one more `posts` row inside its own `DB::transaction`, through
+/// the ORM path - the shared body [`advance_posts`] and
+/// [`race::write_posts_after_reread`] both use to advance the same
+/// dependency identity a render's own `Post::find` observes, independent
+/// of any render.
+async fn create_extra_post(title: &str) {
+    let title = title.to_owned();
+    suprnova::DB::transaction(move |_tx| {
         Box::pin(async move {
-            Post::create(attrs! { title: "advanced" }).await?;
+            Post::create(attrs! { title: title }).await?;
             Ok::<(), FrameworkError>(())
         })
     })
     .await
-    .expect("advance posts");
+    .expect("create extra post");
 }
 
 async fn cached_handler(request: Request) -> Response {
@@ -1042,6 +1084,12 @@ async fn stale_handler(request: Request) -> Response {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let _ = Post::find(id).await;
+    // Task 17: lets a background rebuild of this route be raced by a write
+    // the same way `cached_handler`'s foreground renders already can be
+    // (see `write_during_next_render`'s own doc) - a no-op unless a test
+    // has armed it, so every other test's stale-route behavior (fail,
+    // stale-on-error, stale-servable) is unaffected.
+    counting_route::maybe_write_during_render().await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("stale render {n}")))
 }
@@ -1610,6 +1658,120 @@ pub mod counting_route {
             });
             let _ = handle.await;
         }
+    }
+}
+
+/// Task 17: the deterministic race suite's own hooks.
+///
+/// Three of the five hooks a race suite over this middleware needs already
+/// exist, under other names, in [`counting_route`]: [`counting_route::hold_next_render`],
+/// [`counting_route::wait_until_rendering_count`], and
+/// [`counting_route::release_render`] cover holding a render (foreground or
+/// background - both call [`counting_route::on_render_start`]), observing
+/// that it has actually started, and releasing it (ruling R83). This
+/// module does not duplicate them; a race test calls them directly. What
+/// this module adds:
+///
+/// - [`write_posts_after_reread`] and [`advance_epoch_during_next_render`]
+///   arm the two race points in [`suprnova::render_cache::middleware::race_points`]
+///   that do not correspond to anything `counting_route` already exposes,
+///   because they fire from the coherence check around a render, not from
+///   the render itself.
+/// - [`wait_until_background_finished`] is a barrier `counting_route` has
+///   no reason to provide: a background rebuild is a detached `tokio::spawn`
+///   inside the middleware (see `RenderCacheMiddleware::spawn_background_rebuild`),
+///   so the client dispatch that triggered it returns long before that
+///   rebuild's own publish decision is final. See its own doc for why
+///   [`WaiterTrackingCoordinator::released`] - not a render merely having
+///   started - is the correct signal to wait on.
+///
+/// Compiled only under the `testing` feature (ruling R72): the first two
+/// functions reach `suprnova::render_cache::middleware::race_points`,
+/// which only exists in the library under that feature, so an integration
+/// test crate outside it can only see this module through the same gate -
+/// matching `#![cfg(feature = "testing")]` at the top of `render_cache_races.rs`,
+/// which is this module's only caller.
+#[cfg(feature = "testing")]
+pub mod race {
+    use suprnova::render_cache::middleware::race_points;
+
+    use super::*;
+
+    /// Arms the fresh reread of whichever render next finds itself
+    /// coherent to land one more write to the `posts` table - the same
+    /// dependency a `Post::find` render observes - immediately after that
+    /// reread has already passed, but before the render's own candidate is
+    /// built and stored. The stored candidate therefore still carries the
+    /// pre-write observations, so it is the *next* lookup, not this one,
+    /// that finds them behind the ledger and misses. One-shot: consumed
+    /// the first time [`race_points::AFTER_REREAD`] fires after this call.
+    pub fn write_posts_after_reread(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-after-reread")));
+        race_points::arm(&race_points::AFTER_REREAD, hook);
+    }
+
+    /// Arms the next *request's* epoch capture (in
+    /// `RenderCacheMiddleware::serve`, which reads the epoch for every
+    /// GET/HEAD to a policy-covered route before it knows whether that
+    /// request will be a hit, a stale serve, or a render) to advance the
+    /// installed runtime's authority epoch immediately after that capture.
+    /// That is not necessarily the next render: a request this hook fires
+    /// on but that turns out to be a hit or a stale serve still consumes
+    /// the arm without any render happening. When the request the hook
+    /// does fire on goes on to render, that render carries a stale epoch
+    /// by construction, and its own fresh reread - which reads the epoch
+    /// again, after the advance - is guaranteed to find it moved. One-shot:
+    /// consumed the first time [`race_points::EPOCH_CAPTURED`] fires after
+    /// this call, on whichever request reaches it next.
+    pub fn advance_epoch_during_next_render(_harness: &Harness) {
+        let hook: race_points::Hook = Box::new(|| {
+            Box::pin(async {
+                RenderCache::advance_epoch()
+                    .await
+                    .expect("advance epoch during race test");
+            })
+        });
+        race_points::arm(&race_points::EPOCH_CAPTURED, hook);
+    }
+
+    /// Waits until at least `n` admitted leads (foreground or background)
+    /// have finished their whole publish-decision pipeline and released
+    /// their coordinator lease, regardless of whether they actually
+    /// published - the same race-free "enable-then-check" shape as
+    /// [`counting_route::wait_until_waiting`], over
+    /// [`WaiterTrackingCoordinator::released`] instead of its `waiting`
+    /// counter. See that field's own doc for exactly which point in
+    /// `lead_render` calls `release` on each return path; every one of
+    /// them has already made its publish decision (and applied it to the
+    /// store, when there is one) by the time `release` runs, so this is
+    /// true exactly when a render's outcome (published, declined, or
+    /// discarded as moved) is already final and observable - unlike a
+    /// render merely having *started* ([`counting_route::wait_until_rendering_count`]),
+    /// which a background rebuild reaches long before its own publish
+    /// decision is made.
+    pub async fn wait_until_background_finished(harness: &Harness, n: u64) {
+        loop {
+            let notified = harness.waiting.released_notify.notified();
+            if harness.waiting.released.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Disarms both race points. Fix round 1, F4: nothing previously
+    /// cleared an arm a test made but never consumed - `AFTER_REREAD` only
+    /// fires on a coherent reread, and `lead_render` has several decline
+    /// paths that return before reaching it, so a test that armed it and
+    /// then hit one of those paths would otherwise leave the hook loaded
+    /// for whichever test runs next in the same process. Called from
+    /// [`super::boot`] alongside [`counting_route::reset`], so every test
+    /// starts with both race points disarmed regardless of what the
+    /// previous test in the same binary armed and never fired.
+    pub(crate) fn reset() {
+        race_points::disarm(&race_points::AFTER_REREAD);
+        race_points::disarm(&race_points::EPOCH_CAPTURED);
     }
 }
 

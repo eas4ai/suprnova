@@ -418,6 +418,14 @@ impl RenderCacheMiddleware {
             Ok(epoch) => epoch,
             Err(_) => return Err(ProviderFailure(request, next)),
         };
+        // Test-only race seam (R72/R83): fires right after the epoch this
+        // request's `RenderJob` will carry is captured, and before the
+        // render it describes begins - so an epoch advance armed here is
+        // baked into the job as already stale by the time that render's
+        // own fresh reread checks it, proving such a render's candidate is
+        // never published.
+        #[cfg(any(test, feature = "testing"))]
+        race_points::fire(&race_points::EPOCH_CAPTURED).await;
         let Ok(input) = key_input(runtime, &request, pattern, policy, epoch) else {
             // Fix round 5: a dimension's value could not be declared (see
             // `variance_descriptor`'s own doc) - bypass uncached rather
@@ -1741,7 +1749,17 @@ async fn fresh_reread_is_coherent(
     let current = runtime.ledger.current(&digests).await.map_err(|_| ())?;
     let fresh_epoch = runtime.ledger.epoch().await.map_err(|_| ())?;
     match CoherenceCheck::compare(observed, &current, fresh_epoch, epoch) {
-        CoherenceCheck::Coherent => Ok(()),
+        CoherenceCheck::Coherent => {
+            // Test-only race seam (R72/R83): fires after this reread has
+            // already found the candidate coherent, so a write armed here
+            // lands too late to be caught by *this* check but still lands
+            // before the entry below is built and stored - proving that
+            // such a write is instead caught at the *next* lookup, through
+            // the stored `observed` set this reread already closed over.
+            #[cfg(any(test, feature = "testing"))]
+            race_points::fire(&race_points::AFTER_REREAD).await;
+            Ok(())
+        }
         CoherenceCheck::Moved(_) => Err(()),
     }
 }
@@ -1911,6 +1929,135 @@ pub fn key_input_for_test(
         // same key regardless of when it runs in a test.
         epoch: 1,
         variance,
+    }
+}
+
+/// Test-only race-injection seams for this module's own coherence checks.
+/// Each hook fires from the exact point in the request flow its name
+/// describes, awaited in place, so a test can land a write or an epoch
+/// advance inside a window that is otherwise too narrow to hit
+/// deterministically from outside.
+///
+/// Compiled only under `cfg(test)` or the `testing` feature (ruling R72):
+/// an integration test under `framework/tests/` is a separate crate with
+/// no `cfg(test)` of its own reaching this library, so it can only see
+/// these hooks through the feature - which is on by default, so an
+/// ordinary `cargo test` still exercises them, but a feature-matrix build
+/// that turns default features off compiles the race suite's own test
+/// file to nothing instead of failing against seams that do not exist.
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod race_points {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A one-shot, boxed async closure a test arms and this module
+    /// consumes exactly once, the next time its race point fires.
+    pub type Hook = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+    /// One race point: an `armed` flag plus the hook itself behind a
+    /// `Mutex`.
+    ///
+    /// `testing` is a default-on feature (see `Cargo.toml`'s `default`
+    /// list), so [`fire`] runs on every GET/HEAD to a policy-covered route
+    /// in an ordinary build, hits included - `EPOCH_CAPTURED` sits before
+    /// the L0 lookup. Fix round 1, F6: `armed` is the fast path that keeps
+    /// an unarmed race point to one relaxed load, rather than a mutex lock
+    /// on every such request. Fix round 1, F8: `Mutex::new` has been
+    /// `const` since Rust 1.63, so a race point needs no `OnceLock` layer
+    /// to lazily initialize the way the previous version did.
+    pub struct RacePoint {
+        armed: AtomicBool,
+        hook: Mutex<Option<Hook>>,
+    }
+
+    impl RacePoint {
+        /// A disarmed race point, usable directly as a `static` initializer.
+        const fn new() -> Self {
+            Self {
+                armed: AtomicBool::new(false),
+                hook: Mutex::new(None),
+            }
+        }
+    }
+
+    /// Fires from [`super::fresh_reread_is_coherent`], immediately after it
+    /// finds the render still coherent and before its caller acts on that
+    /// result - the exact window a write must land in to be "after the
+    /// reread" and "before publication": late enough that it cannot itself
+    /// be caught by this same reread, early enough that the entry this
+    /// request publishes still carries the observations from before it.
+    pub static AFTER_REREAD: RacePoint = RacePoint::new();
+
+    /// Fires from [`super::RenderCacheMiddleware::serve`], immediately
+    /// after the epoch a new [`super::RenderJob`] will carry is read, and
+    /// before the render that job describes begins - the exact window an
+    /// epoch advance must land in to be baked into the job as stale by the
+    /// time that render's own fresh reread checks it. Fires on whichever
+    /// *request* reaches that point next, not necessarily the next
+    /// *render*: `serve` reads the epoch before it knows whether the
+    /// request will be a hit, a stale serve, or a render (fix round 1, F7).
+    pub static EPOCH_CAPTURED: RacePoint = RacePoint::new();
+
+    /// Arms `point` to run `hook` exactly once, the next time it fires.
+    /// Replaces any hook already armed there.
+    ///
+    /// Fix round 2, N1: the hook write and the `armed` store are one
+    /// critical section (both happen while `slot` is still locked), the
+    /// same as [`disarm`] and [`fire`] below. Storing `armed` outside the
+    /// lock (as an earlier version of this module did) let the two race
+    /// points' state disagree under interleaving: `fire` could `take()` the
+    /// hook and release the lock, an `arm` on another thread could then
+    /// lock, write a new hook, and set `armed` true, and only *then* would
+    /// `fire`'s own deferred `armed.store(false)` run - clobbering the new
+    /// arm's `true` back to `false` while its hook sat in the `Mutex` as
+    /// `Some(..)`. That hook would never fire; the symptom is a barrier
+    /// that hangs forever waiting for a race that silently never happened.
+    /// Keeping the flag and the hook inside one lock makes that
+    /// interleaving impossible: whichever of `arm`/`disarm`/`fire` gets the
+    /// lock next always sees (and leaves) a consistent pair.
+    pub fn arm(point: &'static RacePoint, hook: Hook) {
+        let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(hook);
+        point.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Clears any hook armed at `point` without firing it, and lowers the
+    /// flag [`fire`] checks. Fix round 1, F4: `AFTER_REREAD` only fires on
+    /// a coherent reread, and `lead_render` has several decline paths that
+    /// return before reaching it, so an arm a test made but that path never
+    /// consumed would otherwise leak into whichever test runs next in the
+    /// same process. Test-only cleanup; production code never calls this.
+    /// Fix round 2, N1: flag and hook clear inside the same critical
+    /// section - see [`arm`]'s own doc for why that matters.
+    pub fn disarm(point: &'static RacePoint) {
+        let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+        point.armed.store(false, Ordering::Relaxed);
+    }
+
+    /// Fires `point` if a hook is armed there, consuming the arm; a no-op
+    /// otherwise. The relaxed load of `armed` is the only cost an ordinary,
+    /// unarmed request pays - it never reaches the mutex. Once that fast
+    /// path decides to look further, the `take()` and the `armed` store
+    /// that consume the arm run inside one critical section (fix round 2,
+    /// N1; see [`arm`]'s own doc), so an `arm` racing this call can never
+    /// land its hook in the gap between them.
+    pub(crate) async fn fire(point: &'static RacePoint) {
+        if !point.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let hook = {
+            let mut slot = point.hook.lock().unwrap_or_else(|e| e.into_inner());
+            let hook = slot.take();
+            point.armed.store(false, Ordering::Relaxed);
+            hook
+        };
+        if let Some(hook) = hook {
+            hook().await;
+        }
     }
 }
 
