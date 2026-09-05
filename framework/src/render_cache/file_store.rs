@@ -523,7 +523,7 @@ impl FileRenderStore {
     ///
     /// # Bounded work (fix round 1, R94/F5)
     ///
-    /// At most [`SWEEP_BATCH_LIMIT`] entries are removed per call, oldest
+    /// At most `SWEEP_BATCH_LIMIT` entries are removed per call, oldest
     /// `published_at_ms` first. `sweep` runs inline on the request path
     /// (triggered every 256th publication) with the tally lock held across
     /// every removal it performs - moving it off the request path with
@@ -620,7 +620,7 @@ pub struct SweepOutcome {
     /// Files actually removed from disk by this call.
     pub removed: usize,
     /// Whether at least one dead entry remains after this call - either
-    /// because the backlog exceeded [`SWEEP_BATCH_LIMIT`], or because a
+    /// because the backlog exceeded `SWEEP_BATCH_LIMIT`, or because a
     /// removal within the batch failed and left its entry tracked and
     /// still dead.
     pub more_remain: bool,

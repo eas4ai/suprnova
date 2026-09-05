@@ -1961,7 +1961,7 @@ pub mod race_points {
     /// `Mutex`.
     ///
     /// `testing` is a default-on feature (see `Cargo.toml`'s `default`
-    /// list), so [`fire`] runs on every GET/HEAD to a policy-covered route
+    /// list), so `fire` runs on every GET/HEAD to a policy-covered route
     /// in an ordinary build, hits included - `EPOCH_CAPTURED` sits before
     /// the L0 lookup. Fix round 1, F6: `armed` is the fast path that keeps
     /// an unarmed race point to one relaxed load, rather than a mutex lock
@@ -1983,7 +1983,7 @@ pub mod race_points {
         }
     }
 
-    /// Fires from [`super::fresh_reread_is_coherent`], immediately after it
+    /// Fires from `fresh_reread_is_coherent`, immediately after it
     /// finds the render still coherent and before its caller acts on that
     /// result - the exact window a write must land in to be "after the
     /// reread" and "before publication": late enough that it cannot itself
@@ -1991,8 +1991,8 @@ pub mod race_points {
     /// request publishes still carries the observations from before it.
     pub static AFTER_REREAD: RacePoint = RacePoint::new();
 
-    /// Fires from [`super::RenderCacheMiddleware::serve`], immediately
-    /// after the epoch a new [`super::RenderJob`] will carry is read, and
+    /// Fires from `RenderCacheMiddleware::serve`, immediately
+    /// after the epoch a new `RenderJob` will carry is read, and
     /// before the render that job describes begins - the exact window an
     /// epoch advance must land in to be baked into the job as stale by the
     /// time that render's own fresh reread checks it. Fires on whichever
@@ -2006,7 +2006,7 @@ pub mod race_points {
     ///
     /// Fix round 2, N1: the hook write and the `armed` store are one
     /// critical section (both happen while `slot` is still locked), the
-    /// same as [`disarm`] and [`fire`] below. Storing `armed` outside the
+    /// same as [`disarm`] and `fire` below. Storing `armed` outside the
     /// lock (as an earlier version of this module did) let the two race
     /// points' state disagree under interleaving: `fire` could `take()` the
     /// hook and release the lock, an `arm` on another thread could then
@@ -2025,7 +2025,7 @@ pub mod race_points {
     }
 
     /// Clears any hook armed at `point` without firing it, and lowers the
-    /// flag [`fire`] checks. Fix round 1, F4: `AFTER_REREAD` only fires on
+    /// flag `fire` checks. Fix round 1, F4: `AFTER_REREAD` only fires on
     /// a coherent reread, and `lead_render` has several decline paths that
     /// return before reaching it, so an arm a test made but that path never
     /// consumed would otherwise leak into whichever test runs next in the
