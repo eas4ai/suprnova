@@ -62,6 +62,7 @@ fn app_env_in_base_dotenv_selects_environment_specific_file() {
     // BEFORE the base `.env` was loaded, so `.env.production` was
     // skipped.
 
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&[
@@ -117,6 +118,7 @@ fn app_env_in_base_dotenv_selects_environment_specific_file() {
 fn system_env_app_env_selects_environment_file() {
     // The "old" path - `APP_ENV=production` in real system env - must
     // still work after the reorder.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_SYS_PROD"]);
@@ -141,6 +143,7 @@ fn no_app_env_defaults_to_local() {
     // Backwards compatibility: when APP_ENV is unset and no .env exists
     // anywhere, the loader returns Local. We preserve this so existing
     // local-dev workflows that rely on `cargo run` keep working.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
@@ -162,6 +165,7 @@ fn system_env_wins_over_dotenv_files() {
     // `from_path_override` would clobber a system value - that would
     // be a precedence inversion (system env is highest, files are
     // lower).
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_SYS_WINS"]);
@@ -195,6 +199,7 @@ fn env_specific_file_overrides_base_dotenv() {
     // `.env.production` must beat `.env` for the same key, because
     // env-specific files are more specific (higher precedence than the
     // base file).
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_OVERRIDE"]);
@@ -229,6 +234,7 @@ fn malformed_dotenv_returns_error() {
     // typo in `.env.production` (e.g. `APP_KEY="unterminated` or a
     // stray non-key/value line) would leave required settings missing
     // or defaulted with no signal to the operator.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
@@ -257,6 +263,7 @@ fn malformed_dotenv_returns_error() {
 fn missing_optional_env_files_are_ok() {
     // Missing `.env.local`, `.env.<env>`, `.env.<env>.local` are the
     // expected case - the loader must NOT promote ENOENT to an error.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
@@ -279,6 +286,7 @@ fn repeat_load_does_not_promote_stale_keys_to_system_tier() {
     // root B must let B's file values win for shared keys. Previously
     // A's file values were promoted to the "real system env" snapshot
     // on B's call, freezing the stale value in place.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_LEAK"]);

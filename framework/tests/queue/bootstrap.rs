@@ -83,6 +83,7 @@ fn set_env(key: &str, value: Option<&str>) {
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
+    let _env = crate::env_lock::lock_env();
     Queue::set_driver(Arc::new(BogusDriver));
     assert_eq!(Queue::driver_name().unwrap(), "bogus");
 
@@ -98,6 +99,7 @@ async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
+    let _env = crate::env_lock::lock_env();
     Queue::set_driver(Arc::new(BogusDriver));
     assert_eq!(Queue::driver_name().unwrap(), "bogus");
 
@@ -109,6 +111,7 @@ async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
+    let _env = crate::env_lock::lock_env();
     Queue::set_driver(Arc::new(BogusDriver));
     assert_eq!(Queue::driver_name().unwrap(), "bogus");
 
@@ -141,6 +144,7 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
 #[tokio::test]
 #[serial]
 async fn the_database_driver_binds_a_failed_jobs_store() {
+    let _env = crate::env_lock::lock_env();
     // The binding is what is under test, not the schema - `bootstrap_from_env`
     // only needs a live connection to hand the two stores.
     suprnova::DB::init_with(
@@ -172,6 +176,7 @@ async fn the_database_driver_binds_a_failed_jobs_store() {
 #[tokio::test]
 #[serial]
 async fn failover_wires_a_driver_over_the_listed_connections() {
+    let _env = crate::env_lock::lock_env();
     Queue::set_driver(Arc::new(BogusDriver));
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory, memory"));
@@ -202,6 +207,7 @@ async fn failover_wires_a_driver_over_the_listed_connections() {
 #[tokio::test]
 #[serial]
 async fn failover_without_a_connection_list_is_a_boot_error() {
+    let _env = crate::env_lock::lock_env();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", None);
     let result = bootstrap_from_env().await;
@@ -217,6 +223,7 @@ async fn failover_without_a_connection_list_is_a_boot_error() {
 #[tokio::test]
 #[serial]
 async fn failover_with_a_blank_connection_list_is_a_boot_error() {
+    let _env = crate::env_lock::lock_env();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("   "));
     let result = bootstrap_from_env().await;
@@ -233,6 +240,7 @@ async fn failover_with_a_blank_connection_list_is_a_boot_error() {
 #[tokio::test]
 #[serial]
 async fn failover_rejects_a_nested_failover_connection() {
+    let _env = crate::env_lock::lock_env();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,failover"));
     let result = bootstrap_from_env().await;
@@ -252,6 +260,7 @@ async fn failover_rejects_a_nested_failover_connection() {
 #[tokio::test]
 #[serial]
 async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() {
+    let _env = crate::env_lock::lock_env();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,redsi"));
     let result = bootstrap_from_env().await;

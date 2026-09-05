@@ -87,6 +87,7 @@ fn token_from_fake(fake: &suprnova::mail::MailFake) -> String {
 
 #[tokio::test]
 async fn verified_provider_user_resets_without_a_magnetar_engine() {
+    let _env = crate::env_lock::lock_env();
     unsafe {
         std::env::set_var("MAIL_FROM", "test-mailer@example.test");
     }

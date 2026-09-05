@@ -36,6 +36,7 @@ fn default_port() -> u16 {
 #[test]
 #[serial]
 fn resolve_reads_env_into_typed_struct_with_defaults() {
+    let _env = crate::env_lock::lock_env();
     clear_env(&["MAIL_DRIVER", "MAIL_HOST", "MAIL_PORT"]);
     set_env("MAIL_DRIVER", "smtp");
     set_env("MAIL_HOST", "smtp.example.com");
@@ -55,6 +56,7 @@ fn resolve_reads_env_into_typed_struct_with_defaults() {
 #[test]
 #[serial]
 fn resolve_parses_typed_fields_from_string_envs() {
+    let _env = crate::env_lock::lock_env();
     clear_env(&["MAIL_DRIVER", "MAIL_HOST", "MAIL_PORT"]);
     set_env("MAIL_DRIVER", "ses");
     set_env("MAIL_HOST", "email.us-east-1.amazonaws.com");
@@ -69,6 +71,7 @@ fn resolve_parses_typed_fields_from_string_envs() {
 #[test]
 #[serial]
 fn resolve_reports_missing_required_field() {
+    let _env = crate::env_lock::lock_env();
     // MAIL_DRIVER is required (no serde default) - missing should error.
     clear_env(&["MAIL_DRIVER", "MAIL_HOST", "MAIL_PORT"]);
     // Leave MAIL_DRIVER unset; set the others.
@@ -99,6 +102,7 @@ struct PrefixedDbConfig {
 #[test]
 #[serial]
 fn resolve_prefixed_strips_prefix_before_mapping() {
+    let _env = crate::env_lock::lock_env();
     clear_env(&["DB_HOST", "DB_PORT", "DB_SSL"]);
     set_env("DB_HOST", "db.example.com");
     set_env("DB_PORT", "5432");
@@ -115,6 +119,7 @@ fn resolve_prefixed_strips_prefix_before_mapping() {
 #[test]
 #[serial]
 fn resolve_prefixed_ignores_unprefixed_env_vars() {
+    let _env = crate::env_lock::lock_env();
     clear_env(&["DB_HOST", "DB_PORT", "DB_SSL", "HOST", "PORT"]);
     // Set BOTH prefixed and unprefixed; resolve_prefixed must only see
     // the prefixed ones, so HOST=ghost / PORT=9999 must NOT leak into
@@ -143,6 +148,7 @@ struct RenamedConfig {
 #[test]
 #[serial]
 fn resolve_respects_serde_rename() {
+    let _env = crate::env_lock::lock_env();
     clear_env(&["WEIRD_EXTERNAL_NAME", "INTERNAL_FIELD"]);
     // Set the renamed key, NOT the internal field name. If serde
     // rename were ignored, we'd hit a missing-field error.

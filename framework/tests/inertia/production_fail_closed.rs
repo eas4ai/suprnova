@@ -76,6 +76,7 @@ fn restore_app_env(prior: Option<String>) {
 #[test]
 #[serial_test::serial(inertia_cfg01_app_env)]
 fn default_config_resolves_production_mode_under_app_env_production() {
+    let _env = crate::env_lock::lock_env();
     let prior = set_app_env_production();
 
     let cfg = InertiaConfig::default();
@@ -91,6 +92,7 @@ fn default_config_resolves_production_mode_under_app_env_production() {
 #[tokio::test]
 #[serial_test::serial(inertia_cfg01_app_env)]
 async fn production_html_shell_never_references_a_localhost_dev_server() {
+    let _env = crate::env_lock::lock_env();
     let prior = set_app_env_production();
 
     // No manifest exists at the default path relative to this crate's
@@ -131,6 +133,7 @@ async fn production_html_shell_never_references_a_localhost_dev_server() {
 #[test]
 #[serial_test::serial(inertia_cfg01_app_env)]
 fn install_with_default_config_fails_closed_in_production_without_a_manifest() {
+    let _env = crate::env_lock::lock_env();
     let prior = set_app_env_production();
 
     // No explicit `.production()` override - this is the environment-

@@ -50,6 +50,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn local_env_without_app_key_boots_and_installs_transient_key() {
+    let _env = crate::env_lock::lock_env();
     let _guard = BOOT_LOCK.lock().unwrap();
     let _envg = EnvGuard::capture(&["APP_ENV", "APP_KEY"]);
     // SAFETY: BOOT_LOCK serializes env access for this binary.
@@ -87,6 +88,7 @@ fn second_boot_is_idempotent_and_does_not_panic() {
     // in long-running test harnesses) must not panic on `OnceLock`
     // reuse. The first boot in this binary installs Crypt; the second
     // boot should see `Crypt::is_initialized()` and skip key install.
+    let _env = crate::env_lock::lock_env();
     let _guard = BOOT_LOCK.lock().unwrap();
     let _envg = EnvGuard::capture(&["APP_ENV", "APP_KEY"]);
     // SAFETY: BOOT_LOCK serializes env access for this binary.
@@ -118,6 +120,7 @@ fn boot_with_explicit_app_key_installs_that_key() {
     // that test is order-independent. This integration test
     // serves as a smoke check that the full boot path with
     // APP_KEY=<valid> stays panic-free.
+    let _env = crate::env_lock::lock_env();
     let _guard = BOOT_LOCK.lock().unwrap();
     let _envg = EnvGuard::capture(&["APP_ENV", "APP_KEY"]);
 

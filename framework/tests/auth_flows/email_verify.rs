@@ -161,6 +161,7 @@ async fn reload_ada() -> TestUser {
 #[tokio::test]
 #[serial]
 async fn send_link_then_verify_marks_verified_single_use() {
+    let _env = crate::env_lock::lock_env();
     let _h = setup().await;
 
     // Look the user up so `send_link` has a `MustVerifyEmail` to mint against.
@@ -230,6 +231,7 @@ async fn send_link_then_verify_marks_verified_single_use() {
 #[tokio::test]
 #[serial]
 async fn check_reports_validity_without_consuming() {
+    let _env = crate::env_lock::lock_env();
     let _h = setup().await;
 
     let p = EloquentUserProvider::<TestUser>::new();
@@ -274,6 +276,7 @@ async fn check_reports_validity_without_consuming() {
 #[tokio::test]
 #[serial]
 async fn resend_sends_for_known_email_and_is_silent_for_unknown() {
+    let _env = crate::env_lock::lock_env();
     let _h = setup().await;
 
     // Known email → a mail is sent.
@@ -303,6 +306,7 @@ async fn resend_sends_for_known_email_and_is_silent_for_unknown() {
 #[tokio::test]
 #[serial]
 async fn verify_rejects_garbage_token() {
+    let _env = crate::env_lock::lock_env();
     let _h = setup().await;
     assert!(
         EmailVerification::verify("not-a-real-token").await.is_err(),

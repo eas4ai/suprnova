@@ -23,6 +23,7 @@ impl Job for NoopJob {
 #[tokio::test]
 #[serial_test::serial]
 async fn defaults_bind_in_memory_queue_and_rate_limiter() {
+    let _env = crate::env_lock::lock_env();
     // Wipe any prior env vars so we exercise the default path.
     // SAFETY: #[serial] ensures no other thread reads these vars concurrently.
     unsafe {

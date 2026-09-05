@@ -70,6 +70,7 @@ fn clear_mail_env() {
 #[tokio::test]
 #[serial]
 async fn boot_default_binds_log_transport() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
 
@@ -90,6 +91,7 @@ async fn boot_default_binds_log_transport() {
 #[tokio::test]
 #[serial]
 async fn boot_memory_driver_binds_in_memory_transport() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     // SAFETY: serial test.
@@ -126,6 +128,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     // the stale Arc from the first. `RwLock<Option<...>>` plus
     // `clear_memory_capture()` at the top of `bootstrap_from_env` must fix
     // this - verify the captured handle is fresh across switches.
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
 
@@ -174,6 +177,7 @@ async fn boot_smtp_driver_binds_unencrypted_when_creds_absent() {
     // We can't actually deliver SMTP in a test, but we CAN verify the
     // bootstrap path runs without error when MAIL_DRIVER=smtp and no creds
     // are set (falls through to unencrypted local-dev mode).
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -199,6 +203,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
     // We can't actually open an SMTP session in-test (no live relay), but
     // building the transport must succeed - the lettre builder validates
     // the host + port shape at construction time.
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -224,6 +229,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
 #[tokio::test]
 #[serial]
 async fn boot_postmark_driver_routes_via_endpoint_override() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     let server = MockServer::start().await;
@@ -259,6 +265,7 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
 #[tokio::test]
 #[serial]
 async fn boot_sendgrid_driver_routes_via_endpoint_override() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     let server = MockServer::start().await;
@@ -288,6 +295,7 @@ async fn boot_sendgrid_driver_routes_via_endpoint_override() {
 #[tokio::test]
 #[serial]
 async fn boot_mailgun_driver_routes_via_endpoint_override() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     let server = MockServer::start().await;
@@ -318,6 +326,7 @@ async fn boot_mailgun_driver_routes_via_endpoint_override() {
 #[tokio::test]
 #[serial]
 async fn boot_resend_driver_routes_via_endpoint_override() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     let server = MockServer::start().await;
@@ -347,6 +356,7 @@ async fn boot_resend_driver_routes_via_endpoint_override() {
 #[tokio::test]
 #[serial]
 async fn boot_ses_driver_routes_via_endpoint_override() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     let server = MockServer::start().await;
@@ -381,6 +391,7 @@ async fn boot_ses_driver_routes_via_endpoint_override() {
 #[tokio::test]
 #[serial]
 async fn boot_postmark_missing_token_returns_descriptive_error() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -401,6 +412,7 @@ async fn boot_postmark_missing_token_returns_descriptive_error() {
 #[tokio::test]
 #[serial]
 async fn boot_ses_missing_secret_returns_descriptive_error() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -423,6 +435,7 @@ async fn boot_ses_missing_secret_returns_descriptive_error() {
 #[tokio::test]
 #[serial]
 async fn boot_sendgrid_missing_key_returns_descriptive_error() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -443,6 +456,7 @@ async fn boot_sendgrid_missing_key_returns_descriptive_error() {
 #[tokio::test]
 #[serial]
 async fn boot_mailgun_missing_domain_returns_descriptive_error() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -465,6 +479,7 @@ async fn boot_mailgun_missing_domain_returns_descriptive_error() {
 #[tokio::test]
 #[serial]
 async fn boot_resend_missing_key_returns_descriptive_error() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -486,6 +501,7 @@ async fn boot_resend_missing_key_returns_descriptive_error() {
 #[traced_test]
 #[serial]
 async fn boot_unknown_driver_falls_back_to_log_with_warning() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -523,6 +539,7 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
 #[test]
 #[serial]
 fn bootstrap_from_env_is_callable_from_sync_context() {
+    let _env = crate::env_lock::lock_env();
     clear_mail_env();
     let _ = Mail::clear_transport();
 

@@ -16,6 +16,7 @@ use suprnova::{Router, Server};
 
 #[test]
 fn production_without_app_key_returns_err_with_actionable_message() {
+    let _env = crate::env_lock::lock_env();
     // Set APP_ENV=production and ensure APP_KEY is not set before
     // booting. This binary has its own process; no other test can
     // install Crypt before us.

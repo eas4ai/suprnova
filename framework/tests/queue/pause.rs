@@ -432,6 +432,7 @@ impl Job for UnpausableJob {
 #[tokio::test]
 #[serial]
 async fn pausable_false_worker_ignores_the_global_pause_signal() {
+    let _env = crate::env_lock::lock_env();
     cache_init();
     Queue::resume_all().await.unwrap(); // defensive
     UNPAUSABLE_RUNS.store(0, Ordering::SeqCst);

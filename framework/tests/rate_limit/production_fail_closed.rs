@@ -85,6 +85,7 @@ fn set(name: &str, value: &str) {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_without_a_driver_fails_closed() {
+    let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
 
@@ -106,6 +107,7 @@ async fn production_boot_without_a_driver_fails_closed() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_on_the_memory_driver_fails_closed() {
+    let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("RATE_LIMIT_DRIVER", "memory");
@@ -121,6 +123,7 @@ async fn production_boot_on_the_memory_driver_fails_closed() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back() {
+    let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("RATE_LIMIT_DRIVER", "Redis");
@@ -140,6 +143,7 @@ async fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn a_non_truthy_override_keeps_the_guard_armed() {
+    let _env = crate::env_lock::lock_env();
     for value in ["false", "0", "no", "maybe", ""] {
         let _guard = EnvGuard::take();
         set("APP_ENV", "production");
@@ -158,6 +162,7 @@ async fn a_non_truthy_override_keeps_the_guard_armed() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn the_override_lets_a_single_process_deployment_boot() {
+    let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set(OVERRIDE_ENV, "true");
@@ -172,6 +177,7 @@ async fn the_override_lets_a_single_process_deployment_boot() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn non_production_boot_is_unchanged() {
+    let _env = crate::env_lock::lock_env();
     for app_env in [None, Some("local"), Some("development"), Some("staging")] {
         let _guard = EnvGuard::take();
         if let Some(v) = app_env {
@@ -190,6 +196,7 @@ async fn non_production_boot_is_unchanged() {
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn staging_is_not_gated() {
+    let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
     set("APP_ENV", "staging");
     set("RATE_LIMIT_DRIVER", "memory");

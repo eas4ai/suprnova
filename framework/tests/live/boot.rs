@@ -129,6 +129,7 @@ fn context_lifetime_is_bounded_at_configuration_time() {
 
 #[test]
 fn runtime_is_bound_before_fallible_routes_and_reused_on_reentry() {
+    let _env = crate::env_lock::lock_env();
     // This test is the only environment-mutating test in this binary. Each
     // integration test file is a separate process, so the APP_KEY OnceLock and
     // App container are isolated from the existing boot suites.
@@ -528,6 +529,7 @@ fn server_new_prepares_live_before_attempting_to_bind_a_socket() {
 #[test]
 #[ignore = "executed in a child process by the Server::new lifecycle proof"]
 fn server_new_child_rejects_invalid_live_mount_before_socket_binding() {
+    let _env = crate::env_lock::lock_env();
     unsafe {
         std::env::set_var("APP_ENV", "testing");
         std::env::remove_var("APP_KEY");

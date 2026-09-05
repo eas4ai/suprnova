@@ -191,6 +191,7 @@ async fn row_count(db: &DatabaseConnection, table: &str) -> i64 {
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
+    let _env = crate::env_lock::lock_env();
     let raw = connect_postgres().await;
     fresh_jobs_table(&raw, "pg_worker_jobs").await;
 
@@ -233,6 +234,7 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_queue_worker_dead_letters_into_the_database_store() {
+    let _env = crate::env_lock::lock_env();
     let raw = connect_postgres().await;
     fresh_jobs_table(&raw, "pg_worker_dead_jobs").await;
     fresh_failed_jobs_table(&raw, "pg_worker_failed_jobs").await;

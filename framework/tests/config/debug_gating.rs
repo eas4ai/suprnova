@@ -75,6 +75,7 @@ fn response_body_json(resp: HttpResponse) -> Value {
 #[test]
 #[serial]
 fn registered_debug_false_overrides_app_debug_true_in_env() {
+    let _env = crate::env_lock::lock_env();
     // Set the loud env state - but register a quiet AppConfig.
     set_env("APP_ENV", "local");
     set_env("APP_DEBUG", "true");
@@ -101,6 +102,7 @@ fn registered_debug_false_overrides_app_debug_true_in_env() {
 #[test]
 #[serial]
 fn registered_debug_true_overrides_production_fail_closed_default() {
+    let _env = crate::env_lock::lock_env();
     // Production env state would default debug=false; the registered
     // AppConfig must win and include debug_message.
     set_env("APP_ENV", "production");
@@ -144,6 +146,7 @@ fn unregistered_repo_in_production_env_is_fail_closed() {
     // defaults). The semantic invariant under test - "production +
     // no explicit debug = no debug_message" - holds either way, and
     // this is what the fix guarantees.
+    let _env = crate::env_lock::lock_env();
     clear_env(&["APP_DEBUG"]);
     set_env("APP_ENV", "production");
     // Register a Production AppConfig whose `debug` was env-derived
@@ -176,6 +179,7 @@ fn registered_debug_false_also_suppresses_jsonapi_renderer_debug_message() {
     // (`FrameworkError::into_json_api_response`). It uses the same
     // `Config::is_debug()` gate, so a registered AppConfig {debug:
     // false} must suppress `meta.debug_message` there too.
+    let _env = crate::env_lock::lock_env();
     set_env("APP_ENV", "local");
     set_env("APP_DEBUG", "true");
     install_app_config(Environment::Production, false);

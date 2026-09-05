@@ -92,6 +92,7 @@ impl Drop for AppDebugGuard {
 
 #[test]
 fn internal_error_500_body_is_generic_in_production() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::internal("DB error: connection refused at 127.0.0.1:5432");
@@ -116,6 +117,7 @@ fn internal_error_500_body_is_generic_in_production() {
 
 #[test]
 fn database_error_500_body_is_generic_in_production() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::database(
@@ -139,6 +141,7 @@ fn database_error_500_body_is_generic_in_production() {
 
 #[test]
 fn service_not_found_500_body_is_generic_in_production() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::service_not_found::<u64>(); // arbitrary marker type
@@ -156,6 +159,7 @@ fn service_not_found_500_body_is_generic_in_production() {
 
 #[test]
 fn internal_error_with_debug_exposes_debug_message_keeping_message_generic() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::truthy();
 
     let raw = "DB error: connection refused at 127.0.0.1:5432";
@@ -175,6 +179,7 @@ fn internal_error_with_debug_exposes_debug_message_keeping_message_generic() {
 
 #[test]
 fn domain_4xx_preserves_original_message() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::Domain {
@@ -193,6 +198,7 @@ fn domain_4xx_preserves_original_message() {
 
 #[test]
 fn param_error_4xx_keeps_field_specific_message() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::param("priority");
@@ -207,6 +213,7 @@ fn param_error_4xx_keeps_field_specific_message() {
 
 #[test]
 fn validation_4xx_keeps_per_field_errors() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let mut errs = suprnova::error::ValidationErrors::new();
@@ -227,6 +234,7 @@ fn validation_4xx_keeps_per_field_errors() {
 
 #[test]
 fn unauthorized_403_keeps_static_message() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::Unauthorized;
@@ -238,6 +246,7 @@ fn unauthorized_403_keeps_static_message() {
 
 #[test]
 fn all_error_responses_include_request_id_field() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     // Outside a REQUEST_ID scope (which is the default for these unit
@@ -265,6 +274,7 @@ fn all_error_responses_include_request_id_field() {
 
 #[tokio::test]
 async fn request_id_propagates_into_error_body_when_scope_active() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let id = suprnova::logging::RequestId::from_string("rid-error-test-12345");
@@ -282,6 +292,7 @@ async fn request_id_propagates_into_error_body_when_scope_active() {
 
 #[test]
 fn json_api_envelope_500_body_is_generic_in_production() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::internal("DB error: secret SQL fragment 'SELECT secret FROM users'");
@@ -303,6 +314,7 @@ fn json_api_envelope_500_body_is_generic_in_production() {
 
 #[test]
 fn json_api_envelope_500_with_debug_exposes_meta_debug_message() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::truthy();
 
     let raw = "DB error: secret SQL fragment 'SELECT secret FROM users'";
@@ -325,6 +337,7 @@ fn json_api_envelope_500_with_debug_exposes_meta_debug_message() {
 
 #[test]
 fn json_api_envelope_4xx_preserves_detail() {
+    let _env = crate::env_lock::lock_env();
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::Domain {

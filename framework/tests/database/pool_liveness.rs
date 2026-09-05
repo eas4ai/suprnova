@@ -77,6 +77,7 @@ fn clear_liveness_env() {
 
 #[test]
 fn defaults_leave_the_pool_exactly_as_it_is_today() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
@@ -97,6 +98,7 @@ fn defaults_leave_the_pool_exactly_as_it_is_today() {
 
 #[test]
 fn every_liveness_knob_round_trips_from_the_environment() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
@@ -117,6 +119,7 @@ fn every_liveness_knob_round_trips_from_the_environment() {
 
 #[test]
 fn zero_on_a_reaping_knob_is_kept_as_the_disable_signal() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
@@ -137,6 +140,7 @@ fn zero_on_a_reaping_knob_is_kept_as_the_disable_signal() {
 
 #[test]
 fn an_unparseable_value_falls_back_instead_of_failing_the_boot() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
@@ -170,6 +174,7 @@ fn validate_pool_rejects_a_zero_acquire_timeout() {
 
 #[test]
 fn builder_setters_win_over_the_environment() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();

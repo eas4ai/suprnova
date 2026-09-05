@@ -68,6 +68,7 @@ fn set_env(key: &str, value: Option<&str>) {
 
 #[test]
 fn production_with_default_source_refuses_silent_sqlite_fallback() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
@@ -98,6 +99,7 @@ fn production_with_default_source_refuses_silent_sqlite_fallback() {
 
 #[test]
 fn production_with_env_source_is_accepted() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
@@ -113,6 +115,7 @@ fn production_with_env_source_is_accepted() {
 
 #[test]
 fn production_with_explicit_source_is_accepted_even_for_sqlite() {
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
@@ -136,6 +139,7 @@ fn staging_with_default_source_also_refuses() {
     // Staging is production-like for the purposes of "real secrets must
     // be configured." This guards against the regression where the
     // is-prod check is too narrow.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
@@ -154,6 +158,7 @@ fn local_with_default_source_is_accepted() {
     // `cargo run` in a fresh checkout boots against
     // `sqlite://./database.db` with zero setup. This documents the
     // intended dev posture as a hard-coded test guarantee.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
@@ -178,6 +183,7 @@ fn is_configured_reflects_url_source() {
     // A user who explicitly sets `DATABASE_URL=sqlite://./database.db`
     // is "configured" - they meant the local SQLite, didn't fall
     // through to it.
+    let _env = crate::env_lock::lock_env();
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 

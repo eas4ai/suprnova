@@ -24,6 +24,7 @@ use suprnova::{Router, Server};
 
 #[test]
 fn production_validation_runs_even_when_crypt_is_pre_initialized() {
+    let _env = crate::env_lock::lock_env();
     // Pre-install a transient key, simulating a test fixture or earlier
     // boot that already populated `CRYPT_RING`.
     let key = suprnova::EncryptionKey::generate();

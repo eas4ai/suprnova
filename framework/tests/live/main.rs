@@ -1,6 +1,8 @@
 //! Integration tests for the `live` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+#[path = "../support/env_lock.rs"]
+mod env_lock;
 #[path = "../support/live_async_support/mod.rs"]
 mod live_async_support;
 #[path = "../support/live_dogfood_support/mod.rs"]

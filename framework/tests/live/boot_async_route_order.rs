@@ -29,6 +29,7 @@ use suprnova::{App, FrameworkError, Router, Server};
 
 #[tokio::test]
 async fn the_live_runtime_is_bound_before_the_async_route_closure_runs() {
+    let _env = crate::env_lock::lock_env();
     // The only environment mutation in this binary; see the module doc.
     unsafe {
         std::env::set_var("APP_ENV", "testing");
