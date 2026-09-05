@@ -705,8 +705,8 @@ fn ci_profile_and_toolchain_requirements_are_pinned() {
 
     let toolchain = read_entrypoint("rust-toolchain.toml");
     assert!(
-        toolchain.contains("channel = \"1.94.0\""),
-        "the Rust toolchain channel must be pinned to 1.94.0"
+        toolchain.contains("channel = \"1.98.1\""),
+        "the Rust toolchain channel must be pinned to 1.98.1"
     );
     assert!(
         toolchain.contains("components = [\"rustfmt\", \"clippy\"]"),
