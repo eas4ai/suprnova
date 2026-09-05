@@ -64,7 +64,7 @@
 use crate::database::DB;
 use crate::error::FrameworkError;
 use rand::RngExt;
-use sea_orm::{ConnectionTrait, DatabaseTransaction, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, IsolationLevel, TransactionTrait};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1087,7 +1087,43 @@ impl DB {
         >,
         T: Send,
     {
-        Self::transaction_inner(f)
+        Self::transaction_inner(f, None)
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// [`DB::transaction`] opened at an explicit isolation level.
+    ///
+    /// Identical to [`DB::transaction`] in every other respect: the same
+    /// nesting refusal, the same `CURRENT_TX` scope, the same begin, commit,
+    /// and rollback events, the same savepoint and after-commit handling,
+    /// because both entry points share [`Self::transaction_inner`]. The only
+    /// difference is the `BEGIN`: SeaORM's
+    /// `begin_with_config(isolation_level, None)` instead of a bare
+    /// `begin()`, which on PostgreSQL issues `SET TRANSACTION ISOLATION
+    /// LEVEL ...` as the first statement of the transaction and on MySQL
+    /// sets it before `START TRANSACTION`. `None` is exactly the backend
+    /// default and therefore exactly what `DB::transaction` does.
+    ///
+    /// `pub(crate)`: the render cache is the one caller. Its render
+    /// transaction needs one consistent snapshot across the handler's own
+    /// reads and the generation read at window close, which PostgreSQL's
+    /// default `READ COMMITTED` does not give (every statement sees the
+    /// latest committed data), so it asks for `REPEATABLE READ` there. See
+    /// `render_cache::middleware::run_render`.
+    pub(crate) async fn transaction_with_isolation<F, T>(
+        isolation_level: Option<IsolationLevel>,
+        f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        Self::transaction_inner(f, isolation_level)
             .await
             .map_err(TransactionFailure::into_error)
     }
@@ -1102,7 +1138,10 @@ impl DB {
     /// callback failed afterwards". Encoding that in the return type rather
     /// than in the error's message means no user-supplied error text can ever
     /// be mistaken for either.
-    async fn transaction_inner<F, T>(f: F) -> Result<T, TransactionFailure>
+    async fn transaction_inner<F, T>(
+        f: F,
+        isolation_level: Option<IsolationLevel>,
+    ) -> Result<T, TransactionFailure>
     where
         F: for<'b> FnOnce(
             &'b Transaction,
@@ -1129,9 +1168,13 @@ impl DB {
         // (no `transaction_on(name)` surface yet); when that lands, the
         // `conn_name` Arc<str> is the only thing that needs to grow.
         let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
+        // `begin_with_config(None, None)` is what SeaORM's own `begin()`
+        // delegates to, so a caller that asked for no isolation level gets
+        // exactly the backend default `DB::transaction` has always opened
+        // with; only `transaction_with_isolation` ever passes `Some`.
         let tx = conn
             .inner()
-            .begin()
+            .begin_with_config(isolation_level, None)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         // BEGIN succeeded - fire TransactionBeginning before the
@@ -1392,7 +1435,7 @@ impl DB {
             // to know whether the COMMIT landed. An after-commit callback that
             // fails with a deadlock-shaped error must not re-run a closure whose
             // writes are already durable.
-            match DB::transaction_inner(|tx| f(tx)).await {
+            match DB::transaction_inner(|tx| f(tx), None).await {
                 Ok(v) => return Ok(v),
                 Err(TransactionFailure::NotCommitted(e))
                     if is_deadlock(&e) && attempt < attempts =>
