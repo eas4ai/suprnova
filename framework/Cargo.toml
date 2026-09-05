@@ -380,3 +380,24 @@ webauthn-authenticator-rs = { version = "0.5.5", default-features = false, featu
     "softpasskey",
 ] }
 wiremock = "0.6"
+
+# Integration tests that register into link-time process-global registries
+# (inventory) and must not share a binary with other registrants. They stay in
+# their module folder but compile as their own targets; each file's header
+# states the reason. Named after the former top-level file so test ids are
+# unchanged.
+[[test]]
+name = "container_boot_returns_err_on_missing_dep"
+path = "tests/container/boot_returns_err_on_missing_dep.rs"
+
+[[test]]
+name = "eloquent_macro_smoke"
+path = "tests/eloquent/macro_smoke.rs"
+
+[[test]]
+name = "eloquent_relations_morph_registry"
+path = "tests/eloquent/relations_morph_registry.rs"
+
+[[test]]
+name = "eloquent_soft_deletes"
+path = "tests/eloquent/soft_deletes.rs"
