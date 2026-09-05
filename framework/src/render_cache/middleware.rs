@@ -301,6 +301,22 @@ impl RenderCacheRuntime {
     }
 }
 
+/// The permission version bound into `Principal` material, frozen at 0.
+///
+/// The engine's `PrivateMaterial::principal` keeps a version parameter so a
+/// host may bind one; this host no longer does. Until the closing fix round
+/// the framework bound a process-local `AtomicU64` here that
+/// `RenderCache::bump_permission_version` incremented, which changed every
+/// signed-in visitor's key on a bump but reset to 0 on restart while an L1
+/// entry keyed under version 0 survived on disk (final review, F3). A bump
+/// now advances a persisted generation on
+/// [`collector::permission_version_identity`], which every render whose key
+/// carries a resolved `Principal` observes (see [`run_render`]), so the
+/// ledger rather than the key is what makes a pre-bump private entry a
+/// miss, and it stays a miss across a restart because the generation lives
+/// in the database.
+const FROZEN_PERMISSION_VERSION: u64 = 0;
+
 /// Coherence outcome of a stored entry against the current authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Coherence {
@@ -696,7 +712,7 @@ fn variance_descriptor(
                 Some(id) => DimensionValue::Private(PrivateMaterial::principal(
                     &runtime.keys,
                     &id,
-                    collector::permission_version(),
+                    FROZEN_PERMISSION_VERSION,
                 )),
                 None => DimensionValue::Anonymous,
             },
@@ -1166,7 +1182,14 @@ async fn lead_render(
 ) -> Response {
     let method = request.method().as_str().to_owned();
     let if_none_match = request.header("if-none-match").map(str::to_owned);
-    let (response, report, observed) = run_render(runtime, request, next, job.epoch).await;
+    let (response, report, observed) = run_render(
+        runtime,
+        request,
+        next,
+        job.epoch,
+        key_carries_a_resolved_principal(&job.variance),
+    )
+    .await;
     let Ok(response) = response else {
         let _ = runtime.coordinator.release(lease).await;
         return response;
@@ -1211,7 +1234,7 @@ async fn lead_render(
                 .iter()
                 .next()
                 .map_or(SENTINEL_OBSERVED_LABEL, String::as_str);
-            PrivateMaterial::principal(&runtime.keys, id, collector::permission_version())
+            PrivateMaterial::principal(&runtime.keys, id, FROZEN_PERMISSION_VERSION)
         }),
         // Fix round 4: previously hard-coded `None` because nothing
         // produced this observation. `Request::live_tenant()` now records
@@ -1629,7 +1652,7 @@ fn key_used_different_values_than_the_render_saw(
                     DimensionValue::Private(PrivateMaterial::principal(
                         &runtime.keys,
                         observed_id,
-                        collector::permission_version(),
+                        FROZEN_PERMISSION_VERSION,
                     ))
                 }
                 VarianceDimension::Tenant => {
@@ -1696,20 +1719,47 @@ fn render_isolation_level(backend: DbBackend) -> Option<IsolationLevel> {
     }
 }
 
+/// Whether the key this render publishes under carries a resolved
+/// `Principal` value, which is exactly the set of entries the permission
+/// version used to partition (see [`FROZEN_PERMISSION_VERSION`]) and
+/// therefore the set that must observe
+/// [`collector::permission_version_identity`].
+///
+/// The key's variance, not the classification, is the precise criterion:
+/// `PrivateCached` also arises from a tenant-only observation, where the
+/// permission version never played a part, and a route that declares
+/// `Principal` and caches one representation per signed-in visitor without
+/// its render ever reading identity (ruling R89's shape) still keyed by the
+/// version and still has to miss after a bump. An `Anonymous` value is
+/// excluded for the same reason: the version was never bound into it.
+fn key_carries_a_resolved_principal(variance: &VarianceDescriptor) -> bool {
+    matches!(
+        variance.dimensions().get(&VarianceDimension::Principal),
+        Some(DimensionValue::Private(_))
+    )
+}
+
 /// The body every [`run_render`] path shares: `next(request)` under a fresh
 /// [`Collector::scope`], the report extracted while the scope is open, and
-/// the window closed against `ledger` (see [`close_window`]).
+/// the window closed against `ledger` (see [`close_window`]). When
+/// `observes_permission_generation` is set, the permission-version identity
+/// is observed first, so it lands in the report like any other read and
+/// counts toward the same bound.
 async fn render_under_collector(
     request: Request,
     next: Next,
     epoch: u64,
     ledger: &dyn GenerationLedger,
+    observes_permission_generation: bool,
 ) -> (
     Response,
     super::collector::CollectorReport,
     Option<GenerationSet>,
 ) {
     Collector::scope(async move {
+        if observes_permission_generation {
+            collector::observe(collector::permission_version_identity());
+        }
         let response = next(request).await;
         let report = collector::current_report().unwrap_or_default();
         let observed = close_window(&report, epoch, ledger).await;
@@ -1734,11 +1784,16 @@ async fn render_under_collector(
 /// transaction closure, so that if the transaction itself cannot even open
 /// (a provider failure, not a route failure), the still-untouched request
 /// is recoverable for a plain, uncached render instead of being lost.
+///
+/// `observes_permission_generation` is [`key_carries_a_resolved_principal`]
+/// for the job's variance; see that function for why the key, not the
+/// classification, decides it.
 async fn run_render(
     runtime: &Arc<RenderCacheRuntime>,
     request: Request,
     next: Next,
     epoch: u64,
+    observes_permission_generation: bool,
 ) -> (
     Response,
     super::collector::CollectorReport,
@@ -1748,7 +1803,14 @@ async fn run_render(
         .ok()
         .map(|conn| conn.inner().get_database_backend());
     let Some(backend) = backend else {
-        return render_under_collector(request, next, epoch, runtime.ledger.as_ref()).await;
+        return render_under_collector(
+            request,
+            next,
+            epoch,
+            runtime.ledger.as_ref(),
+            observes_permission_generation,
+        )
+        .await;
     };
     let slot: Arc<std::sync::Mutex<Option<Request>>> =
         Arc::new(std::sync::Mutex::new(Some(request)));
@@ -1766,7 +1828,14 @@ async fn run_render(
                 .take()
                 .expect("the request is taken exactly once, by this closure, when it runs");
             Ok::<_, crate::FrameworkError>(
-                render_under_collector(request, next, epoch, ledger.as_ref()).await,
+                render_under_collector(
+                    request,
+                    next,
+                    epoch,
+                    ledger.as_ref(),
+                    observes_permission_generation,
+                )
+                .await,
             )
         })
     })
@@ -1785,7 +1854,14 @@ async fn run_render(
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .expect("a failed DB::transaction never invoked its closure");
-            render_under_collector(request, next, epoch, runtime.ledger.as_ref()).await
+            render_under_collector(
+                request,
+                next,
+                epoch,
+                runtime.ledger.as_ref(),
+                observes_permission_generation,
+            )
+            .await
         }
     }
 }
@@ -1959,7 +2035,7 @@ pub fn key_input_for_test(
                 Some(id) => DimensionValue::Private(PrivateMaterial::principal(
                     &runtime.keys,
                     id,
-                    collector::permission_version(),
+                    FROZEN_PERMISSION_VERSION,
                 )),
                 None => DimensionValue::Anonymous,
             };

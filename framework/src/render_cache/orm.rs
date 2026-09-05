@@ -51,7 +51,12 @@ use crate::{DB, FrameworkError};
 /// has no primary pool at all - a supported, tested configuration (see
 /// `eloquent_eager_named_connection.rs`) - and a model write on one of
 /// those named connections must keep working exactly as it always has.
-async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
+///
+/// `pub(crate)` for exactly one caller outside this module:
+/// [`super::RenderCache::bump_permission_version`], which advances the
+/// reserved permission-version identity through this same path so a bump is
+/// persisted and logged the way every ORM write's advance is.
+pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
     if !super::is_installed() {
         return Ok(());
     }

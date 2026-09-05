@@ -295,14 +295,39 @@ impl RenderCache {
             .clone()
     }
 
-    /// Bumps the process-wide permission version fed into `Principal`
-    /// variance. Call this when an application changes what a signed-in
-    /// user is permitted to do (a role reassignment, a permission grant or
-    /// revocation) - without it, a user whose permissions just changed
-    /// keeps matching the cache key their prior permission set produced,
-    /// and keeps being served whatever was cached under it. See ruling R54.
-    pub fn bump_permission_version() {
-        collector::bump_permission_version();
+    /// Advances the permission version. Call this when an application
+    /// changes what a signed-in user is permitted to do (a role
+    /// reassignment, a permission grant or revocation) - without it, a user
+    /// whose permissions just changed keeps matching the cache key their
+    /// prior permission set produced, and keeps being served whatever was
+    /// cached under it. See ruling R54.
+    ///
+    /// The version is a persisted generation, not a process counter (final
+    /// review, F3 / ruling R119): this advances
+    /// [`collector::permission_version_identity`] through the same ledger
+    /// path an ORM write's advance takes ([`orm`]'s own `advance`), so the
+    /// bump joins the caller's ambient `DB::transaction` when there is one
+    /// (a role change and its bump commit or roll back together) and opens
+    /// its own otherwise, and is recorded in `suprnova_render_generations`
+    /// and its change log. Every render whose key carries a resolved
+    /// `Principal` observes that identity, so each such entry published
+    /// before the bump fails its coherence check at its next lookup, in this
+    /// process and in every later one sharing the database: a restart no
+    /// longer resurrects a pre-bump entry from an L1 directory, which the
+    /// earlier process-local counter allowed.
+    ///
+    /// A no-op that returns `Ok(())` when no RenderCache runtime is
+    /// installed in this process, matching every other write-side advance:
+    /// nothing is cached, so there is nothing to invalidate, and an
+    /// application that never installs RenderCache pays no SQL here.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger's own error when the advance cannot be committed
+    /// (a database failure, or a missing `suprnova_render_epochs` table under
+    /// the caller's own transaction).
+    pub async fn bump_permission_version() -> Result<(), FrameworkError> {
+        orm::advance(vec![collector::permission_version_identity()]).await
     }
 
     /// Emergency invalidation: advances the authority epoch, making every

@@ -4,12 +4,17 @@
 //!
 //! # Limitations, by design
 //!
-//! - **Config and Feature identities have no producer.** No write path
-//!   advances a config or feature generation, so observing them would spend
-//!   the bounded observation budget while contributing nothing to
-//!   invalidation - the same reasoning as ruling R24 on query classes.
-//!   `Config::get::<T>()` is also type-keyed rather than name-keyed, so
-//!   there is no stable name to build an identity from at that seam.
+//! - **Config and Feature identities have no automatic producer.** No
+//!   framework read observes a config or feature generation and no write
+//!   path advances one, so observing them would spend the bounded
+//!   observation budget while contributing nothing to invalidation - the
+//!   same reasoning as ruling R24 on query classes. `Config::get::<T>()` is
+//!   also type-keyed rather than name-keyed, so there is no stable name to
+//!   build an identity from at that seam. The one reserved exception is
+//!   [`permission_version_identity`], a `Config` identity this crate itself
+//!   both observes (for every render whose key carries a resolved
+//!   `Principal`) and advances
+//!   ([`crate::render_cache::RenderCache::bump_permission_version`]).
 //! - **Raw SQL reads mark the report incomplete.** `DB::select`,
 //!   `DB::select_one`, `DB::scalar`, and `DB::select_on` cannot name the
 //!   tables they read, so they call [`observe_unobservable_read`] and the
@@ -29,40 +34,42 @@
 //!   through the Tenant variance dimension, not here.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use suprnova_live::render_cache::generation::{DependencyIdentity, MAX_OBSERVATIONS};
 
-/// Process-wide permission-version counter fed into `Principal` variance
-/// (`PrivateMaterial::principal`) so a cached private representation stops
-/// matching a user whose permissions changed since it was published.
+/// The reserved `Config` key behind [`permission_version_identity`].
 ///
-/// Starts at 0. Nothing in the framework bumps this on its own: role and
-/// permission changes are application-defined (a `roles` table update, a
-/// policy reassignment), so only the application knows when they happen.
-/// An application that grants or revokes permissions and cares about
-/// RenderCache must call [`crate::render_cache::RenderCache::bump_permission_version`]
-/// when it does - documented on that function and in the manual. Without
+/// A dotted, crate-prefixed name no application configuration key would
+/// collide with; the identity's digest, not this text, is what the ledger
+/// stores.
+pub const PERMISSION_VERSION_CONFIG_KEY: &str = "suprnova.render_cache.permission_version";
+
+/// The dependency identity whose generation is the permission version.
+///
+/// Every render whose lookup key carries a resolved `Principal` value
+/// observes this identity (the middleware adds it to the collector at the
+/// start of the render), and
+/// [`crate::render_cache::RenderCache::bump_permission_version`] advances it
+/// through the same ledger path an ORM write uses, so a bump is persisted in
+/// `suprnova_render_generations` and logged like any other advance. A
+/// cached private representation published before a bump therefore fails
+/// its coherence check at the next lookup, and keeps failing it after a
+/// process restart, which the earlier process-local counter (a `static
+/// AtomicU64` that reset to 0 while an L1 entry survived on disk) did not
+/// guarantee (final review, F3).
+///
+/// Nothing in the framework bumps this on its own: role and permission
+/// changes are application-defined (a `roles` table update, a policy
+/// reassignment), so only the application knows when they happen. An
+/// application that grants or revokes permissions and cares about
+/// RenderCache must call `bump_permission_version` when it does. Without
 /// that call, a user whose permissions were just revoked keeps matching the
 /// cache key their prior permission set produced, and keeps being served
 /// whatever was cached under it.
-static PERMISSION_VERSION: AtomicU64 = AtomicU64::new(0);
-
-/// The current process-wide permission version. Read by the middleware
-/// while building `Principal` variance material; see
-/// [`crate::render_cache::RenderCache::bump_permission_version`] for what
-/// advances it.
 #[must_use]
-pub fn permission_version() -> u64 {
-    PERMISSION_VERSION.load(Ordering::SeqCst)
-}
-
-/// Advances the permission version. `pub(crate)`: the public entry point is
-/// [`crate::render_cache::RenderCache::bump_permission_version`], which this
-/// backs.
-pub(crate) fn bump_permission_version() {
-    PERMISSION_VERSION.fetch_add(1, Ordering::SeqCst);
+pub fn permission_version_identity() -> DependencyIdentity {
+    DependencyIdentity::config(PERMISSION_VERSION_CONFIG_KEY)
 }
 
 /// The collector's own cap, one below [`MAX_OBSERVATIONS`].

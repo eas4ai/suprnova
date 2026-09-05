@@ -28,7 +28,8 @@ use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
-    ensure_round3_authz_gate, ensure_round4_per_user_authz_gate, rename_user,
+    ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
+    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user,
 };
 
 #[tokio::test]
@@ -1893,8 +1894,9 @@ async fn declaring_principal_does_not_cover_a_flag_scoped_by_team() {
 }
 
 // ---------------------------------------------------------------------
-// Closing fix round (final review F2, ruling R118): the query-builder and
-// raw read seams.
+// Closing fix round (final review F2, F3; rulings R118 and R119): the
+// query-builder and raw read seams, and the permission version as a
+// persisted generation.
 // ---------------------------------------------------------------------
 
 /// Final review, F2 (the review's Probe B, promoted): a render whose only
@@ -2041,5 +2043,100 @@ async fn a_private_render_showing_auth_user_is_invalidated_by_an_orm_write_to_th
     assert!(
         after_body.contains(&format!("user {id} named alicia")),
         "the re-render shows the renamed row - got {after_body:?}"
+    );
+}
+
+/// Final review, F3 / ruling R119: `bump_permission_version` advances a
+/// persisted generation on a reserved identity that every render whose key
+/// carries a resolved `Principal` observes, so a private entry published
+/// before the bump is a miss at its next lookup. `PrivateCached` is never
+/// served stale, so the moved entry goes straight to `Dead` and renders.
+///
+/// Proven by revert: with the ledger advance removed from
+/// `RenderCache::bump_permission_version` (the function made a no-op), this
+/// fails at the "miss after the bump" assertion with `left: 1, right: 2`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_private_entry_is_a_miss_after_a_permission_bump() {
+    let harness = boot_with_render_cache().await;
+    let login = [("x-test-login", "alice")];
+
+    dispatch_get(&harness, "/private/1", &login).await;
+    assert_eq!(counting_route::renders(), 1);
+    dispatch_get(&harness, "/private/1", &login).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the private entry is a hit for its own visitor before the bump"
+    );
+
+    RenderCache::bump_permission_version()
+        .await
+        .expect("bump the permission version");
+
+    dispatch_get(&harness, "/private/1", &login).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a private entry published before the bump is a miss after it"
+    );
+    dispatch_get(&harness, "/private/1", &login).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "control: the post-bump render published under the advanced generation and is a hit"
+    );
+}
+
+/// Final review, F3 / ruling R119: the bump survives a restart. A private
+/// entry published to L1 before the bump, still on disk after a simulated
+/// restart (a fresh runtime slot over the same database and the same L1
+/// directory), is still a miss, because the generation the bump advanced
+/// lives in the database, not in the process. The earlier process-local
+/// counter reset to 0 on restart and the very same L1 file was served again.
+///
+/// Proven by revert: with the ledger advance removed from
+/// `RenderCache::bump_permission_version`, this fails at the "still a miss"
+/// assertion with `left: 0, right: 1`: the restarted process serves the
+/// pre-bump file from L1 without rendering.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_pre_bump_private_entry_stays_a_miss_after_a_restart_that_keeps_l1_and_the_database() {
+    let first_boot = boot_with_render_cache_and_l1_for_test().await;
+    let login = [("x-test-login", "alice")];
+
+    dispatch_get(&first_boot, "/private-l1/1", &login).await;
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        RenderCache::inspect_l1_for_test("/private-l1/{id}", &[("id", "1")], Some("alice"))
+            .await
+            .is_some(),
+        "precondition: the private entry reached L1"
+    );
+
+    RenderCache::bump_permission_version()
+        .await
+        .expect("bump the permission version");
+
+    let restarted =
+        reboot_with_render_cache_on_the_same_database_and_l1_for_test(&first_boot).await;
+    assert_eq!(
+        counting_route::renders(),
+        0,
+        "the restarted process has rendered nothing yet"
+    );
+    assert!(
+        RenderCache::inspect_l1_for_test("/private-l1/{id}", &[("id", "1")], Some("alice"))
+            .await
+            .is_some(),
+        "precondition: the pre-bump entry survived the restart on disk"
+    );
+
+    dispatch_get(&restarted, "/private-l1/1", &login).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the pre-bump entry is still a miss after the restart: its observed permission \
+         generation is behind the one the bump persisted"
     );
 }
