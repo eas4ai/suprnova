@@ -10,11 +10,16 @@
 //! is exactly what a decoded cache entry's freshness recheck compares).
 
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::ledger::{SqlGenerationLedger, advance_in_current_transaction};
+use suprnova::render_cache::{DependencyIdentity, RenderCache};
 use suprnova::testing::TestDatabase;
 use suprnova::{DB, FrameworkError};
 use suprnova_live::render_cache::generation::GenerationLedger;
+
+mod render_cache_middleware_support;
+use render_cache_middleware_support::{
+    Harness, boot_with_render_cache_on_live_server_for_test, counting_route, dispatch_get,
+};
 
 struct RenderCacheTestMigrator;
 
@@ -672,4 +677,92 @@ async fn live_postgres_a_write_inside_a_transaction_on_an_unmigrated_database_fa
     );
 
     drop(guard);
+}
+
+/// Final review, F1 / ruling R117: the render transaction is a snapshot on
+/// every backend. A write that commits while a cached render is running
+/// (after the handler's own read, before the observation window closes) must
+/// never leave that render's candidate published as current. With the
+/// snapshot, the window-close read still sees the pre-write generations, the
+/// fresh reread outside the transaction sees the write, and the candidate is
+/// discarded as moved; the next request renders again and no entry exists
+/// under the route's key.
+///
+/// SQLite hides this by construction (a WAL read transaction is a snapshot
+/// from its first read), which is why `render_cache_middleware.rs`'s own
+/// version of this scenario proves nothing about PostgreSQL, whose default
+/// isolation is `READ COMMITTED`: there the window-close read saw the
+/// committed write, the stored generations matched the fresh reread, and a
+/// body built from the pre-write data was published as current. The render
+/// transaction now asks for `REPEATABLE READ` on PostgreSQL (and MySQL,
+/// where InnoDB already defaults to it).
+///
+/// Proven by revert on PostgreSQL: with `render_isolation_level` returning
+/// `None` for every backend, the "renders again" assertion below fails with
+/// `left: 1, right: 2` and `inspect` finds the stale entry published.
+async fn assert_a_write_committed_during_a_cached_render_is_never_published_as_current(
+    harness: &Harness,
+) {
+    counting_route::write_during_next_render(harness);
+    dispatch_get(harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the raced render still runs; only publication is declined"
+    );
+    let key = RenderCache::key_for_route_for_test("/cached/{id}", &[("id", "1")], None);
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_none(),
+        "a candidate whose observed table moved during its render is never published as \
+         current"
+    );
+
+    dispatch_get(harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "nothing was published under the current generations, so the next request renders \
+         again"
+    );
+
+    // Positive control: the un-raced render publishes, so a build that
+    // cannot publish at all does not pass this test vacuously.
+    dispatch_get(harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "control: the second render published and this dispatch is a hit"
+    );
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "control: the un-raced render's entry exists"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let harness =
+        boot_with_render_cache_on_live_server_for_test(suprnova::DbConnection::from_raw(conn))
+            .await;
+    assert_a_write_committed_during_a_cached_render_is_never_published_as_current(&harness).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored live_mysql"]
+async fn live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    let harness =
+        boot_with_render_cache_on_live_server_for_test(suprnova::DbConnection::from_raw(conn))
+            .await;
+    assert_a_write_committed_during_a_cached_render_is_never_published_as_current(&harness).await;
 }

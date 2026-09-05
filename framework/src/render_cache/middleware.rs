@@ -154,6 +154,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use sea_orm::{DbBackend, IsolationLevel};
 use sha2::{Digest as _, Sha256};
 use suprnova_live::clock::Clock;
 use suprnova_live::crypto::SnapshotKeyRing;
@@ -1671,15 +1672,68 @@ async fn close_window(
     window.close(ledger).await.ok()
 }
 
-/// Runs `next(request)` under [`Collector::scope`], inside `DB::transaction`
-/// when a database is configured, and closes the collector's report into
-/// its observed generations (see [`close_window`]) while that transaction
-/// is still open, so the render's own reads and the generation reread
-/// share one snapshot. `request` is captured through a slot rather than
-/// moved directly into the transaction closure, so that if the transaction
-/// itself cannot even open (a provider failure, not a route failure), the
-/// still-untouched request is recoverable for a plain, uncached render
-/// instead of being lost.
+/// The isolation level the render transaction asks for on the active
+/// backend (final review, F1 / ruling R117).
+///
+/// The render's own reads and the generation read at window close have to
+/// share one snapshot, or a write that commits mid-render is visible to
+/// the close read (and to the fresh reread) while the body was built from
+/// the data before it, and a stale body is published under current
+/// generations. PostgreSQL's default is `READ COMMITTED`, where every
+/// statement sees the latest committed data, so it needs `REPEATABLE READ`
+/// explicitly. InnoDB's default is already `REPEATABLE READ`, so the
+/// explicit level is a no-op there and is passed for uniformity. SQLite's
+/// WAL read transaction is a snapshot as of its first read already, and the
+/// pinned SeaORM (2.0.2, `driver::sqlx_sqlite::set_transaction_config`)
+/// does not error on a level but logs a `warn!` for every transaction that
+/// carries one, so SQLite gets `None`: the backend default, with no log
+/// noise, and the same snapshot. An unrecognised future backend (the enum
+/// is `#[non_exhaustive]`) asks for `REPEATABLE READ`, the safe direction.
+fn render_isolation_level(backend: DbBackend) -> Option<IsolationLevel> {
+    match backend {
+        DbBackend::Sqlite => None,
+        _ => Some(IsolationLevel::RepeatableRead),
+    }
+}
+
+/// The body every [`run_render`] path shares: `next(request)` under a fresh
+/// [`Collector::scope`], the report extracted while the scope is open, and
+/// the window closed against `ledger` (see [`close_window`]).
+async fn render_under_collector(
+    request: Request,
+    next: Next,
+    epoch: u64,
+    ledger: &dyn GenerationLedger,
+) -> (
+    Response,
+    super::collector::CollectorReport,
+    Option<GenerationSet>,
+) {
+    Collector::scope(async move {
+        let response = next(request).await;
+        let report = collector::current_report().unwrap_or_default();
+        let observed = close_window(&report, epoch, ledger).await;
+        (response, report, observed)
+    })
+    .await
+}
+
+/// Runs `next(request)` under [`Collector::scope`], inside a database
+/// transaction when a database is configured, and closes the collector's
+/// report into its observed generations (see [`close_window`]) while that
+/// transaction is still open, so the render's own reads and the generation
+/// reread share one snapshot. The transaction is opened through
+/// `DB::transaction_with_isolation` at [`render_isolation_level`], because a
+/// plain `DB::transaction` is `READ COMMITTED` on PostgreSQL and therefore
+/// not a snapshot at all (final review, F1). The consequence for authors is
+/// documented in the manual and in `render-cache.md`: on PostgreSQL a cached
+/// route's handler that updates a row another transaction changed after the
+/// render began sees a serialization failure; cached routes are read paths.
+///
+/// `request` is captured through a slot rather than moved directly into the
+/// transaction closure, so that if the transaction itself cannot even open
+/// (a provider failure, not a route failure), the still-untouched request
+/// is recoverable for a plain, uncached render instead of being lost.
 async fn run_render(
     runtime: &Arc<RenderCacheRuntime>,
     request: Request,
@@ -1690,35 +1744,31 @@ async fn run_render(
     super::collector::CollectorReport,
     Option<GenerationSet>,
 ) {
-    if !DB::is_connected() {
-        return Collector::scope(async move {
-            let response = next(request).await;
-            let report = collector::current_report().unwrap_or_default();
-            let observed = close_window(&report, epoch, runtime.ledger.as_ref()).await;
-            (response, report, observed)
-        })
-        .await;
-    }
+    let backend = DB::connection()
+        .ok()
+        .map(|conn| conn.inner().get_database_backend());
+    let Some(backend) = backend else {
+        return render_under_collector(request, next, epoch, runtime.ledger.as_ref()).await;
+    };
     let slot: Arc<std::sync::Mutex<Option<Request>>> =
         Arc::new(std::sync::Mutex::new(Some(request)));
     let slot_for_closure = Arc::clone(&slot);
     let next_for_closure = next.clone();
     let ledger_for_closure = Arc::clone(&runtime.ledger);
-    let result = DB::transaction(move |_tx| {
+    let result = DB::transaction_with_isolation(render_isolation_level(backend), move |_tx| {
         let slot = Arc::clone(&slot_for_closure);
         let next = next_for_closure.clone();
         let ledger = Arc::clone(&ledger_for_closure);
-        Box::pin(Collector::scope(async move {
+        Box::pin(async move {
             let request = slot
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .expect("the request is taken exactly once, by this closure, when it runs");
-            let response = next(request).await;
-            let report = collector::current_report().unwrap_or_default();
-            let observed = close_window(&report, epoch, ledger.as_ref()).await;
-            Ok::<_, crate::FrameworkError>((response, report, observed))
-        }))
+            Ok::<_, crate::FrameworkError>(
+                render_under_collector(request, next, epoch, ledger.as_ref()).await,
+            )
+        })
     })
     .await;
     match result {
@@ -1735,13 +1785,7 @@ async fn run_render(
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .expect("a failed DB::transaction never invoked its closure");
-            Collector::scope(async move {
-                let response = next(request).await;
-                let report = collector::current_report().unwrap_or_default();
-                let observed = close_window(&report, epoch, runtime.ledger.as_ref()).await;
-                (response, report, observed)
-            })
-            .await
+            render_under_collector(request, next, epoch, runtime.ledger.as_ref()).await
         }
     }
 }

@@ -73,7 +73,8 @@ render_cache_mysql_out="$(cargo test -p suprnova --test render_cache_ledger -- -
 echo "$render_cache_mysql_out"
 for render_cache_mysql_test in \
     live_mysql_generation_ledger_advances_and_reads \
-    live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock; do
+    live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock \
+    live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current; do
     if ! grep -qE "^test ${render_cache_mysql_test} \.\.\. ok" <<<"$render_cache_mysql_out"; then
         echo "check-mysql: ${render_cache_mysql_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
