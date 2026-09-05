@@ -167,7 +167,13 @@ class StepRegistryTests(unittest.TestCase):
                 "workspace-tests",
                 ["default", "full"],
                 1800,
-                ["cargo", "test", "--workspace", "--no-fail-fast"],
+                ["cargo", "nextest", "run", "--workspace", "--no-fail-fast"],
+            ),
+            (
+                "workspace-doctests",
+                ["default", "full"],
+                900,
+                ["cargo", "test", "--workspace", "--doc", "--no-fail-fast"],
             ),
             (
                 "magnetar-all-feature-tests",

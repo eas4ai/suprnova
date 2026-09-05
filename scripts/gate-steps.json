@@ -102,8 +102,17 @@
       "id": "workspace-tests",
       "name": "workspace tests",
       "tiers": ["default", "full"],
-      "argv": ["cargo", "test", "--workspace", "--no-fail-fast"],
+      "argv": ["cargo", "nextest", "run", "--workspace", "--no-fail-fast"],
       "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["cargo", "cargo-nextest"]
+    },
+    {
+      "id": "workspace-doctests",
+      "name": "workspace doctests",
+      "tiers": ["default", "full"],
+      "argv": ["cargo", "test", "--workspace", "--doc", "--no-fail-fast"],
+      "timeout_seconds": 900,
       "category": "code",
       "capabilities": ["cargo"]
     },

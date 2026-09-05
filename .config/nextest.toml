@@ -4,3 +4,10 @@ failure-output = "immediate"
 
 [profile.ci]
 fail-fast = false
+
+[test-groups]
+serial-binaries = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(paginated_users_e2e)'
+test-group = 'serial-binaries'
