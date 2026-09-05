@@ -9,16 +9,16 @@
 //! for why that distinction matters (`GenerationSet::get_digest` vs `None`
 //! is exactly what a decoded cache entry's freshness recheck compares).
 
+use crate::render_cache_middleware_support;
+use render_cache_middleware_support::{
+    Harness, boot_with_render_cache_on_live_server_for_test, counting_route, dispatch_get,
+};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::render_cache::ledger::{SqlGenerationLedger, advance_in_current_transaction};
 use suprnova::render_cache::{DependencyIdentity, RenderCache};
 use suprnova::testing::TestDatabase;
 use suprnova::{DB, FrameworkError};
 use suprnova_live::render_cache::generation::GenerationLedger;
-use crate::render_cache_middleware_support;
-use render_cache_middleware_support::{
-    Harness, boot_with_render_cache_on_live_server_for_test, counting_route, dispatch_get,
-};
 
 struct RenderCacheTestMigrator;
 

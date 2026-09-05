@@ -1,10 +1,10 @@
 //! Integration tests for the `mail` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
-#[path = "../support/env_lock.rs"]
-mod env_lock;
 pub mod address;
 pub mod boot;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
 pub mod fake;
 pub mod file_transport;
 pub mod in_memory;

@@ -20,8 +20,6 @@
 //! thread, driven by explicit `Notify`-based state barriers rather than
 //! real OS parallelism.
 
-use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
-use suprnova::{StatusCode, async_trait};
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
@@ -30,6 +28,8 @@ use render_cache_middleware_support::{
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
     reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user,
 };
+use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
+use suprnova::{StatusCode, async_trait};
 
 #[tokio::test]
 #[serial_test::serial]

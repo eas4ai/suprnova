@@ -972,7 +972,11 @@ async fn magnetar_host_engine_child() {
 
 fn run_magnetar_host_engine_child(mode: &str) -> Output {
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "host_engine::magnetar_host_engine_child", "--nocapture"])
+        .args([
+            "--exact",
+            "host_engine::magnetar_host_engine_child",
+            "--nocapture",
+        ])
         .env(CHILD_MODE, mode)
         .output()
         .expect("spawn Magnetar host-engine child");

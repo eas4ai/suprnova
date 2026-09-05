@@ -33,7 +33,11 @@ fn bootstrap_free_console_child() {
 
 fn assert_bootstrap_free_mode(mode: &str) {
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "main_bootstrap_boundaries::bootstrap_free_console_child", "--nocapture"])
+        .args([
+            "--exact",
+            "main_bootstrap_boundaries::bootstrap_free_console_child",
+            "--nocapture",
+        ])
         .env(CHILD_MODE, mode)
         .env("APP_ENV", "production")
         .env_remove("APP_KEY")

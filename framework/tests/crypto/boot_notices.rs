@@ -19,7 +19,11 @@ fn crypto_notice_child() {
 fn run_child(mode: &str) -> Output {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
-        .args(["--exact", "boot_notices::crypto_notice_child", "--nocapture"])
+        .args([
+            "--exact",
+            "boot_notices::crypto_notice_child",
+            "--nocapture",
+        ])
         .env(CHILD_MODE, mode)
         .env_remove("APP_KEY")
         .env_remove("APP_KEY_PREVIOUS")

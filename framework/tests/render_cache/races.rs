@@ -25,12 +25,12 @@
 //! `render_cache_middleware.rs`'s own singleflight tests already prove.
 #![cfg(feature = "testing")]
 
-use suprnova::StatusCode;
-use suprnova::render_cache::RenderCache;
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
     boot_with_render_cache, clock, counting_route, dispatch_get, race,
 };
+use suprnova::StatusCode;
+use suprnova::render_cache::RenderCache;
 
 /// A write that lands after the fresh reread already found a render
 /// coherent - but before that render's candidate is built and stored -

@@ -9,5 +9,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Hold the returned guard for the whole test body that mutates environment.
 pub fn lock_env() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
