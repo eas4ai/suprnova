@@ -165,7 +165,7 @@ docker run -p 6334:6334 -p 6333:6333 qdrant/qdrant
 Integrationstests laufen über:
 
 ```bash
-QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector_qdrant -- --ignored
+QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector -- --ignored qdrant::
 ```
 
 ### Pinecone - `PineconeVectorDriver`
@@ -313,7 +313,7 @@ die beide Umgebungsvariablen benötigen:
 ```bash
 PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
     cargo test -p suprnova --features vector-pinecone \
-    --test vector_pinecone -- --ignored
+    --test vector -- --ignored pinecone::
 ```
 
 ### MariaDB - `MariaDbVectorDriver`
@@ -480,7 +480,7 @@ Integrationstests laufen über:
 
 ```bash
 MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
-    cargo test -p suprnova --test vector_mariadb -- --ignored
+    cargo test -p suprnova --test vector -- --ignored mariadb::
 ```
 
 ## Treibervergleich

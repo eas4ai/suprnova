@@ -106,7 +106,7 @@ docker run -p 6334:6334 -p 6333:6333 qdrant/qdrant
 統合テストは次で実行されます:
 
 ```bash
-QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector_qdrant -- --ignored
+QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector -- --ignored qdrant::
 ```
 
 ### Pinecone - `PineconeVectorDriver`
@@ -183,7 +183,7 @@ let hits: FetchResponse = driver.data_plane_post(
 ```bash
 PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
     cargo test -p suprnova --features vector-pinecone \
-    --test vector_pinecone -- --ignored
+    --test vector -- --ignored pinecone::
 ```
 
 ### MariaDB - `MariaDbVectorDriver`
@@ -263,7 +263,7 @@ docker run -p 3306:3306 \
 
 ```bash
 MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
-    cargo test -p suprnova --test vector_mariadb -- --ignored
+    cargo test -p suprnova --test vector -- --ignored mariadb::
 ```
 
 ## ドライバーの比較
