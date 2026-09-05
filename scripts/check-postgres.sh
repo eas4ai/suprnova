@@ -148,6 +148,9 @@ for render_cache_pg_test in \
     fi
 done
 
+# Savepoint aliases must select the same row and deferred-effect boundary.
+cargo test -p suprnova --test queue_after_commit savepoint_aliases_postgres_rows_and_jobs_agree -- --ignored --exact
+
 # The workflow lease-reclaim tests are in-source unit tests, and they are
 # gated TWICE: `#[ignore]` keeps them out of the normal run, and even when
 # un-ignored they return early unless `DATABASE_URL` names a Postgres. Both

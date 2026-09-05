@@ -41,6 +41,17 @@ pub enum WebPushError {
     Json(#[from] serde_json::Error),
     #[error("subscription expired or invalid (HTTP 404/410)")]
     SubscriptionGone,
+    /// Refused before any I/O: a caller-supplied HTTP client with an
+    /// unknown redirect policy must not send under the `Strict` endpoint
+    /// policy, which validates only the initial URL. Build the transport
+    /// with `WebPushClient::with_client_builder` (redirects forcibly
+    /// disabled) or explicitly accept the risk with
+    /// `WebPushClient::allow_unconfined_redirects`.
+    #[error(
+        "refusing Strict send over a redirect-uncharacterized HTTP client; \
+         use WebPushClient::with_client_builder or allow_unconfined_redirects"
+    )]
+    UnconfinedRedirects,
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -54,7 +65,7 @@ impl WebPushError {
     /// Returns `false` for terminal outcomes: `SubscriptionGone` (404/410),
     /// other 4xx (authn/authz/protocol errors), and for the local errors
     /// that fired before any HTTP I/O (`Vapid`, `Encryption`, `Base64`,
-    /// `Json`, `Internal`).
+    /// `Json`, `Internal`, `UnconfinedRedirects`).
     ///
     /// When `Some`, [`Self::retry_after`] gives the push-service-suggested
     /// minimum delay.
@@ -69,7 +80,8 @@ impl WebPushError {
             | Self::Encryption(_)
             | Self::Base64(_)
             | Self::Json(_)
-            | Self::Internal(_) => false,
+            | Self::Internal(_)
+            | Self::UnconfinedRedirects => false,
         }
     }
 

@@ -45,7 +45,7 @@ pub mod driver;
 pub mod middleware;
 pub mod store;
 
-pub use config::SessionConfig;
+pub use config::{MAX_SESSION_LIFETIME_MINUTES, MAX_SESSION_LIFETIME_SECS, SessionConfig};
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{
     SessionGcMetrics, SessionGcSupervisor, SessionMiddleware, auth_user_id, clear_auth_user,

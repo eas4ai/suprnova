@@ -99,19 +99,21 @@ let client = WebPushClient::new(signer, "mailto:test@example.org")?
 
 ### カスタムトランスポート
 
-`WebPushClient::new` は、リクエストごとに30秒のタイムアウトを適用します。異なるトランスポートポリシーが必要な場合 - 企業のプロキシ、ピン留めされたTLS、より短いタイムアウトなど - は、`reqwest::Client` を構築し、`WebPushClient::with_client` を使ってください:
+`WebPushClient::new` は、リクエストごとに30秒のタイムアウトを適用します。異なるトランスポートポリシーが必要な場合 - 企業のプロキシ、ピン留めされたTLS、より短いタイムアウトなど - は、`reqwest::ClientBuilder` を `WebPushClient::with_client_builder` に渡してください。ビルダーのオプションはすべて尊重されますが、リダイレクトポリシーは強制的に無効化されます。検証済みのエンドポイントが3xxで応答しても、POSTを未検証のURLに転送してはならないため、ライブラリは呼び出し側のリダイレクト設定を受け付けません:
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` は、すでに構築済みのクライアントを受け取りますが、そのリダイレクトポリシーをライブラリ側で検査できません。デフォルトの `Strict` ポリシーでの送信は、そのようなトランスポートではI/Oの前に拒否されます。`with_client_builder` に切り替えるか、クライアントがリダイレクトを追跡しないことが確実な場合に `.allow_unconfined_redirects()` でリスクを明示的に受け入れてください。
 
 ## WebPushChannelを通知に配線する
 

@@ -296,3 +296,132 @@ async fn throttle_missing_named_limiter_returns_503() {
         "missing named limiter must short-circuit with 503 (not 500/panic)"
     );
 }
+
+#[tokio::test]
+async fn colliding_throttle_clauses_have_independent_allowances() {
+    let _g = install_test_cache();
+    for (index, keys) in [("same", "same"), ("&a&bc;;", "a")].into_iter().enumerate() {
+        let limits = vec![
+            Limit::per_minute(2).by(keys.0),
+            Limit::per_hour(10).by(keys.1),
+        ];
+        let router = Router::new()
+            .get("/quota", |_| async { text("ok") })
+            .middleware(
+                ThrottleRequestsMiddleware::with_limits(limits)
+                    .prefix(format!("collision-{index}")),
+            );
+        let addr = spawn_server(router, 3).await;
+        assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+        assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+        let (status, headers) = get_with_headers(addr, "/quota").await;
+        assert_eq!(status, 429);
+        assert_eq!(headers["x-ratelimit-limit"], "2");
+        assert!(headers.contains_key("retry-after"));
+    }
+}
+
+#[tokio::test]
+async fn colliding_named_clauses_keep_counters_when_reordered() {
+    let _g = install_test_cache();
+    let calls = AtomicUsize::new(0);
+    RateLimiter::define("reordered-clauses", move |_| {
+        let mut limits = vec![
+            Limit::per_minute(2).by("same"),
+            Limit::per_hour(10).by("same"),
+        ];
+        if calls.fetch_add(1, Ordering::SeqCst) % 2 == 1 {
+            limits.reverse();
+        }
+        limits.into()
+    });
+    let router = Router::new()
+        .get("/quota", |_| async { text("ok") })
+        .middleware(ThrottleRequestsMiddleware::by_name("reordered-clauses"));
+    let addr = spawn_server(router, 3).await;
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 429);
+}
+
+#[tokio::test]
+async fn colliding_deferred_and_unconditional_clauses_do_not_trade_counters() {
+    let _g = install_test_cache();
+    let calls = AtomicUsize::new(0);
+    RateLimiter::define("reordered-deferred-clauses", move |_| {
+        let mut limits = vec![
+            Limit::per_minute(2).by("same"),
+            Limit::per_minute(2).by("same").after(|_| false),
+        ];
+        if calls.fetch_add(1, Ordering::SeqCst) % 2 == 1 {
+            limits.reverse();
+        }
+        limits.into()
+    });
+    let router = Router::new()
+        .get("/quota", |_| async { text("ok") })
+        .middleware(ThrottleRequestsMiddleware::by_name(
+            "reordered-deferred-clauses",
+        ));
+    let addr = spawn_server(router, 3).await;
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 429);
+}
+
+#[tokio::test]
+async fn colliding_windows_expire_independently() {
+    let _g = install_test_cache();
+    let limits = vec![
+        Limit::new(2, Duration::from_secs(1)).by("expiry"),
+        Limit::per_minute(3).by("expiry"),
+    ];
+    let router = Router::new()
+        .get("/quota", |_| async { text("ok") })
+        .middleware(ThrottleRequestsMiddleware::with_limits(limits));
+    let addr = spawn_server(router, 4).await;
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    // The cache's TTL uses std::time::Instant, not Tokio's paused clock.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(get_with_headers(addr, "/quota").await.0, 200);
+    let (status, headers) = get_with_headers(addr, "/quota").await;
+    assert_eq!(status, 429);
+    assert_eq!(
+        headers["x-ratelimit-limit"], "3",
+        "the long window remains exhausted"
+    );
+}
+
+#[tokio::test]
+async fn colliding_deferred_clauses_debit_once_on_both_response_branches() {
+    let _g = install_test_cache();
+    for fail in [false, true] {
+        let limits = vec![
+            Limit::per_minute(2)
+                .by("same")
+                .after(|_| true)
+                .response(|_| suprnova::http::HttpResponse::text("quota reached").status(418)),
+            Limit::per_minute(2).by("same").after(|_| true),
+            Limit::none().into(),
+        ];
+        let router = Router::new()
+            .get("/quota", move |_| async move {
+                if fail {
+                    Err(suprnova::http::HttpResponse::text("failed").status(500))
+                } else {
+                    text("ok")
+                }
+            })
+            .middleware(
+                ThrottleRequestsMiddleware::with_limits(limits).prefix(format!("deferred-{fail}")),
+            );
+        let addr = spawn_server(router, 3).await;
+        let expected = if fail { 500 } else { 200 };
+        let (status, headers) = get_with_headers(addr, "/quota").await;
+        assert_eq!(status, expected);
+        assert_eq!(headers["x-ratelimit-remaining"], "1");
+        assert_eq!(get_with_headers(addr, "/quota").await.0, expected);
+        assert_eq!(get_with_headers(addr, "/quota").await.0, 418);
+    }
+}

@@ -29,6 +29,7 @@
 use super::Storage;
 use crate::FrameworkError;
 use futures::TryStreamExt;
+use opendal::{Operator, Writer};
 
 /// Streaming chunk size for the reader. 64 KiB strikes a balance between
 /// syscall / network round-trips and memory pressure for large files.
@@ -48,6 +49,11 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 ///   fails mid-stream, a chunk write fails, or the final close fails. Each
 ///   boundary uses a distinct message prefix so failures are identifiable in
 ///   logs.
+///
+/// Failure aborts the writer without deleting the public destination, which
+/// may still hold an earlier object or a concurrent writer's bytes. Cancellation
+/// diverts that cleanup to a detached task. Backends that overwrite in place
+/// cannot restore old bytes; abort cleans up only what the backend owns.
 pub async fn copy_between_disks(
     src: &str,
     src_path: &str,
@@ -67,40 +73,171 @@ pub async fn copy_between_disks(
         .await
         .map_err(|e| FrameworkError::internal(format!("open source: {e}")))?;
 
-    let mut writer = dest_op
+    let writer = dest_op
         .writer(dest_path)
         .await
         .map_err(|e| FrameworkError::internal(format!("open dest: {e}")))?;
 
-    // Once the writer is open, a mid-stream failure can leave a partial object
-    // at `dest_path`. Run the transfer separately so that on ANY error we
-    // discard the partial write before propagating - a failed copy must never
-    // be observable as a truncated destination object.
-    match stream_to_writer(reader, &mut writer).await {
-        Ok(total) => Ok(total),
-        Err(err) => {
-            // `abort` discards staged writes for backends that buffer them
-            // (e.g. S3 multipart parts); `delete` removes an already-visible
-            // partial file (e.g. the local FS backend). Both are best-effort
-            // and only logged - the caller still sees the original error.
-            if let Err(abort_err) = writer.abort().await {
-                tracing::warn!(
-                    disk = dest,
-                    path = dest_path,
-                    error = %abort_err,
-                    "failed to abort writer while cleaning up a failed cross-disk copy"
-                );
-            }
-            if let Err(delete_err) = dest_op.delete(dest_path).await {
-                tracing::warn!(
-                    disk = dest,
-                    path = dest_path,
-                    error = %delete_err,
-                    "failed to delete partial destination while cleaning up a failed cross-disk copy"
-                );
-            }
-            Err(err)
+    // Only the backend knows which staged state belongs to this writer.
+    // Even an earlier absence check cannot make a public key ours to delete.
+    let mut guard =
+        WriterGuard::new(dest_op.clone(), dest, dest_path, writer).preserve_destination();
+    let result = stream_to_writer(reader, guard.writer()).await;
+    guard.settle(result).await
+}
+
+/// Owns the destination writer across the transfer loop so cleanup runs on
+/// every exit path, including task cancellation.
+///
+/// Errors settle inline ([`WriterGuard::settle`]) by aborting the writer.
+/// Deletion is enabled only for a unique staging path; callers targeting a
+/// public destination must use [`WriterGuard::preserve_destination`]. If the
+/// guard is dropped first, cleanup runs on a detached task.
+pub(crate) struct WriterGuard {
+    writer: Option<Writer>,
+    dest_op: Operator,
+    dest: String,
+    dest_path: String,
+    complete: bool,
+    delete_destination: bool,
+}
+
+impl WriterGuard {
+    pub(crate) fn new(dest_op: Operator, dest: &str, dest_path: &str, writer: Writer) -> Self {
+        Self {
+            writer: Some(writer),
+            dest_op,
+            dest: dest.to_string(),
+            dest_path: dest_path.to_string(),
+            complete: false,
+            delete_destination: true,
         }
+    }
+
+    /// Abort only: an existing destination or conditional-write winner is not
+    /// this transfer's object to delete.
+    pub(crate) fn preserve_destination(mut self) -> Self {
+        self.delete_destination = false;
+        self
+    }
+
+    pub(crate) fn writer(&mut self) -> &mut Writer {
+        self.writer
+            .as_mut()
+            .expect("writer is taken only while settling")
+    }
+
+    /// Settle a finished transfer. Success disarms the guard (the loop
+    /// already closed the writer); failure runs the configured cleanup and
+    /// propagates the original error.
+    ///
+    /// Cleanup runs on a detached task that is awaited here: if this
+    /// task is cancelled mid-cleanup, the detached task still runs it to
+    /// completion instead of abandoning the remainder.
+    pub(crate) async fn settle<T, E>(mut self, result: Result<T, E>) -> Result<T, E> {
+        match result {
+            Ok(total) => {
+                self.complete = true;
+                Ok(total)
+            }
+            Err(err) => {
+                self.cleanup().await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Discard a failed transfer or an unpublished promotion that lost a race.
+    /// The cleanup task retains ownership if its caller is cancelled.
+    pub(crate) async fn cleanup(mut self) {
+        let writer = self.writer.take();
+        self.complete = true;
+        let cleanup = run_cleanup(
+            writer,
+            self.dest_op.clone(),
+            self.dest.clone(),
+            self.dest_path.clone(),
+            self.delete_destination,
+            "discarded",
+        );
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let _ = handle.spawn(cleanup).await;
+            }
+            // Foreign executors have no runtime to spawn onto.
+            Err(_) => cleanup.await,
+        }
+    }
+}
+
+/// Abort the staged write, then delete any visible partial - best
+/// effort, failures only logged. `kind` is `"discarded"` for the error
+/// path and `"cancelled"` for the divert path, so logs say which exit
+/// the transfer took.
+async fn run_cleanup(
+    writer: Option<Writer>,
+    dest_op: Operator,
+    dest: String,
+    dest_path: String,
+    delete_destination: bool,
+    kind: &'static str,
+) {
+    if let Some(mut writer) = writer
+        && let Err(abort_err) = writer.abort().await
+    {
+        tracing::warn!(
+            disk = dest,
+            path = dest_path,
+            error = %abort_err,
+            "failed to abort writer while cleaning up a {kind} cross-disk copy"
+        );
+    }
+    if delete_destination && let Err(delete_err) = dest_op.delete(&dest_path).await {
+        tracing::warn!(
+            disk = dest,
+            path = dest_path,
+            error = %delete_err,
+            "failed to delete partial destination while cleaning up a {kind} cross-disk copy"
+        );
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        if self.complete || self.writer.is_none() {
+            return;
+        }
+        // Cancelled (or panicked) before the transfer settled: an open writer
+        // or a closed but unpublished promotion may still own staged output.
+        // Divert cleanup to a detached task that outlives this task.
+        let writer = self.writer.take();
+        let dest_op = self.dest_op.clone();
+        let dest = self.dest.clone();
+        let dest_path = self.dest_path.clone();
+        spawn_cleanup(run_cleanup(
+            writer,
+            dest_op,
+            dest,
+            dest_path,
+            self.delete_destination,
+            "cancelled",
+        ));
+    }
+}
+
+/// Run `future` on a detached task that outlives the spawning task's
+/// cancellation. Cancellation-divert only, never the happy path; the
+/// cleanup needs no ambient context (operator, writer, and paths are all
+/// owned), so nothing is propagated. Without a running runtime
+/// (shutdown) there is nothing to spawn onto, which is logged.
+fn spawn_cleanup(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(future);
+    } else {
+        tracing::error!(
+            "cross-disk copy cancelled with no async runtime running; \
+             its partial destination may remain"
+        );
     }
 }
 

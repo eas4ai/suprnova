@@ -33,7 +33,7 @@ pub(crate) mod vendor;
 
 use std::future::Future;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -43,17 +43,17 @@ use crate::FrameworkError;
 
 pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
 
-/// Process-global flag flipped by [`Http::fail_on_real_calls`]. When
-/// `true`, [`RequestBuilder::send`] refuses to hit the real network -
-/// every outbound call that isn't intercepted by an active fake
-/// returns an error.
+/// Process-global install count raised by [`Http::fail_on_real_calls`].
+/// While nonzero, [`RequestBuilder::send`] refuses to hit the real
+/// network - every outbound call that isn't intercepted by an active
+/// fake returns an error.
 ///
-/// The flag is process-global by design: the goal is to fail closed on
+/// The count is process-global by design: the goal is to fail closed on
 /// accidental network escape from spawned tasks that don't inherit the
 /// caller's task-local fake. Tests that flip this should use
 /// [`FailOnRealCallsGuard`] (or call [`Http::allow_real_calls`] in
 /// teardown) so the flag doesn't leak between tests.
-static FAIL_ON_REAL_CALLS: AtomicBool = AtomicBool::new(false);
+static FAIL_ON_REAL_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static REQWEST_CLIENT_NO_REDIRECT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -234,19 +234,20 @@ impl Http {
     /// // Inside this scope, any unfaked outbound call fails closed.
     /// ```
     pub fn fail_on_real_calls() {
-        FAIL_ON_REAL_CALLS.store(true, Ordering::SeqCst);
+        FAIL_ON_REAL_CALLS.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Disable the test-guard mode. After this returns, unfaked
     /// outbound calls proceed to the real network as usual. Default
-    /// state at process start is "real calls allowed".
+    /// state at process start is "real calls allowed". Resets the
+    /// install count to zero, releasing every outstanding guard.
     pub fn allow_real_calls() {
-        FAIL_ON_REAL_CALLS.store(false, Ordering::SeqCst);
+        FAIL_ON_REAL_CALLS.store(0, Ordering::SeqCst);
     }
 
     /// `true` when [`Self::fail_on_real_calls`] is active.
     pub fn is_guarded() -> bool {
-        FAIL_ON_REAL_CALLS.load(Ordering::SeqCst)
+        FAIL_ON_REAL_CALLS.load(Ordering::SeqCst) > 0
     }
 
     /// Set the process-global cap on a buffered outbound response body
@@ -332,41 +333,38 @@ impl Http {
 /// }
 /// ```
 ///
-/// `Drop` restores the state that was in effect when the guard was
-/// installed, so nested guards compose correctly: dropping an inner guard
-/// returns the flag to whatever the outer scope had set, not
-/// unconditionally to "allowed".
+/// `Drop` releases one install, so nested guards compose correctly:
+/// dropping an inner guard returns the count to whatever the outer
+/// scope holds, not unconditionally to "allowed".
 ///
-/// # Parallel-task caveat
-///
-/// The underlying flag is a process-global `AtomicBool`, so parallel
-/// tasks that each install their own guard race on the same cell - an
-/// inner guard from one task can briefly relax the guard for another
-/// task that expects it to stay on. Process-global by design: this
-/// catches the exact failure it was built for (work `tokio::spawn`-ed
-/// out of a [`Http::fake`] scope hitting the real network). For
-/// parallel test isolation, prefer per-task fake scopes via
-/// [`Http::fake`] + [`Http::spawn_with_fake_inheritance`] instead of
-/// relying on the guard alone.
+/// The install count is process-global by design: this catches the
+/// exact failure it was built for (work `tokio::spawn`-ed out of a
+/// [`Http::fake`] scope hitting the real network). Parallel tasks
+/// that each install their own guard compose safely - the flag stays
+/// armed until the last outstanding guard drops. For parallel test
+/// isolation, still prefer per-task fake scopes via [`Http::fake`] +
+/// [`Http::spawn_with_fake_inheritance`] instead of relying on the
+/// guard alone.
 #[must_use = "FailOnRealCallsGuard releases the guard on drop - bind it to a name"]
-pub struct FailOnRealCallsGuard {
-    previous: bool,
-}
+pub struct FailOnRealCallsGuard;
 
 impl FailOnRealCallsGuard {
-    /// Flip [`Http::fail_on_real_calls`] on and return a guard whose
-    /// `Drop` impl restores the PREVIOUS state (not unconditionally
-    /// "allowed"), making nested installs safe.
+    /// Arm [`Http::fail_on_real_calls`] and return a guard whose
+    /// `Drop` impl releases one install, making nested and parallel
+    /// installs safe.
     pub fn install() -> Self {
-        let previous = Http::is_guarded();
         Http::fail_on_real_calls();
-        Self { previous }
+        Self
     }
 }
 
 impl Drop for FailOnRealCallsGuard {
     fn drop(&mut self) {
-        FAIL_ON_REAL_CALLS.store(self.previous, Ordering::SeqCst);
+        // The closure never returns `None`, so this cannot fail; the
+        // `let _` only satisfies `unused_must_use`.
+        let _ = FAIL_ON_REAL_CALLS.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            Some(count.saturating_sub(1))
+        });
     }
 }
 
@@ -768,7 +766,11 @@ impl RequestBuilder {
                     return Ok(resp.with_max_bytes(effective_max));
                 }
                 Err(e) => {
-                    if let Some(p) = policy.filter(|_| attempt < max_attempts) {
+                    // Like the 5xx branch above, transport-error retries
+                    // require `method_retryable`: replaying a POST/PATCH
+                    // whose first attempt may already have taken effect
+                    // needs the explicit `retry_non_idempotent` opt-in.
+                    if method_retryable && let Some(p) = policy.filter(|_| attempt < max_attempts) {
                         let allowed = self
                             .retry_when
                             .as_ref()

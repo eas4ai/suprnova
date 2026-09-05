@@ -380,3 +380,48 @@ async fn webhook_for_unknown_provider_returns_404() {
         String::from_utf8_lossy(&resp_body)
     );
 }
+
+/// P4-12: an over-cap webhook body must surface 413, not 400. The route
+/// used to flatten every body-read failure to 400, obscuring the
+/// configured limit and breaking the status contract the other capped
+/// request paths keep.
+///
+/// The declared `Content-Length` exceeds the default 8 MiB cap while the
+/// actual body is two bytes: the pre-reject fires on the header alone,
+/// so the test proves the status mapping without allocating megabytes.
+#[tokio::test]
+async fn over_cap_webhook_body_returns_413_not_400() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let provider_name: &'static str = "mock-idem-body-cap";
+    register_mock(provider_name);
+
+    let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+        .await
+        .expect("TestDatabase::fresh");
+    let conn = Arc::new(db.conn().clone());
+    let router = webhook_routes(conn.clone());
+    let addr = spawn_server(router, 1).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    let over_cap = suprnova::DEFAULT_MAX_REQUEST_BODY_BYTES + 1;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {over_cap}\r\nConnection: close\r\n\r\n{{}}"
+    );
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut raw))
+        .await
+        .expect("read response")
+        .expect("read_to_end");
+    let head_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response has a head");
+    let status_line = String::from_utf8_lossy(&raw[..head_end]);
+    assert!(
+        status_line.starts_with("HTTP/1.1 413"),
+        "over-cap webhook body must return 413, got: {status_line}"
+    );
+}

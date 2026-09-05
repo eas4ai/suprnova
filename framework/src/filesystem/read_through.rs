@@ -39,6 +39,8 @@
 //! rename (memory, S3, Azure Blob, GCS) publish a write as a single indivisible
 //! operation, so for those the direct write is already atomic and is what runs.
 
+use super::streaming::WriterGuard;
+use futures::TryStreamExt;
 use opendal::options::{DeleteOptions, ReadOptions, ReaderOptions, WriteOptions};
 use opendal::raw::oio::Copy as _;
 use opendal::raw::{
@@ -603,48 +605,53 @@ impl ReadThroughReader {
 
         if !self.promote_atomically {
             let options = self.promotion_options(&metadata, self.promote_conditionally);
-            self.primary
-                .write_options(&self.path, contents.clone(), options)
-                .await?;
-            return Ok(());
+            let writer = self.primary.writer_options(&self.path, options).await?;
+            // Abort multipart state on cancellation, but never delete a
+            // published object: another reader may have won the condition.
+            let mut guard = WriterGuard::new(
+                self.primary.clone(),
+                "read-through primary",
+                &self.path,
+                writer,
+            )
+            .preserve_destination();
+            let result = async {
+                guard.writer().write(contents.clone()).await?;
+                guard.writer().close().await.map(|_| ())
+            }
+            .await;
+            return guard.settle(result).await;
         }
 
         let staged = staging_path(&self.path);
         let options = self.promotion_options(&metadata, false);
-        if let Err(e) = self
-            .primary
-            .write_options(&staged, contents.clone(), options)
-            .await
-        {
-            // A backend that creates the target before filling it leaves a
-            // partial staging object behind when the write fails part-way, and
-            // nothing else ever sweeps it. Deleting a path that was never
-            // created is a no-op, so this is safe either way.
-            self.discard(&staged).await;
-            return Err(e);
-        }
-
-        match self.primary.exists(&self.path).await {
-            // Somebody published while we were staging. Their object wins.
-            Ok(true) => {
-                self.discard(&staged).await;
-                return Ok(());
+        let writer = self.primary.writer_options(&staged, options).await?;
+        // Own both the writer's staging and the unique sibling until the
+        // final rename completes. Cleanup never targets the published path.
+        let mut guard = WriterGuard::new(
+            self.primary.clone(),
+            "read-through primary",
+            &staged,
+            writer,
+        );
+        let result: Result<bool> = async {
+            guard.writer().write(contents.clone()).await?;
+            guard.writer().close().await?;
+            if self.primary.exists(&self.path).await? {
+                // Somebody published while we were staging. Their object wins.
+                return Ok(false);
             }
-            Ok(false) => {}
-            // The staged object is already written, so every path out of here
-            // has to clean it up or it is left behind for good.
-            Err(e) => {
-                self.discard(&staged).await;
-                return Err(e);
+            self.primary.rename(&staged, &self.path).await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => {
+                guard.cleanup().await;
+                Ok(())
             }
+            result => guard.settle(result.map(|_| ())).await,
         }
-
-        if let Err(e) = self.primary.rename(&staged, &self.path).await {
-            self.discard(&staged).await;
-            return Err(e);
-        }
-
-        Ok(())
     }
 
     /// The write options a promotion runs under, carrying the fallback
@@ -658,20 +665,6 @@ impl ReadThroughReader {
             content_encoding: metadata.content_encoding().map(str::to_owned),
             user_metadata: metadata.user_metadata().cloned(),
             ..Default::default()
-        }
-    }
-
-    /// Remove a staging object that will never be published. Best-effort: the
-    /// caller is already returning the bytes or a more useful error, so a
-    /// failure here is logged and dropped rather than replacing that outcome.
-    async fn discard(&self, staged: &str) {
-        if let Err(e) = self.primary.delete(staged).await {
-            tracing::warn!(
-                path = %self.path,
-                staging_path = %staged,
-                error = %e,
-                "failed to remove a read-through staging object; it will need cleaning up by hand"
-            );
         }
     }
 }
@@ -761,11 +754,10 @@ struct TransferConditions {
 /// cannot express that condition fails the transfer through opendal's own
 /// correctness check rather than quietly ignoring it.
 ///
-/// A failure mid-stream must not be observable as a truncated destination, so
-/// the writer is aborted and a destination this transfer created is deleted
-/// before the error is returned - the same cleanup `copy_between_disks`
-/// performs. A destination that was already there is left alone; see
-/// [`discard_partial`].
+/// Failure aborts only the writer's owned state, as `copy_between_disks` does.
+/// A public destination can belong to another writer even if it was absent
+/// when this transfer began. Cancellation diverts abort to a detached task.
+/// A backend that truncates in place cannot restore old bytes.
 async fn stream_across(
     primary: &Operator,
     fallback: &Operator,
@@ -785,12 +777,7 @@ async fn stream_across(
         .await?;
     let mut stream = std::pin::pin!(reader.into_bytes_stream(..).await?);
 
-    // Whether the destination is this transfer's to remove if it fails. An
-    // object that was already there belongs to the caller, and a failed copy
-    // must not be the thing that destroys it.
-    let destination_existed = primary.exists(to).await?;
-
-    let mut writer = primary
+    let writer = primary
         .writer_options(
             to,
             WriteOptions {
@@ -800,85 +787,22 @@ async fn stream_across(
         )
         .await?;
 
-    loop {
-        match futures::TryStreamExt::try_next(&mut stream).await {
-            Ok(Some(chunk)) => {
-                if let Err(e) = writer.write(chunk).await {
-                    discard_partial(primary, &mut writer, to, destination_existed).await;
-                    return Err(e);
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                discard_partial(primary, &mut writer, to, destination_existed).await;
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    format!("reading '{from}' from the fallback disk failed"),
-                )
-                .set_source(e));
-            }
+    let mut guard = WriterGuard::new(primary.clone(), "read-through primary", to, writer)
+        .preserve_destination();
+    let result = async {
+        while let Some(chunk) = stream.try_next().await.map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("reading '{from}' from the fallback disk failed"),
+            )
+            .set_source(e)
+        })? {
+            guard.writer().write(chunk).await?;
         }
+        guard.writer().close().await
     }
-
-    match writer.close().await {
-        Ok(meta) => Ok(meta),
-        Err(e) => {
-            discard_partial(primary, &mut writer, to, destination_existed).await;
-            Err(e)
-        }
-    }
-}
-
-/// Best-effort cleanup of a half-written destination. `abort` discards staged
-/// writes for backends that buffer them; `delete` removes an already-visible
-/// partial object. Both are logged rather than propagated so the caller still
-/// sees the failure that actually mattered.
-///
-/// `destination_existed` is what keeps the cleanup from becoming the worse
-/// failure. On an object store - the tiering case this whole feature exists
-/// for - a write is buffered until it is published, so an intact object sits at
-/// `to` for the whole transfer and deleting it would destroy data the transfer
-/// never wrote. When it was already there, it is left alone.
-///
-/// A local-filesystem primary registered through `Storage::register_fs` behaves
-/// the same way, because it stages the write under
-/// [`crate::filesystem::ATOMIC_STAGING_DIR`] and only renames on success; the
-/// `abort` above is what removes the staged file. An fs operator built without
-/// that staging directory is the asymmetry: it opens the target itself with
-/// `O_TRUNC`, so a pre-existing destination is already gone by the time a
-/// transfer can fail, and nothing here can bring it back.
-async fn discard_partial(
-    primary: &Operator,
-    writer: &mut opendal::Writer,
-    to: &str,
-    destination_existed: bool,
-) {
-    if let Err(e) = writer.abort().await {
-        tracing::warn!(
-            path = %to,
-            error = %e,
-            "failed to abort the writer while cleaning up a failed read-through transfer"
-        );
-    }
-
-    if destination_existed {
-        tracing::warn!(
-            path = %to,
-            "a read-through transfer failed onto a destination that already \
-             existed; leaving it in place, though a primary that opens the \
-             target in place rather than staging the write will have \
-             truncated it when the writer opened"
-        );
-        return;
-    }
-
-    if let Err(e) = primary.delete(to).await {
-        tracing::warn!(
-            path = %to,
-            error = %e,
-            "failed to delete the partial destination while cleaning up a failed read-through transfer"
-        );
-    }
+    .await;
+    guard.settle(result).await
 }
 
 /// Rewrap a fallback-spanning copy failure. Mirrors Laravel's

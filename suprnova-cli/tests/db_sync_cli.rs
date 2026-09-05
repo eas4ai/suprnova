@@ -265,6 +265,56 @@ fn db_sync_rejects_mysql_instead_of_running_postgres_sql() {
     assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
 }
 
+/// P4-06: every current scaffold registers its migrator in the default
+/// application binary - there is no `src/bin/migrate.rs` anymore. A
+/// project in the current layout must still run its migrations before
+/// discovery instead of warning and introspecting a stale database.
+///
+/// Teeth: with the obsolete marker check in place, this fixture warns
+/// "Migration binary not found, skipping migrations" and exits 0 after
+/// discovering the stale schema. The assertions below require the
+/// migrate invocation to be attempted (and, in this minimal fixture
+/// whose package has no runnable binary, to fail loudly rather than
+/// silently sync stale models).
+#[test]
+fn db_sync_runs_migrations_for_current_layout_without_legacy_migrate_binary() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    // Current scaffold layout: migrations live in `src/migrations`, the
+    // migrator is registered in the default application binary, and no
+    // legacy `src/bin/migrate.rs` exists.
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+    fs::create_dir_all(root.join("src/migrations")).expect("create migrations dir");
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"probe\"\n").expect("write manifest");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}/schema.db?mode=rwc", root.display()),
+        )
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert!(
+        !text.contains("skipping migrations"),
+        "current-layout projects must not skip migrations; got: {text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the migrate invocation must be attempted (and fail loudly in this \
+         binary-less fixture) instead of syncing stale models; output: {text}"
+    );
+    assert!(
+        text.contains("Migration failed") || text.contains("Failed to execute"),
+        "the failure must name the migrate step; got: {text}"
+    );
+    assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
+}
+
 /// The schema is untrusted input. A table name is used both as a path
 /// component (`src/models/entities/<name>.rs`) and inside generated Rust, so
 /// `db:sync` must refuse names that escape the entity directory - while still

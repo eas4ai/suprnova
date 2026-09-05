@@ -406,7 +406,12 @@ impl WebhookHandler for StripeProvider {
         })?;
         let tolerance = self.webhook_signature_tolerance_seconds();
         let now = chrono::Utc::now().timestamp();
-        if (now - ts).abs() > tolerance {
+        // `abs_diff` (u64) instead of `(now - ts).abs()`: the subtraction
+        // overflows for extreme `t=` values (`i64::MIN`), which would
+        // unwind on checked builds instead of returning a signature
+        // error. A negative configured tolerance rejects everything
+        // except an exact-now timestamp.
+        if now.abs_diff(ts) > tolerance.max(0) as u64 {
             return Err(PaymentError::WebhookSignature(format!(
                 "timestamp outside tolerance window of {tolerance}s (now={now}, sig_ts={ts})"
             )));

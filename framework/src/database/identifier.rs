@@ -33,6 +33,7 @@
 //! [`DbTableBuilder`]: crate::database::DbTableBuilder
 
 use crate::FrameworkError;
+use sea_orm::DbBackend;
 
 /// Maximum allowed identifier length. All three first-class backends
 /// (Postgres 63, MySQL 64, SQLite ~1MB) accept far more, but capping
@@ -105,10 +106,8 @@ fn validate_segment(full: &str, segment: &str) -> Result<(), FrameworkError> {
 }
 
 /// Maximum allowed savepoint name length. Postgres/MySQL identifiers
-/// max out at 63/64 chars; we cap savepoint names at 64 to stay
-/// portable across every first-class backend while ensuring the
-/// validator's error bites well before a malformed name reaches the
-/// SQL executor.
+/// max out at 63/64 bytes. Preserve the accepted 64-byte API limit;
+/// PostgreSQL's 63-byte aliasing is reflected by canonical_savepoint_name.
 const MAX_SAVEPOINT_NAME_LEN: usize = 64;
 
 /// Validate a SQL savepoint identifier. Stricter than
@@ -151,6 +150,19 @@ pub fn validate_savepoint_name(name: &str) -> Result<&str, FrameworkError> {
         }
     }
     Ok(name)
+}
+
+/// SQL-equivalent identity for an unquoted savepoint and its registry mark.
+pub(crate) fn canonical_savepoint_name(
+    name: &str,
+    backend: DbBackend,
+) -> Result<String, FrameworkError> {
+    let mut canonical = validate_savepoint_name(name)?.to_ascii_lowercase();
+    if backend == DbBackend::Postgres {
+        // Validation guarantees ASCII, so byte truncation is a char boundary.
+        canonical.truncate(63);
+    }
+    Ok(canonical)
 }
 
 /// Allowlist of SQL comparison / membership operators accepted by
@@ -201,6 +213,38 @@ pub fn validate_sql_operator(op: &str) -> Result<&'static str, FrameworkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn savepoint_canonical_identity_matches_backend_boundaries() {
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres, DbBackend::MySql] {
+            assert_eq!(
+                canonical_savepoint_name("Check_POINT", backend).unwrap(),
+                "check_point"
+            );
+            for length in [63, 64] {
+                let name = "A".repeat(length);
+                let expected = if backend == DbBackend::Postgres {
+                    length.min(63)
+                } else {
+                    length
+                };
+                assert_eq!(
+                    canonical_savepoint_name(&name, backend).unwrap(),
+                    "a".repeat(expected)
+                );
+            }
+            for invalid in [
+                "".to_string(),
+                "A".repeat(65),
+                "1bad".into(),
+                "bad.name".into(),
+                "cafÉ".into(),
+                "a;SELECT".into(),
+            ] {
+                assert!(canonical_savepoint_name(&invalid, backend).is_err());
+            }
+        }
+    }
 
     #[test]
     fn accepts_simple_identifier() {

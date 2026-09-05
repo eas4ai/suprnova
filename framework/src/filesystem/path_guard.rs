@@ -52,8 +52,11 @@ use opendal::raw::{
 use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
 };
+use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// Reject any path that could escape the local-filesystem disk root.
@@ -483,6 +486,42 @@ async fn remove_staged(staged: &Path) {
     }
 }
 
+/// Keep local filesystem work alive until it finishes. Dropping a Tokio
+/// filesystem future does not stop blocking work that it already submitted.
+fn owned_task<T: Send + 'static>(
+    future: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<JoinHandle<Result<T>>> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+        Error::new(
+            ErrorKind::Unexpected,
+            "local filesystem operation needs an async runtime",
+        )
+        .set_source(e)
+    })?;
+    Ok(runtime.spawn(future))
+}
+
+async fn task_result<T>(task: &mut JoinHandle<Result<T>>) -> Result<T> {
+    task.await.map_err(|e| {
+        Error::new(
+            ErrorKind::Unexpected,
+            "owned local filesystem operation failed",
+        )
+        .set_source(e)
+    })?
+}
+
+fn detached_cleanup(future: impl Future<Output = Result<()>> + Send + 'static) {
+    if let Err(error) = owned_task(async move {
+        if let Err(error) = future.await {
+            tracing::warn!(%error, "failed to abort cancelled local filesystem operation");
+        }
+        Ok(())
+    }) {
+        tracing::error!(%error, "cannot clean up cancelled local filesystem operation");
+    }
+}
+
 /// How a [`PathGuardWriter`] publishes what the inner writer staged.
 enum Publish {
     /// The inner writer holds the caller's path and opendal's own staging
@@ -497,6 +536,19 @@ enum Publish {
         /// idempotent and cannot undo one another.
         settled: bool,
     },
+}
+
+/// An abort is terminal for writes, but remains retryable until cleanup succeeds.
+enum AbortState {
+    NotStarted,
+    Running(JoinHandle<Result<()>>),
+    Failed,
+}
+
+impl AbortState {
+    fn started(&self) -> bool {
+        !matches!(self, Self::NotStarted)
+    }
 }
 
 /// [`Layer`] that wraps a local-filesystem accessor so every path-bearing
@@ -587,12 +639,16 @@ impl Service for PathGuardService {
         };
         let inner = self.inner.write(ctx, inner_path, args)?;
         Ok(PathGuardWriter {
-            inner,
+            inner: Arc::new(Mutex::new(inner)),
             root,
             path: path.to_owned(),
             prepared: false,
             append_in_place,
             publish,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         })
     }
 
@@ -633,12 +689,16 @@ impl Service for PathGuardService {
         let staged = staging_path_for(to);
         let inner = self.inner.copy(ctx, from, &staged, args, opts)?;
         Ok(PathGuardCopier {
-            inner,
+            inner: Arc::new(Mutex::new(inner)),
             root,
             from: from.to_owned(),
             to: to.to_owned(),
             validated: false,
             staged: Some(staged),
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         })
     }
 
@@ -685,8 +745,8 @@ impl<R: oio::Read> oio::Read for PathGuardReader<R> {
     }
 }
 
-pub(crate) struct PathGuardWriter<W> {
-    inner: W,
+pub(crate) struct PathGuardWriter<W: oio::Write + 'static> {
+    inner: Arc<Mutex<W>>,
     root: String,
     path: String,
     prepared: bool,
@@ -694,9 +754,15 @@ pub(crate) struct PathGuardWriter<W> {
     /// place rather than staging the append.
     append_in_place: bool,
     publish: Publish,
+    // Retain the handle across cancelled close waiters. Calling the backend's
+    // close again can try to rename a temp file it already published.
+    closing: Option<JoinHandle<Result<Metadata>>>,
+    abort: AbortState,
+    completed: Option<Metadata>,
+    finished: bool,
 }
 
-impl<W> PathGuardWriter<W> {
+impl<W: oio::Write + 'static> PathGuardWriter<W> {
     /// Validate the caller's path once, and do the one-time preparation this
     /// write needs before the inner writer touches the filesystem.
     async fn prepare_once(&mut self) -> Result<()> {
@@ -721,57 +787,169 @@ impl<W> PathGuardWriter<W> {
             _ => None,
         }
     }
-
-    /// Publish an exclusive write by linking its staging file onto the target.
-    async fn publish(&mut self) -> Result<()> {
-        let Some(staged) = self.take_staged() else {
-            return Ok(());
-        };
-        let staged = on_disk_path(&self.root, &staged);
-        let target = on_disk_path(&self.root, &self.path);
-        let linked = link_exclusive(&staged, &target, &self.path).await;
-        // The staging name belongs to this layer either way. When the link
-        // succeeded the target names the same inode, so dropping the staging
-        // name publishes nothing and leaks nothing.
-        remove_staged(&staged).await;
-        linked
-    }
-
-    /// Drop the staging file without publishing it.
-    async fn discard(&mut self) {
-        if let Some(staged) = self.take_staged() {
-            remove_staged(&on_disk_path(&self.root, &staged)).await;
-        }
-    }
 }
 
-impl<W: oio::Write> oio::Write for PathGuardWriter<W> {
+impl<W: oio::Write + 'static> oio::Write for PathGuardWriter<W> {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
+        if self.closing.is_some() || self.finished || self.abort.started() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "local writer is already closing or finished",
+            ));
+        }
         self.prepare_once().await?;
-        self.inner.write(buffer).await
+        // Acquire before spawning: cancellation cleanup must queue behind this
+        // operation even if its task has not started running yet.
+        let mut inner = self.inner.clone().lock_owned().await;
+        task_result(&mut owned_task(async move { inner.write(buffer).await })?).await
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.prepare_once().await?;
-        match self.inner.close().await {
-            Ok(meta) => {
-                self.publish().await?;
-                Ok(meta)
-            }
-            Err(e) => {
-                self.discard().await;
-                Err(e)
-            }
+        if let Some(meta) = &self.completed {
+            return Ok(meta.clone());
         }
+        if self.finished || self.abort.started() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "local writer is already finished",
+            ));
+        }
+        if self.closing.is_none() {
+            self.prepare_once().await?;
+            let mut inner = self.inner.clone().lock_owned().await;
+            let staged = match &self.publish {
+                Publish::ExclusiveLink {
+                    staged,
+                    settled: false,
+                } => Some(on_disk_path(&self.root, staged)),
+                _ => None,
+            };
+            let target = on_disk_path(&self.root, &self.path);
+            let path = self.path.clone();
+            self.closing = Some(owned_task(async move {
+                // One owner spans backend close, publication, and cleanup.
+                // Abort cannot remove a stage before late backend work creates it.
+                let result = async {
+                    let meta = inner.close().await?;
+                    if let Some(staged) = &staged {
+                        link_exclusive(staged, &target, &path).await?;
+                    }
+                    Ok(meta)
+                }
+                .await;
+                if result.is_err()
+                    && let Err(error) = inner.abort().await
+                {
+                    tracing::warn!(%error, "failed to abort failed local writer");
+                }
+                if let Some(staged) = &staged {
+                    remove_staged(staged).await;
+                }
+                result
+            })?);
+        }
+        let joined = match &mut self.closing {
+            Some(task) => task.await,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "local writer close was not started",
+                ));
+            }
+        };
+        self.closing = None;
+        let result = match joined {
+            Ok(result) => result,
+            Err(error) => {
+                // A panic can bypass the task's cleanup. Keep the stage owned
+                // until abort has handed cleanup to its own surviving task.
+                if let Err(error) = self.abort().await {
+                    tracing::warn!(%error, "failed to clean up interrupted local writer close");
+                }
+                return Err(
+                    Error::new(ErrorKind::Unexpected, "owned local writer close failed")
+                        .set_source(error),
+                );
+            }
+        };
+        if let Ok(meta) = &result {
+            self.finished = true;
+            self.take_staged();
+            self.completed = Some(meta.clone());
+        } else {
+            // The task tried abort, but a backend failure must remain retryable.
+            self.abort = AbortState::Failed;
+        }
+        result
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Aborting cannot create or expose data. Always forward it so an inner
         // writer can release resources even when the path disappears after
         // activation or validation can no longer complete.
-        let aborted = self.inner.abort().await;
-        self.discard().await;
-        aborted
+        if self.finished {
+            return Ok(());
+        }
+        if !matches!(self.abort, AbortState::Running(_)) {
+            self.abort = AbortState::Failed;
+            let mut inner = self.inner.clone().lock_owned().await;
+            let staged = match &self.publish {
+                Publish::ExclusiveLink {
+                    staged,
+                    settled: false,
+                } => Some(on_disk_path(&self.root, staged)),
+                _ => None,
+            };
+            self.abort = AbortState::Running(owned_task(async move {
+                let aborted = inner.abort().await;
+                if let Some(staged) = &staged {
+                    remove_staged(staged).await;
+                }
+                aborted
+            })?);
+            self.closing = None;
+        }
+        let result = match &mut self.abort {
+            AbortState::Running(task) => task_result(task).await,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "local writer abort was not started",
+                ));
+            }
+        };
+        self.abort = AbortState::Failed;
+        if result.is_ok() {
+            self.finished = true;
+            self.take_staged();
+        }
+        result
+    }
+}
+
+impl<W: oio::Write + 'static> Drop for PathGuardWriter<W> {
+    fn drop(&mut self) {
+        if self.finished || !self.prepared {
+            return;
+        }
+        let inner = self.inner.clone();
+        let abort = std::mem::replace(&mut self.abort, AbortState::Failed);
+        let staged = self
+            .take_staged()
+            .map(|path| on_disk_path(&self.root, &path));
+        detached_cleanup(async move {
+            if let AbortState::Running(mut task) = abort
+                && task_result(&mut task).await.is_ok()
+            {
+                return Ok(());
+            }
+            let mut inner = inner.lock().await;
+            let aborted = inner.abort().await;
+            if let Some(staged) = &staged {
+                remove_staged(staged).await;
+            }
+            aborted
+        });
     }
 }
 
@@ -814,8 +992,8 @@ impl<L: oio::List> oio::List for PathGuardLister<L> {
     }
 }
 
-pub(crate) struct PathGuardCopier<C> {
-    inner: C,
+pub(crate) struct PathGuardCopier<C: oio::Copy + 'static> {
+    inner: Arc<Mutex<C>>,
     root: String,
     from: String,
     to: String,
@@ -823,9 +1001,13 @@ pub(crate) struct PathGuardCopier<C> {
     /// Storage path of the staging file the copy is filling, until it is
     /// renamed onto `to` or discarded. `None` once it is settled.
     staged: Option<String>,
+    closing: Option<JoinHandle<Result<Metadata>>>,
+    abort: AbortState,
+    completed: Option<Metadata>,
+    finished: bool,
 }
 
-impl<C> PathGuardCopier<C> {
+impl<C: oio::Copy + 'static> PathGuardCopier<C> {
     async fn validate_once(&mut self) -> Result<()> {
         if !self.validated {
             validate_resolved_path(&self.root, &self.from).await?;
@@ -834,63 +1016,158 @@ impl<C> PathGuardCopier<C> {
         }
         Ok(())
     }
-
-    /// Publish the copy by renaming its staging file onto the destination.
-    /// `rename(2)` replaces whatever is there, so a copy still overwrites.
-    async fn publish(&mut self) -> Result<()> {
-        let Some(staged) = self.staged.take() else {
-            return Ok(());
-        };
-        let staged = on_disk_path(&self.root, &staged);
-        let target = on_disk_path(&self.root, &self.to);
-        if let Err(e) = ensure_parent_dir(&target, &self.to).await {
-            remove_staged(&staged).await;
-            return Err(e);
-        }
-        if let Err(e) = tokio::fs::rename(&staged, &target).await {
-            remove_staged(&staged).await;
-            return Err(publish_error(
-                "renaming the staged copy failed",
-                &self.to,
-                e,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Drop the staging file without publishing it.
-    async fn discard(&mut self) {
-        if let Some(staged) = self.staged.take() {
-            remove_staged(&on_disk_path(&self.root, &staged)).await;
-        }
-    }
 }
 
-impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
+impl<C: oio::Copy + 'static> oio::Copy for PathGuardCopier<C> {
     async fn next(&mut self) -> Result<Option<usize>> {
+        if self.closing.is_some() || self.finished || self.abort.started() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "local copier is already closing or finished",
+            ));
+        }
         self.validate_once().await?;
-        self.inner.next().await
+        let mut inner = self.inner.clone().lock_owned().await;
+        task_result(&mut owned_task(async move { inner.next().await })?).await
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.validate_once().await?;
-        match self.inner.close().await {
-            Ok(meta) => {
-                self.publish().await?;
-                Ok(meta)
-            }
-            Err(e) => {
-                self.discard().await;
-                Err(e)
-            }
+        if let Some(meta) = &self.completed {
+            return Ok(meta.clone());
         }
+        if self.finished || self.abort.started() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "local copier is already finished",
+            ));
+        }
+        if self.closing.is_none() {
+            self.validate_once().await?;
+            let mut inner = self.inner.clone().lock_owned().await;
+            let staged = self
+                .staged
+                .as_ref()
+                .map(|path| on_disk_path(&self.root, path));
+            let target = on_disk_path(&self.root, &self.to);
+            let path = self.to.clone();
+            self.closing = Some(owned_task(async move {
+                let result = async {
+                    let meta = inner.close().await?;
+                    if let Some(staged) = &staged {
+                        ensure_parent_dir(&target, &path).await?;
+                        tokio::fs::rename(staged, &target).await.map_err(|e| {
+                            publish_error("renaming the staged copy failed", &path, e)
+                        })?;
+                    }
+                    Ok(meta)
+                }
+                .await;
+                if result.is_err()
+                    && let Err(error) = inner.abort().await
+                {
+                    tracing::warn!(%error, "failed to abort failed local copier");
+                }
+                if let Some(staged) = &staged {
+                    remove_staged(staged).await;
+                }
+                result
+            })?);
+        }
+        let joined = match &mut self.closing {
+            Some(task) => task.await,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "local copier close was not started",
+                ));
+            }
+        };
+        self.closing = None;
+        let result = match joined {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(error) = self.abort().await {
+                    tracing::warn!(%error, "failed to clean up interrupted local copier close");
+                }
+                return Err(
+                    Error::new(ErrorKind::Unexpected, "owned local copier close failed")
+                        .set_source(error),
+                );
+            }
+        };
+        if let Ok(meta) = &result {
+            self.finished = true;
+            self.staged = None;
+            self.completed = Some(meta.clone());
+        } else {
+            self.abort = AbortState::Failed;
+        }
+        result
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Abort is cleanup-only and must never be suppressed by path validation.
-        let aborted = self.inner.abort().await;
-        self.discard().await;
-        aborted
+        if self.finished {
+            return Ok(());
+        }
+        if !matches!(self.abort, AbortState::Running(_)) {
+            self.abort = AbortState::Failed;
+            let mut inner = self.inner.clone().lock_owned().await;
+            let staged = self
+                .staged
+                .as_ref()
+                .map(|path| on_disk_path(&self.root, path));
+            self.abort = AbortState::Running(owned_task(async move {
+                let aborted = inner.abort().await;
+                if let Some(staged) = &staged {
+                    remove_staged(staged).await;
+                }
+                aborted
+            })?);
+            self.closing = None;
+        }
+        let result = match &mut self.abort {
+            AbortState::Running(task) => task_result(task).await,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "local copier abort was not started",
+                ));
+            }
+        };
+        self.abort = AbortState::Failed;
+        if result.is_ok() {
+            self.finished = true;
+            self.staged = None;
+        }
+        result
+    }
+}
+
+impl<C: oio::Copy + 'static> Drop for PathGuardCopier<C> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let inner = self.inner.clone();
+        let abort = std::mem::replace(&mut self.abort, AbortState::Failed);
+        let staged = self
+            .staged
+            .take()
+            .map(|path| on_disk_path(&self.root, &path));
+        detached_cleanup(async move {
+            if let AbortState::Running(mut task) = abort
+                && task_result(&mut task).await.is_ok()
+            {
+                return Ok(());
+            }
+            let mut inner = inner.lock().await;
+            let aborted = inner.abort().await;
+            if let Some(staged) = &staged {
+                remove_staged(staged).await;
+            }
+            aborted
+        });
     }
 }
 
@@ -917,17 +1194,23 @@ impl<D: oio::Delete> oio::Delete for PathGuardDeleter<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATOMIC_STAGING_DIR, PathGuardCopier, PathGuardLister, PathGuardWriter,
+        ATOMIC_STAGING_DIR, AbortState, PathGuardCopier, PathGuardLister, PathGuardWriter,
         ensure_target_exists, validate_resolved_path, validate_storage_path,
     };
     use opendal::raw::oio::{self, Copy as _, List as _, Write as _};
-    use opendal::{Buffer, EntryMode, ErrorKind, Metadata, Result};
+    use opendal::{Buffer, EntryMode, Error, ErrorKind, Metadata, Result};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
 
     #[derive(Default)]
     struct RecordingWriter {
         writes: usize,
         closes: usize,
         aborts: usize,
+        panic_on_close: bool,
+        abort_failures: usize,
+        abort_gate: Option<Arc<AtomicUsize>>,
     }
 
     impl oio::Write for RecordingWriter {
@@ -938,11 +1221,22 @@ mod tests {
 
         async fn close(&mut self) -> Result<Metadata> {
             self.closes += 1;
+            assert!(!self.panic_on_close, "injected backend writer panic");
             Ok(Metadata::new(EntryMode::FILE))
         }
 
         async fn abort(&mut self) -> Result<()> {
             self.aborts += 1;
+            if self.abort_failures > 0 {
+                self.abort_failures -= 1;
+                return Err(Error::new(ErrorKind::Unexpected, "injected abort failure"));
+            }
+            if let Some(gate) = &self.abort_gate {
+                gate.store(1, Ordering::SeqCst);
+                while gate.load(Ordering::SeqCst) == 1 {
+                    tokio::task::yield_now().await;
+                }
+            }
             Ok(())
         }
     }
@@ -971,6 +1265,9 @@ mod tests {
         nexts: usize,
         closes: usize,
         aborts: usize,
+        panic_on_close: bool,
+        abort_failures: usize,
+        abort_gate: Option<Arc<AtomicUsize>>,
     }
 
     impl oio::Copy for RecordingCopier {
@@ -981,13 +1278,431 @@ mod tests {
 
         async fn close(&mut self) -> Result<Metadata> {
             self.closes += 1;
+            assert!(!self.panic_on_close, "injected backend copier panic");
             Ok(Metadata::new(EntryMode::FILE))
         }
 
         async fn abort(&mut self) -> Result<()> {
             self.aborts += 1;
+            if self.abort_failures > 0 {
+                self.abort_failures -= 1;
+                return Err(Error::new(ErrorKind::Unexpected, "injected abort failure"));
+            }
+            if let Some(gate) = &self.abort_gate {
+                gate.store(1, Ordering::SeqCst);
+                while gate.load(Ordering::SeqCst) == 1 {
+                    tokio::task::yield_now().await;
+                }
+            }
             Ok(())
         }
+    }
+
+    fn cancelling_publication_keeps_staging_owned(copying: bool, retry: bool) {
+        use super::Publish;
+        use std::future::{Future, poll_fn};
+        use std::sync::mpsc;
+        use std::task::Poll;
+        use tokio::runtime::Builder;
+        use tokio::sync::oneshot;
+
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("test runtime");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = std::fs::canonicalize(root.path()).expect("canonical root");
+        let staged_name = format!("{ATOMIC_STAGING_DIR}/owned.stage");
+        let staged = root_path.join(&staged_name);
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("staging dir");
+        std::fs::write(&staged, b"complete bytes").expect("completed inner operation");
+        runtime.block_on(async {
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.expect("blocking worker occupied");
+            if copying {
+                let mut copier = PathGuardCopier {
+                    inner: Arc::new(Mutex::new(RecordingCopier::default())),
+                    root: root_path.to_str().expect("UTF-8").into(),
+                    from: "source.bin".into(),
+                    to: "published/destination.bin".into(),
+                    validated: true,
+                    staged: Some(staged_name),
+                    closing: None,
+                    abort: AbortState::NotStarted,
+                    completed: None,
+                    finished: false,
+                };
+                let mut close = Box::pin(copier.close());
+                assert!(
+                    poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx)))
+                        .await
+                        .is_pending()
+                );
+                drop(close);
+                release_tx.send(()).expect("release worker");
+                blocker.await.expect("worker finished");
+                if retry {
+                    copier.close().await.expect("resume the same publication");
+                    copier.close().await.expect("completed close is idempotent");
+                    assert_eq!(copier.inner.lock().await.closes, 1);
+                } else {
+                    copier.abort().await.expect("abort copier");
+                }
+            } else {
+                let mut writer = PathGuardWriter {
+                    inner: Arc::new(Mutex::new(RecordingWriter::default())),
+                    root: root_path.to_str().expect("UTF-8").into(),
+                    path: "published/destination.bin".into(),
+                    prepared: true,
+                    append_in_place: false,
+                    publish: Publish::ExclusiveLink {
+                        staged: staged_name,
+                        settled: false,
+                    },
+                    closing: None,
+                    abort: AbortState::NotStarted,
+                    completed: None,
+                    finished: false,
+                };
+                let mut close = Box::pin(writer.close());
+                assert!(
+                    poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx)))
+                        .await
+                        .is_pending()
+                );
+                drop(close);
+                release_tx.send(()).expect("release worker");
+                blocker.await.expect("worker finished");
+                if retry {
+                    writer.close().await.expect("resume the same publication");
+                    writer.close().await.expect("completed close is idempotent");
+                    assert_eq!(writer.inner.lock().await.closes, 1);
+                } else {
+                    writer.abort().await.expect("abort writer");
+                }
+            }
+            assert!(
+                !staged.exists(),
+                "cancelled publication leaks its private stage (copy={copying})"
+            );
+            if retry {
+                assert_eq!(
+                    std::fs::read(root_path.join("published/destination.bin"))
+                        .expect("completed publication remains readable"),
+                    b"complete bytes"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn cancelling_writer_publication_keeps_staging_owned() {
+        cancelling_publication_keeps_staging_owned(false, false);
+    }
+
+    #[test]
+    fn cancelling_copier_publication_keeps_staging_owned() {
+        cancelling_publication_keeps_staging_owned(true, false);
+    }
+
+    #[test]
+    fn retrying_cancelled_writer_close_does_not_repeat_backend_close() {
+        cancelling_publication_keeps_staging_owned(false, true);
+    }
+
+    #[test]
+    fn retrying_cancelled_copier_close_does_not_repeat_backend_close() {
+        cancelling_publication_keeps_staging_owned(true, true);
+    }
+
+    #[tokio::test]
+    async fn owned_close_task_panic_still_cleans_writer_and_copier_staging() {
+        for copying in [false, true] {
+            let root = tempfile::tempdir().expect("root");
+            let staged_name = format!("{ATOMIC_STAGING_DIR}/panic.stage");
+            let staged = root.path().join(&staged_name);
+            std::fs::create_dir_all(staged.parent().expect("parent")).expect("staging directory");
+            std::fs::write(&staged, b"private staged bytes").expect("seed owned stage");
+            std::fs::write(root.path().join("destination.bin"), b"original")
+                .expect("seed destination");
+            let error = if copying {
+                let mut copier = PathGuardCopier {
+                    inner: Arc::new(Mutex::new(RecordingCopier {
+                        panic_on_close: true,
+                        ..Default::default()
+                    })),
+                    root: root.path().to_str().expect("UTF-8").into(),
+                    from: "source.bin".into(),
+                    to: "destination.bin".into(),
+                    validated: true,
+                    staged: Some(staged_name),
+                    closing: None,
+                    abort: AbortState::NotStarted,
+                    completed: None,
+                    finished: false,
+                };
+                let error = copier.close().await.expect_err("join failure is reported");
+                assert_eq!(copier.inner.lock().await.aborts, 1);
+                error
+            } else {
+                let mut writer = PathGuardWriter {
+                    inner: Arc::new(Mutex::new(RecordingWriter {
+                        panic_on_close: true,
+                        ..Default::default()
+                    })),
+                    root: root.path().to_str().expect("UTF-8").into(),
+                    path: "destination.bin".into(),
+                    prepared: true,
+                    append_in_place: false,
+                    publish: super::Publish::ExclusiveLink {
+                        staged: staged_name,
+                        settled: false,
+                    },
+                    closing: None,
+                    abort: AbortState::NotStarted,
+                    completed: None,
+                    finished: false,
+                };
+                let error = writer.close().await.expect_err("join failure is reported");
+                assert_eq!(writer.inner.lock().await.aborts, 1);
+                error
+            };
+            assert_eq!(error.kind(), ErrorKind::Unexpected);
+            assert!(error.to_string().contains("injected backend"), "{error}");
+            assert!(
+                !staged.exists(),
+                "join failure must not disarm staging cleanup"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("destination.bin")).expect("destination remains"),
+                b"original"
+            );
+        }
+    }
+
+    async fn retry_writer_abort(cancel: bool) {
+        let root = tempfile::tempdir().expect("root");
+        let staged_name = format!("{ATOMIC_STAGING_DIR}/retry.stage");
+        let staged = root.path().join(&staged_name);
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("staging directory");
+        std::fs::write(&staged, b"private bytes").expect("seed stage");
+        let gate = Arc::new(AtomicUsize::new(0));
+        let mut writer = PathGuardWriter {
+            inner: Arc::new(Mutex::new(RecordingWriter {
+                abort_failures: usize::from(!cancel),
+                abort_gate: cancel.then(|| gate.clone()),
+                ..Default::default()
+            })),
+            root: root.path().to_str().expect("UTF-8").into(),
+            path: "destination.bin".into(),
+            prepared: true,
+            append_in_place: false,
+            publish: super::Publish::ExclusiveLink {
+                staged: staged_name,
+                settled: false,
+            },
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
+        };
+        if cancel {
+            let mut abort = Box::pin(writer.abort());
+            tokio::select! {
+                _ = &mut abort => panic!("abort must wait at its gate"),
+                _ = wait_for_abort_gate(&gate) => {}
+            }
+            drop(abort);
+            assert_abort_still_pending(writer.abort(), &gate).await;
+        } else {
+            writer.abort().await.expect_err("first abort fails");
+            assert!(writer.write(Buffer::from("must not write")).await.is_err());
+            assert!(writer.close().await.is_err());
+            writer
+                .abort()
+                .await
+                .expect("second abort retries backend cleanup");
+        }
+        assert_eq!(writer.inner.lock().await.aborts, if cancel { 1 } else { 2 });
+        assert!(!staged.exists());
+        assert!(!root.path().join("destination.bin").exists());
+    }
+
+    async fn retry_copier_abort(cancel: bool) {
+        let root = tempfile::tempdir().expect("root");
+        let staged_name = format!("{ATOMIC_STAGING_DIR}/retry.stage");
+        let staged = root.path().join(&staged_name);
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("staging directory");
+        std::fs::write(&staged, b"private bytes").expect("seed stage");
+        let gate = Arc::new(AtomicUsize::new(0));
+        let mut copier = PathGuardCopier {
+            inner: Arc::new(Mutex::new(RecordingCopier {
+                abort_failures: usize::from(!cancel),
+                abort_gate: cancel.then(|| gate.clone()),
+                ..Default::default()
+            })),
+            root: root.path().to_str().expect("UTF-8").into(),
+            from: "source.bin".into(),
+            to: "destination.bin".into(),
+            validated: true,
+            staged: Some(staged_name),
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
+        };
+        if cancel {
+            let mut abort = Box::pin(copier.abort());
+            tokio::select! {
+                _ = &mut abort => panic!("abort must wait at its gate"),
+                _ = wait_for_abort_gate(&gate) => {}
+            }
+            drop(abort);
+            assert_abort_still_pending(copier.abort(), &gate).await;
+        } else {
+            copier.abort().await.expect_err("first abort fails");
+            assert!(copier.next().await.is_err());
+            assert!(copier.close().await.is_err());
+            copier
+                .abort()
+                .await
+                .expect("second abort retries backend cleanup");
+        }
+        assert_eq!(copier.inner.lock().await.aborts, if cancel { 1 } else { 2 });
+        assert!(!staged.exists());
+        assert!(!root.path().join("destination.bin").exists());
+    }
+
+    async fn wait_for_abort_gate(gate: &AtomicUsize) {
+        use std::time::Duration;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gate.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("backend abort starts");
+    }
+
+    async fn assert_abort_still_pending(
+        abort: impl std::future::Future<Output = Result<()>>,
+        gate: &AtomicUsize,
+    ) {
+        use std::future::poll_fn;
+        use std::task::Poll;
+        let mut abort = Box::pin(abort);
+        let pending = poll_fn(|cx| Poll::Ready(abort.as_mut().poll(cx)))
+            .await
+            .is_pending();
+        gate.store(2, Ordering::SeqCst);
+        assert!(pending, "retry must await the same pending backend cleanup");
+        abort.await.expect("pending cleanup finishes");
+    }
+
+    #[tokio::test]
+    async fn writer_abort_failure_can_be_retried() {
+        retry_writer_abort(false).await;
+    }
+    #[tokio::test]
+    async fn copier_abort_failure_can_be_retried() {
+        retry_copier_abort(false).await;
+    }
+    #[tokio::test]
+    async fn cancelled_writer_abort_can_be_retried() {
+        retry_writer_abort(true).await;
+    }
+    #[tokio::test]
+    async fn cancelled_copier_abort_can_be_retried() {
+        retry_copier_abort(true).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_copier_waits_for_late_backend_stage_before_cleanup() {
+        use std::path::PathBuf;
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        struct LateCopier {
+            staged: PathBuf,
+            started: Option<oneshot::Sender<()>>,
+            finished: Option<oneshot::Sender<()>>,
+            release: Option<oneshot::Receiver<()>>,
+        }
+        impl oio::Copy for LateCopier {
+            async fn next(&mut self) -> Result<Option<usize>> {
+                let staged = self.staged.clone();
+                let started = self.started.take().expect("one backend operation");
+                let finished = self.finished.take().expect("one completion");
+                let release = self.release.take().expect("one release gate");
+                tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = release.blocking_recv();
+                    std::fs::write(staged, b"late staged bytes")
+                        .expect("backend completes after cancellation");
+                    let _ = finished.send(());
+                })
+                .await
+                .expect("blocking copy completes");
+                Ok(Some(17))
+            }
+            async fn close(&mut self) -> Result<Metadata> {
+                Ok(Metadata::new(EntryMode::FILE))
+            }
+            async fn abort(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().expect("root");
+        let staged_name = format!("{ATOMIC_STAGING_DIR}/late.stage");
+        let staged = root.path().join(&staged_name);
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("staging directory");
+        let (started, entered) = oneshot::channel();
+        let (finished, completed) = oneshot::channel();
+        let (release, blocked) = oneshot::channel();
+        let mut copier = PathGuardCopier {
+            inner: Arc::new(Mutex::new(LateCopier {
+                staged: staged.clone(),
+                started: Some(started),
+                finished: Some(finished),
+                release: Some(blocked),
+            })),
+            root: root.path().to_str().expect("UTF-8").into(),
+            from: "source.bin".into(),
+            to: "destination.bin".into(),
+            validated: true,
+            staged: Some(staged_name),
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
+        };
+        let operation = tokio::spawn(async move { copier.next().await });
+        entered.await.expect("backend has started");
+        operation.abort();
+        assert!(
+            operation
+                .await
+                .expect_err("cancelled waiter")
+                .is_cancelled()
+        );
+        release
+            .send(())
+            .expect("release blocking backend after cancellation");
+        completed.await.expect("backend has created its late stage");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while staged.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late backend completion must not orphan its stage");
+        assert!(!root.path().join("destination.bin").exists());
     }
 
     #[test]
@@ -1516,13 +2231,17 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create root");
 
         let mut writer = PathGuardWriter {
-            inner: RecordingWriter::default(),
+            inner: Arc::new(Mutex::new(RecordingWriter::default())),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
             prepared: false,
             append_in_place: false,
             // These cases drive validation forwarding, not publishing.
             publish: super::Publish::Inner,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         };
 
         writer
@@ -1539,8 +2258,8 @@ mod tests {
             .await
             .expect("active writer close must always forward");
 
-        assert_eq!(writer.inner.writes, 2);
-        assert_eq!(writer.inner.closes, 1);
+        assert_eq!(writer.inner.lock().await.writes, 2);
+        assert_eq!(writer.inner.lock().await.closes, 1);
     }
 
     #[tokio::test]
@@ -1550,13 +2269,17 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create root");
 
         let mut writer = PathGuardWriter {
-            inner: RecordingWriter::default(),
+            inner: Arc::new(Mutex::new(RecordingWriter::default())),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
             prepared: false,
             append_in_place: false,
             // These cases drive validation forwarding, not publishing.
             publish: super::Publish::Inner,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         };
 
         writer
@@ -1569,8 +2292,8 @@ mod tests {
             .await
             .expect("active writer abort must always forward");
 
-        assert_eq!(writer.inner.writes, 1);
-        assert_eq!(writer.inner.aborts, 1);
+        assert_eq!(writer.inner.lock().await.writes, 1);
+        assert_eq!(writer.inner.lock().await.aborts, 1);
     }
 
     #[tokio::test]
@@ -1606,13 +2329,17 @@ mod tests {
         std::fs::write(root.join("source.txt"), b"copy").expect("create source");
 
         let mut copier = PathGuardCopier {
-            inner: RecordingCopier::default(),
+            inner: Arc::new(Mutex::new(RecordingCopier::default())),
             root: canonical_root(&root),
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
             // These cases drive validation forwarding, not publishing.
             staged: None,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -1629,8 +2356,8 @@ mod tests {
             .await
             .expect("active copier close must always forward");
 
-        assert_eq!(copier.inner.nexts, 2);
-        assert_eq!(copier.inner.closes, 1);
+        assert_eq!(copier.inner.lock().await.nexts, 2);
+        assert_eq!(copier.inner.lock().await.closes, 1);
     }
 
     #[tokio::test]
@@ -1641,13 +2368,17 @@ mod tests {
         std::fs::write(root.join("source.txt"), b"copy").expect("create source");
 
         let mut copier = PathGuardCopier {
-            inner: RecordingCopier::default(),
+            inner: Arc::new(Mutex::new(RecordingCopier::default())),
             root: canonical_root(&root),
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
             // These cases drive validation forwarding, not publishing.
             staged: None,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -1657,8 +2388,8 @@ mod tests {
             .await
             .expect("active copier abort must always forward");
 
-        assert_eq!(copier.inner.nexts, 1);
-        assert_eq!(copier.inner.aborts, 1);
+        assert_eq!(copier.inner.lock().await.nexts, 1);
+        assert_eq!(copier.inner.lock().await.aborts, 1);
     }
 
     #[tokio::test]
@@ -1669,13 +2400,17 @@ mod tests {
         std::fs::write(root.join("source.txt"), b"copy").expect("create source");
 
         let mut copier = PathGuardCopier {
-            inner: RecordingCopier::default(),
+            inner: Arc::new(Mutex::new(RecordingCopier::default())),
             root: canonical_root(&root),
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
             // These cases drive validation forwarding, not publishing.
             staged: None,
+            closing: None,
+            abort: AbortState::NotStarted,
+            completed: None,
+            finished: false,
         };
 
         std::fs::remove_dir_all(&root).expect("remove root before activation");
@@ -1683,6 +2418,6 @@ mod tests {
             .abort()
             .await
             .expect("unactivated copier abort must always forward");
-        assert_eq!(copier.inner.aborts, 1);
+        assert_eq!(copier.inner.lock().await.aborts, 1);
     }
 }

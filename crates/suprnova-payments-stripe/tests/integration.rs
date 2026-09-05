@@ -251,3 +251,32 @@ fn webhook_verify_rejects_non_numeric_timestamp() {
         .expect_err("non-numeric timestamp must reject");
     assert!(matches!(err, PaymentError::WebhookSignature(_)));
 }
+
+/// P4-11: `t=i64::MIN` is a valid `i64` parse, but `(now - ts).abs()`
+/// overflows on it - unwinding on checked builds instead of returning a
+/// signature error. The tolerance comparison must use overflow-free
+/// arithmetic.
+#[test]
+fn webhook_verify_rejects_minimum_timestamp_without_unwinding() {
+    install_crypto_provider();
+    let secret = "whsec_test_secret";
+    let body = br#"{"id":"evt_test","type":"payment_intent.succeeded"}"#;
+    let timestamp = i64::MIN.to_string();
+    let sig_hex = compute_stripe_v1(secret, &timestamp, body);
+
+    let p = StripeProvider::new("sk_test", "pk_test", secret);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "stripe-signature",
+        format!("t={timestamp},v1={sig_hex}").parse().unwrap(),
+    );
+    let ctx = WebhookContext {
+        body,
+        headers: &headers,
+        remote_addr: None,
+    };
+    let err = p
+        .verify(&ctx)
+        .expect_err("minimum timestamp must reject as outside tolerance");
+    assert!(matches!(err, PaymentError::WebhookSignature(_)));
+}

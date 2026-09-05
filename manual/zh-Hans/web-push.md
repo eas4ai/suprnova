@@ -111,20 +111,21 @@ let client = WebPushClient::new(signer, "mailto:test@example.org")?
 
 ### 自定义传输
 
-`WebPushClient::new` 会应用一个逐请求 30 秒的超时。如果您需要一个不同的传输策略 - 企业代理、固定的 TLS、更短的超时 - 就构建一个
-`reqwest::Client`，并使用 `WebPushClient::with_client`：
+`WebPushClient::new` 会应用一个逐请求 30 秒的超时。如果您需要不同的传输策略 - 企业代理、固定的 TLS、更短的超时 - 请把一个 `reqwest::ClientBuilder` 传给 `WebPushClient::with_client_builder`。构建器的所有选项都会生效，但重定向策略会被强制禁用：已验证的端点即使返回 3xx，也绝不能把 POST 转发到未经验证的 URL，因此该库不会接受调用方的重定向设置。
 
 ```rust
 use reqwest::Client;
 use std::time::Duration;
 use suprnova::WebPushClient;
 
-let http = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()?;
-
-let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?;
+let client = WebPushClient::with_client_builder(
+    Client::builder().timeout(Duration::from_secs(10)),
+    signer,
+    "mailto:ops@example.org",
+)?;
 ```
+
+`WebPushClient::with_client` 接收一个已经构建好的客户端，该库无法检查它的重定向策略。在默认的 `Strict` 策略下，这类传输的发送会在任何 I/O 之前被拒绝。请切换到 `with_client_builder`；如果确认客户端不会跟随重定向，也可以用 `.allow_unconfined_redirects()` 显式接受该风险。
 
 ## 把 WebPushChannel 接入通知
 

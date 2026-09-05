@@ -81,6 +81,8 @@ for render_cache_mysql_test in \
     fi
 done
 
+cargo test -p suprnova --test queue_after_commit savepoint_aliases_mysql_rows_and_jobs_agree -- --ignored --exact
+
 echo
 echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"
 workflow_out="$(cargo test -p suprnova --lib \

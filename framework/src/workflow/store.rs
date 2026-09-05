@@ -141,8 +141,12 @@ pub async fn claim_next_workflow(
         ));
     }
 
-    let lock_until = Utc::now().naive_utc()
-        + ChronoDuration::seconds(i64::try_from(config.lock_timeout_secs).unwrap_or(i64::MAX));
+    // The initial expiry is computed by the database (`NOW() + $1`),
+    // not from a client-side timestamp taken before the round trip.
+    // This matches the reclaim clock and avoids worker clock skew. A slow
+    // response can still consume the lease, so execution must refresh and
+    // verify ownership before entering user code.
+    let lock_timeout_secs = i64::try_from(config.lock_timeout_secs).unwrap_or(i64::MAX);
 
     // Eligible-row predicate covers two cases:
     //   1. status='pending' rows ready to run (next_run_at elapsed, no live lock).
@@ -215,7 +219,7 @@ pub async fn claim_next_workflow(
         UPDATE workflows
         SET status = 'running',
             attempts = attempts + 1,
-            locked_until = $1,
+            locked_until = NOW() + ($1 * INTERVAL '1 second'),
             worker_id = $2,
             started_at = COALESCE(started_at, NOW()),
             updated_at = NOW()
@@ -229,7 +233,7 @@ pub async fn claim_next_workflow(
         DatabaseBackend::Postgres,
         sql,
         vec![
-            lock_until.into(),
+            lock_timeout_secs.into(),
             worker_id.into(),
             ATTEMPT_BUDGET_EXHAUSTED_ERROR.into(),
         ],
@@ -328,15 +332,26 @@ pub(crate) async fn refresh_lock_if_owned_at(
     now: chrono::NaiveDateTime,
 ) -> Result<bool, FrameworkError> {
     let db = DB::connection()?;
-    let lock_until =
-        now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
+    let seconds = i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX);
+    // PostgreSQL claims and reclaim checks use the database clock. Using a
+    // worker timestamp here could immediately expire a successfully renewed
+    // lease. The supplied clock remains the deterministic non-Postgres path.
+    let (lock_until, updated_at) = if db.inner().get_database_backend() == DatabaseBackend::Postgres
+    {
+        (
+            Expr::cust_with_values("NOW() + ($1 * INTERVAL '1 second')", [seconds]),
+            Expr::cust("NOW()"),
+        )
+    } else {
+        (
+            Expr::value(Some(now + ChronoDuration::seconds(seconds))),
+            Expr::value(now),
+        )
+    };
 
     let result = workflows::Entity::update_many()
-        .col_expr(
-            workflows::Column::LockedUntil,
-            Expr::value(Some(lock_until)),
-        )
-        .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
+        .col_expr(workflows::Column::LockedUntil, lock_until)
+        .col_expr(workflows::Column::UpdatedAt, updated_at)
         .filter(workflows::Column::Id.eq(id))
         .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
         .filter(workflows::Column::WorkerId.eq(worker_id))

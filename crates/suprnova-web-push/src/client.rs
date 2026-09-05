@@ -70,12 +70,35 @@ pub enum EndpointPolicy {
     AllowAny,
 }
 
+/// Whether the HTTP transport is proven to not follow redirects.
+///
+/// A subscription endpoint that passes [`EndpointPolicy::Strict`]
+/// validation can still answer 3xx; only a transport that never follows
+/// redirects keeps the POST confined to the validated URL. An
+/// already-built [`Client`] carries its redirect policy opaquely, so a
+/// client supplied by the caller cannot be proven confined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectConfinement {
+    /// Built by this crate with redirects forcibly disabled
+    /// ([`WebPushClient::new`] / [`WebPushClient::with_client_builder`]).
+    Confined,
+    /// Caller-supplied [`Client`] whose redirect policy is unknown.
+    /// [`EndpointPolicy::Strict`] sends are refused until the caller
+    /// either switches to a confined transport or explicitly accepts
+    /// the risk via
+    /// [`WebPushClient::allow_unconfined_redirects`].
+    Unknown,
+    /// Caller explicitly accepted redirect-following under `Strict`.
+    Unchecked,
+}
+
 #[derive(Debug)]
 pub struct WebPushClient {
     http: Client,
     signer: VapidSigner,
     subject: String,
     endpoint_policy: EndpointPolicy,
+    redirects: RedirectConfinement,
 }
 
 impl WebPushClient {
@@ -101,14 +124,41 @@ impl WebPushClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("default reqwest Client builds without TLS/proxy config");
-        Self::with_client(http, signer, subject)
+        Self::from_client(http, signer, subject, RedirectConfinement::Confined)
+    }
+
+    /// Build a client from a caller-supplied [`reqwest::ClientBuilder`].
+    ///
+    /// The hardened customization path: every builder option (proxy, TLS
+    /// pinning, timeouts) is honoured, but the redirect policy is forcibly
+    /// set to [`reqwest::redirect::Policy::none()`], ignoring whatever the
+    /// caller configured. A custom transport that could follow redirects
+    /// would let a validated endpoint bounce the POST to an unvalidated
+    /// URL, so the library does not accept the caller's redirect setting.
+    ///
+    /// `subject` validation matches [`Self::with_client`].
+    pub fn with_client_builder(
+        builder: reqwest::ClientBuilder,
+        signer: VapidSigner,
+        subject: impl Into<String>,
+    ) -> Result<Self, WebPushError> {
+        let http = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Self::from_client(http, signer, subject, RedirectConfinement::Confined)
     }
 
     /// Build a client wrapping a caller-supplied [`Client`].
     ///
-    /// Use this when the default transport (a 30 s timeout) is the wrong
-    /// policy - for example, when wiring through a corporate proxy, pinning
-    /// TLS, or applying a different timeout.
+    /// Use this only when [`Self::with_client_builder`] cannot express the
+    /// transport (it covers proxy, TLS, and timeout customization). An
+    /// already-built client carries its redirect policy opaquely: a
+    /// redirect-following client (reqwest's default) combined with the
+    /// default [`EndpointPolicy::Strict`] would validate only the initial
+    /// URL while a 3xx silently moves the POST elsewhere. Sends under
+    /// `Strict` are therefore refused until the transport is proven
+    /// confined ([`Self::with_client_builder`]) or explicitly accepted via
+    /// [`Self::allow_unconfined_redirects`].
     ///
     /// `subject` must be a VAPID contact URI per RFC 8292 §2.1: either a
     /// `mailto:` URI with a non-empty recipient, or an `https://` URL.
@@ -122,6 +172,29 @@ impl WebPushClient {
         signer: VapidSigner,
         subject: impl Into<String>,
     ) -> Result<Self, WebPushError> {
+        Self::from_client(http, signer, subject, RedirectConfinement::Unknown)
+    }
+
+    /// Explicitly accept a redirect-following transport under `Strict`.
+    ///
+    /// Call this only when the supplied [`Client`] is known to not follow
+    /// redirects (or when following them is acceptable): unlike
+    /// [`Self::with_client_builder`], the library cannot verify that.
+    /// [`EndpointPolicy::Strict`] then validates the initial endpoint URL
+    /// only, exactly as before.
+    pub fn allow_unconfined_redirects(mut self) -> Self {
+        if self.redirects == RedirectConfinement::Unknown {
+            self.redirects = RedirectConfinement::Unchecked;
+        }
+        self
+    }
+
+    fn from_client(
+        http: Client,
+        signer: VapidSigner,
+        subject: impl Into<String>,
+        redirects: RedirectConfinement,
+    ) -> Result<Self, WebPushError> {
         let subject = subject.into();
         validate_vapid_subject(&subject)?;
         Ok(Self {
@@ -129,6 +202,7 @@ impl WebPushClient {
             signer,
             subject,
             endpoint_policy: EndpointPolicy::default(),
+            redirects,
         })
     }
 
@@ -150,6 +224,15 @@ impl WebPushClient {
         encoding: ContentEncoding,
         ttl_secs: u32,
     ) -> Result<PushResponse, WebPushError> {
+        // A caller-supplied transport with an unknown redirect policy
+        // must not send under `Strict`: validation covers only the
+        // initial URL, so a 3xx could move the POST to an unvalidated
+        // destination. Refused before any work, including encryption.
+        if self.endpoint_policy == EndpointPolicy::Strict
+            && self.redirects == RedirectConfinement::Unknown
+        {
+            return Err(WebPushError::UnconfinedRedirects);
+        }
         let payload = Payload::encrypt(
             plaintext,
             &subscription.keys.p256dh,

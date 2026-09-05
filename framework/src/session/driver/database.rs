@@ -1,15 +1,18 @@
 //! Database-backed session storage driver
 
 use async_trait::async_trait;
+use chrono::Datelike;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{QueryFilter, Set, TransactionTrait};
+use sea_orm::{QueryFilter, QuerySelect, Set, TransactionTrait};
 use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::database::DB;
 use crate::error::FrameworkError;
-use crate::session::store::{SessionData, SessionMigrationError, SessionStore};
+use crate::session::store::{
+    SessionData, SessionMigrationError, SessionStore, guard_principal_ids_in,
+};
 
 /// Database session driver using SeaORM
 ///
@@ -28,6 +31,17 @@ impl DatabaseSessionDriver {
     pub fn new(lifetime: Duration) -> Self {
         Self { lifetime }
     }
+
+    /// Session lifetime in whole seconds, capped at
+    /// [`MAX_SESSION_LIFETIME_SECS`](crate::session::MAX_SESSION_LIFETIME_SECS)
+    /// so the `u64`→`i64` conversion is exact and deadline arithmetic
+    /// cannot overflow. Env parsing clamps to the same bound, but a
+    /// programmatically built config can carry any [`Duration`].
+    fn lifetime_secs_capped(&self) -> i64 {
+        i64::try_from(self.lifetime.as_secs())
+            .unwrap_or(i64::MAX)
+            .min(crate::session::MAX_SESSION_LIFETIME_SECS as i64)
+    }
 }
 
 #[async_trait]
@@ -41,10 +55,16 @@ impl SessionStore for DatabaseSessionDriver {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         if let Some(session) = result {
-            // Check if expired
+            // Check if expired. The lifetime is capped so the `i64`
+            // conversion is exact and the deadline addition stays in
+            // range; `checked_add` is belt-and-suspenders against a
+            // far-future stored timestamp, which reads as still active
+            // (fail closed) rather than panicking.
             let now = chrono::Utc::now().naive_utc();
-            let expiry =
-                session.last_activity + chrono::Duration::seconds(self.lifetime.as_secs() as i64);
+            let expiry = session
+                .last_activity
+                .checked_add_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
+                .unwrap_or(chrono::NaiveDateTime::MAX);
 
             if now > expiry {
                 // Session expired, clean it up
@@ -240,20 +260,63 @@ impl SessionStore for DatabaseSessionDriver {
     async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 
-        let result = sessions::Entity::delete_many()
+        // Indexed path: sessions whose default-guard principal is `user_id`.
+        let mut deleted = sessions::Entity::delete_many()
             .filter(sessions::Column::UserId.eq(user_id))
             .exec(db.inner())
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .rows_affected;
 
-        Ok(result.rows_affected)
+        // Named-guard principals live only inside the payload
+        // (`_auth_guards`), so the indexed column cannot see them: a
+        // named-only session has `user_id = NULL`, and a multi-principal
+        // session carries a different top-level id. Compare the surviving
+        // rows' guard identities exactly in Rust. Revocation is rare, so
+        // correctness outranks index use here; the in-Rust comparison
+        // also keeps backend JSON-dialect differences out of the query.
+        let rows = sessions::Entity::find()
+            .select_only()
+            .column(sessions::Column::Id)
+            .column(sessions::Column::Payload)
+            .into_tuple::<(String, String)>()
+            .all(db.inner())
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        for (id, payload) in rows {
+            let data: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&payload).unwrap_or_default();
+            if guard_principal_ids_in(&data).iter().any(|id| id == user_id) {
+                deleted += sessions::Entity::delete_by_id(id)
+                    .exec(db.inner())
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?
+                    .rows_affected;
+            }
+        }
+
+        Ok(deleted)
     }
 
     async fn gc(&self) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 
-        let threshold = chrono::Utc::now().naive_utc()
-            - chrono::Duration::seconds(self.lifetime.as_secs() as i64);
+        // A cutoff outside the database's date range must not be bound into
+        // SQL: chrono accepts negative years that MySQL cannot encode and
+        // dates older than PostgreSQL's timestamp range.
+        let Some(threshold) = chrono::Utc::now()
+            .naive_utc()
+            .checked_sub_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
+        else {
+            return Ok(0);
+        };
+        // Year 1000 is a conservative portable SQL datetime floor. Sessions
+        // written by this driver have modern activity timestamps, so an
+        // earlier cutoff has nothing to collect. Skip rather than moving
+        // the cutoff forward and risking premature expiry.
+        if threshold.year() < 1000 {
+            return Ok(0);
+        }
 
         let result = sessions::Entity::delete_many()
             .filter(sessions::Column::LastActivity.lt(threshold))

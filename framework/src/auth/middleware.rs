@@ -111,9 +111,44 @@ impl Default for AuthMiddleware {
 #[async_trait]
 impl Middleware for AuthMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
+        // Resolve the user instead of trusting a persisted identifier. A
+        // session can outlive its principal (deleted or soft-deleted user),
+        // and an ID-presence check would keep authorizing the removed
+        // identity. A provider miss clears the stale slot so the next
+        // request does not carry it.
         let authenticated = match &self.guard {
-            Some(name) => Auth::guard(name)?.check().await?,
-            None => Auth::check(),
+            Some(name) => {
+                let guard = Auth::guard(name)?;
+                match guard.user().await? {
+                    Some(_) => true,
+                    None => {
+                        if guard.id().await?.is_some() {
+                            crate::session::middleware::clear_guard_auth_user(name);
+                        }
+                        false
+                    }
+                }
+            }
+            None => {
+                // Fast path: no identity at all, without touching a provider.
+                if Auth::id().is_none() {
+                    false
+                } else {
+                    match Auth::user().await {
+                        Ok(user) => {
+                            if user.is_none() {
+                                crate::session::clear_auth_user();
+                            }
+                            user.is_some()
+                        }
+                        // Providerless `login_id`-only apps have nothing to
+                        // resolve against: keep the ID-presence decision.
+                        // Any other resolution failure stays an error.
+                        Err(e) if Auth::is_missing_provider(&e) => Auth::check(),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
         };
         if authenticated {
             // Authentication proof belongs to this middleware's successful

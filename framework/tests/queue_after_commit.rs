@@ -8,6 +8,7 @@
 //! *entire* push, and the rollback callback releases a unique job's lock).
 
 use chrono::Utc;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use suprnova::App;
 use suprnova::cache::{CacheStore, InMemoryCache};
+use suprnova::database::events::{TransactionCommitted, TransactionRolledBack};
 use suprnova::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use suprnova::queue::testing::{install_fake, pushed};
 use suprnova::queue::worker::register_job;
@@ -24,6 +26,367 @@ use suprnova::{
     DB, DatabaseConfig, DbConnection, EnvelopeOverrides, FrameworkError, Job, Queue, TxHandle,
     async_trait,
 };
+use suprnova::{EventFacade, Listener};
+use tokio::sync::Notify;
+use tokio::time::timeout;
+
+#[derive(Serialize, Deserialize)]
+struct SavepointRowJob {
+    id: i32,
+}
+
+#[async_trait]
+impl Job for SavepointRowJob {
+    fn job_name() -> &'static str {
+        "savepoint-row"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+async fn savepoint_rows_match_jobs(
+    first: String,
+    second: Option<String>,
+    rollback: String,
+    expected: &[i32],
+) {
+    let driver = install_driver();
+    let connection = DB::connection().expect("test connection");
+    let backend = connection.inner().get_database_backend();
+    let table = format!("savepoint_rows_{}", uuid::Uuid::new_v4().simple());
+    connection
+        .inner()
+        .execute_unprepared(&format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+        .await
+        .expect("create owned table");
+    let tx_table = table.clone();
+    DB::transaction(move |tx| {
+        Box::pin(async move {
+            for id in 0..3 {
+                if id == 1 {
+                    tx.savepoint(&first).await?;
+                }
+                if id == 2 {
+                    if let Some(second) = &second {
+                        tx.savepoint(second).await?;
+                    } else {
+                        break;
+                    }
+                }
+                tx.query_all(Statement::from_string(
+                    backend,
+                    format!("INSERT INTO {tx_table} (id) VALUES ({id})"),
+                ))
+                .await?;
+                Queue::push(SavepointRowJob { id }).await?;
+            }
+            tx.rollback_to(&rollback).await?;
+            // ROLLBACK TO keeps its mark usable. Repeat through another spelling.
+            tx.query_all(Statement::from_string(
+                backend,
+                format!("INSERT INTO {tx_table} (id) VALUES (3)"),
+            ))
+            .await?;
+            Queue::push(SavepointRowJob { id: 3 }).await?;
+            tx.rollback_to(&rollback.to_ascii_uppercase()).await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("outer commit");
+    let rows: Vec<i32> = connection
+        .inner()
+        .query_all_raw(Statement::from_string(
+            backend,
+            format!("SELECT id FROM {table} ORDER BY id"),
+        ))
+        .await
+        .expect("committed rows")
+        .into_iter()
+        .map(|row| row.try_get("", "id").unwrap())
+        .collect();
+    let jobs: Vec<i32> = driver
+        .envelopes()
+        .into_iter()
+        .map(|env| {
+            serde_json::from_value::<SavepointRowJob>(env.payload)
+                .unwrap()
+                .id
+        })
+        .collect();
+    connection
+        .inner()
+        .execute_unprepared(&format!("DROP TABLE {table}"))
+        .await
+        .expect("drop owned table");
+    assert_eq!(rows, expected, "physical rollback boundary");
+    assert_eq!(jobs, expected, "deferred effects must match committed rows");
+}
+
+async fn savepoint_alias_suite() {
+    savepoint_rows_match_jobs("checkpoint".into(), None, "CHECKPOINT".into(), &[0]).await;
+    savepoint_rows_match_jobs(
+        "checkpoint".into(),
+        Some("CHECKPOINT".into()),
+        "checkpoint".into(),
+        &[0, 1],
+    )
+    .await;
+    let prefix = "a".repeat(63);
+    let postgres = DB::connection().unwrap().inner().get_database_backend() == DbBackend::Postgres;
+    savepoint_rows_match_jobs(
+        format!("{prefix}x"),
+        Some(format!("{prefix}y")),
+        format!("{prefix}x"),
+        if postgres { &[0, 1] } else { &[0] },
+    )
+    .await;
+    if postgres {
+        savepoint_rows_match_jobs(format!("{prefix}x"), None, prefix, &[0]).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn savepoint_aliases_sqlite_rows_and_jobs_agree() {
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    savepoint_alias_suite().await;
+}
+
+async fn live_savepoint_aliases(variable: &str, expected_backend: DbBackend) {
+    let url = std::env::var(variable).expect("explicit disposable database URL required");
+    let config = DatabaseConfig::builder()
+        .url(url)
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let connection = DbConnection::connect(&config)
+        .await
+        .expect("live test database");
+    assert_eq!(
+        connection.inner().get_database_backend(),
+        expected_backend,
+        "the live dialect test must use its intended backend"
+    );
+    TestContainer::scope(async move {
+        TestContainer::singleton(connection);
+        savepoint_alias_suite().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable PostgreSQL in PG_TEST_URL"]
+async fn savepoint_aliases_postgres_rows_and_jobs_agree() {
+    live_savepoint_aliases("PG_TEST_URL", DbBackend::Postgres).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL/MariaDB in MYSQL_TEST_URL"]
+async fn savepoint_aliases_mysql_rows_and_jobs_agree() {
+    live_savepoint_aliases("MYSQL_TEST_URL", DbBackend::MySql).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn savepoint_case_alias_releases_unique_job_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("checkpoint").await?;
+            assert!(
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "case-alias".into()
+                })
+                .await?
+            );
+            tx.rollback_to("CHECKPOINT").await?;
+            assert!(
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "case-alias".into()
+                })
+                .await?
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+    assert_eq!(driver.count(), 1);
+}
+
+#[derive(Default)]
+struct CompletionEventGate {
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl Listener<TransactionCommitted> for CompletionEventGate {
+    async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<TransactionRolledBack> for CompletionEventGate {
+    async fn handle(&self, _: &TransactionRolledBack) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_during_commit_event_preserves_deferred_dispatch() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let gate = Arc::new(CompletionEventGate::default());
+    EventFacade::listen::<TransactionCommitted, _>(gate.clone()).await;
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                Queue::push(AfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+    timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("commit listener entered");
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    gate.release.notify_one();
+    EventFacade::forget::<TransactionCommitted>();
+    poll_until(
+        || driver.count() == 1,
+        Duration::from_secs(2),
+        "dispatch after committed caller cancellation",
+    )
+    .await;
+    assert_eq!(driver.only().job_name, AfterCommitJob::job_name());
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_during_rollback_event_releases_unique_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    let gate = Arc::new(CompletionEventGate::default());
+    EventFacade::listen::<TransactionRolledBack, _>(gate.clone()).await;
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                assert!(
+                    Queue::push_unique(UniqueAfterCommitJob {
+                        key: "rollback-event-abort".into()
+                    })
+                    .await?
+                );
+                Err::<(), FrameworkError>(FrameworkError::internal("rollback"))
+            })
+        })
+        .await
+    });
+    timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("rollback listener entered");
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    gate.release.notify_one();
+    EventFacade::forget::<TransactionRolledBack>();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if Queue::push_unique(UniqueAfterCommitJob {
+                key: "rollback-event-abort".into(),
+            })
+            .await
+            .expect("retry dispatch")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rollback compensation must release lock");
+    assert_eq!(driver.count(), 1, "only the retry dispatch publishes");
+}
+
+#[tokio::test]
+#[serial]
+async fn cancellation_preserves_callback_registration_order() {
+    let driver = Arc::new(GatedDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let caller = tokio::spawn(async {
+        DB::transaction(|_| {
+            Box::pin(async {
+                Queue::push(BlockingAfterCommitJob).await?;
+                Queue::push(OtherAfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+    poll_until(
+        || driver.entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "first callback entered",
+    )
+    .await;
+    caller.abort();
+    assert!(caller.await.expect_err("caller aborted").is_cancelled());
+    let second_started = timeout(Duration::from_millis(100), async {
+        loop {
+            if !driver.pushed.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    driver.release.notify_one();
+    poll_until(
+        || driver.pushed.lock().unwrap().len() == 2,
+        Duration::from_secs(2),
+        "ordered callbacks complete",
+    )
+    .await;
+    assert!(
+        !second_started,
+        "second callback must wait for the first callback after caller cancellation"
+    );
+    let names: Vec<_> = driver
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|env| env.job_name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            BlockingAfterCommitJob::job_name(),
+            OtherAfterCommitJob::job_name()
+        ]
+    );
+}
 
 // --- Driver -----------------------------------------------------------------
 
@@ -1373,5 +1736,211 @@ async fn a_rolled_back_deferred_push_releases_its_lock_even_when_the_primary_is_
         fallback.count(),
         1,
         "and the re-dispatch itself still falls over to the fallback"
+    );
+}
+
+// ── Cancellation barriers (P4-04) ───────────────────────────────────────────
+// Aborting the task running `DB::transaction` must not strand deferred
+// work: the database rolls back on drop, but queue publication and lock
+// ownership live outside the database. These tests abort before the
+// commit and while post-commit callbacks are pending, then prove the
+// effects still land exactly once.
+
+/// Poll `cond` until it holds or `timeout` elapses. The sleeps yield,
+/// which is what lets detached finalizer tasks run on the
+/// `current_thread` test runtime.
+async fn poll_until(cond: impl Fn() -> bool, timeout: Duration, what: &str) {
+    tokio::time::timeout(timeout, async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+#[tokio::test]
+#[serial]
+async fn an_aborted_transaction_releases_its_deferred_unique_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_in, release_in) = (entered.clone(), release.clone());
+    let handle = tokio::spawn(async move {
+        DB::transaction(|_tx| {
+            Box::pin(async move {
+                let taken = Queue::push_unique(UniqueAfterCommitJob {
+                    key: "abort-1".into(),
+                })
+                .await?;
+                assert!(taken, "the lock is taken at push time");
+                entered_in.store(true, Ordering::SeqCst);
+                release_in.notified().await;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+
+    poll_until(
+        || entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "the transaction to take its lock and park",
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+
+    // The diverted compensation must release the lock: the same unique
+    // key becomes pushable again immediately, not after `unique_for`.
+    // A bespoke loop here (rather than `poll_until`) because the
+    // condition itself awaits.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let retried = Queue::push_unique(UniqueAfterCommitJob {
+                key: "abort-1".into(),
+            })
+            .await
+            .unwrap_or(false);
+            if retried {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the aborted transaction's unique lock must be released");
+    assert_eq!(
+        driver.count(),
+        1,
+        "only the re-push envelope exists; the aborted dispatch never published"
+    );
+}
+
+/// Driver that parks its first push behind a gate, so a test can abort
+/// the transaction task while a post-commit callback is in flight.
+struct GatedDriver {
+    pushed: Mutex<Vec<Envelope>>,
+    gate_armed: AtomicBool,
+    entered: AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl GatedDriver {
+    fn new() -> Self {
+        Self {
+            pushed: Mutex::new(Vec::new()),
+            gate_armed: AtomicBool::new(true),
+            entered: AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl QueueDriver for GatedDriver {
+    async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+        if self.gate_armed.swap(false, Ordering::SeqCst) {
+            self.entered.store(true, Ordering::SeqCst);
+            self.release.notified().await;
+        }
+        self.pushed.lock().unwrap().push(env);
+        Ok(())
+    }
+
+    async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn ack(&self, _t: &ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn nack(&self, _t: &ReservationToken, _delay: Duration) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        Ok(self.pushed.lock().unwrap().len() as u64)
+    }
+
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlockingAfterCommitJob;
+
+#[async_trait]
+impl Job for BlockingAfterCommitJob {
+    fn job_name() -> &'static str {
+        "wave5-after-commit-blocking"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn an_abort_after_commit_still_completes_every_callback_exactly_once() {
+    let driver = Arc::new(GatedDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    let handle = tokio::spawn(async {
+        DB::transaction(|_tx| {
+            Box::pin(async {
+                // Registration order is execution order: the blocking push
+                // runs first and parks inside the driver gate.
+                Queue::push(BlockingAfterCommitJob).await?;
+                Queue::push(OtherAfterCommitJob).await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+    });
+
+    poll_until(
+        || driver.entered.load(Ordering::SeqCst),
+        Duration::from_secs(10),
+        "the first post-commit callback to go in flight",
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+    // Let the in-flight callback finish; the owned runner then starts
+    // the remaining callbacks in order. `notify_one` (not
+    // `notify_waiters`) so the permit survives if the child has not
+    // parked yet.
+    driver.release.notify_one();
+
+    poll_until(
+        || driver.pushed.lock().unwrap().len() == 2,
+        Duration::from_secs(10),
+        "both post-commit callbacks to complete after the abort",
+    )
+    .await;
+    let names: Vec<String> = driver
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|env| env.job_name.clone())
+        .collect();
+    assert!(
+        names.contains(&BlockingAfterCommitJob::job_name().to_string()),
+        "the in-flight callback must survive the abort, got: {names:?}"
+    );
+    assert!(
+        names.contains(&OtherAfterCommitJob::job_name().to_string()),
+        "the unstarted remainder must divert, got: {names:?}"
     );
 }
