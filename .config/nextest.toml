@@ -11,3 +11,9 @@ serial-binaries = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(paginated_users_e2e)'
 test-group = 'serial-binaries'
+
+# A real-clock fairness assertion over an SSE transport: it holds when the
+# machine is not saturated by other test processes, so it runs alone.
+[[profile.default.overrides]]
+filter = 'binary(live) & test(=async_backpressure::a_chatty_island_cannot_starve_its_sibling_on_one_transport)'
+threads-required = "num-test-threads"
