@@ -294,6 +294,13 @@ weaknesses:
   Inertia route that does not declare `Locale` variance, on every request:
   this fails closed rather than leaking, but it fails silently from the
   response's own point of view, and declaring `Locale` is the fix.
+- **Only the serving process advances generations.** The write-side
+  instrumentation is opened by `RenderCache::install`, which only the
+  serving process calls (`serve` and `web-run`), so writes from queue
+  workers, scheduled tasks, and console commands advance no generation and
+  `bump_permission_version` there is a no-op. A page that depends on such a
+  write stays current only within its freshness window; `advance_epoch` is
+  the operator remedy after a job that changes cached content.
 
 A route handler that branches its output on a header or a config value,
 without also declaring the matching variance, is outside what this

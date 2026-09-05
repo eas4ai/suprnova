@@ -44,3 +44,6 @@ class.
 - The privacy leak suite gains a case proving a per-tenant-only gate check
   does not leak one tenant's authorized page to a different tenant sharing
   the same key once this widening ships.
+- RBAC role and permission checks read through `DB::select_one` and
+  `DB::scalar`, so a cached route that evaluates one is never stored until
+  those known tables are observed precisely.

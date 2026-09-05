@@ -3,7 +3,7 @@
 Status: Staged (not in current contract)
 Captured: 2026-09-05
 Target domain: `conventions.md` (framework-wide build and verification
-convention), with `15-render-cache-architecture.md` as the first affected
+convention), with `15-render-representations-and-storage.md` as the first affected
 domain
 
 ## What it is
