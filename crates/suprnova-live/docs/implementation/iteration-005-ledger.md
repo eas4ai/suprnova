@@ -1,5 +1,11 @@
 # Iteration 005 implementation ledger
 
+On 2026-09-05 the framework's integration tests were folded into one binary
+per module under `framework/tests/<module>/`. The `--test <former_file>`
+commands quoted below are historical - they name binaries that no longer
+exist. The current form is `cargo test -p suprnova --test <module> -- <stem>::`
+(nextest: `cargo nextest run -p suprnova --test <module> -E 'test(<stem>::)'`).
+
 This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
