@@ -23,3 +23,4 @@ license = "MIT"
 
 [profile.dev]
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
