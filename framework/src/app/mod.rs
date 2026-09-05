@@ -64,24 +64,42 @@ type RoutesFuture = Pin<Box<dyn Future<Output = Result<Router, FrameworkError>> 
 /// call wins across all three rather than each form keeping a rival
 /// catalog that the server would have to choose between.
 enum RoutesFn {
-    /// Built synchronously, by [`Server::try_from_config_with_routes`].
+    /// Registered by [`Application::routes`] or
+    /// [`Application::try_routes`]; ready the moment it is called.
     Sync(Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>),
-    /// Awaited, by [`Server::try_from_config_with_routes_async`].
+    /// Registered by [`Application::try_routes_async`]; awaited.
     Async(Box<dyn FnOnce() -> RoutesFuture + Send>),
 }
 
 impl RoutesFn {
-    /// Hand the registered catalog to the `Server` constructor that matches
-    /// its shape, so services and the immutable Live runtime are prepared
-    /// before it runs either way. No registration at all means an empty
-    /// router, which is what the server built before any of the three
-    /// registration methods existed.
-    async fn prepare_server(registered: Option<Self>) -> Result<Server, FrameworkError> {
+    /// Run whichever closure is in the slot and return the router it built.
+    /// No registration at all yields an empty router, which is what the
+    /// server built before any of the three registration methods existed.
+    ///
+    /// This is the whole of the sync-or-async dispatch and nothing else: it
+    /// boots no services, binds no Live runtime, and reads no environment,
+    /// so a test can drive it directly. Takes `Option<Self>` rather than
+    /// `self` so the no-registration case lives inside the dispatch instead
+    /// of at every call site.
+    async fn build_router(registered: Option<Self>) -> Result<Router, FrameworkError> {
         match registered {
-            Some(Self::Async(routes)) => Server::try_from_config_with_routes_async(routes).await,
-            Some(Self::Sync(routes)) => Server::try_from_config_with_routes(routes),
-            None => Server::try_from_config_with_routes(|| Ok(Router::new())),
+            Some(Self::Async(routes)) => routes().await,
+            Some(Self::Sync(routes)) => routes(),
+            None => Ok(Router::new()),
         }
+    }
+
+    /// [`Self::build_router`] behind the boot sequence: framework services
+    /// and the immutable Live runtime are prepared first, then the
+    /// registered closure runs, then the server is assembled around the
+    /// router it returned.
+    ///
+    /// Both shapes go through the asynchronous constructor. That is not a
+    /// behaviour change for a synchronous catalog: the two constructors
+    /// share one prologue (`prepare_boot`) and one epilogue (`finish_boot`),
+    /// and a `Sync` closure simply completes without ever yielding.
+    async fn prepare_server(registered: Option<Self>) -> Result<Server, FrameworkError> {
+        Server::try_from_config_with_routes_async(move || Self::build_router(registered)).await
     }
 }
 
@@ -2798,14 +2816,21 @@ mod boot_hook_tests {
 #[cfg(test)]
 mod route_registration_tests {
     //! `routes`, `try_routes` and `try_routes_async` write one slot, and
-    //! `run_server_internal` hands whatever is in it to the `Server`
-    //! constructor that matches its shape. A regression that gave the
-    //! asynchronous form a field of its own would leave `suprnova serve`
-    //! quietly building the synchronous catalog the application meant to
-    //! replace: no compile error, no missing route, only a middleware that
-    //! was never installed. These tests go through the same
-    //! `RoutesFn::prepare_server` the serve path calls, so the dispatch
-    //! itself is under test and not merely the field.
+    //! `RoutesFn::build_router` runs whichever closure is in it. A
+    //! regression that gave the asynchronous form a field of its own would
+    //! leave `suprnova serve` quietly building the synchronous catalog the
+    //! application meant to replace: no compile error, no missing route,
+    //! only a middleware that was never installed.
+    //!
+    //! These tests drive `build_router` and nothing else. They boot no
+    //! services, bind no Live runtime, and read no environment, so they
+    //! cannot be broken by what another test in this binary left in the
+    //! process-global container - which is exactly how an earlier version
+    //! of this module, which called `prepare_server`, failed under the
+    //! repository gate while passing when run alone. `prepare_server` is
+    //! `build_router` handed to `Server::try_from_config_with_routes_async`,
+    //! and the boot order that wrapper owes is proven where a real
+    //! container is legitimate: `framework/tests/live_boot.rs`.
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -2831,9 +2856,9 @@ mod route_registration_tests {
                     Ok(Router::new())
                 }
             });
-        RoutesFn::prepare_server(async_last.routes_fn)
+        RoutesFn::build_router(async_last.routes_fn)
             .await
-            .expect("the asynchronous catalog must prepare a server");
+            .expect("the asynchronous catalog must build a router");
         assert_eq!(
             *ran.lock().expect("recorder"),
             vec!["async"],
@@ -2856,9 +2881,9 @@ mod route_registration_tests {
                 sync_second.lock().expect("recorder").push("sync");
                 Ok(Router::new())
             });
-        RoutesFn::prepare_server(sync_last.routes_fn)
+        RoutesFn::build_router(sync_last.routes_fn)
             .await
-            .expect("the synchronous catalog must prepare a server");
+            .expect("the synchronous catalog must build a router");
         assert_eq!(
             *ran.lock().expect("recorder"),
             vec!["sync"],
@@ -2867,15 +2892,124 @@ mod route_registration_tests {
         );
     }
 
+    /// The infallible builder shares the slot too. `routes` is the oldest
+    /// of the three and the one an existing application is most likely to
+    /// be holding when it adds `try_routes_async`, so its half of the
+    /// last-wins rule is worth its own test rather than an inference from
+    /// the fallible one.
+    #[tokio::test]
+    async fn the_infallible_routes_builder_shares_the_slot_with_the_async_one() {
+        let ran = recorder();
+
+        let infallible_first = Arc::clone(&ran);
+        let async_second = Arc::clone(&ran);
+        let async_last = Application::new()
+            .routes(move || {
+                infallible_first.lock().expect("recorder").push("routes");
+                Router::new()
+            })
+            .try_routes_async(move || {
+                let recorded = Arc::clone(&async_second);
+                async move {
+                    recorded.lock().expect("recorder").push("async");
+                    Ok(Router::new())
+                }
+            });
+        RoutesFn::build_router(async_last.routes_fn)
+            .await
+            .expect("the asynchronous catalog must build a router");
+        assert_eq!(
+            *ran.lock().expect("recorder"),
+            vec!["async"],
+            "try_routes_async must replace an earlier infallible routes builder"
+        );
+
+        ran.lock().expect("recorder").clear();
+
+        let async_first = Arc::clone(&ran);
+        let infallible_second = Arc::clone(&ran);
+        let infallible_last = Application::new()
+            .try_routes_async(move || {
+                let recorded = Arc::clone(&async_first);
+                async move {
+                    recorded.lock().expect("recorder").push("async");
+                    Ok(Router::new())
+                }
+            })
+            .routes(move || {
+                infallible_second.lock().expect("recorder").push("routes");
+                Router::new()
+            });
+        RoutesFn::build_router(infallible_last.routes_fn)
+            .await
+            .expect("the infallible catalog must build a router");
+        assert_eq!(
+            *ran.lock().expect("recorder"),
+            vec!["routes"],
+            "a later infallible routes builder must replace an earlier try_routes_async"
+        );
+    }
+
+    /// The router each closure returns is the router the dispatch hands
+    /// back, whichever shape registered it. This is the unit-level half of
+    /// "the server serves the router the closure returned"; the other half,
+    /// that the wrapper carries this router into the assembled server, is
+    /// `finish_boot`, shared with the synchronous constructor and covered
+    /// in `framework/tests/live_boot.rs`.
+    #[tokio::test]
+    async fn each_form_hands_back_the_router_its_own_closure_built() {
+        let from_async = RoutesFn::build_router(
+            Application::new()
+                .try_routes_async(|| async {
+                    Ok(Router::new()
+                        .get("/async-built", |_req| async { crate::http::text("async") })
+                        .into())
+                })
+                .routes_fn,
+        )
+        .await
+        .expect("the asynchronous catalog must build a router");
+        assert!(
+            from_async
+                .match_route(&hyper::Method::GET, "/async-built")
+                .is_some(),
+            "the awaited closure's own router must come back, not a fresh one"
+        );
+
+        let from_sync = RoutesFn::build_router(
+            Application::new()
+                .try_routes(|| {
+                    Ok(Router::new()
+                        .get("/sync-built", |_req| async { crate::http::text("sync") })
+                        .into())
+                })
+                .routes_fn,
+        )
+        .await
+        .expect("the synchronous catalog must build a router");
+        assert!(
+            from_sync
+                .match_route(&hyper::Method::GET, "/sync-built")
+                .is_some(),
+            "the synchronous closure's own router must come back unchanged"
+        );
+        assert!(
+            from_sync
+                .match_route(&hyper::Method::GET, "/async-built")
+                .is_none(),
+            "sanity: the two dispatches must not share a router"
+        );
+    }
+
     #[tokio::test]
     async fn an_error_from_the_async_route_closure_surfaces_like_the_sync_one() {
-        let from_sync = RoutesFn::prepare_server(
+        let from_sync = RoutesFn::build_router(
             Application::new()
                 .try_routes(|| Err(FrameworkError::internal("route catalog rejected")))
                 .routes_fn,
         )
         .await;
-        let from_async = RoutesFn::prepare_server(
+        let from_async = RoutesFn::build_router(
             Application::new()
                 .try_routes_async(|| async {
                     Err(FrameworkError::internal("route catalog rejected"))
@@ -2885,11 +3019,11 @@ mod route_registration_tests {
         .await;
 
         let sync_error = match from_sync {
-            Ok(_) => panic!("a synchronous route-construction error must abort preparation"),
+            Ok(_) => panic!("a synchronous route-construction error must abort the dispatch"),
             Err(error) => error,
         };
         let async_error = match from_async {
-            Ok(_) => panic!("an asynchronous route-construction error must abort preparation"),
+            Ok(_) => panic!("an asynchronous route-construction error must abort the dispatch"),
             Err(error) => error,
         };
         assert!(
@@ -2905,9 +3039,13 @@ mod route_registration_tests {
     }
 
     #[tokio::test]
-    async fn registering_no_route_builder_still_prepares_an_empty_router() {
-        RoutesFn::prepare_server(Application::new().routes_fn)
+    async fn registering_no_route_builder_still_builds_an_empty_router() {
+        let empty = RoutesFn::build_router(Application::new().routes_fn)
             .await
-            .expect("an application that registers no routes must still boot");
+            .expect("an application that registers no routes must still build one");
+        assert!(
+            empty.match_route(&hyper::Method::GET, "/").is_none(),
+            "the no-registration path must yield a bare Router::new()"
+        );
     }
 }

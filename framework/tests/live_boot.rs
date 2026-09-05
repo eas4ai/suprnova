@@ -242,6 +242,72 @@ fn runtime_is_bound_before_fallible_routes_and_reused_on_reentry() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("live route catalog rejected"));
+
+    // `Server::try_from_config_with_routes_async` is the asynchronous twin
+    // of the constructor above, reached by `Application::try_routes_async`.
+    // Exercised here, inside this one test, rather than in its own: this
+    // file's contract is that exactly one test mutates `APP_ENV`, and a
+    // second test running beside it would race that `set_var` across the
+    // harness's threads. A runtime is built for the two awaits rather than
+    // turning this into a `#[tokio::test]`, so every assertion above keeps
+    // running exactly as it did outside one.
+    //
+    // What this position can prove, and does: the awaited closure actually
+    // runs, it resolves the same immutable runtime the rest of this test
+    // holds (so a re-entry through the asynchronous door rebinds nothing),
+    // and a construction error comes back untouched with no listener
+    // bound. What it cannot prove is the boot *order*, because by this
+    // line the container is already warm - three earlier boots in this test
+    // bound the runtime, so the closure would resolve it whether the
+    // constructor's prologue ran before it or not. That claim needs a cold
+    // process and is proven in `live_boot_async_route_order.rs`.
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime for the asynchronous constructor");
+
+    let observed_async = Arc::new(Mutex::new(None::<LiveRuntime>));
+    let observed_in_async_routes = Arc::clone(&observed_async);
+    let _async_server = async_runtime
+        .block_on(Server::try_from_config_with_routes_async(
+            move || async move {
+                let runtime: LiveRuntime = App::resolve().map_err(|error| {
+                    FrameworkError::internal(format!(
+                        "Live runtime was not bound before asynchronous route construction: {error}"
+                    ))
+                })?;
+                *observed_in_async_routes.lock().expect("observation lock") = Some(runtime);
+                Ok(Router::new())
+            },
+        ))
+        .expect("ordered asynchronous server preparation");
+
+    let during_async_routes = observed_async
+        .lock()
+        .expect("observation lock")
+        .clone()
+        .expect("asynchronous route closure observed a runtime");
+    assert!(
+        same_runtime_instance(&during_async_routes, &after_routes),
+        "an asynchronous re-entry must reuse the immutable runtime, never replace it"
+    );
+
+    let async_failed =
+        async_runtime.block_on(Server::try_from_config_with_routes_async(|| async {
+            Err(FrameworkError::internal(
+                "async live route catalog rejected",
+            ))
+        }));
+    let async_error = match async_failed {
+        Ok(_) => panic!("fallible asynchronous route construction must return its error"),
+        Err(error) => error,
+    };
+    assert!(
+        async_error
+            .to_string()
+            .contains("async live route catalog rejected"),
+        "the awaited closure's own error must survive: {async_error}"
+    );
 }
 
 #[test]
