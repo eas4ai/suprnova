@@ -42,7 +42,9 @@ The framework adapts those contracts to Suprnova, under
   process-installed flag that gates every write-side probe.
 - `config.rs`: `RenderCacheConfig::from_env` and its environment variables.
 - `collector.rs`: the request-scoped dependency collector, a Tokio task-local,
-  and the process-wide permission-version counter.
+  and the reserved permission-version identity
+  (`permission_version_identity`, a `Config` identity under
+  `suprnova.render_cache.permission_version`).
 - `middleware.rs`: `RenderCacheMiddleware`, the whole request flow.
 - `file_store.rs`: `FileRenderStore`, the file-backed L1 provider.
 - `ledger.rs`: `SqlGenerationLedger`, the database-authoritative
@@ -101,8 +103,17 @@ the router comes back untouched, nothing is probed, no runtime is assembled,
 no middleware is registered, and the write side's gate stays shut, so an
 application that turns the cache off need not carry the migration at all.
 
-`RenderCache::bump_permission_version()` advances the process-wide counter
-fed into `Principal` variance material. `RenderCache::advance_epoch()`
+`RenderCache::bump_permission_version()` advances a persisted generation on
+the reserved permission-version identity, through the same ledger path an
+ORM write's advance takes (it joins the caller's ambient transaction when
+there is one and opens its own otherwise), and every render whose key
+carries a resolved `Principal` value observes that identity, so each such
+entry published before the bump fails its coherence check at its next
+lookup, in this process and in every later one sharing the database. The
+version field the engine's `PrivateMaterial::principal` still accepts is
+frozen at 0 by this host: the earlier process-local counter that fed it
+reset to 0 on restart while an L1 entry keyed under 0 survived on disk, so
+the generation, not the key, is the mechanism. `RenderCache::advance_epoch()`
 advances the ledger's authority epoch and clears L0 immediately.
 `RenderCache::inspect(key_text)` and `RenderCache::store_inspection()` give
 body-free, key-free operator visibility into L0 occupancy and one entry's
@@ -139,9 +150,14 @@ Operations below.
    renders without publishing if the leader's cycle failed to publish; a
    request past the waiter cap renders without publishing.
 6. The leader's render runs under the request-scoped collector, inside a
-   database read transaction when a database is configured, so the
-   generations it reads at window-close share one snapshot with the data the
-   render itself read.
+   database transaction when a database is configured, opened at
+   `REPEATABLE READ` on PostgreSQL and MySQL (`DB::transaction_with_isolation`)
+   and at the backend default on SQLite, whose WAL read transaction is
+   already a snapshot, so the generations it reads at window-close share one
+   snapshot with the data the render itself read. A plain `DB::transaction`
+   would be `READ COMMITTED` on PostgreSQL and not a snapshot at all. When
+   the key carries a resolved `Principal`, the collector observes the
+   reserved permission-version identity before the handler runs.
 7. After the render, the response is checked for eligibility
    (`RenderCachePolicy::eligibility`) and classified from what the collector
    actually observed (`classify`); an ineligible or `Uncacheable` response,
@@ -207,7 +223,8 @@ unconditionally, since it is a content-variance concern rather than a
 
 This guard can only compare what the collector actually recorded. Two
 categories of read produce no observation at all, so there is nothing to
-compare against:
+compare against, and one category is recorded as unobservable, so the render
+is never stored:
 
 - **Headers**, read through `Request::header` and friends, are deliberately
   not instrumented: every request reads some header for some purpose, so
@@ -215,6 +232,22 @@ compare against:
 - **Configuration**, read through `Config::get::<T>()`, has no producer: the
   call returns whole typed structs, so a read that touches secret
   configuration is indistinguishable at that seam from one that does not.
+- **Raw SQL reads fail closed.** `DB::select`, `DB::select_one`,
+  `DB::scalar`, and `DB::select_on` cannot name the tables their statement
+  read, so each marks the collector report incomplete
+  (`collector::observe_unobservable_read`) and the render is declined rather
+  than stored, the same way an overflowed report is; the response is still
+  served, and the framework's own RBAC role and permission checks
+  (`rbac::has_roles`) read this way, so a cached route that evaluates one
+  never stores. The query-builder facade is not in this category:
+  `DB::table(..).get()`, `first()`, and `count()` know their table and record
+  it (`collector::observe_table_read`), which is also how `Auth::user()`
+  resolving through `DatabaseUserProvider` observes the `users` table with
+  no change of its own. Writes are classified by a prefix heuristic
+  (`is_select_statement`): a raw statement that does not begin with `SELECT`
+  is treated as a write and advances `Broad`, the safe direction, while a
+  side-effecting `SELECT nextval(..)` is treated as a read and advances
+  nothing.
 - **An Eloquent global scope's own per-request state.** `ScopeRegistry`'s own
   documentation invites a `GlobalScope::apply` implementation to read
   per-request state, such as the current tenant, from an application-defined
@@ -334,13 +367,30 @@ identity's current generation from the ledger, by digest, and returns a
 
 Two separate reads make up coherence around one render:
 
-- **The consistent read view.** The leader's render runs inside
-  `DB::transaction` when a database is configured, and the observation
-  window closes (reading the ledger) while that transaction is still open,
-  so the generations it reads share one snapshot with whatever data the
-  render itself read. A write that lands after the transaction commits is
-  therefore never visible to this reread as if it had already happened
-  before the render started.
+- **The consistent read view.** The leader's render runs inside a
+  transaction opened through `DB::transaction_with_isolation` when a
+  database is configured, at `REPEATABLE READ` on PostgreSQL (whose default
+  `READ COMMITTED` gives every statement the latest committed data, not a
+  snapshot) and on MySQL (where InnoDB already defaults to it), and at the
+  backend default on SQLite (a WAL read transaction is a snapshot as of its
+  first read; the pinned SeaORM would only log a warning for a level there).
+  The observation window closes (reading the ledger) while that transaction
+  is still open, so the generations it reads share one snapshot with
+  whatever data the render itself read: a write that commits mid-render is
+  invisible to both, the candidate carries the pre-write generations, and the
+  fresh reread below discards it. The consequence for authors: on PostgreSQL
+  a cached route's handler that updates a row another transaction changed
+  after the render began sees a serialization failure; cached routes are
+  read paths. Proven against a live PostgreSQL in
+  `live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current`
+  (and the MySQL twin), which `scripts/check-postgres.sh` and
+  `scripts/check-mysql.sh` run and assert on by name.
+- **The owning transaction.** An ORM write inside a `DB::transaction`
+  advances its generations inside that same transaction; a bare autocommit
+  write (`model.save()` with no ambient transaction) has already committed
+  its row when the advance opens an immediately following dedicated
+  transaction, so the window between the two is "new data, old generation",
+  which costs one extra rebuild and never serves stale content.
 - **The fresh reread.** After the render finishes and classification and
   the value guard both pass, `fresh_reread_is_coherent` rereads the observed
   dependencies and the epoch again, outside the transactional view this
@@ -408,7 +458,10 @@ stored already dead.
 ### File layout and the tally/disk invariant
 
 L1 stores one file per key, flat under the configured directory:
-`<key.to_base64url()>.snrc`. Each file holds one frame:
+`<key.to_base64url()>.snrc`. Each file holds one frame (the entry bytes
+inside it carry a JSON header whose enum tags are `snake_case`, such as
+`"class": "public_shared"` and `{"private": ..}`, matching every other JSON
+name in the crate):
 
 | Field | Bytes |
 |---|---|

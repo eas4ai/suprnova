@@ -91,6 +91,36 @@ capture on authorization reads now also names the wider class of public,
 uninstrumented accessors onto the authenticated identity and the single
 tripwire that is its only present coverage.
 
+### The closing fix round
+
+The final whole-branch review of the range `c2aac7a7` to `c136178c` returned
+FIX-THEN-SHIP with fifteen findings and no blocker; the closing fix round
+carried out the controller's rulings on each. The render transaction is now
+opened at `REPEATABLE READ` on PostgreSQL and MySQL through a shared-body
+`DB::transaction_with_isolation`, so the handler's reads and the window-close
+generation read share one snapshot on every backend, not only on SQLite; the
+query-builder facade (`DB::table(..).get()`, `first()`, `count()`) records
+the table it read and the raw `DB::select` family marks a render unstorable;
+the permission version is a persisted generation on a reserved identity that
+every principal-keyed render observes, so a bump survives a restart; and the
+build id is parsed once at install and refused when unparsable, a misplaced
+frame is evicted rather than served, an unobservable identity at window
+close declines the candidate, the stored header's enum tags are
+`snake_case`, and the async route-order test sets its own `APP_ENV`. The
+race and consistent-view evidence, previously SQLite-only (finding F15), now
+includes
+`live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current`
+and its MySQL twin, run and asserted on by name in `scripts/check-postgres.sh`
+and `scripts/check-mysql.sh`; the Postgres one fails with the isolation level
+removed. The seams the `testing` default feature compiles into ordinary
+builds were captured in `iterations/next/test-seams-in-ordinary-builds.md`
+rather than changed. The English manual's matching prose (the raw-read
+decline, the `Auth::user()` consequence, the PostgreSQL serialization note,
+the autocommit qualification, and the bump's new asynchronous signature) was
+not edited in this round, because an English-only edit fails the repository
+gate's translation-lock step until the six locales are retranslated; it is
+recorded in the closing fix report for a translation pass before release.
+
 ### The dogfood route and its proof
 
 `app::live::routes` declares a `PublicShared` policy on `/live/public` with a
@@ -212,7 +242,9 @@ Every gate run this checkpoint produced, in order, with the tip it covered:
 | `1c63eeae` | repository | exit 2, refused to start on installed-tooling drift; no step ran |
 | `11948eed` | Live | exit 0 |
 | `11948eed` | repository | exit 1, run `20260905T032853.263434Z-1404788-83b35f4e`; `workspace-tests` failed on two targets this plan had just added, a lib unit test that booted the process-global container and the `env.tpl` half of the scaffold's environment templates |
-| the fix round 2 tip | repository | started detached; its outcome is in the task report, not here |
+| `c136178c` (the fix round 2 tip) | Live | exit 0, rerun because that round changed files under `crates/suprnova-live/` |
+| `c136178c` (the fix round 2 tip) | repository | exit 0, run `20260905T044827.099098Z-2171055-a58cca6f`, `GATE GREEN: default` |
+| the closing fix round tip | Live, then repository | both launched after this table was written, since a ledger row naming their outcome would change the tree they cover; their exit codes, logs, and run identifier are in the closing fix report (`final-fix-report.md` in the plan's SDD workspace) |
 
 Every run was launched detached with its exit code captured to a file. The
 recorded install commit, the run logs, and the exit codes live in the task
