@@ -199,6 +199,32 @@ rodava, em termos que você vai reconhecer:
   `Config::get`, é completamente invisível para o RenderCache - ele não
   pode recusar o que não consegue ver, então declarar a variância
   correspondente é responsabilidade sua.
+- **Você executou SQL bruto por meio de `DB::select`, `DB::select_one`,
+  `DB::scalar`, ou `DB::select_on`.** O framework não consegue nomear as
+  tabelas que uma instrução bruta leu, então a renderização nunca é
+  armazenada; ela ainda é servida. Leituras por meio de `DB::table(..)`
+  conhecem sua tabela e entram em cache normalmente, assim como
+  `Auth::user()`, que resolve por esse caminho. Verificações de papel e
+  permissão RBAC também leem por meio dessas instruções brutas, então uma
+  rota em cache que avalia uma delas nunca é armazenada.
+- **A escrita foi feita por um worker de fila, uma tarefa agendada, ou um
+  comando de console.** Apenas um processo que executou
+  `RenderCache::install` (o servidor) avança gerações; escritas de outros
+  processos não o fazem, e `RenderCache::bump_permission_version()` ali não
+  faz nada. Uma página que depende de tal escrita permanece atual apenas
+  dentro de sua janela de validade; execute `render-cache:epoch-advance`
+  depois de um job que muda o que as páginas em cache exibem.
+
+No PostgreSQL, a renderização roda em uma transação `REPEATABLE READ` para
+que o que foi lido e as gerações registradas estejam de acordo; o handler
+de uma rota em cache que atualiza uma linha que outra transação mudou
+depois que a renderização começou sofre uma falha de serialização. Rotas
+em cache são caminhos de leitura.
+
+Uma escrita feita fora de qualquer transação (`model.save()` sozinho)
+confirma primeiro e avança suas gerações em uma transação imediatamente
+seguinte, então o momento entre as duas é "dado novo, geração antiga": uma
+reconstrução extra, nunca conteúdo obsoleto.
 
 Nada disso precisa de ferramentas especiais para ser visto na prática: o
 comando oculto `render-cache:inspect` (abaixo) mostra se a entrada de uma
@@ -277,10 +303,13 @@ segurança.
 
 ## Epoch, permissões e inspeção
 
-- **`RenderCache::bump_permission_version()`** - chame isso sempre que uma
-  ação da aplicação mudar o que um usuário autenticado tem permissão para
-  fazer (uma mudança de papel, uma concessão ou revogação de permissão).
-  Sem isso, um usuário cujas permissões acabaram de mudar continua
+- **`RenderCache::bump_permission_version().await?`** - chame isso sempre
+  que uma ação da aplicação mudar o que um usuário autenticado tem
+  permissão para fazer (uma mudança de papel, uma concessão ou revogação de
+  permissão). Isso avança uma geração persistida que toda renderização com
+  chave por visitante autenticado observa, de modo que ela sobrevive a um
+  reinício e se junta à transação em que a mudança de papel roda, quando há
+  uma. Sem isso, um usuário cujas permissões acabaram de mudar continua
   correspondendo ao que estava armazenado em cache sob seu conjunto de
   permissões anterior.
 - **`RenderCache::advance_epoch()`**, ou o comando oculto
@@ -314,7 +343,9 @@ inteiras, a chave é derivada automaticamente a partir da rota e de sua
 variância declarada, e a invalidação é baseada em geração: uma escrita
 comum no banco de dados através do ORM ou do construtor de consultas avança
 as gerações das quais a renderização dependia, e a entrada é recalculada na
-próxima vez que for solicitada, em vez de apagada manualmente. Recorra a
+próxima vez que for solicitada, em vez de apagada manualmente; uma
+renderização que leu SQL bruto nunca chega a ser armazenada, então não há
+nada para recalcular. Recorra a
 `suprnova::Cache` quando você tiver um valor específico que quer computar
 uma vez e reutilizar; recorra ao RenderCache quando você tiver uma rota
 inteira cuja resposta é cara de renderizar e segura de compartilhar.

@@ -202,6 +202,34 @@ pendant son exécution, en des termes que vous reconnaîtrez :
   d'une réponse à un en-tête de requête ordinaire, ou à `Config::get`, est
   totalement invisible pour RenderCache - il ne peut pas refuser ce qu'il
   ne peut pas voir, donc déclarer la variance correspondante vous revient.
+- **Vous avez exécuté du SQL brut via `DB::select`, `DB::select_one`,
+  `DB::scalar`, ou `DB::select_on`.** Le framework ne peut pas nommer les
+  tables qu'une instruction brute a lues, donc le rendu n'est jamais
+  stocké ; il est tout de même servi. Les lectures via `DB::table(..)`
+  connaissent leur table et sont mises en cache normalement, tout comme
+  `Auth::user()`, qui se résout via ce chemin. Les vérifications de rôle
+  et de permission RBAC lisent elles aussi via ces instructions brutes,
+  donc une route mise en cache qui en évalue une n'est jamais stockée.
+- **L'écriture a été faite par un worker de file d'attente, une tâche
+  planifiée, ou une commande console.** Seul un processus ayant exécuté
+  `RenderCache::install` (le serveur) fait avancer les générations ; les
+  écritures faites par d'autres processus ne les font pas avancer, et
+  `RenderCache::bump_permission_version()` n'y fait rien non plus. Une
+  page qui dépend d'une telle écriture ne reste à jour que dans sa
+  fenêtre de fraîcheur ; exécutez `render-cache:epoch-advance` après un
+  job qui change ce que montrent les pages mises en cache.
+
+Sous PostgreSQL, le rendu s'exécute dans une transaction `REPEATABLE READ`
+afin que ce qu'il a lu et les générations qu'il a enregistrées concordent ;
+le handler d'une route mise en cache qui met à jour une ligne qu'une autre
+transaction a modifiée après le début du rendu voit un échec de
+sérialisation. Les routes mises en cache sont des chemins de lecture.
+
+Une écriture faite en dehors de toute transaction (`model.save()` seul) se
+commite en premier et fait avancer ses générations dans une transaction
+qui suit immédiatement, si bien que l'instant entre les deux est
+« nouvelles données, ancienne génération » : une reconstruction
+supplémentaire, jamais de contenu périmé.
 
 Rien de tout cela n'a besoin d'un outillage particulier pour être observé
 en pratique : la commande masquée `render-cache:inspect` (ci-dessous)
@@ -281,12 +309,16 @@ quelque chose qu'aucune clé ne pourrait partitionner en toute sécurité.
 
 ## Epoch, permissions et inspection
 
-- **`RenderCache::bump_permission_version()`** - appelez ceci chaque fois
-  qu'une action applicative change ce qu'un utilisateur connecté est
-  autorisé à faire (un changement de rôle, l'octroi ou la révocation d'une
-  permission). Sans cela, un utilisateur dont les permissions viennent de
-  changer continue de correspondre à ce qui était mis en cache sous son
-  précédent jeu de permissions.
+- **`RenderCache::bump_permission_version().await?`** - appelez ceci
+  chaque fois qu'une action applicative change ce qu'un utilisateur
+  connecté est autorisé à faire (un changement de rôle, l'octroi ou la
+  révocation d'une permission). Cela fait avancer une génération
+  persistée que chaque rendu indexé par visiteur observe, si bien
+  qu'elle tient à travers un redémarrage et rejoint la transaction dans
+  laquelle s'exécute le changement de rôle quand il y en a une. Sans
+  cela, un utilisateur dont les permissions viennent de changer continue
+  de correspondre à ce qui était mis en cache sous son précédent jeu de
+  permissions.
 - **`RenderCache::advance_epoch()`**, ou la commande masquée
   `render-cache:epoch-advance` - une invalidation d'urgence. Chaque entrée
   actuellement stockée devient inatteignable par une recherche ordinaire
@@ -321,8 +353,9 @@ la clé est dérivée automatiquement de la route et de sa variance déclarée,
 et l'invalidation est fondée sur des générations : une écriture ordinaire
 en base de données via l'ORM ou le générateur de requêtes avance les
 générations dont dépendait le rendu, et l'entrée est recalculée la
-prochaine fois qu'elle est demandée plutôt que supprimée à la main.
-Tournez-vous vers `suprnova::Cache` quand vous avez une valeur précise que
-vous voulez calculer une fois et réutiliser ; tournez-vous vers RenderCache
-quand vous avez une route entière dont la réponse est coûteuse à rendre et
-sûre à partager.
+prochaine fois qu'elle est demandée plutôt que supprimée à la main ; un
+rendu qui a lu du SQL brut n'est jamais stocké du tout, donc il n'y a rien
+à recalculer. Tournez-vous vers `suprnova::Cache` quand vous avez une
+valeur précise que vous voulez calculer une fois et réutiliser ;
+tournez-vous vers RenderCache quand vous avez une route entière dont la
+réponse est coûteuse à rendre et sûre à partager.

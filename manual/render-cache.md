@@ -183,6 +183,30 @@ it ran, in terms you will recognize:
   ordinary request header, or on `Config::get`, is invisible to RenderCache
   entirely - it cannot decline what it cannot see, so declaring the
   matching variance is on you.
+- **You ran raw SQL through `DB::select`, `DB::select_one`, `DB::scalar`, or
+  `DB::select_on`.** The framework cannot name the tables a raw statement
+  read, so the render is never stored; it is still served. Reads through
+  `DB::table(..)` know their table and are cached normally, and so is
+  `Auth::user()`, which resolves through that path. RBAC role and permission
+  checks read through those raw statements too, so a cached route that
+  evaluates one is never stored.
+- **The write was made by a queue worker, a scheduled task, or a console
+  command.** Only a process that ran `RenderCache::install` (the server)
+  advances generations; writes from other processes do not, and
+  `RenderCache::bump_permission_version()` there does nothing. A page
+  depending on such a write stays current only within its freshness window;
+  run `render-cache:epoch-advance` after a job that changes what cached
+  pages show.
+
+On PostgreSQL the render runs in a `REPEATABLE READ` transaction so that what
+it read and the generations it recorded agree; a cached route's handler that
+updates a row another transaction changed after the render began sees a
+serialization failure. Cached routes are read paths.
+
+A write made outside any transaction (`model.save()` on its own) commits
+first and advances its generations in an immediately following transaction,
+so the moment between the two is "new data, old generation": one extra
+rebuild, never stale content.
 
 None of this needs special tooling to see happen in practice: the hidden
 `render-cache:inspect` command (below) shows whether a route's entry
@@ -258,11 +282,13 @@ depends on something no key could safely partition by.
 
 ## Epoch, permissions, and inspection
 
-- **`RenderCache::bump_permission_version()`** - call this whenever an
-  application action changes what a signed-in user is allowed to do (a role
-  change, a permission grant or revocation). Without it, a user whose
-  permissions just changed keeps matching whatever was cached under their
-  prior permission set.
+- **`RenderCache::bump_permission_version().await?`** - call this whenever
+  an application action changes what a signed-in user is allowed to do (a
+  role change, a permission grant or revocation). It advances a persisted
+  generation that every principal-keyed render observes, so it holds across
+  a restart and joins the transaction the role change runs in when there is
+  one. Without it, a user whose permissions just changed keeps matching
+  whatever was cached under their prior permission set.
 - **`RenderCache::advance_epoch()`**, or the hidden
   `render-cache:epoch-advance` command - an emergency invalidation. Every
   currently stored entry becomes unreachable by ordinary lookup at its very
@@ -291,7 +317,9 @@ handler. It caches whole HTTP responses, the key is derived automatically
 from the route and its declared variance, and invalidation is
 generation-based: an ordinary database write through the ORM or query
 builder advances the generations the render depended on, and the entry is
-recomputed the next time it is asked for rather than deleted by hand. Reach
+recomputed the next time it is asked for rather than deleted by hand; a
+render that read raw SQL is never stored in the first place, so there is
+nothing to recompute. Reach
 for `suprnova::Cache` when you have a specific value you want to compute
 once and reuse; reach for RenderCache when you have a whole route whose
 response is expensive to render and safe to share.

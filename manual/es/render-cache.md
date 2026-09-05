@@ -199,6 +199,33 @@ se ejecutaba, en términos que reconocerás:
   respuesta de una cabecera de petición ordinaria, o de `Config::get`, es
   completamente invisible para RenderCache - no puede rechazar lo que no
   puede ver, así que declarar la varianza correspondiente depende de ti.
+- **Ejecutaste SQL en bruto a través de `DB::select`, `DB::select_one`,
+  `DB::scalar`, o `DB::select_on`.** El framework no puede nombrar las
+  tablas que lee una sentencia en bruto, así que el render nunca se
+  almacena; aun así se sirve. Las lecturas a través de `DB::table(..)`
+  conocen su tabla y se cachean con normalidad, y lo mismo ocurre con
+  `Auth::user()`, que se resuelve por esa vía. Las comprobaciones de rol y
+  permiso de RBAC también leen a través de esas sentencias en bruto, así
+  que una ruta cacheada que evalúa una nunca se almacena.
+- **La escritura la hizo un worker de cola, una tarea programada, o un
+  comando de consola.** Solo un proceso que ejecutó `RenderCache::install`
+  (el servidor) avanza generaciones; las escrituras de otros procesos no
+  lo hacen, y `RenderCache::bump_permission_version()` ahí no hace nada.
+  Una página que depende de tal escritura se mantiene vigente solo dentro
+  de su ventana de frescura; ejecuta `render-cache:epoch-advance` después
+  de un job que cambie lo que muestran las páginas cacheadas.
+
+En PostgreSQL el render se ejecuta en una transacción `REPEATABLE READ`
+para que lo que leyó y las generaciones que registró concuerden; el
+handler de una ruta cacheada que actualiza una fila que otra transacción
+cambió después de que empezara el render ve un fallo de serialización.
+Las rutas cacheadas son rutas de lectura.
+
+Una escritura hecha fuera de cualquier transacción (`model.save()` por su
+cuenta) confirma primero y avanza sus generaciones en una transacción
+inmediatamente posterior, así que el momento entre ambas es «datos
+nuevos, generación antigua»: una reconstrucción extra, nunca contenido
+obsoleto.
 
 Nada de esto necesita herramientas especiales para verse en la práctica:
 el comando oculto `render-cache:inspect` (más abajo) muestra si siquiera
@@ -277,11 +304,15 @@ que ninguna clave podría particionar con seguridad.
 
 ## Epoch, permisos e inspección
 
-- **`RenderCache::bump_permission_version()`** - llama a esto cada vez que
-  una acción de la aplicación cambie lo que un usuario con sesión iniciada
-  tiene permitido hacer (un cambio de rol, una concesión o revocación de
-  permiso). Sin ello, un usuario cuyos permisos acaban de cambiar sigue
-  coincidiendo con lo que se cacheó bajo su anterior conjunto de permisos.
+- **`RenderCache::bump_permission_version().await?`** - llama a esto cada
+  vez que una acción de la aplicación cambie lo que un usuario con sesión
+  iniciada tiene permitido hacer (un cambio de rol, una concesión o
+  revocación de permiso). Avanza una generación persistida que observa
+  todo render con clave por principal, así que se mantiene tras un
+  reinicio y se une a la transacción en la que se ejecuta el cambio de
+  rol, cuando existe una. Sin ello, un usuario cuyos permisos acaban de
+  cambiar sigue coincidiendo con lo que se cacheó bajo su anterior
+  conjunto de permisos.
 - **`RenderCache::advance_epoch()`**, o el comando oculto
   `render-cache:epoch-advance` - una invalidación de emergencia. Toda
   entrada actualmente almacenada se vuelve inalcanzable por búsqueda
@@ -314,7 +345,9 @@ automáticamente de la ruta y su varianza declarada, y la invalidación se
 basa en generaciones: una escritura de base de datos ordinaria a través
 del ORM o del constructor de consultas avanza las generaciones de las que
 dependía el render, y la entrada se recalcula la próxima vez que se
-solicita en lugar de borrarse a mano. Recurre a `suprnova::Cache` cuando
+solicita en lugar de borrarse a mano; un render que leyó SQL en bruto
+nunca llega a almacenarse, así que no hay nada que recalcular. Recurre a
+`suprnova::Cache` cuando
 tengas un valor específico que quieras calcular una vez y reutilizar;
 recurre a RenderCache cuando tengas una ruta completa cuya respuesta es
 cara de renderizar y segura de compartir.

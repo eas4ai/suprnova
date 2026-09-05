@@ -204,6 +204,35 @@ werden:
   abhängt, ist für RenderCache völlig unsichtbar - es kann nicht ablehnen,
   was es nicht sehen kann, daher liegt es an Ihnen, die passende Varianz zu
   deklarieren.
+- **Sie haben rohes SQL über `DB::select`, `DB::select_one`, `DB::scalar`
+  oder `DB::select_on` ausgeführt.** Das Framework kann die Tabellen, die
+  eine rohe Anweisung liest, nicht benennen, daher wird das Rendering nie
+  gespeichert; es wird trotzdem ausgeliefert. Lesezugriffe über
+  `DB::table(..)` kennen ihre Tabelle und werden normal gecacht, ebenso
+  `Auth::user()`, das über diesen Pfad aufgelöst wird. RBAC-Rollen- und
+  Berechtigungsprüfungen lesen ebenfalls über jene rohen Anweisungen, daher
+  wird eine gecachte Route, die eine davon auswertet, nie gespeichert.
+- **Der Schreibzugriff erfolgte durch einen Queue-Worker, eine geplante
+  Aufgabe oder einen Konsolenbefehl.** Nur ein Prozess, der
+  `RenderCache::install` ausgeführt hat (der Server), erhöht Generationen;
+  Schreibzugriffe aus anderen Prozessen tun das nicht, und
+  `RenderCache::bump_permission_version()` bewirkt dort nichts. Eine Seite,
+  die von einem solchen Schreibzugriff abhängt, bleibt nur innerhalb ihres
+  Frische-Fensters aktuell; führen Sie `render-cache:epoch-advance` aus,
+  nachdem ein Job gelaufen ist, der ändert, was gecachte Seiten anzeigen.
+
+Auf PostgreSQL läuft das Rendering in einer `REPEATABLE READ`-Transaktion,
+damit das, was es gelesen hat, und die Generationen, die es aufgezeichnet
+hat, übereinstimmen; der Handler einer gecachten Route, der eine Zeile
+aktualisiert, die eine andere Transaktion verändert hat, nachdem das
+Rendering begonnen hat, erhält einen Serialisierungsfehler. Gecachte Routen
+sind Lesepfade.
+
+Ein Schreibzugriff, der außerhalb jeder Transaktion erfolgt (`model.save()`
+für sich allein), committet zuerst und erhöht seine Generationen in einer
+unmittelbar folgenden Transaktion, sodass der Moment dazwischen „neue
+Daten, alte Generation“ ist: ein zusätzlicher Neuaufbau, nie veralteter
+Inhalt.
 
 Nichts davon braucht spezielle Werkzeuge, um es in der Praxis zu beobachten:
 Der verborgene Befehl `render-cache:inspect` (unten) zeigt, ob überhaupt ein
@@ -281,12 +310,15 @@ Schlüssel sicher partitionieren könnte.
 
 ## Epoche, Berechtigungen und Inspektion
 
-- **`RenderCache::bump_permission_version()`** - rufen Sie dies auf, wann
-  immer eine Anwendungsaktion ändert, wozu ein angemeldeter Benutzer
+- **`RenderCache::bump_permission_version().await?`** - rufen Sie dies auf,
+  wann immer eine Anwendungsaktion ändert, wozu ein angemeldeter Benutzer
   berechtigt ist (eine Rollenänderung, eine Berechtigungserteilung oder ein
-  Berechtigungsentzug). Ohne dies passt ein Benutzer, dessen Berechtigungen
-  sich gerade geändert haben, weiterhin zu allem, was unter seinem
-  vorherigen Berechtigungssatz gecacht wurde.
+  Berechtigungsentzug). Es erhöht eine persistierte Generation, die jedes
+  principal-geschlüsselte Rendering beobachtet, sodass sie einen Neustart
+  übersteht und sich der Transaktion anschließt, in der die
+  Rollenänderung läuft, sofern es eine gibt. Ohne dies passt ein Benutzer,
+  dessen Berechtigungen sich gerade geändert haben, weiterhin zu allem, was
+  unter seinem vorherigen Berechtigungssatz gecacht wurde.
 - **`RenderCache::advance_epoch()`**, oder der verborgene Befehl
   `render-cache:epoch-advance` - eine Notfall-Invalidierung. Jeder aktuell
   gespeicherte Eintrag wird bei seiner allernächsten Anfrage sofort über das
@@ -320,7 +352,9 @@ aus der Route und ihrer deklarierten Varianz abgeleitet, und die
 Invalidierung ist generationsbasiert: Ein gewöhnlicher
 Datenbankschreibzugriff über den ORM oder den Query-Builder erhöht die
 Generationen, von denen das Rendering abhing, und der Eintrag wird beim
-nächsten Abruf neu berechnet, statt von Hand gelöscht zu werden. Greifen Sie
+nächsten Abruf neu berechnet, statt von Hand gelöscht zu werden; ein
+Rendering, das rohes SQL gelesen hat, wird von vornherein nie gespeichert,
+sodass es nichts neu zu berechnen gibt. Greifen Sie
 zu `suprnova::Cache`, wenn Sie einen bestimmten Wert haben, den Sie einmal
 berechnen und wiederverwenden möchten; greifen Sie zu RenderCache, wenn Sie
 eine ganze Route haben, deren Antwort teuer zu rendern und sicher zu teilen
