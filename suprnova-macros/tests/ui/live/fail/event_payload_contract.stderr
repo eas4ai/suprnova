@@ -9,7 +9,7 @@ help: the trait `EventPayloadMetadata` is not implemented for `UndeclaredPayload
   |
 3 | struct UndeclaredPayload;
   | ^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `EventMetadata::from_payload`
+note: required by a bound in `suprnova_live::metadata::browser::EventMetadata::from_payload`
  --> $WORKSPACE/crates/suprnova-live/src/metadata/browser.rs
   |
   |     pub fn from_payload<T: EventPayloadMetadata + 'static>() -> Result<Self, MetadataError> {
