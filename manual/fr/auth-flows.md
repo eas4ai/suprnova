@@ -1068,16 +1068,16 @@ comportement à usage unique.
 
 Les exemples de source canoniques sont :
 
-- `framework/tests/email_verify.rs` pour la vérification liée à l'acteur et les
+- `framework/tests/auth_flows/email_verify.rs` pour la vérification liée à l'acteur et les
   tokens à usage unique.
-- `framework/tests/password_reset.rs` pour la délégation Magnetar et les
+- `framework/tests/auth_flows/password_reset.rs` pour la délégation Magnetar et les
   résultats de complétion.
-- `framework/tests/magnetar_default_engine.rs` pour une configuration réelle du
+- `framework/tests/magnetar_integration/default_engine.rs` pour une configuration réelle du
   moteur par défaut.
-- `framework/tests/brute_force.rs` pour le cycle de vie du verrouillage.
-- `framework/tests/two_factor_challenge_flow.rs` pour le flux de défi TOTP
+- `framework/tests/auth_flows/brute_force.rs` pour le cycle de vie du verrouillage.
+- `framework/tests/auth_flows/two_factor_challenge_flow.rs` pour le flux de défi TOTP
   conservé par le framework.
-- `framework/tests/magnetar_remember_middleware.rs` pour la rotation remember
+- `framework/tests/magnetar_integration/remember_middleware.rs` pour la rotation remember
   et la liaison à deux sessions.
 
 L'installation de Magnetar globale au processus est volontairement à usage

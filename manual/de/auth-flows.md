@@ -1060,16 +1060,16 @@ Prüfung, atomaren Abschluss, Session-Widerruf und Einmalverhalten.
 
 Maßgebliche Quellbeispiele sind:
 
-- `framework/tests/email_verify.rs` für akteurgebundene Verifizierung und
+- `framework/tests/auth_flows/email_verify.rs` für akteurgebundene Verifizierung und
   Einmal-Token.
-- `framework/tests/password_reset.rs` für die Magnetar-Delegierung und
+- `framework/tests/auth_flows/password_reset.rs` für die Magnetar-Delegierung und
   Abschluss-Ergebnisse.
-- `framework/tests/magnetar_default_engine.rs` für die Einrichtung der
+- `framework/tests/magnetar_integration/default_engine.rs` für die Einrichtung der
   tatsächlichen Standard-Engine.
-- `framework/tests/brute_force.rs` für den Lifecycle der Sperre.
-- `framework/tests/two_factor_challenge_flow.rs` für den beibehaltenen
+- `framework/tests/auth_flows/brute_force.rs` für den Lifecycle der Sperre.
+- `framework/tests/auth_flows/two_factor_challenge_flow.rs` für den beibehaltenen
   TOTP-Challenge-Flow des Frameworks.
-- `framework/tests/magnetar_remember_middleware.rs` für Remember-Rotation und
+- `framework/tests/magnetar_integration/remember_middleware.rs` für Remember-Rotation und
   die Bindung an zwei Sessions.
 
 Die prozessweite Magnetar-Installation ist absichtlich nur einmal möglich.

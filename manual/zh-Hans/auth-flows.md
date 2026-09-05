@@ -746,12 +746,12 @@ async fn verify_fires_email_verified_event() {
 
 规范源码示例为：
 
-- `framework/tests/email_verify.rs`：绑定 actor 的验证和一次性令牌。
-- `framework/tests/password_reset.rs`：Magnetar 委托和完成结果。
-- `framework/tests/magnetar_default_engine.rs`：真实默认引擎设置。
-- `framework/tests/brute_force.rs`：锁定生命周期。
-- `framework/tests/two_factor_challenge_flow.rs`：保留的框架 TOTP 质询流程。
-- `framework/tests/magnetar_remember_middleware.rs`：remember 轮换和双会话绑定。
+- `framework/tests/auth_flows/email_verify.rs`：绑定 actor 的验证和一次性令牌。
+- `framework/tests/auth_flows/password_reset.rs`：Magnetar 委托和完成结果。
+- `framework/tests/magnetar_integration/default_engine.rs`：真实默认引擎设置。
+- `framework/tests/auth_flows/brute_force.rs`：锁定生命周期。
+- `framework/tests/auth_flows/two_factor_challenge_flow.rs`：保留的框架 TOTP 质询流程。
+- `framework/tests/magnetar_integration/remember_middleware.rs`：remember 轮换和双会话绑定。
 
 进程全局 Magnetar 安装刻意是一次性的。需要不同引擎的测试应放在单独的集成测试二进制文件中，或为整个二进制文件只安装一次测试适配器。
 

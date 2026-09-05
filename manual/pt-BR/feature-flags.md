@@ -469,7 +469,7 @@ async fn admin_upsert_propagates_to_cached_chain() {
 }
 ```
 
-Veja `framework/tests/features.rs` para o conjunto completo
+Veja `framework/tests/features/features.rs` para o conjunto completo
 de testes de composição.
 
 ### Por que Suprnova diverge

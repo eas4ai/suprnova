@@ -999,16 +999,16 @@ finalización atómica, revocación de sesión y comportamiento de un solo uso.
 
 Los ejemplos fuente canónicos son:
 
-- `framework/tests/email_verify.rs` para la verificación vinculada al actor y
+- `framework/tests/auth_flows/email_verify.rs` para la verificación vinculada al actor y
   los tokens de un solo uso.
-- `framework/tests/password_reset.rs` para la delegación de Magnetar y los
+- `framework/tests/auth_flows/password_reset.rs` para la delegación de Magnetar y los
   resultados de finalización.
-- `framework/tests/magnetar_default_engine.rs` para la configuración de un
+- `framework/tests/magnetar_integration/default_engine.rs` para la configuración de un
   motor predeterminado real.
-- `framework/tests/brute_force.rs` para el ciclo de vida de bloqueo.
-- `framework/tests/two_factor_challenge_flow.rs` para el flujo de desafío TOTP
+- `framework/tests/auth_flows/brute_force.rs` para el ciclo de vida de bloqueo.
+- `framework/tests/auth_flows/two_factor_challenge_flow.rs` para el flujo de desafío TOTP
   del framework conservado.
-- `framework/tests/magnetar_remember_middleware.rs` para la rotación de
+- `framework/tests/magnetar_integration/remember_middleware.rs` para la rotación de
   remember y la vinculación de sesión dual.
 
 La instalación de Magnetar global al proceso es intencionadamente de una sola

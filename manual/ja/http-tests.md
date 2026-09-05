@@ -23,7 +23,7 @@
 これを回避する、きれいな方法が2つあります。
 
 1. **TCPループバック** - `127.0.0.1:0` のリスナーをバインドし、`service_fn` の中で1つのacceptを処理し、hyperクライアントを通じてリクエストを送り、サーバー側で `Incoming` が自然に生成されるようにします。フレームワークのあらゆる統合テストが、すでにこれを行っています。
-2. **プロセス内でのRequestの構築** - ルーティングを経由せずに `Request` のアクセッサー（ヘッダー、ルートパラメータ、IP、JSONのパース）を調べるだけで済むテストには、同じTCPループバックのキャプチャパターンを使いますが、それを実行する代わりに `Request` を `oneshot::channel` へ取り出すサービスを使います。`framework/tests/http_request_accessors.rs` ファイルには、この `build_request()` ヘルパーがそのまま入っています。
+2. **プロセス内でのRequestの構築** - ルーティングを経由せずに `Request` のアクセッサー（ヘッダー、ルートパラメータ、IP、JSONのパース）を調べるだけで済むテストには、同じTCPループバックのキャプチャパターンを使いますが、それを実行する代わりに `Request` を `oneshot::channel` へ取り出すサービスを使います。`framework/tests/http/request_accessors.rs` ファイルには、この `build_request()` ヘルパーがそのまま入っています。
 
 どちらのパターンも、本物の `Incoming` ボディを生成します。このループバックはローカルであり、テストの実時間の観点では同期的（マイクロ秒単位）であり、`lo` の外のネットワークには決して触れません。この契約を保ったまま、これより遅い、あるいはこれより単純な方法はありません。
 
@@ -124,7 +124,7 @@ async fn get_root_returns_hello() {
 }
 ```
 
-これが全体の形です。この2つのヘルパーをクレートごとにコピーし、スイートに合わせて調整してください（複数のaccept、ヘッダーのキャプチャ、ボディのキャプチャ）。フレームワーク自体は、`framework/tests/cors_middleware.rs`、`framework/tests/middleware_panic_safety.rs`、`framework/tests/email_verified_middleware.rs` の中で、ほぼ同一のヘルパーを使っています。
+これが全体の形です。この2つのヘルパーをクレートごとにコピーし、スイートに合わせて調整してください（複数のaccept、ヘッダーのキャプチャ、ボディのキャプチャ）。フレームワーク自体は、`framework/tests/cors/middleware.rs`、`framework/tests/middleware/panic_safety.rs`、`framework/tests/auth_flows/email_verified_middleware.rs` の中で、ほぼ同一のヘルパーを使っています。
 
 `accepts` という引数は、acceptループが終了するまでに処理するコネクションの数を制限します。単一のリクエストには1で十分です - テストがパニック後のリカバリを行使する場合は、2以上に増やしてください（[パニック境界をテストする](#パニック境界をテストする)を参照してください）。
 
@@ -348,7 +348,7 @@ fn cors_registry() -> MiddlewareRegistry {
 async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
     // spawn_serverの3引数の形を使うと、空でないMiddlewareRegistryを
-// 配線できる - framework/tests/cors_middleware.rs からこのヘルパーを
+// 配線できる - framework/tests/cors/middleware.rs からこのヘルパーを
 // コピーする（~30行）。
 let addr = spawn_server(router, cors_registry(), 1).await;
 
@@ -369,7 +369,7 @@ let addr = spawn_server(router, cors_registry(), 1).await;
 }
 ```
 
-このテストが証明しているのは、CORSのロジック自体だけではありません - グローバルミドルウェアが**ルーティングされない**リクエストに対しても実行されることを証明しています。これは、フレームワークが保証する契約です（そうでなければ、決してルートにマッチしないOPTIONSのプリフライトは、CORSをスキップしてしまいます）。完全なスイートについては `framework/tests/cors_middleware.rs` を参照してください。
+このテストが証明しているのは、CORSのロジック自体だけではありません - グローバルミドルウェアが**ルーティングされない**リクエストに対しても実行されることを証明しています。これは、フレームワークが保証する契約です（そうでなければ、決してルートにマッチしないOPTIONSのプリフライトは、CORSをスキップしてしまいます）。完全なスイートについては `framework/tests/cors/middleware.rs` を参照してください。
 
 ### ルート固有のミドルウェアをテストする
 
@@ -386,7 +386,7 @@ assert_eq!(status, 403); // 未認証のリクエスト
 
 ### 認証済みユーザーをスタブする
 
-本物の認証フローのテストには、ログイン済みのユーザーが必要です。最もきれいなパターンは、テスト対象のミドルウェアより前に `Auth::set_user` を呼ぶ、小さな一回限りのミドルウェアです。フレームワーク自身の `framework/tests/email_verified_middleware.rs` が、これを使っています。
+本物の認証フローのテストには、ログイン済みのユーザーが必要です。最もきれいなパターンは、テスト対象のミドルウェアより前に `Auth::set_user` を呼ぶ、小さな一回限りのミドルウェアです。フレームワーク自身の `framework/tests/auth_flows/email_verified_middleware.rs` が、これを使っています。
 
 ```rust
 use std::any::Any;
@@ -509,7 +509,7 @@ async fn login_flow_issues_session_cookie() {
 }
 ```
 
-これらのミドルウェアなしの簡略化したルーターは、クッキーの配線だけを示すものであり、認証フローのテストではありません。`framework/tests/auth_http_middleware.rs` は明示的なレジストリで認証ミドルウェアの振る舞いをテストしますが、本物の `SessionMiddleware` はインストールしません。ステートフルなログインフローのテストは、上で示した通り、セッションミドルウェアと認証ゲートの両方をインストールしなければなりません。
+これらのミドルウェアなしの簡略化したルーターは、クッキーの配線だけを示すものであり、認証フローのテストではありません。`framework/tests/auth/http_middleware.rs` は明示的なレジストリで認証ミドルウェアの振る舞いをテストしますが、本物の `SessionMiddleware` はインストールしません。ステートフルなログインフローのテストは、上で示した通り、セッションミドルウェアと認証ゲートの両方をインストールしなければなりません。
 
 ## パニック境界をテストする
 
@@ -554,7 +554,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` には、完全な `build_request(builder, body) -> Request` ヘルパーがあります。これをクレートごとに一度コピーすれば、あらゆるアクセッサーのテストはきれいに読めます。
+`framework/tests/http/request_accessors.rs` には、完全な `build_request(builder, body) -> Request` ヘルパーがあります。これをクレートごとに一度コピーすれば、あらゆるアクセッサーのテストはきれいに読めます。
 
 ```rust
 #[tokio::test]
@@ -602,7 +602,7 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 
 - **`Incoming` はサーバーサイド専用です。** あなたのテストの中でこれを構築することはできません。TCPループバック（あるいはプロセス内のサービスキャプチャ）だけが唯一の道です - 「`Vec<u8>` のボディから `Request` を構築する」というコンストラクタはありません。
 - **テスト間で状態を共有しないでください。** 各 `#[tokio::test]` は自分専用のランタイムを手にします - テストをまたいだ汚染は、通常グローバル（`once_cell`、`lazy_static`、環境変数）を共有していることを意味します。DBの状態については、[テスト](testing.md)の中の `TestDatabase` を参照してください。
-- **クッキーには本物のクライアントが必要です。** 自動的なクッキージャーはありません - あるレスポンスの `Set-Cookie` を、次の `Cookie` へ手作業で通してください。パターンについては `framework/tests/auth_http_middleware.rs` を参照してください。
+- **クッキーには本物のクライアントが必要です。** 自動的なクッキージャーはありません - あるレスポンスの `Set-Cookie` を、次の `Cookie` へ手作業で通してください。パターンについては `framework/tests/auth/http_middleware.rs` を参照してください。
 - **レスポンス後の終了処理のspawnは、ブロックしません。** `Terminable` を介して実行される副作用をアサートしたい場合は、それをポーリングしてください - レスポンスは、そのフックが実行される前にクライアントへ返ります。
 
 ## 各要素の実装場所
@@ -612,12 +612,12 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 | `handle_request`、`handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`、`with_params`、`with_route_pattern`、`with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`、`append`、`prepend` | `framework/src/middleware/registry.rs` |
-| ループバックのテストハーネス（標準） | `framework/tests/cors_middleware.rs` |
+| ループバックのテストハーネス（標準） | `framework/tests/cors/middleware.rs` |
 | `TestResponse`（上記トリプルに対する流暢なアサーション） | `framework/src/testing/response.rs` |
 | `AssertableInertia`、`ReloadRequest`（流暢なInertiaページオブジェクトアサーション） | `framework/src/testing/inertia.rs` |
-| プロセス内の `Request` キャプチャハーネス | `framework/tests/http_request_accessors.rs` |
-| パニック境界のテストパターン | `framework/tests/middleware_panic_safety.rs` |
-| 認証 + ミドルウェアのエンドツーエンドパターン | `framework/tests/email_verified_middleware.rs` |
+| プロセス内の `Request` キャプチャハーネス | `framework/tests/http/request_accessors.rs` |
+| パニック境界のテストパターン | `framework/tests/middleware/panic_safety.rs` |
+| 認証 + ミドルウェアのエンドツーエンドパターン | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## 次のステップ
 

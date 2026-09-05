@@ -426,7 +426,7 @@ entorno con forma `DATABASE_URL` suministrada por el operador, poner
 la prueba tras una puerta de entorno para que se salte cuando la
 variable esté ausente, y marcarla `#[serial]` para que dos de ellas no
 compitan por la base de datos real compartida. El patrón `MARIADB_URL`
-en `framework/tests/vector_mariadb.rs` es el ejemplo canónico:
+en `framework/tests/vector/mariadb.rs` es el ejemplo canónico:
 
 ```rust
 use serial_test::serial;

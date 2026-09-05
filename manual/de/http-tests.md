@@ -55,7 +55,7 @@ Es gibt zwei saubere Wege darum herum:
    TCP-Loopback-Capture-Muster, aber mit einem Service, der die
    `Request` in einen `oneshot::channel` herauszieht, statt sie
    auszuführen. Die Datei
-   `framework/tests/http_request_accessors.rs` hat diesen
+   `framework/tests/http/request_accessors.rs` hat diesen
    `build_request()`-Helfer wortwörtlich.
 
 Beide Muster erzeugen echte `Incoming`-Bodys. Der Loopback ist
@@ -175,9 +175,9 @@ async fn get_root_returns_hello() {
 Das ist die gesamte Form. Kopieren Sie die zwei Helfer pro Crate,
 stimmen Sie sie auf die Suite ab (mehrere Accepts,
 Header-Erfassung, Body-Erfassung). Das Framework selbst verwendet
-nahezu identische Helfer in `framework/tests/cors_middleware.rs`,
-`framework/tests/middleware_panic_safety.rs` und
-`framework/tests/email_verified_middleware.rs`.
+nahezu identische Helfer in `framework/tests/cors/middleware.rs`,
+`framework/tests/middleware/panic_safety.rs` und
+`framework/tests/auth_flows/email_verified_middleware.rs`.
 
 Das Argument `accepts` begrenzt, wie viele Verbindungen die
 Accept-Schleife bedient, bevor sie beendet. Eins reicht für eine
@@ -430,7 +430,7 @@ async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
     // Die 3-Arg-Form von `spawn_server` lässt Sie eine nicht leere
 // MiddlewareRegistry verdrahten - kopieren Sie den Helfer aus
-// framework/tests/cors_middleware.rs (er hat ~30 Zeilen).
+// framework/tests/cors/middleware.rs (er hat ~30 Zeilen).
 let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
@@ -454,7 +454,7 @@ Dieser Test beweist mehr als nur die CORS-Logik selbst: Er beweist,
 dass globale Middleware auch auf **ungeroutete** Anfragen läuft, was
 der Vertrag ist, den das Framework garantiert (sonst würde ein
 OPTIONS-Preflight, der nie eine Route matcht, CORS überspringen).
-Siehe `framework/tests/cors_middleware.rs` für die vollständige
+Siehe `framework/tests/cors/middleware.rs` für die vollständige
 Suite.
 
 ### Routenspezifische Middleware testen
@@ -478,7 +478,7 @@ Echte Auth-Flow-Tests brauchen einen angemeldeten Benutzer. Das
 sauberste Muster ist eine winzige Einweg-Middleware, die
 `Auth::set_user` vor der zu testenden Middleware aufruft. Das
 Framework selbst verwendet das in
-`framework/tests/email_verified_middleware.rs`:
+`framework/tests/auth_flows/email_verified_middleware.rs`:
 
 ```rust
 use std::any::Any;
@@ -623,7 +623,7 @@ async fn login_flow_issues_session_cookie() {
 
 Der abgekürzte Router ohne diese Middlewares demonstriert nur die
 Cookie-Verdrahtung; er ist kein Authentifizierungs-Flow-Test.
-`framework/tests/auth_http_middleware.rs` testet das Verhalten der
+`framework/tests/auth/http_middleware.rs` testet das Verhalten der
 Authentifizierungs-Middleware mit expliziten Registries, installiert jedoch
 keine echte `SessionMiddleware`. Ein zustandsbehafteter Login-Flow-Test muss
 wie oben gezeigt sowohl die Session-Middleware als auch das
@@ -682,7 +682,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` hat den vollständigen
+`framework/tests/http/request_accessors.rs` hat den vollständigen
 `build_request(builder, body) -> Request`-Helfer. Kopieren Sie ihn
 einmal pro Crate, und jeder Accessor-Test liest sich sauber:
 
@@ -751,7 +751,7 @@ Eine kurze Liste von Fallen, die Erstautoren erwischen:
 - **Cookies brauchen einen echten Client.** Kein automatisches
   Cookie-Jar - fädeln Sie `Set-Cookie` aus einer Response in
   `Cookie` auf der nächsten. Siehe
-  `framework/tests/auth_http_middleware.rs` für das Muster.
+  `framework/tests/auth/http_middleware.rs` für das Muster.
 - **Der Post-Response-Termination-Spawn ist non-blocking.** Wenn
   Sie auf Seiteneffekte assertieren wollen, die über `Terminable`
   laufen, pollen Sie danach - die Response geht an den Client
@@ -764,12 +764,12 @@ Eine kurze Liste von Fallen, die Erstautoren erwischen:
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| Loopback-Test-Harness (kanonisch) | `framework/tests/cors_middleware.rs` |
+| Loopback-Test-Harness (kanonisch) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (fluente Assertions über das obige Triple) | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` (fluente Assertions zum Inertia-Seitenobjekt) | `framework/src/testing/inertia.rs` |
-| In-Process-`Request`-Erfassungs-Harness | `framework/tests/http_request_accessors.rs` |
-| Panic-Grenze-Testmuster | `framework/tests/middleware_panic_safety.rs` |
-| Auth + Middleware End-to-End-Muster | `framework/tests/email_verified_middleware.rs` |
+| In-Process-`Request`-Erfassungs-Harness | `framework/tests/http/request_accessors.rs` |
+| Panic-Grenze-Testmuster | `framework/tests/middleware/panic_safety.rs` |
+| Auth + Middleware End-to-End-Muster | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## Nächste Schritte
 

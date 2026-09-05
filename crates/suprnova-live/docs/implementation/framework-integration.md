@@ -187,9 +187,9 @@ live under `app/templates/live/`, the Askama default for a crate without an
 
 ## Evidence
 
-`framework/tests/live_dogfood.rs` drives a public island through the real
+`framework/tests/live/dogfood.rs` drives a public island through the real
 session, CSRF, guard, tenant, and rate-limit middleware in process, and
-`framework/tests/live_dogfood_server.rs` boots `Server::run` on a socket and
+`framework/tests/live/dogfood_server.rs` boots `Server::run` on a socket and
 performs the same document and action round trip. `app/tests/live_dogfood.rs`,
 `live_upload_reacquire.rs`, and `live_async_dogfood.rs` exercise the
 application surface through its own global middleware stack with seeded

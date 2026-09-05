@@ -490,7 +490,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-Suprnovas eigenes `framework/tests/idempotency.rs` deckt die
+Suprnovas eigenes `framework/tests/idempotency/idempotency.rs` deckt die
 Vertrags-Oberfläche ab: Duplikat-Unterdrückung, TTL-Ablauf,
 Freigabe-Policy je nach Fehler vs. Erfolg, Lease-Erneuerung über
 Rumpf-Laufzeiten hinweg, die die TTL überleben, das

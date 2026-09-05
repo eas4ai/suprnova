@@ -483,7 +483,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-O próprio `framework/tests/idempotency.rs` do framework cobre
+O próprio `framework/tests/idempotency/idempotency.rs` do framework cobre
 a superfície do contrato: supressão de duplicado, expiração de
 TTL, política de release erro-vs-sucesso, renovação de lease
 através de durações de corpo que sobrevivem ao TTL, a corrida

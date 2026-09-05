@@ -719,12 +719,12 @@ async fn verify_fires_email_verified_event() {
 
 正規のソース例:
 
-- アクター束縛された確認と使い捨てトークンについては `framework/tests/email_verify.rs`。
-- Magnetarへの委譲と完了結果については `framework/tests/password_reset.rs`。
-- 実際のデフォルトエンジン設定については `framework/tests/magnetar_default_engine.rs`。
-- ロックアウトのライフサイクルについては `framework/tests/brute_force.rs`。
-- 維持されるフレームワークTOTPチャレンジフローについては `framework/tests/two_factor_challenge_flow.rs`。
-- rememberのローテーションと二重セッション束縛については `framework/tests/magnetar_remember_middleware.rs`。
+- アクター束縛された確認と使い捨てトークンについては `framework/tests/auth_flows/email_verify.rs`。
+- Magnetarへの委譲と完了結果については `framework/tests/auth_flows/password_reset.rs`。
+- 実際のデフォルトエンジン設定については `framework/tests/magnetar_integration/default_engine.rs`。
+- ロックアウトのライフサイクルについては `framework/tests/auth_flows/brute_force.rs`。
+- 維持されるフレームワークTOTPチャレンジフローについては `framework/tests/auth_flows/two_factor_challenge_flow.rs`。
+- rememberのローテーションと二重セッション束縛については `framework/tests/magnetar_integration/remember_middleware.rs`。
 
 プロセスグローバルなMagnetarインストールは、意図的に一度限りです。異なるエンジンを必要とするテストは別々の統合テストバイナリーに置くか、テストアダプターをバイナリー全体で一度だけインストールしてください。
 

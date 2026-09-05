@@ -311,7 +311,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-フレームワーク自身の `framework/tests/idempotency.rs` は、契約の表面をカバーしています: 重複の抑制、TTLの期限切れ、エラー対成功の解放ポリシー、TTLより長生きする本体の実行時間にまたがるリースの更新、`InProgress` のレース、そしてキャッシュの `release_lock` 自体がエラーになるケースです。頼りにできる正確な振る舞いを見たいなら、それらのテストを読んでください。
+フレームワーク自身の `framework/tests/idempotency/idempotency.rs` は、契約の表面をカバーしています: 重複の抑制、TTLの期限切れ、エラー対成功の解放ポリシー、TTLより長生きする本体の実行時間にまたがるリースの更新、`InProgress` のレース、そしてキャッシュの `release_lock` 自体がエラーになるケースです。頼りにできる正確な振る舞いを見たいなら、それらのテストを読んでください。
 
 ## 落とし穴
 

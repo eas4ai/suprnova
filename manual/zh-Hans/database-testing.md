@@ -267,7 +267,7 @@ async fn parallel_io_test() {
 3. **向量 / NoSQL / 时序表面。** Suprnova 的 MariaDB `VECTOR` 驱动程序、Qdrant 集成、Pinecone 集成，以及类似的非 SQL 驱动程序，在 SQLite 里完全没法建模。
 4. **生产环境对等的冒烟测试。** 少数几个“这在我们实际部署的那个真实数据库上真的能跑吗？”的测试，被限定在 CI 里运行，即便单元测试这一层是 SQLite，这些测试也值得保留。
 
-对这四种情况，模式都是一样的：完全走出 `TestDatabase`，针对一个由运维人员提供的、`DATABASE_URL` 风格的环境变量，构建一个 `DbConnection`，用环境变量把这个测试挡住，让它在这个变量缺失时跳过，并标上 `#[serial]`，这样两个这样的测试就不会为共享的真实数据库打起来。`framework/tests/vector_mariadb.rs` 里的 `MARIADB_URL` 模式就是那个标准范例：
+对这四种情况，模式都是一样的：完全走出 `TestDatabase`，针对一个由运维人员提供的、`DATABASE_URL` 风格的环境变量，构建一个 `DbConnection`，用环境变量把这个测试挡住，让它在这个变量缺失时跳过，并标上 `#[serial]`，这样两个这样的测试就不会为共享的真实数据库打起来。`framework/tests/vector/mariadb.rs` 里的 `MARIADB_URL` 模式就是那个标准范例：
 
 ```rust
 use serial_test::serial;

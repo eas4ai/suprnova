@@ -406,7 +406,7 @@ For all four cases the pattern is the same: step outside
 operator-supplied `DATABASE_URL`-style env var, env-gate the test
 so it skips when the var is absent, and mark it `#[serial]` so two
 of them don't fight over the shared real database. The
-`MARIADB_URL` pattern in `framework/tests/vector_mariadb.rs` is the
+`MARIADB_URL` pattern in `framework/tests/vector/mariadb.rs` is the
 canonical example:
 
 ```rust

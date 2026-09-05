@@ -433,7 +433,7 @@ d'env de style `DATABASE_URL` fournie par l'opérateur, filtrez le
 test par l'env pour qu'il soit ignoré quand la variable est absente,
 et marquez-le `#[serial]` pour que deux d'entre eux ne se disputent
 pas la vraie base de données partagée. Le motif `MARIADB_URL` dans
-`framework/tests/vector_mariadb.rs` est l'exemple canonique :
+`framework/tests/vector/mariadb.rs` est l'exemple canonique :
 
 ```rust
 use serial_test::serial;

@@ -439,7 +439,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-The framework's own `framework/tests/idempotency.rs` covers the
+The framework's own `framework/tests/idempotency/idempotency.rs` covers the
 contract surface: duplicate suppression, TTL expiry, error-vs-success
 release policy, lease renewal across body durations that outlive the
 TTL, the `InProgress` race, and the case where the cache's

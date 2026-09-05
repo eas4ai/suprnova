@@ -284,7 +284,7 @@ accepted with the reason recorded here:
   on its own inside the CSRF middleware, whatever policy the application
   configured, and ordinary routes keep the configured policy; the scaffold,
   the dogfood, and the manual use the default `CsrfMiddleware::new()`.
-  `framework/tests/live_trusted_context.rs` proves the Live proof under the
+  `framework/tests/live/trusted_context.rs` proves the Live proof under the
   default policy, that a Live read records the proof with a not-required
   CSRF check and nothing without it, and that an ordinary same-origin POST
   without a token is still refused.
@@ -301,7 +301,7 @@ accepted with the reason recorded here:
   the identity absences that kind permits before the engine validates the
   request, and `AuthMiddleware::optional()` records a principal when one
   exists and lets an anonymous request continue.
-  `framework/tests/live_public_seed_actions.rs` proves the anonymous
+  `framework/tests/live/public_seed_actions.rs` proves the anonymous
   promotion, the identity-bound refusal, and the owner's acceptance through
   the production middleware stack; the dogfood application, its tests, and
   the browser suite now exercise the anonymous increment. That browser case

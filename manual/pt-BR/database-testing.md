@@ -422,7 +422,7 @@ no estilo `DATABASE_URL` fornecida pelo operador, faça o teste
 verificar a env e pular quando ela estiver ausente, e marque-o como
 `#[serial]` para que dois deles não disputem o mesmo banco de dados
 real. O padrão `MARIADB_URL` em
-`framework/tests/vector_mariadb.rs` é o exemplo canônico:
+`framework/tests/vector/mariadb.rs` é o exemplo canônico:
 
 ```rust
 use serial_test::serial;

@@ -311,7 +311,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-框架自己的 `framework/tests/idempotency.rs`，覆盖了这份契约的整个表面：重复抑制、TTL 过期、错误对成功的释放策略、跨越比 TTL 活得更久的函数体时长的租约续约、`InProgress` 竞态，以及缓存自己的 `release_lock` 出错的情形。如果您想看到自己能依赖的确切行为，请去读那些测试。
+框架自己的 `framework/tests/idempotency/idempotency.rs`，覆盖了这份契约的整个表面：重复抑制、TTL 过期、错误对成功的释放策略、跨越比 TTL 活得更久的函数体时长的租约续约、`InProgress` 竞态，以及缓存自己的 `release_lock` 出错的情形。如果您想看到自己能依赖的确切行为，请去读那些测试。
 
 ## 常见陷阱
 

@@ -479,7 +479,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-Le propre `framework/tests/idempotency.rs` du framework couvre la
+Le propre `framework/tests/idempotency/idempotency.rs` du framework couvre la
 surface du contrat : suppression des doublons, expiration du TTL,
 policy de libération erreur-vs-succès, renouvellement de bail à
 travers des durées de corps qui survivent au TTL, la course

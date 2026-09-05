@@ -54,7 +54,7 @@ Il y a deux façons propres de contourner cela :
    routage, utilisez le même motif de capture par boucle locale TCP
    mais avec un service qui extrait la `Request` vers un
    `oneshot::channel` plutôt que de l'exécuter. Le fichier
-   `framework/tests/http_request_accessors.rs` a ce helper
+   `framework/tests/http/request_accessors.rs` a ce helper
    `build_request()` mot pour mot.
 
 Les deux motifs produisent de vrais corps `Incoming`. La boucle locale
@@ -170,9 +170,9 @@ async fn get_root_returns_hello() {
 C'est la forme complète. Copiez les deux helpers par crate, adaptez-les
 pour la suite (plusieurs accepts, capture d'en-tête, capture de
 corps). Le framework lui-même utilise des helpers quasi identiques
-dans `framework/tests/cors_middleware.rs`,
-`framework/tests/middleware_panic_safety.rs`, et
-`framework/tests/email_verified_middleware.rs`.
+dans `framework/tests/cors/middleware.rs`,
+`framework/tests/middleware/panic_safety.rs`, et
+`framework/tests/auth_flows/email_verified_middleware.rs`.
 
 L'argument `accepts` borne combien de connexions la boucle d'accept
 sert avant de sortir. Un suffit pour une seule requête ; montez à deux
@@ -487,7 +487,7 @@ async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
     // La forme à 3 arguments de `spawn_server` vous laisse câbler un
 // MiddlewareRegistry non vide - copiez le helper depuis
-// framework/tests/cors_middleware.rs (il fait ~30 lignes).
+// framework/tests/cors/middleware.rs (il fait ~30 lignes).
 let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
@@ -511,7 +511,7 @@ Ce test prouve plus que la logique CORS elle-même : il prouve que le
 middleware global s'exécute aussi sur les requêtes **non routées**, ce
 qui est le contrat que le framework garantit (sinon un preflight
 OPTIONS qui ne correspond jamais à une route sauterait CORS). Voir
-`framework/tests/cors_middleware.rs` pour la suite complète.
+`framework/tests/cors/middleware.rs` pour la suite complète.
 
 ### Tester le middleware propre à une route
 
@@ -534,7 +534,7 @@ Les vrais tests de flux d'authentification ont besoin d'un
 utilisateur connecté. Le motif le plus propre est un tout petit
 middleware ponctuel qui appelle `Auth::set_user` avant le middleware
 sous test. Le propre
-`framework/tests/email_verified_middleware.rs` du framework utilise
+`framework/tests/auth_flows/email_verified_middleware.rs` du framework utilise
 ceci :
 
 ```rust
@@ -719,7 +719,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` a le helper complet
+`framework/tests/http/request_accessors.rs` a le helper complet
 `build_request(builder, body) -> Request`. Copiez-le une fois par
 crate et chaque test d'accesseur se lit proprement :
 
@@ -789,7 +789,7 @@ Une courte liste de pièges qui attrapent les auteurs débutants :
 - **Les cookies ont besoin d'un vrai client.** Aucun pot à cookies
   automatique - faites transiter le `Set-Cookie` d'une réponse vers le
   `Cookie` de la suivante. Voir
-  `framework/tests/auth_http_middleware.rs` pour le motif.
+  `framework/tests/auth/http_middleware.rs` pour le motif.
 - **Le spawn de terminaison post-réponse n'est pas bloquant.** Si vous
   voulez affirmer sur des effets de bord qui s'exécutent via
   `Terminable`, sondez-les - la réponse revient au client avant que le
@@ -802,12 +802,12 @@ Une courte liste de pièges qui attrapent les auteurs débutants :
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| Harnais de test en boucle locale (canonique) | `framework/tests/cors_middleware.rs` |
+| Harnais de test en boucle locale (canonique) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (assertions fluides sur le triplet ci-dessus) | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` (assertions fluides sur l'objet de page Inertia) | `framework/src/testing/inertia.rs` |
-| Harnais de capture de `Request` en cours de processus | `framework/tests/http_request_accessors.rs` |
-| Motif de test de limite de panique | `framework/tests/middleware_panic_safety.rs` |
-| Motif de bout en bout auth + middleware | `framework/tests/email_verified_middleware.rs` |
+| Harnais de capture de `Request` en cours de processus | `framework/tests/http/request_accessors.rs` |
+| Motif de test de limite de panique | `framework/tests/middleware/panic_safety.rs` |
+| Motif de bout en bout auth + middleware | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## Suivant
 

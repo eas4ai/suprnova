@@ -268,7 +268,7 @@ SQLiteのインメモリが十分でないケースが4つあります:
 3. **ベクター / NoSQL /時系列の表面。** SuprnovaのMariaDBの `VECTOR` ドライバー、Qdrant連携、Pinecone連携、そして類似の非SQLドライバーは、SQLiteの中でモデリングすることが一切できません。
 4. **本番環境との整合性を確かめるスモークテスト。** 「これは、実際にデプロイ先の本物のDB上で本当に動くのか」を確かめる一握りのテストは、CIに限定してでも、ユニットテストの層がSQLiteである場合でも、残しておく価値があります。
 
-この4つのケースすべてにおいて、パターンは同じです: `TestDatabase` の外に完全に出て、運用者が与える `DATABASE_URL` 形式の環境変数に対して `DbConnection` を構築し、変数が不在ならスキップするようにテストを環境変数でゲートし、2つが共有される本物のデータベースを奪い合わないよう `#[serial]` を付けてください。`framework/tests/vector_mariadb.rs` の `MARIADB_URL` パターンが、その規範的な例です:
+この4つのケースすべてにおいて、パターンは同じです: `TestDatabase` の外に完全に出て、運用者が与える `DATABASE_URL` 形式の環境変数に対して `DbConnection` を構築し、変数が不在ならスキップするようにテストを環境変数でゲートし、2つが共有される本物のデータベースを奪い合わないよう `#[serial]` を付けてください。`framework/tests/vector/mariadb.rs` の `MARIADB_URL` パターンが、その規範的な例です:
 
 ```rust
 use serial_test::serial;

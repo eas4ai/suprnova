@@ -51,7 +51,7 @@ There are two clean ways around it:
    parsing) without going through routing, use the same TCP-loopback
    capture pattern but with a service that pulls the `Request` out
    into a `oneshot::channel` instead of running it. The
-   `framework/tests/http_request_accessors.rs` file has this
+   `framework/tests/http/request_accessors.rs` file has this
    `build_request()` helper verbatim.
 
 Both patterns produce real `Incoming` bodies. The loopback is local,
@@ -167,9 +167,9 @@ async fn get_root_returns_hello() {
 That's the entire shape. Copy the two helpers per crate, tune them
 for the suite (multiple accepts, header capture, body capture). The
 framework itself uses near-identical helpers in
-`framework/tests/cors_middleware.rs`,
-`framework/tests/middleware_panic_safety.rs`, and
-`framework/tests/email_verified_middleware.rs`.
+`framework/tests/cors/middleware.rs`,
+`framework/tests/middleware/panic_safety.rs`, and
+`framework/tests/auth_flows/email_verified_middleware.rs`.
 
 The `accepts` argument bounds how many connections the accept loop
 serves before exiting. One is enough for a single request; bump to
@@ -503,7 +503,7 @@ async fn cors_preflight_returns_204_with_headers() {
 This test proves more than the CORS logic itself: it proves that
 global middleware runs on **unrouted** requests too, which is the
 contract the framework guarantees (otherwise an OPTIONS preflight that
-never matches a route would skip CORS). See `framework/tests/cors_middleware.rs`
+never matches a route would skip CORS). See `framework/tests/cors/middleware.rs`
 for the full suite.
 
 ### Testing route-specific middleware
@@ -526,7 +526,7 @@ assert_eq!(status, 403); // unauthenticated request
 Real auth-flow tests need a logged-in user. The cleanest pattern is a
 tiny one-off middleware that calls `Auth::set_user` ahead of the
 middleware under test. The framework's own
-`framework/tests/email_verified_middleware.rs` uses this:
+`framework/tests/auth_flows/email_verified_middleware.rs` uses this:
 
 ```rust
 use std::any::Any;
@@ -668,7 +668,7 @@ async fn login_flow_issues_session_cookie() {
 
 The abbreviated router without those middlewares demonstrates cookie
 plumbing only; it is not an authentication-flow test.
-`framework/tests/auth_http_middleware.rs` tests authentication
+`framework/tests/auth/http_middleware.rs` tests authentication
 middleware behavior with explicit registries, but it does not install a
 real `SessionMiddleware`. A stateful login-flow test must install both
 the session middleware and the authentication gate as shown above.
@@ -724,7 +724,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` has the full
+`framework/tests/http/request_accessors.rs` has the full
 `build_request(builder, body) -> Request` helper. Copy it once per
 crate and every accessor test reads cleanly:
 
@@ -788,7 +788,7 @@ A short list of footguns that catch first-time authors:
   `TestDatabase` in [Testing](testing.md).
 - **Cookies need a real client.** No automatic cookie jar - thread
   `Set-Cookie` from one response into `Cookie` on the next. See
-  `framework/tests/auth_http_middleware.rs` for the pattern.
+  `framework/tests/auth/http_middleware.rs` for the pattern.
 - **The post-response termination spawn is non-blocking.** If you
   want to assert on side effects that run via `Terminable`, poll
   for them - the response returns to the client before the hook runs.
@@ -800,12 +800,12 @@ A short list of footguns that catch first-time authors:
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| Loopback test harness (canonical) | `framework/tests/cors_middleware.rs` |
+| Loopback test harness (canonical) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` (fluent Inertia page-object assertions) | `framework/src/testing/inertia.rs` |
-| In-process `Request` capture harness | `framework/tests/http_request_accessors.rs` |
-| Panic-boundary test pattern | `framework/tests/middleware_panic_safety.rs` |
-| Auth + middleware end-to-end pattern | `framework/tests/email_verified_middleware.rs` |
+| In-process `Request` capture harness | `framework/tests/http/request_accessors.rs` |
+| Panic-boundary test pattern | `framework/tests/middleware/panic_safety.rs` |
+| Auth + middleware end-to-end pattern | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## Next
 

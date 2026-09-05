@@ -461,7 +461,7 @@ async fn admin_upsert_propagates_to_cached_chain() {
 ```
 
 Die vollständige Sammlung an Kompositions-Tests finden Sie in
-`framework/tests/features.rs`.
+`framework/tests/features/features.rs`.
 
 ### Warum Suprnova abweicht
 

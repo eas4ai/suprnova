@@ -477,7 +477,7 @@ async fn duplicate_remember_replays_the_first_result() {
 }
 ```
 
-`framework/tests/idempotency.rs`, del propio framework, cubre la
+`framework/tests/idempotency/idempotency.rs`, del propio framework, cubre la
 superficie del contrato: supresión de duplicados, expiración del
 TTL, política de liberación éxito-versus-fallo, renovación de lease
 a través de duraciones de cuerpo que sobreviven al TTL, la carrera de

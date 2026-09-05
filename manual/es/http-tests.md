@@ -23,7 +23,7 @@ La única complicación que conviene conocer de antemano: `handle_request` toma 
 Hay dos formas limpias de evitarlo:
 
 1. **Loopback TCP** - vincula un listener TCP en `127.0.0.1:0`, sirve un accept dentro de un `service_fn`, envía la solicitud a través de un cliente de hyper, y deja que `Incoming` se produzca de forma natural en el lado del servidor. Esto es lo que ya hace cada test de integración en el framework.
-2. **Construcción de `Request` dentro del proceso** - para tests que solo necesitan inspeccionar accesores de `Request` (encabezados, parámetros de ruta, IP, análisis de JSON) sin pasar por el enrutamiento, usa el mismo patrón de captura por loopback TCP pero con un servicio que saca el `Request` hacia un `oneshot::channel` en lugar de ejecutarlo. El archivo `framework/tests/http_request_accessors.rs` tiene este ayudante `build_request()` textual.
+2. **Construcción de `Request` dentro del proceso** - para tests que solo necesitan inspeccionar accesores de `Request` (encabezados, parámetros de ruta, IP, análisis de JSON) sin pasar por el enrutamiento, usa el mismo patrón de captura por loopback TCP pero con un servicio que saca el `Request` hacia un `oneshot::channel` en lugar de ejecutarlo. El archivo `framework/tests/http/request_accessors.rs` tiene este ayudante `build_request()` textual.
 
 Ambos patrones producen cuerpos `Incoming` reales. El loopback es local, síncrono en términos de reloj de pared del test (microsegundos), y nunca toca la red fuera de `lo`. No hay una forma más lenta ni más simple que preserve el contrato.
 
@@ -123,7 +123,7 @@ async fn get_root_returns_hello() {
 }
 ```
 
-Eso es toda la forma. Copia los dos ayudantes por crate, ajústalos para la suite (múltiples accepts, captura de encabezados, captura de cuerpo). El propio framework usa ayudantes casi idénticos en `framework/tests/cors_middleware.rs`, `framework/tests/middleware_panic_safety.rs`, y `framework/tests/email_verified_middleware.rs`.
+Eso es toda la forma. Copia los dos ayudantes por crate, ajústalos para la suite (múltiples accepts, captura de encabezados, captura de cuerpo). El propio framework usa ayudantes casi idénticos en `framework/tests/cors/middleware.rs`, `framework/tests/middleware/panic_safety.rs`, y `framework/tests/auth_flows/email_verified_middleware.rs`.
 
 El argumento `accepts` limita cuántas conexiones el loop de accept sirve antes de salir. Uno es suficiente para una única solicitud; aumenta a dos-o-más cuando un test ejercita recuperación posterior a pánico (ver [Probar el límite de pánico](#probar-el-límite-de-pánico)).
 
@@ -375,7 +375,7 @@ async fn cors_preflight_returns_204_with_headers() {
 }
 ```
 
-Este test demuestra más que la lógica de CORS en sí misma: demuestra que el middleware global también se ejecuta sobre solicitudes **no enrutadas**, que es el contrato que garantiza el framework (de otro modo, un preflight OPTIONS que nunca coincide con una ruta se saltaría CORS). Consulta `framework/tests/cors_middleware.rs` para la suite completa.
+Este test demuestra más que la lógica de CORS en sí misma: demuestra que el middleware global también se ejecuta sobre solicitudes **no enrutadas**, que es el contrato que garantiza el framework (de otro modo, un preflight OPTIONS que nunca coincide con una ruta se saltaría CORS). Consulta `framework/tests/cors/middleware.rs` para la suite completa.
 
 ### Probar middleware específico de ruta
 
@@ -392,7 +392,7 @@ assert_eq!(status, 403); // solicitud sin autenticar
 
 ### Preestablecer el usuario autenticado
 
-Los tests de flujo de autenticación reales necesitan un usuario ya conectado. El patrón más limpio es un pequeño middleware puntual que llama a `Auth::set_user` antes del middleware bajo prueba. El propio `framework/tests/email_verified_middleware.rs` del framework usa esto:
+Los tests de flujo de autenticación reales necesitan un usuario ya conectado. El patrón más limpio es un pequeño middleware puntual que llama a `Auth::set_user` antes del middleware bajo prueba. El propio `framework/tests/auth_flows/email_verified_middleware.rs` del framework usa esto:
 
 ```rust
 use std::any::Any;
@@ -531,7 +531,7 @@ async fn login_flow_issues_session_cookie() {
 
 El router abreviado sin esos middleware solo demuestra la plomería de
 cookies; no es un test de flujo de autenticación.
-`framework/tests/auth_http_middleware.rs` prueba el comportamiento del
+`framework/tests/auth/http_middleware.rs` prueba el comportamiento del
 middleware de autenticación con registries explícitos, pero no instala un
 `SessionMiddleware` real. Un test de flujo de login con estado debe instalar
 tanto el middleware de sesión como la compuerta de autenticación, como se
@@ -581,7 +581,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` tiene el ayudante completo `build_request(builder, body) -> Request`. Cópialo una vez por crate y cada test de accesor lee limpiamente:
+`framework/tests/http/request_accessors.rs` tiene el ayudante completo `build_request(builder, body) -> Request`. Cópialo una vez por crate y cada test de accesor lee limpiamente:
 
 ```rust
 #[tokio::test]
@@ -629,7 +629,7 @@ Una lista corta de trampas que atrapan a los autores primerizos:
 
 - **`Incoming` es solo del lado del servidor.** No puedes construir uno en tu test. El loopback TCP (o captura de servicio dentro del proceso) es el único camino - no hay un constructor "construye un `Request` desde un `Vec<u8>` body".
 - **No compartas estado entre tests.** Cada `#[tokio::test]` obtiene su propio runtime; la contaminación cruzada de tests suele significar que estás compartiendo un global (`once_cell`, `lazy_static`, variable de entorno). Para estado de BD ver `TestDatabase` en [Pruebas](testing.md).
-- **Las cookies necesitan un cliente real.** Sin jar de cookies automático - hila `Set-Cookie` de una respuesta dentro de `Cookie` en la siguiente. Ver `framework/tests/auth_http_middleware.rs` para el patrón.
+- **Las cookies necesitan un cliente real.** Sin jar de cookies automático - hila `Set-Cookie` de una respuesta dentro de `Cookie` en la siguiente. Ver `framework/tests/auth/http_middleware.rs` para el patrón.
 - **El spawn de terminación posterior a la respuesta no bloquea.** Si quieres hacer aserciones sobre efectos secundarios que se ejecutan vía `Terminable`, sondea por ellos - la respuesta regresa al cliente antes de que el hook se ejecute.
 
 ## Dónde vive cada pieza
@@ -639,12 +639,12 @@ Una lista corta de trampas que atrapan a los autores primerizos:
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| Harness de test por loopback (canónico) | `framework/tests/cors_middleware.rs` |
+| Harness de test por loopback (canónico) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (aserciones fluidas sobre la triple) | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` (aserciones de page-object Inertia fluidas) | `framework/src/testing/inertia.rs` |
-| Harness de captura de `Request` dentro del proceso | `framework/tests/http_request_accessors.rs` |
-| Patrón de test del límite de pánico | `framework/tests/middleware_panic_safety.rs` |
-| Patrón de punta a punta de auth + middleware | `framework/tests/email_verified_middleware.rs` |
+| Harness de captura de `Request` dentro del proceso | `framework/tests/http/request_accessors.rs` |
+| Patrón de test del límite de pánico | `framework/tests/middleware/panic_safety.rs` |
+| Patrón de punta a punta de auth + middleware | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## Siguiente
 

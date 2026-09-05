@@ -26,7 +26,7 @@
    `service_fn` 里服务一次 accept，通过一个 hyper 客户端发送这个请求，让 `Incoming` 在服务器一侧自然地产生出来。框架里每一个集成测试已经都是这么做的。
 2. **进程内的 Request 构建** - 对于只需要检视 `Request` 访问器（请求头、路由参数、IP、JSON 解析），却不需要经过路由的测试，请使用同样的 TCP 回环捕获模式，但用一个把 `Request` 拽进一个
    `oneshot::channel` 而不是运行它的服务。
-   `framework/tests/http_request_accessors.rs` 文件里逐字带着这个
+   `framework/tests/http/request_accessors.rs` 文件里逐字带着这个
    `build_request()` 辅助函数。
 
 两种模式都会产出真正的 `Incoming` 请求体。这个回环是本地的，在测试的挂钟时间上是同步的（微秒级），并且从不触达 `lo` 之外的网络。没有一种既更慢又更简单、还能保住这份契约的方式。
@@ -128,7 +128,7 @@ async fn get_root_returns_hello() {
 }
 ```
 
-那就是整个形态。逐 crate 复制这两个辅助函数，为您的测试套件调整它们（多次 accept、请求头捕获、请求体捕获）。框架自己在 `framework/tests/cors_middleware.rs`、`framework/tests/middleware_panic_safety.rs`，以及 `framework/tests/email_verified_middleware.rs` 里，用的都是几乎一样的辅助函数。
+那就是整个形态。逐 crate 复制这两个辅助函数，为您的测试套件调整它们（多次 accept、请求头捕获、请求体捕获）。框架自己在 `framework/tests/cors/middleware.rs`、`framework/tests/middleware/panic_safety.rs`，以及 `framework/tests/auth_flows/email_verified_middleware.rs` 里，用的都是几乎一样的辅助函数。
 
 `accepts` 这个参数限定了这个 accept 循环在退出之前会服务多少条连接。对一个单独的请求来说，一次就够了；当一个测试要练习 panic 之后的恢复时，请调到两次或更多（见[测试 panic 边界](#测试-panic-边界)）。
 
@@ -382,7 +382,7 @@ async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
     // `spawn_server` 的三参数形态，让您能接上一个非空的
 // MiddlewareRegistry - 从
-// framework/tests/cors_middleware.rs 复制这个辅助函数（大约 30 行）。
+// framework/tests/cors/middleware.rs 复制这个辅助函数（大约 30 行）。
 let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
@@ -402,7 +402,7 @@ let addr = spawn_server(router, cors_registry(), 1).await;
 }
 ```
 
-这个测试证明的不只是 CORS 逻辑本身：它证明了全局中间件在**未路由**的请求上也会运行，这是框架保证的契约（否则一个永远匹配不到路由的 OPTIONS 预检，就会跳过 CORS）。完整的测试套件请参见 `framework/tests/cors_middleware.rs`。
+这个测试证明的不只是 CORS 逻辑本身：它证明了全局中间件在**未路由**的请求上也会运行，这是框架保证的契约（否则一个永远匹配不到路由的 OPTIONS 预检，就会跳过 CORS）。完整的测试套件请参见 `framework/tests/cors/middleware.rs`。
 
 ### 测试路由特定的中间件
 
@@ -419,7 +419,7 @@ assert_eq!(status, 403); // 未认证的请求
 
 ### 为已认证用户设置存根
 
-真实的认证流程测试需要一个已登录的用户。最干净的模式是一个微小的一次性中间件，在被测试的中间件之前调用 `Auth::set_user`。框架自己的 `framework/tests/email_verified_middleware.rs` 用的就是这个：
+真实的认证流程测试需要一个已登录的用户。最干净的模式是一个微小的一次性中间件，在被测试的中间件之前调用 `Auth::set_user`。框架自己的 `framework/tests/auth_flows/email_verified_middleware.rs` 用的就是这个：
 
 ```rust
 use std::any::Any;
@@ -544,7 +544,7 @@ async fn login_flow_issues_session_cookie() {
 ```
 
 没有这些中间件的简化路由只展示 cookie 接线；它不是认证流程测试。
-`framework/tests/auth_http_middleware.rs` 使用显式注册表测试认证中间件行为，但不会安装真实的 `SessionMiddleware`。有状态的登录流程测试必须同时安装会话中间件和认证门，就像上面的示例一样。
+`framework/tests/auth/http_middleware.rs` 使用显式注册表测试认证中间件行为，但不会安装真实的 `SessionMiddleware`。有状态的登录流程测试必须同时安装会话中间件和认证门，就像上面的示例一样。
 
 ## 测试 panic 边界
 
@@ -589,7 +589,7 @@ let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` 有完整的 `build_request(builder, body) -> Request` 辅助函数。每个 crate 复制一次，每一个访问器测试就都能读得干干净净：
+`framework/tests/http/request_accessors.rs` 有完整的 `build_request(builder, body) -> Request` 辅助函数。每个 crate 复制一次，每一个访问器测试就都能读得干干净净：
 
 ```rust
 #[tokio::test]
@@ -640,7 +640,7 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
   “从一个 `Vec<u8>` 请求体构建一个 `Request`”的构造函数。
 - **不要在测试之间共享状态。** 每一个 `#[tokio::test]` 都会得到自己的运行时；跨测试的污染通常意味着您在共享一个全局量（`once_cell`、`lazy_static`、环境变量）。数据库状态请参见
   [测试](testing.md)里的 `TestDatabase`。
-- **Cookie 需要一个真实的客户端。** 没有自动的 cookie jar - 请把一个响应上的 `Set-Cookie`，穿线传进下一个响应的 `Cookie` 里。这个模式请参见 `framework/tests/auth_http_middleware.rs`。
+- **Cookie 需要一个真实的客户端。** 没有自动的 cookie jar - 请把一个响应上的 `Set-Cookie`，穿线传进下一个响应的 `Cookie` 里。这个模式请参见 `framework/tests/auth/http_middleware.rs`。
 - **响应后终止的 spawn 是非阻塞的。** 如果您想对经由 `Terminable`
   运行的副作用做断言，请轮询它们 - 这个响应会在这个钩子运行之前就返回给客户端。
 
@@ -651,12 +651,12 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 | `handle_request`、`handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`、`with_params`、`with_route_pattern`、`with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`、`append`、`prepend` | `framework/src/middleware/registry.rs` |
-| 回环测试装置（典范） | `framework/tests/cors_middleware.rs` |
+| 回环测试装置（典范） | `framework/tests/cors/middleware.rs` |
 | `TestResponse`（对上述三元组做流式断言） | `framework/src/testing/response.rs` |
 | `AssertableInertia`、`ReloadRequest`（流式 Inertia 页面对象断言） | `framework/src/testing/inertia.rs` |
-| 进程内的 `Request` 捕获装置 | `framework/tests/http_request_accessors.rs` |
-| Panic 边界测试模式 | `framework/tests/middleware_panic_safety.rs` |
-| 认证 + 中间件端到端模式 | `framework/tests/email_verified_middleware.rs` |
+| 进程内的 `Request` 捕获装置 | `framework/tests/http/request_accessors.rs` |
+| Panic 边界测试模式 | `framework/tests/middleware/panic_safety.rs` |
+| 认证 + 中间件端到端模式 | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
 ## 下一步
 

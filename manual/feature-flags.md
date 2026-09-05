@@ -372,7 +372,7 @@ async fn admin_upsert_propagates_to_cached_chain() {
 }
 ```
 
-See `framework/tests/features.rs` for the full set of composition tests.
+See `framework/tests/features/features.rs` for the full set of composition tests.
 
 ### Why Suprnova diverges
 

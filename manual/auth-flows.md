@@ -1024,15 +1024,15 @@ single-use behavior.
 
 Canonical source examples are:
 
-- `framework/tests/email_verify.rs` for actor-bound verification and
+- `framework/tests/auth_flows/email_verify.rs` for actor-bound verification and
   single-use tokens.
-- `framework/tests/password_reset.rs` for Magnetar delegation and completion
+- `framework/tests/auth_flows/password_reset.rs` for Magnetar delegation and completion
   outcomes.
-- `framework/tests/magnetar_default_engine.rs` for real default-engine setup.
-- `framework/tests/brute_force.rs` for lockout lifecycle.
-- `framework/tests/two_factor_challenge_flow.rs` for the retained framework
+- `framework/tests/magnetar_integration/default_engine.rs` for real default-engine setup.
+- `framework/tests/auth_flows/brute_force.rs` for lockout lifecycle.
+- `framework/tests/auth_flows/two_factor_challenge_flow.rs` for the retained framework
   TOTP challenge flow.
-- `framework/tests/magnetar_remember_middleware.rs` for remember rotation and
+- `framework/tests/magnetar_integration/remember_middleware.rs` for remember rotation and
   dual-session binding.
 
 Process-global Magnetar installation is intentionally one-shot. Put tests that

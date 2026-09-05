@@ -370,7 +370,7 @@ async fn admin_upsert_propagates_to_cached_chain() {
 }
 ```
 
-構成テストの全体像は `framework/tests/features.rs` を参照してください。
+構成テストの全体像は `framework/tests/features/features.rs` を参照してください。
 
 ### Suprnovaが異なる設計を選んだ理由
 

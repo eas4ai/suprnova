@@ -372,7 +372,7 @@ async fn admin_upsert_propagates_to_cached_chain() {
 }
 ```
 
-完整的组合测试集合，请参见 `framework/tests/features.rs`。
+完整的组合测试集合，请参见 `framework/tests/features/features.rs`。
 
 ### 为什么 Suprnova 有所不同
 

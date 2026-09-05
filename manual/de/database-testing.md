@@ -431,7 +431,7 @@ von Betreibern bereitgestellte `DATABASE_URL`-artige Env-Variable,
 gaten Sie den Test env-abhängig, sodass er überspringt, wenn die
 Variable fehlt, und markieren Sie ihn `#[serial]`, damit sich nicht
 zwei von ihnen um die geteilte echte Datenbank streiten. Das Muster
-`MARIADB_URL` in `framework/tests/vector_mariadb.rs` ist das
+`MARIADB_URL` in `framework/tests/vector/mariadb.rs` ist das
 kanonische Beispiel:
 
 ```rust
