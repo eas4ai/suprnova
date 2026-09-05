@@ -55,8 +55,8 @@ fi
 export MYSQL_TEST_URL="mysql://root:${MYSQL_PASSWORD}@127.0.0.1:${HOST_PORT}/suprnova_test"
 
 echo
-echo "==> cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored"
-cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-threads=1
+echo "==> cargo test -p suprnova --test eloquent -- --ignored mass_write_mysql::"
+cargo test -p suprnova --test eloquent -- --ignored --test-threads=1 mass_write_mysql::
 
 # `render_cache_ledger` is a mixed file: SQLite tests run unconditionally,
 # and Postgres-tagged and MySQL-tagged `#[ignore]`d tests share it. Select
@@ -68,20 +68,20 @@ cargo test -p suprnova --test eloquent_mass_write_mysql -- --ignored --test-thre
 # green. Assert on the output, not just the exit code, the way the workflow
 # regression step below already does.
 echo
-echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_mysql"
-render_cache_mysql_out="$(cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_mysql 2>&1)"
+echo "==> cargo test -p suprnova --test render_cache -- --ignored ledger::live_mysql"
+render_cache_mysql_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 ledger::live_mysql 2>&1)"
 echo "$render_cache_mysql_out"
 for render_cache_mysql_test in \
     live_mysql_generation_ledger_advances_and_reads \
     live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock \
     live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current; do
-    if ! grep -qE "^test ${render_cache_mysql_test} \.\.\. ok" <<<"$render_cache_mysql_out"; then
+    if ! grep -qE "^test ledger::${render_cache_mysql_test} \.\.\. ok" <<<"$render_cache_mysql_out"; then
         echo "check-mysql: ${render_cache_mysql_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
     fi
 done
 
-cargo test -p suprnova --test queue_after_commit savepoint_aliases_mysql_rows_and_jobs_agree -- --ignored --exact
+cargo test -p suprnova --test queue after_commit::savepoint_aliases_mysql_rows_and_jobs_agree -- --ignored --exact
 
 echo
 echo "==> cargo test -p suprnova --lib workflow::tests::test_mysql_"

@@ -80,54 +80,55 @@ export PG_TEST_URL="postgres://postgres:${PG_PASSWORD}@127.0.0.1:${HOST_PORT}/su
 # recreate the same table names; in parallel they clobber each other and
 # fail in ways that look like product bugs.
 #
-# Each file is named explicitly rather than swept with a glob so that a new
-# Postgres test file has to be added here consciously - a glob would let one
+# Each submodule is named explicitly rather than swept with a glob so that a new
+# Postgres submodule has to be added here consciously - a glob would let one
 # land, never run, and look covered.
 PG_TESTS=(
-    rbac_postgres
-    queue_database_postgres
-    queue_worker_postgres
-    notification_database_postgres
-    eloquent_aggregate_postgres
-    eloquent_mass_write_postgres
+    rbac/postgres
+    queue/database_postgres
+    queue/worker_postgres
+    notifications/database_postgres
+    eloquent/aggregate_postgres
+    eloquent/mass_write_postgres
 )
 
 # Wave 6 owns this target and releases in 1.3.4. The 1.3.3 gate knows the
 # future target name but must not require code that does not ship in this
-# release. Once the file lands, it is appended automatically; after the
+# release. Once the submodule lands, it is appended automatically; after the
 # workspace advances past 1.3.3, its absence is a gate error rather than a
 # silent skip.
-PIVOT_FILTER_TEST="framework/tests/eloquent_relations_pivot_filters_postgres.rs"
+PIVOT_FILTER_TEST="framework/tests/eloquent/relations_pivot_filters_postgres.rs"
 if [[ -f "$PIVOT_FILTER_TEST" ]]; then
-    PG_TESTS+=(eloquent_relations_pivot_filters_postgres)
+    PG_TESTS+=(eloquent/relations_pivot_filters_postgres)
 elif ! grep -q '^version = "1\.3\.3"$' Cargo.toml; then
     echo "check-postgres: missing required target $PIVOT_FILTER_TEST" >&2
     exit 1
 fi
 
 for t in "${PG_TESTS[@]}"; do
+    module="${t%%/*}"
+    stem="${t#*/}"
     echo
-    # The list is shared by every branch this checkout's scripts/ is copied
-    # into, so a file that only exists on a newer branch is skipped loudly
-    # rather than failing a release gate for a test it cannot contain. An
-    # existing file is never skipped, so the "add it consciously" rule holds.
-    if [ ! -f "framework/tests/${t}.rs" ]; then
-        echo "==> skip ${t}: framework/tests/${t}.rs does not exist on this branch"
+    # Each entry is module/stem: the module binary under framework/tests/<module>/
+    # and the former file, now a submodule, selected by its path prefix. The
+    # existence check keeps the "add it consciously" rule from before the fold.
+    if [ ! -f "framework/tests/${module}/${stem}.rs" ]; then
+        echo "==> skip ${t}: framework/tests/${module}/${stem}.rs does not exist on this branch"
         continue
     fi
-    echo "==> cargo test -p suprnova --test ${t} -- --ignored"
-    cargo test -p suprnova --test "$t" -- --ignored --test-threads=1
+    echo "==> cargo test -p suprnova --test ${module} -- --ignored ${stem}::"
+    cargo test -p suprnova --test "$module" -- --ignored --test-threads=1 "${stem}::"
 done
 
-# `pagination` is a mixed file: its live tests cover Postgres AND MySQL, so
+# `pagination` is a mixed submodule: its live tests cover Postgres AND MySQL, so
 # it cannot be run with a bare `--ignored` here - the MySQL case would fail
 # for want of a MySQL. Select the Postgres one by name.
 echo
-echo "==> cargo test -p suprnova --test pagination -- --ignored live_postgres"
-cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_postgres
+echo "==> cargo test -p suprnova --test pagination -- --ignored pagination::live_postgres"
+cargo test -p suprnova --test pagination -- --ignored --test-threads=1 pagination::live_postgres
 
 # `render_cache_ledger` is the same shape: SQLite tests run unconditionally,
-# and Postgres-tagged and MySQL-tagged `#[ignore]`d tests share the file.
+# and Postgres-tagged and MySQL-tagged `#[ignore]`d tests share the submodule.
 # Select the Postgres-tagged ones by name for the same reason as above.
 #
 # `--ignored live_postgres` exits 0 when the filter matches nothing, so a
@@ -135,21 +136,21 @@ cargo test -p suprnova --test pagination -- --ignored --test-threads=1 live_post
 # stayed green. Assert on the output, not just the exit code, the way the
 # workflow lease-reclaim step below already does.
 echo
-echo "==> cargo test -p suprnova --test render_cache_ledger -- --ignored live_postgres"
-render_cache_pg_out="$(cargo test -p suprnova --test render_cache_ledger -- --ignored --test-threads=1 live_postgres 2>&1)"
+echo "==> cargo test -p suprnova --test render_cache -- --ignored ledger::live_postgres"
+render_cache_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 ledger::live_postgres 2>&1)"
 echo "$render_cache_pg_out"
 for render_cache_pg_test in \
     live_postgres_generation_ledger_advances_and_reads \
     live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock \
     live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current; do
-    if ! grep -qE "^test ${render_cache_pg_test} \.\.\. ok" <<<"$render_cache_pg_out"; then
+    if ! grep -qE "^test ledger::${render_cache_pg_test} \.\.\. ok" <<<"$render_cache_pg_out"; then
         echo "check-postgres: ${render_cache_pg_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
     fi
 done
 
 # Savepoint aliases must select the same row and deferred-effect boundary.
-cargo test -p suprnova --test queue_after_commit savepoint_aliases_postgres_rows_and_jobs_agree -- --ignored --exact
+cargo test -p suprnova --test queue after_commit::savepoint_aliases_postgres_rows_and_jobs_agree -- --ignored --exact
 
 # The workflow lease-reclaim tests are in-source unit tests, and they are
 # gated TWICE: `#[ignore]` keeps them out of the normal run, and even when

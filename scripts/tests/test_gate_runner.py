@@ -1451,7 +1451,7 @@ class ShellAssetContractTests(unittest.TestCase):
 
         pivot_target = (
             self.repo
-            / "framework/tests/eloquent_relations_pivot_filters_postgres.rs"
+            / "framework/tests/eloquent/relations_pivot_filters_postgres.rs"
         )
         pivot_target.parent.mkdir(parents=True, exist_ok=True)
         pivot_target.write_text("", encoding="utf-8")
@@ -1504,16 +1504,16 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test %s ... ok\\n' \"$arg\"\n"
             "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
-            "        live_postgres)\n"
-            "            printf 'test live_postgres_generation_ledger_advances_and_reads ... ok\\n'\n"
-            "            printf 'test live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
-            "            printf 'test live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
+            "        ledger::live_postgres)\n"
+            "            printf 'test ledger::live_postgres_generation_ledger_advances_and_reads ... ok\\n'\n"
+            "            printf 'test ledger::live_postgres_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
+            "            printf 'test ledger::live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
-            "        live_mysql)\n"
-            "            printf 'test live_mysql_generation_ledger_advances_and_reads ... ok\\n'\n"
-            "            printf 'test live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
-            "            printf 'test live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
+            "        ledger::live_mysql)\n"
+            "            printf 'test ledger::live_mysql_generation_ledger_advances_and_reads ... ok\\n'\n"
+            "            printf 'test ledger::live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
+            "            printf 'test ledger::live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
             "    esac\n"
@@ -1628,11 +1628,11 @@ class ShellAssetContractTests(unittest.TestCase):
         }
         cargo_expectations = {
             "scripts/check-postgres.sh": [
-                "--test eloquent_relations_pivot_filters_postgres --",
+                "--test eloquent -- --ignored --test-threads=1 relations_pivot_filters_postgres::",
                 "workflow::tests::test_claim_reclaims_expired_running_row",
             ],
             "scripts/check-mysql.sh": [
-                "--test eloquent_mass_write_mysql --",
+                "--test eloquent -- --ignored --test-threads=1 mass_write_mysql::",
                 "workflow::tests::test_mysql_",
             ],
             "scripts/check-magnetar-live.sh": [],
