@@ -17,3 +17,10 @@ test-group = 'serial-binaries'
 [[profile.default.overrides]]
 filter = 'binary(live) & test(=async_backpressure::a_chatty_island_cannot_starve_its_sibling_on_one_transport)'
 threads-required = "num-test-threads"
+
+# The Live reference host's shutdown tests race socket closure against upload
+# quarantine cleanup with sub-second budgets: under nextest's cross-binary
+# scheduling the suite runs alone, as it did under one-binary-at-a-time cargo test.
+[[profile.default.overrides]]
+filter = 'binary(reference_host)'
+threads-required = "num-test-threads"
