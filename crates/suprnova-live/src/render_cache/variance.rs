@@ -188,7 +188,12 @@ impl<'de> serde::Deserialize<'de> for PrivateMaterial {
 }
 
 /// One dimension's normalized value.
+///
+/// Serialized with `snake_case` tags (`{"public": ..}`, `{"private": ..}`,
+/// `"anonymous"`), matching every other JSON name in the stored entry
+/// header.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DimensionValue {
     /// A bounded public value that may appear in inspection output.
     Public(String),

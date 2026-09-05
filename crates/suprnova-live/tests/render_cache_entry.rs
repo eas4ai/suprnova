@@ -11,7 +11,7 @@ use suprnova_live::render_cache::entry::{
 use suprnova_live::render_cache::generation::GenerationSet;
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::variance::{
-    DimensionValue, VarianceDescriptor, VarianceDimension,
+    DimensionValue, PrivateMaterial, VarianceDescriptor, VarianceDimension,
 };
 use suprnova_live::render_cache::{RenderCacheErrorKind, RepresentationClass};
 
@@ -82,7 +82,7 @@ fn entry_with(
 fn base_header_json(keys: &SnapshotKeyRing) -> serde_json::Value {
     serde_json::json!({
         "key": RenderKey::for_test(keys, "/hello").to_base64url(),
-        "class": "PublicShared",
+        "class": "public_shared",
         "variance": {},
         "published_at_ms": 1_000,
         "fresh_ms": 60_000,
@@ -105,6 +105,44 @@ fn base_header_json(keys: &SnapshotKeyRing) -> serde_json::Value {
 /// can still be produced with a correctly-computed integrity tag.
 fn encode_kind_for_test(keys: &SnapshotKeyRing, kind: EntryKind) -> Bytes {
     encode_with_kind_for_test(&entry(keys), keys, kind)
+}
+
+/// Final review, F11: the stored header is JSON and every tag in it is
+/// `snake_case`, like every other public JSON name in this crate. The
+/// representation class and the dimension value enum both serialize that
+/// way, and a header written in that form decodes.
+///
+/// Proven by revert: with `#[serde(rename_all = "snake_case")]` removed from
+/// `RepresentationClass`, the first assertion sees `"PublicShared"`; removed
+/// from `DimensionValue`, the second sees `"Anonymous"`.
+#[test]
+fn the_stored_header_uses_snake_case_enum_tags() {
+    let keys = keys();
+    let header = serde_json::to_value(entry(&keys).header()).expect("header serializes");
+    assert_eq!(header["class"], serde_json::json!("public_shared"));
+    assert_eq!(
+        serde_json::to_value(DimensionValue::Anonymous).expect("anonymous serializes"),
+        serde_json::json!("anonymous")
+    );
+    assert_eq!(
+        serde_json::to_value(DimensionValue::Public("en".to_owned())).expect("public serializes"),
+        serde_json::json!({ "public": "en" })
+    );
+    let private = PrivateMaterial::principal(&keys, "user-7", 0);
+    let private_json = serde_json::to_value(DimensionValue::Private(private)).expect("serializes");
+    assert!(
+        private_json.get("private").is_some(),
+        "private material is tagged `private`, got {private_json}"
+    );
+
+    // A header in the documented form decodes: `base_header_json` is written
+    // in exactly these tags, and the round trip below is what every
+    // hand-built header fixture in this file relies on.
+    let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
+    let encoded = encode_raw_header_for_test(&base_header_json(&keys), &body, &keys);
+    let decoded = decode(&encoded, &keys, &EntryLimits::default())
+        .expect("a header written with snake_case tags decodes");
+    assert_eq!(decoded.header().class, RepresentationClass::PublicShared);
 }
 
 #[test]
@@ -309,7 +347,7 @@ fn variance_beyond_the_declared_dimension_bound_with_a_valid_integrity_tag_still
     for index in 0..25 {
         dimensions.insert(
             format!("app:d{index}"),
-            serde_json::Value::String("Anonymous".to_owned()),
+            serde_json::Value::String("anonymous".to_owned()),
         );
     }
     header["variance"] = serde_json::Value::Object(dimensions);

@@ -10,11 +10,17 @@
 //! not. This file is its own process and boots nothing beforehand, so the
 //! observation *is* the order.
 //!
-//! One test, and it mutates no environment. With `APP_ENV` unset the
-//! framework detects `Local` and installs a transient development key, so
-//! the constructor succeeds with no setup at all. That is deliberate:
-//! `live_boot.rs` documents that at most one test in a binary may call
-//! `std::env::set_var`, and needing none is the cheapest way to honour it.
+//! One test, and it is the one environment-mutating test this binary is
+//! allowed (`live_boot.rs` documents that at most one test per binary may
+//! call `std::env::set_var`). An earlier version mutated nothing and relied
+//! on `APP_ENV` being unset so the framework detected `Local` and installed a
+//! transient development key; a developer with `APP_ENV=production` exported
+//! then got "APP_KEY is required when APP_ENV=production" from an assertion
+//! whose message blamed the constructor's ordering (final review, F5). The
+//! test now sets `APP_ENV=testing` and clears every key variable itself,
+//! exactly as `live_boot.rs`'s
+//! `runtime_is_bound_before_fallible_routes_and_reused_on_reentry` does, so
+//! it does not depend on the invoking shell.
 
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +29,14 @@ use suprnova::{App, FrameworkError, Router, Server};
 
 #[tokio::test]
 async fn the_live_runtime_is_bound_before_the_async_route_closure_runs() {
+    // The only environment mutation in this binary; see the module doc.
+    unsafe {
+        std::env::set_var("APP_ENV", "testing");
+        std::env::remove_var("APP_KEY");
+        std::env::remove_var("APP_KEY_PREVIOUS");
+        std::env::remove_var("APP_PREVIOUS_KEYS");
+    }
+
     assert!(
         App::resolve::<LiveRuntime>().is_err(),
         "sanity: this process must start with nothing bound, or the observation \

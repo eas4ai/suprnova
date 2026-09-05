@@ -182,6 +182,11 @@ impl RenderCache {
     /// # Errors
     ///
     /// Fails when:
+    /// - `APP_BUILD_ID` (`RenderCacheConfig::build_id`) does not satisfy the
+    ///   bounded build identity grammar (final review, F6): the value is
+    ///   parsed once here, before anything else, and an unparsable one is an
+    ///   actionable error naming the variable and the accepted shape rather
+    ///   than every deploy silently sharing one `default` namespace;
     /// - the RenderCache migration's tables are not present on the primary
     ///   connection (ruling R58) - an actionable error naming the
     ///   migration, rather than every request failing later against a
@@ -225,6 +230,20 @@ impl RenderCache {
         if !config.enabled {
             return Ok(router);
         }
+        // Parsed before the migration probe: this is pure configuration
+        // validation and needs no database, so a misconfigured build id
+        // fails the same way with or without one.
+        let build = suprnova_live::identity::BuildId::parse(&config.build_id).map_err(|_| {
+            FrameworkError::internal(format!(
+                "RenderCache::install: APP_BUILD_ID {:?} is not a valid build identity. The \
+                 value must be 1 to 64 bytes of ASCII letters, digits, '.', '_', or '-' (the \
+                 same grammar as a crate version such as 1.3.7 or 1.3.7-rc.1); a '+' build \
+                 metadata suffix, whitespace, or any other character is refused, because a \
+                 build id that could not be parsed would otherwise collapse every deploy \
+                 onto one shared cache namespace.",
+                config.build_id
+            ))
+        })?;
         if !ledger::migration_present().await? {
             return Err(FrameworkError::internal(
                 "RenderCache::install: the suprnova_render_epochs table is missing. Add \
@@ -258,6 +277,7 @@ impl RenderCache {
         let epoch_ledger = ledger::SqlGenerationLedger::new();
         let runtime = Arc::new(RenderCacheRuntime {
             config,
+            build,
             table,
             l0,
             l1,
@@ -527,6 +547,53 @@ mod tests {
             clock_override: None,
             coordinator_override: None,
         }
+    }
+
+    /// Final review, F6: an `APP_BUILD_ID` that does not satisfy `BuildId`'s
+    /// grammar fails install with an error naming the variable and the
+    /// accepted shape, before any database is consulted (this binary has
+    /// none). Before the fix the key path silently fell back to `default`
+    /// on every request instead.
+    ///
+    /// Proven by revert: with the parse in `install` restored to the old
+    /// per-request `unwrap_or_else(.. "default" ..)` fallback, `install`
+    /// reaches the migration probe and fails on the missing database with a
+    /// message that never mentions `APP_BUILD_ID`, so the first assertion
+    /// below fails.
+    #[tokio::test]
+    async fn an_unparsable_app_build_id_fails_install_with_an_actionable_error() {
+        let router: Router = Router::new()
+            .get("/unparsable-build-id-probe", |_req| async { text("probe") })
+            .into();
+        let mut config = disabled_config();
+        config.enabled = true;
+        config.build_id = "build 7".to_owned();
+
+        let message = match RenderCache::install(router, config).await {
+            Ok(_) => panic!("a build id with a space must be refused at install"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("APP_BUILD_ID") && message.contains("build 7"),
+            "the error must name the variable and echo the rejected value: {message}"
+        );
+        assert!(
+            message.contains("letters, digits"),
+            "the error must state the accepted shape: {message}"
+        );
+        assert!(
+            RenderCache::runtime().is_none(),
+            "a refused install must leave no runtime behind"
+        );
+
+        // The shipped default must parse, or every install would now fail:
+        // `RenderCacheConfig::from_env` falls back to the application's
+        // `CARGO_PKG_VERSION`, which is plain dotted digits.
+        let default_build_id = RenderCacheConfig::from_env().build_id;
+        assert!(
+            suprnova_live::identity::BuildId::parse(&default_build_id).is_ok(),
+            "the default build id {default_build_id:?} must satisfy the grammar install enforces"
+        );
     }
 
     #[tokio::test]

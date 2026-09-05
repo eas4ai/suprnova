@@ -232,7 +232,10 @@ impl std::fmt::Debug for RenderKey {
 }
 
 /// Inspectable key dimensions: public values verbatim, private values as
-/// four-byte digest prefixes.
+/// the redacted marker `<private-material>` (the `Debug` form of
+/// [`PrivateMaterial`](super::variance::PrivateMaterial), which never
+/// prints any part of the material), and an anonymous private dimension as
+/// `anonymous`.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct RenderKeyDimensions {
     route: String,

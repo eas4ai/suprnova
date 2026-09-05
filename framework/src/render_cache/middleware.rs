@@ -252,6 +252,13 @@ pub struct RenderCacheMiddleware;
 /// process; `super::RenderCache::runtime` hands out clones of the `Arc`.
 pub struct RenderCacheRuntime {
     pub(crate) config: RenderCacheConfig,
+    /// `config.build_id` parsed once, at install, into the bounded identity
+    /// the lookup key feeds (final review, F6). Before this the key path
+    /// parsed the configured text on every request and silently fell back to
+    /// `default` when `APP_BUILD_ID` did not satisfy `BuildId`'s grammar, so
+    /// every deploy with such a value shared one namespace with no signal;
+    /// `RenderCache::install` now refuses such a value instead.
+    pub(crate) build: BuildId,
     pub(crate) table: RenderCachePolicyTable,
     pub(crate) l0: MemoryRenderStore,
     pub(crate) l1: Option<FileRenderStore>,
@@ -779,8 +786,7 @@ fn key_input(
         host,
         media: "text/html".to_owned(),
         encoding: None,
-        build: BuildId::parse(&runtime.config.build_id)
-            .unwrap_or_else(|_| BuildId::parse("default").expect("'default' is a valid build id")),
+        build: runtime.build.clone(),
         epoch,
         variance: variance_descriptor(runtime, request, policy)?,
     })
@@ -789,6 +795,14 @@ fn key_input(
 /// Reads a key from L0, then L1 (promoting a decodable L1 hit to L0). A
 /// defective entry (decode failure) is evicted from the layer it was found
 /// in and treated as a miss on that layer.
+///
+/// So is a misplaced one (final review, F7): an entry that decodes but whose
+/// stored header names a different key than the one it was found under. The
+/// store derives every path and map slot from the key alone and the entry's
+/// own HMAC prevents forgery, so nothing request-derived can steer bytes to
+/// the wrong slot; this comparison is defence in depth against a store
+/// defect or a second writer sharing the key ring and directory, and it
+/// costs one comparison per hit.
 async fn lookup(
     runtime: &RenderCacheRuntime,
     key: &RenderKey,
@@ -796,8 +810,12 @@ async fn lookup(
     let l0_stored = runtime.l0.get(key).await.map_err(|_| ())?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-            Ok(entry) => return Ok(Some((entry, stored, Layer::L0))),
-            Err(_) => {
+            Ok(entry) if entry.header().key == *key => {
+                return Ok(Some((entry, stored, Layer::L0)));
+            }
+            // Defective (`Err`) or misplaced (`Ok` under another key): the
+            // same treatment either way.
+            Ok(_) | Err(_) => {
                 let _ = runtime.l0.evict(key).await;
             }
         }
@@ -806,7 +824,7 @@ async fn lookup(
         let l1_stored = l1.get(key).await.map_err(|_| ())?;
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-                Ok(entry) => {
+                Ok(entry) if entry.header().key == *key => {
                     // L0 has no age-based expiry of its own (see
                     // `MemoryRenderStore::publish`'s own doc); `u64::MAX`
                     // is the trait's documented "never age-swept" value,
@@ -824,7 +842,9 @@ async fn lookup(
                         .await;
                     return Ok(Some((entry, stored, Layer::L1)));
                 }
-                Err(_) => {
+                // Defective or misplaced, as for L0 above; a misplaced L1
+                // entry is never promoted.
+                Ok(_) | Err(_) => {
                     let _ = l1.evict(key).await;
                 }
             }
@@ -1690,7 +1710,13 @@ async fn close_window(
     let identities = report.storable()?;
     let mut window = ObservationWindow::open(epoch);
     for identity in identities {
-        let _ = window.observe(identity.clone());
+        // Final review, F10: an identity the window cannot hold is a
+        // decline, never a silent omission. Unreachable today, because
+        // `MAX_COLLECTED` is one below `MAX_OBSERVATIONS` so a storable
+        // report always fits; a future bound change that broke that would
+        // otherwise drop identities from the stored set silently, which is
+        // the unsafe direction (an entry no write can invalidate).
+        window.observe(identity.clone()).ok()?;
     }
     window.close(ledger).await.ok()
 }
@@ -2050,8 +2076,7 @@ pub fn key_input_for_test(
         host: None,
         media: "text/html".to_owned(),
         encoding: None,
-        build: BuildId::parse(&runtime.config.build_id)
-            .unwrap_or_else(|_| BuildId::parse("default").expect("'default' is a valid build id")),
+        build: runtime.build.clone(),
         // A fixed baseline matching the RenderCache migration's seeded
         // epoch: this test helper never advances the epoch, so every call
         // deriving a key for the same route and login always lands on the
@@ -2193,6 +2218,140 @@ pub mod race_points {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+    use suprnova_live::identity::{KeyId, UnixMillis};
+    use suprnova_live::render_cache::singleflight::{
+        LocalCoordinatorLimits, LocalRebuildCoordinator,
+    };
+    use suprnova_live::render_cache::store::{MemoryStoreLimits, PublicationFence};
+
+    fn test_keys() -> SnapshotKeyRing {
+        let active = KeyRecord::new(
+            KeyId::parse("render-cache-middleware-test").expect("key id"),
+            RootKey::new(vec![7; 32]).expect("root key"),
+            UnixMillis::new(0),
+            UnixMillis::new(u64::MAX / 2),
+            UnixMillis::new(u64::MAX),
+        )
+        .expect("key record");
+        SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
+    }
+
+    /// A runtime with an L0 store and no L1, enough for `lookup` alone: the
+    /// ledger and coordinator are never consulted by it.
+    fn lookup_only_runtime(keys: SnapshotKeyRing) -> RenderCacheRuntime {
+        RenderCacheRuntime {
+            config: RenderCacheConfig {
+                enabled: true,
+                l0: super::super::L0Limits {
+                    max_entries: 8,
+                    max_bytes: 1024 * 1024,
+                },
+                l1: super::super::L1Config::Disabled,
+                failure: FailurePolicy::Open,
+                build_id: "test".to_owned(),
+                clock_override: None,
+                coordinator_override: None,
+            },
+            build: BuildId::parse("test").expect("build id"),
+            table: RenderCachePolicyTable::default(),
+            l0: MemoryRenderStore::new(MemoryStoreLimits {
+                max_entries: 8,
+                max_bytes: 1024 * 1024,
+            }),
+            l1: None,
+            ledger: Arc::new(super::super::ledger::SqlGenerationLedger::new()),
+            epoch_ledger: super::super::ledger::SqlGenerationLedger::new(),
+            coordinator: Arc::new(LocalRebuildCoordinator::new(LocalCoordinatorLimits {
+                lease_ms: 30_000,
+                max_waiters: 8,
+            })),
+            keys,
+            clock: Arc::new(suprnova_live::clock::SystemClock),
+            limits: EntryLimits::default(),
+            leases: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn entry_for(key: &RenderKey) -> CompleteEntry {
+        CompleteEntry::new(
+            EntryHeader {
+                key: key.clone(),
+                class: RepresentationClass::PublicShared,
+                variance: VarianceDescriptor::new(),
+                published_at_ms: 1_000,
+                fresh_ms: 60_000,
+                stale_servable_ms: 0,
+                stale_on_error_ms: 0,
+                observed: GenerationSet::default(),
+                epoch: 1,
+                seed_deadline_ms: None,
+                status: 200,
+                headers: SafeHeaders::from_pairs([("content-type", "text/html; charset=utf-8")])
+                    .expect("safe headers"),
+                content_encoding: None,
+            },
+            Bytes::from_static(b"<!doctype html><html><body>stored</body></html>"),
+        )
+    }
+
+    /// Final review, F7: a frame that decodes and verifies but whose header
+    /// names a different key than the one it was found under is misplaced.
+    /// `lookup` evicts it and reports a miss instead of serving another
+    /// key's bytes. The control half proves the comparison is against the
+    /// stored key, not a blanket refusal: the same bytes under their own key
+    /// are a hit.
+    ///
+    /// Proven by revert: with the `entry.header().key == *key` guard removed
+    /// from `lookup`'s L0 arm, the first assertion fails because the
+    /// misplaced entry is returned as a hit.
+    #[tokio::test]
+    async fn a_decodable_entry_stored_under_another_key_is_evicted_and_treated_as_a_miss() {
+        // Two rings from the same root derive the same keys, so the
+        // encoder's ring and the runtime's ring agree; `SnapshotKeyRing` is
+        // deliberately not `Clone`.
+        let keys = test_keys();
+        let runtime = lookup_only_runtime(test_keys());
+        let own_key = RenderKey::for_test(&keys, "/own");
+        let other_key = RenderKey::for_test(&keys, "/other");
+        let encoded = encode(&entry_for(&other_key), &keys).expect("encode");
+        let fence = PublicationFence {
+            epoch: 1,
+            generation_digest: [0; 32],
+            token: 1,
+        };
+
+        // Misplaced: the entry for `/other` sits at `/own`'s slot.
+        runtime
+            .l0
+            .publish(&own_key, encoded.clone(), fence, 1_000, u64::MAX)
+            .await
+            .expect("publish the misplaced entry");
+        let hit = lookup(&runtime, &own_key).await.expect("lookup");
+        assert!(
+            hit.is_none(),
+            "an entry whose stored key is not the lookup key must be a miss, never served"
+        );
+        assert!(
+            runtime.l0.get(&own_key).await.expect("get").is_none(),
+            "the misplaced entry is evicted from the layer it was found in"
+        );
+
+        // Control: the same bytes under their own key are a hit.
+        runtime
+            .l0
+            .publish(&other_key, encoded, fence, 1_000, u64::MAX)
+            .await
+            .expect("publish the well-placed entry");
+        let hit = lookup(&runtime, &other_key).await.expect("lookup");
+        assert!(
+            hit.is_some_and(
+                |(entry, _, layer)| entry.header().key == other_key && layer == Layer::L0
+            ),
+            "control: a correctly placed entry is served from L0"
+        );
+    }
 
     #[test]
     fn a_reasonless_private_classification_narrowed_from_a_wider_declared_class_is_declined() {

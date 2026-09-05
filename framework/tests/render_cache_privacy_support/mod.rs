@@ -876,10 +876,16 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
 /// Reads the production policy table (`RenderCachePolicyTable::effective_policy`,
 /// through the framework's own `render_cache::testing::policy_table` seam),
 /// not a copy this module keeps.
+///
+/// Requires the route's own effective policy to carry a class other than
+/// `Uncacheable` (final review, F13 / ruling R104): a future patch to
+/// `Uncacheable` would otherwise keep the attachment assertion green while
+/// the route could never store anything, which is the same vacuity from a
+/// different direction.
 pub fn route_is_under_a_policy(harness: &Harness, pattern: &str) -> bool {
     suprnova::render_cache::testing::policy_table(&harness.router)
         .effective_policy(pattern)
-        .is_some()
+        .is_some_and(|policy| policy.class() != RepresentationClass::Uncacheable)
 }
 
 // ── Route patterns ─────────────────────────────────────────────────────
