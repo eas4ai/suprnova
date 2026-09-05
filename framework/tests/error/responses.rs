@@ -272,13 +272,9 @@ fn all_error_responses_include_request_id_field() {
     }
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 async fn request_id_propagates_into_error_body_when_scope_active() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _g = AppDebugGuard::falsy();
 
     let id = suprnova::logging::RequestId::from_string("rid-error-test-12345");

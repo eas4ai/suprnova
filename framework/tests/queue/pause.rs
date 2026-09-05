@@ -429,14 +429,10 @@ impl Job for UnpausableJob {
     }
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 #[serial]
 async fn pausable_false_worker_ignores_the_global_pause_signal() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     cache_init();
     Queue::resume_all().await.unwrap(); // defensive
     UNPAUSABLE_RUNS.store(0, Ordering::SeqCst);

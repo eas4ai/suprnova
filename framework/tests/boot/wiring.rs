@@ -20,14 +20,10 @@ impl Job for NoopJob {
     }
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 #[serial_test::serial]
 async fn defaults_bind_in_memory_queue_and_rate_limiter() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     // Wipe any prior env vars so we exercise the default path.
     // SAFETY: #[serial] ensures no other thread reads these vars concurrently.
     unsafe {

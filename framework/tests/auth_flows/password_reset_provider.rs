@@ -85,13 +85,9 @@ fn token_from_fake(fake: &suprnova::mail::MailFake) -> String {
         .to_owned()
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 async fn verified_provider_user_resets_without_a_magnetar_engine() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     unsafe {
         std::env::set_var("MAIL_FROM", "test-mailer@example.test");
     }

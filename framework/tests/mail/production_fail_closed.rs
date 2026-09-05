@@ -137,14 +137,10 @@ fn set(name: &str, value: &str) {
     }
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_boot_without_a_mail_driver_fails_closed() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
 
@@ -228,14 +224,10 @@ fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back_to_log() {
     );
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_boot_succeeds_with_the_explicit_override() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "log");
@@ -275,7 +267,7 @@ fn a_negative_override_value_does_not_open_the_gate() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_boot_on_a_delivering_driver_is_unaffected() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -307,7 +299,7 @@ async fn production_boot_on_a_delivering_driver_is_unaffected() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_smtp_without_credentials_refuses_to_boot() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -328,7 +320,7 @@ async fn production_smtp_without_credentials_refuses_to_boot() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_smtp_with_encryption_none_refuses_to_boot() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -346,7 +338,7 @@ async fn production_smtp_with_encryption_none_refuses_to_boot() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn the_insecure_override_lets_production_boot_in_the_clear() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -363,7 +355,7 @@ async fn the_insecure_override_lets_production_boot_in_the_clear() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     for value in ["false", "0", "no", "maybe", ""] {
         let _guard = EnvGuard::take();
         set("APP_ENV", "production");
@@ -385,7 +377,7 @@ async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn implicit_tls_boots_from_the_environment() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -405,7 +397,7 @@ async fn implicit_tls_boots_from_the_environment() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn an_encrypted_mode_without_credentials_names_the_credentials() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
     set("MAIL_DRIVER", "smtp");
@@ -427,7 +419,7 @@ async fn an_encrypted_mode_without_credentials_names_the_credentials() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn development_smtp_still_boots_against_a_local_catcher() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     for app_env in [None, Some("local"), Some("development"), Some("testing")] {
         let _guard = EnvGuard::take();
         if let Some(v) = app_env {
@@ -450,7 +442,7 @@ async fn development_smtp_still_boots_against_a_local_catcher() {
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn an_unrecognised_encryption_value_fails_outside_production_too() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
     set("APP_ENV", "local");
     set("MAIL_DRIVER", "smtp");
@@ -466,14 +458,10 @@ async fn an_unrecognised_encryption_value_fails_outside_production_too() {
     );
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
-)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn non_production_boot_is_unchanged() {
-    let _env = crate::env_lock::lock_env();
+    let _env = crate::env_lock::lock_env_async().await;
     for app_env in [None, Some("local"), Some("development"), Some("staging")] {
         let _guard = EnvGuard::take();
         if let Some(v) = app_env {
