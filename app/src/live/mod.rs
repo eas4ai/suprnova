@@ -2,9 +2,10 @@
 //! the application-owned upload reacquisition route, and two document routes.
 //!
 //! `bootstrap::register()` binds [`registry`] together with the upload host and
-//! the gates in [`providers`]; `cmd/main.rs` installs [`routes`] through
-//! `Application::try_routes`, so the server, the workers, and the
-//! `suprnova live:*` commands all see the same components.
+//! the gates in [`providers`]; `cmd/main.rs` installs
+//! [`routes_with_render_cache`] through `Application::try_routes_async`, so the
+//! server, the workers, and the `suprnova live:*` commands all see the same
+//! components.
 
 pub mod components;
 pub mod pages;
@@ -190,18 +191,20 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     )
 }
 
-/// [`routes`] followed by the RenderCache middleware, for a caller that can
-/// await.
+/// [`routes`] followed by the RenderCache middleware. This is the entry
+/// point every server in this application uses.
 ///
 /// Separate from [`routes`] rather than the last line of it, because
 /// `RenderCache::install` is `async` (it probes for the generation ledger's
-/// tables before assembling a runtime) while `Application::try_routes` takes
-/// a synchronous `FnOnce() -> Result<Router, FrameworkError>`. A caller that
-/// already has a runtime - the browser scenario's server in
-/// `examples/live_dogfood_host.rs`, and the Live test harness - uses this;
-/// `cmd/main.rs` still calls [`routes`] alone, so the `suprnova serve`
-/// binary registers the route policy but no middleware and every request
-/// renders as before.
+/// tables before assembling a runtime) while [`routes`] itself is not.
+/// `cmd/main.rs` reaches it through `Application::try_routes_async`, the
+/// asynchronous route hook that exists for exactly this shape, so the
+/// `suprnova serve` binary installs the middleware; so do the browser
+/// scenario's server in `examples/live_dogfood_host.rs` and the Live test
+/// harness, which both already had a runtime to await on. [`routes`] stays
+/// public and synchronous as the inner half: it registers the reserved Live
+/// routes, the document route, and the cache policy, and installs no
+/// middleware.
 ///
 /// Ordering matters and is the caller's responsibility:
 /// `register_global_middleware` appends, so this must run *after*

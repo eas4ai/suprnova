@@ -5,7 +5,8 @@
 //! `suprnova live:*` commands all see the same components. `routes()` installs
 //! the reserved Live routes behind this application's session authentication,
 //! tenant, and rate-limit middleware; register document routes and mounts
-//! there as well.
+//! there as well. `routes_with_render_cache()` is what `cmd/main.rs` calls:
+//! `routes()` followed by the RenderCache middleware.
 //!
 //! `suprnova live:make <name>` adds a component module and registers it here.
 
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use suprnova::live::{LiveRegistry, LiveTenantMiddleware, LiveTenantResolver, RegistryError};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
+use suprnova::render_cache::{RenderCache, RenderCacheConfig};
 use suprnova::{
     AuthMiddleware, FrameworkError, RateLimitMiddleware, Request, Router, SlidingWindowConfig,
     async_trait,
@@ -50,6 +52,26 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
                 },
             ))
     })
+}
+
+/// `routes()` followed by the RenderCache middleware.
+///
+/// Separate from `routes()` rather than its last line, because
+/// `RenderCache::install` is asynchronous: it probes the database for the
+/// generation ledger's tables before it assembles a runtime, so a Migrator
+/// that is missing `suprnova::render_cache::migration::Migration` fails once
+/// at boot with an actionable message instead of on every request.
+/// `cmd/main.rs` reaches this through `Application::try_routes_async`, which
+/// prepares services and the immutable Live runtime first.
+///
+/// Order matters: `register_global_middleware` appends, so this must run
+/// after `bootstrap::register_http_stack`, whose session, locale, and
+/// feature middleware establish the request-scoped state the cache
+/// middleware reads while it builds a lookup key. Set
+/// `RENDER_CACHE_ENABLED=false` to turn the cache off; the install then
+/// returns the router untouched and probes nothing.
+pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
+    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()).await
 }
 
 /// This application serves one tenant, so every Live request is tenantless.

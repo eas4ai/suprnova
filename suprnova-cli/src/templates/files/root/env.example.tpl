@@ -81,3 +81,12 @@ MAIL_SMTP_ENCRYPTION=
 # send without a real from-address.
 MAIL_FROM=hello@example.com
 MAIL_FROM_NAME="Suprnova App"
+
+# RenderCache (Tier 0). `RENDER_CACHE_ENABLED` is the master switch and
+# defaults to true when unset; anything other than `false` or `0` enables
+# it. Setting it to `false` makes `live::routes_with_render_cache` a no-op:
+# the router is returned untouched and nothing is probed or installed.
+# `RENDER_CACHE_L1_DIR` names a directory this process owns for the
+# file-backed second tier; leave it empty for the in-process tier alone.
+RENDER_CACHE_ENABLED=true
+RENDER_CACHE_L1_DIR=

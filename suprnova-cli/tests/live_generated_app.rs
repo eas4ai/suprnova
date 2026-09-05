@@ -61,6 +61,17 @@ fn a_generated_application_is_live_ready() {
     assert!(module.contains("pub fn registry()"), "{module}");
     assert!(module.contains("pub fn routes(router: Router)"), "{module}");
     assert!(module.contains("try_live_with"), "{module}");
+    // The RenderCache install is the asynchronous half, separate from
+    // `routes` because it probes for the generation ledger before it
+    // assembles a runtime.
+    assert!(
+        module.contains("pub async fn routes_with_render_cache(router: Router)"),
+        "{module}"
+    );
+    assert!(
+        module.contains("RenderCache::install(routes(router)?, RenderCacheConfig::from_env())"),
+        "{module}"
+    );
     assert!(module.contains("AuthMiddleware::new()"), "{module}");
     assert!(module.contains("LiveTenantMiddleware"), "{module}");
     assert!(module.contains("RateLimitMiddleware::new("), "{module}");
@@ -79,8 +90,18 @@ fn a_generated_application_is_live_ready() {
     assert!(!bootstrap.contains("with_origin_policy"), "{bootstrap}");
     let main = read(project.join("cmd/main.rs"));
     assert!(
-        main.contains(".try_routes(|| live::routes(routes::register()))"),
+        main.contains(
+            ".try_routes_async(|| async { live::routes_with_render_cache(routes::register()).await })"
+        ),
         "{main}"
+    );
+    // Without the framework's own migration in the generated Migrator, the
+    // install's boot probe fails the first time a generated application
+    // runs `suprnova serve`.
+    let migrator = read(project.join("src/migrations/mod.rs"));
+    assert!(
+        migrator.contains("Box::new(suprnova::render_cache::migration::Migration),"),
+        "{migrator}"
     );
 
     let output = live_make(&project, "Counter");
