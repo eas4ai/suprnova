@@ -107,22 +107,46 @@ document's seed still promotes, and a conditional request on the served
 validator answers 304 from the same entry. The three-engine Playwright
 dogfood suite exercises the same route through the real server.
 
-### The middleware install is not on the server binary
+### The asynchronous route hook, and what it wired up
 
 `RenderCache::install` is `async`, because it probes for the generation
 ledger's tables before assembling a runtime, while `Application::try_routes`
-takes a synchronous `FnOnce() -> Result<Router, FrameworkError>` and
-`Server::try_from_config_with_routes` calls it synchronously. There is no
-asynchronous route-construction hook, so the install cannot be the last line
-of `app::live::routes`. It lives in `app::live::routes_with_render_cache`
-instead, which the browser scenario's server and the Live test harness call
-and `app/cmd/main.rs` does not: `suprnova serve` registers the route policy
-and renders every request as before. The same gap blocks the CLI scaffold,
-whose generated `routes` is synchronous and reached through the same
-`try_routes` call, so the generated application declares no cache. Closing
-this needs an asynchronous route hook on `Application` and `Server`, or an
-install that defers the ledger probe; both are framework API decisions
-outside this plan.
+takes a synchronous `FnOnce() -> Result<Router, FrameworkError>`. Neither
+boot hook can host the install either: `bootstrap` and `http_bootstrap` both
+run before a router exists, and a `booted` callback is synchronous and never
+sees one. The route closure is the only place with both a container and a
+router, so fix round 1 made an asynchronous one.
+`Server::try_from_config_with_routes_async` is the asynchronous twin of
+`try_from_config_with_routes`, sharing its prologue (services, then the
+immutable Live runtime) and its epilogue (mount registration, then
+assembly), and `Application::try_routes_async` is the application-level
+hook that reaches it. `routes`, `try_routes` and `try_routes_async` write
+one slot, so the last of the three called is the one the server builds.
+
+`app/cmd/main.rs` now calls
+`.try_routes_async(|| async { live::routes_with_render_cache(routes::register()).await })`,
+so `suprnova serve` installs the middleware. `app::live::routes` stays the
+synchronous inner half that registers the reserved Live routes, the document
+routes, and the cache policy. The CLI scaffold follows: the generated
+`cmd/main.rs` uses the same asynchronous form, the generated `src/live/mod.rs`
+gains `routes_with_render_cache`, the generated Migrator lists
+`suprnova::render_cache::migration::Migration` (without it a generated
+application fails the boot probe on its first `suprnova serve`), and the
+generated `.env.example` documents `RENDER_CACHE_ENABLED` and
+`RENDER_CACHE_L1_DIR`. The acceptance test that builds a freshly generated
+application and runs the integrated checker against it still passes.
+
+`RENDER_CACHE_ENABLED=false` is now a real off switch at install time.
+`RenderCacheConfig` always carried the `enabled` flag and the middleware
+always re-read it per request, but `install` itself ignored it: it probed
+and registered regardless, so an application that turned the cache off was
+still required to carry the migration and still paid the write side's ledger
+SQL. A disabled configuration now returns the router untouched, probes
+nothing, assembles nothing, registers nothing, and leaves the
+process-installed gate shut. The middleware's own per-request check is
+redundant for a process that installs through this path and is left in
+place, because a runtime installed by other means (this crate's own test
+harnesses build one directly) still relies on it.
 
 ### Commands that ran for this checkpoint
 
@@ -151,10 +175,37 @@ CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 crates/suprnova-live/scripts/gate.sh
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 scripts/gate.sh
 ```
 
-Both gates ran detached with their exit codes captured; the two run logs and
-the repository gate runner's own run identifier are recorded in the task
-report alongside the counts, because a ledger edit naming them would change
-the tree the gates had just covered.
+Fix round 1 added the asynchronous route hook, the disabled-install no-op,
+the application and scaffold wiring, and this documentation, in four
+commits:
+
+```
+feat(server): add an async route-construction hook for the application
+fix(render-cache): make RENDER_CACHE_ENABLED=false a real off switch at install
+feat(render-cache): install the cache from serve and from a generated app
+docs(render-cache): document the async route hook and the disabled install
+```
+
+and ran, in addition to the commands above:
+
+```
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 cargo test -p suprnova --lib
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 cargo fmt --all --check
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 cargo clippy -p suprnova -p app -p suprnova-cli --all-targets -- -D clippy::disallowed_methods
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 cargo test -p suprnova-cli --test live_generated_app -- --ignored
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 scripts/install-gate.py --source "$PWD" --repo "$PWD" --commit "$(git rev-parse HEAD)"
+```
+
+The gate install is the documented step for tooling that changed in a
+reviewed commit on this branch: Task 11 added the `render_cache_ledger` live
+test blocks to `scripts/check-postgres.sh` and `scripts/check-mysql.sh`, and
+the install record still named the commit from before them, so the runner
+refused to start on tooling drift. Re-recording from this branch's own tip
+is what the record is for. Both gates ran detached with their exit codes
+captured; the recorded install commit, the two run logs, and the exit codes
+are in the task report alongside the counts, because a ledger edit naming
+them would change the tree the gates had just covered.
 
 ### A full-tier failure inherited from the branch point
 

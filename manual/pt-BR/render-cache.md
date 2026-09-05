@@ -91,8 +91,12 @@ busca, então ele precisa rodar depois de tudo o que os configura):
 use suprnova::RenderCache;
 use suprnova::render_cache::RenderCacheConfig;
 
-let router = add_render_cache(router)?;
-let router = RenderCache::install(router, RenderCacheConfig::from_env()).await?;
+Application::new()
+    // ...
+    .try_routes_async(|| async {
+        let router = add_render_cache(routes::register())?;
+        RenderCache::install(router, RenderCacheConfig::from_env()).await
+    });
 ```
 
 ## Declarando variância

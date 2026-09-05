@@ -95,8 +95,12 @@ il doit s'exécuter après ce qui les met en place) :
 use suprnova::RenderCache;
 use suprnova::render_cache::RenderCacheConfig;
 
-let router = add_render_cache(router)?;
-let router = RenderCache::install(router, RenderCacheConfig::from_env()).await?;
+Application::new()
+    // ...
+    .try_routes_async(|| async {
+        let router = add_render_cache(routes::register())?;
+        RenderCache::install(router, RenderCacheConfig::from_env()).await
+    });
 ```
 
 ## Déclarer la variance

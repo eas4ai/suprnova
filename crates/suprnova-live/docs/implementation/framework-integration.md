@@ -148,7 +148,8 @@ RenderCache is a separate opt-in provider, not part of the runtime above: an
 application that wants it opts routes and groups in with
 `Router::try_render_cache`/`try_render_cache_group` and then finishes
 installation with one line, `RenderCache::install(router,
-RenderCacheConfig::from_env())`, after every middleware registration that
+RenderCacheConfig::from_env())`, called from `Application::try_routes_async`
+because that line is asynchronous, after every middleware registration that
 establishes request-scoped locale or identity. See
 [RenderCache](render-cache.md) for the full contract: the middleware's
 request flow, the classification and coherence rules, the file-backed L1

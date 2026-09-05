@@ -92,7 +92,14 @@ middleware reads `Lang::locale()` and `Auth::id()` before the handler runs.
 The process-installed flag also gates the write side: `orm::advance` and
 `ledger::advance_in_current_transaction` consult it before issuing any SQL,
 so an application that never installs RenderCache pays zero RenderCache SQL
-on any write.
+on any write. The install is asynchronous because of that first probe, so
+`Application::try_routes_async` is the hook that hosts it: the process-wide
+and HTTP boot hooks both run before a router exists, and a `booted` callback
+is synchronous and never sees one. A configuration whose `enabled` master
+switch is false (`RENDER_CACHE_ENABLED=false`) makes the whole call a no-op:
+the router comes back untouched, nothing is probed, no runtime is assembled,
+no middleware is registered, and the write side's gate stays shut, so an
+application that turns the cache off need not carry the migration at all.
 
 `RenderCache::bump_permission_version()` advances the process-wide counter
 fed into `Principal` variance material. `RenderCache::advance_epoch()`
