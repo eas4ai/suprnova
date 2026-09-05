@@ -213,9 +213,11 @@ impl RenderCache {
     /// not be made to carry the RenderCache migration, must not fail to
     /// boot on ruling R58's probe, and must not pay ledger SQL on its
     /// writes. [`middleware::RenderCacheMiddleware`] re-reads the same flag
-    /// per request, which is now redundant for a process that installs
-    /// through this path but still holds for a runtime installed by other
-    /// means (this crate's own test harnesses build one directly).
+    /// on every request. That check is redundant now: this is the only
+    /// place a [`RenderCacheRuntime`] is built, so a runtime that exists at
+    /// all was installed from a configuration whose switch was on. It is
+    /// kept as defence in depth against a future second construction site,
+    /// and for no other reason.
     pub async fn install(
         router: Router,
         config: RenderCacheConfig,

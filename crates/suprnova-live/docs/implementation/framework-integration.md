@@ -140,9 +140,10 @@ bootstrap so the server, workers, and the console tooling helper all see them:
 - The tenant resolver behind `LiveTenantMiddleware` and the rate limiter the
   guard uses.
 
-`Server::run` and `Application::try_routes` bind the runtime, register every
-declared mount, and finalize the mount catalog before the first request; a
-mount declared after that point is rejected at startup.
+`Server::run` and both route hooks, `Application::try_routes` and
+`Application::try_routes_async`, bind the runtime, register every declared
+mount, and finalize the mount catalog before the first request; a mount
+declared after that point is rejected at startup.
 
 RenderCache is a separate opt-in provider, not part of the runtime above: an
 application that wants it opts routes and groups in with

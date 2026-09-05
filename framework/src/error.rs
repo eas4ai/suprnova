@@ -1713,6 +1713,15 @@ mod render_cache_error_bridge_tests {
             inner(kind)?;
             Ok(())
         }
+        // Written out rather than matched. `RenderCacheErrorKind` is
+        // `#[non_exhaustive]` (crates/suprnova-live/src/render_cache/mod.rs),
+        // so a `match` on it here, downstream of the defining crate, is
+        // required by the compiler to carry a wildcard arm and can never be
+        // an exhaustiveness gate. The gate for a new variant is the engine's
+        // own `Display` match, which is exhaustive because it is inside that
+        // crate: a new kind does not compile until it is given a token
+        // there. What this list cannot promise is that a new kind is also
+        // walked here; keep the two in step by hand.
         for kind in [
             RenderCacheErrorKind::PolicyInvalid,
             RenderCacheErrorKind::VarianceInvalid,

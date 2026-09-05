@@ -202,10 +202,22 @@ reviewed commit on this branch: Task 11 added the `render_cache_ledger` live
 test blocks to `scripts/check-postgres.sh` and `scripts/check-mysql.sh`, and
 the install record still named the commit from before them, so the runner
 refused to start on tooling drift. Re-recording from this branch's own tip
-is what the record is for. Both gates ran detached with their exit codes
-captured; the recorded install commit, the two run logs, and the exit codes
-are in the task report alongside the counts, because a ledger edit naming
-them would change the tree the gates had just covered.
+is what the record is for.
+
+Every gate run this checkpoint produced, in order, with the tip it covered:
+
+| Tip | Gate | Outcome |
+|---|---|---|
+| `1c63eeae` | Live | exit 0 |
+| `1c63eeae` | repository | exit 2, refused to start on installed-tooling drift; no step ran |
+| `11948eed` | Live | exit 0 |
+| `11948eed` | repository | exit 1, run `20260905T032853.263434Z-1404788-83b35f4e`; `workspace-tests` failed on two targets this plan had just added, a lib unit test that booted the process-global container and the `env.tpl` half of the scaffold's environment templates |
+| the fix round 2 tip | repository | started detached; its outcome is in the task report, not here |
+
+Every run was launched detached with its exit code captured to a file. The
+recorded install commit, the run logs, and the exit codes live in the task
+report alongside the counts, because a ledger edit naming them would change
+the tree the gates had just covered.
 
 ### A full-tier failure inherited from the branch point
 
