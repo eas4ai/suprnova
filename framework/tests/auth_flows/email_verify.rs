@@ -158,6 +158,10 @@ async fn reload_ada() -> TestUser {
         .clone()
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn send_link_then_verify_marks_verified_single_use() {
@@ -228,6 +232,10 @@ async fn send_link_then_verify_marks_verified_single_use() {
     assert!(replay.is_err(), "a consumed token must not verify again");
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn check_reports_validity_without_consuming() {
@@ -273,6 +281,10 @@ async fn check_reports_validity_without_consuming() {
     assert!(!EmailVerification::check(token).await.expect("check spent"));
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn resend_sends_for_known_email_and_is_silent_for_unknown() {
@@ -303,6 +315,10 @@ async fn resend_sends_for_known_email_and_is_silent_for_unknown() {
     }
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn verify_rejects_garbage_token() {

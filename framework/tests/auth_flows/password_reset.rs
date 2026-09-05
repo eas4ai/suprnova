@@ -171,6 +171,10 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
     }
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 async fn password_reset_facade_delegates_issue_check_and_completion_to_magnetar() {
     let _env = crate::env_lock::lock_env();

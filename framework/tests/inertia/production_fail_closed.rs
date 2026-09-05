@@ -89,6 +89,10 @@ fn default_config_resolves_production_mode_under_app_env_production() {
     restore_app_env(prior);
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial_test::serial(inertia_cfg01_app_env)]
 async fn production_html_shell_never_references_a_localhost_dev_server() {

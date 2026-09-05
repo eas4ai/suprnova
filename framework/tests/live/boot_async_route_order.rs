@@ -27,6 +27,10 @@ use std::sync::{Arc, Mutex};
 use suprnova::live::LiveRuntime;
 use suprnova::{App, FrameworkError, Router, Server};
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 async fn the_live_runtime_is_bound_before_the_async_route_closure_runs() {
     let _env = crate::env_lock::lock_env();

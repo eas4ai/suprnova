@@ -137,6 +137,10 @@ fn set(name: &str, value: &str) {
     }
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_boot_without_a_mail_driver_fails_closed() {
@@ -224,6 +228,10 @@ fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back_to_log() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn production_boot_succeeds_with_the_explicit_override() {
@@ -458,6 +466,10 @@ async fn an_unrecognised_encryption_value_fails_outside_production_too() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(mail_sec03_env)]
 async fn non_production_boot_is_unchanged() {

@@ -80,6 +80,10 @@ fn set_env(key: &str, value: Option<&str>) {
     }
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
@@ -96,6 +100,10 @@ async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
@@ -108,6 +116,10 @@ async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
     assert_eq!(Queue::driver_name().unwrap(), "memory");
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
@@ -141,6 +153,10 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
 /// Found in the container harness: the dogfood app had the table, ran the
 /// migration, and still recorded `failed_jobs = 0` when a poison job was
 /// finally dead-lettered.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn the_database_driver_binds_a_failed_jobs_store() {
@@ -173,6 +189,10 @@ async fn the_database_driver_binds_a_failed_jobs_store() {
 
 /// The env path has to build every inner connection and install the decorator,
 /// not just parse the list.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn failover_wires_a_driver_over_the_listed_connections() {
@@ -204,6 +224,10 @@ async fn failover_wires_a_driver_over_the_listed_connections() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn failover_without_a_connection_list_is_a_boot_error() {
@@ -220,6 +244,10 @@ async fn failover_without_a_connection_list_is_a_boot_error() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn failover_with_a_blank_connection_list_is_a_boot_error() {
@@ -237,6 +265,10 @@ async fn failover_with_a_blank_connection_list_is_a_boot_error() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn failover_rejects_a_nested_failover_connection() {
@@ -257,6 +289,10 @@ async fn failover_rejects_a_nested_failover_connection() {
 /// The warn-and-fall-back-to-memory behaviour belongs to `QUEUE_DRIVER` alone.
 /// Inside a failover chain a typo would silently splice an ephemeral in-memory
 /// connection into a durable list, so it has to be a boot error instead.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() {

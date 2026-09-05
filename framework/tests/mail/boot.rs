@@ -67,6 +67,10 @@ fn clear_mail_env() {
     }
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_default_binds_log_transport() {
@@ -88,6 +92,10 @@ async fn boot_default_binds_log_transport() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_memory_driver_binds_in_memory_transport() {
@@ -121,6 +129,10 @@ async fn boot_memory_driver_binds_in_memory_transport() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_releases_memory_capture_when_switching_drivers() {
@@ -226,6 +238,10 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
 //   2. The endpoint override actually routes the subsequent send through
 //      the mock server (proving the endpoint env var is wired).
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_postmark_driver_routes_via_endpoint_override() {
@@ -262,6 +278,10 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_sendgrid_driver_routes_via_endpoint_override() {
@@ -292,6 +312,10 @@ async fn boot_sendgrid_driver_routes_via_endpoint_override() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_mailgun_driver_routes_via_endpoint_override() {
@@ -323,6 +347,10 @@ async fn boot_mailgun_driver_routes_via_endpoint_override() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_resend_driver_routes_via_endpoint_override() {
@@ -353,6 +381,10 @@ async fn boot_resend_driver_routes_via_endpoint_override() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 async fn boot_ses_driver_routes_via_endpoint_override() {
@@ -497,6 +529,10 @@ async fn boot_resend_missing_key_returns_descriptive_error() {
     clear_mail_env();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[traced_test]
 #[serial]

@@ -82,6 +82,10 @@ fn set(name: &str, value: &str) {
 
 /// The shipping case: a deploy that set `APP_ENV=production` and never
 /// thought about the limiter at all.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_without_a_driver_fails_closed() {
@@ -104,6 +108,10 @@ async fn production_boot_without_a_driver_fails_closed() {
     );
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_on_the_memory_driver_fails_closed() {
@@ -120,6 +128,10 @@ async fn production_boot_on_the_memory_driver_fails_closed() {
 /// The case most likely to reach production, because it *looks*
 /// configured. A capitalised driver name used to warn once at boot and
 /// then quietly limit per-process.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back() {
@@ -140,6 +152,10 @@ async fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back() {
 }
 
 /// Presence is not consent. Same discipline as the mail override.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn a_non_truthy_override_keeps_the_guard_armed() {
@@ -159,6 +175,10 @@ async fn a_non_truthy_override_keeps_the_guard_armed() {
 
 /// The override is for a genuinely single-process deployment, where a
 /// per-process quota *is* the global quota.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn the_override_lets_a_single_process_deployment_boot() {
@@ -174,6 +194,10 @@ async fn the_override_lets_a_single_process_deployment_boot() {
 
 /// Development must be untouched - a fresh `suprnova new` has no
 /// `RATE_LIMIT_DRIVER` and must keep working with zero configuration.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn non_production_boot_is_unchanged() {
@@ -193,6 +217,10 @@ async fn non_production_boot_is_unchanged() {
 /// Staging deliberately stays permissive, matching SEC-03's reasoning:
 /// hard-failing a staging environment pushes teams to set the override
 /// globally, which disarms it where it actually matters.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial(rate_limit_env)]
 async fn staging_is_not_gated() {

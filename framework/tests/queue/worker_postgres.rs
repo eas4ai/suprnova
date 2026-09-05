@@ -187,6 +187,10 @@ async fn row_count(db: &DatabaseConnection, table: &str) -> i64 {
 /// The `queue:work` boot sequence end to end: initialise the database, then
 /// let `bootstrap_from_env` build the database driver from it, then drain a
 /// job through `run_worker`.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
@@ -230,6 +234,10 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
 
 /// The dead-letter path: an exhausted job is acked off `jobs` and written to
 /// the Postgres-backed failed-jobs store.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the environment lock must cover the whole test body; each test owns its runtime and no other task in it takes the lock"
+)]
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
