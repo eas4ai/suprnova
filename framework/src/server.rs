@@ -159,10 +159,62 @@ impl Server {
     where
         F: FnOnce() -> Result<Router, crate::FrameworkError>,
     {
+        let (config, runtime) = Self::prepare_boot()?;
+        let router = routes()?;
+        Self::finish_boot(router, &runtime, config)
+    }
+
+    /// [`Self::try_from_config_with_routes`] for a route catalog whose own
+    /// construction has to await.
+    ///
+    /// Identical sequence and identical guarantees: framework services and
+    /// the immutable Live runtime are prepared before `routes` runs, so the
+    /// closure may resolve either from the container, and a
+    /// route-construction failure is returned without binding a listener.
+    ///
+    /// The asynchronous form exists because some route catalogs cannot be
+    /// built synchronously. `RenderCache::install`
+    /// ([`crate::render_cache::RenderCache::install`]) is this workspace's
+    /// case: it probes the database for the generation ledger's tables
+    /// before it assembles a runtime and appends its middleware, so that a
+    /// missing migration fails once at boot with an actionable message
+    /// rather than on every request. [`crate::Application::try_routes_async`]
+    /// is the application-level hook that reaches this constructor.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::try_from_config_with_routes`] returns, plus
+    /// whatever the awaited closure returns.
+    pub async fn try_from_config_with_routes_async<F, Fut>(
+        routes: F,
+    ) -> Result<Self, crate::FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Router, crate::FrameworkError>>,
+    {
+        let (config, runtime) = Self::prepare_boot()?;
+        let router = routes().await?;
+        Self::finish_boot(router, &runtime, config)
+    }
+
+    /// The boot prologue both fallible constructors share: framework
+    /// services first, then the immutable Live runtime, both before any
+    /// route-construction closure runs.
+    fn prepare_boot() -> Result<(ServerConfig, crate::live::LiveRuntime), crate::FrameworkError> {
         let config = Self::prepare_config()?;
         let runtime = crate::live::LiveRuntime::bind()?;
-        let router = routes()?;
-        Self::prepare_live_router(&router, &runtime)?;
+        Ok((config, runtime))
+    }
+
+    /// The boot epilogue both fallible constructors share: register the
+    /// constructed router's Live mounts with the bound runtime, then
+    /// assemble the server around it.
+    fn finish_boot(
+        router: Router,
+        runtime: &crate::live::LiveRuntime,
+        config: ServerConfig,
+    ) -> Result<Self, crate::FrameworkError> {
+        Self::prepare_live_router(&router, runtime)?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -2127,6 +2179,73 @@ mod tests {
     //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
+
+    /// `try_from_config_with_routes_async` is the asynchronous twin of
+    /// `try_from_config_with_routes` and owes the same order: framework
+    /// services and the immutable Live runtime are prepared first, so the
+    /// closure can resolve either from the container, and the router the
+    /// closure returns is the one the assembled server carries.
+    /// `framework/tests/live_boot.rs`'s
+    /// `runtime_is_bound_before_fallible_routes_and_reused_on_reentry`
+    /// pins that for the synchronous form from outside the crate; the
+    /// asynchronous form is pinned here instead because only an in-crate
+    /// test can read the assembled server's own router back.
+    #[tokio::test]
+    async fn async_route_construction_runs_after_boot_and_keeps_its_router() {
+        let bound_during_routes = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&bound_during_routes);
+
+        let server = Server::try_from_config_with_routes_async(move || async move {
+            observed.store(
+                App::resolve::<crate::live::LiveRuntime>().is_ok(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            let router: Router = Router::new()
+                .get("/async-route-probe", |_req| async {
+                    crate::http::text("probe")
+                })
+                .into();
+            Ok(router)
+        })
+        .await
+        .expect("asynchronous route construction must prepare a server");
+
+        assert!(
+            bound_during_routes.load(std::sync::atomic::Ordering::SeqCst),
+            "the immutable Live runtime must be container-bound before the asynchronous \
+             route closure runs, exactly as it is for the synchronous constructor"
+        );
+        assert!(
+            server
+                .router
+                .match_route(&hyper::Method::GET, "/async-route-probe")
+                .is_some(),
+            "the prepared server must carry the router the asynchronous closure returned"
+        );
+    }
+
+    /// The asynchronous constructor must fail the way the synchronous one
+    /// does: the route-construction error travels out untouched and no
+    /// listener is bound.
+    #[tokio::test]
+    async fn an_async_route_error_is_returned_without_binding_a_listener() {
+        let failed = Server::try_from_config_with_routes_async(|| async {
+            Err(crate::FrameworkError::internal(
+                "async live route catalog rejected",
+            ))
+        })
+        .await;
+        let error = match failed {
+            Ok(_) => panic!("fallible asynchronous route construction must return its error"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("async live route catalog rejected"),
+            "the closure's own error must survive: {error}"
+        );
+    }
 
     #[test]
     fn invalid_host_returns_typed_error_not_panic() {

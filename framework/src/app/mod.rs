@@ -53,6 +53,38 @@ type BootedFn = Box<dyn FnOnce()>;
 /// Boxed function that registers the application's scheduled tasks.
 type ScheduleFn = Box<dyn FnOnce(&mut Schedule) + Send>;
 
+/// Boxed future returned by an asynchronous route-construction function.
+type RoutesFuture = Pin<Box<dyn Future<Output = Result<Router, FrameworkError>> + Send>>;
+
+/// The application's registered route-construction function, in whichever
+/// shape registered it.
+///
+/// [`Application::routes`], [`Application::try_routes`] and
+/// [`Application::try_routes_async`] all write this one slot, so the last
+/// call wins across all three rather than each form keeping a rival
+/// catalog that the server would have to choose between.
+enum RoutesFn {
+    /// Built synchronously, by [`Server::try_from_config_with_routes`].
+    Sync(Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>),
+    /// Awaited, by [`Server::try_from_config_with_routes_async`].
+    Async(Box<dyn FnOnce() -> RoutesFuture + Send>),
+}
+
+impl RoutesFn {
+    /// Hand the registered catalog to the `Server` constructor that matches
+    /// its shape, so services and the immutable Live runtime are prepared
+    /// before it runs either way. No registration at all means an empty
+    /// router, which is what the server built before any of the three
+    /// registration methods existed.
+    async fn prepare_server(registered: Option<Self>) -> Result<Server, FrameworkError> {
+        match registered {
+            Some(Self::Async(routes)) => Server::try_from_config_with_routes_async(routes).await,
+            Some(Self::Sync(routes)) => Server::try_from_config_with_routes(routes),
+            None => Server::try_from_config_with_routes(|| Ok(Router::new())),
+        }
+    }
+}
+
 /// CLI structure for suprnova applications
 #[derive(Parser)]
 #[command(name = "app")]
@@ -194,7 +226,7 @@ where
     config_fn: Option<Box<dyn FnOnce()>>,
     bootstrap_fn: Option<BootstrapFn>,
     http_bootstrap_fn: Option<BootstrapFn>,
-    routes_fn: Option<Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>>,
+    routes_fn: Option<RoutesFn>,
     schedule_fn: Option<ScheduleFn>,
     booted_fns: Vec<BootedFn>,
     _migrator: std::marker::PhantomData<M>,
@@ -644,7 +676,7 @@ where
     where
         F: FnOnce() -> Router + Send + 'static,
     {
-        self.routes_fn = Some(Box::new(|| Ok(f())));
+        self.routes_fn = Some(RoutesFn::Sync(Box::new(|| Ok(f()))));
         self
     }
 
@@ -653,11 +685,62 @@ where
     /// Services and the immutable Live runtime are prepared before this
     /// function runs. A registration error therefore aborts startup before a
     /// listener is bound.
+    ///
+    /// [`routes`](Self::routes), this method and
+    /// [`try_routes_async`](Self::try_routes_async) share one slot: the last
+    /// of the three that is called is the one the server builds.
     pub fn try_routes<F>(mut self, f: F) -> Self
     where
         F: FnOnce() -> Result<Router, FrameworkError> + Send + 'static,
     {
-        self.routes_fn = Some(Box::new(f));
+        self.routes_fn = Some(RoutesFn::Sync(Box::new(f)));
+        self
+    }
+
+    /// Register a fallible route-construction function that has to await.
+    ///
+    /// [`try_routes`](Self::try_routes) for a route catalog whose own
+    /// construction is asynchronous. `RenderCache::install`
+    /// ([`crate::render_cache::RenderCache::install`]) is this workspace's
+    /// case: it probes the database for the generation ledger's tables
+    /// before it assembles a runtime and appends its middleware, so a
+    /// missing migration fails once at boot instead of on every request.
+    /// Without this hook such a catalog has nowhere to run - the
+    /// process-wide and HTTP boot hooks both run before any router exists,
+    /// and a `booted` callback is synchronous and never sees the router.
+    ///
+    /// Services and the immutable Live runtime are prepared before this
+    /// function runs, exactly as for the synchronous form, so a
+    /// registration error aborts startup before a listener is bound.
+    ///
+    /// [`routes`](Self::routes), [`try_routes`](Self::try_routes) and this
+    /// method share one slot: the last of the three that is called is the
+    /// one the server builds.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{Application, FrameworkError, Router};
+    /// # mod routes {
+    /// #     pub fn register() -> suprnova::Router { suprnova::Router::new() }
+    /// # }
+    /// # mod live {
+    /// #     use suprnova::{FrameworkError, Router};
+    /// #     pub async fn routes_with_render_cache(r: Router) -> Result<Router, FrameworkError> {
+    /// #         Ok(r)
+    /// #     }
+    /// # }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .try_routes_async(|| async { live::routes_with_render_cache(routes::register()).await });
+    /// # }
+    /// ```
+    pub fn try_routes_async<F, Fut>(mut self, f: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Router, FrameworkError>> + Send + 'static,
+    {
+        self.routes_fn = Some(RoutesFn::Async(Box::new(move || Box::pin(f()))));
         self
     }
 
@@ -907,7 +990,7 @@ where
     async fn run_server_internal(
         bootstrap_fn: Option<BootstrapFn>,
         http_bootstrap_fn: Option<BootstrapFn>,
-        routes_fn: Option<Box<dyn FnOnce() -> Result<Router, FrameworkError> + Send>>,
+        routes_fn: Option<RoutesFn>,
         booted_fns: Vec<BootedFn>,
     ) {
         // Run the process-wide hook, then the HTTP-only one.
@@ -921,13 +1004,7 @@ where
         // error type carries the user-facing remediation (it points at
         // `suprnova key:generate`); we surface it on stderr without a
         // panic stack-trace wrapper so production boot logs stay clean.
-        let server = match Server::try_from_config_with_routes(|| {
-            if let Some(routes_fn) = routes_fn {
-                routes_fn()
-            } else {
-                Ok(Router::new())
-            }
-        }) {
+        let server = match RoutesFn::prepare_server(routes_fn).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("suprnova: failed to start server: {e}");
@@ -2715,5 +2792,122 @@ mod boot_hook_tests {
         let order = Arc::new(Mutex::new(Vec::new()));
         Application::<NoMigrator>::run_boot_hooks(None, Some(recording(&order, "http"))).await;
         assert_eq!(*order.lock().expect("order mutex"), vec!["http"]);
+    }
+}
+
+#[cfg(test)]
+mod route_registration_tests {
+    //! `routes`, `try_routes` and `try_routes_async` write one slot, and
+    //! `run_server_internal` hands whatever is in it to the `Server`
+    //! constructor that matches its shape. A regression that gave the
+    //! asynchronous form a field of its own would leave `suprnova serve`
+    //! quietly building the synchronous catalog the application meant to
+    //! replace: no compile error, no missing route, only a middleware that
+    //! was never installed. These tests go through the same
+    //! `RoutesFn::prepare_server` the serve path calls, so the dispatch
+    //! itself is under test and not merely the field.
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn recorder() -> Arc<Mutex<Vec<&'static str>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn the_last_registered_route_builder_wins_across_both_forms() {
+        let ran = recorder();
+
+        let sync_first = Arc::clone(&ran);
+        let async_second = Arc::clone(&ran);
+        let async_last = Application::new()
+            .try_routes(move || {
+                sync_first.lock().expect("recorder").push("sync");
+                Ok(Router::new())
+            })
+            .try_routes_async(move || {
+                let recorded = Arc::clone(&async_second);
+                async move {
+                    recorded.lock().expect("recorder").push("async");
+                    Ok(Router::new())
+                }
+            });
+        RoutesFn::prepare_server(async_last.routes_fn)
+            .await
+            .expect("the asynchronous catalog must prepare a server");
+        assert_eq!(
+            *ran.lock().expect("recorder"),
+            vec!["async"],
+            "try_routes_async must replace an earlier try_routes, not run beside it"
+        );
+
+        ran.lock().expect("recorder").clear();
+
+        let async_first = Arc::clone(&ran);
+        let sync_second = Arc::clone(&ran);
+        let sync_last = Application::new()
+            .try_routes_async(move || {
+                let recorded = Arc::clone(&async_first);
+                async move {
+                    recorded.lock().expect("recorder").push("async");
+                    Ok(Router::new())
+                }
+            })
+            .try_routes(move || {
+                sync_second.lock().expect("recorder").push("sync");
+                Ok(Router::new())
+            });
+        RoutesFn::prepare_server(sync_last.routes_fn)
+            .await
+            .expect("the synchronous catalog must prepare a server");
+        assert_eq!(
+            *ran.lock().expect("recorder"),
+            vec!["sync"],
+            "the slot is shared in both directions: a later try_routes must replace \
+             an earlier try_routes_async"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_from_the_async_route_closure_surfaces_like_the_sync_one() {
+        let from_sync = RoutesFn::prepare_server(
+            Application::new()
+                .try_routes(|| Err(FrameworkError::internal("route catalog rejected")))
+                .routes_fn,
+        )
+        .await;
+        let from_async = RoutesFn::prepare_server(
+            Application::new()
+                .try_routes_async(|| async {
+                    Err(FrameworkError::internal("route catalog rejected"))
+                })
+                .routes_fn,
+        )
+        .await;
+
+        let sync_error = match from_sync {
+            Ok(_) => panic!("a synchronous route-construction error must abort preparation"),
+            Err(error) => error,
+        };
+        let async_error = match from_async {
+            Ok(_) => panic!("an asynchronous route-construction error must abort preparation"),
+            Err(error) => error,
+        };
+        assert!(
+            async_error.to_string().contains("route catalog rejected"),
+            "the closure's own error must survive: {async_error}"
+        );
+        assert_eq!(
+            async_error.to_string(),
+            sync_error.to_string(),
+            "an awaited catalog must fail with exactly what the synchronous one fails with"
+        );
+        assert_eq!(async_error.status_code(), sync_error.status_code());
+    }
+
+    #[tokio::test]
+    async fn registering_no_route_builder_still_prepares_an_empty_router() {
+        RoutesFn::prepare_server(Application::new().routes_fn)
+            .await
+            .expect("an application that registers no routes must still boot");
     }
 }
