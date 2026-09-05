@@ -15,5 +15,3 @@ error: cannot construct `magnetar::sessions::SessionGrant` with struct literal s
   |
 4 |     let _ = SessionGrant {};
   |             ^^^^^^^^^^^^
-  |
-  = note: private fields `session_id`, `user_id`, `opaque_token`, `token_digest`, `expires_at` and `metadata` that were not provided
