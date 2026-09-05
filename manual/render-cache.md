@@ -201,7 +201,10 @@ it ran, in terms you will recognize:
 On PostgreSQL the render runs in a `REPEATABLE READ` transaction so that what
 it read and the generations it recorded agree; a cached route's handler that
 updates a row another transaction changed after the render began sees a
-serialization failure. Cached routes are read paths.
+serialization failure. Design cached routes as read paths. A handler that
+does write inside the render transaction still advances generations, but it
+competes with concurrent writers for the same rows and can see the
+serialization failure above.
 
 A write made outside any transaction (`model.save()` on its own) commits
 first and advances its generations in an immediately following transaction,
@@ -285,10 +288,11 @@ depends on something no key could safely partition by.
 - **`RenderCache::bump_permission_version().await?`** - call this whenever
   an application action changes what a signed-in user is allowed to do (a
   role change, a permission grant or revocation). It advances a persisted
-  generation that every principal-keyed render observes, so it holds across
-  a restart and joins the transaction the role change runs in when there is
-  one. Without it, a user whose permissions just changed keeps matching
-  whatever was cached under their prior permission set.
+  generation that every principal-keyed render observes. The generation
+  survives a restart, and the bump joins the transaction the role change
+  runs in when there is one. Without the bump, a user whose permissions just
+  changed keeps matching whatever was cached under their prior permission
+  set.
 - **`RenderCache::advance_epoch()`**, or the hidden
   `render-cache:epoch-advance` command - an emergency invalidation. Every
   currently stored entry becomes unreachable by ordinary lookup at its very

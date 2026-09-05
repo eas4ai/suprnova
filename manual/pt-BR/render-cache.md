@@ -216,10 +216,12 @@ rodava, em termos que você vai reconhecer:
   depois de um job que muda o que as páginas em cache exibem.
 
 No PostgreSQL, a renderização roda em uma transação `REPEATABLE READ` para
-que o que foi lido e as gerações registradas estejam de acordo; o handler
-de uma rota em cache que atualiza uma linha que outra transação mudou
-depois que a renderização começou sofre uma falha de serialização. Rotas
-em cache são caminhos de leitura.
+que o que foi lido e as gerações registradas estejam de acordo; o handler de
+uma rota em cache que atualiza uma linha que outra transação mudou depois
+que a renderização começou sofre uma falha de serialização. Projete rotas em
+cache como caminhos de leitura. Um handler que grava dentro da transação de
+renderização ainda avança gerações, mas compete com escritores concorrentes
+pelas mesmas linhas e pode sofrer a falha de serialização acima.
 
 Uma escrita feita fora de qualquer transação (`model.save()` sozinho)
 confirma primeiro e avança suas gerações em uma transação imediatamente
@@ -304,14 +306,14 @@ segurança.
 ## Epoch, permissões e inspeção
 
 - **`RenderCache::bump_permission_version().await?`** - chame isso sempre
-  que uma ação da aplicação mudar o que um usuário autenticado tem
-  permissão para fazer (uma mudança de papel, uma concessão ou revogação de
+  que uma ação da aplicação mudar o que um usuário autenticado tem permissão
+  para fazer (uma mudança de papel, uma concessão ou revogação de
   permissão). Isso avança uma geração persistida que toda renderização com
-  chave por visitante autenticado observa, de modo que ela sobrevive a um
-  reinício e se junta à transação em que a mudança de papel roda, quando há
-  uma. Sem isso, um usuário cujas permissões acabaram de mudar continua
-  correspondendo ao que estava armazenado em cache sob seu conjunto de
-  permissões anterior.
+  chave por visitante autenticado observa. A geração sobrevive a um
+  reinício, e a chamada se junta à transação em que a mudança de papel roda,
+  quando há uma. Sem essa chamada, um usuário cujas permissões acabaram de
+  mudar continua correspondendo ao que estava armazenado em cache sob seu
+  conjunto de permissões anterior.
 - **`RenderCache::advance_epoch()`**, ou o comando oculto
   `render-cache:epoch-advance` - uma invalidação de emergência. Toda
   entrada atualmente armazenada se torna inacessível por busca comum já na

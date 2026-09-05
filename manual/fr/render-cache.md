@@ -223,7 +223,11 @@ Sous PostgreSQL, le rendu s'exécute dans une transaction `REPEATABLE READ`
 afin que ce qu'il a lu et les générations qu'il a enregistrées concordent ;
 le handler d'une route mise en cache qui met à jour une ligne qu'une autre
 transaction a modifiée après le début du rendu voit un échec de
-sérialisation. Les routes mises en cache sont des chemins de lecture.
+sérialisation. Concevez les routes mises en cache comme des chemins de
+lecture. Un handler qui écrit à l'intérieur de la transaction du rendu fait
+quand même avancer les générations, mais il est en concurrence avec des
+écrivains simultanés pour les mêmes lignes et peut rencontrer l'échec de
+sérialisation ci-dessus.
 
 Une écriture faite en dehors de toute transaction (`model.save()` seul) se
 commite en premier et fait avancer ses générations dans une transaction
@@ -309,16 +313,15 @@ quelque chose qu'aucune clé ne pourrait partitionner en toute sécurité.
 
 ## Epoch, permissions et inspection
 
-- **`RenderCache::bump_permission_version().await?`** - appelez ceci
-  chaque fois qu'une action applicative change ce qu'un utilisateur
-  connecté est autorisé à faire (un changement de rôle, l'octroi ou la
-  révocation d'une permission). Cela fait avancer une génération
-  persistée que chaque rendu indexé par visiteur observe, si bien
-  qu'elle tient à travers un redémarrage et rejoint la transaction dans
-  laquelle s'exécute le changement de rôle quand il y en a une. Sans
-  cela, un utilisateur dont les permissions viennent de changer continue
-  de correspondre à ce qui était mis en cache sous son précédent jeu de
-  permissions.
+- **`RenderCache::bump_permission_version().await?`** - appelez ceci chaque
+  fois qu'une action applicative change ce qu'un utilisateur connecté est
+  autorisé à faire (un changement de rôle, l'octroi ou la révocation d'une
+  permission). Cela fait avancer une génération persistée que chaque rendu
+  indexé par visiteur observe. La génération survit à un redémarrage, et
+  l'appel rejoint la transaction dans laquelle s'exécute le changement de
+  rôle quand il y en a une. Sans cet appel, un utilisateur dont les
+  permissions viennent de changer continue de correspondre à ce qui était
+  mis en cache sous son précédent jeu de permissions.
 - **`RenderCache::advance_epoch()`**, ou la commande masquée
   `render-cache:epoch-advance` - une invalidation d'urgence. Chaque entrée
   actuellement stockée devient inatteignable par une recherche ordinaire

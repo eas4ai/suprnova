@@ -215,11 +215,14 @@ se ejecutaba, en términos que reconocerás:
   de su ventana de frescura; ejecuta `render-cache:epoch-advance` después
   de un job que cambie lo que muestran las páginas cacheadas.
 
-En PostgreSQL el render se ejecuta en una transacción `REPEATABLE READ`
-para que lo que leyó y las generaciones que registró concuerden; el
-handler de una ruta cacheada que actualiza una fila que otra transacción
-cambió después de que empezara el render ve un fallo de serialización.
-Las rutas cacheadas son rutas de lectura.
+En PostgreSQL el render se ejecuta en una transacción `REPEATABLE READ` para
+que lo que leyó y las generaciones que registró concuerden; el handler de
+una ruta cacheada que actualiza una fila que otra transacción cambió después
+de que empezara el render ve un fallo de serialización. Diseña las rutas
+cacheadas como rutas de lectura. Un handler que sí escribe dentro de la
+transacción del render igual avanza generaciones, pero compite con
+escritores concurrentes por las mismas filas y puede ver el fallo de
+serialización anterior.
 
 Una escritura hecha fuera de cualquier transacción (`model.save()` por su
 cuenta) confirma primero y avanza sus generaciones en una transacción
@@ -307,12 +310,12 @@ que ninguna clave podría particionar con seguridad.
 - **`RenderCache::bump_permission_version().await?`** - llama a esto cada
   vez que una acción de la aplicación cambie lo que un usuario con sesión
   iniciada tiene permitido hacer (un cambio de rol, una concesión o
-  revocación de permiso). Avanza una generación persistida que observa
-  todo render con clave por principal, así que se mantiene tras un
-  reinicio y se une a la transacción en la que se ejecuta el cambio de
-  rol, cuando existe una. Sin ello, un usuario cuyos permisos acaban de
-  cambiar sigue coincidiendo con lo que se cacheó bajo su anterior
-  conjunto de permisos.
+  revocación de permiso). Avanza una generación persistida que observa todo
+  render con clave por principal. La generación sobrevive a un reinicio, y
+  la llamada se une a la transacción en la que se ejecuta el cambio de rol,
+  cuando existe una. Sin esta llamada, un usuario cuyos permisos acaban de
+  cambiar sigue coincidiendo con lo que se cacheó bajo su anterior conjunto
+  de permisos.
 - **`RenderCache::advance_epoch()`**, o el comando oculto
   `render-cache:epoch-advance` - una invalidación de emergencia. Toda
   entrada actualmente almacenada se vuelve inalcanzable por búsqueda

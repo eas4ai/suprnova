@@ -225,8 +225,11 @@ Auf PostgreSQL läuft das Rendering in einer `REPEATABLE READ`-Transaktion,
 damit das, was es gelesen hat, und die Generationen, die es aufgezeichnet
 hat, übereinstimmen; der Handler einer gecachten Route, der eine Zeile
 aktualisiert, die eine andere Transaktion verändert hat, nachdem das
-Rendering begonnen hat, erhält einen Serialisierungsfehler. Gecachte Routen
-sind Lesepfade.
+Rendering begonnen hat, erhält einen Serialisierungsfehler. Gestalten Sie
+gecachte Routen als Lesepfade. Ein Handler, der innerhalb dieser Transaktion
+schreibt, erhöht weiterhin Generationen, konkurriert dabei aber mit
+gleichzeitigen Schreibern um dieselben Zeilen und kann den oben genannten
+Serialisierungsfehler erhalten.
 
 Ein Schreibzugriff, der außerhalb jeder Transaktion erfolgt (`model.save()`
 für sich allein), committet zuerst und erhöht seine Generationen in einer
@@ -314,11 +317,11 @@ Schlüssel sicher partitionieren könnte.
   wann immer eine Anwendungsaktion ändert, wozu ein angemeldeter Benutzer
   berechtigt ist (eine Rollenänderung, eine Berechtigungserteilung oder ein
   Berechtigungsentzug). Es erhöht eine persistierte Generation, die jedes
-  principal-geschlüsselte Rendering beobachtet, sodass sie einen Neustart
-  übersteht und sich der Transaktion anschließt, in der die
-  Rollenänderung läuft, sofern es eine gibt. Ohne dies passt ein Benutzer,
-  dessen Berechtigungen sich gerade geändert haben, weiterhin zu allem, was
-  unter seinem vorherigen Berechtigungssatz gecacht wurde.
+  principal-geschlüsselte Rendering beobachtet. Die Generation übersteht
+  einen Neustart, und der Aufruf schließt sich der Transaktion an, in der
+  die Rollenänderung läuft, sofern es eine gibt. Ohne diesen Aufruf passt
+  ein Benutzer, dessen Berechtigungen sich gerade geändert haben, weiterhin
+  zu allem, was unter seinem vorherigen Berechtigungssatz gecacht wurde.
 - **`RenderCache::advance_epoch()`**, oder der verborgene Befehl
   `render-cache:epoch-advance` - eine Notfall-Invalidierung. Jeder aktuell
   gespeicherte Eintrag wird bei seiner allernächsten Anfrage sofort über das
