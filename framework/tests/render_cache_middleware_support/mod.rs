@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -26,9 +27,9 @@ use suprnova::render_cache::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    App, Auth, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse, Lang, Locale,
-    MiddlewareRegistry, Model, Next, Request, Response, Router, attrs, handle_request,
-    scope_locale,
+    App, Auth, AuthConfig, AuthManager, ConnectionTrait, Crypt, DB, DatabaseUserProvider,
+    EncryptionKey, FrameworkError, GenericUser, HttpResponse, Lang, Locale, MiddlewareRegistry,
+    Model, Next, Request, Response, Router, attrs, handle_request, scope_locale,
 };
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
@@ -49,6 +50,16 @@ pub struct Post {
     pub id: i64,
     pub title: String,
     pub views: i64,
+}
+
+/// The row `DatabaseUserProvider` resolves `Auth::user()` from on the
+/// `/shows-auth-user` route (final review, F2). Written through the ORM by
+/// the test that proves such a render is invalidated by a change to the
+/// user's own row.
+#[suprnova::model(table = "users", timestamps = false, fillable = ["name"])]
+pub struct User {
+    pub id: i64,
+    pub name: String,
 }
 
 struct MiddlewareMigrator;
@@ -93,6 +104,39 @@ impl suprnova::Middleware for LoginHeader {
             Auth::set_user(Arc::new(Principal(id.to_owned())));
         }
         next(request).await
+    }
+}
+
+/// The sign-in shape that makes `Auth::user()` reach a `UserProvider`
+/// (final review, F2): a request carrying `x-test-provider-login: <id>` has
+/// that id established as the default guard's identity (`Auth::login_id`,
+/// inside a test session scope) with **no** user object cached for the
+/// request, so the first `Auth::user()` in the handler resolves the row
+/// through the `DatabaseUserProvider` this harness registers on the `users`
+/// provider name. `LoginHeader` above cannot serve this purpose: `set_user`
+/// caches the user object, so `Auth::user()` never touches a provider.
+///
+/// Runs before `RenderCacheMiddleware`, like `LoginHeader`, so the session
+/// write `login_id` performs happens outside the render's collector scope
+/// and the identity is already established when the middleware derives the
+/// key; the handler's own `Auth::user()` then reads request state, never the
+/// session.
+pub struct ProviderLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for ProviderLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(id) = request.header("x-test-provider-login").map(str::to_owned) else {
+            return next(request).await;
+        };
+        suprnova::session::session_scope_for_test(
+            suprnova::session::new_session_slot_for_test(),
+            async move {
+                Auth::login_id(id).expect("login_id inside the test session scope");
+                next(request).await
+            },
+        )
+        .await
     }
 }
 
@@ -333,12 +377,42 @@ pub struct Harness {
     middleware: Arc<MiddlewareRegistry>,
     clock: Arc<AdjustableTestClock>,
     waiting: Arc<WaiterTrackingCoordinator>,
-    _conn: suprnova::database::DbConnection,
+    conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
-    _tempdir: tempfile::TempDir,
+    /// The directory holding a fresh SQLite database; `None` when booted on
+    /// a live server connection or on a previous boot's database.
+    _tempdir: Option<tempfile::TempDir>,
     /// Held only for its `Drop` (removes the directory on disk); `None`
     /// unless booted through [`boot_with_render_cache_and_l1_for_test`].
     _l1_tempdir: Option<tempfile::TempDir>,
+    /// The L1 directory the runtime was installed with, whether this boot
+    /// created it or inherited it; `None` when L1 is disabled.
+    l1_dir: Option<PathBuf>,
+}
+
+/// Where a boot gets its database.
+pub enum BootDatabase {
+    /// A fresh WAL-mode SQLite file in a new temporary directory; see
+    /// [`boot_with_render_cache`] for why a file rather than memory.
+    FreshSqlite,
+    /// A live server (Postgres or MySQL) connection. The harness drops and
+    /// recreates every table it owns, so the database must be disposable.
+    LiveServer(suprnova::database::DbConnection),
+    /// A connection a previous boot in this process already prepared;
+    /// schema and rows are kept exactly as that boot left them.
+    Existing(suprnova::database::DbConnection),
+}
+
+/// Where a boot gets its L1 directory.
+pub enum BootL1 {
+    /// No L1 provider.
+    Disabled,
+    /// A fresh temporary directory, with L0 capped at one entry; see
+    /// [`boot_with_render_cache_and_l1_for_test`].
+    Fresh,
+    /// A directory a previous boot created, reopened as is, with the same
+    /// single-entry L0 cap.
+    Existing(PathBuf),
 }
 
 /// Boots a fresh SQLite database with WAL journaling, installs RenderCache,
@@ -374,7 +448,7 @@ pub struct Harness {
 /// transaction began and never blocks a writer, and a writer never blocks
 /// a reader. That is exactly the isolation the render's read view needs.
 pub async fn boot_with_render_cache() -> Arc<Harness> {
-    boot(true, false).await
+    boot(true, BootDatabase::FreshSqlite, BootL1::Disabled).await
 }
 
 /// Test-only for the fix round 1, item 2 regression test: boots exactly
@@ -386,7 +460,7 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
 /// already registered its own middleware" without also fighting this
 /// harness's own test-isolation clear.
 pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
-    boot(false, false).await
+    boot(false, BootDatabase::FreshSqlite, BootL1::Disabled).await
 }
 
 /// Test-only for fix round 2, item 5: boots exactly like
@@ -399,10 +473,85 @@ pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> A
 /// this is the first and only place L1 actually runs together with the
 /// middleware.
 pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
-    boot(true, true).await
+    boot(true, BootDatabase::FreshSqlite, BootL1::Fresh).await
 }
 
-async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
+/// Boots exactly like [`boot_with_render_cache`], on a live server
+/// connection instead of a fresh SQLite file (final review, F1 / ruling
+/// R117): the render-cache race that SQLite's WAL snapshot hides by
+/// construction can only be proven against a server whose default
+/// transaction isolation is not a snapshot. Drops and recreates every table
+/// this harness owns (`posts`, `users`, and the three RenderCache tables),
+/// so `conn` must point at a disposable database.
+pub async fn boot_with_render_cache_on_live_server_for_test(
+    conn: suprnova::database::DbConnection,
+) -> Arc<Harness> {
+    boot(true, BootDatabase::LiveServer(conn), BootL1::Disabled).await
+}
+
+/// A simulated process restart (final review, F3 / ruling R119): a fresh
+/// runtime slot (`RenderCache::install` replaces the installed runtime, so
+/// L0, the coordinator, and the lease map start empty), over the **same**
+/// database `previous` booted and the **same** L1 directory it published
+/// into, reopened as is. `previous` must have been booted with L1 and must
+/// stay alive for the duration (it owns the directory on disk).
+pub async fn reboot_with_render_cache_on_the_same_database_and_l1_for_test(
+    previous: &Harness,
+) -> Arc<Harness> {
+    let l1_dir = previous
+        .l1_dir
+        .clone()
+        .expect("the previous boot must have been made with L1 enabled");
+    boot(
+        true,
+        BootDatabase::Existing(previous.conn.clone()),
+        BootL1::Existing(l1_dir),
+    )
+    .await
+}
+
+/// The tables this harness owns on a live server, dropped and recreated by
+/// every `BootDatabase::LiveServer` boot. Children before parents is not a
+/// concern here (nothing references anything), but the RenderCache tables
+/// come last so a failed drop of one of them is the loudest failure.
+const OWNED_TABLES: [&str; 5] = [
+    "posts",
+    "users",
+    "suprnova_render_epochs",
+    "suprnova_render_generation_log",
+    "suprnova_render_generations",
+];
+
+/// Creates `posts` and `users` in the active backend's own DDL. SQLite's
+/// `INTEGER PRIMARY KEY AUTOINCREMENT`, Postgres's `BIGSERIAL`, and
+/// MySQL's `BIGINT AUTO_INCREMENT` all back the models' `i64` ids.
+async fn create_owned_tables(conn: &suprnova::database::DbConnection) {
+    let backend = conn.inner().get_database_backend();
+    let id_column = match backend {
+        sea_orm::DbBackend::Sqlite => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        sea_orm::DbBackend::Postgres => "BIGSERIAL PRIMARY KEY",
+        sea_orm::DbBackend::MySql => "BIGINT AUTO_INCREMENT PRIMARY KEY",
+        other => panic!("this harness has no DDL for backend {other:?}"),
+    };
+    let views_column = match backend {
+        sea_orm::DbBackend::Sqlite => "INTEGER NOT NULL DEFAULT 0",
+        _ => "BIGINT NOT NULL DEFAULT 0",
+    };
+    conn.inner()
+        .execute_unprepared(&format!(
+            "CREATE TABLE posts (id {id_column}, title TEXT NOT NULL, views {views_column})"
+        ))
+        .await
+        .expect("create posts table");
+    conn.inner()
+        .execute_unprepared(&format!(
+            "CREATE TABLE users (id {id_column}, name TEXT NOT NULL)"
+        ))
+        .await
+        .expect("create users table");
+}
+
+async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
@@ -418,39 +567,67 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     }
 
     let guard = TestContainer::fake();
-    let tempdir = tempfile::tempdir().expect("tempdir for render cache middleware test database");
-    let db_path = tempdir.path().join("render-cache-middleware.sqlite3");
-    let config = suprnova::database::DatabaseConfig::builder()
-        .url(format!("sqlite://{}", db_path.display()))
-        .max_connections(4)
-        .min_connections(1)
-        .logging(false)
-        .build();
-    let conn = suprnova::database::DbConnection::connect(&config)
-        .await
-        .expect("connect sqlite");
-    conn.inner()
-        .execute_unprepared("PRAGMA journal_mode=WAL")
-        .await
-        .expect("enable WAL journaling");
-    conn.inner()
-        .execute_unprepared("PRAGMA busy_timeout=5000")
-        .await
-        .expect("set busy timeout");
-    MiddlewareMigrator::up(conn.inner(), None)
-        .await
-        .expect("apply render cache migration");
-    conn.inner()
-        .execute_unprepared(
-            "CREATE TABLE posts (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL, \
-                views INTEGER NOT NULL DEFAULT 0\
-            )",
-        )
-        .await
-        .expect("create posts table");
+    let (conn, tempdir) = match database {
+        BootDatabase::FreshSqlite => {
+            let tempdir =
+                tempfile::tempdir().expect("tempdir for render cache middleware test database");
+            let db_path = tempdir.path().join("render-cache-middleware.sqlite3");
+            let config = suprnova::database::DatabaseConfig::builder()
+                .url(format!("sqlite://{}", db_path.display()))
+                .max_connections(4)
+                .min_connections(1)
+                .logging(false)
+                .build();
+            let conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            conn.inner()
+                .execute_unprepared("PRAGMA journal_mode=WAL")
+                .await
+                .expect("enable WAL journaling");
+            conn.inner()
+                .execute_unprepared("PRAGMA busy_timeout=5000")
+                .await
+                .expect("set busy timeout");
+            MiddlewareMigrator::up(conn.inner(), None)
+                .await
+                .expect("apply render cache migration");
+            create_owned_tables(&conn).await;
+            (conn, Some(tempdir))
+        }
+        BootDatabase::LiveServer(conn) => {
+            for table in OWNED_TABLES {
+                conn.inner()
+                    .execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+                    .await
+                    .expect("drop a harness-owned table on the live server");
+            }
+            // The migration's `up` directly, not the migrator: a live
+            // database that ran a previous boot still lists the migration
+            // as applied in `seaql_migrations`, and the migrator would then
+            // skip recreating the tables this boot just dropped.
+            let manager = sea_orm_migration::SchemaManager::new(conn.inner());
+            suprnova::render_cache::migration::Migration
+                .up(&manager)
+                .await
+                .expect("apply the render cache migration to the live server");
+            create_owned_tables(&conn).await;
+            (conn, None)
+        }
+        BootDatabase::Existing(conn) => (conn, None),
+    };
     TestContainer::singleton(conn.clone());
+    // Final review, F2: the named-guard system, so `Auth::user()` resolves
+    // the default guard through a registered provider rather than the
+    // legacy container-bound fallback, and a `DatabaseUserProvider` over
+    // the `users` table as that provider. `Auth::id()`, `Auth::check()`,
+    // and `Auth::set_user` are manager-free, so every route that only ever
+    // used those is unaffected; `ProviderLoginHeader` is the only sign-in
+    // that leaves a request with an identity but no cached user object,
+    // which is what sends `Auth::user()` to the provider.
+    TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+    Auth::register_provider("users", Arc::new(DatabaseUserProvider::new("users")))
+        .expect("register the users provider on the test AuthManager");
 
     let waiting = Arc::new(WaiterTrackingCoordinator::new(LocalCoordinatorLimits {
         lease_ms: 30_000,
@@ -472,6 +649,35 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .vary(VarianceDimension::Principal)
         .build()
         .expect("private policy");
+    // Final review, F3 / ruling R119: the same private shape with L1, so a
+    // pre-bump entry can survive a simulated restart on disk and be proven
+    // a miss afterwards. Only meaningful when booted with L1.
+    let private_l1_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
+        .build()
+        .expect("private l1 policy");
+    // Final review, F2 / ruling R118: a public route whose only read is the
+    // query-builder facade (`DB::table("posts").get()`), and one whose only
+    // read is raw SQL (`DB::select`, `select_one`, or `scalar` by route
+    // parameter). Neither declares any variance; the question is what the
+    // collector records for each read shape.
+    let builder_read_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("builder read policy");
+    let raw_read_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("raw read policy");
+    // Final review, F2: a private route whose body shows `Auth::user()`,
+    // resolved through `DatabaseUserProvider` (see `ProviderLoginHeader`).
+    let shows_auth_user_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("shows auth user policy");
     let sets_cookie_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
@@ -648,6 +854,12 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
+    let router: Router = router.get("/private-l1/{id}", private_handler).into();
+    let router: Router = router.get("/builder-read", builder_read_handler).into();
+    let router: Router = router.get("/raw-read/{kind}", raw_read_handler).into();
+    let router: Router = router
+        .get("/shows-auth-user", shows_auth_user_handler)
+        .into();
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router.get("/leaky", leaky_handler).into();
@@ -807,6 +1019,17 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .expect("attach stale policy")
         .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
         .expect("attach private policy")
+        .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
+        .expect("attach private l1 policy")
+        .try_render_cache("/builder-read", GroupPolicy::from(builder_read_policy))
+        .expect("attach builder read policy")
+        .try_render_cache("/raw-read/{kind}", GroupPolicy::from(raw_read_policy))
+        .expect("attach raw read policy")
+        .try_render_cache(
+            "/shows-auth-user",
+            GroupPolicy::from(shows_auth_user_policy),
+        )
+        .expect("attach shows auth user policy")
         .try_render_cache("/sets-cookie", GroupPolicy::from(sets_cookie_policy))
         .expect("attach sets-cookie policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
@@ -939,20 +1162,32 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;
     config.enabled = true;
-    let l1_tempdir = if l1_enabled {
-        let dir = tempfile::tempdir().expect("l1 tempdir");
-        config.l1 = suprnova::render_cache::L1Config::File {
-            directory: dir.path().to_path_buf(),
-            max_bytes: 16 * 1024 * 1024,
-        };
-        // Forces a second publish to evict the first from L0 (see this
-        // function's own doc), while L1's byte budget above comfortably
-        // holds both of this suite's tiny bodies.
-        config.l0.max_entries = 1;
-        Some(dir)
-    } else {
-        config.l1 = suprnova::render_cache::L1Config::Disabled;
-        None
+    let (l1_tempdir, l1_dir) = match l1 {
+        BootL1::Disabled => {
+            config.l1 = suprnova::render_cache::L1Config::Disabled;
+            (None, None)
+        }
+        BootL1::Fresh => {
+            let dir = tempfile::tempdir().expect("l1 tempdir");
+            let path = dir.path().to_path_buf();
+            config.l1 = suprnova::render_cache::L1Config::File {
+                directory: path.clone(),
+                max_bytes: 16 * 1024 * 1024,
+            };
+            // Forces a second publish to evict the first from L0 (see this
+            // function's own doc), while L1's byte budget above comfortably
+            // holds both of this suite's tiny bodies.
+            config.l0.max_entries = 1;
+            (Some(dir), Some(path))
+        }
+        BootL1::Existing(path) => {
+            config.l1 = suprnova::render_cache::L1Config::File {
+                directory: path.clone(),
+                max_bytes: 16 * 1024 * 1024,
+            };
+            config.l0.max_entries = 1;
+            (None, Some(path))
+        }
     };
 
     // Fix round 1, item 3: register the identity-establishing middleware
@@ -969,6 +1204,9 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
     // deployment can produce and which would have hidden exactly the
     // ordering bug fix round 1 found.
     suprnova::middleware::register_global_middleware(LoginHeader);
+    // Final review, F2: the provider-resolving sign-in, same ordering
+    // requirement as `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(ProviderLoginHeader);
     // Fix round 4, Leak B: the non-default-guard sign-in, same ordering
     // requirement as `LoginHeader` above.
     suprnova::middleware::register_global_middleware(NamedGuardLoginHeader);
@@ -1020,10 +1258,11 @@ async fn boot(clear_global_middleware: bool, l1_enabled: bool) -> Arc<Harness> {
         middleware,
         clock,
         waiting,
-        _conn: conn,
+        conn,
         _guard: guard,
         _tempdir: tempdir,
         _l1_tempdir: l1_tempdir,
+        l1_dir,
     })
 }
 
@@ -1041,6 +1280,33 @@ pub fn ledger() -> suprnova::render_cache::ledger::SqlGenerationLedger {
 /// independent of any render.
 pub async fn advance_posts(_harness: &Harness) {
     create_extra_post("advanced").await;
+}
+
+/// Creates the `users` row `/shows-auth-user` resolves, through the ORM,
+/// returning its id. Final review, F2.
+pub async fn create_user(_harness: &Harness, name: &str) -> i64 {
+    let name = name.to_owned();
+    User::create(attrs! { name: name })
+        .await
+        .expect("create user")
+        .id
+}
+
+/// Renames a `users` row through the ORM (`save`), inside its own
+/// `DB::transaction`, so the write advances the `users` table and record
+/// generations the way any application write would. Final review, F2.
+pub async fn rename_user(_harness: &Harness, id: i64, name: &str) {
+    let name = name.to_owned();
+    suprnova::DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let mut user = User::find(id).await?.expect("the user row exists");
+            user.name = name;
+            user.save().await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("rename user");
 }
 
 /// Creates one more `posts` row inside its own `DB::transaction`, through
@@ -1109,6 +1375,70 @@ async fn private_handler(_request: Request) -> Response {
 /// `session_read`). Without `key_omits_observed_privacy`, this is exactly
 /// the shape that stores one identity's render under a principal-free key
 /// and serves it back to a different identity.
+/// Final review, F2 / ruling R118: reads `posts` through the query-builder
+/// facade only. The body carries the row count so a stale serve is visible
+/// in the response, not only in the render count.
+async fn builder_read_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let rows = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "builder read sees {} posts (render {n})",
+        rows.len()
+    )))
+}
+
+/// Final review, F2 / ruling R118: reads `posts` through exactly one raw
+/// facade method, chosen by the `{kind}` route parameter: `select`,
+/// `select-one`, or `scalar`. Each is its own key, so one route proves all
+/// three shapes decline to store.
+async fn raw_read_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let kind = request.param("kind").unwrap_or("select").to_owned();
+    // Plain column reads for the row-returning shapes: an aggregate column
+    // does not reliably carry a type through the dynamic row conversion on
+    // SQLite (see `DbTableBuilder::count`'s own doc), and what matters here
+    // is the read shape, not the arithmetic.
+    let count: i64 = match kind.as_str() {
+        "select" => DB::select("SELECT id FROM posts", vec![]).await?.len() as i64,
+        "select-one" => DB::select_one("SELECT id FROM posts ORDER BY id LIMIT 1", vec![])
+            .await?
+            .map_or(0, |_| 1),
+        "scalar" => DB::scalar("SELECT COUNT(*) FROM posts", vec![]).await?,
+        other => {
+            return Ok(HttpResponse::text(format!("unknown raw read kind {other}")).status(404));
+        }
+    };
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "raw {kind} sees {count} posts (render {n})"
+    )))
+}
+
+/// Final review, F2: shows the signed-in user's own row, resolved through
+/// `Auth::user()` and therefore through `DatabaseUserProvider` when the
+/// request was signed in by `ProviderLoginHeader`. The body carries the
+/// row's `name` so a stale serve after the row changes is visible.
+async fn shows_auth_user_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let user = Auth::user().await?;
+    let shown = match user {
+        Some(user) => {
+            let name = user
+                .as_any()
+                .downcast_ref::<GenericUser>()
+                .and_then(|generic| generic.attribute("name"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("<no name>")
+                .to_owned();
+            format!("user {} named {name}", user.get_auth_identifier())
+        }
+        None => "nobody".to_owned(),
+    };
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("{shown} (render {n})")))
+}
+
 async fn leaky_handler(_request: Request) -> Response {
     counting_route::on_render_start().await;
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());

@@ -10,6 +10,12 @@
 //!   invalidation - the same reasoning as ruling R24 on query classes.
 //!   `Config::get::<T>()` is also type-keyed rather than name-keyed, so
 //!   there is no stable name to build an identity from at that seam.
+//! - **Raw SQL reads mark the report incomplete.** `DB::select`,
+//!   `DB::select_one`, `DB::scalar`, and `DB::select_on` cannot name the
+//!   tables they read, so they call [`observe_unobservable_read`] and the
+//!   render is never stored (final review, F2). The query-builder facade
+//!   (`DB::table(..).get()`, `first()`, `count()`) knows its table and
+//!   records it through [`observe_table_read`] instead.
 //! - **[`observe_secret_context_read`] has no automatic producer.**
 //!   `Config::get::<T>()` returns whole typed structs, so a secret read is
 //!   indistinguishable from any other configuration read at that seam;
@@ -248,6 +254,23 @@ pub fn observe(identity: DependencyIdentity) {
         state.seen.insert(identity.clone());
         state.report.observed.push(identity);
     });
+}
+
+/// A read whose dependencies cannot be named at all: raw SQL through
+/// `DB::select`, `DB::select_one`, `DB::scalar`, or `DB::select_on`, whose
+/// statement text is opaque to the framework.
+///
+/// Marks the report incomplete, the same way an overflowed report or an
+/// unencodable identity does, so the representation is never stored: a
+/// render that read something the collector cannot account for is not one
+/// whose stored dependency set could ever be trusted to invalidate it (final
+/// review, F2; the 005 contract's "insufficiently observable reads bypass
+/// caching"). A no-op outside a scope, like every other observer here.
+pub fn observe_unobservable_read() {
+    if !is_active() {
+        return;
+    }
+    mark_incomplete();
 }
 
 /// A read of one table.

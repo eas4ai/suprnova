@@ -13,6 +13,32 @@ use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 use crate::database::transaction::{ExecutorChoice, TxHandle};
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
+/// The executor every read in this module goes through: the ambient
+/// `CURRENT_TX` when one is open (a render's own transaction, so the
+/// window-close read shares its snapshot; a caller's write transaction, so a
+/// probe lands on its connection), and the primary pool otherwise, never a
+/// read replica.
+///
+/// Resolved directly rather than through `DB::select_on` (final review, F2 /
+/// ruling R118): the raw `DB::select` family now marks an active collector
+/// report incomplete, because a raw statement's tables cannot be recorded,
+/// and the ledger's own reads run inside every render's collector scope.
+/// Routed through the facade, every render would decline itself. The same
+/// primary pin as before: `resolve_read` still yields to the ambient
+/// transaction first and then honours the explicit primary override without
+/// ever consulting `__read_replica__`, which a database-authoritative ledger
+/// must never read (a lagging follower would report an entry fresh that the
+/// primary already moved past).
+async fn primary_executor() -> Result<ExecutorChoice, FrameworkError> {
+    ExecutorChoice::resolve_read(None, Some(PRIMARY_CONNECTION_NAME), None).await
+}
+
+/// Wraps a driver error into the framework's database error, the way every
+/// `exec` call in this module reports one.
+fn database_error(error: sea_orm::DbErr) -> FrameworkError {
+    FrameworkError::database(error.to_string())
+}
+
 /// Hex-encodes an identity's digest for the `identity` column. Every value
 /// that crosses the database boundary as an identity goes through this, so
 /// the encoding never drifts between the write path (which knows
@@ -106,16 +132,16 @@ fn provider_error(error: FrameworkError) -> RenderCacheError {
 /// all): `install` should fail loudly on that too, not report it as "the
 /// migration is missing".
 pub(crate) async fn migration_present() -> Result<bool, FrameworkError> {
-    match DB::select_on(
-        PRIMARY_CONNECTION_NAME,
+    let exec = primary_executor().await?;
+    let statement = sea_orm::Statement::from_sql_and_values(
+        exec.backend(),
         "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
         vec![],
-    )
-    .await
-    {
+    );
+    match exec.query_one(statement).await {
         Ok(_) => Ok(true),
         Err(e) if is_missing_table_error(&e.to_string()) => Ok(false),
-        Err(e) => Err(e),
+        Err(e) => Err(database_error(e)),
     }
 }
 
@@ -511,33 +537,32 @@ impl GenerationLedger for SqlGenerationLedger {
             return Ok(set);
         }
 
-        // Pinned to the primary, not `DB::select`: `resolve_read` silently
-        // routes an ambient-transaction-free read to a registered
-        // `__read_replica__`, and a database-authoritative ledger reading a
-        // lagging follower would recheck an entry against a generation the
-        // primary already moved past, reporting it fresh when it is not.
-        // `DB::select_on` still yields to `CURRENT_TX` first (see its own
-        // doc), which is the precedence this needs: inside a transaction
-        // the transaction's own connection wins, exactly as `DB::select`
-        // would have resolved it.
-        let backend = DB::connection()
-            .map_err(provider_error)?
-            .inner()
-            .get_database_backend();
+        // Pinned to the primary through `primary_executor` (see its doc):
+        // inside a transaction the transaction's own connection wins,
+        // otherwise the primary pool, never a replica.
+        let exec = primary_executor().await.map_err(provider_error)?;
+        let backend = exec.backend();
         let digests: Vec<String> = dependencies.iter().map(hex::encode).collect();
         let sql = format!(
             "SELECT identity, generation FROM suprnova_render_generations WHERE identity IN ({})",
             placeholders(backend, digests.len()).map_err(provider_error)?
         );
         let values: Vec<Value> = digests.into_iter().map(Value::from).collect();
-        let rows = DB::select_on(PRIMARY_CONNECTION_NAME, &sql, values)
+        let rows = exec
+            .query_all(sea_orm::Statement::from_sql_and_values(
+                backend, &sql, values,
+            ))
             .await
-            .map_err(provider_error)?;
+            .map_err(|e| provider_error(database_error(e)))?;
 
         let mut found: HashMap<String, u64> = HashMap::new();
         for row in rows {
-            let identity = row.get_string("identity").map_err(provider_error)?;
-            let generation = row.get_int("generation").map_err(provider_error)?;
+            let identity: String = row
+                .try_get_by_index(0)
+                .map_err(|e| provider_error(database_error(e)))?;
+            let generation: i64 = row
+                .try_get_by_index(1)
+                .map_err(|e| provider_error(database_error(e)))?;
             found.insert(identity, generation as u64);
         }
 
@@ -570,24 +595,26 @@ impl GenerationLedger for SqlGenerationLedger {
         // `advance_epoch` is the emergency invalidation lever, its `UPDATE`
         // always lands on the primary, and if this read came from a lagging
         // replica the lever would appear to do nothing for the length of
-        // replication lag. `DB::scalar` has no `_on` variant, so this reads
-        // the row through `DB::select_on` and decodes it by column name
-        // instead.
-        let rows = DB::select_on(
-            PRIMARY_CONNECTION_NAME,
-            "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
-            vec![],
-        )
-        .await
-        .map_err(provider_error)?;
-        let row = rows.first().ok_or_else(|| {
-            tracing::warn!(
-                target: "suprnova::render_cache",
-                "epoch: suprnova_render_epochs has no singleton row",
-            );
-            RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
-        })?;
-        let epoch = row.get_int("epoch").map_err(provider_error)?;
+        // replication lag.
+        let exec = primary_executor().await.map_err(provider_error)?;
+        let row = exec
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                exec.backend(),
+                "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+                vec![],
+            ))
+            .await
+            .map_err(|e| provider_error(database_error(e)))?
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: "suprnova::render_cache",
+                    "epoch: suprnova_render_epochs has no singleton row",
+                );
+                RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
+            })?;
+        let epoch: i64 = row
+            .try_get_by_index(0)
+            .map_err(|e| provider_error(database_error(e)))?;
         Ok(epoch as u64)
     }
 }

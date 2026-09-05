@@ -27,8 +27,8 @@ mod render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
-    dispatch_get, dispatch_head, ensure_per_tenant_authz_gate, ensure_round3_authz_gate,
-    ensure_round4_per_user_authz_gate,
+    create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
+    ensure_round3_authz_gate, ensure_round4_per_user_authz_gate, rename_user,
 };
 
 #[tokio::test]
@@ -1889,5 +1889,157 @@ async fn declaring_principal_does_not_cover_a_flag_scoped_by_team() {
         counting_route::renders(),
         after_repeat + 1,
         "team alpha is a genuine miss"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Closing fix round (final review F2, ruling R118): the query-builder and
+// raw read seams.
+// ---------------------------------------------------------------------
+
+/// Final review, F2 (the review's Probe B, promoted): a render whose only
+/// read is `DB::table("posts").get()` observes the `posts` table, so an ORM
+/// write to `posts` after publication makes the next request render again
+/// rather than serve the stale row count. Before the fix the builder facade
+/// recorded nothing, the entry observed only `Broad`, and the second
+/// dispatch below was served stale with `renders()` still `1`.
+///
+/// Proven by revert: with `observe_table_read` removed from
+/// `DbTableBuilder::get`, this fails at the "reconciled" assertion with
+/// `left: 1, right: 2` and the stale `0 posts` body.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_query_builder_read_is_reconciled_by_an_orm_write() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        String::from_utf8_lossy(&first.body).contains("sees 0 posts"),
+        "precondition: the table is empty at the first render"
+    );
+    let repeat = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: a builder-only read is cacheable and the repeat is a hit"
+    );
+    assert_eq!(repeat.header("age"), Some("0"));
+
+    advance_posts(&harness).await;
+
+    let after_write = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "an ORM write to posts landed after publication; a render that read posts through \
+         DB::table must be reconciled, not served stale"
+    );
+    assert!(
+        String::from_utf8_lossy(&after_write.body).contains("sees 1 posts"),
+        "the re-render shows the written row - got {:?}",
+        String::from_utf8_lossy(&after_write.body)
+    );
+
+    dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "control: the re-render published and this repeat is a hit"
+    );
+}
+
+/// Final review, F2: a render whose only read is raw SQL (`DB::select`,
+/// `DB::select_one`, or `DB::scalar`; one key per shape) is never stored.
+/// The framework cannot name the tables such a statement read, so it marks
+/// the collector report incomplete and the render is declined, the same way
+/// an overflowed report is: served, never cached, and never served stale.
+///
+/// Proven by revert: with `observe_unobservable_read` removed from the three
+/// facade methods, the first shape's repeat is a hit (`renders()` stays at
+/// `1` where `2` is required) and `inspect` finds a stored entry.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_raw_sql_read_is_never_stored() {
+    let harness = boot_with_render_cache().await;
+
+    let mut expected_renders = 0;
+    for kind in ["select", "select-one", "scalar"] {
+        let path = format!("/raw-read/{kind}");
+        let first = dispatch_get(&harness, &path, &[]).await;
+        expected_renders += 1;
+        assert_eq!(
+            first.status,
+            StatusCode::OK,
+            "{kind}: the raw read itself works"
+        );
+        assert_eq!(
+            counting_route::renders(),
+            expected_renders,
+            "{kind}: first render"
+        );
+        let key = RenderCache::key_for_route_for_test("/raw-read/{kind}", &[("kind", kind)], None);
+        assert!(
+            RenderCache::inspect(&key).await.expect("inspect").is_none(),
+            "{kind}: a render that read through raw SQL is never published"
+        );
+
+        dispatch_get(&harness, &path, &[]).await;
+        expected_renders += 1;
+        assert_eq!(
+            counting_route::renders(),
+            expected_renders,
+            "{kind}: the repeat renders again; a raw-SQL render is never a hit"
+        );
+    }
+}
+
+/// Final review, F2: `Auth::user()` resolves through `DatabaseUserProvider`,
+/// which reads the `users` table through `DB::table(..).first()`; with the
+/// builder facade observed, a `PrivateCached` render that shows the
+/// signed-in user's own row is invalidated by an ORM write to that row. The
+/// provider itself needed no change. Before the fix the entry observed only
+/// `Broad` and the renamed user kept seeing their old name for `fresh_ms`.
+///
+/// Proven by revert: with `observe_table_read` removed from
+/// `DbTableBuilder::get`, this fails at the "invalidated" assertion with
+/// `left: 1, right: 2` and the body still naming `alice`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_private_render_showing_auth_user_is_invalidated_by_an_orm_write_to_that_users_row() {
+    let harness = boot_with_render_cache().await;
+    let id = create_user(&harness, "alice").await;
+    let id_text = id.to_string();
+    let login = [("x-test-provider-login", id_text.as_str())];
+
+    let first = dispatch_get(&harness, "/shows-auth-user", &login).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_body = String::from_utf8_lossy(&first.body).to_string();
+    assert!(
+        first_body.contains(&format!("user {id} named alice")),
+        "precondition: Auth::user() resolved the row through the provider - got {first_body:?}"
+    );
+    assert_eq!(counting_route::renders(), 1);
+    dispatch_get(&harness, "/shows-auth-user", &login).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the private render is cacheable for its own visitor and the repeat is \
+         a hit"
+    );
+
+    rename_user(&harness, id, "alicia").await;
+
+    let after_write = dispatch_get(&harness, "/shows-auth-user", &login).await;
+    let after_body = String::from_utf8_lossy(&after_write.body).to_string();
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "an ORM write to the user's own row must invalidate a render that showed it"
+    );
+    assert!(
+        after_body.contains(&format!("user {id} named alicia")),
+        "the re-render shows the renamed row - got {after_body:?}"
     );
 }

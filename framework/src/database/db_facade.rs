@@ -272,8 +272,16 @@ impl DbTableBuilder {
     /// instrumented executor helpers - emits
     /// [`QueryExecuted`](crate::database::events::QueryExecuted) on
     /// every call.
+    ///
+    /// Inside a RenderCache render this records a read of the whole table
+    /// (`collector::observe_table_read`), so an ORM or query-builder write to
+    /// that table later invalidates the cached representation. The table is
+    /// known here, which is what makes the observation precise; the raw
+    /// `DB::select` family cannot name its tables and marks the render
+    /// unstorable instead. `first` funnels through this method.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
         self.validate_inputs()?;
+        crate::render_cache::collector::observe_table_read(&self.table);
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
             self.connection_override.as_deref(),
@@ -320,6 +328,8 @@ impl DbTableBuilder {
         // literal SQL and would otherwise fail the identifier
         // validator on the parenthesised aggregate.
         self.validate_inputs()?;
+        // Same table-known observation as `get`; see its doc.
+        crate::render_cache::collector::observe_table_read(&self.table);
         // T11/T12: route through resolve_read.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
@@ -718,6 +728,14 @@ impl DB {
     /// Placeholders must match the active backend (`$1, $2, ...` for
     /// Postgres, `?` for MySQL + SQLite).
     ///
+    /// Inside a RenderCache render this marks the render unstorable
+    /// (`collector::observe_unobservable_read`): the statement text is
+    /// opaque to the framework, so the tables it read cannot be recorded and
+    /// no later write could be relied on to invalidate the entry. The
+    /// response is still served; it is just never cached. `select_one`,
+    /// `scalar`, and `select_on` behave the same way; `DB::table(..).get()`
+    /// knows its table and is observed precisely instead.
+    ///
     /// ```rust,no_run
     /// # use suprnova::DB;
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
@@ -731,6 +749,7 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
+        crate::render_cache::collector::observe_unobservable_read();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         let backend = exec.backend();
@@ -747,11 +766,14 @@ impl DB {
     }
 
     /// Run a raw SELECT and return the FIRST row (or `None`).
-    /// Mirrors Laravel's `DB::selectOne($sql, $bindings)`.
+    /// Mirrors Laravel's `DB::selectOne($sql, $bindings)`. Inside a
+    /// RenderCache render this marks the render unstorable; see
+    /// [`DB::select`].
     pub async fn select_one(
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Option<DynamicRow>, FrameworkError> {
+        crate::render_cache::collector::observe_unobservable_read();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         let backend = exec.backend();
@@ -768,7 +790,8 @@ impl DB {
     /// Mirrors Laravel's `DB::scalar($sql, $bindings)`.
     ///
     /// `T` must implement `sea_orm::TryGetable` - the framework
-    /// re-exports the trait at the crate root.
+    /// re-exports the trait at the crate root. Inside a RenderCache render
+    /// this marks the render unstorable; see [`DB::select`].
     ///
     /// ```rust,no_run
     /// # use suprnova::DB;
@@ -784,6 +807,7 @@ impl DB {
     where
         T: sea_orm::TryGetable,
     {
+        crate::render_cache::collector::observe_unobservable_read();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         let backend = exec.backend();
@@ -958,12 +982,16 @@ impl DB {
 
     /// Phase 10C T12 - `DB::select` variant that runs against the
     /// named connection instead of consulting the default routing
-    /// chain. Errors if `conn_name` isn't registered.
+    /// chain. Errors if `conn_name` isn't registered. Inside a RenderCache
+    /// render this marks the render unstorable; see [`DB::select`]. The
+    /// render cache's own generation ledger does not use this method for
+    /// that reason: its reads go through `ExecutorChoice` directly.
     pub async fn select_on(
         conn_name: &str,
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
+        crate::render_cache::collector::observe_unobservable_read();
         // Inside a transaction the tx connection wins absolutely -
         // even an explicit `_on` call cannot route around it because
         // it would split the atomicity contract. Resolve_read with the
