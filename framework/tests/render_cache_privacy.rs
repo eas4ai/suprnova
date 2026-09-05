@@ -45,17 +45,87 @@
 mod render_cache_privacy_support;
 
 use render_cache_privacy_support::{
-    AUTHZ_DRIVEN_ROUTE, IMPERSONATED_ROUTE, LOCALE_LATE_MIDDLEWARE_ROUTE,
+    AUTHZ_DRIVEN_ROUTE, Harness, IMPERSONATED_ROUTE, LOCALE_LATE_MIDDLEWARE_ROUTE,
     LOCALE_NESTED_SCOPE_ROUTE, LOCALE_SWITCHES_ROUTE, LOCALE_VARIES_ROUTE, NAMED_GUARD_ONLY_ROUTE,
-    NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE, PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE,
-    READS_AUTH_ID_ROUTE, READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE,
+    NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE, PRINCIPAL_DECLARED_AUTHZ_ROUTE,
+    PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE, READS_AUTH_ID_ROUTE,
+    READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE,
     READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE,
-    TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE,
-    boot_with_cache_installed_before_the_auth_middleware, boot_with_render_cache, counting_route,
-    dispatch_get, ensure_role_gate,
+    REQUEST_AUTH_USER_ID_ROUTE, TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_VARIES_ROUTE,
+    UNDECLARED_LOCALE_ROUTE, boot_with_cache_installed_before_the_auth_middleware,
+    boot_with_render_cache, counting_route, dispatch_get, ensure_role_gate,
+    route_is_under_a_policy,
 };
 use suprnova::StatusCode;
 use suprnova::render_cache::RenderCache;
+
+/// R103's positive control, in the shape the ruling names: the same visitor
+/// twice on `path` must render exactly once, and both responses must carry a
+/// validator, before the caller goes on to prove a boundary holds. Returns
+/// the render count afterwards, so each test expresses its own expectations
+/// relative to it rather than to a hard-coded total.
+///
+/// # Why every leak test needs one
+///
+/// Sixteen of this suite's twenty assertions are that something did *not*
+/// get cached, and a route that is never cached can never leak. The review
+/// measured both halves of that: sixteen tests pass against a guard that
+/// declines every publication, and *all* twenty pass when a single route's
+/// `.try_render_cache(...)` opt-in is deleted from the support module. A
+/// regression that disabled the cache, for the whole boot or for one single
+/// route, would have left this suite green, which is the opposite of why it
+/// exists.
+///
+/// So each leak test first proves the safe direction really is stored, in
+/// this same boot and this same harness. Where the attacked route can itself
+/// cache for a visitor who does not cross the boundary, this runs against
+/// that route on a different parameter, which is the strongest form. Where
+/// the attacked route can never be stored - the undeclared-dimension
+/// declines, and the session and cookie reads - this runs against a sibling
+/// route that declares the dimension, and the test additionally asserts
+/// through [`route_is_under_a_policy`] that its own route is still attached,
+/// because no behavioural signal distinguishes "declining correctly" from
+/// "never registered".
+///
+/// The `ETag` is the load-bearing half of the header check: a declined
+/// render returns the handler's own response with no cache validators at all
+/// (`render_and_publish` returns early), so a route that publishes and a
+/// route that declines are told apart by exactly this.
+async fn same_visitor_twice_is_a_hit(
+    harness: &Harness,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> u64 {
+    let before = counting_route::renders();
+    let first = dispatch_get(harness, path, headers).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "positive control: the first request to {path} must run the handler"
+    );
+    assert!(
+        first.header("etag").is_some(),
+        "positive control: {path} must publish, so its own response carries a \
+         validator - a declined render carries none"
+    );
+
+    let second = dispatch_get(harness, path, headers).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "positive control: the second identical request to {path} must be a cache \
+         hit. If it is not, this boot is storing nothing and the boundary \
+         assertion below would pass against a cache that had been switched off"
+    );
+    assert!(
+        second.header("etag").is_some(),
+        "positive control: the hit replays the stored validator"
+    );
+    assert_eq!(second.text(), first.text());
+    counting_route::renders()
+}
 
 // ── R82, attack 1 ──────────────────────────────────────────────────────
 
@@ -68,6 +138,17 @@ use suprnova::render_cache::RenderCache;
 #[serial_test::serial]
 async fn a_logged_in_users_page_never_reaches_another_visitor_on_a_route_with_no_per_user_keying() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: this route can never be stored
+    // (it reads an identity and declares no dimension), so the control is a
+    // route that reads the same identity and *does* declare `Principal`.
+    let base =
+        same_visitor_twice_is_a_hit(&harness, "/privacy/private/1", &[("x-test-login", "alice")])
+            .await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_AUTH_ID_ROUTE),
+        "the attacked route must still be attached to a policy: a deleted opt-in \
+         makes every assertion below vacuous"
+    );
 
     let alice = dispatch_get(&harness, READS_AUTH_ID_ROUTE, &[("x-test-login", "alice")]).await;
     assert_eq!(alice.status, StatusCode::OK);
@@ -91,7 +172,7 @@ async fn a_logged_in_users_page_never_reaches_another_visitor_on_a_route_with_no
 
     assert_eq!(
         counting_route::renders(),
-        3,
+        base + 3,
         "none of the three renders was ever safe to store: a bug that merely narrowed \
          the served class without repartitioning the key would have rendered once and \
          served that page to all three"
@@ -112,7 +193,7 @@ async fn a_logged_in_users_page_never_reaches_another_visitor_on_a_route_with_no
     );
     assert_eq!(
         counting_route::renders(),
-        4,
+        base + 4,
         "and the route never publishes at all, so even a repeat of the same identity \
          renders again"
     );
@@ -130,6 +211,16 @@ async fn a_logged_in_users_page_never_reaches_another_visitor_on_a_route_with_no
 #[serial_test::serial]
 async fn an_identity_read_through_the_crate_root_accessor_never_crosses_visitors() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: this route can never be stored
+    // (it reads an identity and declares no dimension), so the control is a
+    // route that reads the same identity and *does* declare `Principal`.
+    let base =
+        same_visitor_twice_is_a_hit(&harness, "/privacy/private/1", &[("x-test-login", "alice")])
+            .await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let alice = dispatch_get(
         &harness,
@@ -155,7 +246,7 @@ async fn an_identity_read_through_the_crate_root_accessor_never_crosses_visitors
     assert!(bob.text().contains("for bob"), "got {}", bob.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "neither render was ever safe to store"
     );
 }
@@ -171,6 +262,21 @@ async fn an_identity_read_through_the_crate_root_accessor_never_crosses_visitors
 async fn a_body_driven_by_an_authorization_decision_alone_never_crosses_roles() {
     ensure_role_gate();
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: `AuthorizationRead` requires the
+    // `Principal` dimension, so the same gate-driven handler on a route that
+    // declares it does cache - here through the guard's empty-set arm, since
+    // an anonymous visitor's key resolves `Anonymous` and the gate names no
+    // identity.
+    let base =
+        same_visitor_twice_is_a_hit(&harness, "/privacy/principal-declared-authz/1", &[]).await;
+    assert!(
+        route_is_under_a_policy(&harness, AUTHZ_DRIVEN_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+    assert!(
+        route_is_under_a_policy(&harness, PRINCIPAL_DECLARED_AUTHZ_ROUTE),
+        "and so must its control"
+    );
 
     let admin = dispatch_get(&harness, AUTHZ_DRIVEN_ROUTE, &[("x-test-role", "admin")]).await;
     assert_eq!(admin.status, StatusCode::OK);
@@ -190,7 +296,7 @@ async fn a_body_driven_by_an_authorization_decision_alone_never_crosses_roles() 
     );
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "an authorization read narrows the class with nothing in the key to partition \
          by, which must decline to store, not merely narrow"
     );
@@ -206,6 +312,19 @@ async fn a_body_driven_by_an_authorization_decision_alone_never_crosses_roles() 
 #[serial_test::serial]
 async fn a_tenant_keyed_route_never_crosses_users_inside_one_tenant() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: this route can never be stored
+    // (its render reads an identity it does not declare), so the control is a
+    // route that declares `Tenant` and reads only the tenant.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/tenant-varies/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, TENANT_DECLARED_READS_IDENTITY_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let alice = dispatch_get(
         &harness,
@@ -235,7 +354,7 @@ async fn a_tenant_keyed_route_never_crosses_users_inside_one_tenant() {
     assert!(bob.text().contains("for bob"), "got {}", bob.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "the identity read requires the Principal dimension, which this route does not \
          declare, so neither render was ever safe to store"
     );
@@ -258,10 +377,21 @@ async fn a_tenant_keyed_route_never_crosses_users_inside_one_tenant() {
 #[serial_test::serial]
 async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: a visitor signed
+    // in on *both* guards under one identity derives a key the render's own
+    // observation matches, so this route does cache when nothing crosses.
+    // Parameter 1 here, parameter 2 for the attack, so the control's entry
+    // can never be what the attack hits.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/named-guard-only/1",
+        &[("x-test-login", "carol"), ("x-test-named-login", "carol")],
+    )
+    .await;
 
     let carol = dispatch_get(
         &harness,
-        "/privacy/named-guard-only/1",
+        "/privacy/named-guard-only/2",
         &[("x-test-named-login", "carol")],
     )
     .await;
@@ -270,7 +400,7 @@ async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() 
 
     let dora = dispatch_get(
         &harness,
-        "/privacy/named-guard-only/1",
+        "/privacy/named-guard-only/2",
         &[("x-test-named-login", "dora")],
     )
     .await;
@@ -284,7 +414,7 @@ async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() 
     assert!(dora.text().contains("for dora"), "got {}", dora.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "a declared dimension that resolves to a constant partitions nothing, so the \
          observed value must be compared against it and both renders declined"
     );
@@ -301,14 +431,27 @@ async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() 
 #[serial_test::serial]
 async fn a_session_mut_read_is_observed_and_declines_storage() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: a session read narrows to
+    // `Uncacheable` whatever the route declares, so there is no dimension to
+    // declare and the control is simply a route that does cache in this boot.
+    let base = same_visitor_twice_is_a_hit(&harness, "/privacy/plain/1", &[]).await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_SESSION_MUT_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let first = dispatch_get(&harness, READS_SESSION_MUT_ROUTE, &[]).await;
     assert_eq!(first.status, StatusCode::OK);
+    assert!(
+        first.header("etag").is_none(),
+        "a declined render carries no validator, which is the same signal the \
+         control above used in the other direction"
+    );
     let second = dispatch_get(&harness, READS_SESSION_MUT_ROUTE, &[]).await;
     assert_eq!(second.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "a session value read forces Uncacheable, so the second identical request must \
          render again rather than hit"
     );
@@ -331,10 +474,20 @@ async fn a_session_mut_read_is_observed_and_declines_storage() {
 #[serial_test::serial]
 async fn impersonation_after_key_derivation_never_serves_one_target_to_another() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: with no
+    // impersonation the key alice derives and the identity the render sees
+    // are the same, so this route caches. Parameter 1 for the control,
+    // parameter 2 for the attack.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/impersonated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
 
     let first = dispatch_get(
         &harness,
-        "/privacy/impersonated/1",
+        "/privacy/impersonated/2",
         &[
             ("x-test-login", "alice"),
             ("x-test-impersonate", "victim-one"),
@@ -351,7 +504,7 @@ async fn impersonation_after_key_derivation_never_serves_one_target_to_another()
 
     let second = dispatch_get(
         &harness,
-        "/privacy/impersonated/1",
+        "/privacy/impersonated/2",
         &[
             ("x-test-login", "alice"),
             ("x-test-impersonate", "victim-two"),
@@ -371,7 +524,7 @@ async fn impersonation_after_key_derivation_never_serves_one_target_to_another()
     );
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "the key says alice and the render said victim-one, which must decline"
     );
     assert_eq!(IMPERSONATED_ROUTE, "/privacy/impersonated/{id}");
@@ -386,6 +539,14 @@ async fn impersonation_after_key_derivation_never_serves_one_target_to_another()
 #[serial_test::serial]
 async fn a_cookie_read_counts_as_a_session_read_and_declines_storage() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: same reasoning as the
+    // `session_mut` test - a session read narrows unconditionally, so the
+    // control is a route that does cache in this boot.
+    let base = same_visitor_twice_is_a_hit(&harness, "/privacy/plain/1", &[]).await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_COOKIE_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let first = dispatch_get(
         &harness,
@@ -403,7 +564,7 @@ async fn a_cookie_read_counts_as_a_session_read_and_declines_storage() {
     assert_eq!(second.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "a cookie read must produce a session read, which forces Uncacheable; a read \
          that produced no classification reason at all would have published the first \
          visitor's page and served it to the second"
@@ -422,10 +583,20 @@ async fn a_cookie_read_counts_as_a_session_read_and_declines_storage() {
 #[serial_test::serial]
 async fn a_mid_render_locale_switch_never_publishes_under_the_pre_switch_key() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: with no switch
+    // requested the render's locale and the key's locale are the same, so
+    // this route caches. Parameter 1 for the control, parameter 2 for the
+    // attack.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/locale-switches/1",
+        &[("x-test-locale", "en")],
+    )
+    .await;
 
     let french = dispatch_get(
         &harness,
-        "/privacy/locale-switches/1",
+        "/privacy/locale-switches/2",
         &[("x-test-locale", "en"), ("x-test-switch-to", "fr")],
     )
     .await;
@@ -438,7 +609,7 @@ async fn a_mid_render_locale_switch_never_publishes_under_the_pre_switch_key() {
 
     let german = dispatch_get(
         &harness,
-        "/privacy/locale-switches/1",
+        "/privacy/locale-switches/2",
         &[("x-test-locale", "en"), ("x-test-switch-to", "de")],
     )
     .await;
@@ -451,7 +622,7 @@ async fn a_mid_render_locale_switch_never_publishes_under_the_pre_switch_key() {
     assert!(german.text().contains("after=de"), "got {}", german.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "the locale the render actually used differs from the one the key holds, which \
          must decline"
     );
@@ -469,10 +640,20 @@ async fn a_mid_render_locale_switch_never_publishes_under_the_pre_switch_key() {
 #[serial_test::serial]
 async fn a_render_inside_a_nested_scope_locale_never_publishes_under_the_outer_locales_key() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: with no switch
+    // requested the render's locale and the key's locale are the same, so
+    // this route caches. Parameter 1 for the control, parameter 2 for the
+    // attack.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/locale-nested-scope/1",
+        &[("x-test-locale", "en")],
+    )
+    .await;
 
     let french = dispatch_get(
         &harness,
-        "/privacy/locale-nested-scope/1",
+        "/privacy/locale-nested-scope/2",
         &[("x-test-locale", "en"), ("x-test-nested-locale", "fr")],
     )
     .await;
@@ -485,7 +666,7 @@ async fn a_render_inside_a_nested_scope_locale_never_publishes_under_the_outer_l
 
     let german = dispatch_get(
         &harness,
-        "/privacy/locale-nested-scope/1",
+        "/privacy/locale-nested-scope/2",
         &[("x-test-locale", "en"), ("x-test-nested-locale", "de")],
     )
     .await;
@@ -496,7 +677,7 @@ async fn a_render_inside_a_nested_scope_locale_never_publishes_under_the_outer_l
         german.text()
     );
     assert!(german.text().contains("locale=de"), "got {}", german.text());
-    assert_eq!(counting_route::renders(), 2);
+    assert_eq!(counting_route::renders(), base + 2);
     assert_eq!(
         LOCALE_NESTED_SCOPE_ROUTE,
         "/privacy/locale-nested-scope/{id}"
@@ -513,10 +694,20 @@ async fn a_render_inside_a_nested_scope_locale_never_publishes_under_the_outer_l
 #[serial_test::serial]
 async fn a_locale_middleware_installed_after_the_cache_never_publishes_under_the_earlier_key() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: with no switch
+    // requested the render's locale and the key's locale are the same, so
+    // this route caches. Parameter 1 for the control, parameter 2 for the
+    // attack.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/locale-late-middleware/1",
+        &[("x-test-locale", "en")],
+    )
+    .await;
 
     let french = dispatch_get(
         &harness,
-        "/privacy/locale-late-middleware/1",
+        "/privacy/locale-late-middleware/2",
         &[("x-test-locale", "en"), ("x-test-late-locale", "fr")],
     )
     .await;
@@ -530,7 +721,7 @@ async fn a_locale_middleware_installed_after_the_cache_never_publishes_under_the
 
     let german = dispatch_get(
         &harness,
-        "/privacy/locale-late-middleware/1",
+        "/privacy/locale-late-middleware/2",
         &[("x-test-locale", "en"), ("x-test-late-locale", "de")],
     )
     .await;
@@ -541,7 +732,7 @@ async fn a_locale_middleware_installed_after_the_cache_never_publishes_under_the
         german.text()
     );
     assert!(german.text().contains("locale=de"), "got {}", german.text());
-    assert_eq!(counting_route::renders(), 2);
+    assert_eq!(counting_route::renders(), base + 2);
     assert_eq!(
         LOCALE_LATE_MIDDLEWARE_ROUTE,
         "/privacy/locale-late-middleware/{id}"
@@ -559,10 +750,22 @@ async fn a_locale_middleware_installed_after_the_cache_never_publishes_under_the
 #[serial_test::serial]
 async fn a_second_identity_touch_never_overwrites_the_first_the_body_was_built_from() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: when both
+    // accessors resolve to one identity there is only one observed value and
+    // it is the key's, so this route caches. That is also the sharpest form
+    // of the control here, because it shows the guard comparing values
+    // rather than declining whenever two accessors are touched. Parameter 1
+    // for the control, parameter 2 for the attack.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/named-then-default/1",
+        &[("x-test-login", "alice"), ("x-test-named-login", "alice")],
+    )
+    .await;
 
     let carol = dispatch_get(
         &harness,
-        "/privacy/named-then-default/1",
+        "/privacy/named-then-default/2",
         &[("x-test-login", "zed"), ("x-test-named-login", "carol")],
     )
     .await;
@@ -575,7 +778,7 @@ async fn a_second_identity_touch_never_overwrites_the_first_the_body_was_built_f
 
     let dora = dispatch_get(
         &harness,
-        "/privacy/named-then-default/1",
+        "/privacy/named-then-default/2",
         &[("x-test-login", "zed"), ("x-test-named-login", "dora")],
     )
     .await;
@@ -589,7 +792,7 @@ async fn a_second_identity_touch_never_overwrites_the_first_the_body_was_built_f
     assert!(dora.text().contains("for dora"), "got {}", dora.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "a render that saw two different values for one dimension cannot be represented \
          by any one key, so every observed value must be compared and both renders \
          declined"
@@ -609,6 +812,27 @@ async fn a_second_identity_touch_never_overwrites_the_first_the_body_was_built_f
 #[serial_test::serial]
 async fn a_feature_flags_identity_is_observed_on_the_evaluator_miss_and_replayed_on_the_hit() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: a *globally* scoped flag's answer
+    // does not depend on the reader, so reading one records nothing and the
+    // page still caches, even for a signed-in visitor whose id the feature
+    // middleware has already put in the ambient context. Without this
+    // control, a change that made every flag read uncacheable would leave
+    // this test green while disabling the cache for every page in an
+    // application that checks any flag.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/reads-global-flag/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_USER_SCOPED_FLAG_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+    assert!(
+        route_is_under_a_policy(&harness, READS_GLOBAL_FLAG_ROUTE),
+        "and so must its control"
+    );
 
     let alice = dispatch_get(
         &harness,
@@ -624,7 +848,7 @@ async fn a_feature_flags_identity_is_observed_on_the_evaluator_miss_and_replayed
     );
     assert_eq!(
         counting_route::renders(),
-        1,
+        base + 1,
         "sanity: the first request is the flag evaluator's own miss"
     );
 
@@ -641,7 +865,7 @@ async fn a_feature_flags_identity_is_observed_on_the_evaluator_miss_and_replayed
     assert_eq!(alice_again.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "the flag-cache hit is exactly as identity-dependent as the miss, so this render \
          must decline too rather than publish alice's page under a key with no \
          Principal dimension"
@@ -661,7 +885,7 @@ async fn a_feature_flags_identity_is_observed_on_the_evaluator_miss_and_replayed
     );
     assert_eq!(
         counting_route::renders(),
-        3,
+        base + 3,
         "three renders: the miss, the flag-cache hit, and bob"
     );
     assert_eq!(
@@ -680,6 +904,22 @@ async fn a_feature_flags_identity_is_observed_on_the_evaluator_miss_and_replayed
 #[serial_test::serial]
 async fn a_principal_declaring_route_whose_key_resolves_anonymous_never_crosses_visitors() {
     let harness = boot_with_cache_installed_before_the_auth_middleware().await;
+    // R103 positive control, sibling shape: under this boot no
+    // `Principal`-declaring route can cache at all, because the key always
+    // resolves `Anonymous` while the render sees a real identity. The tenant
+    // middleware is still registered before `install` here, so a
+    // `Tenant`-declaring route does cache and proves this boot stores
+    // representations.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/tenant-varies/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let alice = dispatch_get(
         &harness,
@@ -706,7 +946,7 @@ async fn a_principal_declaring_route_whose_key_resolves_anonymous_never_crosses_
     assert!(bob.text().contains("for bob"), "got {}", bob.text());
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "checking only that the dimension is declared is not enough: the observed value \
          has to be compared against the value the key actually holds"
     );
@@ -729,22 +969,49 @@ async fn a_principal_declaring_route_whose_key_resolves_anonymous_never_crosses_
 async fn two_distinct_principals_derive_two_distinct_keys_and_two_distinct_entries() {
     let harness = boot_with_render_cache().await;
 
+    // Every claim below is measured on the request path. The only public
+    // key-derivation entry point, `RenderCache::key_for_route_for_test`, goes
+    // through `key_input_for_test`, which re-implements the `Principal` arm
+    // rather than calling `variance_descriptor` - so a key-text assertion on
+    // its own would measure the helper, and did: the review forced
+    // production's `Principal` arm to a constant and the key texts still came
+    // back distinct while the route had stopped partitioning.
+    //
+    // The helper is used here only as a *probe against production storage*:
+    // each key is handed to `RenderCache::inspect`, which is a raw lookup in
+    // the store production actually wrote. An entry comes back only if the
+    // helper's key and production's key agree, so a divergence between them
+    // fails here rather than hiding.
     let alice_key =
         RenderCache::key_for_route_for_test(PRIVATE_ROUTE, &[("id", "1")], Some("alice"));
     let bob_key = RenderCache::key_for_route_for_test(PRIVATE_ROUTE, &[("id", "1")], Some("bob"));
-    let anonymous_key = RenderCache::key_for_route_for_test(PRIVATE_ROUTE, &[("id", "1")], None);
-    assert_ne!(
-        alice_key, bob_key,
-        "two distinct principals must derive two distinct keys on a route declaring \
-         Principal variance"
-    );
-    assert_ne!(alice_key, anonymous_key);
-    assert_ne!(bob_key, anonymous_key);
 
-    // The key is a digest, never a transcript. This is a structural
-    // property rather than a guard arm - there is no line to revert - but
-    // it is asserted here so a future change that inlines identity, path,
-    // or cookie material into the key text fails in this suite.
+    let alice = dispatch_get(&harness, "/privacy/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        alice.header("etag").is_some(),
+        "alice's render published, so it carries a validator"
+    );
+    assert!(
+        RenderCache::inspect(&alice_key)
+            .await
+            .expect("inspect")
+            .is_some(),
+        "production stored alice's render under the key alice's own request derives"
+    );
+    assert!(
+        RenderCache::inspect(&bob_key)
+            .await
+            .expect("inspect")
+            .is_none(),
+        "and stored nothing under bob's, which is what makes the two principals two \
+         partitions rather than one"
+    );
+
+    // The key is a digest, never a transcript. Asserted on the key that
+    // production has just proven it stores under, so this covers the real
+    // encoding and not the helper's.
     for forbidden in ["alice", "bob", "privacy", "private"] {
         assert!(
             !alice_key.contains(forbidden),
@@ -752,10 +1019,6 @@ async fn two_distinct_principals_derive_two_distinct_keys_and_two_distinct_entri
              in {alice_key}"
         );
     }
-
-    let alice = dispatch_get(&harness, "/privacy/private/1", &[("x-test-login", "alice")]).await;
-    assert_eq!(alice.status, StatusCode::OK);
-    assert_eq!(counting_route::renders(), 1);
 
     let alice_again =
         dispatch_get(&harness, "/privacy/private/1", &[("x-test-login", "alice")]).await;
@@ -765,6 +1028,10 @@ async fn two_distinct_principals_derive_two_distinct_keys_and_two_distinct_entri
         "alice's own repeat is a hit: the route caches, in her own partition"
     );
     assert_eq!(alice_again.text(), alice.text());
+    assert!(
+        alice_again.header("etag").is_some(),
+        "the hit replays the stored validator"
+    );
 
     let bob = dispatch_get(&harness, "/privacy/private/1", &[("x-test-login", "bob")]).await;
     assert_eq!(
@@ -777,6 +1044,13 @@ async fn two_distinct_principals_derive_two_distinct_keys_and_two_distinct_entri
         alice.text(),
         "and gets his own page, not hers - got {}",
         bob.text()
+    );
+    assert!(
+        RenderCache::inspect(&bob_key)
+            .await
+            .expect("inspect")
+            .is_some(),
+        "bob's own render is now stored, under his own key"
     );
 
     let alice_third =
@@ -801,6 +1075,14 @@ async fn two_distinct_principals_derive_two_distinct_keys_and_two_distinct_entri
 #[serial_test::serial]
 async fn a_reader_with_no_identity_on_a_scoped_flags_axis_never_publishes_a_shared_entry() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: an identity-less reader of a flag
+    // with no identity rule at all still caches, so the decline below is
+    // about the flag's scope and not about flag reads in general.
+    let base = same_visitor_twice_is_a_hit(&harness, "/privacy/reads-global-flag/1", &[]).await;
+    assert!(
+        route_is_under_a_policy(&harness, READS_OVERRIDE_FLAG_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let anonymous = dispatch_get(&harness, "/privacy/reads-override-flag/1", &[]).await;
     assert_eq!(anonymous.status, StatusCode::OK);
@@ -809,7 +1091,7 @@ async fn a_reader_with_no_identity_on_a_scoped_flags_axis_never_publishes_a_shar
         "sanity: an anonymous reader falls through to the flag's global rule - got {}",
         anonymous.text()
     );
-    assert_eq!(counting_route::renders(), 1);
+    assert_eq!(counting_route::renders(), base + 1);
 
     let bob = dispatch_get(
         &harness,
@@ -825,7 +1107,7 @@ async fn a_reader_with_no_identity_on_a_scoped_flags_axis_never_publishes_a_shar
     );
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "the identity-less reader records a bare read on the flag's scoped axis, which \
          the route does not declare, so its page is never published"
     );
@@ -849,8 +1131,13 @@ async fn a_route_that_declares_nothing_and_observes_nothing_still_caches() {
     assert_eq!(first.status, StatusCode::OK);
     assert_eq!(counting_route::renders(), 1);
     assert!(
-        first.header("cache-control").is_some(),
-        "sanity: the route is genuinely under a policy, not merely unmatched"
+        first.header("cache-control").is_some() && first.header("etag").is_some(),
+        "sanity: the route is genuinely under a policy and genuinely published - a \
+         declined render carries neither header"
+    );
+    assert!(
+        route_is_under_a_policy(&harness, PLAIN_ROUTE),
+        "and the policy is still attached"
     );
 
     let second = dispatch_get(&harness, "/privacy/plain/1", &[]).await;
@@ -862,6 +1149,10 @@ async fn a_route_that_declares_nothing_and_observes_nothing_still_caches() {
          every leak test in this file and ships a feature that stores nothing"
     );
     assert_eq!(second.text(), first.text());
+    assert!(
+        second.header("etag").is_some(),
+        "the hit carries a validator"
+    );
 
     let other = dispatch_get(&harness, "/privacy/plain/2", &[]).await;
     assert_eq!(
@@ -922,6 +1213,10 @@ async fn a_tenant_declaring_route_partitions_by_tenant() {
          partitions rather than merely declining"
     );
     assert_eq!(acme_again.text(), acme.text());
+    assert!(
+        acme_again.header("etag").is_some(),
+        "the hit replays the stored validator"
+    );
     assert_eq!(TENANT_VARIES_ROUTE, "/privacy/tenant-varies/{id}");
 }
 
@@ -969,6 +1264,10 @@ async fn a_locale_declaring_route_partitions_by_locale() {
          locale rather than declining"
     );
     assert_eq!(german_again.text(), german.text());
+    assert!(
+        german_again.header("etag").is_some(),
+        "the hit replays the stored validator"
+    );
     assert_eq!(LOCALE_VARIES_ROUTE, "/privacy/locale-varies/{id}");
 }
 
@@ -979,6 +1278,19 @@ async fn a_locale_declaring_route_partitions_by_locale() {
 #[serial_test::serial]
 async fn an_undeclared_locale_read_declines_storage() {
     let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape, exactly as the ruling prescribes
+    // for a never-stored route: the same locale read on a route that *does*
+    // declare `Locale` caches.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/locale-varies/1",
+        &[("x-test-locale", "de")],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, UNDECLARED_LOCALE_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let first = dispatch_get(
         &harness,
@@ -997,9 +1309,92 @@ async fn an_undeclared_locale_read_declines_storage() {
     .await;
     assert_eq!(
         counting_route::renders(),
-        2,
+        base + 2,
         "an observed locale with no declared Locale dimension must decline, even for two \
          identical requests: the route would otherwise cache one language for everyone"
     );
     assert_ne!(first.text(), second.text());
+}
+
+// ── R79 claim 4, carried here rather than borrowed ─────────────────────
+
+/// `Request::auth_user_id()` is `pub`, returns a resolved identity, and has
+/// no collector instrumentation at all: on its face it is the round-2 break
+/// again. The reason it is not is a *measurement*, not an argument - the
+/// field has one writer, `Request::with_auth_user_id`, called from one site
+/// inside the WebSocket-upgrade terminator, so an ordinary HTTP request
+/// always sees `None`.
+///
+/// That measurement is the precondition the whole "cannot influence a body"
+/// classification rests on, and until this round it lived only in
+/// `render_cache_middleware.rs`. This suite exists to be independent of that
+/// file, so a restructuring of it - or of its harness, which a parallel
+/// branch is editing - could delete the precondition with nothing here
+/// noticing. It is carried here too, and stated as both halves: the
+/// uninstrumented accessor sees nothing, and the instrumented one sees the
+/// signed-in user whose identity the key is then built from.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_uninstrumented_request_accessor_carries_no_identity_and_no_body_crosses() {
+    let harness = boot_with_render_cache().await;
+    // R103 positive control, on the attacked route itself: alice's key and
+    // alice's observed identity agree, so this route caches for her.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/reads-request-auth-user-id/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+
+    let alice = dispatch_get(
+        &harness,
+        "/privacy/reads-request-auth-user-id/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        base,
+        "still alice's own entry, so the body below is the one her render produced"
+    );
+    assert!(
+        alice.text().contains("stamped=none"),
+        "the measurement: `Request::auth_user_id()` is stamped only on the \
+         WebSocket-upgrade path, so an ordinary HTTP render sees nothing there. If \
+         this ever fails, an uninstrumented accessor is returning a real identity \
+         and every 'cannot influence a body' conclusion about it is void - got {}",
+        alice.text()
+    );
+    assert!(
+        alice.text().contains("observed=alice"),
+        "and the other half: the instrumented accessor does see her, so the render \
+         genuinely had an identity available to leak - got {}",
+        alice.text()
+    );
+
+    let bob = dispatch_get(
+        &harness,
+        "/privacy/reads-request-auth-user-id/1",
+        &[("x-test-login", "bob")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        base + 1,
+        "bob derives his own key and renders rather than hitting alice's entry"
+    );
+    assert!(
+        !bob.text().contains("observed=alice"),
+        "and no body crosses - got {}",
+        bob.text()
+    );
+    assert!(
+        bob.text().contains("stamped=none") && bob.text().contains("observed=bob"),
+        "got {}",
+        bob.text()
+    );
+    assert_eq!(
+        REQUEST_AUTH_USER_ID_ROUTE,
+        "/privacy/reads-request-auth-user-id/{id}"
+    );
 }

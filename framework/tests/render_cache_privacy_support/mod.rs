@@ -29,7 +29,13 @@
 //!   derives its key before any identity exists and a declared `Principal`
 //!   dimension resolves `Anonymous` while the render observes a real
 //!   principal.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "the framework's test-support modules are shared by test binaries \
+              that each use a subset of the harness; five of the nine \
+              pre-existing ones carry a bare allow for the same reason, and \
+              this one names it"
+)]
 
 use std::any::Any;
 use std::sync::Arc;
@@ -204,10 +210,10 @@ impl suprnova::Middleware for LateLocaleMiddleware {
     }
 }
 
-/// A clock the tests can move forward on demand, in whole milliseconds.
-/// Never advanced by this suite - every entry stays fresh for its whole
-/// window, so a second render is always a guard decision and never an
-/// expiry.
+/// A clock that never moves. Deliberately fixed and with no way to advance
+/// it: every entry this suite publishes stays fresh for its whole window, so
+/// a second render is always a guard decision and never an expiry. A test
+/// that wanted to observe an expiry would be testing freshness, not privacy.
 pub struct FixedTestClock {
     millis: AtomicU64,
 }
@@ -217,11 +223,6 @@ impl FixedTestClock {
         Self {
             millis: AtomicU64::new(start_ms),
         }
-    }
-
-    /// Advances the clock by `delta_ms`. Never goes backwards.
-    pub fn advance_ms(&self, delta_ms: u64) {
-        self.millis.fetch_add(delta_ms, Ordering::SeqCst);
     }
 }
 
@@ -439,6 +440,37 @@ async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
     )))
 }
 
+/// Reads a **globally** scoped flag: the same answer for every visitor, no
+/// identity anywhere in the decision. Reading it must cost the cache
+/// nothing, even for a signed-in visitor whose id `FeatureMiddleware` has
+/// already put in the ambient context. R103's positive control for the two
+/// flag leak tests: without it, a change that made every flag read
+/// uncacheable would leave both of them green while disabling the cache for
+/// every page in an application that checks any flag.
+async fn reads_global_flag_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    // See [`reads_user_scoped_flag_handler`] for why the literal is
+    // repeated here rather than referenced through [`GLOBAL_FLAG`].
+    let enabled = suprnova::is_enabled!("privacy-global-flag", false);
+    Ok(HttpResponse::html(format!(
+        "global-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Builds its body from `Request::auth_user_id()` - a `pub` accessor with no
+/// collector instrumentation at all - alongside the instrumented one, so a
+/// test can assert both halves of the claim the R79 sweep rests on: that the
+/// field is stamped only on the WebSocket-upgrade path, and that the
+/// identity the render actually sees is the observed one.
+async fn reads_request_auth_user_id_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let stamped = request.auth_user_id().unwrap_or("none").to_owned();
+    let observed = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "request-auth-user-id render {n} stamped={stamped} observed={observed}"
+    )))
+}
+
 /// Reads a flag whose only identity rule belongs to *someone else*. A
 /// reader who carries no id at all falls through to the global rule, gets
 /// an answer the override's owner would not get, and must not publish that
@@ -473,6 +505,10 @@ pub fn ensure_role_gate() {
 /// everyone else falls through to no rule at all and takes the default.
 const USER_SCOPED_FLAG: &str = "privacy-user-scoped-flag";
 
+/// A flag with one global rule and no identity rule at all: its answer does
+/// not depend on the reader, so reading it must narrow nothing.
+const GLOBAL_FLAG: &str = "privacy-global-flag";
+
 /// A flag with a global rule *and* an override belonging to `bob`. The
 /// case that distinguishes "record by flag scope" from "record by the
 /// scope key that happened to match this reader", and (for a reader with
@@ -501,6 +537,10 @@ async fn install_feature_evaluator() {
                 .await
                 .expect("seed the user-scoped flag");
             database
+                .set_flag(GLOBAL_FLAG, "", true)
+                .await
+                .expect("seed the globally scoped flag");
+            database
                 .set_flag(OVERRIDE_FLAG, "", false)
                 .await
                 .expect("seed the global rule of the override flag");
@@ -527,7 +567,6 @@ async fn install_feature_evaluator() {
 pub struct Harness {
     router: Arc<Router>,
     middleware: Arc<MiddlewareRegistry>,
-    clock: Arc<FixedTestClock>,
     _conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
     _tempdir: tempfile::TempDir,
@@ -669,6 +708,18 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             reads_another_users_override_flag_handler,
         )
         .into();
+    let router: Router = router
+        .get(READS_GLOBAL_FLAG_ROUTE, reads_global_flag_handler)
+        .into();
+    let router: Router = router
+        .get(PRINCIPAL_DECLARED_AUTHZ_ROUTE, authz_driven_handler)
+        .into();
+    let router: Router = router
+        .get(
+            REQUEST_AUTH_USER_ID_ROUTE,
+            reads_request_auth_user_id_handler,
+        )
+        .into();
 
     let router = router
         .try_render_cache(PLAIN_ROUTE, GroupPolicy::from(no_variance.clone()))
@@ -713,7 +764,7 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .expect("attach impersonated policy")
         .try_render_cache(
             PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE,
-            GroupPolicy::from(principal_declared),
+            GroupPolicy::from(principal_declared.clone()),
         )
         .expect("attach principal-declared reads-identity policy")
         .try_render_cache(PRIVATE_ROUTE, GroupPolicy::from(private_declared))
@@ -745,8 +796,23 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             GroupPolicy::from(no_variance.clone()),
         )
         .expect("attach user-scoped-flag policy")
-        .try_render_cache(READS_OVERRIDE_FLAG_ROUTE, GroupPolicy::from(no_variance))
-        .expect("attach override-flag policy");
+        .try_render_cache(
+            READS_OVERRIDE_FLAG_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach override-flag policy")
+        .try_render_cache(READS_GLOBAL_FLAG_ROUTE, GroupPolicy::from(no_variance))
+        .expect("attach global-flag policy")
+        .try_render_cache(
+            PRINCIPAL_DECLARED_AUTHZ_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach principal-declared authz policy")
+        .try_render_cache(
+            REQUEST_AUTH_USER_ID_ROUTE,
+            GroupPolicy::from(principal_declared),
+        )
+        .expect("attach request-auth-user-id policy");
 
     let mut config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -789,16 +855,31 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     Arc::new(Harness {
         router: Arc::new(router),
         middleware,
-        clock,
         _conn: conn,
         _guard: guard,
         _tempdir: tempdir,
     })
 }
 
-/// The clock `install` was configured with.
-pub fn clock(harness: &Harness) -> &Arc<FixedTestClock> {
-    &harness.clock
+/// Whether `pattern` resolves to a render-cache policy on the router this
+/// harness installed (R103).
+///
+/// Every leak test that attacks a route which can never be stored - the
+/// undeclared-dimension declines, and the session and cookie reads - asserts
+/// this about its own route, because no behavioural signal can tell "under a
+/// policy and correctly declining" from "never registered at all": both
+/// return the raw handler response with no validators. Without it, deleting
+/// one route's `.try_render_cache(...)` opt-in makes that route's leak test
+/// assert nothing while staying green, which is exactly the vacuity the
+/// review measured.
+///
+/// Reads the production policy table (`RenderCachePolicyTable::effective_policy`,
+/// through the framework's own `render_cache::testing::policy_table` seam),
+/// not a copy this module keeps.
+pub fn route_is_under_a_policy(harness: &Harness, pattern: &str) -> bool {
+    suprnova::render_cache::testing::policy_table(&harness.router)
+        .effective_policy(pattern)
+        .is_some()
 }
 
 // ── Route patterns ─────────────────────────────────────────────────────
@@ -849,6 +930,16 @@ pub const UNDECLARED_LOCALE_ROUTE: &str = "/privacy/undeclared-locale";
 pub const READS_USER_SCOPED_FLAG_ROUTE: &str = "/privacy/reads-user-scoped-flag/{id}";
 /// Declares nothing, reads a flag whose only override belongs to bob.
 pub const READS_OVERRIDE_FLAG_ROUTE: &str = "/privacy/reads-override-flag/{id}";
+/// Declares nothing, reads a globally scoped flag; the flag tests' positive
+/// control, because a global flag's answer does not depend on the reader.
+pub const READS_GLOBAL_FLAG_ROUTE: &str = "/privacy/reads-global-flag/{id}";
+/// Declares `Principal`, body driven by `Gate::allows`; the authorization
+/// test's positive control, since `AuthorizationRead` requires exactly that
+/// dimension.
+pub const PRINCIPAL_DECLARED_AUTHZ_ROUTE: &str = "/privacy/principal-declared-authz/{id}";
+/// Declares `Principal`, reads the uninstrumented `Request::auth_user_id()`
+/// beside the instrumented accessor.
+pub const REQUEST_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-request-auth-user-id/{id}";
 
 // ── Dispatch ───────────────────────────────────────────────────────────
 
