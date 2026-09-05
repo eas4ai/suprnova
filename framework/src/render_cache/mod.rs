@@ -203,10 +203,26 @@ impl RenderCache {
     /// one process (this crate's own test suite calls it once per test) is
     /// a test concern, solved by the test harness clearing the registry
     /// itself before each call - never by this production path.
+    ///
+    /// A configuration whose [`RenderCacheConfig::enabled`] master switch is
+    /// false (`RENDER_CACHE_ENABLED=false`) makes this a no-op: the router
+    /// is returned untouched, no migration probe is issued, no runtime is
+    /// assembled, no middleware is registered, and the write side's
+    /// instrumentation gate stays shut. That is what an off switch has to
+    /// mean at install time. An application that turns the cache off must
+    /// not be made to carry the RenderCache migration, must not fail to
+    /// boot on ruling R58's probe, and must not pay ledger SQL on its
+    /// writes. [`middleware::RenderCacheMiddleware`] re-reads the same flag
+    /// per request, which is now redundant for a process that installs
+    /// through this path but still holds for a runtime installed by other
+    /// means (this crate's own test harnesses build one directly).
     pub async fn install(
         router: Router,
         config: RenderCacheConfig,
     ) -> Result<Router, FrameworkError> {
+        if !config.enabled {
+            return Ok(router);
+        }
         if !ledger::migration_present().await? {
             return Err(FrameworkError::internal(
                 "RenderCache::install: the suprnova_render_epochs table is missing. Add \
@@ -456,5 +472,61 @@ impl RenderCache {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `RENDER_CACHE_ENABLED=false` has to be an off switch at install time,
+    //! not only per request. An application that turns the cache off must
+    //! not be made to carry the RenderCache migration, must not fail ruling
+    //! R58's boot probe, and must not open the write side's instrumentation
+    //! gate for a cache that will never serve anything. This test binary has
+    //! no database configured at all, so a probe that still ran would fail
+    //! loudly right here.
+    use super::*;
+    use crate::http::text;
+
+    fn disabled_config() -> RenderCacheConfig {
+        RenderCacheConfig {
+            enabled: false,
+            l0: L0Limits {
+                max_entries: 1,
+                max_bytes: 1024,
+            },
+            l1: L1Config::Disabled,
+            failure: FailurePolicy::Open,
+            build_id: "disabled-install-test".to_owned(),
+            clock_override: None,
+            coordinator_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_configuration_installs_nothing_and_probes_nothing() {
+        let router: Router = Router::new()
+            .get("/disabled-render-cache-probe", |_req| async {
+                text("probe")
+            })
+            .into();
+
+        let returned = RenderCache::install(router, disabled_config())
+            .await
+            .expect(
+                "a disabled RenderCache must install without a database: the migration probe \
+                 must not run at all",
+            );
+
+        assert!(
+            returned
+                .match_route(&hyper::Method::GET, "/disabled-render-cache-probe")
+                .is_some(),
+            "a disabled install must hand back the application's own router untouched",
+        );
+        assert!(
+            RenderCache::runtime().is_none(),
+            "a disabled install must assemble no runtime: with one installed the middleware \
+             would be registered and every request would pay a lookup for a cache that is off",
+        );
     }
 }
