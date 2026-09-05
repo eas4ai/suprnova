@@ -19,7 +19,7 @@ fn crypto_notice_child() {
 fn run_child(mode: &str) -> Output {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
-        .args(["--exact", "crypto_notice_child", "--nocapture"])
+        .args(["--exact", "boot_notices::crypto_notice_child", "--nocapture"])
         .env(CHILD_MODE, mode)
         .env_remove("APP_KEY")
         .env_remove("APP_KEY_PREVIOUS")
@@ -45,7 +45,13 @@ fn run_child(mode: &str) -> Output {
         other => panic!("unknown child mode: {other}"),
     }
 
-    command.output().expect("spawn crypto-notice child")
+    let output = command.output().expect("spawn crypto-notice child");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "child filter matched no test (the child's module path changed?); stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    output
 }
 
 #[test]

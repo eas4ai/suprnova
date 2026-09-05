@@ -514,7 +514,7 @@ fn server_new_prepares_live_before_attempting_to_bind_a_socket() {
         .args([
             "--ignored",
             "--exact",
-            "server_new_child_rejects_invalid_live_mount_before_socket_binding",
+            "boot::server_new_child_rejects_invalid_live_mount_before_socket_binding",
         ])
         .output()
         .expect("run isolated Server::new lifecycle proof");
@@ -523,6 +523,11 @@ fn server_new_prepares_live_before_attempting_to_bind_a_socket() {
         "isolated Server::new proof failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "child filter matched no test (the child's module path changed?); stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
     );
 }
 

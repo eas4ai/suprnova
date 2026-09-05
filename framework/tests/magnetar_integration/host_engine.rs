@@ -971,11 +971,17 @@ async fn magnetar_host_engine_child() {
 }
 
 fn run_magnetar_host_engine_child(mode: &str) -> Output {
-    Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "magnetar_host_engine_child", "--nocapture"])
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", "host_engine::magnetar_host_engine_child", "--nocapture"])
         .env(CHILD_MODE, mode)
         .output()
-        .expect("spawn Magnetar host-engine child")
+        .expect("spawn Magnetar host-engine child");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "child filter matched no test (the child's module path changed?); stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    output
 }
 
 fn assert_magnetar_host_engine_child_succeeds(mode: &str) {

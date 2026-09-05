@@ -33,7 +33,7 @@ fn bootstrap_free_console_child() {
 
 fn assert_bootstrap_free_mode(mode: &str) {
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "bootstrap_free_console_child", "--nocapture"])
+        .args(["--exact", "main_bootstrap_boundaries::bootstrap_free_console_child", "--nocapture"])
         .env(CHILD_MODE, mode)
         .env("APP_ENV", "production")
         .env_remove("APP_KEY")
@@ -49,6 +49,11 @@ fn assert_bootstrap_free_mode(mode: &str) {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "child filter matched no test (the child's module path changed?); stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
     );
 }
 
