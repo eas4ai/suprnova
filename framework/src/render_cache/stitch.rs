@@ -34,22 +34,27 @@
 
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
+use suprnova_live::mount::{DocumentMountKey, DocumentMountScope, PrivateMountRequest};
+use suprnova_live::render_cache::coherence::age_seconds;
 use suprnova_live::render_cache::composite::{
-    CompositeEntry, HeaderPiece, HeaderTemplate, MAX_NONCE_HEADERS, MAX_NONCE_HOLES,
-    MAX_STITCH_SLOTS, Segment, SegmentGraph, StitchSlot, surrounding_digest,
+    AssembledDocument, AssemblyInput, CheckedIsland, CompositeEntry, HeaderPiece, HeaderTemplate,
+    MAX_NONCE_HEADERS, MAX_NONCE_HOLES, MAX_STITCH_SLOTS, ParsedSlot, Segment, SegmentGraph,
+    SlotFailurePolicy, SlotOutcome, StitchSlot, assemble, fresh_nonce, surrounding_digest,
 };
 use suprnova_live::render_cache::entry::{CompleteEntry, DecodedEntry, EntryHeader};
+use suprnova_live::render_cache::http::{
+    ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value,
+};
+use suprnova_live::snapshot::MountedDocumentPath;
 
-use crate::http::{Request, Response};
-use crate::live::StitchSlotDescriptor;
+use crate::http::{HttpResponse, Request, Response};
+use crate::live::{LiveMountKind, LiveRuntime, StitchSlotDescriptor};
 use crate::middleware::Next;
 use crate::telemetry::metrics::Metrics;
 
-use super::RenderCachePolicy;
-use super::collector;
-use super::live::LiveDocumentFacts;
 use super::middleware::conditional_response;
 use super::telemetry as render_cache_telemetry;
+use super::{RenderCache, RenderCachePolicy, collector, live::LiveDocumentFacts};
 
 /// A hit the RenderCache middleware decoded, checked, and handed to the
 /// route chain instead of serving itself.
@@ -113,22 +118,283 @@ pub(crate) async fn serve_prepared(mut request: Request, next: Next) -> Response
     }
 }
 
-/// Serves a Composite entry.
+/// Serves a Composite entry by assembling it for *this* request.
 ///
-/// Task 8 replaces this body with request-time assembly. Until then a
-/// Composite entry is served the way a fail-document outcome is: by the
-/// route's own handler, uncached.
+/// The shell is shared; the islands in it are not. Every slot the graph
+/// declares is re-derived from the live mount catalog, checked against the
+/// identities the entry stored, re-authorized through the same request
+/// context a handler's own mount would build, and mounted again here and
+/// now. Nothing about an island is replayed from storage: the entry carries
+/// only the island's *declaration*, never its markup or its snapshot, so an
+/// assembled document can only ever contain islands this request's own
+/// principal was authorized for. Reauthorization is per request, never
+/// cached.
+///
+/// Failure is per slot and follows the slot's own declared policy (see
+/// [`render_slot`] for what counts as a slot failure): `Omit` and
+/// `Fallback` are recorded as such and assembly continues, `FailDocument`
+/// abandons assembly for the whole document. Anything that is not a slot's
+/// business - a runtime that is not installed, a path or a stored
+/// declaration that will not parse, a shell whose islands cannot be
+/// reserved, an exhausted randomness source, or an engine assembly that
+/// rejects the result - fails the document as a whole rather than serving a
+/// partial one. Every one of those paths ends at [`fail_document`], which
+/// counts the outcome and lets the route's own handler answer, uncached,
+/// exactly as it would on a miss.
+///
+/// `now_ms` is the instant the cache middleware evaluated freshness at,
+/// before the chain ran, so `Age` measures the entry's age and not the time
+/// the chain and these mounts took.
 async fn assemble_hit(
     request: Request,
     next: Next,
-    _entry: CompositeEntry,
-    _policy: RenderCachePolicy,
-    _published_at_ms: u64,
-    _now_ms: u64,
-    _warning: Option<&'static str>,
+    entry: CompositeEntry,
+    policy: RenderCachePolicy,
+    published_at_ms: u64,
+    now_ms: u64,
+    warning: Option<&'static str>,
 ) -> Response {
+    let Some(runtime) = RenderCache::runtime() else {
+        return fail_document(request, next).await;
+    };
+    let Ok(live) = LiveRuntime::bind() else {
+        return fail_document(request, next).await;
+    };
+    let Ok(path) = MountedDocumentPath::parse(request.path()) else {
+        return fail_document(request, next).await;
+    };
+    let graph = entry.graph();
+    // The public-seed islands that stayed inside the shell already own their
+    // document keys, so the scope has to know about them before a single
+    // slot is mounted: without this a stitched slot could re-mount under a
+    // key the assembled document already contains and the browser would see
+    // two islands claiming one identity.
+    let mut scope = DocumentMountScope::new();
+    for island in &graph.shell_islands {
+        let Ok(key) = DocumentMountKey::parse(&island.document_key) else {
+            return fail_document(request, next).await;
+        };
+        if scope.reserve_existing(key).is_err() {
+            return fail_document(request, next).await;
+        }
+    }
+    let mut outcomes = Vec::with_capacity(graph.slots.len());
+    for slot in &graph.slots {
+        let Ok(parsed) = slot.parse() else {
+            return fail_document(request, next).await;
+        };
+        match render_slot(&request, &live, &mut scope, &parsed, &path).await {
+            Ok(island) => {
+                count_slot("rendered");
+                outcomes.push(SlotOutcome::Rendered(island));
+            }
+            Err(()) => match &parsed.on_failure {
+                SlotFailurePolicy::Omit => {
+                    count_slot("omitted");
+                    outcomes.push(SlotOutcome::Omitted);
+                }
+                SlotFailurePolicy::Fallback { .. } => {
+                    count_slot("fallback");
+                    outcomes.push(SlotOutcome::Fallback);
+                }
+                SlotFailurePolicy::FailDocument => {
+                    count_slot("failed");
+                    return fail_document(request, next).await;
+                }
+            },
+        }
+    }
+    // A graph needs a nonce when the shell has a hole where one was, or when
+    // a stored header's value carried one; either way it is minted here, per
+    // request, so no two visitors are ever sent the same one.
+    let nonce = if entry.needs_nonce() {
+        match fresh_nonce() {
+            Ok(nonce) => Some(nonce),
+            Err(_) => return fail_document(request, next).await,
+        }
+    } else {
+        None
+    };
+    let Ok(document) = assemble(
+        &entry,
+        AssemblyInput { outcomes, nonce },
+        runtime.limits.max_body_bytes,
+    ) else {
+        return fail_document(request, next).await;
+    };
+    count_assembly("assembled");
+    respond(
+        &request,
+        &policy,
+        entry.header(),
+        &document,
+        published_at_ms,
+        now_ms,
+        warning,
+    )
+}
+
+/// Re-mounts one declared slot under this request's own authority.
+///
+/// `Err(())` means the slot could not be resolved *for this request*, and
+/// the caller applies the slot's declared failure policy to it. There is
+/// deliberately only one error: an unregistered mount, a declaration that
+/// no longer matches the catalog, a refused request context (an anonymous
+/// or logged-out visitor included), and a rejected mount are all the same
+/// fact from the assembler's point of view - this island is not available
+/// to this principal - and the declaration, not this function, decides what
+/// that means for the document.
+///
+/// The identity comparison is the whole point of storing typed identities
+/// in the slot rather than a component name alone. A registration is
+/// accepted only when it is still identity-bound (a mount redeclared as a
+/// public seed belongs in the shell, not in a slot) and its component,
+/// contract digest, protocol, document key, and build all match what was
+/// stored. Anything else is drift between the stored entry and the running
+/// build, and drift is a slot failure, never a substitution.
+///
+/// The mount runs inside [`collector::slot_scope`] for the same reason
+/// `LiveDocument::mount` does: whatever it reads belongs to this island,
+/// which is re-rendered on every hit, and must never be attributed to the
+/// shared shell. There is no collector open on the hit path today, so the
+/// wrapper is inert here; it is kept so the two mount sites cannot drift
+/// apart if one ever is opened.
+async fn render_slot(
+    request: &Request,
+    live: &LiveRuntime,
+    scope: &mut DocumentMountScope,
+    slot: &ParsedSlot,
+    path: &MountedDocumentPath,
+) -> Result<CheckedIsland, ()> {
+    let registration = live
+        .stitch_registration(&slot.route, &slot.slot)
+        .ok_or(())?;
+    if registration.kind != LiveMountKind::IdentityBound
+        || registration.selection.component() != &slot.component
+        || registration.selection.contract_digest() != &slot.contract_digest
+        || registration.selection.protocol() != slot.protocol
+        || registration.document_key != slot.document_key
+        || registration.build != slot.build
+    {
+        return Err(());
+    }
+    let context = live
+        .validate_request_context(
+            request,
+            slot.route.clone(),
+            slot.slot.clone(),
+            registration.selection.clone(),
+        )
+        .map_err(|_| ())?;
+    let output = collector::slot_scope(
+        live.mount_private_component(
+            scope,
+            PrivateMountRequest::new(
+                slot.document_key.clone(),
+                slot.parameters.clone(),
+                slot.flags.clone(),
+            )
+            .with_document_path(path.clone()),
+            &context,
+        ),
+    )
+    .await
+    .map_err(|_| ())?;
+    let (html, _metadata) = output.into_document_parts();
+    Ok(CheckedIsland::new(
+        html,
+        slot.slot.clone(),
+        slot.document_key.clone(),
+    ))
+}
+
+/// Abandons assembly and lets the route's own handler answer, uncached.
+///
+/// This is the only outcome besides a fully assembled document: there is no
+/// partial response. The handler renders the document itself, exactly as it
+/// does on a miss, and the stored entry is left untouched.
+async fn fail_document(request: Request, next: Next) -> Response {
     count_assembly("fail_document");
     next(request).await
+}
+
+/// Builds the served response for an assembled document.
+///
+/// The counterpart of
+/// [`conditional_response`](super::middleware::conditional_response) for a
+/// representation that had to be assembled first. Two things differ, and
+/// both follow from the bytes being new. The validator is strong over the
+/// document just assembled rather than over stored bytes, so a client's
+/// `If-None-Match` is compared against what this request would actually
+/// have received. And the replayable headers come from the assembled
+/// document rather than from the stored header, because a nonce-bearing
+/// header (a `Content-Security-Policy`, typically) has been rebuilt around
+/// the nonce minted for this request; replaying the stored value would
+/// declare the leader's nonce over a body carrying somebody else's.
+///
+/// Everything else is the shared contract: `Cache-Control` from the class
+/// and policy (private for this class by definition - the shell is what the
+/// server caches, never what a downstream cache may share), `Vary` from the
+/// declared variance, `Age` from the publication instant, and `Warning`
+/// when the entry was served stale. `HEAD` and a matching `If-None-Match`
+/// both send the headers without a body.
+fn respond(
+    request: &Request,
+    policy: &RenderCachePolicy,
+    header: &EntryHeader,
+    document: &AssembledDocument,
+    published_at_ms: u64,
+    now_ms: u64,
+    warning: Option<&'static str>,
+) -> Response {
+    let not_modified = matches!(
+        evaluate_conditional(request.header("if-none-match"), document.validator()),
+        ConditionalOutcome::NotModified
+    );
+    let is_head = request.method().as_str() == "HEAD";
+    let body = if not_modified || is_head {
+        Bytes::new()
+    } else {
+        document.body().clone()
+    };
+    let content_type = document
+        .headers()
+        .iter()
+        .find(|(name, _)| *name == "content-type")
+        .map(|(_, value)| value.to_owned())
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let mut response = HttpResponse::bytes(body, content_type).status(if not_modified {
+        304
+    } else {
+        header.status
+    });
+    for (name, value) in document.headers().iter() {
+        if name == "content-type" || name == "cache-control" || name == "vary" {
+            continue;
+        }
+        response = response.header(name.to_owned(), value.to_owned());
+    }
+    response = response.header("ETag", document.validator().etag());
+    let seed_remaining = header
+        .seed_deadline_ms
+        .map(|deadline| deadline.saturating_sub(now_ms));
+    response = response.header(
+        "Cache-Control",
+        cache_control_value(
+            header.class,
+            policy.shared(),
+            &policy.freshness(),
+            seed_remaining,
+        ),
+    );
+    if let Some(vary) = vary_value(&header.variance) {
+        response = response.header("Vary", vary);
+    }
+    response = response.header("Age", age_seconds(published_at_ms, now_ms).to_string());
+    if let Some(warning) = warning {
+        response = response.header("Warning", warning);
+    }
+    Ok(response)
 }
 
 /// Counts one composite assembly attempt under its closed outcome label.
@@ -138,10 +404,6 @@ fn count_assembly(outcome: &'static str) {
 }
 
 /// Counts one slot outcome inside a composite assembly.
-#[allow(
-    dead_code,
-    reason = "Task 8's assembler is the only producer of slot outcomes"
-)]
 fn count_slot(outcome: &'static str) {
     Metrics::counter(render_cache_telemetry::STITCH_SLOTS)
         .inc_with(&[(render_cache_telemetry::OUTCOME, outcome)]);

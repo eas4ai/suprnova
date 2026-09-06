@@ -26,11 +26,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use serde_json::Value;
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
 use suprnova::live::{
     LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry, LiveTenantMiddleware,
@@ -281,6 +284,28 @@ pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
 /// policy, installs RenderCache, and prepares the Live runtime on the same
 /// router with the same clock.
 pub async fn boot() -> Arc<Harness> {
+    boot_with_stitched_freshness(generous_freshness()).await
+}
+
+/// [`boot`] with [`STITCHED_PATH`] given the named intervals instead of the
+/// generous default, so a test can move the shared clock past the fresh
+/// interval and observe the stale-servable path. Every other route keeps
+/// the default, so only the route under test ever goes stale.
+pub async fn boot_with_freshness(
+    fresh_ms: u64,
+    stale_servable_ms: u64,
+    stale_on_error_ms: u64,
+) -> Arc<Harness> {
+    boot_with_stitched_freshness(
+        FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)
+            .expect("stitched freshness intervals"),
+    )
+    .await
+}
+
+/// The shared body of [`boot`] and [`boot_with_freshness`]: everything but
+/// the freshness [`STITCHED_PATH`] is registered with is identical.
+async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Arc<Harness> {
     static CRYPT_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT_ONCE.get_or_init(|| {
         suprnova::Crypt::init(suprnova::EncryptionKey::generate());
@@ -351,8 +376,13 @@ pub async fn boot() -> Arc<Harness> {
     router = nonce_route(router, SEED_ONLY_NONCE_PATH, &seed_only_nonce);
 
     for path in STITCH_PATHS {
+        let freshness = if path == STITCHED_PATH {
+            stitched_freshness
+        } else {
+            generous_freshness()
+        };
         router = router
-            .try_render_cache(path, stitched_policy())
+            .try_render_cache(path, stitched_policy(freshness))
             .unwrap_or_else(|_| panic!("attach stitched render cache policy for {path}"));
     }
 
@@ -412,9 +442,16 @@ fn identity_bound(path: &str, document_key: &str) -> LiveMount<DogfoodCounter> {
         .unwrap_or_else(|_| panic!("declare identity-bound mount for {path}"))
 }
 
-fn stitched_policy() -> RenderCachePolicy {
+/// Fresh for longer than any test's clock ever advances, and never
+/// stale-servable: the default every route here keeps unless a test asks
+/// for something narrower.
+fn generous_freshness() -> FreshnessPolicy {
+    FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness")
+}
+
+fn stitched_policy(freshness: FreshnessPolicy) -> RenderCachePolicy {
     RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
-        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .freshness(freshness)
         .build()
         .expect("stitched policy")
 }
@@ -636,6 +673,49 @@ pub struct StitchDocument<'a> {
     pub island: &'a TrustedHtml,
 }
 
+/// The opening tag of the island whose document key is `key`.
+///
+/// The same helper the application's own `live_support` uses, copied here
+/// rather than shared: it is what separates an island's per-principal
+/// markup from the shell bytes around it, which is exactly the distinction
+/// an assembled stitched document has to get right.
+#[must_use]
+pub fn island_tag<'h>(html: &'h str, key: &str) -> &'h str {
+    let needle = format!("data-suprnova-live-document-key=\"{key}\"");
+    let position = html
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no island with document key {key}"));
+    let start = html[..position].rfind('<').expect("island tag start");
+    let end = html[position..].find('>').expect("island tag end") + position + 1;
+    &html[start..end]
+}
+
+/// The value of `name` in one opening tag.
+#[must_use]
+pub fn attribute<'h>(tag: &'h str, name: &str) -> &'h str {
+    let prefix = format!("{name}=\"");
+    let start = tag
+        .find(&prefix)
+        .map(|index| index + prefix.len())
+        .unwrap_or_else(|| panic!("missing attribute {name} in {tag}"));
+    let tail = &tag[start..];
+    let end = tail.find('"').expect("unterminated attribute");
+    &tail[..end]
+}
+
+/// The signed snapshot one island tag carries, decoded from its base64url
+/// `data-suprnova-live-snapshot` attribute. The envelope is
+/// `{"body": {...}, "signature": ...}`, so the scope an island was mounted
+/// under reads as `["body"]["scope"]`.
+#[must_use]
+pub fn decoded_snapshot(tag: &str) -> Value {
+    let encoded = attribute(tag, "data-suprnova-live-snapshot");
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode emitted Live snapshot");
+    serde_json::from_slice(&bytes).expect("parse emitted Live snapshot")
+}
+
 /// One dispatched response: status, an accessor for a header, and the body.
 pub struct TestResponse {
     /// The response status.
@@ -656,6 +736,15 @@ impl TestResponse {
     #[must_use]
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// The session cookie pair this response established, to present on a
+    /// later request that has to be the *same* session. Without it every
+    /// dispatch starts a fresh session, and the session fingerprint is one
+    /// of the three identities a mount's scope is derived from.
+    #[must_use]
+    pub fn session_cookie(&self) -> String {
+        crate::live_dogfood_support::session_cookie(&self.headers)
     }
 }
 

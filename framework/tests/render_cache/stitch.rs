@@ -12,7 +12,8 @@ use suprnova_live::render_cache::entry::EntryKind;
 
 use crate::render_cache_stitch_support::{
     POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH,
-    STITCHED_PATH, boot, chain_reaches, dispatch, handler_renders,
+    STITCHED_PATH, TestResponse, boot, boot_with_freshness, chain_reaches, clock, decoded_snapshot,
+    dispatch, handler_renders, island_tag,
 };
 
 /// A stitched route whose document holds nothing principal-specific is still
@@ -239,5 +240,295 @@ async fn a_zero_slot_document_with_a_nonce_publishes_a_composite_entry() {
     assert!(
         String::from_utf8_lossy(&first.body).contains(nonce),
         "the rendered body carried the nonce the header declared"
+    );
+}
+
+/// The hit is assembled, not replayed: the shell comes from the stored
+/// entry and the island inside it is mounted again, here and now, for
+/// whoever is asking. So the handler never runs, two principals never
+/// receive the same island, the same principal on the same session keeps
+/// the scope its island was mounted under, and the bytes outside the island
+/// are the very bytes the first render produced.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hit_assembles_each_principals_own_island_without_the_handler() {
+    let harness = boot().await;
+    let a1 = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(a1.status, StatusCode::OK, "{}", a1.text());
+    let before = handler_renders(STITCHED_PATH);
+    let b1 = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(b1.status, StatusCode::OK, "{}", b1.text());
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "the handler did not run on the hit"
+    );
+    assert_eq!(b1.header("age"), Some("0"));
+    let island_a = island_tag(&a1.text(), "stitch-counter").to_owned();
+    let island_b = island_tag(&b1.text(), "stitch-counter").to_owned();
+    assert_ne!(island_a, island_b, "each principal gets its own island");
+    assert_ne!(
+        decoded_snapshot(&island_a)["body"]["scope"],
+        decoded_snapshot(&island_b)["body"]["scope"]
+    );
+    // On `a1`'s own session: the scope a mount is bound to is derived from
+    // the session as well as the principal, and every dispatch without the
+    // cookie starts a new session, so presenting it is what makes the two
+    // requests comparable at all.
+    let session_a = a1.session_cookie();
+    let a2 = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a"), ("cookie", &session_a)],
+    )
+    .await;
+    assert_eq!(handler_renders(STITCHED_PATH), before);
+    assert_eq!(
+        decoded_snapshot(island_tag(&a2.text(), "stitch-counter"))["body"]["scope"],
+        decoded_snapshot(&island_a)["body"]["scope"]
+    );
+    // the shell around the island is byte-identical for a and b
+    let shell = |text: &str| text.replace(island_tag(text, "stitch-counter"), "");
+    assert_eq!(shell(&a1.text()), shell(&b1.text()));
+    assert!(
+        a2.header("cache-control")
+            .expect("cc")
+            .starts_with("private, max-age=")
+    );
+}
+
+/// Every response an assembled hit sends carries a strong validator over
+/// exactly the bytes it sent, and the conditional and `HEAD` paths run
+/// against that validator rather than against anything stored.
+///
+/// A stitched document is assembled per request and its islands carry
+/// server-minted instance identities, so no two assemblies are ever the same
+/// bytes and a validator from an earlier response legitimately stops
+/// matching - which is exactly what a strong validator is supposed to say.
+/// `If-None-Match: *` is therefore the conditional this class can satisfy,
+/// and it takes the 304 path: the assembled document's metadata, no body.
+/// `HEAD` takes that path too, carrying the validator of the document
+/// assembled for it rather than of the empty body it sends.
+#[tokio::test]
+#[serial_test::serial]
+async fn conditional_and_head_requests_use_the_assembled_validator() {
+    let harness = boot().await;
+    dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    let b = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    let etag_b = b.header("etag").expect("etag").to_owned();
+    assert_eq!(
+        etag_b,
+        suprnova_live::render_cache::Validator::strong_for(&b.body).etag()
+    );
+    let not_modified = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b"), ("if-none-match", "*")],
+    )
+    .await;
+    assert_eq!(not_modified.status, StatusCode::NOT_MODIFIED);
+    assert!(not_modified.body.is_empty());
+    assert!(
+        not_modified.header("etag").is_some(),
+        "a 304 still carries the assembled document's validator"
+    );
+    assert_eq!(not_modified.header("age"), Some("0"));
+    let other = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a"), ("if-none-match", &etag_b)],
+    )
+    .await;
+    assert_eq!(
+        other.status,
+        StatusCode::OK,
+        "b's validator does not match a's assembled document"
+    );
+    let other_etag = suprnova_live::render_cache::Validator::strong_for(&other.body).etag();
+    assert_eq!(
+        other.header("etag"),
+        Some(other_etag.as_str()),
+        "and the response carries a validator over its own bytes"
+    );
+    let head = dispatch(
+        &harness,
+        Method::HEAD,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.body.is_empty());
+    let head_etag = head.header("etag").expect("etag").to_owned();
+    assert_ne!(
+        head_etag,
+        suprnova_live::render_cache::Validator::strong_for(&[]).etag(),
+        "the validator is over the document assembled for this request, \
+         not over the empty body a HEAD sends"
+    );
+    assert_eq!(
+        head.header("cache-control"),
+        b.header("cache-control"),
+        "and the rest of the metadata is the metadata a GET would carry"
+    );
+}
+
+/// A zero-slot Composite is assembled too. Nothing is re-mounted, but the
+/// nonce is minted for this request and reaches the body and the header the
+/// document declared it in together, so two hits are handler-free and
+/// differ from one another in exactly the nonce - and in the validator that
+/// describes them.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit() {
+    let harness = boot().await;
+    let published = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_NONCE_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.text());
+    let before = handler_renders(SEED_ONLY_NONCE_PATH);
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_NONCE_PATH,
+        &[("x-test-login", "user-2")],
+    )
+    .await;
+    let second = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_NONCE_PATH,
+        &[("x-test-login", "user-3")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    assert_eq!(
+        handler_renders(SEED_ONLY_NONCE_PATH),
+        before,
+        "both hits were assembled without the handler"
+    );
+    let first_nonce = declared_nonce(&first);
+    let second_nonce = declared_nonce(&second);
+    assert_ne!(first_nonce, second_nonce, "every hit mints its own nonce");
+    assert!(
+        first.text().contains(&first_nonce) && second.text().contains(&second_nonce),
+        "each body carries the nonce its own header declared"
+    );
+    assert_eq!(
+        first.text().replace(&first_nonce, "<nonce>"),
+        second.text().replace(&second_nonce, "<nonce>"),
+        "the two assembled bodies differ only in the nonce"
+    );
+    assert_ne!(
+        first.header("etag"),
+        second.header("etag"),
+        "and each validator describes its own bytes"
+    );
+    let first_etag = suprnova_live::render_cache::Validator::strong_for(&first.body).etag();
+    assert_eq!(first.header("etag"), Some(first_etag.as_str()));
+}
+
+/// The nonce a response declared in its own `Content-Security-Policy`.
+fn declared_nonce(response: &TestResponse) -> String {
+    response
+        .header("content-security-policy")
+        .and_then(|policy| policy.strip_prefix("script-src 'nonce-"))
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("the harness declares script-src 'nonce-<value>'")
+        .to_owned()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_anonymous_or_logged_out_request_never_receives_an_assembled_document() {
+    let harness = boot().await;
+    dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    let anonymous = dispatch(&harness, Method::GET, STITCHED_PATH, &[]).await;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        RenderCache::inspect_route_for_test(STITCHED_PATH)
+            .await
+            .is_some(),
+        "the entry is untouched"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stale_servable_composite_assembles_with_a_warning_and_no_background_render() {
+    let harness = boot_with_freshness(1_000, 60_000, 0).await;
+    dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    clock(&harness).advance_ms(5_000);
+    let before = handler_renders(STITCHED_PATH);
+    let stale = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(stale.status, StatusCode::OK);
+    assert!(stale.header("warning").is_some());
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "no foreground and no background render"
+    );
+    let again = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "still none: stitched routes never rebuild in the background"
     );
 }

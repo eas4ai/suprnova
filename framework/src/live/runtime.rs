@@ -108,10 +108,6 @@ struct RuntimeGraph {
 /// the island is a public seed that stays inside the shell, or an
 /// identity-bound one that has to be rendered again for this request).
 #[derive(Clone)]
-#[allow(
-    dead_code,
-    reason = "Task 8's request-time assembly is the only reader of these fields"
-)]
 pub(crate) struct StitchRegistration {
     /// The catalog-checked route, slot, component, contract, and protocol.
     pub(crate) selection: MountSelection,
@@ -1110,10 +1106,6 @@ impl LiveRuntime {
     /// Finalizes the catalog first, exactly as every other request-path
     /// reader of it does, so the first stitched hit after boot resolves the
     /// same as every later one.
-    #[allow(
-        dead_code,
-        reason = "Task 8's request-time assembly is the only reader of this join"
-    )]
     pub(crate) fn stitch_registration(
         &self,
         route: &RouteIdentity,
