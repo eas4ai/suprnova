@@ -479,6 +479,41 @@ impl RenderCache {
         Self::inspect(&key).await.expect("inspect")
     }
 
+    /// Test-only: the shell bytes of the Composite entry stored for a route
+    /// with empty params and anonymous variance, or `None` when nothing is
+    /// stored for it. Panics when the stored entry is a Complete one.
+    ///
+    /// [`Self::inspect_route_for_test`] reports a shell's *length* and never
+    /// its bytes, which is enough to see that a shell is smaller than the
+    /// document it was cut from but not enough to prove what it does not
+    /// contain. The central privacy claim of a stitched entry is exactly
+    /// that: the shared shell holds no island markup and no signed snapshot,
+    /// so nothing a later visitor is sent can come from an earlier
+    /// visitor's island. Proving it needs the bytes.
+    #[doc(hidden)]
+    pub async fn shell_for_test(pattern: &str) -> Option<bytes::Bytes> {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        let policy = runtime.table.effective_policy(pattern).expect("policy");
+        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy);
+        let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
+            .expect("key");
+        let stored = runtime.l0.get(&key).await.expect("l0 get")?;
+        let decoded = suprnova_live::render_cache::entry::decode(
+            &stored.bytes,
+            &runtime.keys,
+            &runtime.limits,
+        )
+        .expect("decode");
+        match decoded {
+            suprnova_live::render_cache::entry::DecodedEntry::Composite(entry) => {
+                Some(entry.shell().clone())
+            }
+            suprnova_live::render_cache::entry::DecodedEntry::Complete(_) => {
+                panic!("the stored entry is Complete, so it has no shell")
+            }
+        }
+    }
+
     /// Test-only: L1 inspection of a route by pattern, params, and an
     /// optional login - the L1 counterpart of [`Self::inspect_route_for_test`]
     /// and [`Self::key_for_route_for_test`]. Added for fix round 2, item 5:

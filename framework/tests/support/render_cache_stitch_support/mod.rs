@@ -6,6 +6,12 @@
 //! routes still runs that chain instead of being answered by the global
 //! RenderCache middleware before the guard ever sees the request.
 //!
+//! The three `OPTIONAL_*` routes are the deliberate exception: their guard is
+//! `AuthMiddleware::optional()`, so a visitor the identity-bound island will
+//! not accept still reaches the end of the chain. That is what separates a
+//! refusal by the route from a refusal by one slot, and it is the only shape
+//! in which the declared per-slot failure policies can be observed at all.
+//!
 //! Two counters per route, not one, because "the chain ran" and "the handler
 //! ran" are different facts on a stitched route and the whole point of the
 //! request path under test is that the first can happen without the second:
@@ -55,6 +61,7 @@ use suprnova::{
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
 use suprnova_live::mount::MountFlags;
+use suprnova_live::render_cache::composite::SegmentGraph;
 
 use crate::live_dogfood_support::{
     DogfoodCounter, DogfoodDocument, LoginHeader, MemorySessionStore, build_public_router, fixture,
@@ -104,8 +111,40 @@ pub const NONCE_PATH: &str = "/stitch/nonce";
 /// anything to cut out at all".
 pub const SEED_ONLY_NONCE_PATH: &str = "/stitch/seed-only-nonce";
 
+/// A stitched shell whose handler mounts its identity-bound island and then
+/// hand-builds the response itself, never calling `LiveDocument::render`.
+/// The mount facts are still captured - `LiveDocument::mount` records them -
+/// but no document digest is, so nothing proves the bytes being sent are the
+/// bytes a document rendered.
+pub const NO_DIGEST_PATH: &str = "/stitch/no-digest";
+
+/// A stitched shell whose handler renders *two* Live documents in one
+/// request and returns the second. The captured mounts then belong to two
+/// different bodies and no single shell can be cut from both, which is the
+/// one thing `StitchCapture::invalid` records.
+pub const TWICE_RENDERED_PATH: &str = "/stitch/twice-rendered";
+
+/// A stitched shell whose route guard is `AuthMiddleware::optional()`
+/// around an identity-bound island declaring the default
+/// [`StitchFailurePolicy::FailDocument`].
+///
+/// The three `OPTIONAL_*` routes are the only ones here whose guard admits a
+/// visitor the island itself will not accept, which is what separates a slot
+/// reauthorization refusal from a route refusal: the guard says yes, the
+/// chain runs to the end, and `validate_request_context` is what says no -
+/// per slot, on the hit, for this request alone. Everywhere else in this
+/// harness the guard turns such a visitor away first and the slot is never
+/// reached.
+pub const OPTIONAL_FAIL_PATH: &str = "/stitch/optional-fail";
+
+/// [`OPTIONAL_FAIL_PATH`]'s shape with [`StitchFailurePolicy::Omit`].
+pub const OPTIONAL_OMIT_PATH: &str = "/stitch/optional-omit";
+
+/// [`OPTIONAL_FAIL_PATH`]'s shape with [`StitchFailurePolicy::Fallback`].
+pub const OPTIONAL_FALLBACK_PATH: &str = "/stitch/optional-fallback";
+
 /// Every stitched route this harness registers, in registration order.
-pub const STITCH_PATHS: [&str; 8] = [
+pub const STITCH_PATHS: [&str; 13] = [
     STITCHED_PATH,
     SEED_ONLY_PATH,
     SHELL_READS_PRINCIPAL_PATH,
@@ -114,6 +153,11 @@ pub const STITCH_PATHS: [&str; 8] = [
     FALLBACK_PATH,
     NONCE_PATH,
     SEED_ONLY_NONCE_PATH,
+    NO_DIGEST_PATH,
+    TWICE_RENDERED_PATH,
+    OPTIONAL_FAIL_PATH,
+    OPTIONAL_OMIT_PATH,
+    OPTIONAL_FALLBACK_PATH,
 ];
 
 /// The fallback fragment `FALLBACK_PATH` declares.
@@ -170,9 +214,16 @@ fn increment(counter: &Mutex<BTreeMap<&'static str, usize>>, path: &'static str)
         .or_insert(0) += 1;
 }
 
-/// Makes [`Refusing`] resolve a different tenant on every request while
-/// `refusing` is set, so a mount scoped to one request's tenant cannot be
-/// re-established on the next one. Reset by [`boot`].
+/// Makes [`Refusing`] resolve a *different* tenant on every request while
+/// `refusing` is set. Reset by [`boot`].
+///
+/// This is a shifting tenant, not a refusal: a fresh mount succeeds under
+/// whatever tenant this request resolved, and only the scope it is bound to
+/// moves. It is therefore how a test observes that a stitched hit derives
+/// the island's authority from the request in front of it rather than
+/// replaying the authority the shell was published under - see
+/// `stitch.rs`'s own test of that. A slot refusal needs a visitor the island
+/// will not accept, which is what the `OPTIONAL_*` routes exist for.
 pub fn set_tenant_refusing(refusing: bool) {
     TENANT_REFUSING.store(refusing, Ordering::SeqCst);
 }
@@ -181,8 +232,9 @@ pub fn set_tenant_refusing(refusing: bool) {
 ///
 /// Resolves nothing at all by default, exactly as `live_dogfood_support`'s
 /// own `Tenantless` does, so the ordinary routes behave identically; with
-/// [`set_tenant_refusing`] on it resolves a *different* tenant per request
-/// instead, which is what an identity-bound mount cannot survive.
+/// [`set_tenant_refusing`] on it resolves a different tenant per request
+/// instead. See that function for what a shifting tenant does and does not
+/// prove.
 pub struct Refusing;
 
 #[async_trait::async_trait]
@@ -279,6 +331,21 @@ pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
     &harness.clock
 }
 
+/// Edits the Composite entry already stored for `path` in place, through the
+/// framework's own test seam, and leaves it published under the same key.
+///
+/// The only way a test can reach the drift a redeploy produces: a stored
+/// slot whose component or contract digest the running registry no longer
+/// has cannot arise inside one process, because the registry and the entry
+/// are written by the same build. An `edit` that changes nothing is also how
+/// a test observes the stored graph, which nothing else here exposes.
+pub async fn rewrite_stored_entry<F>(path: &str, edit: F)
+where
+    F: FnOnce(&mut SegmentGraph),
+{
+    suprnova::render_cache::testing::rewrite_composite_for_test(path, edit).await;
+}
+
 /// Boots a fresh SQLite database with the RenderCache migration applied,
 /// registers every stitched route with a generous `PublicShellStitched`
 /// policy, installs RenderCache, and prepares the Live runtime on the same
@@ -364,6 +431,20 @@ async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Ar
         "stitch-seed-nonce",
     )
     .expect("declare seed-only nonce mount");
+    let no_digest = identity_bound(NO_DIGEST_PATH, "stitch-no-digest");
+    let twice_rendered = identity_bound(TWICE_RENDERED_PATH, "stitch-twice-rendered");
+    let optional_fail = identity_bound(OPTIONAL_FAIL_PATH, "stitch-optional-fail");
+    let optional_omit = identity_bound(OPTIONAL_OMIT_PATH, "stitch-optional-omit")
+        .on_stitch_failure(StitchFailurePolicy::Omit)
+        .expect("declare optional omit failure policy");
+    let optional_fallback_html = TrustedHtml::framework_static(
+        FALLBACK_HTML,
+        TrustedMarkupReason::new("stitch harness fallback").expect("fallback reason"),
+    )
+    .expect("fallback markup");
+    let optional_fallback = identity_bound(OPTIONAL_FALLBACK_PATH, "stitch-optional-fallback")
+        .on_stitch_failure(StitchFailurePolicy::Fallback(optional_fallback_html))
+        .expect("declare optional fallback failure policy");
 
     let mut router: Router = build_public_router();
     router = document_route(router, SEED_ONLY_PATH, &seed_only);
@@ -374,6 +455,11 @@ async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Ar
     router = document_route(router, FALLBACK_PATH, &fallback);
     router = nonce_route(router, NONCE_PATH, &nonce);
     router = nonce_route(router, SEED_ONLY_NONCE_PATH, &seed_only_nonce);
+    router = handler_built_route(router, &no_digest);
+    router = twice_rendered_route(router, &twice_rendered);
+    router = optional_guard_route(router, OPTIONAL_FAIL_PATH, &optional_fail);
+    router = optional_guard_route(router, OPTIONAL_OMIT_PATH, &optional_omit);
+    router = optional_guard_route(router, OPTIONAL_FALLBACK_PATH, &optional_fallback);
 
     for path in STITCH_PATHS {
         let freshness = if path == STITCHED_PATH {
@@ -505,6 +591,63 @@ fn post_processed_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Ro
         .expect("register post-processed mount")
 }
 
+/// One stitched route whose guard is `AuthMiddleware::optional()`: an
+/// anonymous visitor reaches the handler and the Live completion middleware
+/// instead of being turned away, so the identity-bound island - not the
+/// route - is what refuses them.
+fn optional_guard_route(
+    router: Router,
+    path: &'static str,
+    mount: &LiveMount<DogfoodCounter>,
+) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(path, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_stitch_document(request, mount, path).await }
+        })
+        .middleware(AuthMiddleware::optional())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router
+        .try_live_mount(mount)
+        .unwrap_or_else(|_| panic!("register optional-guard mount for {path}"))
+}
+
+/// `NO_DIGEST_PATH`: the same chain as every other stitched route, behind a
+/// handler that mounts its island and then builds the response by hand.
+fn handler_built_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(NO_DIGEST_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_without_a_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router
+        .try_live_mount(mount)
+        .expect("register no-digest mount")
+}
+
+/// `TWICE_RENDERED_PATH`: the same chain, behind a handler that renders two
+/// documents and returns the second.
+fn twice_rendered_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(TWICE_RENDERED_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_twice(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router
+        .try_live_mount(mount)
+        .expect("register twice-rendered mount")
+}
+
 fn nonce_route(router: Router, path: &'static str, mount: &LiveMount<DogfoodCounter>) -> Router {
     let handler_mount = mount.clone();
     let router: Router = router
@@ -528,6 +671,62 @@ async fn render_stitch_document(
     path: &'static str,
 ) -> Result<HttpResponse, HttpResponse> {
     increment(&HANDLER_RENDERS, path);
+    into_response(render_one_document(&request, &mount).await)
+}
+
+/// One Live document render, without touching [`HANDLER_RENDERS`]: the
+/// counter belongs to the *request*, and [`render_twice`] renders two
+/// documents inside one request.
+async fn render_one_document(
+    request: &Request,
+    mount: &LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, FrameworkError> {
+    let mut document = LiveDocument::from_request(request)
+        .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+    let island = document
+        .mount(
+            mount,
+            CanonicalValue::Object(std::collections::BTreeMap::new()),
+            MountFlags::empty(),
+        )
+        .await
+        .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+    let bootstrap = document
+        .bootstrap(LiveBootstrapOptions::esm())
+        .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+    document
+        .render(
+            dogfood_view()?,
+            &DogfoodDocument {
+                bootstrap: bootstrap.html(),
+                island: island.html(),
+            },
+            DocumentResponseIntent::html(StatusCode::OK)
+                .map_err(|_| FrameworkError::internal("response intent"))?,
+            AssetSet::empty(),
+        )
+        .map_err(FrameworkError::from)
+}
+
+/// The shared tail of every handler here: a framework error becomes the
+/// same 500 the visitor would see in production.
+fn into_response(
+    result: Result<HttpResponse, FrameworkError>,
+) -> Result<HttpResponse, HttpResponse> {
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+/// `NO_DIGEST_PATH`'s handler: mounts the island, builds the bootstrap, and
+/// then writes the response itself instead of calling
+/// `LiveDocument::render`. The mount facts are captured either way - they
+/// are recorded at `mount` - but no document digest ever is, so the
+/// publisher cannot prove the bytes it is being asked to cut a shell from
+/// are the bytes a Live document produced.
+async fn render_without_a_document(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    increment(&HANDLER_RENDERS, NO_DIGEST_PATH);
     let result: Result<HttpResponse, FrameworkError> = async {
         let mut document = LiveDocument::from_request(&request)
             .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
@@ -542,21 +741,30 @@ async fn render_stitch_document(
         let bootstrap = document
             .bootstrap(LiveBootstrapOptions::esm())
             .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
-        document
-            .render(
-                dogfood_view()?,
-                &DogfoodDocument {
-                    bootstrap: bootstrap.html(),
-                    island: island.html(),
-                },
-                DocumentResponseIntent::html(StatusCode::OK)
-                    .map_err(|_| FrameworkError::internal("response intent"))?,
-                AssetSet::empty(),
-            )
-            .map_err(FrameworkError::from)
+        Ok(HttpResponse::html(format!(
+            "<!doctype html><html><head>{}</head><body>{}</body></html>",
+            bootstrap.html(),
+            island.html()
+        )))
     }
     .await;
-    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+    into_response(result)
+}
+
+/// `TWICE_RENDERED_PATH`'s handler: two whole Live documents in one request,
+/// the second of which is returned. Both mounts are captured, but they
+/// belong to two different bodies, and the capture says so.
+async fn render_twice(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    increment(&HANDLER_RENDERS, TWICE_RENDERED_PATH);
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let _discarded = render_one_document(&request, &mount).await?;
+        render_one_document(&request, &mount).await
+    }
+    .await;
+    into_response(result)
 }
 
 /// `SHELL_READS_PRINCIPAL_PATH`'s handler: identical to

@@ -29,6 +29,13 @@
 //!   derives its key before any identity exists and a declared `Principal`
 //!   dimension resolves `Anonymous` while the render observes a real
 //!   principal.
+//!
+//! One exception to "nothing here is imported": [`STITCHED_ROUTE`] mounts the
+//! Live counter component and document view from `live_dogfood_support`,
+//! because a Live island needs a registered component and a template file and
+//! declaring a second identical pair here would buy nothing. The routes,
+//! policies, middleware, and dispatch loop - everything a leak could hide in -
+//! are still this module's own.
 #![allow(
     dead_code,
     reason = "the framework's test-support modules are shared by test binaries \
@@ -43,12 +50,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use serde_json::Value;
 use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
+use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
+use suprnova::live::{LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
@@ -56,13 +68,19 @@ use suprnova::render_cache::{
     VarianceDimension,
 };
 use suprnova::testing::TestContainer;
+use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    App, Auth, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
-    MiddlewareRegistry, Next, Request, Response, Router, handle_request, scope_locale,
+    App, Auth, AuthMiddleware, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
+    MiddlewareRegistry, Next, Request, Response, Router, SessionConfig, SessionMiddleware,
+    StatusCode, handle_request, scope_locale,
 };
 use suprnova::{Lang, Locale};
+use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
+use suprnova_live::mount::MountFlags;
+
+use crate::live_dogfood_support::{DogfoodCounter, DogfoodDocument, MemorySessionStore};
 
 struct PrivacyMigrator;
 
@@ -560,6 +578,47 @@ async fn install_feature_evaluator() {
         .await;
 }
 
+/// [`STITCHED_ROUTE`]'s handler: a Live document whose shell touches no
+/// identity at all and whose single island is identity-bound, so the
+/// document splits cleanly into bytes everybody may share and bytes exactly
+/// one principal may see.
+async fn stitched_handler(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    counting_route::record();
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(std::collections::BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm())
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        document
+            .render(
+                ViewName::parse("live/dogfood-document.html")
+                    .map_err(|_| FrameworkError::internal("view identity"))?,
+                &DogfoodDocument {
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                DocumentResponseIntent::html(StatusCode::OK)
+                    .map_err(|_| FrameworkError::internal("response intent"))?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
 // ── Harness ────────────────────────────────────────────────────────────
 
 /// Everything one test needs: the router and middleware registry to
@@ -596,6 +655,17 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     suprnova::middleware::clear_global_middleware_for_test();
 
     let guard = TestContainer::fake();
+    // The Live registry the stitched route's island is mounted from. Only
+    // the component and its view are borrowed from the dogfood support: the
+    // routes, policies, middleware, and dispatch loop this suite attacks are
+    // still entirely its own, which is what the module doc's independence
+    // rule is about.
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<DogfoodCounter>()
+            .expect("register the counter this suite's island mounts")
+            .build(),
+    );
     let tempdir = tempfile::tempdir().expect("tempdir for render cache privacy test database");
     let db_path = tempdir.path().join("render-cache-privacy.sqlite3");
     let config = suprnova::database::DatabaseConfig::builder()
@@ -646,6 +716,14 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .vary(VarianceDimension::Principal)
         .build()
         .expect("private declared policy");
+    // Deliberately no declared variance: a stitched shell is shared by
+    // construction, and it is the island inside it - re-mounted on every hit
+    // for whoever asked - that carries the per-principal bytes. A `Principal`
+    // dimension here would partition the shell too and prove nothing.
+    let stitched_declared = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("stitched declared policy");
 
     let router: Router = Router::new().get(PLAIN_ROUTE, plain_handler).into();
     let router: Router = router
@@ -720,6 +798,30 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             reads_request_auth_user_id_handler,
         )
         .into();
+    let stitched_mount = LiveMount::<DogfoodCounter>::identity_bound(
+        STITCHED_ROUTE,
+        "counter",
+        STITCHED_DOCUMENT_KEY,
+    )
+    .expect("declare the stitched island mount");
+    let handler_mount = stitched_mount.clone();
+    let router: Router = router
+        .get(STITCHED_ROUTE, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { stitched_handler(request, mount).await }
+        })
+        // The route's own guard, which a stitched hit runs again before the
+        // entry is served: this is what turns a signed-out visitor away.
+        //
+        // No tenant middleware here: this suite already registers one
+        // globally, and a Live security check may be recorded only once per
+        // request - a second `LiveTenantMiddleware` on the route would
+        // invalidate the whole attestation and every mount with it.
+        .middleware(AuthMiddleware::new())
+        .into();
+    let router = router
+        .try_live_mount(&stitched_mount)
+        .expect("register the stitched island mount");
 
     let router = router
         .try_render_cache(PLAIN_ROUTE, GroupPolicy::from(no_variance.clone()))
@@ -812,7 +914,9 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             REQUEST_AUTH_USER_ID_ROUTE,
             GroupPolicy::from(principal_declared),
         )
-        .expect("attach request-auth-user-id policy");
+        .expect("attach request-auth-user-id policy")
+        .try_render_cache(STITCHED_ROUTE, GroupPolicy::from(stitched_declared))
+        .expect("attach stitched policy");
 
     let mut config =
         RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -821,6 +925,16 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
 
     install_feature_evaluator().await;
 
+    // Registered before `RenderCache::install`, so the cache middleware sits
+    // inside it and never sees the `Set-Cookie` the session writes on the way
+    // out. An identity-bound Live island binds to a session as well as a
+    // principal, so without this the stitched route could not mount at all.
+    let mut session_config = SessionConfig::default();
+    session_config.cookie_secure = false;
+    suprnova::middleware::register_global_middleware(SessionMiddleware::with_store(
+        session_config,
+        Arc::new(MemorySessionStore::default()),
+    ));
     if auth_before_install {
         // The production ordering: `RenderCache::install` appends to the
         // global registry, so anything the middleware needs already
@@ -852,8 +966,16 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
 
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 
+    let router = Arc::new(router);
+    // The Live runtime the stitched route mounts through. Its own clock is
+    // separate from the RenderCache one only because the two seams take
+    // different types; both are fixed at the same instant and no test in
+    // this suite moves either.
+    prepare_live_router_with_clock_for_test(&router, Arc::new(AdjustableTestClock::new(1_000_000)))
+        .expect("prepare the Live runtime");
+
     Arc::new(Harness {
-        router: Arc::new(router),
+        router,
         middleware,
         _conn: conn,
         _guard: guard,
@@ -946,6 +1068,77 @@ pub const PRINCIPAL_DECLARED_AUTHZ_ROUTE: &str = "/privacy/principal-declared-au
 /// Declares `Principal`, reads the uninstrumented `Request::auth_user_id()`
 /// beside the instrumented accessor.
 pub const REQUEST_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-request-auth-user-id/{id}";
+/// `PublicShellStitched`, declares nothing, and renders a Live document with
+/// one identity-bound island inside a shell that reads no identity at all.
+/// The one route here whose stored representation is deliberately *shared*
+/// while part of the document it produces is per-principal.
+pub const STITCHED_ROUTE: &str = "/privacy/stitched";
+/// The document mount key the island on [`STITCHED_ROUTE`] carries.
+pub const STITCHED_DOCUMENT_KEY: &str = "privacy-stitched-counter";
+
+// ── Reading an emitted island ──────────────────────────────────────────
+
+/// The opening tag of the island whose document key is `key`.
+#[must_use]
+pub fn island_tag<'h>(html: &'h str, key: &str) -> &'h str {
+    let needle = format!("data-suprnova-live-document-key=\"{key}\"");
+    let position = html
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no island with document key {key}"));
+    let start = html[..position].rfind('<').expect("island tag start");
+    let end = html[position..].find('>').expect("island tag end") + position + 1;
+    &html[start..end]
+}
+
+/// The value of `name` in one opening tag.
+#[must_use]
+pub fn attribute<'h>(tag: &'h str, name: &str) -> &'h str {
+    let prefix = format!("{name}=\"");
+    let start = tag
+        .find(&prefix)
+        .map(|index| index + prefix.len())
+        .unwrap_or_else(|| panic!("missing attribute {name} in {tag}"));
+    let tail = &tag[start..];
+    let end = tail.find('"').expect("unterminated attribute");
+    &tail[..end]
+}
+
+/// The signed snapshot one island tag carries, decoded from its base64url
+/// `data-suprnova-live-snapshot` attribute. The envelope is
+/// `{"body": {...}, "signature": ...}`, so the scope an island was mounted
+/// under reads as `["body"]["scope"]`.
+#[must_use]
+pub fn decoded_snapshot(tag: &str) -> Value {
+    let encoded = attribute(tag, "data-suprnova-live-snapshot");
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode emitted Live snapshot");
+    serde_json::from_slice(&bytes).expect("parse emitted Live snapshot")
+}
+
+/// The scope the island on [`STITCHED_ROUTE`] was mounted under, as it
+/// reached the client.
+#[must_use]
+pub fn stitched_scope(html: &str) -> String {
+    decoded_snapshot(island_tag(html, STITCHED_DOCUMENT_KEY))["body"]["scope"]
+        .as_str()
+        .expect("a scope in the emitted snapshot")
+        .to_owned()
+}
+
+/// The session cookie pair a response established, to present on a later
+/// request that has to be the *same* session.
+#[must_use]
+pub fn session_cookie(response: &TestResponse) -> String {
+    let value = response
+        .header("set-cookie")
+        .expect("the session middleware set a cookie");
+    value
+        .split(';')
+        .next()
+        .expect("a cookie name=value pair")
+        .to_owned()
+}
 
 // ── Dispatch ───────────────────────────────────────────────────────────
 

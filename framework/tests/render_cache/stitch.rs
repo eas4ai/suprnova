@@ -10,10 +10,14 @@ use suprnova::StatusCode;
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 use suprnova_live::render_cache::entry::EntryKind;
 
+use suprnova_live::render_cache::composite::Segment;
+
 use crate::render_cache_stitch_support::{
-    POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH,
-    STITCHED_PATH, TestResponse, boot, boot_with_freshness, chain_reaches, clock, decoded_snapshot,
-    dispatch, handler_renders, island_tag,
+    FALLBACK_HTML, FALLBACK_PATH, NO_DIGEST_PATH, NONCE_PATH, OMIT_PATH, OPTIONAL_FAIL_PATH,
+    OPTIONAL_FALLBACK_PATH, OPTIONAL_OMIT_PATH, POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH,
+    SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH, STITCHED_PATH, TWICE_RENDERED_PATH, TestResponse,
+    attribute, boot, boot_with_freshness, chain_reaches, clock, decoded_snapshot, dispatch,
+    handler_renders, island_tag, rewrite_stored_entry, set_tenant_refusing,
 };
 
 /// A stitched route whose document holds nothing principal-specific is still
@@ -546,4 +550,613 @@ async fn a_stale_servable_composite_assembles_with_a_warning_and_no_background_r
         before,
         "still none: stitched routes never rebuild in the background"
     );
+}
+
+// ── Task 9: failure policies, nonce regeneration, redeploy shape,
+//    concurrency, and what the stored shell does not contain ────────────
+
+/// The three declared failure policies, all driven by the same real
+/// reauthorization refusal on a hit - and one that is not the route guard.
+///
+/// The `OPTIONAL_*` routes are guarded by `AuthMiddleware::optional()`, so a
+/// signed-out visitor is admitted, the whole chain runs, and the identity-bound
+/// island is the only thing that refuses them: `validate_request_context`
+/// has no principal to bind the mount to. That is the per-slot refusal a
+/// stitched hit has to survive, and Task 8's anonymous test cannot reach it,
+/// because there the guard answers 401 before any slot is considered.
+///
+/// `Omit` leaves the island out, `Fallback` puts the declared fragment
+/// there, and `FailDocument` abandons assembly and hands the request to the
+/// route's own handler - which, facing the same refusal, fails its own mount,
+/// so the visitor sees the handler's 500 rather than a document quietly
+/// missing an island nobody declared could go missing.
+///
+/// In every case the shell the signed-in leader published is left exactly as
+/// it was, none of the leader's island reaches the signed-out visitor, and a
+/// signed-in visitor afterwards is still served an assembled document with no
+/// handler render at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn omit_and_fallback_policies_take_effect_and_fail_document_runs_the_handler() {
+    let harness = boot().await;
+    let mut leader_islands = Vec::new();
+    for path in [
+        OPTIONAL_OMIT_PATH,
+        OPTIONAL_FALLBACK_PATH,
+        OPTIONAL_FAIL_PATH,
+    ] {
+        let published = dispatch(&harness, Method::GET, path, &[("x-test-login", "user-a")]).await;
+        assert_eq!(published.status, StatusCode::OK, "{}", published.text());
+        assert_eq!(
+            RenderCache::inspect_route_for_test(path)
+                .await
+                .expect("stored")
+                .kind,
+            EntryKind::Composite,
+            "{path} published a Composite entry to assemble from"
+        );
+        leader_islands.push(published.text());
+    }
+
+    let omit_before = handler_renders(OPTIONAL_OMIT_PATH);
+    let omitted = dispatch(&harness, Method::GET, OPTIONAL_OMIT_PATH, &[]).await;
+    assert_eq!(omitted.status, StatusCode::OK, "{}", omitted.text());
+    assert!(
+        !omitted.text().contains("data-suprnova-live-root"),
+        "the island is left out"
+    );
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        omit_before,
+        "an omitted slot still assembles, so the handler never ran"
+    );
+
+    let fallback_before = handler_renders(OPTIONAL_FALLBACK_PATH);
+    let fallback = dispatch(&harness, Method::GET, OPTIONAL_FALLBACK_PATH, &[]).await;
+    assert_eq!(fallback.status, StatusCode::OK, "{}", fallback.text());
+    assert!(fallback.text().contains(FALLBACK_HTML));
+    assert!(!fallback.text().contains("data-suprnova-live-root"));
+    assert_eq!(
+        handler_renders(OPTIONAL_FALLBACK_PATH),
+        fallback_before,
+        "a fallback slot still assembles, so the handler never ran"
+    );
+
+    let before = handler_renders(OPTIONAL_FAIL_PATH);
+    let failed = dispatch(&harness, Method::GET, OPTIONAL_FAIL_PATH, &[]).await;
+    assert_eq!(
+        handler_renders(OPTIONAL_FAIL_PATH),
+        before + 1,
+        "fail-document hands the request to the handler"
+    );
+    assert_eq!(
+        failed.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "and the handler's own mount failure is what the visitor sees"
+    );
+
+    // Nothing the signed-in leader was sent reached the signed-out visitor
+    // in any of the three, and every entry is still exactly what it was.
+    for (path, leader) in [
+        OPTIONAL_OMIT_PATH,
+        OPTIONAL_FALLBACK_PATH,
+        OPTIONAL_FAIL_PATH,
+    ]
+    .into_iter()
+    .zip(&leader_islands)
+    {
+        let island = island_tag(leader, document_key_of(path));
+        for refused in [&omitted, &fallback, &failed] {
+            assert!(
+                !refused.text().contains(island),
+                "no refused visitor received the leader's island from {path}"
+            );
+        }
+        let entry = RenderCache::inspect_route_for_test(path)
+            .await
+            .expect("the entry survived the refused hit");
+        assert_eq!(entry.kind, EntryKind::Composite);
+        assert_eq!(entry.slots, 1);
+    }
+
+    // And a signed-in visitor is still served an assembled document.
+    let before = handler_renders(OPTIONAL_FAIL_PATH);
+    let ok = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_FAIL_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.text());
+    assert_eq!(handler_renders(OPTIONAL_FAIL_PATH), before);
+    assert!(ok.text().contains("data-suprnova-live-root"));
+}
+
+/// The document key each `OPTIONAL_*` route mounts its island under.
+fn document_key_of(path: &str) -> &'static str {
+    match path {
+        OPTIONAL_OMIT_PATH => "stitch-optional-omit",
+        OPTIONAL_FALLBACK_PATH => "stitch-optional-fallback",
+        OPTIONAL_FAIL_PATH => "stitch-optional-fail",
+        other => panic!("no document key recorded for {other}"),
+    }
+}
+
+/// Reauthorization on a hit is done again for this request, never replayed
+/// from the entry: with the tenant middleware resolving a different tenant
+/// on every request, one visitor on one session receives two islands bound
+/// to two different scopes, even though the shell around them is the shell
+/// one earlier render published.
+///
+/// A stitched entry stores an island's *declaration* and never its snapshot,
+/// so there is nothing to replay; this is what that looks like from outside.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hit_binds_its_island_to_the_authority_of_the_request_in_front_of_it() {
+    let harness = boot().await;
+    let leader = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(leader.status, StatusCode::OK, "{}", leader.text());
+    let session = leader.session_cookie();
+    let leader_scope =
+        decoded_snapshot(island_tag(&leader.text(), "stitch-counter"))["body"]["scope"].clone();
+
+    set_tenant_refusing(true);
+    let before = handler_renders(STITCHED_PATH);
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a"), ("cookie", &session)],
+    )
+    .await;
+    let second = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a"), ("cookie", &session)],
+    )
+    .await;
+    set_tenant_refusing(false);
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "both were assembled from the stored shell"
+    );
+    let first_scope =
+        decoded_snapshot(island_tag(&first.text(), "stitch-counter"))["body"]["scope"].clone();
+    let second_scope =
+        decoded_snapshot(island_tag(&second.text(), "stitch-counter"))["body"]["scope"].clone();
+    assert_ne!(
+        first_scope, second_scope,
+        "the same visitor on the same session, under two tenants, gets two scopes"
+    );
+    assert_ne!(
+        first_scope, leader_scope,
+        "and neither is the scope the shell was published under"
+    );
+}
+
+/// The nonce is minted per request and reaches the body and the header
+/// together, on a route that also has an island to re-mount - so this is the
+/// whole shape at once: one private slot, at least one nonce hole in the
+/// shell, and the `Content-Security-Policy` the document declared rebuilt
+/// from a stored template.
+///
+/// A replayed nonce proves nothing, so the miss render's nonce must never
+/// appear again, and two hits by the same visitor must not share one either.
+#[tokio::test]
+#[serial_test::serial]
+async fn nonces_are_regenerated_in_the_body_and_the_csp_header_on_every_hit() {
+    let harness = boot().await;
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        NONCE_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+
+    let stored = RenderCache::inspect_route_for_test(NONCE_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(stored.kind, EntryKind::Composite);
+    assert_eq!(stored.slots, 1, "one identity-bound island to re-mount");
+    // The stored graph is not otherwise observable from outside the crate,
+    // so it is read through the rewrite seam with an edit that changes
+    // nothing.
+    let mut holes = 0usize;
+    let mut templates = 0usize;
+    rewrite_stored_entry(NONCE_PATH, |graph| {
+        holes = graph
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment, Segment::Nonce))
+            .count();
+        templates = graph.nonce_headers.len();
+    })
+    .await;
+    assert!(holes >= 1, "the shell has a hole where the nonce was");
+    assert_eq!(
+        templates, 1,
+        "and the declared content-security-policy is a template, not a stored value"
+    );
+
+    let n1 = declared_nonce(&first);
+    let before = handler_renders(NONCE_PATH);
+    let hit = dispatch(
+        &harness,
+        Method::GET,
+        NONCE_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(hit.status, StatusCode::OK, "{}", hit.text());
+    assert_eq!(
+        handler_renders(NONCE_PATH),
+        before,
+        "the hit was assembled, not rendered"
+    );
+    let n2 = declared_nonce(&hit);
+    assert_ne!(n1, n2);
+    assert!(
+        hit.text().contains(&format!("nonce=\"{n2}\"")),
+        "the bootstrap script tags carry the fresh nonce"
+    );
+    assert!(
+        !hit.text().contains(&n1),
+        "the miss render's nonce never reappears"
+    );
+    // The island in the assembled document belongs to whoever asked, not to
+    // the visitor whose render the shell was cut from.
+    assert_ne!(
+        decoded_snapshot(island_tag(&hit.text(), "stitch-nonce"))["body"]["scope"],
+        decoded_snapshot(island_tag(&first.text(), "stitch-nonce"))["body"]["scope"],
+        "the island belongs to the principal that asked for it"
+    );
+
+    let again = dispatch(
+        &harness,
+        Method::GET,
+        NONCE_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_ne!(
+        declared_nonce(&again),
+        n2,
+        "two hits by one visitor do not share a nonce either"
+    );
+}
+
+/// A redeploy in which a slot's component contract changed: the stored
+/// declaration names a contract digest the running registry does not have,
+/// which is drift between the entry and the build, and drift is a slot
+/// failure - never a substitution of whatever component now answers to that
+/// route and slot.
+///
+/// Each of the three policies is exercised against the same mismatch, so the
+/// policy - not the kind of failure - is what decides the outcome.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_slot_whose_declaration_no_longer_matches_the_catalog_is_a_slot_failure() {
+    let harness = boot().await;
+    for path in [STITCHED_PATH, OMIT_PATH, FALLBACK_PATH] {
+        let published = dispatch(&harness, Method::GET, path, &[("x-test-login", "user-a")]).await;
+        assert_eq!(published.status, StatusCode::OK, "{}", published.text());
+        // Re-encode the stored entry with the slot's contract digest
+        // changed, under the runtime's own ring.
+        rewrite_stored_entry(path, |graph| {
+            graph.slots[0].contract_digest =
+                suprnova_live::identity::ContentDigest::from_bytes(&[0xAB; 32])
+                    .expect("digest")
+                    .to_base64url();
+        })
+        .await;
+    }
+
+    let before = handler_renders(STITCHED_PATH);
+    let response = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before + 1,
+        "fail-document: the handler rendered"
+    );
+
+    let before = handler_renders(OMIT_PATH);
+    let omitted = dispatch(
+        &harness,
+        Method::GET,
+        OMIT_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(omitted.status, StatusCode::OK);
+    assert_eq!(
+        handler_renders(OMIT_PATH),
+        before,
+        "omit: assembled without the handler"
+    );
+    assert!(!omitted.text().contains("data-suprnova-live-root"));
+
+    let before = handler_renders(FALLBACK_PATH);
+    let fallback = dispatch(
+        &harness,
+        Method::GET,
+        FALLBACK_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(fallback.status, StatusCode::OK);
+    assert_eq!(
+        handler_renders(FALLBACK_PATH),
+        before,
+        "fallback: assembled without the handler"
+    );
+    assert!(fallback.text().contains(FALLBACK_HTML));
+    assert!(!fallback.text().contains("data-suprnova-live-root"));
+}
+
+/// A slot whose component name no longer matches is the same drift from the
+/// other direction: the route and slot still resolve, but what they resolve
+/// to is not what the entry recorded, and the declaration - not the running
+/// catalog - is what a stitched hit is checked against.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_slot_naming_a_component_the_registry_does_not_have_is_a_slot_failure() {
+    let harness = boot().await;
+    dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    rewrite_stored_entry(STITCHED_PATH, |graph| {
+        "tests.no-such-component".clone_into(&mut graph.slots[0].component);
+    })
+    .await;
+    let before = handler_renders(STITCHED_PATH);
+    let response = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before + 1,
+        "fail-document: the handler rendered"
+    );
+}
+
+/// Several principals hitting one stitched route at once each receive their
+/// own island, and none of them makes the handler run.
+///
+/// The barrier is the join itself, never a sleep: all four requests are
+/// started before any of them is awaited, so whichever one wins the rebuild
+/// lease publishes the shell while the others are already in flight behind
+/// it - the shape in which a shared shell could most easily be handed out
+/// carrying its leader's island.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn concurrent_principals_during_one_rebuild_each_receive_their_own_island() {
+    let harness = boot().await;
+    let a = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    );
+    let b = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    );
+    let (a, b) = tokio::join!(a, b);
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text());
+    assert_eq!(b.status, StatusCode::OK, "{}", b.text());
+    assert_ne!(
+        decoded_snapshot(island_tag(&a.text(), "stitch-counter"))["body"]["scope"],
+        decoded_snapshot(island_tag(&b.text(), "stitch-counter"))["body"]["scope"]
+    );
+
+    // With the shell published, four more principals at once: now every one
+    // of them is a hit, so the handler must not run at all and no two may
+    // share an island.
+    let published = RenderCache::inspect_route_for_test(STITCHED_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(published.kind, EntryKind::Composite);
+    let before = handler_renders(STITCHED_PATH);
+    let headers = [
+        [("x-test-login", "user-c")],
+        [("x-test-login", "user-d")],
+        [("x-test-login", "user-e")],
+        [("x-test-login", "user-f")],
+    ];
+    let (c, d, e, f) = tokio::join!(
+        dispatch(&harness, Method::GET, STITCHED_PATH, &headers[0]),
+        dispatch(&harness, Method::GET, STITCHED_PATH, &headers[1]),
+        dispatch(&harness, Method::GET, STITCHED_PATH, &headers[2]),
+        dispatch(&harness, Method::GET, STITCHED_PATH, &headers[3]),
+    );
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "every concurrent hit was assembled, none rendered"
+    );
+    let mut scopes = Vec::new();
+    for response in [&c, &d, &e, &f] {
+        assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+        let text = response.text();
+        scopes.push(
+            decoded_snapshot(island_tag(&text, "stitch-counter"))["body"]["scope"]
+                .as_str()
+                .expect("a scope in the emitted snapshot")
+                .to_owned(),
+        );
+    }
+    let distinct: std::collections::BTreeSet<&String> = scopes.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        scopes.len(),
+        "four concurrent principals received four different islands"
+    );
+}
+
+/// What the shared shell is allowed to contain, stated over its actual
+/// bytes: not the leader's island markup, and not the signed snapshot that
+/// island carried.
+///
+/// `inspect_route_for_test` reports only a length, which shows the shell is
+/// smaller than the document but not what came out of it. This reads the
+/// stored bytes.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_stored_shell_holds_no_island_markup_and_no_signed_snapshot() {
+    let harness = boot().await;
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    let body = first.text();
+    let island = island_tag(&body, "stitch-counter").to_owned();
+    let snapshot = attribute(&island, "data-suprnova-live-snapshot").to_owned();
+
+    let shell = RenderCache::shell_for_test(STITCHED_PATH)
+        .await
+        .expect("a Composite entry is stored");
+    let shell = String::from_utf8(shell.to_vec()).expect("the shell is UTF-8");
+    assert!(
+        !shell.contains(&island),
+        "the leader's island markup is not in the shared shell"
+    );
+    assert!(
+        !shell.contains(&snapshot),
+        "nor is the signed snapshot it carried"
+    );
+    assert!(
+        !shell.contains("data-suprnova-live-snapshot"),
+        "nor any signed snapshot at all"
+    );
+    assert!(
+        !shell.contains("data-suprnova-live-root"),
+        "nor any island root the request mounted"
+    );
+    assert!(
+        shell.contains("<html") && shell.contains("</html>"),
+        "what is left is the document around the island: {shell}"
+    );
+}
+
+/// A handler that mounts an identity-bound island and then writes its own
+/// response never records a document digest, so nothing proves the bytes
+/// being cut are the bytes a Live document rendered. The publisher declines
+/// rather than cutting a shell out of a body it cannot vouch for, and the
+/// route renders on every request.
+///
+/// `STITCHED_PATH` is the positive control: the same island, the same
+/// chain, one `LiveDocument::render`, and a Composite entry.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_document_that_was_never_rendered_is_not_published() {
+    let harness = boot().await;
+    let control = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(control.status, StatusCode::OK, "{}", control.text());
+    assert!(
+        RenderCache::inspect_route_for_test(STITCHED_PATH)
+            .await
+            .is_some(),
+        "the control route, which renders its document, publishes"
+    );
+
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        NO_DIGEST_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert!(
+        first.text().contains("data-suprnova-live-root"),
+        "the handler really did mount and emit the island"
+    );
+    assert!(
+        RenderCache::inspect_route_for_test(NO_DIGEST_PATH)
+            .await
+            .is_none(),
+        "declined: no document digest was ever recorded for these bytes"
+    );
+    let before = handler_renders(NO_DIGEST_PATH);
+    dispatch(
+        &harness,
+        Method::GET,
+        NO_DIGEST_PATH,
+        &[("x-test-login", "user-2")],
+    )
+    .await;
+    assert_eq!(handler_renders(NO_DIGEST_PATH), before + 1);
+}
+
+/// Two rendered documents in one request are two bodies, and the mounts
+/// recorded belong to both of them. No single shell can be cut from that,
+/// so the capture is marked invalid and the route publishes nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_request_that_rendered_two_documents_is_not_published() {
+    let harness = boot().await;
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        TWICE_RENDERED_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert!(
+        RenderCache::inspect_route_for_test(TWICE_RENDERED_PATH)
+            .await
+            .is_none(),
+        "declined: the capture is not a faithful account of one body"
+    );
+    let before = handler_renders(TWICE_RENDERED_PATH);
+    dispatch(
+        &harness,
+        Method::GET,
+        TWICE_RENDERED_PATH,
+        &[("x-test-login", "user-2")],
+    )
+    .await;
+    assert_eq!(handler_renders(TWICE_RENDERED_PATH), before + 1);
 }

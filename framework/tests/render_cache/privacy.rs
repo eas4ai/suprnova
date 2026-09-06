@@ -50,10 +50,11 @@ use render_cache_privacy_support::{
     PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE, READS_AUTH_ID_ROUTE,
     READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE,
     READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE,
-    REQUEST_AUTH_USER_ID_ROUTE, TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_VARIES_ROUTE,
-    UNDECLARED_LOCALE_ROUTE, boot_with_cache_installed_before_the_auth_middleware,
-    boot_with_render_cache, counting_route, dispatch_get, ensure_role_gate,
-    route_is_under_a_policy,
+    REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY, STITCHED_ROUTE,
+    TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
+    boot_with_cache_installed_before_the_auth_middleware, boot_with_render_cache, counting_route,
+    dispatch_get, ensure_role_gate, island_tag, route_is_under_a_policy, session_cookie,
+    stitched_scope,
 };
 use suprnova::StatusCode;
 use suprnova::render_cache::RenderCache;
@@ -1395,5 +1396,198 @@ async fn the_uninstrumented_request_accessor_carries_no_identity_and_no_body_cro
     assert_eq!(
         REQUEST_AUTH_USER_ID_ROUTE,
         "/privacy/reads-request-auth-user-id/{id}"
+    );
+}
+
+// ── The stitched row: a shared shell around a per-principal island ──────
+
+/// The stitched class is the one class that publishes a *shared*
+/// representation of a document part of which is per-principal, so it is
+/// the one place in this suite where "the handler did not run" is not by
+/// itself a leak - the shell is meant to be reused, and the island inside it
+/// is meant to be mounted again for whoever asked.
+///
+/// What must therefore hold instead: two principals share the shell byte for
+/// byte and share nothing else. Neither receives the other's island, its
+/// signed snapshot, or its identifier, and the scope each island is bound to
+/// is the scope of the visitor who received it.
+///
+/// The positive control is on this same route: the second principal's
+/// request must actually be a hit, or a boot that stored nothing would pass
+/// every boundary assertion below.
+#[tokio::test]
+#[serial_test::serial]
+async fn two_principals_share_one_stitched_shell_and_never_see_each_others_island() {
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, STITCHED_ROUTE),
+        "the attacked route must still be attached to a policy: a deleted opt-in \
+         makes every assertion below vacuous"
+    );
+
+    let before = counting_route::renders();
+    let alice = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK, "{}", alice.text());
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "positive control: the first request rendered"
+    );
+    assert_eq!(
+        RenderCache::inspect_route_for_test(STITCHED_ROUTE)
+            .await
+            .expect("the shell was published")
+            .slots,
+        1,
+        "positive control: what was stored is a shell with one island cut out of it"
+    );
+
+    let bob = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "bob")]).await;
+    assert_eq!(bob.status, StatusCode::OK, "{}", bob.text());
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "positive control: the second principal was served from the stored shell. \
+         If it was not, this boot is storing nothing and every assertion below \
+         would pass against a cache that had been switched off"
+    );
+
+    let alice_island = island_tag(&alice.text(), STITCHED_DOCUMENT_KEY).to_owned();
+    let bob_island = island_tag(&bob.text(), STITCHED_DOCUMENT_KEY).to_owned();
+    assert_ne!(
+        alice_island, bob_island,
+        "each principal has its own island"
+    );
+    assert_ne!(
+        stitched_scope(&alice.text()),
+        stitched_scope(&bob.text()),
+        "and each island is bound to the scope of the visitor who received it"
+    );
+    assert!(
+        !bob.text().contains(&alice_island),
+        "bob never receives alice's island"
+    );
+    assert!(
+        !bob.text()
+            .contains(attribute(&alice_island, "data-suprnova-live-snapshot")),
+        "nor the signed snapshot it carried"
+    );
+    assert!(
+        !alice.text().contains(&bob_island) && !bob.text().contains("alice"),
+        "and nothing crosses in the other direction either"
+    );
+
+    // The shell around the island is the same bytes for both, which is the
+    // whole reason this class stores anything at all.
+    let shell = |text: &str| text.replace(island_tag(text, STITCHED_DOCUMENT_KEY), "");
+    assert_eq!(shell(&alice.text()), shell(&bob.text()));
+}
+
+/// The stored shell is shared, but reaching it is not: the route's own guard
+/// runs again on every hit, before the entry is served, so a visitor with no
+/// identity is turned away rather than handed a document assembled around
+/// somebody's island - and so is a visitor presenting only the session
+/// cookie of a sign-in that has since ended.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_anonymous_or_signed_out_visitor_never_receives_an_assembled_stitched_document() {
+    let harness = boot_with_render_cache().await;
+    assert!(route_is_under_a_policy(&harness, STITCHED_ROUTE));
+    let alice = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK, "{}", alice.text());
+    let alice_island = island_tag(&alice.text(), STITCHED_DOCUMENT_KEY).to_owned();
+    let alice_cookie = session_cookie(&alice);
+    let published = counting_route::renders();
+
+    let anonymous = dispatch_get(&harness, STITCHED_ROUTE, &[]).await;
+    assert_eq!(
+        anonymous.status,
+        StatusCode::UNAUTHORIZED,
+        "the guard ran before the stored entry was served"
+    );
+    assert!(!anonymous.text().contains(&alice_island));
+    assert!(!anonymous.text().contains("data-suprnova-live-snapshot"));
+
+    // The same session, with the sign-in gone: the cookie alone is not an
+    // identity, and the entry is not reachable without one.
+    let signed_out = dispatch_get(&harness, STITCHED_ROUTE, &[("cookie", &alice_cookie)]).await;
+    assert_eq!(signed_out.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        !signed_out.text().contains(&alice_island),
+        "a cleared sign-in never gets the island the session used to carry"
+    );
+    assert!(!signed_out.text().contains("data-suprnova-live-snapshot"));
+
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "neither refused request reached the handler either"
+    );
+    assert!(
+        RenderCache::inspect_route_for_test(STITCHED_ROUTE)
+            .await
+            .is_some(),
+        "and the shell they were refused is still exactly where it was"
+    );
+}
+
+/// A permission-version bump does not have to invalidate a stitched shell,
+/// and this proves why: the shell holds no principal material at all, and
+/// the island that does is mounted again, under authority derived for the
+/// request in front of it, on every single hit. There is no cached island
+/// for a revoked permission to survive in.
+///
+/// This is what makes the stitched class different from `PrivateCached`,
+/// where a bump *is* what makes a pre-bump entry a miss: there the stored
+/// bytes are one principal's, and here they are nobody's.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_permission_version_bump_leaves_the_shared_shell_and_re_mounts_every_island() {
+    let harness = boot_with_render_cache().await;
+    assert!(route_is_under_a_policy(&harness, STITCHED_ROUTE));
+    let alice = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "alice")]).await;
+    assert_eq!(alice.status, StatusCode::OK, "{}", alice.text());
+    let stored = RenderCache::inspect_route_for_test(STITCHED_ROUTE)
+        .await
+        .expect("the shell was published");
+    let shell_before = RenderCache::shell_for_test(STITCHED_ROUTE)
+        .await
+        .expect("the stored shell");
+    assert!(
+        !String::from_utf8_lossy(&shell_before).contains("data-suprnova-live-snapshot"),
+        "the shared shell carries no principal's signed snapshot to begin with"
+    );
+    let published = counting_route::renders();
+
+    RenderCache::bump_permission_version()
+        .await
+        .expect("bump the permission version");
+
+    let stored_after = RenderCache::inspect_route_for_test(STITCHED_ROUTE)
+        .await
+        .expect("the shell survived the bump");
+    assert_eq!(stored_after.kind, stored.kind);
+    assert_eq!(stored_after.slots, stored.slots);
+    assert_eq!(stored_after.published_at_ms, stored.published_at_ms);
+    assert_eq!(
+        RenderCache::shell_for_test(STITCHED_ROUTE)
+            .await
+            .expect("the stored shell"),
+        shell_before,
+        "the shell entry is unchanged: it never held anything a permission \
+         change could make wrong"
+    );
+
+    let bob = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "bob")]).await;
+    assert_eq!(bob.status, StatusCode::OK, "{}", bob.text());
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "the hit after the bump is still assembled from the shell"
+    );
+    assert_ne!(
+        stitched_scope(&bob.text()),
+        stitched_scope(&alice.text()),
+        "and the island in it was mounted for bob, here and now"
     );
 }
