@@ -188,6 +188,11 @@ fn a_captured_slot_never_prints_the_island_it_holds() {
         data-suprnova-live-snapshot=\"eyJiYWxhbmNlIjoxMjM0fQ\">balance 12.34</div>";
     let mut slot = captured("a", "doc-a");
     slot.html = Bytes::from_static(ISLAND.as_bytes());
+    // The descriptor carries markup of its own: the declared fallback that
+    // takes this island's place on a hit it cannot be re-rendered for.
+    slot.descriptor.on_failure = SlotFailurePolicy::Fallback {
+        html: "<aside>tenant fallback copy</aside>".to_owned(),
+    };
 
     let printed = format!("{slot:?}");
     assert!(
@@ -197,6 +202,10 @@ fn a_captured_slot_never_prints_the_island_it_holds() {
     assert!(
         !printed.contains("balance 12.34"),
         "a captured slot never prints the island's own markup: {printed}"
+    );
+    assert!(
+        !printed.contains("tenant fallback copy") && !printed.contains("<aside>"),
+        "nor the fallback markup its descriptor carries: {printed}"
     );
     assert!(
         printed.contains("html_bytes"),
@@ -215,7 +224,9 @@ fn a_captured_slot_never_prints_the_island_it_holds() {
     };
     let printed = format!("{facts:?}");
     assert!(
-        !printed.contains("data-suprnova-live-snapshot") && !printed.contains("balance 12.34"),
+        !printed.contains("data-suprnova-live-snapshot")
+            && !printed.contains("balance 12.34")
+            && !printed.contains("tenant fallback copy"),
         "nothing above the slot un-redacts it: {printed}"
     );
 }

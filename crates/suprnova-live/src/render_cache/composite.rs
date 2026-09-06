@@ -10,6 +10,7 @@
 //! canonical parameters, inert flags) and what to do if that fails.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -80,7 +81,11 @@ impl Segment {
 }
 
 /// What assembly does when a slot's island cannot be rendered for this request.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+///
+/// `Debug` is hand-written and never prints the fallback markup; see the impl
+/// below. Serialization is untouched: the stored wire shape is what the
+/// serde derives produce, and the header round-trip test pins it.
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SlotFailurePolicy {
     /// The whole document fails; the host falls back to its uncached render path.
@@ -92,6 +97,26 @@ pub enum SlotFailurePolicy {
         /// Trusted fallback markup, at most [`MAX_FALLBACK_BYTES`].
         html: String,
     },
+}
+
+impl fmt::Debug for SlotFailurePolicy {
+    /// Prints the fallback's length, never the fallback.
+    ///
+    /// This policy is carried by [`StitchSlot`], and so by [`SegmentGraph`],
+    /// every stored entry, and every framework descriptor that mirrors it.
+    /// Redacting here covers all of them at once: any of those types may be
+    /// formatted in a diagnostic, and the fragment is application markup
+    /// rather than something a log is entitled to.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FailDocument => formatter.write_str("FailDocument"),
+            Self::Omit => formatter.write_str("Omit"),
+            Self::Fallback { html } => formatter
+                .debug_struct("Fallback")
+                .field("html_bytes", &html.len())
+                .finish(),
+        }
+    }
 }
 
 /// One typed hole for one identity-bound island.
@@ -1589,6 +1614,29 @@ mod tests {
             "<div data-suprnova-live-root=\"first\" data-suprnova-live-document-key=\"doc-first\">F</div>\
              -middle-\
              <div data-suprnova-live-root=\"last\" data-suprnova-live-document-key=\"doc-last\">L</div>"
+        );
+    }
+
+    #[test]
+    fn a_slot_failure_policy_never_prints_the_fallback_it_carries() {
+        let printed = format!(
+            "{:?}",
+            SlotFailurePolicy::Fallback {
+                html: "<p>secret</p>".to_owned(),
+            }
+        );
+        assert!(
+            printed.contains("html_bytes"),
+            "the length is still reported: {printed}"
+        );
+        assert!(
+            !printed.contains("<p>") && !printed.contains("secret"),
+            "the fallback markup is never printed: {printed}"
+        );
+        assert_eq!(format!("{:?}", SlotFailurePolicy::Omit), "Omit");
+        assert_eq!(
+            format!("{:?}", SlotFailurePolicy::FailDocument),
+            "FailDocument"
         );
     }
 
