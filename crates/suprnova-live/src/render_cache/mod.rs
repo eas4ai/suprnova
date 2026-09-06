@@ -1,7 +1,7 @@
-//! RenderCache: typed Complete representations of canonical documents with
-//! the policy, variance, key, entry, storage, generation, coherence, and HTTP
-//! contracts needed to prove safe reuse. The host adapts these contracts;
-//! Live is complete without them.
+//! RenderCache: typed Complete and Composite representations of canonical
+//! documents with the policy, variance, key, entry, storage, generation,
+//! coherence, and HTTP contracts needed to prove safe reuse. The host adapts
+//! these contracts; Live is complete without them.
 
 /// Route and group policy, deterministic patches, and concrete-response
 /// eligibility.
@@ -23,6 +23,9 @@ pub mod generation;
 /// inspection.
 pub mod entry;
 
+/// Composite entries: typed segment graphs, stitch slots, and deterministic assembly.
+pub mod composite;
+
 /// The RenderStore provider contract and the immutable in-process L0 store.
 pub mod store;
 
@@ -39,6 +42,11 @@ pub mod singleflight;
 
 pub use coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
+};
+pub use composite::{
+    CompositeEntry, CompositeHeader, HeaderPiece, HeaderTemplate, MAX_STITCH_SLOTS, ParsedSlot,
+    Segment, SegmentGraph, ShellIsland, SlotFailurePolicy, StitchSlot, fresh_nonce,
+    surrounding_digest, valid_nonce,
 };
 pub use entry::{
     CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
@@ -87,6 +95,8 @@ pub enum RenderCacheErrorKind {
     ProviderUnavailable,
     /// A publication lost its fence.
     PublicationFenced,
+    /// A request-time assembly input was not acceptable for this graph.
+    AssemblyFailed,
 }
 
 /// A RenderCache contract violation.
@@ -119,6 +129,7 @@ impl std::fmt::Display for RenderCacheError {
             RenderCacheErrorKind::EntryUnsupported => "render_cache_entry_unsupported",
             RenderCacheErrorKind::ProviderUnavailable => "render_cache_provider_unavailable",
             RenderCacheErrorKind::PublicationFenced => "render_cache_publication_fenced",
+            RenderCacheErrorKind::AssemblyFailed => "render_cache_assembly_failed",
         })
     }
 }

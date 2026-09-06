@@ -142,7 +142,8 @@ impl MountFlags {
         self.0.is_empty()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+    /// The validated flags in canonical order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.0
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
