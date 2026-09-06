@@ -598,6 +598,53 @@ fn assembly_failed() -> RenderCacheError {
     RenderCacheError::new(RenderCacheErrorKind::AssemblyFailed)
 }
 
+/// The exact final body length for `outcomes` against `graph`, computed from
+/// typed facts alone without copying a single byte: `shell_len` (the
+/// graph's own literal segments always sum to exactly this, per
+/// [`SegmentGraph::validate`]) plus each slot's rendered island or declared
+/// fallback fragment length (zero when omitted) plus one `nonce` length per
+/// [`Segment::Nonce`] hole. [`assemble`] calls this, and rejects a bound
+/// violation, before it allocates the body: an oversized rendered island is
+/// never materialized just to be measured and thrown away. Assumes
+/// `outcomes` already passed the outcome-identity and failure-policy
+/// validation `assemble` runs first, so a mismatched `on_failure` here is
+/// unreachable in practice; it still fails closed rather than assuming that
+/// invariant holds silently.
+fn assembled_len(
+    graph: &SegmentGraph,
+    outcomes: &[SlotOutcome],
+    shell_len: usize,
+    nonce: Option<&str>,
+) -> Result<usize, RenderCacheError> {
+    let mut total = shell_len;
+    for (slot, outcome) in graph.slots.iter().zip(outcomes) {
+        let piece_len = match outcome {
+            SlotOutcome::Rendered(island) => island.html.as_str().len(),
+            SlotOutcome::Fallback => match &slot.on_failure {
+                SlotFailurePolicy::Fallback { html } => html.len(),
+                SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
+                    return Err(assembly_failed());
+                }
+            },
+            SlotOutcome::Omitted => 0,
+        };
+        total = total.checked_add(piece_len).ok_or_else(assembly_failed)?;
+    }
+    let nonce_holes = graph
+        .segments
+        .iter()
+        .filter(|segment| matches!(segment, Segment::Nonce))
+        .count();
+    if nonce_holes > 0 {
+        let nonce_len = nonce.ok_or_else(assembly_failed)?.len();
+        let nonce_total = nonce_len
+            .checked_mul(nonce_holes)
+            .ok_or_else(assembly_failed)?;
+        total = total.checked_add(nonce_total).ok_or_else(assembly_failed)?;
+    }
+    Ok(total)
+}
+
 /// Turns one graph plus current-request outcomes into final bytes and headers.
 /// Pure and deterministic; every rejection is [`RenderCacheErrorKind::AssemblyFailed`].
 pub fn assemble(
@@ -614,6 +661,8 @@ pub fn assemble(
         (None, false) => None,
         _ => return Err(assembly_failed()),
     };
+    // Step 1: every outcome must name the slot it was rendered for and obey
+    // that slot's declared failure policy.
     let mut slots_seen: BTreeSet<&str> = graph
         .shell_islands
         .iter()
@@ -632,6 +681,10 @@ pub fn assemble(
                 {
                     return Err(assembly_failed());
                 }
+                // Defense in depth: `SegmentGraph::validate` already proves
+                // every slot and shell island has a disjoint slot name and
+                // document key, so these inserts can only fail if that
+                // invariant were somehow violated.
                 if !slots_seen.insert(island.slot.as_str())
                     || !keys_seen.insert(island.document_key.as_str())
                 {
@@ -650,14 +703,29 @@ pub fn assemble(
             }
         }
     }
+    // Step 2: the surrounding digest is recomputed from the graph and the
+    // entry's own shell, never trusted from the stored slot alone, so a
+    // shell that drifted after the digest was recorded is caught here.
     for index in 0..graph.slots.len() {
-        if surrounding_digest(graph, entry.shell(), index)? != graph.slots[index].surrounding {
+        if surrounding_digest(graph, entry.shell(), index).map_err(|_| assembly_failed())?
+            != graph.slots[index].surrounding
+        {
             return Err(assembly_failed());
         }
     }
+    // Step 3: the exact final length is known from typed facts alone (see
+    // `assembled_len`), so the bound is enforced and the body buffer sized
+    // exactly before a single byte is copied.
     let shell = entry.shell();
-    let mut body: Vec<u8> = Vec::with_capacity(shell.len() + 4_096);
+    let total_len = assembled_len(graph, &input.outcomes, shell.len(), nonce)?;
+    if total_len > max_body_bytes {
+        return Err(assembly_failed());
+    }
+    let mut body: Vec<u8> = Vec::with_capacity(total_len);
     let mut cursor = 0usize;
+    // Redundant with the `total_len` bound just checked, given a correct
+    // `assembled_len`; kept as a cheap per-append invariant rather than
+    // trusting that one precomputed sum alone, in case the two ever drift.
     let push = |body: &mut Vec<u8>, bytes: &[u8]| -> Result<(), RenderCacheError> {
         body.extend_from_slice(bytes);
         if body.len() > max_body_bytes {
@@ -686,6 +754,9 @@ pub fn assemble(
             Segment::Nonce => push(&mut body, nonce.ok_or_else(assembly_failed)?.as_bytes())?,
         }
     }
+    // Step 4: replayable headers are rebuilt from the stored header plus
+    // every nonce-bearing template, so an untemplated header replays
+    // exactly as stored.
     let mut pairs: BTreeMap<String, String> = entry
         .header()
         .headers
@@ -1275,7 +1346,8 @@ mod tests {
                 nonce: nonce.clone()
             }),
             Err(RenderCacheErrorKind::AssemblyFailed),
-            "a rendered island may not reuse a shell island's document key"
+            "a rendered island's document key must match its own slot's declared key, \
+             even though it names another identity's key"
         );
     }
 
@@ -1396,5 +1468,186 @@ mod tests {
                 .map_err(|e| e.kind()),
             Err(RenderCacheErrorKind::AssemblyFailed)
         );
+    }
+
+    #[test]
+    fn the_assembled_body_may_be_exactly_at_the_bound_but_not_one_byte_over() {
+        let entry = entry();
+        let input = || AssemblyInput {
+            outcomes: vec![
+                SlotOutcome::Rendered(island("a", "doc-a", "A")),
+                SlotOutcome::Omitted,
+            ],
+            nonce: Some("n0nce".to_owned()),
+        };
+        let unbounded = assemble(&entry, input(), 1 << 20).expect("assembles");
+        let exact_len = unbounded.body().len();
+        assert!(
+            assemble(&entry, input(), exact_len).is_ok(),
+            "exactly at the bound must assemble"
+        );
+        assert_eq!(
+            assemble(&entry, input(), exact_len - 1)
+                .map(|_| ())
+                .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "one byte over the bound must be rejected"
+        );
+    }
+
+    #[test]
+    fn a_drifted_surrounding_digest_is_rejected() {
+        let keys = keys();
+        let (mut graph, shell) = graph_and_shell();
+        let slot_1_digest = surrounding_digest(&graph, &shell, 1).expect("surrounding");
+        graph.slots[0].surrounding = slot_1_digest;
+        let entry = CompositeEntry::new(header(&keys), graph, shell).expect("entry");
+        let outcomes = vec![
+            SlotOutcome::Rendered(island("a", "doc-a", "A")),
+            SlotOutcome::Omitted,
+        ];
+        assert_eq!(
+            assemble(
+                &entry,
+                AssemblyInput {
+                    outcomes,
+                    nonce: Some("n0nce".to_owned())
+                },
+                1 << 20
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed)
+        );
+    }
+
+    #[test]
+    fn a_graph_with_no_slots_and_no_nonce_assembles_to_exactly_the_shell() {
+        let keys = keys();
+        let shell = Bytes::from_static(b"<!doctype html><html><body>static</body></html>");
+        let graph = SegmentGraph {
+            segments: vec![Segment::Literal {
+                len: shell.len() as u32,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        let entry = CompositeEntry::new(header(&keys), graph, shell.clone()).expect("entry");
+        let document = assemble(
+            &entry,
+            AssemblyInput {
+                outcomes: Vec::new(),
+                nonce: None,
+            },
+            1 << 20,
+        )
+        .expect("assembles");
+        assert_eq!(document.body(), &shell);
+    }
+
+    #[test]
+    fn a_slot_at_the_first_and_last_segment_places_island_bytes_at_the_edges() {
+        let keys = keys();
+        let mid = b"-middle-".to_vec();
+        let shell = Bytes::from(mid.clone());
+        let mut graph = SegmentGraph {
+            segments: vec![
+                Segment::Slot { index: 0 },
+                Segment::Literal {
+                    len: mid.len() as u32,
+                },
+                Segment::Slot { index: 1 },
+            ],
+            slots: vec![
+                slot("first", "doc-first", SlotFailurePolicy::Omit),
+                slot("last", "doc-last", SlotFailurePolicy::Omit),
+            ],
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        for index in 0..graph.slots.len() {
+            graph.slots[index].surrounding =
+                surrounding_digest(&graph, &shell, index).expect("surrounding");
+        }
+        let entry = CompositeEntry::new(header(&keys), graph, shell).expect("entry");
+        let outcomes = vec![
+            SlotOutcome::Rendered(island("first", "doc-first", "F")),
+            SlotOutcome::Rendered(island("last", "doc-last", "L")),
+        ];
+        let document = assemble(
+            &entry,
+            AssemblyInput {
+                outcomes,
+                nonce: None,
+            },
+            1 << 20,
+        )
+        .expect("assembles");
+        assert_eq!(
+            std::str::from_utf8(document.body()).expect("utf8"),
+            "<div data-suprnova-live-root=\"first\" data-suprnova-live-document-key=\"doc-first\">F</div>\
+             -middle-\
+             <div data-suprnova-live-root=\"last\" data-suprnova-live-document-key=\"doc-last\">L</div>"
+        );
+    }
+
+    #[test]
+    fn a_nonce_header_template_without_a_nonce_segment_still_requires_and_expands_a_nonce() {
+        let keys = keys();
+        let shell = Bytes::from_static(b"<!doctype html><html><body>static</body></html>");
+        let graph = SegmentGraph {
+            segments: vec![Segment::Literal {
+                len: shell.len() as u32,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: vec![HeaderTemplate {
+                name: "content-security-policy".to_owned(),
+                pieces: vec![
+                    HeaderPiece::Text {
+                        text: "script-src 'nonce-".to_owned(),
+                    },
+                    HeaderPiece::Nonce,
+                    HeaderPiece::Text {
+                        text: "'".to_owned(),
+                    },
+                ],
+            }],
+        };
+        let entry = CompositeEntry::new(header(&keys), graph, shell.clone()).expect("entry");
+        assert!(entry.needs_nonce());
+        assert!(
+            assemble(
+                &entry,
+                AssemblyInput {
+                    outcomes: Vec::new(),
+                    nonce: None
+                },
+                1 << 20
+            )
+            .is_err(),
+            "a nonce-bearing header template still requires a nonce with no `Segment::Nonce` in the body"
+        );
+        let document = assemble(
+            &entry,
+            AssemblyInput {
+                outcomes: Vec::new(),
+                nonce: Some("h34der-only".to_owned()),
+            },
+            1 << 20,
+        )
+        .expect("assembles");
+        assert_eq!(
+            document.body(),
+            &shell,
+            "no `Segment::Nonce` means the body is untouched"
+        );
+        let csp = document
+            .headers()
+            .iter()
+            .find(|(name, _)| *name == "content-security-policy")
+            .map(|(_, v)| v.to_owned());
+        assert_eq!(csp.as_deref(), Some("script-src 'nonce-h34der-only'"));
     }
 }
