@@ -39,6 +39,7 @@ pub mod middleware;
 pub mod migration;
 pub mod orm;
 pub mod registry;
+pub mod stitch;
 pub mod telemetry;
 #[doc(hidden)]
 pub mod testing;

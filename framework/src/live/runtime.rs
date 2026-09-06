@@ -1,5 +1,6 @@
 //! Immutable process runtime assembled before Live routes are constructed.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +98,29 @@ struct RuntimeGraph {
     upload_mounts: OnceLock<Arc<[UploadMountSelector]>>,
     mount_kind_builder: Mutex<Option<Vec<MountKindRecord>>>,
     mount_kinds: OnceLock<Arc<[MountKindRecord]>>,
+    stitch_registrations: OnceLock<Arc<HashMap<(RouteIdentity, IslandSlot), StitchRegistration>>>,
+}
+
+/// Everything re-mounting one declared island on a stitched route's hit
+/// needs, joined once at catalog finalization from the two records that
+/// already hold it: the mount selector (which component, under which
+/// contract and protocol, in which document) and the kind record (whether
+/// the island is a public seed that stays inside the shell, or an
+/// identity-bound one that has to be rendered again for this request).
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "Task 8's request-time assembly is the only reader of these fields"
+)]
+pub(crate) struct StitchRegistration {
+    /// The catalog-checked route, slot, component, contract, and protocol.
+    pub(crate) selection: MountSelection,
+    /// The server-declared document mount key.
+    pub(crate) document_key: DocumentMountKey,
+    /// The build the declaration belongs to.
+    pub(crate) build: BuildId,
+    /// The declared publication form.
+    pub(crate) kind: super::document::LiveMountKind,
 }
 
 /// Framework-side record of one registered mount's declared kind.
@@ -1029,10 +1053,6 @@ impl LiveRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(live_boot_error)?;
-        self.graph
-            .upload_mounts
-            .set(Arc::from(selectors))
-            .map_err(|_| live_boot_error())?;
         let kinds = self
             .graph
             .mount_kind_builder
@@ -1040,14 +1060,71 @@ impl LiveRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(live_boot_error)?;
+        // Joined here, once, rather than searched twice per stitched hit:
+        // the selector holds the mount's identity and the kind record holds
+        // its publication form, and `(route, slot)` is what both are keyed
+        // by. A selector with no matching kind record cannot be stitched -
+        // nothing knows whether its island stays in the shell or has to be
+        // rendered again - so it is left out rather than guessed at.
+        let mut stitch_registrations = HashMap::with_capacity(selectors.len());
+        for selector in &selectors {
+            let route = selector.selection.route().clone();
+            let slot = selector.selection.slot().clone();
+            let Some(record) = kinds
+                .iter()
+                .find(|record| record.route == route && record.slot == slot)
+            else {
+                continue;
+            };
+            stitch_registrations.insert(
+                (route, slot),
+                StitchRegistration {
+                    selection: selector.selection.clone(),
+                    document_key: selector.document_key.clone(),
+                    build: selector.build.clone(),
+                    kind: record.kind,
+                },
+            );
+        }
+        self.graph
+            .upload_mounts
+            .set(Arc::from(selectors))
+            .map_err(|_| live_boot_error())?;
         self.graph
             .mount_kinds
             .set(Arc::from(kinds))
             .map_err(|_| live_boot_error())?;
         self.graph
+            .stitch_registrations
+            .set(Arc::new(stitch_registrations))
+            .map_err(|_| live_boot_error())?;
+        self.graph
             .mount_catalog
             .set(Arc::new(builder.build()))
             .map_err(|_| live_boot_error())
+    }
+
+    /// The declaration one stitched slot re-mounts from, if the route and
+    /// slot name a registered mount.
+    ///
+    /// Finalizes the catalog first, exactly as every other request-path
+    /// reader of it does, so the first stitched hit after boot resolves the
+    /// same as every later one.
+    #[allow(
+        dead_code,
+        reason = "Task 8's request-time assembly is the only reader of this join"
+    )]
+    pub(crate) fn stitch_registration(
+        &self,
+        route: &RouteIdentity,
+        slot: &IslandSlot,
+    ) -> Option<StitchRegistration> {
+        self.finalize_mount_catalog().ok()?;
+        self.graph
+            .stitch_registrations
+            .get()?
+            .get(&(route.clone(), slot.clone()))
+            .cloned()
     }
 
     pub(crate) fn validate_upload_request_context(
@@ -1774,6 +1851,7 @@ fn assemble_runtime(
             upload_mounts: OnceLock::new(),
             mount_kind_builder: Mutex::new(Some(Vec::new())),
             mount_kinds: OnceLock::new(),
+            stitch_registrations: OnceLock::new(),
         }),
     })
 }

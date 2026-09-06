@@ -508,50 +508,81 @@ impl RenderCacheMiddleware {
                     Layer::L1 => LookupOutcome::L1Hit,
                 })
                 .record();
-                if matches!(
-                    evaluate_conditional(request.header("if-none-match"), entry.validator()),
-                    ConditionalOutcome::NotModified
-                ) {
+                if let DecodedEntry::Complete(complete) = &entry
+                    && matches!(
+                        evaluate_conditional(request.header("if-none-match"), complete.validator()),
+                        ConditionalOutcome::NotModified
+                    )
+                {
                     LookupOutcome::Conditional.record();
                 }
-                Ok(respond_hit(
-                    &request,
+                Ok(deliver_hit(
+                    request,
+                    next,
                     policy,
-                    &entry,
+                    entry,
                     stored.published_at_ms,
                     now,
                     None,
-                ))
+                )
+                .await)
             }
             FreshnessState::StaleServable => {
                 LookupOutcome::Stale.record();
+                // Fix round 2, item 4: a route whose variance depends on
+                // ambient (task-local) context does not get a background
+                // rebuild - see the module doc's "Background rebuild's
+                // ambient context" note for why. A stitched route is
+                // excluded for the same reason and one more: its render is
+                // the route's own guarded chain, and a `tokio::spawn`ed
+                // task carries none of this request's auth task-locals, so
+                // the shell it produced would be whatever the gate renders
+                // for nobody. The stale entry is still served immediately
+                // either way; only the background refresh is skipped.
+                if (is_stitched(policy) && chain_serves_prepared_hits(&request))
+                    || variance_depends_on_ambient_context(policy)
+                {
+                    return Ok(deliver_hit(
+                        request,
+                        next,
+                        policy,
+                        entry,
+                        stored.published_at_ms,
+                        now,
+                        warning_header(state),
+                    )
+                    .await);
+                }
+                // Below this point the request is spent on the background
+                // rebuild, so the served response has to be built from the
+                // entry first - which only a Complete entry can be. A
+                // Composite entry here means a store defect (`decode`
+                // refuses a Composite entry under any other class, and this
+                // route did not declare the stitched one), so it is treated
+                // as `deliver_hit` treats it: a miss.
+                let DecodedEntry::Complete(complete) = entry else {
+                    LookupOutcome::Miss.record();
+                    return Ok(next(request).await);
+                };
                 let response = respond_hit(
                     &request,
                     policy,
-                    &entry,
+                    &complete,
                     stored.published_at_ms,
                     now,
                     warning_header(state),
                 );
-                // Fix round 2, item 4: a route whose variance depends on
-                // ambient (task-local) context does not get a background
-                // rebuild - see the module doc's "Background rebuild's
-                // ambient context" note for why. The stale entry is still
-                // served immediately either way; only the background
-                // refresh is skipped.
-                if !variance_depends_on_ambient_context(policy) {
-                    self.spawn_background_rebuild(
-                        Arc::clone(runtime),
-                        request,
-                        next,
-                        policy.clone(),
-                        RenderJob {
-                            key,
-                            epoch,
-                            variance,
-                        },
-                    );
-                }
+                self.spawn_background_rebuild(
+                    Arc::clone(runtime),
+                    request,
+                    next,
+                    policy.clone(),
+                    RenderJob {
+                        key,
+                        epoch,
+                        variance,
+                    },
+                );
                 Ok(response)
             }
             FreshnessState::StaleOnError => {
@@ -561,6 +592,7 @@ impl RenderCacheMiddleware {
                 // request back - matching `lead_render`'s own capture.
                 let method = request.method().as_str().to_owned();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
+                let stitched_route = is_stitched(policy) && chain_serves_prepared_hits(&request);
                 let job = RenderJob {
                     key,
                     epoch,
@@ -582,15 +614,24 @@ impl RenderCacheMiddleware {
                     }
                     Err(ProviderFailure(..)) => true,
                 };
-                if !rebuild_failed {
+                // A stitched route has no stale-on-error fallback: serving
+                // the stored shell here would answer the request with a
+                // representation the route's own chain never got to gate on
+                // this time round, which is precisely what this class
+                // exists to prevent. The failed rebuild's own outcome is
+                // what the client sees.
+                if !rebuild_failed || stitched_route {
                     return outcome;
                 }
+                let DecodedEntry::Complete(complete) = entry else {
+                    return outcome;
+                };
                 LookupOutcome::Stale.record();
                 Ok(conditional_response(
                     &method,
                     if_none_match.as_deref(),
                     policy,
-                    &entry,
+                    &complete,
                     stored.published_at_ms,
                     now,
                     warning_header(FreshnessState::StaleOnError),
@@ -805,37 +846,31 @@ fn key_input(
 /// defect or a second writer sharing the key ring and directory, and it
 /// costs one comparison per hit.
 ///
-/// A Composite entry is also treated as a miss on the layer it is found in,
-/// but never evicted: it is not defective, it is simply not servable by
-/// this Complete-only lookup until the assembler lands (Task 6 changes
-/// this).
+/// Both kinds are returned: a Composite entry is a hit like any other, and
+/// what it takes to serve one is [`deliver_hit`]'s concern, not this
+/// function's.
 async fn lookup(
     runtime: &RenderCacheRuntime,
     key: &RenderKey,
-) -> Result<Option<(CompleteEntry, StoredEntry, Layer)>, ()> {
+) -> Result<Option<(DecodedEntry, StoredEntry, Layer)>, ()> {
     let l0_stored = runtime.l0.get(key).await.map_err(|_| ())?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-            Ok(DecodedEntry::Complete(entry)) if entry.header().key == *key => {
+            Ok(entry) if entry.header().key == *key => {
                 return Ok(Some((entry, stored, Layer::L0)));
             }
             // Defective (`Err`) or misplaced (`Ok` under another key): the
             // same treatment either way.
-            Ok(DecodedEntry::Complete(_)) | Err(_) => {
+            Ok(_) | Err(_) => {
                 let _ = runtime.l0.evict(key).await;
             }
-            // A Composite entry needs assembly this function does not yet
-            // perform (Task 3 adds the assembler; Task 6 changes `lookup`
-            // to use it). It is not defective, so it is left in place and
-            // simply treated as a miss for this Complete-only lookup.
-            Ok(DecodedEntry::Composite(_)) => {}
         }
     }
     if let Some(l1) = &runtime.l1 {
         let l1_stored = l1.get(key).await.map_err(|_| ())?;
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-                Ok(DecodedEntry::Complete(entry)) if entry.header().key == *key => {
+                Ok(entry) if entry.header().key == *key => {
                     // L0 has no age-based expiry of its own (see
                     // `MemoryRenderStore::publish`'s own doc); `u64::MAX`
                     // is the trait's documented "never age-swept" value,
@@ -855,12 +890,9 @@ async fn lookup(
                 }
                 // Defective or misplaced, as for L0 above; a misplaced L1
                 // entry is never promoted.
-                Ok(DecodedEntry::Complete(_)) | Err(_) => {
+                Ok(_) | Err(_) => {
                     let _ = l1.evict(key).await;
                 }
-                // As for L0 above: not servable by this Complete-only
-                // lookup yet, but not defective, so it stays on disk.
-                Ok(DecodedEntry::Composite(_)) => {}
             }
         }
     }
@@ -978,6 +1010,83 @@ fn freshness_state(
     )
 }
 
+/// Whether `policy` declares the one class whose gate has to run again on
+/// every hit, so a hit is never answered by this global middleware alone.
+fn is_stitched(policy: &RenderCachePolicy) -> bool {
+    policy.class() == RepresentationClass::PublicShellStitched
+}
+
+/// Whether this request's chain contains a layer that will serve a prepared
+/// hit.
+///
+/// The Live completion middleware is the only such layer, and the server
+/// appends it exactly when the matched route carries Live metadata - which
+/// is also exactly when `Request::live_operation` answers, because that
+/// operation is recorded on the request before the chain is built. Checking
+/// it here rather than assuming a consumer keeps the stitched class honest
+/// on a route that declared it without being a Live route at all: such a
+/// route has no island to stitch and nothing that could serve a hit handed
+/// past this point, so attaching one would silently discard every hit
+/// instead of deferring it, and the route would render on every request
+/// forever. It keeps the ordinary hit path instead, exactly as it had
+/// before stitched delivery existed.
+fn chain_serves_prepared_hits(request: &Request) -> bool {
+    request.live_operation().is_some()
+}
+
+/// Answers a hit, or hands it to the route chain when the route is stitched.
+///
+/// A stitched route is never answered here. Its representation is a shared
+/// *shell*, not a finished answer: the route's own authorization guard,
+/// tenant middleware, and anything else it declared have to run on the hit
+/// exactly as they run on a miss, and only then may the shell be served -
+/// or, for a Composite entry, assembled from islands re-mounted for this
+/// request. So the entry is attached to the request (see
+/// [`Request::attach_prepared_hit`]) and the chain runs; the Live completion
+/// middleware, the last middleware before the handler, serves it through
+/// [`super::stitch::serve_prepared`]. A chain that refuses the request first
+/// drops the hit unread, which is the point.
+///
+/// Every other class keeps the behavior it has always had: the stored
+/// representation is a finished answer and is served right here. A Composite
+/// entry on such a route can only be a store defect - [`decode`] refuses a
+/// Composite entry under any class but the stitched one - so it is counted
+/// as a miss and the route renders.
+async fn deliver_hit(
+    mut request: Request,
+    next: Next,
+    policy: &RenderCachePolicy,
+    entry: DecodedEntry,
+    published_at_ms: u64,
+    now_ms: u64,
+    warning: Option<&'static str>,
+) -> Response {
+    if !is_stitched(policy) || !chain_serves_prepared_hits(&request) {
+        return match entry {
+            DecodedEntry::Complete(complete) => respond_hit(
+                &request,
+                policy,
+                &complete,
+                published_at_ms,
+                now_ms,
+                warning,
+            ),
+            DecodedEntry::Composite(_) => {
+                LookupOutcome::Miss.record();
+                next(request).await
+            }
+        };
+    }
+    request.attach_prepared_hit(Box::new(super::stitch::PreparedHit {
+        entry,
+        policy: policy.clone(),
+        published_at_ms,
+        now_ms,
+        warning,
+    }));
+    next(request).await
+}
+
 /// Builds the served response for a hit: a 304 when the request's
 /// `If-None-Match` matches, the full representation otherwise (body-free
 /// for `HEAD`). Carries `ETag`, `Cache-Control`, `Vary`, `Age`, and
@@ -1009,7 +1118,7 @@ fn respond_hit(
 /// itself, because a freshly rendered candidate's request has already been
 /// consumed by the render by the time this needs to run - see
 /// `lead_render`, which captures both before rendering.
-fn conditional_response(
+pub(crate) fn conditional_response(
     method: &str,
     if_none_match: Option<&str>,
     policy: &RenderCachePolicy,
@@ -1134,25 +1243,29 @@ async fn render_and_publish(
                                 Layer::L1 => LookupOutcome::L1Hit,
                             })
                             .record();
-                            Ok(respond_hit(
-                                &request,
+                            Ok(deliver_hit(
+                                request,
+                                next,
                                 policy,
-                                &entry,
+                                entry,
                                 stored.published_at_ms,
                                 now,
                                 None,
-                            ))
+                            )
+                            .await)
                         }
                         FreshnessState::StaleServable => {
                             LookupOutcome::Stale.record();
-                            Ok(respond_hit(
-                                &request,
+                            Ok(deliver_hit(
+                                request,
+                                next,
                                 policy,
-                                &entry,
+                                entry,
                                 stored.published_at_ms,
                                 now,
                                 warning_header(state),
-                            ))
+                            )
+                            .await)
                         }
                         // `StaleOnError`'s stale-only-on-provider-failure
                         // behavior is the primary hit path's own concern
@@ -1304,6 +1417,29 @@ async fn lead_render(
     // doc for why the document's cache intent does not feed classification
     // at all, and why the *declared* class is what it is passed).
     if live::document_declines(report.live_document.as_ref(), policy.class()) {
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
+    // Task 7 replaces this guard with composite publication.
+    //
+    // A stitched route stops declining an identity-bound island (that is
+    // what declaring the class means), and the handler boundary is now
+    // marked on every Live request, so nothing else stands between a
+    // document that captured one principal's islands - their markup, their
+    // signed snapshots - and being published as this route's *shared*
+    // Complete shell. Until the Composite form those captures belong in can
+    // actually be written, such a document has no storable form at all, and
+    // this declines it under the existing `declined` outcome rather than
+    // adding a label for a state that is about to disappear. `invalid` is
+    // named here too, rather than left to `document_declines`, so this
+    // guard reads as the complete statement of what it refuses.
+    if is_stitched(policy)
+        && report
+            .live_document
+            .as_ref()
+            .is_some_and(|facts| !facts.stitch.slots.is_empty() || facts.stitch.invalid)
+    {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);

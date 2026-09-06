@@ -11,6 +11,8 @@ mod render_cache_middleware_support;
 mod render_cache_operations_support;
 #[path = "../support/render_cache_privacy_support/mod.rs"]
 mod render_cache_privacy_support;
+#[path = "../support/render_cache_stitch_support/mod.rs"]
+mod render_cache_stitch_support;
 #[path = "../support/render_cache_support/mod.rs"]
 mod render_cache_support;
 
@@ -24,3 +26,4 @@ pub mod orm;
 pub mod privacy;
 pub mod races;
 pub mod registry;
+pub mod stitch;

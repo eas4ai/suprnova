@@ -83,6 +83,9 @@ pub struct Request {
     live_tenant: Option<String>,
     /// Advisory cancellation tied to this request value's lifetime.
     live_cancellation: Option<crate::live::ports::cancellation::LiveRequestCancellation>,
+    /// A cache hit the RenderCache middleware prepared for a stitched route;
+    /// served by the Live completion middleware after the route chain ran.
+    render_cache_prepared: Option<Box<crate::render_cache::stitch::PreparedHit>>,
 }
 
 impl Request {
@@ -103,6 +106,7 @@ impl Request {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         }
     }
 
@@ -188,6 +192,7 @@ impl Request {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         }
     }
 
@@ -287,6 +292,32 @@ impl Request {
 
     pub(crate) fn live_cancellation(&self) -> Option<suprnova_live::resource::CancellationFlag> {
         self.live_cancellation.as_ref().map(|guard| guard.flag())
+    }
+
+    /// Carries a decoded cache hit for a stitched route into the rest of
+    /// the chain.
+    ///
+    /// A stitched route is the one representation class whose gate has to
+    /// run again on every hit, so the global RenderCache middleware never
+    /// answers one on its own: it attaches the hit here and calls the next
+    /// layer, and the Live completion middleware - the last middleware
+    /// before the handler, so after every route middleware - is what
+    /// actually serves it. A request the chain answers first (an
+    /// authorization refusal, a tenant refusal) drops the hit unread along
+    /// with the request itself.
+    pub(crate) fn attach_prepared_hit(
+        &mut self,
+        hit: Box<crate::render_cache::stitch::PreparedHit>,
+    ) {
+        self.render_cache_prepared = Some(hit);
+    }
+
+    /// Takes the prepared hit, leaving none behind: exactly one consumer
+    /// ever serves it, and a later layer on the same request finds nothing.
+    pub(crate) fn take_prepared_hit(
+        &mut self,
+    ) -> Option<Box<crate::render_cache::stitch::PreparedHit>> {
+        self.render_cache_prepared.take()
     }
 
     pub(crate) fn record_live_security_check(
@@ -1664,6 +1695,7 @@ mod url_helper_tests {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -1699,6 +1731,7 @@ mod url_helper_tests {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         };
 
         let (_, bytes) = req
@@ -1749,6 +1782,7 @@ mod url_helper_tests {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -1791,6 +1825,7 @@ mod url_helper_tests {
             live_security_attestation: LiveSecurityAttestation::default(),
             live_tenant: None,
             live_cancellation: None,
+            render_cache_prepared: None,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

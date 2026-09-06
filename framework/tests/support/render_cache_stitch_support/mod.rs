@@ -1,0 +1,705 @@
+//! Shared boot for `render_cache/stitch.rs`: a production-shaped Live router
+//! whose routes are every declared as a stitched public shell
+//! ([`RepresentationClass::PublicShellStitched`]), each behind the same route
+//! chain a real application would use - `AuthMiddleware::new()` and
+//! `LiveTenantMiddleware` - so a test can prove that a hit on one of these
+//! routes still runs that chain instead of being answered by the global
+//! RenderCache middleware before the guard ever sees the request.
+//!
+//! Two counters per route, not one, because "the chain ran" and "the handler
+//! ran" are different facts on a stitched route and the whole point of the
+//! request path under test is that the first can happen without the second:
+//! [`chain_reaches`] counts requests the cache middleware passed on to the
+//! rest of the chain, and [`handler_renders`] counts requests the route's own
+//! handler rendered.
+//!
+//! `#[serial_test::serial]` and plain `#[tokio::test]` (current-thread),
+//! never `flavor = "multi_thread"`: `RenderCache::install`'s runtime and the
+//! process-wide global middleware registry are process-global state, and
+//! `TestContainer::fake()` writes a thread-local that a multi-thread runtime
+//! could migrate away from between polls - the same reasoning
+//! `render_cache_live_support` documents, followed here for the same reasons.
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
+use suprnova::live::{
+    LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry, LiveTenantMiddleware,
+    LiveTenantResolver, StitchFailurePolicy,
+};
+use suprnova::middleware::{Middleware, Next};
+use suprnova::render_cache::config::RenderCacheConfig;
+use suprnova::render_cache::{
+    FreshnessPolicy, RenderCache, RenderCachePolicy, RepresentationClass,
+};
+use suprnova::testing::TestContainer;
+use suprnova::view::{
+    AssetSet, DocumentResponseIntent, TrustedHtml, TrustedMarkupReason, ViewName,
+};
+use suprnova::{
+    Auth, AuthMiddleware, CsrfMiddleware, FrameworkError, HttpResponse, MiddlewareRegistry,
+    Request, Response, Router, SessionConfig, SessionMiddleware, StatusCode, handle_request,
+};
+use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::clock::Clock;
+use suprnova_live::mount::MountFlags;
+
+use crate::live_dogfood_support::{
+    DogfoodCounter, DogfoodDocument, LoginHeader, MemorySessionStore, build_public_router, fixture,
+};
+
+/// Askama filter resolution for [`StitchDocument`]: the template's
+/// `trusted_html` filter is looked up in a `filters` module beside the
+/// struct, exactly as `live_dogfood_support` exposes it for its own view.
+pub mod filters {
+    pub use suprnova::view::filters::trusted_html;
+}
+
+/// A stitched shell around one identity-bound island: the shape every other
+/// route here varies from, and the only route whose document actually holds
+/// per-principal markup.
+pub const STITCHED_PATH: &str = "/stitch/dashboard";
+
+/// A stitched shell around one public-seed island. Nothing in the document
+/// is principal-specific, so the whole document is a Complete representation
+/// even under the stitched class - the case that proves declaring the class
+/// does not by itself force assembly.
+pub const SEED_ONLY_PATH: &str = "/stitch/seed-only";
+
+/// A stitched shell whose own handler reads the principal, so the shell -
+/// not just its island - depends on who asked.
+pub const SHELL_READS_PRINCIPAL_PATH: &str = "/stitch/shell-reads-principal";
+
+/// A stitched shell whose route chain rewrites the body after the handler
+/// returns ([`AppendFooter`]), so the bytes the client receives are not the
+/// bytes the document render produced.
+pub const POST_PROCESSED_PATH: &str = "/stitch/post-processed";
+
+/// A stitched shell whose island declares [`StitchFailurePolicy::Omit`].
+pub const OMIT_PATH: &str = "/stitch/omit";
+
+/// A stitched shell whose island declares [`StitchFailurePolicy::Fallback`].
+pub const FALLBACK_PATH: &str = "/stitch/fallback";
+
+/// A stitched shell whose bootstrap stamps a fresh Content Security Policy
+/// nonce per render and declares the matching `script-src` header.
+pub const NONCE_PATH: &str = "/stitch/nonce";
+
+/// Every stitched route this harness registers, in registration order.
+pub const STITCH_PATHS: [&str; 7] = [
+    STITCHED_PATH,
+    SEED_ONLY_PATH,
+    SHELL_READS_PRINCIPAL_PATH,
+    POST_PROCESSED_PATH,
+    OMIT_PATH,
+    FALLBACK_PATH,
+    NONCE_PATH,
+];
+
+/// The fallback fragment `FALLBACK_PATH` declares.
+pub const FALLBACK_HTML: &str = "<p>island unavailable</p>";
+
+/// The footer `POST_PROCESSED_PATH`'s route middleware appends.
+pub const FOOTER: &str = "<!-- footer -->";
+
+/// Requests the RenderCache middleware handed on to the rest of the chain,
+/// per route. Counted by a global middleware registered *after*
+/// `RenderCache::install`, so this grows only when the cache middleware
+/// called `next` - which, on a stitched route, it must do on a hit as well
+/// as on a miss.
+static CHAIN_REACHES: Mutex<BTreeMap<&'static str, usize>> = Mutex::new(BTreeMap::new());
+
+/// Requests each route's own handler rendered, counted inside the handler
+/// itself. A stitched hit that replays a stored Complete representation
+/// leaves this untouched while [`CHAIN_REACHES`] still grows.
+static HANDLER_RENDERS: Mutex<BTreeMap<&'static str, usize>> = Mutex::new(BTreeMap::new());
+
+/// Whether [`Refusing`] resolves a tenant at all; see [`set_tenant_refusing`].
+static TENANT_REFUSING: AtomicBool = AtomicBool::new(false);
+
+/// Distinguishes one refusing resolution from the next.
+static TENANT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+/// Requests the cache middleware passed on to the rest of the chain for
+/// `path` so far.
+#[must_use]
+pub fn chain_reaches(path: &str) -> usize {
+    count(&CHAIN_REACHES, path)
+}
+
+/// Requests `path`'s own handler rendered so far.
+#[must_use]
+pub fn handler_renders(path: &str) -> usize {
+    count(&HANDLER_RENDERS, path)
+}
+
+fn count(counter: &Mutex<BTreeMap<&'static str, usize>>, path: &str) -> usize {
+    counter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn increment(counter: &Mutex<BTreeMap<&'static str, usize>>, path: &'static str) {
+    *counter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(path)
+        .or_insert(0) += 1;
+}
+
+/// Makes [`Refusing`] resolve a different tenant on every request while
+/// `refusing` is set, so a mount scoped to one request's tenant cannot be
+/// re-established on the next one. Reset by [`boot`].
+pub fn set_tenant_refusing(refusing: bool) {
+    TENANT_REFUSING.store(refusing, Ordering::SeqCst);
+}
+
+/// The tenant resolver every stitched route is guarded by.
+///
+/// Resolves nothing at all by default, exactly as `live_dogfood_support`'s
+/// own `Tenantless` does, so the ordinary routes behave identically; with
+/// [`set_tenant_refusing`] on it resolves a *different* tenant per request
+/// instead, which is what an identity-bound mount cannot survive.
+pub struct Refusing;
+
+#[async_trait::async_trait]
+impl LiveTenantResolver for Refusing {
+    async fn resolve(&self, _request: &Request) -> Result<Option<String>, FrameworkError> {
+        if TENANT_REFUSING.load(Ordering::SeqCst) {
+            let sequence = TENANT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+            return Ok(Some(format!("tenant-{sequence}")));
+        }
+        Ok(None)
+    }
+}
+
+/// Counts requests the RenderCache middleware passed on to the rest of the
+/// chain. Registered globally and AFTER `RenderCache::install`, so it sits
+/// behind the cache middleware: a request the cache answered on its own
+/// never reaches it.
+struct ChainCounter;
+
+#[async_trait::async_trait]
+impl Middleware for ChainCounter {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(path) = STITCH_PATHS.iter().find(|path| **path == request.path()) {
+            increment(&CHAIN_REACHES, path);
+        }
+        next(request).await
+    }
+}
+
+/// Rewrites `POST_PROCESSED_PATH`'s body after the handler returned, the way
+/// an application's own route middleware may: the bytes the client receives
+/// are then not the bytes the Live document render produced.
+struct AppendFooter;
+
+#[async_trait::async_trait]
+impl Middleware for AppendFooter {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let (response, failed) = match next(request).await {
+            Ok(response) => (response, false),
+            Err(response) => (response, true),
+        };
+        if response.is_streaming() {
+            return if failed { Err(response) } else { Ok(response) };
+        }
+        let mut body = response.body().to_vec();
+        body.extend_from_slice(FOOTER.as_bytes());
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        let content_type = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| "text/html; charset=utf-8".to_owned());
+        let mut rebuilt = HttpResponse::bytes_body(Bytes::from(body), content_type)
+            .status(response.status_code());
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            rebuilt = rebuilt.header(name, value);
+        }
+        if failed { Err(rebuilt) } else { Ok(rebuilt) }
+    }
+}
+
+/// The single RenderCache migration this harness needs; mirrors
+/// `render_cache_live_support::LiveRenderCacheMigrator`, which is private to
+/// that module.
+struct StitchRenderCacheMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for StitchRenderCacheMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(suprnova::render_cache::migration::Migration)]
+    }
+}
+
+/// Everything one test needs: the router and middleware registry to dispatch
+/// through, and the clock both the Live runtime and the RenderCache runtime
+/// read.
+pub struct Harness {
+    router: Arc<Router>,
+    middleware: Arc<MiddlewareRegistry>,
+    clock: Arc<AdjustableTestClock>,
+    _conn: suprnova::database::DbConnection,
+    _guard: suprnova::testing::TestContainerGuard,
+    _tempdir: tempfile::TempDir,
+}
+
+/// The adjustable clock this harness shares between both runtimes.
+pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
+    &harness.clock
+}
+
+/// Boots a fresh SQLite database with the RenderCache migration applied,
+/// registers every stitched route with a generous `PublicShellStitched`
+/// policy, installs RenderCache, and prepares the Live runtime on the same
+/// router with the same clock.
+pub async fn boot() -> Arc<Harness> {
+    static CRYPT_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CRYPT_ONCE.get_or_init(|| {
+        suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    });
+    suprnova::App::init();
+    suprnova::middleware::clear_global_middleware_for_test();
+
+    let guard = TestContainer::fake();
+    fixture();
+    suprnova::App::singleton(
+        LiveRegistry::builder()
+            .register::<DogfoodCounter>()
+            .expect("register dogfood counter")
+            .build(),
+    );
+
+    let tempdir = tempfile::tempdir().expect("tempdir for render cache stitch test database");
+    let db_path = tempdir.path().join("render-cache-stitch.sqlite3");
+    let config = suprnova::database::DatabaseConfig::builder()
+        .url(format!("sqlite://{}", db_path.display()))
+        .max_connections(4)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let conn = suprnova::database::DbConnection::connect(&config)
+        .await
+        .expect("connect sqlite");
+    StitchRenderCacheMigrator::up(conn.inner(), None)
+        .await
+        .expect("apply render cache migration");
+    TestContainer::singleton(conn.clone());
+
+    let clock = Arc::new(AdjustableTestClock::new(1_000_000));
+
+    let seed_only =
+        LiveMount::<DogfoodCounter>::public_seed(SEED_ONLY_PATH, "counter", "stitch-seed")
+            .expect("declare seed-only mount");
+    let stitched = identity_bound(STITCHED_PATH, "stitch-counter");
+    let shell_reads_principal =
+        identity_bound(SHELL_READS_PRINCIPAL_PATH, "stitch-shell-principal");
+    let post_processed = identity_bound(POST_PROCESSED_PATH, "stitch-post-processed");
+    let omit = identity_bound(OMIT_PATH, "stitch-omit")
+        .on_stitch_failure(StitchFailurePolicy::Omit)
+        .expect("declare omit failure policy");
+    let fallback_reason =
+        TrustedMarkupReason::new("stitch harness fallback").expect("fallback reason");
+    let fallback_html =
+        TrustedHtml::framework_static(FALLBACK_HTML, fallback_reason).expect("fallback markup");
+    let fallback = identity_bound(FALLBACK_PATH, "stitch-fallback")
+        .on_stitch_failure(StitchFailurePolicy::Fallback(fallback_html))
+        .expect("declare fallback failure policy");
+    let nonce = identity_bound(NONCE_PATH, "stitch-nonce");
+
+    let mut router: Router = build_public_router();
+    router = document_route(router, SEED_ONLY_PATH, &seed_only);
+    router = document_route(router, STITCHED_PATH, &stitched);
+    router = principal_route(router, &shell_reads_principal);
+    router = post_processed_route(router, &post_processed);
+    router = document_route(router, OMIT_PATH, &omit);
+    router = document_route(router, FALLBACK_PATH, &fallback);
+    router = nonce_route(router, &nonce);
+
+    for path in STITCH_PATHS {
+        router = router
+            .try_render_cache(path, stitched_policy())
+            .unwrap_or_else(|_| panic!("attach stitched render cache policy for {path}"));
+    }
+
+    let mut render_cache_config =
+        RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    render_cache_config.enabled = true;
+    render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
+
+    // Registered globally, and before `RenderCache::install`, for the same
+    // ordering reason `render_cache_live_support::boot_with_render_cache_and_live`
+    // documents: `install` appends its own middleware rather than inserting
+    // at a fixed position, so this is what makes each route's
+    // `AuthMiddleware::new()` guard see the session `LoginHeader` establishes.
+    let mut session_config = SessionConfig::default();
+    session_config.cookie_secure = false;
+    suprnova::middleware::register_global_middleware(SessionMiddleware::with_store(
+        session_config,
+        Arc::new(MemorySessionStore::default()),
+    ));
+    suprnova::middleware::register_global_middleware(CsrfMiddleware::new());
+    suprnova::middleware::register_global_middleware(LoginHeader);
+
+    let router = RenderCache::install(router, render_cache_config)
+        .await
+        .expect("install render cache");
+    // AFTER install, so it sits behind the cache middleware and grows only
+    // when the cache handed the request on; reset before it is registered so
+    // an earlier test's counts never leak into this one.
+    CHAIN_REACHES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    HANDLER_RENDERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    set_tenant_refusing(false);
+    suprnova::middleware::register_global_middleware(ChainCounter);
+    let router = Arc::new(router);
+    prepare_live_router_with_clock_for_test(&router, Arc::clone(&clock))
+        .expect("prepare Live runtime");
+
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
+
+    Arc::new(Harness {
+        router,
+        middleware,
+        clock,
+        _conn: conn,
+        _guard: guard,
+        _tempdir: tempdir,
+    })
+}
+
+fn identity_bound(path: &str, document_key: &str) -> LiveMount<DogfoodCounter> {
+    LiveMount::<DogfoodCounter>::identity_bound(path, "counter", document_key)
+        .unwrap_or_else(|_| panic!("declare identity-bound mount for {path}"))
+}
+
+fn stitched_policy() -> RenderCachePolicy {
+    RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("stitched policy")
+}
+
+/// Registers one stitched route behind the production-shaped chain every
+/// route here shares: the required auth guard first, then the tenant
+/// middleware, then the Live completion middleware the framework appends.
+fn document_route(router: Router, path: &'static str, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(path, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_stitch_document(request, mount, path).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router
+        .try_live_mount(mount)
+        .unwrap_or_else(|_| panic!("register stitched mount for {path}"))
+}
+
+fn principal_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(SHELL_READS_PRINCIPAL_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_principal_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router
+        .try_live_mount(mount)
+        .expect("register shell-reads-principal mount")
+}
+
+fn post_processed_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(POST_PROCESSED_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_stitch_document(request, mount, POST_PROCESSED_PATH).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .middleware(AppendFooter)
+        .into();
+    router
+        .try_live_mount(mount)
+        .expect("register post-processed mount")
+}
+
+fn nonce_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(NONCE_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { render_nonce_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
+        .into();
+    router.try_live_mount(mount).expect("register nonce mount")
+}
+
+/// The document every plain stitched route renders: one island inside the
+/// shared dogfood shell.
+async fn render_stitch_document(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+    path: &'static str,
+) -> Result<HttpResponse, HttpResponse> {
+    increment(&HANDLER_RENDERS, path);
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(std::collections::BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm())
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        document
+            .render(
+                dogfood_view()?,
+                &DogfoodDocument {
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                DocumentResponseIntent::html(StatusCode::OK)
+                    .map_err(|_| FrameworkError::internal("response intent"))?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+/// `SHELL_READS_PRINCIPAL_PATH`'s handler: identical to
+/// [`render_stitch_document`] except that the shell itself reads the
+/// principal and carries it in the document's title, so the bytes outside
+/// the island already depend on who asked.
+async fn render_principal_document(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    increment(&HANDLER_RENDERS, SHELL_READS_PRINCIPAL_PATH);
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let title = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(std::collections::BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm())
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        document
+            .render(
+                ViewName::parse("live/stitch-document.html")
+                    .map_err(|_| FrameworkError::internal("view identity"))?,
+                &StitchDocument {
+                    title: &title,
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                DocumentResponseIntent::html(StatusCode::OK)
+                    .map_err(|_| FrameworkError::internal("response intent"))?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+/// `NONCE_PATH`'s handler: a fresh Content Security Policy nonce per render,
+/// stamped on the bootstrap's script elements and declared in the document's
+/// own `content-security-policy` header, so a stored shell and the header it
+/// was stored with can never quietly disagree.
+async fn render_nonce_document(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    increment(&HANDLER_RENDERS, NONCE_PATH);
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let nonce = suprnova_live::render_cache::composite::fresh_nonce()
+            .map_err(|_| FrameworkError::internal("fresh nonce"))?;
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(std::collections::BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm().with_nonce(nonce.clone()))
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        let intent = DocumentResponseIntent::html(StatusCode::OK)
+            .map_err(|_| FrameworkError::internal("response intent"))?
+            .with_header(
+                hyper::header::HeaderName::from_static("content-security-policy"),
+                hyper::header::HeaderValue::from_str(&format!("script-src 'nonce-{nonce}'"))
+                    .map_err(|_| FrameworkError::internal("nonce header"))?,
+            )
+            .map_err(|_| FrameworkError::internal("nonce header"))?;
+        document
+            .render(
+                dogfood_view()?,
+                &DogfoodDocument {
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                intent,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+fn dogfood_view() -> Result<ViewName, FrameworkError> {
+    ViewName::parse("live/dogfood-document.html")
+        .map_err(|_| FrameworkError::internal("view identity"))
+}
+
+/// The dogfood shell with a title the handler controls; used only by
+/// `SHELL_READS_PRINCIPAL_PATH`, whose whole point is a shell that carries
+/// principal-specific bytes outside the island.
+#[suprnova::view(path = "live/stitch-document.html")]
+pub struct StitchDocument<'a> {
+    /// Title text the handler resolved for this request.
+    pub title: &'a str,
+    /// Live bootstrap markup.
+    pub bootstrap: &'a TrustedHtml,
+    /// The mounted island's markup.
+    pub island: &'a TrustedHtml,
+}
+
+/// One dispatched response: status, an accessor for a header, and the body.
+pub struct TestResponse {
+    /// The response status.
+    pub status: StatusCode,
+    headers: hyper::HeaderMap,
+    /// The response body bytes.
+    pub body: Bytes,
+}
+
+impl TestResponse {
+    /// The first value of `name`, if present.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    /// The body as UTF-8, for assertion messages.
+    #[must_use]
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// Dispatches one request with the given extra headers through the harness's
+/// real HTTP path (a bound loopback listener, exactly like
+/// `render_cache_live_support::dispatch_get`), and returns the decoded
+/// response. `method` is `GET` or `HEAD`.
+pub async fn dispatch(
+    harness: &Harness,
+    method: hyper::Method,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> TestResponse {
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let router = Arc::clone(&harness.router);
+    let middleware = Arc::clone(&harness.middleware);
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept test request");
+        let service = service_fn(move |request| {
+            let router = Arc::clone(&router);
+            let middleware = Arc::clone(&middleware);
+            async move {
+                Ok::<_, std::convert::Infallible>(handle_request(router, middleware, request).await)
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect test request");
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .expect("HTTP handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = sender.send_request(request).await.expect("send request");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect response body")
+        .to_bytes();
+    TestResponse {
+        status,
+        headers,
+        body,
+    }
+}

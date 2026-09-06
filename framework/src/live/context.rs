@@ -165,11 +165,17 @@ impl LiveRouteSecurityPolicy {
 
 #[async_trait]
 impl Middleware for LiveMiddlewareCompletion {
+    /// The last middleware before any Live route's handler, and therefore
+    /// the boundary the RenderCache's request-scoped collector attributes
+    /// reads against and the only place a hit prepared for a stitched route
+    /// may be served - after every route middleware has had its say. Both
+    /// are [`crate::render_cache::stitch::serve_prepared`]'s job; a request
+    /// carrying no prepared hit simply continues down the chain.
     async fn handle(&self, mut request: Request, next: Next) -> Response {
         if request.live_operation().is_some() {
             self.close_policy_absences(&mut request);
         }
-        next(request).await
+        crate::render_cache::stitch::serve_prepared(request, next).await
     }
 }
 
