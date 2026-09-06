@@ -57,8 +57,8 @@ impl DogfoodCounter {
 
 #[suprnova::view(path = "live/dogfood-document.html")]
 pub struct DogfoodDocument<'a> {
-    bootstrap: &'a TrustedHtml,
-    island: &'a TrustedHtml,
+    pub bootstrap: &'a TrustedHtml,
+    pub island: &'a TrustedHtml,
 }
 
 pub struct Principal(String);

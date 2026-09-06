@@ -140,6 +140,15 @@ impl LiveBootstrapOptions {
         self
     }
 
+    /// The requested Content Security Policy nonce, before validation.
+    ///
+    /// Read only by `LiveDocument::bootstrap`, and only once
+    /// [`render_bootstrap`] has already accepted these options, so what it
+    /// returns is the exact nonce the emitted script elements carry.
+    pub(crate) fn nonce(&self) -> Option<&str> {
+        self.nonce.as_deref()
+    }
+
     /// Returns the delivery form.
     #[must_use]
     pub const fn strategy(&self) -> LiveBootstrapStrategy {

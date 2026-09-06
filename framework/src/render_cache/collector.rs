@@ -65,6 +65,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
+use suprnova_live::render_cache::composite::{MAX_SHELL_ISLANDS, MAX_STITCH_SLOTS, ShellIsland};
 use suprnova_live::render_cache::generation::{DependencyIdentity, MAX_OBSERVATIONS};
 
 /// The reserved `Config` key behind [`permission_version_identity`].
@@ -290,7 +291,11 @@ impl CollectorReport {
         content.session_read |= gate.context.session_read;
         content.authorization_read |= gate.context.authorization_read;
         content.secret_context_read |= gate.context.secret_context_read;
-        content.overflowed |= gate.context.overflowed;
+        // No `overflowed` fold: the gate context has no overflow state to
+        // carry. Both producers - `mark_incomplete` and `observe`'s bound
+        // check - write `report.context.overflowed` whatever bucket the
+        // read was attributed to, precisely so one overflow marks the whole
+        // report no matter where it happened.
         let mut merged = gate.observed;
         let seen: BTreeSet<DependencyIdentity> = merged.iter().cloned().collect();
         merged.extend(
@@ -376,12 +381,25 @@ pub fn begin_handler() {
 /// nests another mount keeps counting reads the same way and the
 /// outermost scope restores gate or content exactly once. A slot read is
 /// recorded nowhere, so nesting cannot leak one into a recorded bucket.
+///
+/// A scope that found the gate bucket restores the *content* bucket when
+/// [`begin_handler`] ran while it was open: the handler boundary was
+/// genuinely crossed inside the slot, so restoring gate would record the
+/// handler's own later reads as gate reads it never made, moving them to
+/// the wrong side of the boundary a stitched route classifies from.
 pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
     struct Restore(Option<Attribution>);
     impl Drop for Restore {
         fn drop(&mut self) {
             if let Some(previous) = self.0 {
-                with_state(|state| state.attribution = previous);
+                with_state(|state| {
+                    state.attribution =
+                        if previous == Attribution::Gate && state.report.handler_began {
+                            Attribution::Content
+                        } else {
+                            previous
+                        };
+                });
             }
         }
     }
@@ -630,6 +648,107 @@ pub fn observe_live_document_no_store() {
             .no_store = true;
     });
 }
+
+/// Records one identity-bound island and its emitted bytes; a no-op
+/// outside a scope. Recording more than [`MAX_STITCH_SLOTS`] slots marks
+/// the capture invalid and records nothing further, because a shell that
+/// silently dropped an island would be published with that island's
+/// contents baked into shared bytes. Called by
+/// [`super::live::record_stitch_slot`], never directly by application code.
+pub fn observe_live_document_stitch_slot(slot: super::live::CapturedSlot) {
+    with_state(|state| {
+        let capture = &mut state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .stitch;
+        if capture.slots.len() >= MAX_STITCH_SLOTS {
+            capture.invalid = true;
+            return;
+        }
+        capture.slots.push(slot);
+    });
+}
+
+/// Records one public-seed island as remaining inside the shell; a no-op
+/// outside a scope. Bounded by [`MAX_SHELL_ISLANDS`], the same way and for
+/// the same reason as [`observe_live_document_stitch_slot`]. Called by
+/// [`super::live::record_shell_island`], never directly by application code.
+pub fn observe_live_document_shell_island(island: ShellIsland) {
+    with_state(|state| {
+        let capture = &mut state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .stitch;
+        if capture.shell_islands.len() >= MAX_SHELL_ISLANDS {
+            capture.invalid = true;
+            return;
+        }
+        capture.shell_islands.push(island);
+    });
+}
+
+/// Records the nonce one document's bootstrap markup stamped; a no-op
+/// outside a scope. A second bootstrap carrying a *different* nonce marks
+/// the capture invalid: one shell can only hold one nonce, so two disagree
+/// about what the holes it cuts should be filled with. A second bootstrap
+/// that stamps no nonce at all is not a conflict - it cut no holes. Called
+/// by [`super::live::record_bootstrap_nonce`], never directly by
+/// application code.
+pub fn observe_live_document_bootstrap_nonce(nonce: Option<&str>) {
+    let Some(fresh) = nonce else {
+        return;
+    };
+    with_state(|state| {
+        let capture = &mut state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .stitch;
+        match capture.nonce.as_deref() {
+            None => capture.nonce = Some(fresh.to_owned()),
+            Some(existing) if existing != fresh => capture.invalid = true,
+            Some(_) => {}
+        }
+    });
+}
+
+/// Records the digest of one rendered document body; a no-op outside a
+/// scope. A second digest marks the capture invalid and keeps the first:
+/// two rendered documents in one request means the recorded mounts belong
+/// to two different bodies, and no single shell can be cut from both.
+/// Called by [`super::live::record_document_digest`], never directly by
+/// application code.
+pub fn observe_live_document_digest(digest: [u8; 32]) {
+    with_state(|state| {
+        let capture = &mut state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .stitch;
+        if capture.document_digest.is_some() {
+            capture.invalid = true;
+            return;
+        }
+        capture.document_digest = Some(digest);
+    });
+}
+
+/// Marks the capture as one no shell can be built from; a no-op outside a
+/// scope. Called by [`super::live::record_stitch_capture_invalid`], never
+/// directly by application code.
+pub fn observe_live_document_stitch_invalid() {
+    with_state(|state| {
+        state
+            .report
+            .live_document
+            .get_or_insert_with(Default::default)
+            .stitch
+            .invalid = true;
+    });
+}
+
 /// Undeclared request context affected rendering.
 pub fn observe_undeclared(name: &str) {
     with_state(|state| {

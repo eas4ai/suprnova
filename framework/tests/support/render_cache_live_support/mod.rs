@@ -17,8 +17,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -26,25 +26,30 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
-use suprnova::live::{LiveDocument, LiveMount, LiveTenantMiddleware};
+use suprnova::live::{
+    LiveBootstrapOptions, LiveComponent, LiveDocument, LiveMount, LiveRegistry,
+    LiveTenantMiddleware, live,
+};
 use suprnova::middleware::{Middleware, Next};
+use suprnova::render_cache::collector::{self, CollectorReport};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::{
     FreshnessPolicy, RenderCache, RenderCachePolicy, RepresentationClass, SharedCachePolicy,
     VarianceDimension,
 };
 use suprnova::testing::TestContainer;
+use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    Auth, AuthMiddleware, CsrfMiddleware, HttpResponse, MiddlewareRegistry, Request, Response,
-    Router, SessionConfig, SessionMiddleware, StatusCode, handle_request,
+    Auth, AuthMiddleware, CsrfMiddleware, FrameworkError, HttpResponse, MiddlewareRegistry,
+    Request, Response, Router, SessionConfig, SessionMiddleware, StatusCode, handle_request,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
 use suprnova_live::mount::MountFlags;
 
 use crate::live_dogfood_support::{
-    DOCUMENT_PATH, DogfoodCounter, LoginHeader, MemorySessionStore, PRIVATE_DOCUMENT_PATH,
-    Tenantless, build_public_router, fixture,
+    DOCUMENT_PATH, DogfoodCounter, DogfoodDocument, LoginHeader, MemorySessionStore,
+    PRIVATE_DOCUMENT_PATH, Tenantless, build_public_router, fixture,
 };
 
 /// An identity-bound island mounted on a route whose handler never calls
@@ -53,6 +58,67 @@ use crate::live_dogfood_support::{
 /// `Display` allows. Proves the mount-time recording (R87) declines this
 /// even though `render_cache::live::record_document_intent` never runs.
 pub const RAW_PATH: &str = "/dogfood/private-raw";
+
+/// An identity-bound island whose handler renders a whole document and then
+/// stores the collector report it can see at that moment into
+/// [`last_report`]. Reading the report from inside the handler is what makes
+/// the mount-time stitch facts observable: the render cache middleware folds
+/// and consumes its own copy after the handler returns, so a test that only
+/// looked at what the cache did could never see the capture itself.
+pub const CAPTURE_PATH: &str = "/dogfood/private-capture";
+
+/// The document mount key `CAPTURE_PATH` declares.
+pub const CAPTURE_DOCUMENT_KEY: &str = "dogfood-capture";
+
+/// The Content Security Policy nonce `CAPTURE_PATH`'s bootstrap stamps, so
+/// the recorded bootstrap nonce has one exact expected value.
+pub const CAPTURE_NONCE: &str = "c4ptur3n0nce";
+
+/// The component `CAPTURE_PATH` mounts: the same shape as
+/// [`DogfoodCounter`], with its own view, and a mount hook that reads the
+/// request's principal.
+///
+/// That read is the point: an identity-bound mount runs inside
+/// `collector::slot_scope`, so a read it performs is counted into
+/// `CollectorReport::slot_reads` and recorded in no bucket at all. Without a
+/// component that actually reads something during its mount, the capture
+/// test could not tell a mount that runs inside a slot scope from one that
+/// does not. `DogfoodCounter` itself must not gain this hook: its
+/// public-seed mount runs outside any slot scope, so the same read would
+/// land in a recorded bucket and narrow that document's class.
+#[derive(LiveComponent)]
+#[live(
+    name = "tests.capture-counter",
+    view = "live/tests/capture-counter.html"
+)]
+pub struct CaptureCounter {
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl CaptureCounter {
+    #[mount]
+    pub fn mount() -> Self {
+        let _ = Auth::id();
+        Self { count: 0 }
+    }
+}
+
+/// The report `CAPTURE_PATH`'s handler saw at the moment it finished
+/// rendering its document. Process-global like every other counter here,
+/// and reset by `boot_with_render_cache_and_live`; the tests that read it
+/// are `#[serial_test::serial]`.
+static LAST_REPORT: Mutex<Option<CollectorReport>> = Mutex::new(None);
+
+/// The collector report `CAPTURE_PATH`'s handler last stored.
+#[must_use]
+pub fn last_report() -> Option<CollectorReport> {
+    LAST_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
 
 /// Fix round 2 (R89): a route declared `RepresentationClass::PrivateCached`
 /// with `Principal` variance, whose handler reads no identity at all.
@@ -101,7 +167,7 @@ struct RenderCounter;
 impl Middleware for RenderCounter {
     async fn handle(&self, request: Request, next: Next) -> Response {
         match request.path() {
-            PRIVATE_DOCUMENT_PATH | RAW_PATH => {
+            PRIVATE_DOCUMENT_PATH | RAW_PATH | CAPTURE_PATH => {
                 PRIVATE_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
             UNREASONED_PATH => {
@@ -171,6 +237,17 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
 
     let guard = TestContainer::fake();
     fixture();
+    // `fixture` registers only `DogfoodCounter`; `CAPTURE_PATH` mounts its
+    // own component, so this harness replaces the registry with one that
+    // holds both. Every other route keeps the component it always had.
+    suprnova::App::singleton(
+        LiveRegistry::builder()
+            .register::<DogfoodCounter>()
+            .expect("register dogfood counter")
+            .register::<CaptureCounter>()
+            .expect("register capture counter")
+            .build(),
+    );
 
     let tempdir = tempfile::tempdir().expect("tempdir for render cache live test database");
     let db_path = tempdir.path().join("render-cache-live.sqlite3");
@@ -216,6 +293,13 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .vary(VarianceDimension::Principal)
         .build()
         .expect("raw identity bound policy");
+    // A policy at all is what puts `CAPTURE_PATH`'s handler inside a
+    // collector scope, which is what makes `current_report()` answer there.
+    let capture_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("capture identity bound policy");
     // R89's own shape: declared `PrivateCached` already requires `Principal`
     // or `Tenant` variance to build at all (Task 14 round 6), so this is a
     // legitimately cacheable route whose handler simply never happens to
@@ -263,6 +347,21 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     let router = router
         .try_live_mount(&raw)
         .expect("register raw identity-bound mount");
+    let capture =
+        LiveMount::<CaptureCounter>::identity_bound(CAPTURE_PATH, "counter", CAPTURE_DOCUMENT_KEY)
+            .expect("declare capture identity-bound mount");
+    let capture_handler = capture.clone();
+    let router: Router = router
+        .get(CAPTURE_PATH, move |request: Request| {
+            let mount = capture_handler.clone();
+            async move { render_capture_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Tenantless)))
+        .into();
+    let router = router
+        .try_live_mount(&capture)
+        .expect("register capture identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
     let router: Router = router.get(STRIP_PATH, strip_handler).into();
     let router: Router = router.get(SEAM_LEAK_PATH, seam_leak_handler).into();
@@ -274,6 +373,8 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .expect("attach identity bound render cache policy")
         .try_render_cache(RAW_PATH, raw_policy)
         .expect("attach raw render cache policy")
+        .try_render_cache(CAPTURE_PATH, capture_policy)
+        .expect("attach capture render cache policy")
         .try_render_cache(UNREASONED_PATH, unreasoned_policy)
         .expect("attach unreasoned private cached policy")
         .try_render_cache(STRIP_PATH, strip_policy)
@@ -315,6 +416,9 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     STRIP_RENDERS.store(0, Ordering::SeqCst);
     SEAM_LEAK_RENDERS.store(0, Ordering::SeqCst);
     SEAM_CONTROL_RENDERS.store(0, Ordering::SeqCst);
+    *LAST_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     suprnova::middleware::register_global_middleware(RenderCounter);
     let router = Arc::new(router);
     prepare_live_router_with_clock_for_test(&router, Arc::clone(&clock))
@@ -352,6 +456,51 @@ async fn render_raw_document(
         "<!doctype html><html><body>{}</body></html>",
         island.html()
     )))
+}
+
+/// `CAPTURE_PATH`'s handler: the same whole-document render
+/// `live_dogfood_support` performs for `PRIVATE_DOCUMENT_PATH`, plus one
+/// extra step - the collector report is stored into [`last_report`] right
+/// after `render` returns, while every mount-time fact and the rendered
+/// document's digest are already recorded and the scope is still open.
+async fn render_capture_document(
+    request: Request,
+    mount: LiveMount<CaptureCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm().with_nonce(CAPTURE_NONCE))
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        let response = document
+            .render(
+                ViewName::parse("live/dogfood-document.html")
+                    .map_err(|_| FrameworkError::internal("view identity"))?,
+                &DogfoodDocument {
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                DocumentResponseIntent::html(StatusCode::OK)
+                    .map_err(|_| FrameworkError::internal("response intent"))?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)?;
+        *LAST_REPORT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = collector::current_report();
+        Ok(response)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
 }
 
 /// R89's shape: reads no identity at all. `UNREASONED_PATH`'s policy

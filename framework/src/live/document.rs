@@ -5,13 +5,17 @@ use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
 
+use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::host::{
     MountCatalogEntry, MountScopeRequirements, MountSelection, ScopeRequirement,
 };
-use suprnova_live::identity::{BuildId, IslandSlot, RouteIdentity};
+use suprnova_live::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
 use suprnova_live::mount::{DocumentMountKey, DocumentMountScope, MountFlags, PrivateMountRequest};
+use suprnova_live::render_cache::composite::{
+    MAX_FALLBACK_BYTES, MAX_SLOT_PARAMETER_BYTES, SlotFailurePolicy,
+};
 use suprnova_live::snapshot::{
     ComponentContract as SnapshotContract, ExpectedSeedV1, MountedDocumentPath,
 };
@@ -38,6 +42,68 @@ pub enum LiveMountKind {
     IdentityBound,
 }
 
+/// What a stitched hit does when this island cannot be rendered for the
+/// request.
+///
+/// Only a route declared as a stitched public shell ever consults this: on
+/// every other route the island is rendered inline and there is nothing to
+/// fall back from.
+#[derive(Clone)]
+pub enum StitchFailurePolicy {
+    /// The cached shell is not used; the route handler renders the request
+    /// uncached, exactly as it would have without the cache.
+    FailDocument,
+    /// The document is served without this island.
+    Omit,
+    /// This checked fragment takes the island's place.
+    Fallback(TrustedHtml),
+}
+
+impl fmt::Debug for StitchFailurePolicy {
+    /// Never prints the fallback markup: a policy is carried in declarations
+    /// and errors that may be logged, and the fragment is application
+    /// markup, not a diagnostic.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::FailDocument => "fail_document",
+            Self::Omit => "omit",
+            Self::Fallback(_) => "fallback(<checked>)",
+        })
+    }
+}
+
+/// One identity-bound island's declaration, in the framework's own typed
+/// identities, as a stitched shell has to record it.
+///
+/// This is what a later hit needs to mount the island again: which
+/// component, under which contract and protocol, with which parameters and
+/// inert flags, and what to do when that mount fails. The engine's
+/// `StitchSlot` spells the same facts as bounded strings; converting is the
+/// publisher's job, not this type's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StitchSlotDescriptor {
+    /// Canonical route identity the declaration belongs to.
+    pub route: RouteIdentity,
+    /// Island slot within that route's document.
+    pub slot: IslandSlot,
+    /// Server-declared document mount key.
+    pub document_key: DocumentMountKey,
+    /// Registered component name.
+    pub component: ComponentName,
+    /// Component contract digest.
+    pub contract_digest: ContentDigest,
+    /// Protocol version the mount was declared with.
+    pub protocol: u16,
+    /// Build identity the declaration belongs to.
+    pub build: BuildId,
+    /// RFC 8785 canonical JSON of the mount parameters.
+    pub parameters: String,
+    /// Inert mount flags.
+    pub flags: MountFlags,
+    /// Declared behavior when the island cannot be rendered on a hit.
+    pub on_failure: SlotFailurePolicy,
+}
+
 /// Immutable typed route/slot declaration shared by startup and its handler.
 pub struct LiveMount<C> {
     route_pattern: String,
@@ -50,6 +116,7 @@ pub struct LiveMount<C> {
     contract: suprnova_live::identity::ContentDigest,
     protocol: u16,
     kind: LiveMountKind,
+    stitch_failure: StitchFailurePolicy,
     marker: PhantomData<fn() -> C>,
 }
 
@@ -66,6 +133,7 @@ impl<C> Clone for LiveMount<C> {
             contract: self.contract.clone(),
             protocol: self.protocol,
             kind: self.kind,
+            stitch_failure: self.stitch_failure.clone(),
             marker: PhantomData,
         }
     }
@@ -148,6 +216,9 @@ impl<C: ComponentContract> LiveMount<C> {
             contract,
             protocol: versions.minimum_protocol(),
             kind,
+            // The safe default: an island that cannot be rendered for this
+            // request means the shell is not used at all.
+            stitch_failure: StitchFailurePolicy::FailDocument,
             marker: PhantomData,
         })
     }
@@ -156,6 +227,71 @@ impl<C: ComponentContract> LiveMount<C> {
     #[must_use]
     pub const fn kind(&self) -> LiveMountKind {
         self.kind
+    }
+
+    /// Declares what a stitched hit does when this island cannot be
+    /// rendered for the request. The default is
+    /// [`StitchFailurePolicy::FailDocument`].
+    ///
+    /// A fallback fragment is limited to `MAX_FALLBACK_BYTES`, the bound the
+    /// stored entry itself applies; a larger one is rejected here, where the
+    /// declaration is written, rather than silently at publication time.
+    pub fn on_stitch_failure(
+        mut self,
+        policy: StitchFailurePolicy,
+    ) -> Result<Self, LiveDocumentError> {
+        if let StitchFailurePolicy::Fallback(html) = &policy
+            && html.as_str().len() > MAX_FALLBACK_BYTES
+        {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::StitchFallbackTooLarge,
+            ));
+        }
+        self.stitch_failure = policy;
+        Ok(self)
+    }
+
+    /// This declaration as a stitched shell has to record it, for one
+    /// request's parameters and inert flags.
+    ///
+    /// Fails when the parameters cannot be spelled as a canonical document
+    /// within the slot's own bound. That is not a mount failure: the island
+    /// still renders, and the caller records the capture as one no shell can
+    /// be built from instead of turning a working document into an error.
+    pub(crate) fn stitch_descriptor(
+        &self,
+        parameters: &CanonicalValue,
+        flags: &MountFlags,
+    ) -> Result<StitchSlotDescriptor, LiveDocumentError> {
+        let limits = suprnova_live::limits::InputLimits::new(
+            MAX_SLOT_PARAMETER_BYTES,
+            32,
+            512,
+            MAX_SLOT_PARAMETER_BYTES,
+        )
+        .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+        let canonical = suprnova_live::canonical::to_canonical_bytes(parameters, &limits)
+            .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+        let parameters = String::from_utf8(canonical)
+            .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+        Ok(StitchSlotDescriptor {
+            route: self.route.clone(),
+            slot: self.slot.clone(),
+            document_key: self.document_key.clone(),
+            component: self.component.clone(),
+            contract_digest: self.contract.clone(),
+            protocol: self.protocol,
+            build: self.build.clone(),
+            parameters,
+            flags: flags.clone(),
+            on_failure: match &self.stitch_failure {
+                StitchFailurePolicy::FailDocument => SlotFailurePolicy::FailDocument,
+                StitchFailurePolicy::Omit => SlotFailurePolicy::Omit,
+                StitchFailurePolicy::Fallback(html) => SlotFailurePolicy::Fallback {
+                    html: html.as_str().to_owned(),
+                },
+            },
+        })
     }
 
     pub(crate) const fn route(&self) -> &RouteIdentity {
@@ -364,21 +500,48 @@ impl<'a> LiveDocument<'a> {
                     LiveMountKind::PublicSeed,
                     Some(output.expires_at().get()),
                 );
+                // A public seed is the same for everybody, so a stitched
+                // shell keeps its bytes: only the fact that the island is
+                // in there is recorded, never a slot to re-mount.
+                crate::render_cache::live::record_shell_island(
+                    &declaration.slot,
+                    &declaration.document_key,
+                );
                 output.into_document_parts()
             }
             LiveMountKind::IdentityBound => {
-                let output = self
-                    .runtime
-                    .mount_private_component(
+                // Built before the parameters are moved into the request,
+                // and never with `?`: an island whose parameters cannot be
+                // spelled within the slot's bound still renders here, it
+                // just cannot be stitched later.
+                let descriptor = declaration.stitch_descriptor(&parameters, &flags);
+                // The mount runs in the slot bucket: whatever it reads is
+                // re-read on every stitched hit and must not be recorded as
+                // something the shared shell depends on.
+                let output = crate::render_cache::collector::slot_scope(
+                    self.runtime.mount_private_component(
                         &mut self.scope,
                         PrivateMountRequest::new(key, parameters, flags)
                             .with_document_path(document_path),
                         &context,
-                    )
-                    .await
-                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                    ),
+                )
+                .await
+                .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
                 crate::render_cache::live::record_mount(LiveMountKind::IdentityBound, None);
-                output.into_document_parts()
+                let (html, metadata) = output.into_document_parts();
+                match descriptor {
+                    // The recorded bytes are the island's own markup, the
+                    // same `TrustedHtml` the template is about to insert.
+                    Ok(descriptor) => crate::render_cache::live::record_stitch_slot(
+                        crate::render_cache::live::CapturedSlot {
+                            descriptor,
+                            html: Bytes::from(html.as_str().as_bytes().to_vec()),
+                        },
+                    ),
+                    Err(_) => crate::render_cache::live::record_stitch_capture_invalid(),
+                }
+                (html, metadata)
             }
         };
         self.metadata.push(metadata);
@@ -438,6 +601,9 @@ impl<'a> LiveDocument<'a> {
                     BootstrapFailure::MarkupRejected => LiveDocumentErrorKind::RenderRejected,
                 })
             })?;
+        // After `render_bootstrap` accepted the options, so the recorded
+        // value is the nonce the emitted script elements actually carry.
+        crate::render_cache::live::record_bootstrap_nonce(options.nonce());
         self.bootstrapped = true;
         Ok(bootstrap)
     }
@@ -464,6 +630,10 @@ impl<'a> LiveDocument<'a> {
                 renderer.render_document(view, template, response, assets, self.metadata)
             })
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?;
+        // The bytes a stitched shell would be cut from are known only
+        // here, and these are the same bytes `document_response` hands to
+        // the response below.
+        crate::render_cache::live::record_document_digest(Sha256::digest(&render.body).into());
         // The mount kind and seed deadline facts are already recorded, at
         // `mount` (see its own doc for why); only the document's cache
         // intent is known here, so this call records only that.
@@ -508,6 +678,8 @@ pub enum LiveDocumentErrorKind {
     BootstrapRepeated,
     /// An island was mounted after the bootstrap markup was already emitted.
     MountAfterBootstrap,
+    /// A declared stitch fallback fragment exceeded the stored entry's bound.
+    StitchFallbackTooLarge,
 }
 
 /// Redacted Live document failure.
@@ -542,6 +714,7 @@ impl fmt::Display for LiveDocumentError {
             LiveDocumentErrorKind::InvalidBootstrap => "invalid_live_bootstrap",
             LiveDocumentErrorKind::BootstrapRepeated => "live_bootstrap_repeated",
             LiveDocumentErrorKind::MountAfterBootstrap => "live_mount_after_bootstrap",
+            LiveDocumentErrorKind::StitchFallbackTooLarge => "live_stitch_fallback_too_large",
         })
     }
 }

@@ -47,7 +47,8 @@ pub mod __private;
 pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
 pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind};
 pub use document::{
-    LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind, MountedIsland,
+    LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind,
+    MountedIsland, StitchFailurePolicy, StitchSlotDescriptor,
 };
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,

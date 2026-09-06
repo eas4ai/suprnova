@@ -4,20 +4,54 @@
 use crate::live_dogfood_support;
 use crate::render_cache_live_support;
 
-use live_dogfood_support::{DOCUMENT_PATH, PRIVATE_DOCUMENT_PATH};
+use bytes::Bytes;
+use live_dogfood_support::{DOCUMENT_PATH, DogfoodCounter, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
-    RAW_PATH, SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH, UNREASONED_PATH,
-    boot_with_render_cache_and_live, clock, dispatch_get, private_renders, public_renders,
-    public_seed_lifetime_ms, seam_control_renders, seam_leak_renders, strip_renders,
-    unreasoned_renders,
+    CAPTURE_NONCE, CAPTURE_PATH, RAW_PATH, SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH,
+    UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get, last_report,
+    private_renders, public_renders, public_seed_lifetime_ms, seam_control_renders,
+    seam_leak_renders, strip_renders, unreasoned_renders,
 };
+use sha2::Digest as _;
 use suprnova::StatusCode;
-use suprnova::live::LiveMountKind;
+use suprnova::live::{
+    LiveDocumentErrorKind, LiveMount, LiveMountKind, StitchFailurePolicy, StitchSlotDescriptor,
+};
+use suprnova::render_cache::RepresentationClass;
 use suprnova::render_cache::collector::{Collector, current_report};
 use suprnova::render_cache::live::{
-    LiveDocumentFacts, document_declines, record_document_intent, record_mount,
+    CapturedSlot, LiveDocumentFacts, StitchCapture, document_declines, record_bootstrap_nonce,
+    record_document_digest, record_document_intent, record_mount, record_shell_island,
+    record_stitch_capture_invalid, record_stitch_slot,
 };
-use suprnova::view::{DocumentCachePolicy, DocumentResponseIntent};
+use suprnova::view::{
+    DocumentCachePolicy, DocumentResponseIntent, TrustedHtml, TrustedMarkupReason,
+};
+use suprnova_live::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
+use suprnova_live::mount::{DocumentMountKey, MountFlags};
+use suprnova_live::render_cache::composite::{
+    MAX_FALLBACK_BYTES, MAX_STITCH_SLOTS, SlotFailurePolicy,
+};
+
+/// One recorded slot with every identity valid and nothing else varying but
+/// the island slot and the document mount key.
+fn captured(slot: &str, key: &str) -> CapturedSlot {
+    CapturedSlot {
+        descriptor: StitchSlotDescriptor {
+            route: RouteIdentity::from_bytes(&[3u8; 32]).expect("route"),
+            slot: IslandSlot::parse(slot).expect("slot"),
+            document_key: DocumentMountKey::parse(key).expect("key"),
+            component: ComponentName::parse("app.counter").expect("component"),
+            contract_digest: ContentDigest::from_bytes(&[1u8; 32]).expect("digest"),
+            protocol: 1,
+            build: BuildId::parse("suprnova-1.0.0").expect("build"),
+            parameters: "{}".to_owned(),
+            flags: MountFlags::empty(),
+            on_failure: SlotFailurePolicy::FailDocument,
+        },
+        html: Bytes::from_static(b"<div>island</div>"),
+    }
+}
 
 #[test]
 fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
@@ -26,9 +60,10 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         identity_bound_islands: 0,
         seed_deadline_ms: Some(10),
         no_store: false,
+        ..Default::default()
     };
     assert!(
-        !document_declines(Some(&public)),
+        !document_declines(Some(&public), RepresentationClass::PublicShared),
         "a public seed with a resolved deadline stores"
     );
     let bound = LiveDocumentFacts {
@@ -36,19 +71,19 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..public.clone()
     };
     assert!(
-        document_declines(Some(&bound)),
-        "an identity-bound island never stores; composite stitching is a later plan"
+        document_declines(Some(&bound), RepresentationClass::PublicShared),
+        "an identity-bound island never stores on a route that did not declare stitching"
     );
     let no_store = LiveDocumentFacts {
         no_store: true,
         ..public.clone()
     };
     assert!(
-        document_declines(Some(&no_store)),
+        document_declines(Some(&no_store), RepresentationClass::PublicShared),
         "a document that declared NoStore never stores"
     );
     assert!(
-        !document_declines(None),
+        !document_declines(None, RepresentationClass::PublicShared),
         "a plain route with no Live document is left alone"
     );
     let no_deadline = LiveDocumentFacts {
@@ -56,8 +91,249 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..public
     };
     assert!(
-        document_declines(Some(&no_deadline)),
+        document_declines(Some(&no_deadline), RepresentationClass::PublicShared),
         "a seed document without a resolvable deadline is not stored"
+    );
+}
+
+#[test]
+fn identity_bound_islands_decline_unless_the_route_is_declared_stitched() {
+    let bound = LiveDocumentFacts {
+        identity_bound_islands: 1,
+        seed_deadline_ms: None,
+        ..Default::default()
+    };
+    assert!(document_declines(
+        Some(&bound),
+        RepresentationClass::PublicShared
+    ));
+    assert!(document_declines(
+        Some(&bound),
+        RepresentationClass::PrivateCached
+    ));
+    assert!(!document_declines(
+        Some(&bound),
+        RepresentationClass::PublicShellStitched
+    ));
+    let invalid = LiveDocumentFacts {
+        stitch: StitchCapture {
+            invalid: true,
+            ..Default::default()
+        },
+        ..bound.clone()
+    };
+    assert!(
+        document_declines(Some(&invalid), RepresentationClass::PublicShellStitched),
+        "a capture that could not be represented declines even a stitched route"
+    );
+    let no_store = LiveDocumentFacts {
+        no_store: true,
+        ..bound
+    };
+    assert!(
+        document_declines(Some(&no_store), RepresentationClass::PublicShellStitched),
+        "NoStore means this cache too, stitched or not"
+    );
+}
+
+#[test]
+fn a_stitch_fallback_is_bounded_at_declaration_and_never_printed() {
+    let mount = LiveMount::<DogfoodCounter>::public_seed(
+        "/dogfood/fallback",
+        "counter",
+        "dogfood-fallback",
+    )
+    .expect("declare mount");
+    let reason = TrustedMarkupReason::new("stitch fallback test").expect("reason");
+    let largest = TrustedHtml::framework_generated("x".repeat(MAX_FALLBACK_BYTES), reason.clone())
+        .expect("fallback markup");
+    assert!(
+        mount
+            .clone()
+            .on_stitch_failure(StitchFailurePolicy::Fallback(largest))
+            .is_ok(),
+        "a fallback exactly at the stored entry's bound is accepted"
+    );
+    let oversized =
+        TrustedHtml::framework_generated("x".repeat(MAX_FALLBACK_BYTES + 1), reason.clone())
+            .expect("fallback markup");
+    let Err(error) = mount.on_stitch_failure(StitchFailurePolicy::Fallback(oversized)) else {
+        panic!("one byte past the bound is refused where it is declared");
+    };
+    assert_eq!(error.kind(), LiveDocumentErrorKind::StitchFallbackTooLarge);
+    assert_eq!(
+        error.to_string(),
+        "live_stitch_fallback_too_large",
+        "the message names the violated contract and carries no markup"
+    );
+    let secret = TrustedHtml::framework_generated("<b>tenant secret</b>".to_owned(), reason)
+        .expect("fallback markup");
+    assert_eq!(
+        format!("{:?}", StitchFailurePolicy::Fallback(secret)),
+        "fallback(<checked>)",
+        "a policy never prints the markup it carries"
+    );
+    assert_eq!(format!("{:?}", StitchFailurePolicy::Omit), "omit");
+    assert_eq!(
+        format!("{:?}", StitchFailurePolicy::FailDocument),
+        "fail_document"
+    );
+}
+
+#[tokio::test]
+async fn capture_records_slots_shell_islands_nonce_and_digest_in_order() {
+    let facts = Collector::scope(async {
+        record_mount(LiveMountKind::PublicSeed, Some(5_000));
+        record_shell_island(
+            &IslandSlot::parse("seed").expect("slot"),
+            &DocumentMountKey::parse("doc-seed").expect("key"),
+        );
+        record_bootstrap_nonce(Some("n0nce"));
+        record_mount(LiveMountKind::IdentityBound, None);
+        record_stitch_slot(captured("a", "doc-a"));
+        record_mount(LiveMountKind::IdentityBound, None);
+        record_stitch_slot(captured("b", "doc-b"));
+        record_document_digest([7u8; 32]);
+        current_report()
+            .expect("report")
+            .live_document
+            .expect("facts")
+    })
+    .await;
+    assert_eq!(facts.identity_bound_islands, 2);
+    assert_eq!(facts.stitch.slots.len(), 2);
+    assert_eq!(facts.stitch.slots[0].descriptor.slot.as_str(), "a");
+    assert_eq!(facts.stitch.slots[1].descriptor.slot.as_str(), "b");
+    assert_eq!(facts.stitch.shell_islands.len(), 1);
+    assert_eq!(facts.stitch.shell_islands[0].slot, "seed");
+    assert_eq!(facts.stitch.nonce.as_deref(), Some("n0nce"));
+    assert_eq!(facts.stitch.document_digest, Some([7u8; 32]));
+    assert!(!facts.stitch.invalid);
+}
+
+#[tokio::test]
+async fn a_second_digest_a_conflicting_nonce_or_too_many_slots_marks_the_capture_invalid() {
+    let facts = Collector::scope(async {
+        record_document_digest([1u8; 32]);
+        record_document_digest([2u8; 32]);
+        current_report()
+            .expect("report")
+            .live_document
+            .expect("facts")
+    })
+    .await;
+    assert!(
+        facts.stitch.invalid,
+        "two rendered documents in one request"
+    );
+    let facts = Collector::scope(async {
+        record_bootstrap_nonce(Some("one"));
+        record_bootstrap_nonce(Some("two"));
+        current_report()
+            .expect("report")
+            .live_document
+            .expect("facts")
+    })
+    .await;
+    assert!(facts.stitch.invalid, "two bootstraps with different nonces");
+    let facts = Collector::scope(async {
+        for index in 0..=MAX_STITCH_SLOTS {
+            record_stitch_slot(captured(&format!("s{index}"), &format!("k{index}")));
+        }
+        current_report()
+            .expect("report")
+            .live_document
+            .expect("facts")
+    })
+    .await;
+    assert!(facts.stitch.invalid, "a 33rd slot");
+    assert_eq!(
+        facts.stitch.slots.len(),
+        MAX_STITCH_SLOTS,
+        "the slot past the bound is not recorded either"
+    );
+}
+
+#[tokio::test]
+async fn an_island_that_cannot_be_described_as_a_slot_invalidates_the_capture() {
+    let facts = Collector::scope(async {
+        record_mount(LiveMountKind::IdentityBound, None);
+        // What `LiveDocument::mount` records when the island's parameters
+        // cannot be spelled as a canonical document within the slot's bound:
+        // the island still rendered, so the document is served, but no shell
+        // can be cut from it.
+        record_stitch_capture_invalid();
+        current_report()
+            .expect("report")
+            .live_document
+            .expect("facts")
+    })
+    .await;
+    assert!(facts.stitch.invalid);
+    assert!(
+        facts.stitch.slots.is_empty(),
+        "an island with no describable slot is never recorded as one"
+    );
+    assert!(document_declines(
+        Some(&facts),
+        RepresentationClass::PublicShellStitched
+    ));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_identity_bound_mount_captures_its_exact_island_bytes_inside_a_slot_scope() {
+    let harness = boot_with_render_cache_and_live().await;
+    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let cookie = login.session_cookie();
+    let response = dispatch_get(
+        &harness,
+        CAPTURE_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let report = last_report().expect("the capture handler stored its report");
+    let facts = report.live_document.clone().expect("facts");
+    assert_eq!(facts.stitch.slots.len(), 1);
+    let html = std::str::from_utf8(&facts.stitch.slots[0].html).expect("utf8");
+    assert!(
+        html.starts_with("<div data-suprnova-live-root=\"counter\""),
+        "{html}"
+    );
+    assert!(
+        std::str::from_utf8(&response.body)
+            .expect("utf8")
+            .contains(html),
+        "the island bytes appear verbatim in the document"
+    );
+    assert!(
+        report.slot_reads > 0,
+        "the mount's own reads were attributed to the slot"
+    );
+    assert!(
+        !report.context.principal_read,
+        "the handler itself read no principal"
+    );
+    assert!(
+        report.gate.context.principal_read,
+        "the auth guard's read is a gate read"
+    );
+    assert_eq!(
+        facts.stitch.nonce.as_deref(),
+        Some(CAPTURE_NONCE),
+        "the bootstrap's own nonce is recorded once"
+    );
+    let expected: [u8; 32] = sha2::Sha256::digest(&response.body).into();
+    assert_eq!(
+        facts.stitch.document_digest,
+        Some(expected),
+        "the recorded digest covers exactly the bytes the document served"
     );
 }
 

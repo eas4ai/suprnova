@@ -1297,12 +1297,13 @@ async fn lead_render(
         return Ok(response);
     }
     // The rendered Live document's own facts (if any) decline independently
-    // of `classify`: an identity-bound island, a `NoStore` document intent,
-    // or a public-seed island without a resolvable deadline. This can only
-    // decline, never narrow or widen `classification.class` (see
-    // `document_declines`'s own doc for why the document's cache intent
-    // does not feed classification at all).
-    if live::document_declines(report.live_document.as_ref()) {
+    // of `classify`: an identity-bound island on a route that did not
+    // declare stitching, a `NoStore` document intent, or a public-seed
+    // island without a resolvable deadline. This can only decline, never
+    // narrow or widen `classification.class` (see `document_declines`'s own
+    // doc for why the document's cache intent does not feed classification
+    // at all, and why the *declared* class is what it is passed).
+    if live::document_declines(report.live_document.as_ref(), policy.class()) {
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);

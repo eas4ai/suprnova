@@ -172,6 +172,11 @@ enum TrustedMarkupProvenance {
 /// let untrusted = String::from("<strong>untrusted</strong>");
 /// let _: TrustedHtml = untrusted.into();
 /// ```
+///
+/// `Clone` is safe here and carries no new authority: a clone copies markup
+/// that already crossed one of the audited paths above, keeping the same
+/// reason and the same provenance. Nothing becomes trusted by being cloned.
+#[derive(Clone)]
 pub struct TrustedHtml {
     html: String,
     reason: TrustedMarkupReason,

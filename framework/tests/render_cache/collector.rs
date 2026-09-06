@@ -311,6 +311,65 @@ async fn slot_scope_reads_are_counted_and_recorded_nowhere_else() {
 }
 
 #[tokio::test]
+async fn a_nested_slot_scope_stays_in_the_slot_bucket_and_restores_exactly_once() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        collector::slot_scope(async {
+            collector::observe_table_read("outer_slot");
+            collector::slot_scope(async {
+                collector::observe_table_read("inner_slot");
+            })
+            .await;
+            // Still inside the outer slot scope: the inner one restored the
+            // slot bucket it found, not the content bucket underneath both.
+            collector::observe_table_read("after_inner");
+        })
+        .await;
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(
+        report.slot_reads, 3,
+        "every read inside either scope is a slot read"
+    );
+    assert_eq!(
+        report.observed.len(),
+        1,
+        "only the read after the outermost scope is recorded, and it is a content read"
+    );
+    assert!(
+        report.gate.observed.is_empty(),
+        "the outermost scope restored content, not gate"
+    );
+}
+
+#[tokio::test]
+async fn a_slot_scope_that_begins_the_handler_inside_it_restores_to_content() {
+    let report = Collector::scope(async {
+        // The scope starts in the gate bucket, as a real request does, and
+        // the handler boundary is crossed while the slot scope is open.
+        collector::slot_scope(async {
+            collector::begin_handler();
+            collector::observe_table_read("counters");
+        })
+        .await;
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    assert!(report.handler_began);
+    assert_eq!(report.slot_reads, 1);
+    assert_eq!(
+        report.observed.len(),
+        1,
+        "the read after the scope is a content read: restoring the gate bucket the scope \
+         found would have recorded it as a gate read the handler never made"
+    );
+    assert!(report.gate.observed.is_empty());
+}
+
+#[tokio::test]
 async fn folding_the_gate_into_content_reproduces_the_undivided_report() {
     let mut report = Collector::scope(async {
         collector::observe_principal_value("alice");
