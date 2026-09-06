@@ -16,11 +16,21 @@
 //! every hit.
 //!
 //! Only a [`crate::render_cache::RepresentationClass::PublicShellStitched`]
-//! route classifies from the content bucket alone. Every hit on that class
-//! runs its gate again before anything is served, so a principal or tenant
-//! the gate read is re-resolved per request and never baked into the
-//! shared shell; what the *handler* read is what the shell actually
-//! contains. Every other class folds the gate bucket back into content
+//! route classifies from the content bucket alone. Three things together
+//! are what make that sound. The stored shell holds only what the handler
+//! rendered after [`begin_handler`], so a gate's own bytes are never in it,
+//! and a gate that rewrites the body after the handler returned is caught
+//! by the body digest and declines the store. Every hit on that class runs
+//! the route's gate again before anything is served, so the gate's decision
+//! is taken fresh per request rather than read back out of the shell. And a
+//! gate value that also reaches the handler through an instrumented seam -
+//! `Auth::user()`, a cookie, a query-builder read - is observed again in
+//! the content bucket when the handler consumes it, so it still reaches the
+//! key. What is left is a gate value reaching the handler through an
+//! uninstrumented seam, a request header or an application task-local:
+//! the pre-existing boundary "Limitations, by design" below already
+//! describes, which the gate bucket never closed and this exemption does
+//! not widen. Every other class folds the gate bucket back into content
 //! ([`CollectorReport::fold_gate_into_content`], called by the render
 //! cache middleware for every non-stitched route) and classifies from
 //! exactly the undivided report it produced before attribution existed.
@@ -363,6 +373,13 @@ fn with_context<R>(f: impl FnOnce(&mut CollectedContext) -> R) -> Option<R> {
 /// read. Idempotent; a no-op outside a scope. Called by the Live
 /// completion middleware, the last middleware before any Live route's
 /// handler.
+///
+/// Framework-internal, and `pub` only because the framework's own
+/// integration tests drive it: calling it from application code moves the
+/// gate/content boundary to wherever the call is, so reads that ran before
+/// the handler are recorded as ones the shared shell depends on and the
+/// route classifies from a bucket that no longer describes the body.
+#[doc(hidden)]
 pub fn begin_handler() {
     with_state(|state| {
         state.report.handler_began = true;
@@ -387,6 +404,13 @@ pub fn begin_handler() {
 /// genuinely crossed inside the slot, so restoring gate would record the
 /// handler's own later reads as gate reads it never made, moving them to
 /// the wrong side of the boundary a stitched route classifies from.
+///
+/// Framework-internal, and `pub` only because the framework's own
+/// integration tests drive it: calling it from application code suppresses
+/// dependency recording for everything inside it, since a slot read is
+/// counted and recorded nowhere, so a route classifies as depending on
+/// less than it actually read.
+#[doc(hidden)]
 pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
     struct Restore(Option<Attribution>);
     impl Drop for Restore {

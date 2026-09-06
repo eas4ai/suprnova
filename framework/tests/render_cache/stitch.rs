@@ -1139,7 +1139,9 @@ async fn the_stored_shell_holds_no_island_markup_and_no_signed_snapshot() {
         shell.contains("<html") && shell.contains("</html>"),
         "what is left is the document around the island: {} bytes starting {:?}",
         shell.len(),
-        &shell[..shell.len().min(80)]
+        // By character, not by byte: a byte index that landed inside a
+        // multi-byte character would panic while formatting the failure.
+        shell.chars().take(80).collect::<String>()
     );
 }
 

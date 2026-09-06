@@ -8,8 +8,8 @@ use bytes::Bytes;
 use live_dogfood_support::{DOCUMENT_PATH, DogfoodCounter, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
     CAPTURE_NONCE, CAPTURE_PATH, RAW_PATH, SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH,
-    UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get, last_report,
-    private_renders, public_renders, public_seed_lifetime_ms, seam_control_renders,
+    UNCACHED_CAPTURE_PATH, UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get,
+    last_report, private_renders, public_renders, public_seed_lifetime_ms, seam_control_renders,
     seam_leak_renders, strip_renders, unreasoned_renders,
 };
 use sha2::Digest as _;
@@ -391,6 +391,50 @@ async fn an_identity_bound_mount_captures_its_exact_island_bytes_inside_a_slot_s
         facts.stitch.document_digest,
         Some(expected),
         "the recorded digest covers exactly the bytes the document served"
+    );
+}
+
+/// `LiveDocument` builds a stitch descriptor, copies each island's markup,
+/// and hashes the rendered body only when a collector is active, because
+/// every `record_*` those feed is a no-op without one. This route carries no
+/// render cache policy, so nothing wraps its handler in a scope: the
+/// document still renders exactly as it does under one, and the handler sees
+/// no report to store.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_document_rendered_outside_a_collector_scope_records_nothing() {
+    let harness = boot_with_render_cache_and_live().await;
+    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let cookie = login.session_cookie();
+    let response = dispatch_get(
+        &harness,
+        UNCACHED_CAPTURE_PATH,
+        &[("x-test-login", "user-7"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body = std::str::from_utf8(&response.body).expect("utf8");
+    // The handler ran and produced a whole Live document: the island the
+    // guarded copy would have captured is in the served bytes, and the
+    // bootstrap stamped the nonce the guarded recording would have read.
+    assert!(
+        body.contains("<div data-suprnova-live-root=\"counter\""),
+        "the island is rendered into the document unchanged: {body}"
+    );
+    assert!(
+        body.contains(&format!("nonce=\"{CAPTURE_NONCE}\"")),
+        "and the bootstrap stamped its nonce"
+    );
+    // Which means the `None` below is what the handler saw, not a handler
+    // that never ran: it stores the report unconditionally before returning.
+    assert!(
+        last_report().is_none(),
+        "no collector was active, so no LiveDocumentFacts were recorded"
     );
 }
 

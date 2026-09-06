@@ -70,6 +70,20 @@ pub const CAPTURE_PATH: &str = "/dogfood/private-capture";
 /// The document mount key `CAPTURE_PATH` declares.
 pub const CAPTURE_DOCUMENT_KEY: &str = "dogfood-capture";
 
+/// The same whole-document render as [`CAPTURE_PATH`], on a route carrying
+/// no render cache policy at all, so nothing ever wraps its handler in a
+/// collector scope.
+///
+/// `LiveDocument` guards its capture work on `collector::is_active`, so this
+/// route is what proves those guards leave the served document exactly as it
+/// was and record nothing: the handler stores the report it can see into
+/// [`last_report`] the same way `CAPTURE_PATH`'s does, and outside a scope
+/// there is none to see.
+pub const UNCACHED_CAPTURE_PATH: &str = "/dogfood/private-capture-uncached";
+
+/// The document mount key `UNCACHED_CAPTURE_PATH` declares.
+pub const UNCACHED_CAPTURE_DOCUMENT_KEY: &str = "dogfood-capture-uncached";
+
 /// The Content Security Policy nonce `CAPTURE_PATH`'s bootstrap stamps, so
 /// the recorded bootstrap nonce has one exact expected value.
 pub const CAPTURE_NONCE: &str = "c4ptur3n0nce";
@@ -167,7 +181,7 @@ struct RenderCounter;
 impl Middleware for RenderCounter {
     async fn handle(&self, request: Request, next: Next) -> Response {
         match request.path() {
-            PRIVATE_DOCUMENT_PATH | RAW_PATH | CAPTURE_PATH => {
+            PRIVATE_DOCUMENT_PATH | RAW_PATH | CAPTURE_PATH | UNCACHED_CAPTURE_PATH => {
                 PRIVATE_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
             UNREASONED_PATH => {
@@ -362,6 +376,27 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     let router = router
         .try_live_mount(&capture)
         .expect("register capture identity-bound mount");
+    // No `try_render_cache` for this one, deliberately: a route with no
+    // policy is never wrapped in a collector scope, which is the state the
+    // capture guards have to leave the document unchanged in.
+    let uncached = LiveMount::<CaptureCounter>::identity_bound(
+        UNCACHED_CAPTURE_PATH,
+        "counter",
+        UNCACHED_CAPTURE_DOCUMENT_KEY,
+    )
+    .expect("declare uncached capture identity-bound mount");
+    let uncached_handler = uncached.clone();
+    let router: Router = router
+        .get(UNCACHED_CAPTURE_PATH, move |request: Request| {
+            let mount = uncached_handler.clone();
+            async move { render_capture_document(request, mount).await }
+        })
+        .middleware(AuthMiddleware::new())
+        .middleware(LiveTenantMiddleware::new(Arc::new(Tenantless)))
+        .into();
+    let router = router
+        .try_live_mount(&uncached)
+        .expect("register uncached capture identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
     let router: Router = router.get(STRIP_PATH, strip_handler).into();
     let router: Router = router.get(SEAM_LEAK_PATH, seam_leak_handler).into();
@@ -458,11 +493,13 @@ async fn render_raw_document(
     )))
 }
 
-/// `CAPTURE_PATH`'s handler: the same whole-document render
-/// `live_dogfood_support` performs for `PRIVATE_DOCUMENT_PATH`, plus one
-/// extra step - the collector report is stored into [`last_report`] right
-/// after `render` returns, while every mount-time fact and the rendered
-/// document's digest are already recorded and the scope is still open.
+/// `CAPTURE_PATH`'s handler, and `UNCACHED_CAPTURE_PATH`'s: the same
+/// whole-document render `live_dogfood_support` performs for
+/// `PRIVATE_DOCUMENT_PATH`, plus one extra step - the collector report is
+/// stored into [`last_report`] right after `render` returns, while every
+/// mount-time fact and the rendered document's digest are already recorded
+/// and the scope is still open. On `UNCACHED_CAPTURE_PATH` there is no
+/// scope, so the stored report is `None`.
 async fn render_capture_document(
     request: Request,
     mount: LiveMount<CaptureCounter>,

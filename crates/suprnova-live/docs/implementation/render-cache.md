@@ -564,11 +564,22 @@ bucket, which holds what the handler read to build the body. `slot_scope`
 runs an identity-bound island's mount in the **slot** bucket, whose reads
 are counted and recorded nowhere else.
 
-Only `PublicShellStitched` classifies from the content bucket alone. That
-exemption is earned by the hit path and by nothing else: every hit on this
-class runs the route's own gate again before a byte is served, so a
-principal or tenant the gate read is re-resolved per request and is never
-baked into the shared shell. Every other class folds the gate bucket back
+Only `PublicShellStitched` classifies from the content bucket alone. Three
+things together are what earn that exemption. First, the stored shell holds
+only what the handler rendered after `begin_handler`, so a gate's own bytes
+are never in it, and a gate that rewrites the body after the handler
+returned is caught by the body digest, which declines the store rather than
+publishing the rewritten bytes. Second, every hit on this class runs the
+route's own gate again before a byte is served, so the gate's decision is
+taken fresh per request instead of being read back out of the shell. Third,
+a gate value that also reaches the handler through an instrumented seam
+(`Auth::user()`, a cookie, a query-builder read) is observed a second time
+in the content bucket when the handler consumes it, so it still reaches the
+key. What is left is a gate value reaching the handler through an
+uninstrumented seam - a request header, an application task-local - and that
+is the pre-existing boundary described under "The honest boundary of what
+the guards can see" above, which the gate bucket never closed and this
+exemption does not widen. Every other class folds the gate bucket back
 into content (`CollectorReport::fold_gate_into_content`) and classifies from
 exactly the undivided report it produced before attribution existed. A
 stitched route whose chain answered before the handler ever ran has an empty
@@ -754,6 +765,13 @@ Each of these is ruled behaviour, not a defect.
   them out), more than 32 identity-bound islands, or more than 193 graph
   segments declines under the generic `declined` outcome; there is no
   dedicated telemetry reason for a bound.
+- A replayable header that carries the nonce is budgeted against the
+  4,096-byte header value bound at `MAX_NONCE_BYTES` (256) for each nonce
+  piece, not at the length of the nonce this document actually stamped,
+  because the nonce that lands there is minted per hit and is not known when
+  the entry is validated. A `content-security-policy` value close to 4,096
+  bytes therefore declines even when the document carries a single short
+  nonce.
 - An assembled document with at least one private island is sent
   `Cache-Control: private, no-store`; a zero-island Composite keeps the
   class's private `max-age`.

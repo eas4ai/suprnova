@@ -462,8 +462,15 @@ fn every_single_bit_flip_of_a_composite_entry_fails_to_decode() {
         for bit in 0..8 {
             let mut corrupted = encoded.to_vec();
             corrupted[byte] ^= 1 << bit;
-            let result = decode(&Bytes::from(corrupted), &keys, &EntryLimits::default());
-            assert!(result.is_err(), "byte {byte} bit {bit} decoded");
+            let error = decode(&Bytes::from(corrupted), &keys, &EntryLimits::default())
+                .expect_err("corrupt fails closed");
+            assert!(
+                matches!(
+                    error.kind(),
+                    RenderCacheErrorKind::EntryInvalid | RenderCacheErrorKind::EntryUnsupported
+                ),
+                "byte {byte} bit {bit}"
+            );
         }
     }
 }

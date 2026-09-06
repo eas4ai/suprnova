@@ -508,11 +508,17 @@ impl<'a> LiveDocument<'a> {
                 );
                 // A public seed is the same for everybody, so a stitched
                 // shell keeps its bytes: only the fact that the island is
-                // in there is recorded, never a slot to re-mount.
-                crate::render_cache::live::record_shell_island(
-                    &declaration.slot,
-                    &declaration.document_key,
-                );
+                // in there is recorded, never a slot to re-mount. Guarded
+                // on an active collector because the recording copies the
+                // slot and the key into owned strings; the recording itself
+                // is already a no-op outside a scope, so this only skips
+                // the two allocations an uncached request would waste.
+                if crate::render_cache::collector::is_active() {
+                    crate::render_cache::live::record_shell_island(
+                        &declaration.slot,
+                        &declaration.document_key,
+                    );
+                }
                 output.into_document_parts()
             }
             LiveMountKind::IdentityBound => {
@@ -520,7 +526,18 @@ impl<'a> LiveDocument<'a> {
                 // and never with `?`: an island whose parameters cannot be
                 // spelled within the slot's bound still renders here, it
                 // just cannot be stitched later.
-                let descriptor = declaration.stitch_descriptor(&parameters, &flags);
+                //
+                // Only inside a collector scope, the read-site idiom
+                // `collector::is_active` documents: the descriptor
+                // canonicalizes the parameters and clones the mount's
+                // identities, and the recording it feeds below is a no-op
+                // without a scope, so an uncached request should pay one
+                // `try_with` and nothing else. The check has to happen
+                // here, before `parameters` moves into the request, so the
+                // `Option` it produces is also what gates the island copy
+                // after the mount; a scope cannot start or end in between.
+                let descriptor = crate::render_cache::collector::is_active()
+                    .then(|| declaration.stitch_descriptor(&parameters, &flags));
                 // The mount runs in the slot bucket: whatever it reads is
                 // re-read on every stitched hit and must not be recorded as
                 // something the shared shell depends on.
@@ -539,13 +556,16 @@ impl<'a> LiveDocument<'a> {
                 match descriptor {
                     // The recorded bytes are the island's own markup, the
                     // same `TrustedHtml` the template is about to insert.
-                    Ok(descriptor) => crate::render_cache::live::record_stitch_slot(
+                    Some(Ok(descriptor)) => crate::render_cache::live::record_stitch_slot(
                         crate::render_cache::live::CapturedSlot {
                             descriptor,
                             html: Bytes::from(html.as_str().as_bytes().to_vec()),
                         },
                     ),
-                    Err(_) => crate::render_cache::live::record_stitch_capture_invalid(),
+                    Some(Err(_)) => crate::render_cache::live::record_stitch_capture_invalid(),
+                    // No collector was active above, so there is nothing to
+                    // record and the island's markup is never copied.
+                    None => {}
                 }
                 (html, metadata)
             }
@@ -638,8 +658,12 @@ impl<'a> LiveDocument<'a> {
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?;
         // The bytes a stitched shell would be cut from are known only
         // here, and these are the same bytes `document_response` hands to
-        // the response below.
-        crate::render_cache::live::record_document_digest(Sha256::digest(&render.body).into());
+        // the response below. Hashed only inside a collector scope: the
+        // recording is a no-op without one, so an uncached response would
+        // pay a whole-body SHA-256 for nothing.
+        if crate::render_cache::collector::is_active() {
+            crate::render_cache::live::record_document_digest(Sha256::digest(&render.body).into());
+        }
         // The mount kind and seed deadline facts are already recorded, at
         // `mount` (see its own doc for why); only the document's cache
         // intent is known here, so this call records only that.
