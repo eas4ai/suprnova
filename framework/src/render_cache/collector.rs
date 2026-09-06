@@ -71,6 +71,12 @@
 //!   read on two different connections shares one identity. This
 //!   over-invalidates, which is safe; tenancy is handled at the key level
 //!   through the Tenant variance dimension, not here.
+//! - **Uninstrumented seams are invisible to every bucket.** A gate value
+//!   that reaches the handler through a request header or an application
+//!   task-local is never observed, so it reaches neither the key nor the
+//!   classification. That boundary predates attribution, and the stitched
+//!   class's gate exemption does not widen it; the implementation doc's
+//!   "The honest boundary of what the guards can see" records it.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
