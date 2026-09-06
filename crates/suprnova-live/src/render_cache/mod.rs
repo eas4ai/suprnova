@@ -91,7 +91,7 @@ pub enum RenderCacheErrorKind {
     EntryInvalid,
     /// The entry format is known but not supported by this build.
     EntryUnsupported,
-    /// A store, ledger, or coordinator provider failed.
+    /// A store, ledger, coordinator, or randomness provider failed.
     ProviderUnavailable,
     /// A publication lost its fence.
     PublicationFenced,

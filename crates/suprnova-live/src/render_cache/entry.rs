@@ -67,6 +67,15 @@ pub const REPLAYABLE_HEADERS: [&str; 8] = [
     "x-content-type-options",
 ];
 
+/// Whether `value` carries none of the header-value control bytes (CR, LF,
+/// or NUL) that would let it smuggle a second header or truncate the wire
+/// representation. Shared by [`SafeHeaders::from_pairs`] and the Composite
+/// nonce-header template check, which apply the same rule to a different
+/// value shape (a stored value versus an assembled piece of one).
+pub(super) fn header_value_is_safe(value: &str) -> bool {
+    !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+}
+
 impl SafeHeaders {
     /// Builds from lower-cased pairs; any name outside the allowlist fails.
     pub fn from_pairs<I, K, V>(pairs: I) -> Result<Self, RenderCacheError>
@@ -84,7 +93,7 @@ impl SafeHeaders {
                 return Err(RenderCacheError::new(RenderCacheErrorKind::EntryInvalid));
             }
             let value = value.as_ref();
-            if value.len() > 4_096 || value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            if value.len() > 4_096 || !header_value_is_safe(value) {
                 return Err(RenderCacheError::new(RenderCacheErrorKind::EntryInvalid));
             }
             map.insert(name, value.to_owned());
@@ -228,7 +237,13 @@ fn integrity(keys: &SnapshotKeyRing, bytes: &[u8]) -> [u8; 32] {
 /// ceiling comes from the caller-supplied [`EntryLimits`], not a fixed
 /// constant, and [`crate::limits::InputLimits::new`] rejects a zero or
 /// above-ceiling value.
-fn header_limits(max_header_bytes: usize) -> Result<crate::limits::InputLimits, RenderCacheError> {
+///
+/// `pub(super)` so [`super::composite::CompositeHeader::canonical_bytes`]
+/// shares exactly this bound instead of repeating the tuple: a Composite
+/// header's canonical framing can never diverge from a Complete header's.
+pub(super) fn header_limits(
+    max_header_bytes: usize,
+) -> Result<crate::limits::InputLimits, RenderCacheError> {
     crate::limits::InputLimits::new(max_header_bytes, 32, 512, 4_096)
         .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::EntryInvalid))
 }

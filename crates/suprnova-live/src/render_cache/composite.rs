@@ -40,6 +40,10 @@ pub const MAX_NONCE_HEADERS: usize = 4;
 pub const SURROUNDING_WINDOW_BYTES: usize = 64;
 /// Longest accepted nonce, in bytes.
 pub const MAX_NONCE_BYTES: usize = 256;
+/// Largest assembled header value, in bytes: the same bound
+/// [`super::entry::SafeHeaders::from_pairs`] applies to a stored header
+/// value, applied here to the value a nonce-header template assembles into.
+const MAX_HEADER_VALUE_BYTES: usize = 4_096;
 
 fn invalid() -> RenderCacheError {
     RenderCacheError::new(RenderCacheErrorKind::EntryInvalid)
@@ -147,8 +151,13 @@ impl StitchSlot {
         if self.parameters.len() > MAX_SLOT_PARAMETER_BYTES {
             return Err(invalid());
         }
-        let limits = crate::limits::InputLimits::new(MAX_SLOT_PARAMETER_BYTES, 32, 512, 4_096)
-            .map_err(|_| invalid())?;
+        let limits = crate::limits::InputLimits::new(
+            MAX_SLOT_PARAMETER_BYTES,
+            32,
+            512,
+            MAX_SLOT_PARAMETER_BYTES,
+        )
+        .map_err(|_| invalid())?;
         let parameters =
             crate::canonical::parse_canonical_value(self.parameters.as_bytes(), &limits)
                 .map_err(|_| invalid())?;
@@ -290,6 +299,7 @@ impl SegmentGraph {
         for template in &self.nonce_headers {
             if !REPLAYABLE_HEADERS.contains(&template.name.as_str())
                 || !header_names.insert(template.name.as_str())
+                || template.pieces.len() > MAX_NONCE_HOLES
                 || !template
                     .pieces
                     .iter()
@@ -297,19 +307,20 @@ impl SegmentGraph {
             {
                 return Err(invalid());
             }
+            // A `Nonce` piece is not yet a nonce (assembly has not run), but
+            // the budget must hold for whatever nonce actually lands there,
+            // so it counts the worst case, `MAX_NONCE_BYTES`, rather than 0.
             let text_len: usize = template
                 .pieces
                 .iter()
                 .map(|piece| match piece {
                     HeaderPiece::Text { text } => text.len(),
-                    HeaderPiece::Nonce => 0,
+                    HeaderPiece::Nonce => MAX_NONCE_BYTES,
                 })
                 .sum();
-            if text_len > 4_096
+            if text_len > MAX_HEADER_VALUE_BYTES
                 || template.pieces.iter().any(|piece| match piece {
-                    HeaderPiece::Text { text } => {
-                        text.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
-                    }
+                    HeaderPiece::Text { text } => !super::entry::header_value_is_safe(text),
                     HeaderPiece::Nonce => false,
                 })
             {
@@ -320,13 +331,16 @@ impl SegmentGraph {
     }
 }
 
-/// SHA-256 (base64url) over the shell bytes adjacent to slot `index`: the
-/// last [`SURROUNDING_WINDOW_BYTES`] of the literal segment immediately
-/// before the slot (empty when the previous segment is not a literal), a
-/// zero byte, and the first [`SURROUNDING_WINDOW_BYTES`] of the literal
-/// segment immediately after it (empty likewise). Computed from the graph
-/// and the shell alone, so the assembler can recompute it without the
-/// original document.
+/// SHA-256 (base64url) over the shell bytes adjacent to slot `index`: a
+/// 4-byte big-endian length followed by the last [`SURROUNDING_WINDOW_BYTES`]
+/// of the literal segment immediately before the slot (empty when the
+/// previous segment is not a literal), then a 4-byte big-endian length
+/// followed by the first [`SURROUNDING_WINDOW_BYTES`] of the literal segment
+/// immediately after it (empty likewise). The length prefixes frame the two
+/// windows injectively; a fixed zero-byte separator would not, since either
+/// window may itself contain a zero byte. Computed from the graph and the
+/// shell alone, so the assembler can recompute it without the original
+/// document.
 pub fn surrounding_digest(
     graph: &SegmentGraph,
     shell: &[u8],
@@ -366,15 +380,24 @@ pub fn surrounding_digest(
         .map(|(start, end)| &shell[start..(start + SURROUNDING_WINDOW_BYTES).min(end)])
         .unwrap_or(&[]);
     let mut hasher = Sha256::new();
+    hasher.update((before.len() as u32).to_be_bytes());
     hasher.update(before);
-    hasher.update([0u8]);
+    hasher.update((after.len() as u32).to_be_bytes());
     hasher.update(after);
     Ok(URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 
-fn decode_digest(text: &str) -> Result<[u8; 32], RenderCacheError> {
+/// Whether `text` is syntactically a digest: canonical unpadded base64url
+/// decoding to exactly 32 bytes. Its only caller checks format, not content,
+/// so it reports success or failure rather than handing back bytes nothing
+/// uses.
+fn decode_digest(text: &str) -> Result<(), RenderCacheError> {
     let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| invalid())?;
-    <[u8; 32]>::try_from(bytes).map_err(|_| invalid())
+    if bytes.len() == 32 {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 
 /// The stored header of a Composite entry: every Complete header field plus the graph.
@@ -391,8 +414,7 @@ impl CompositeHeader {
     /// Canonical bounded JSON bytes of this header, as the codec writes them.
     pub fn canonical_bytes(&self, max_header_bytes: usize) -> Result<Vec<u8>, RenderCacheError> {
         let json = serde_json::to_vec(self).map_err(|_| invalid())?;
-        let limits = crate::limits::InputLimits::new(max_header_bytes, 32, 512, 4_096)
-            .map_err(|_| invalid())?;
+        let limits = super::entry::header_limits(max_header_bytes)?;
         crate::canonical::parse_canonical_value(&json, &limits)
             .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
             .map_err(|_| invalid())
@@ -416,7 +438,10 @@ impl CompositeEntry {
     /// recompute each slot's [`surrounding`](StitchSlot::surrounding) digest
     /// against `shell`'s actual bytes; that comparison belongs to the
     /// request-time assembler, which is the only place a drifted shell is
-    /// meaningfully observable.
+    /// meaningfully observable. The structural digest is computed over the
+    /// canonical header bytes under `EntryLimits::default()`'s
+    /// `max_header_bytes`; that default is the contract, and the codec
+    /// encodes under the same default, so the two can never diverge.
     pub fn new(
         header: EntryHeader,
         graph: SegmentGraph,
@@ -719,6 +744,21 @@ mod tests {
             "template without a nonce piece"
         );
         let (mut graph, shell) = graph_and_shell();
+        // 17 Nonce pieces carry no text of their own, but each must be
+        // budgeted at MAX_NONCE_BYTES for the value the assembled nonce will
+        // actually occupy: 17 * 256 = 4,352 > MAX_HEADER_VALUE_BYTES (4,096).
+        graph.nonce_headers[0].pieces = vec![HeaderPiece::Nonce; 17];
+        assert!(
+            graph.validate(shell.len()).is_err(),
+            "nonce-only template exceeds the assembled header value budget"
+        );
+        let (mut graph, shell) = graph_and_shell();
+        graph.nonce_headers[0].pieces = vec![HeaderPiece::Nonce; MAX_NONCE_HOLES + 1];
+        assert!(
+            graph.validate(shell.len()).is_err(),
+            "too many pieces in one header template"
+        );
+        let (mut graph, shell) = graph_and_shell();
         for _ in 0..MAX_NONCE_HOLES {
             graph.segments.insert(2, Segment::Nonce);
         }
@@ -756,6 +796,34 @@ mod tests {
     }
 
     #[test]
+    fn too_many_segments_is_invalid() {
+        // `validate` checks `segments.len() > MAX_SEGMENTS` as part of one
+        // combined bound check that runs before the per-segment loop that
+        // counts nonce holes, so this graph would also fail the nonce-hole
+        // bound on its own; the segments-count check fires first either way,
+        // and that is the branch this test reaches.
+        let graph = SegmentGraph {
+            segments: vec![Segment::Nonce; MAX_SEGMENTS + 1],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        assert!(graph.validate(0).is_err());
+    }
+
+    #[test]
+    fn too_many_nonce_headers_is_invalid() {
+        let (mut graph, shell) = graph_and_shell();
+        for _ in 0..MAX_NONCE_HEADERS {
+            graph.nonce_headers.push(HeaderTemplate {
+                name: "vary".to_owned(),
+                pieces: vec![HeaderPiece::Nonce],
+            });
+        }
+        assert!(graph.validate(shell.len()).is_err());
+    }
+
+    #[test]
     fn a_composite_entry_binds_header_graph_and_shell_into_a_structural_digest() {
         let keys = keys();
         let (graph, shell) = graph_and_shell();
@@ -765,17 +833,22 @@ mod tests {
         assert_eq!(entry.structural_digest(), same.structural_digest());
         let mut other_shell = shell.to_vec();
         other_shell[0] ^= 1;
-        let mut other_graph = graph.clone();
-        other_graph.segments[0] = Segment::Literal {
-            len: graph.segments[0].literal_len().expect("literal"),
-        };
-        let other = CompositeEntry::new(header(&keys), other_graph, Bytes::from(other_shell))
+        let other = CompositeEntry::new(header(&keys), graph.clone(), Bytes::from(other_shell))
             .expect("entry");
         assert_ne!(entry.structural_digest(), other.structural_digest());
         assert_ne!(
             *entry.structural_digest(),
             <[u8; 32]>::from(sha2::Sha256::digest(&shell)),
             "the structural digest is not a body digest"
+        );
+        let mut renamed_graph = graph.clone();
+        renamed_graph.slots[0].slot = "renamed".to_owned();
+        let renamed =
+            CompositeEntry::new(header(&keys), renamed_graph, shell.clone()).expect("entry");
+        assert_ne!(
+            entry.structural_digest(),
+            renamed.structural_digest(),
+            "the structural digest binds every StitchSlot field, not just the shell bytes"
         );
     }
 
@@ -819,6 +892,92 @@ mod tests {
         assert_ne!(first, second);
         assert!(!valid_nonce(""));
         assert!(!valid_nonce("has space"));
+        assert!(valid_nonce(&"a".repeat(MAX_NONCE_BYTES)));
         assert!(!valid_nonce(&"a".repeat(257)));
+    }
+
+    #[test]
+    fn surrounding_digest_at_the_first_segment_has_an_empty_before_window() {
+        let shell = b"0123456789".to_vec();
+        let graph = SegmentGraph {
+            segments: vec![
+                Segment::Slot { index: 0 },
+                Segment::Literal {
+                    len: shell.len() as u32,
+                },
+            ],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        let digest = surrounding_digest(&graph, &shell, 0).expect("computed");
+        let mut changed_shell = shell.clone();
+        changed_shell[0] ^= 1;
+        let changed = surrounding_digest(&graph, &changed_shell, 0).expect("computed");
+        assert_ne!(
+            digest, changed,
+            "the after-window is the only content, so changing it must change the digest"
+        );
+    }
+
+    #[test]
+    fn surrounding_digest_at_the_last_segment_has_an_empty_after_window() {
+        let shell = b"0123456789".to_vec();
+        let graph = SegmentGraph {
+            segments: vec![
+                Segment::Literal {
+                    len: shell.len() as u32,
+                },
+                Segment::Slot { index: 0 },
+            ],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        assert!(surrounding_digest(&graph, &shell, 0).is_ok());
+    }
+
+    #[test]
+    fn surrounding_digest_of_adjacent_slots_never_reads_past_its_own_literal() {
+        let a = b"aaaaaaaaaa".to_vec();
+        let b = b"bbbbbbbbbb".to_vec();
+        let c = b"cccccccccc".to_vec();
+        let shell = Bytes::from([a.as_slice(), b.as_slice(), c.as_slice()].concat());
+        let graph = SegmentGraph {
+            segments: vec![
+                Segment::Literal {
+                    len: a.len() as u32,
+                },
+                Segment::Slot { index: 0 },
+                Segment::Literal {
+                    len: b.len() as u32,
+                },
+                Segment::Slot { index: 1 },
+                Segment::Literal {
+                    len: c.len() as u32,
+                },
+            ],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        let digest_0 = surrounding_digest(&graph, &shell, 0).expect("computed");
+        let digest_1 = surrounding_digest(&graph, &shell, 1).expect("computed");
+
+        // Slot 0's window is `a` (before) and `b` (after); it never reads
+        // `c`, so flipping a byte there must not move its digest.
+        let mut shell_with_changed_c = shell.to_vec();
+        *shell_with_changed_c.last_mut().expect("non-empty") ^= 1;
+        let digest_0_after_c_changed =
+            surrounding_digest(&graph, &shell_with_changed_c, 0).expect("computed");
+        assert_eq!(digest_0, digest_0_after_c_changed, "slot 0 must not read c");
+
+        // Slot 1's window is `b` (before) and `c` (after); it never reads
+        // `a`, so flipping a byte there must not move its digest.
+        let mut shell_with_changed_a = shell.to_vec();
+        shell_with_changed_a[0] ^= 1;
+        let digest_1_after_a_changed =
+            surrounding_digest(&graph, &shell_with_changed_a, 1).expect("computed");
+        assert_eq!(digest_1, digest_1_after_a_changed, "slot 1 must not read a");
     }
 }
