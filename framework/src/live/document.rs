@@ -233,6 +233,12 @@ impl<C: ComponentContract> LiveMount<C> {
     /// rendered for the request. The default is
     /// [`StitchFailurePolicy::FailDocument`].
     ///
+    /// The policy is consulted only for an identity-bound mount on a route
+    /// declared `RepresentationClass::PublicShellStitched`, the one class
+    /// that re-renders islands on a hit. On a public-seed mount, or on any
+    /// other class, it is accepted and inert: the island is rendered inline
+    /// by the handler and there is no stitched hit to fall back from.
+    ///
     /// A fallback fragment is limited to `MAX_FALLBACK_BYTES`, the bound the
     /// stored entry itself applies; a larger one is rejected here, where the
     /// declaration is written, rather than silently at publication time.

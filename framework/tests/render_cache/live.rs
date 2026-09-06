@@ -180,6 +180,46 @@ fn a_stitch_fallback_is_bounded_at_declaration_and_never_printed() {
     );
 }
 
+#[test]
+fn a_captured_slot_never_prints_the_island_it_holds() {
+    // A real identity-bound island: one principal's rendered state, with
+    // that mount's signed snapshot in an attribute.
+    const ISLAND: &str = "<div data-suprnova-live-root=\"counter\" \
+        data-suprnova-live-snapshot=\"eyJiYWxhbmNlIjoxMjM0fQ\">balance 12.34</div>";
+    let mut slot = captured("a", "doc-a");
+    slot.html = Bytes::from_static(ISLAND.as_bytes());
+
+    let printed = format!("{slot:?}");
+    assert!(
+        !printed.contains("data-suprnova-live-snapshot"),
+        "a captured slot never prints the snapshot it carries: {printed}"
+    );
+    assert!(
+        !printed.contains("balance 12.34"),
+        "a captured slot never prints the island's own markup: {printed}"
+    );
+    assert!(
+        printed.contains("html_bytes"),
+        "the length is still reported: {printed}"
+    );
+
+    // The whole reachable chain, the way a caller would hit it:
+    // `current_report()` hands back a `CollectorReport` whose `Debug` is
+    // derived all the way down to this slot.
+    let facts = LiveDocumentFacts {
+        stitch: StitchCapture {
+            slots: vec![slot],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let printed = format!("{facts:?}");
+    assert!(
+        !printed.contains("data-suprnova-live-snapshot") && !printed.contains("balance 12.34"),
+        "nothing above the slot un-redacts it: {printed}"
+    );
+}
+
 #[tokio::test]
 async fn capture_records_slots_shell_islands_nonce_and_digest_in_order() {
     let facts = Collector::scope(async {
@@ -328,6 +368,12 @@ async fn an_identity_bound_mount_captures_its_exact_island_bytes_inside_a_slot_s
         facts.stitch.nonce.as_deref(),
         Some(CAPTURE_NONCE),
         "the bootstrap's own nonce is recorded once"
+    );
+    assert!(
+        std::str::from_utf8(&response.body)
+            .expect("utf8")
+            .contains(&format!("nonce=\"{CAPTURE_NONCE}\"")),
+        "the recorded nonce is the one the emitted script elements carry"
     );
     let expected: [u8; 32] = sha2::Sha256::digest(&response.body).into();
     assert_eq!(

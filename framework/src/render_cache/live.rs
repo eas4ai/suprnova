@@ -1,6 +1,8 @@
 //! Live document facts: public-seed documents are Complete representations
 //! bounded by the seed deadline; identity-bound islands wait for stitching.
 
+use std::fmt;
+
 use bytes::Bytes;
 use suprnova_live::identity::IslandSlot;
 use suprnova_live::mount::DocumentMountKey;
@@ -41,12 +43,33 @@ pub struct LiveDocumentFacts {
 /// mount produced and handed to the template - not a re-render and not a
 /// re-serialization - so a shell built by locating them inside the rendered
 /// document finds them byte for byte or not at all.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CapturedSlot {
     /// The typed declaration this slot re-mounts from.
     pub descriptor: StitchSlotDescriptor,
     /// The island markup this mount emitted.
     pub html: Bytes,
+}
+
+impl fmt::Debug for CapturedSlot {
+    /// Prints the declaration and the island's length, never the island.
+    ///
+    /// An identity-bound island's markup is that principal's own rendered
+    /// state and carries its signed snapshot in
+    /// `data-suprnova-live-snapshot`. This type is reachable from a public
+    /// derived `Debug` - [`StitchCapture`] to [`LiveDocumentFacts`] to
+    /// [`super::collector::CollectorReport`], which
+    /// [`super::collector::current_report`] hands to any caller - so a
+    /// derived `Debug` here would put a snapshot and a user's HTML into
+    /// whatever formatted a report. The same rule the engine applies to
+    /// `TrustedHtml` and `DocumentRender`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapturedSlot")
+            .field("descriptor", &self.descriptor)
+            .field("html_bytes", &self.html.len())
+            .finish()
+    }
 }
 
 /// Everything one request's Live documents recorded for a stitched shell.
