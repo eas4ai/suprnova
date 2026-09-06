@@ -20,6 +20,12 @@
 //! routes whose chain ends in the Live completion middleware; elsewhere every
 //! hit is discarded and the route renders as if nothing were cached.
 //!
+//! An assembled document is never a repeat of an earlier one - it carries a
+//! nonce and island identities minted for this request alone - so a
+//! Composite hit never answers 304, and a Composite entry with any slot in
+//! it is sent `private, no-store` so no shared browser profile can replay
+//! one principal's islands to the next visitor (see [`respond`]).
+//!
 //! A route under this class must not rewrite the response body in route
 //! middleware after the Live document rendered it. Such middleware runs again
 //! on every hit, so its output would be baked into the stored representation
@@ -42,9 +48,7 @@ use suprnova_live::render_cache::composite::{
     SlotFailurePolicy, SlotOutcome, StitchSlot, assemble, fresh_nonce, surrounding_digest,
 };
 use suprnova_live::render_cache::entry::{CompleteEntry, DecodedEntry, EntryHeader};
-use suprnova_live::render_cache::http::{
-    ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value,
-};
+use suprnova_live::render_cache::http::{cache_control_value, vary_value};
 use suprnova_live::snapshot::MountedDocumentPath;
 
 use crate::http::{HttpResponse, Request, Response};
@@ -226,7 +230,7 @@ async fn assemble_hit(
     respond(
         &request,
         &policy,
-        entry.header(),
+        &entry,
         &document,
         published_at_ms,
         now_ms,
@@ -300,10 +304,17 @@ async fn render_slot(
     )
     .await
     .map_err(|_| ())?;
-    let (html, _metadata) = output.into_document_parts();
+    // The slot comes from the mount's own metadata, not from the stored
+    // declaration, so the assembler's identity check compares the island
+    // that was actually produced against the slot it is about to be dropped
+    // into rather than comparing a stored value with itself. The document
+    // key has no such counterpart - neither `MountMetadata` nor
+    // `PrivateMountOutput` reports one - so the declaration's key stands,
+    // and it is the key the mount was requested under two lines above.
+    let (html, metadata) = output.into_document_parts();
     Ok(CheckedIsland::new(
         html,
-        slot.slot.clone(),
+        metadata.slot().clone(),
         slot.document_key.clone(),
     ))
 }
@@ -322,37 +333,48 @@ async fn fail_document(request: Request, next: Next) -> Response {
 ///
 /// The counterpart of
 /// [`conditional_response`](super::middleware::conditional_response) for a
-/// representation that had to be assembled first. Two things differ, and
-/// both follow from the bytes being new. The validator is strong over the
-/// document just assembled rather than over stored bytes, so a client's
-/// `If-None-Match` is compared against what this request would actually
-/// have received. And the replayable headers come from the assembled
-/// document rather than from the stored header, because a nonce-bearing
-/// header (a `Content-Security-Policy`, typically) has been rebuilt around
-/// the nonce minted for this request; replaying the stored value would
-/// declare the leader's nonce over a body carrying somebody else's.
+/// representation that had to be assembled first. Three things differ, and
+/// all three follow from the bytes being new.
 ///
-/// Everything else is the shared contract: `Cache-Control` from the class
-/// and policy (private for this class by definition - the shell is what the
-/// server caches, never what a downstream cache may share), `Vary` from the
-/// declared variance, `Age` from the publication instant, and `Warning`
-/// when the entry was served stale. `HEAD` and a matching `If-None-Match`
-/// both send the headers without a body.
+/// The replayable headers come from the assembled document rather than from
+/// the stored header, because a nonce-bearing header (a
+/// `Content-Security-Policy`, typically) has been rebuilt around the nonce
+/// minted for this request; replaying the stored value would declare the
+/// leader's nonce over a body carrying somebody else's.
+///
+/// **A Composite response never answers 304.** `If-None-Match` is not
+/// evaluated here at all: every assembly is a distinct representation - a
+/// fresh nonce, fresh instance identities - so a 304 would tell the client
+/// to pair the body it already has with the nonce headers minted for *this*
+/// request, and those describe a document it has never seen. The validator
+/// is still emitted, still strong over exactly the bytes sent, and still
+/// honest about which representation this is; it simply never matches on a
+/// later request, which is the truth. `HEAD` still sends the headers with
+/// no body.
+///
+/// **A slotted entry is `private, no-store`.** The bytes contain islands
+/// mounted for one principal under authority re-derived for one request. A
+/// `max-age` on that would let a shared browser profile replay one
+/// principal's islands to whoever sits down next, and would skip the
+/// per-request reauthorization for the whole window. A zero-slot Composite
+/// has no per-principal bytes in it - only a per-request nonce - so it
+/// keeps the class's private `max-age` from
+/// [`cache_control_value`] as any other private representation would.
+///
+/// Everything else is the shared contract: `Vary` from the declared
+/// variance, `Age` from the publication instant, and `Warning` when the
+/// entry was served stale.
 fn respond(
     request: &Request,
     policy: &RenderCachePolicy,
-    header: &EntryHeader,
+    entry: &CompositeEntry,
     document: &AssembledDocument,
     published_at_ms: u64,
     now_ms: u64,
     warning: Option<&'static str>,
 ) -> Response {
-    let not_modified = matches!(
-        evaluate_conditional(request.header("if-none-match"), document.validator()),
-        ConditionalOutcome::NotModified
-    );
-    let is_head = request.method().as_str() == "HEAD";
-    let body = if not_modified || is_head {
+    let header = entry.header();
+    let body = if request.method().as_str() == "HEAD" {
         Bytes::new()
     } else {
         document.body().clone()
@@ -363,11 +385,10 @@ fn respond(
         .find(|(name, _)| *name == "content-type")
         .map(|(_, value)| value.to_owned())
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let mut response = HttpResponse::bytes(body, content_type).status(if not_modified {
-        304
-    } else {
-        header.status
-    });
+    let mut response = HttpResponse::bytes(body, content_type).status(header.status);
+    // The three names skipped here are the ones set explicitly below. This
+    // list is duplicated in `middleware::conditional_response`, which does
+    // the same for a Complete entry; the two must stay in step.
     for (name, value) in document.headers().iter() {
         if name == "content-type" || name == "cache-control" || name == "vary" {
             continue;
@@ -375,18 +396,20 @@ fn respond(
         response = response.header(name.to_owned(), value.to_owned());
     }
     response = response.header("ETag", document.validator().etag());
-    let seed_remaining = header
-        .seed_deadline_ms
-        .map(|deadline| deadline.saturating_sub(now_ms));
-    response = response.header(
-        "Cache-Control",
+    let cache_control = if entry.graph().slots.is_empty() {
+        let seed_remaining = header
+            .seed_deadline_ms
+            .map(|deadline| deadline.saturating_sub(now_ms));
         cache_control_value(
             header.class,
             policy.shared(),
             &policy.freshness(),
             seed_remaining,
-        ),
-    );
+        )
+    } else {
+        "private, no-store".to_owned()
+    };
+    response = response.header("Cache-Control", cache_control);
     if let Some(vary) = vary_value(&header.variance) {
         response = response.header("Vary", vary);
     }

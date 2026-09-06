@@ -303,25 +303,24 @@ async fn a_hit_assembles_each_principals_own_island_without_the_handler() {
     // the shell around the island is byte-identical for a and b
     let shell = |text: &str| text.replace(island_tag(text, "stitch-counter"), "");
     assert_eq!(shell(&a1.text()), shell(&b1.text()));
-    assert!(
-        a2.header("cache-control")
-            .expect("cc")
-            .starts_with("private, max-age=")
-    );
+    // The bytes hold one principal's island, mounted under authority derived
+    // for one request, so nothing may store them: a `max-age` here would let
+    // a shared browser profile hand user-a's island to whoever sits down
+    // next, and skip reauthorization for the whole window.
+    assert_eq!(a2.header("cache-control"), Some("private, no-store"));
+    assert_eq!(b1.header("cache-control"), Some("private, no-store"));
 }
 
 /// Every response an assembled hit sends carries a strong validator over
-/// exactly the bytes it sent, and the conditional and `HEAD` paths run
-/// against that validator rather than against anything stored.
+/// exactly the bytes it sent, and no assembled response is ever a 304.
 ///
-/// A stitched document is assembled per request and its islands carry
-/// server-minted instance identities, so no two assemblies are ever the same
-/// bytes and a validator from an earlier response legitimately stops
-/// matching - which is exactly what a strong validator is supposed to say.
-/// `If-None-Match: *` is therefore the conditional this class can satisfy,
-/// and it takes the 304 path: the assembled document's metadata, no body.
-/// `HEAD` takes that path too, carrying the validator of the document
-/// assembled for it rather than of the empty body it sends.
+/// A stitched document is assembled per request: a nonce and island
+/// identities minted for this request alone. So no two assemblies are the
+/// same representation, and a 304 - even for `If-None-Match: *` - would tell
+/// the client to pair the body it already holds with the nonce headers just
+/// minted for a document it has never seen. The conditional is therefore not
+/// evaluated at all: every assembled `GET` answers 200 with its body and its
+/// own validator, and `HEAD` answers with the same headers and no body.
 #[tokio::test]
 #[serial_test::serial]
 async fn conditional_and_head_requests_use_the_assembled_validator() {
@@ -345,37 +344,43 @@ async fn conditional_and_head_requests_use_the_assembled_validator() {
         etag_b,
         suprnova_live::render_cache::Validator::strong_for(&b.body).etag()
     );
-    let not_modified = dispatch(
+    let wildcard = dispatch(
         &harness,
         Method::GET,
         STITCHED_PATH,
         &[("x-test-login", "user-b"), ("if-none-match", "*")],
     )
     .await;
-    assert_eq!(not_modified.status, StatusCode::NOT_MODIFIED);
-    assert!(not_modified.body.is_empty());
-    assert!(
-        not_modified.header("etag").is_some(),
-        "a 304 still carries the assembled document's validator"
+    assert_eq!(
+        wildcard.status,
+        StatusCode::OK,
+        "an assembled document is never answered 304, not even for `*`"
     );
-    assert_eq!(not_modified.header("age"), Some("0"));
-    let other = dispatch(
+    assert!(!wildcard.body.is_empty());
+    let wildcard_etag = suprnova_live::render_cache::Validator::strong_for(&wildcard.body).etag();
+    assert_eq!(wildcard.header("etag"), Some(wildcard_etag.as_str()));
+    let echoed = dispatch(
         &harness,
         Method::GET,
         STITCHED_PATH,
-        &[("x-test-login", "user-a"), ("if-none-match", &etag_b)],
+        &[("x-test-login", "user-b"), ("if-none-match", &etag_b)],
     )
     .await;
     assert_eq!(
-        other.status,
+        echoed.status,
         StatusCode::OK,
-        "b's validator does not match a's assembled document"
+        "nor for the validator of a document this same principal received"
     );
-    let other_etag = suprnova_live::render_cache::Validator::strong_for(&other.body).etag();
+    assert!(!echoed.body.is_empty());
+    let echoed_etag = suprnova_live::render_cache::Validator::strong_for(&echoed.body).etag();
     assert_eq!(
-        other.header("etag"),
-        Some(other_etag.as_str()),
+        echoed.header("etag"),
+        Some(echoed_etag.as_str()),
         "and the response carries a validator over its own bytes"
+    );
+    assert_ne!(
+        echoed_etag, etag_b,
+        "which is a different document from the one the client had"
     );
     let head = dispatch(
         &harness,
@@ -458,6 +463,16 @@ async fn a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit() {
     );
     let first_etag = suprnova_live::render_cache::Validator::strong_for(&first.body).etag();
     assert_eq!(first.header("etag"), Some(first_etag.as_str()));
+    // No slot means no per-principal bytes in the document, only a
+    // per-request nonce, so this one keeps the class's private `max-age`
+    // rather than the `no-store` a slotted entry is sent with.
+    assert!(
+        first
+            .header("cache-control")
+            .expect("cache-control")
+            .starts_with("private, max-age="),
+        "a zero-slot Composite keeps the class's private freshness"
+    );
 }
 
 /// The nonce a response declared in its own `Content-Security-Policy`.
