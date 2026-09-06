@@ -1975,17 +1975,31 @@ impl UploadRuntime {
             uploads
                 .drain()
                 .map(|(_, slot)| match slot {
-                    UploadSlot::Ready(upload) => (upload.handle, upload.mode),
-                    UploadSlot::Busy { handle, mode } => (handle, mode),
+                    UploadSlot::Ready(upload) => (upload.handle, upload.mode, false),
+                    UploadSlot::Busy { handle, mode } => (handle, mode, true),
                 })
                 .collect::<Vec<_>>()
         };
         let mut first_error = None;
-        for (handle, mode) in pending {
+        for (handle, mode, busy) in pending {
             let cleanup = async {
-                match mode {
-                    TransferMode::File => self.file.cancel(&handle).await,
-                    TransferMode::Direct => self.direct.cancel(&handle).await,
+                loop {
+                    // Registered before the attempt so a release that lands
+                    // between the attempt and the wait is not missed.
+                    let released = self.uploads.changed.notified();
+                    let attempt = match mode {
+                        TransferMode::File => self.file.cancel(&handle).await,
+                        TransferMode::Direct => self.direct.cancel(&handle).await,
+                    };
+                    match attempt {
+                        // A busy slot's operation still holds the transfer: the
+                        // shutdown signal ends its write, the operation's drop
+                        // notifies, and the cancel is retried on a released slot.
+                        Err(error) if busy && error.kind() == UploadErrorKind::UploadConflict => {
+                            released.await;
+                        }
+                        other => return other,
+                    }
                 }
             };
             match timeout(Duration::from_millis(500), cleanup).await {
@@ -2634,6 +2648,114 @@ mod tests {
         }
 
         runtime.retire().await.expect("runtime retires");
+        assert_eq!(active.current(), 0);
+        let mut entries = tokio::fs::read_dir(&root).await.expect("quarantine root");
+        assert!(
+            entries
+                .next_entry()
+                .await
+                .expect("quarantine entry")
+                .is_none()
+        );
+        tokio::fs::remove_dir(&root)
+            .await
+            .expect("remove empty test root");
+    }
+
+    #[tokio::test]
+    async fn retirement_waits_for_a_busy_upload_slot_before_cancelling_its_transfer() {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).expect("test root entropy");
+        let root = std::env::temp_dir().join(format!(
+            "suprnova-live-upload-retire-busy-{}",
+            u64::from_le_bytes(random)
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("test root");
+        let (request_shutdown, shutdown) = watch::channel(false);
+        let active = Arc::new(ResourceCounter::default());
+        let timers = Arc::new(ResourceCounter::default());
+        let runtime = Arc::new(
+            UploadRuntime::open(
+                &root,
+                ReferenceFaultSchedule::None,
+                shutdown,
+                Arc::clone(&active),
+                Arc::clone(&timers),
+            )
+            .await
+            .expect("upload runtime"),
+        );
+        let created = runtime
+            .create(CreateUploadRequest {
+                field: "avatar".to_owned(),
+                filename: "pending.bin".to_owned(),
+                content_type: "application/octet-stream".to_owned(),
+                expected_bytes: 8,
+                mode: "file".to_owned(),
+            })
+            .await
+            .expect("created upload");
+        let handle = created["handle"].as_str().expect("handle").to_owned();
+        let grant = created["grant"].as_str().expect("grant").to_owned();
+
+        // One byte per pull, announced at the first: the provider writes each
+        // byte as its own supervised physical operation, so every point at
+        // which the chunk task yields is inside a held operation, the state a
+        // half-open socket leaves a real chunk write in when shutdown arrives.
+        let provider_is_writing = Arc::new(Notify::new());
+        let announce = Arc::clone(&provider_is_writing);
+        let mut polls = 0_u32;
+        let body = Body::from_stream(futures_util::stream::poll_fn(
+            move |_context| -> Poll<Option<Result<Bytes, std::io::Error>>> {
+                polls += 1;
+                if polls == 1 {
+                    announce.notify_one();
+                }
+                if polls <= 8 {
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"a"))))
+                } else {
+                    Poll::Pending
+                }
+            },
+        ));
+        let checksum = hex_digest(Sha256::digest(b"aaaaaaaa"));
+        let operation_runtime = Arc::clone(&runtime);
+        let operation_handle = handle.clone();
+        let task = tokio::spawn(async move {
+            operation_runtime
+                .write_chunk(&operation_handle, 0, &grant, &checksum, Some(8), body)
+                .await
+        });
+        timeout(Duration::from_secs(1), provider_is_writing.notified())
+            .await
+            .expect("provider pulled the body while the slot is busy");
+
+        // The host signals shutdown and retires uploads before the chunk task
+        // has run again, the ordering the reference host's shutdown produces.
+        request_shutdown.send(true).expect("shutdown signal");
+        timeout(Duration::from_secs(2), runtime.retire())
+            .await
+            .expect("retirement deadline")
+            .expect("retirement waits for the busy slot instead of reporting upload_conflict");
+
+        let interrupted = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("interrupted chunk write ends")
+            .expect("chunk task completes");
+        // Retirement's first cancel attempt already canceled the transfer, so
+        // the resumed write ends with TransferCanceled; had the body observed
+        // the shutdown signal first it would be BodyInterrupted. Either way
+        // the chunk did not commit.
+        let kind = interrupted
+            .expect_err("the interrupted chunk write fails")
+            .kind();
+        assert!(
+            matches!(
+                kind,
+                UploadErrorKind::TransferCanceled | UploadErrorKind::BodyInterrupted
+            ),
+            "{kind:?}"
+        );
         assert_eq!(active.current(), 0);
         let mut entries = tokio::fs::read_dir(&root).await.expect("quarantine root");
         assert!(
