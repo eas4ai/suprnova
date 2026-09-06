@@ -40,6 +40,10 @@ pub mod http;
 /// coherence fence, bounded waiters, expiry, and release.
 pub mod singleflight;
 
+/// Cross-node rebuild leadership: the lease store port, its in-memory
+/// reference, and the fenced coordinator kernel over both.
+pub mod lease;
+
 pub use coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
 };
@@ -59,6 +63,7 @@ pub use generation::{
 };
 pub use http::{ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value};
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
+pub use lease::{FencedLeaseCoordinator, LeaseAttempt, LeaseStore, MemoryLeaseStore};
 pub use policy::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
     QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
@@ -96,6 +101,9 @@ pub enum RenderCacheErrorKind {
     ProviderUnavailable,
     /// A publication lost its fence.
     PublicationFenced,
+    /// The rebuild lease expired or was taken over before publication; the
+    /// result is discarded.
+    LeaseFenced,
     /// A request-time assembly input was not acceptable for this graph.
     AssemblyFailed,
 }
@@ -130,6 +138,7 @@ impl std::fmt::Display for RenderCacheError {
             RenderCacheErrorKind::EntryUnsupported => "render_cache_entry_unsupported",
             RenderCacheErrorKind::ProviderUnavailable => "render_cache_provider_unavailable",
             RenderCacheErrorKind::PublicationFenced => "render_cache_publication_fenced",
+            RenderCacheErrorKind::LeaseFenced => "render_cache_lease_fenced",
             RenderCacheErrorKind::AssemblyFailed => "render_cache_assembly_failed",
         })
     }

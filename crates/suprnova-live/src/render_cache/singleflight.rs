@@ -21,13 +21,54 @@ pub struct RebuildLease {
     epoch: u64,
     lease_id: u64,
     expires_at_ms: u64,
+    distributed_lease_id: Option<u64>,
 }
 
 impl RebuildLease {
+    /// Creates a lease held by one coordinator. `distributed_lease_id` is
+    /// `None` for a lease that only this process knows about, and the backing
+    /// store's lease id when a cross-node coordinator granted it.
+    pub(crate) fn new(
+        key: RenderKey,
+        epoch: u64,
+        lease_id: u64,
+        expires_at_ms: u64,
+        distributed_lease_id: Option<u64>,
+    ) -> Self {
+        Self {
+            key,
+            epoch,
+            lease_id,
+            expires_at_ms,
+            distributed_lease_id,
+        }
+    }
+
+    /// Attaches a backing store's lease id to a lease this process already
+    /// leads, which is how a distributed coordinator layers cross-node
+    /// leadership over the in-process one.
+    pub(crate) fn with_distributed_lease_id(mut self, distributed_lease_id: u64) -> Self {
+        self.distributed_lease_id = Some(distributed_lease_id);
+        self
+    }
+
     /// The key this lease rebuilds.
     #[must_use]
     pub fn key(&self) -> &RenderKey {
         &self.key
+    }
+
+    /// The backing store's lease id when a cross-node coordinator granted
+    /// this lease, or `None` when leadership is in-process only.
+    #[must_use]
+    pub fn distributed_lease_id(&self) -> Option<u64> {
+        self.distributed_lease_id
+    }
+
+    /// The authority epoch this lease rebuilds at; it becomes the fence's
+    /// epoch at publication.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -195,6 +236,13 @@ impl LocalRebuildCoordinator {
         }
     }
 
+    /// The bounds this coordinator admits under. A coordinator that composes
+    /// this one reads its lease lifetime from here rather than keeping a
+    /// second copy of the limits.
+    pub(crate) fn limits(&self) -> LocalCoordinatorLimits {
+        self.limits
+    }
+
     /// Locks the state, recovering it from poison rather than propagating a
     /// panic across this coordinator's operations.
     fn lock_state(&self) -> MutexGuard<'_, CoordinatorState> {
@@ -242,12 +290,13 @@ impl RebuildCoordinator for LocalRebuildCoordinator {
                 completion: CompletionHandle::default(),
             },
         );
-        Ok(RebuildAdmission::Lead(Box::new(RebuildLease {
-            key: key.clone(),
+        Ok(RebuildAdmission::Lead(Box::new(RebuildLease::new(
+            key.clone(),
             epoch,
             lease_id,
             expires_at_ms,
-        })))
+            None,
+        ))))
     }
 
     async fn publish_token(
