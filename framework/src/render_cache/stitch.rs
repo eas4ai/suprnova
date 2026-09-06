@@ -179,20 +179,30 @@ fn count_slot(outcome: &'static str) {
 ///    exactly once cannot be cut out, and a shell that kept it would be
 ///    that principal's markup and signed snapshot, shared.
 /// 4. Occurrences of the document's bootstrap nonce outside every island
-///    are collected as holes.
+///    are collected as holes (see [`collect_holes`]). A scan that reached
+///    its own match limit declines outright, before any filtering: a
+///    truncated scan cannot prove there is no further occurrence, and one
+///    it did not see would be copied into the shared shell as a fixed
+///    nonce while every hit rebuilt the header with a fresh one.
 /// 5. Every replayable stored header whose value carries that nonce is
 ///    collected as a template.
-/// 6. Only now is the form decided. A document with no island to cut out,
-///    no hole, and no template is a finished shared answer and is published
-///    Complete. Anything else is published Composite - including a document
-///    with *no* islands but a nonce, whose graph is a legal zero-slot one:
-///    a Complete entry there would freeze the first visitor's nonce into
-///    the stored body and the stored `Content-Security-Policy` alike and
-///    replay both to everybody, which is a nonce that proves nothing.
+/// 6. Only now is the form decided, and it can be decided because steps 3
+///    to 5 between them enumerated everything that has to come out: every
+///    island, every nonce occurrence, every nonce-bearing header. A
+///    document with none of the three is a finished shared answer and is
+///    published Complete. Anything else is published Composite - including
+///    a document with *no* islands but a nonce, whose graph is a legal
+///    zero-slot one: a Complete entry there would freeze the first
+///    visitor's nonce into the stored body and the stored
+///    `Content-Security-Policy` alike and replay both to everybody, which
+///    is a nonce that proves nothing.
 /// 7. The body is walked once, cutting at every island and every hole:
 ///    what is not cut out becomes the shell, the cuts become typed
 ///    segments, and each slot's surrounding digest is taken over the shell
-///    that resulted.
+///    that resulted. The shell therefore holds no island bytes and no
+///    nonce occurrence at all - one inside an island leaves with the
+///    island, and one outside every island is a hole, because step 4
+///    declined rather than hand back a truncated list.
 ///
 /// Nothing here is fallible in the error sense: every rejection is a
 /// decline, and the caller records it under the existing declined outcome.
@@ -235,28 +245,14 @@ pub(crate) fn build_composite_entry(
     if placed.windows(2).any(|pair| pair[0].1 > pair[1].0) {
         return None;
     }
-    // 4. Nonce holes: occurrences of this document's bootstrap nonce that
-    //    lie outside every island. One inside an island is that island's
-    //    own business - it is re-rendered on every hit and brings its own
-    //    nonce with it - and is deliberately not a hole. An occurrence
-    //    overlapping one already taken is skipped as well, so the holes are
-    //    disjoint from each other exactly as they are from the islands.
+    // 4. Nonce holes, over the island ranges just proved disjoint. The
+    //    helper declines for the whole document, so `?` carries that out.
     let nonce = capture.nonce.as_deref().filter(|nonce| !nonce.is_empty());
-    let mut holes: Vec<(usize, usize)> = Vec::new();
-    if let Some(nonce) = nonce {
-        for start in find_all(body, nonce.as_bytes(), MAX_NONCE_HOLES + 1) {
-            let end = start + nonce.len();
-            if placed.iter().any(|(s, e, _)| start < *e && end > *s)
-                || holes.last().is_some_and(|(_, taken)| start < *taken)
-            {
-                continue;
-            }
-            holes.push((start, end));
-            if holes.len() > MAX_NONCE_HOLES {
-                return None;
-            }
-        }
-    }
+    let islands: Vec<(usize, usize)> = placed.iter().map(|(s, e, _)| (*s, *e)).collect();
+    let holes = match nonce {
+        Some(nonce) => collect_holes(body, nonce.as_bytes(), &islands)?,
+        None => Vec::new(),
+    };
     // 5. Every replayable header whose value carries the nonce becomes a
     //    template, so a hit's fresh nonce reaches the header as well as the
     //    body and no stored header is left holding the miss's nonce as if
@@ -310,7 +306,10 @@ pub(crate) fn build_composite_entry(
     }
     // 7. Walk the body once: what is not cut out becomes the shell, and the
     //    cuts become typed segments. The shell therefore holds no island
-    //    bytes and no nonce at all.
+    //    bytes, and no nonce occurrence either - one inside an island
+    //    leaves with the island, and every occurrence outside every island
+    //    is a hole, because `collect_holes` declined rather than hand back
+    //    a list its scan had truncated.
     let mut cuts: Vec<(usize, usize, Cut)> = placed
         .iter()
         .map(|(start, end, index)| (*start, *end, Cut::Slot(*index)))
@@ -370,6 +369,57 @@ enum Cut {
     Slot(usize),
     /// One occurrence of the document's bootstrap nonce.
     Nonce,
+}
+
+/// The nonce holes to cut out of `body`: every occurrence of `nonce` that
+/// lies outside every range in `islands`, as `(start, end)` pairs in
+/// ascending order. `None` declines the whole document.
+///
+/// An occurrence inside an island is that island's own business - the
+/// island is re-rendered on every hit and brings its own nonce with it - so
+/// it is not a hole, and an occurrence overlapping a hole already taken is
+/// skipped too, which keeps the holes disjoint from each other exactly as
+/// they are from the islands.
+///
+/// The scan is bounded at [`MAX_NONCE_HOLES`] `+ 1` matches, and a scan that
+/// reached that limit declines here, *before* any of that filtering. The
+/// filtering only ever removes occurrences, so counting holes after it
+/// would let a body with more occurrences than the bound pass whenever
+/// enough of them happened to fall inside an island - and the ones the scan
+/// never reached would then be copied into the shared shell verbatim,
+/// leaving one visitor's nonce fixed in bytes every later visitor receives
+/// while the assembled `Content-Security-Policy` carried a fresh one. A
+/// truncated scan cannot prove completeness, so it is not asked to.
+///
+/// `islands` is bounded by [`MAX_STITCH_SLOTS`] and the returned vector by
+/// the scan's own limit, so both are bounded before either is allocated.
+fn collect_holes(
+    body: &[u8],
+    nonce: &[u8],
+    islands: &[(usize, usize)],
+) -> Option<Vec<(usize, usize)>> {
+    let found = find_all(body, nonce, MAX_NONCE_HOLES + 1);
+    if found.len() > MAX_NONCE_HOLES {
+        return None;
+    }
+    let mut holes: Vec<(usize, usize)> = Vec::with_capacity(found.len());
+    for start in found {
+        let end = start + nonce.len();
+        if islands.iter().any(|(s, e)| start < *e && end > *s)
+            || holes.last().is_some_and(|(_, taken)| start < *taken)
+        {
+            continue;
+        }
+        holes.push((start, end));
+    }
+    // Unreachable: the scan above stops at `MAX_NONCE_HOLES + 1` matches and
+    // declines at that count, and filtering only removes. Kept as the
+    // invariant this function's whole contract with `SegmentGraph::validate`
+    // rests on, rather than left to the reader to re-derive.
+    if holes.len() > MAX_NONCE_HOLES {
+        return None;
+    }
+    Some(holes)
 }
 
 /// Every occurrence of `needle` in `haystack`, left to right, as start
@@ -442,7 +492,13 @@ fn stitch_slot(descriptor: &StitchSlotDescriptor) -> StitchSlot {
 
 #[cfg(test)]
 mod tests {
-    use super::find_all;
+    use super::{MAX_NONCE_HOLES, collect_holes, find_all};
+
+    /// `count` occurrences of the test nonce `XY`, each followed by a
+    /// separator, so occurrence `n` starts at `3 * n` and no two overlap.
+    fn body_with(count: usize) -> Vec<u8> {
+        b"XY-".repeat(count)
+    }
 
     /// Overlapping occurrences are counted, so a needle that matches twice
     /// is reported twice rather than once. This is what makes step 3 of
@@ -473,5 +529,53 @@ mod tests {
         assert!(find_all(b"", b"", 2).is_empty());
         assert!(find_all(b"abc", b"", 2).is_empty());
         assert!(find_all(b"ab", b"abc", 2).is_empty());
+    }
+
+    /// Every occurrence in the shell becomes a hole, right up to the bound.
+    #[test]
+    fn every_shell_occurrence_within_the_bound_becomes_a_hole() {
+        let body = body_with(MAX_NONCE_HOLES);
+        let holes = collect_holes(&body, b"XY", &[]).expect("within bound");
+        assert_eq!(holes.len(), MAX_NONCE_HOLES);
+        assert_eq!(holes[0], (0, 2));
+        assert_eq!(
+            holes[MAX_NONCE_HOLES - 1],
+            (3 * (MAX_NONCE_HOLES - 1), 3 * MAX_NONCE_HOLES - 1)
+        );
+    }
+
+    /// One occurrence past the bound declines: 65 is what the scan's limit
+    /// lets it see, and seeing the limit is what it declines on.
+    #[test]
+    fn one_occurrence_past_the_bound_declines() {
+        let body = body_with(MAX_NONCE_HOLES + 1);
+        assert!(collect_holes(&body, b"XY", &[]).is_none());
+    }
+
+    /// The regression this helper exists for: a truncated scan declines
+    /// even when islands would have trimmed the *visible* holes back under
+    /// the bound. With 66 occurrences of which two lie inside one island,
+    /// filtering first left 63 holes and published a shell still carrying
+    /// every occurrence the scan never reached.
+    #[test]
+    fn a_truncated_scan_declines_even_when_islands_would_trim_it_back_under_the_bound() {
+        let body = body_with(MAX_NONCE_HOLES + 2);
+        let island = (30usize, 36usize);
+        assert_eq!(
+            &body[island.0..island.1],
+            b"XY-XY-",
+            "the island covers two occurrences"
+        );
+        assert!(collect_holes(&body, b"XY", &[island]).is_none());
+    }
+
+    /// An occurrence straddling an island boundary belongs to the island,
+    /// not to the shell, and dropping it is not by itself a reason to
+    /// decline.
+    #[test]
+    fn an_occurrence_straddling_an_island_boundary_is_excluded_without_declining() {
+        let body = body_with(3);
+        let holes = collect_holes(&body, b"XY", &[(4, 6)]).expect("nothing exceeded a bound");
+        assert_eq!(holes, vec![(0, 2), (6, 8)]);
     }
 }
