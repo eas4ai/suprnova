@@ -579,7 +579,7 @@ async fn a_stale_servable_composite_assembles_with_a_warning_and_no_background_r
 #[serial_test::serial]
 async fn omit_and_fallback_policies_take_effect_and_fail_document_runs_the_handler() {
     let harness = boot().await;
-    let mut leader_islands = Vec::new();
+    let mut leader_bodies = Vec::new();
     for path in [
         OPTIONAL_OMIT_PATH,
         OPTIONAL_FALLBACK_PATH,
@@ -595,7 +595,7 @@ async fn omit_and_fallback_policies_take_effect_and_fail_document_runs_the_handl
             EntryKind::Composite,
             "{path} published a Composite entry to assemble from"
         );
-        leader_islands.push(published.text());
+        leader_bodies.push(published.text());
     }
 
     let omit_before = handler_renders(OPTIONAL_OMIT_PATH);
@@ -623,7 +623,19 @@ async fn omit_and_fallback_policies_take_effect_and_fail_document_runs_the_handl
     );
 
     let before = handler_renders(OPTIONAL_FAIL_PATH);
+    let reaches_before = chain_reaches(OPTIONAL_FAIL_PATH);
+    assert!(
+        RenderCache::inspect_route_for_test(OPTIONAL_FAIL_PATH)
+            .await
+            .is_some(),
+        "an entry is stored, so this request is a hit and not another miss"
+    );
     let failed = dispatch(&harness, Method::GET, OPTIONAL_FAIL_PATH, &[]).await;
+    assert_eq!(
+        chain_reaches(OPTIONAL_FAIL_PATH),
+        reaches_before + 1,
+        "the cache middleware handed the request on: the hit path was taken"
+    );
     assert_eq!(
         handler_renders(OPTIONAL_FAIL_PATH),
         before + 1,
@@ -643,7 +655,7 @@ async fn omit_and_fallback_policies_take_effect_and_fail_document_runs_the_handl
         OPTIONAL_FAIL_PATH,
     ]
     .into_iter()
-    .zip(&leader_islands)
+    .zip(&leader_bodies)
     {
         let island = island_tag(leader, document_key_of(path));
         for refused in [&omitted, &fallback, &failed] {
@@ -816,12 +828,13 @@ async fn nonces_are_regenerated_in_the_body_and_the_csp_header_on_every_hit() {
         !hit.text().contains(&n1),
         "the miss render's nonce never reappears"
     );
-    // The island in the assembled document belongs to whoever asked, not to
-    // the visitor whose render the shell was cut from.
+    // The island in the assembled document was mounted for this request, not
+    // replayed from the render the shell was cut out of: a replayed island
+    // would carry the miss render's own scope.
     assert_ne!(
         decoded_snapshot(island_tag(&hit.text(), "stitch-nonce"))["body"]["scope"],
         decoded_snapshot(island_tag(&first.text(), "stitch-nonce"))["body"]["scope"],
-        "the island belongs to the principal that asked for it"
+        "the hit's island is not the one the shell was cut from"
     );
 
     let again = dispatch(
@@ -949,13 +962,28 @@ async fn a_slot_naming_a_component_the_registry_does_not_have_is_a_slot_failure(
 }
 
 /// Several principals hitting one stitched route at once each receive their
-/// own island, and none of them makes the handler run.
+/// own island - the island belonging to *that* principal, not merely a
+/// different one from its neighbour's - and none of them makes the handler
+/// run.
 ///
-/// The barrier is the join itself, never a sleep: all four requests are
-/// started before any of them is awaited, so whichever one wins the rebuild
-/// lease publishes the shell while the others are already in flight behind
-/// it - the shape in which a shared shell could most easily be handed out
-/// carrying its leader's island.
+/// The barrier is the join itself, never a sleep: the requests are started
+/// before any of them is awaited.
+///
+/// The first pair races the rebuild. Whichever wins the lease publishes the
+/// shell while the other is already in flight behind it, which is the shape
+/// in which a waiter could most easily be handed the leader's own bytes; had
+/// that happened, the two scopes would be equal.
+///
+/// The second burst is where attribution is proved, and it needs the session
+/// pinned. A mount's scope is a digest over (session, principal, tenant), and
+/// every request sent without a cookie mints a fresh session, so four
+/// distinct scopes would follow from session freshness alone even if the four
+/// responses had been shuffled between the principals who asked for them. So
+/// each principal is given one serial request first, its session cookie and
+/// resulting scope recorded, and the concurrent burst then presents that same
+/// cookie: the tenant is absent, so each principal's scope is fixed, and the
+/// concurrent response is checked against the scope belonging to the
+/// principal who sent it.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn concurrent_principals_during_one_rebuild_each_receive_their_own_island() {
@@ -977,22 +1005,53 @@ async fn concurrent_principals_during_one_rebuild_each_receive_their_own_island(
     assert_eq!(b.status, StatusCode::OK, "{}", b.text());
     assert_ne!(
         decoded_snapshot(island_tag(&a.text(), "stitch-counter"))["body"]["scope"],
-        decoded_snapshot(island_tag(&b.text(), "stitch-counter"))["body"]["scope"]
+        decoded_snapshot(island_tag(&b.text(), "stitch-counter"))["body"]["scope"],
+        "the waiter behind the rebuild was not handed the leader's own island: \
+         that would have given both requests one scope"
     );
 
-    // With the shell published, four more principals at once: now every one
-    // of them is a hit, so the handler must not run at all and no two may
-    // share an island.
     let published = RenderCache::inspect_route_for_test(STITCHED_PATH)
         .await
         .expect("stored");
     assert_eq!(published.kind, EntryKind::Composite);
     let before = handler_renders(STITCHED_PATH);
+
+    // One serial request per principal, to learn the session each of them is
+    // on and the scope that session and principal produce together.
+    let logins = ["user-c", "user-d", "user-e", "user-f"];
+    let mut sessions = Vec::new();
+    let mut expected = Vec::new();
+    for login in logins {
+        let primed = dispatch(
+            &harness,
+            Method::GET,
+            STITCHED_PATH,
+            &[("x-test-login", login)],
+        )
+        .await;
+        assert_eq!(primed.status, StatusCode::OK, "{}", primed.text());
+        sessions.push(primed.session_cookie());
+        expected.push(scope_of(&primed.text()));
+    }
+
+    // The same four, at once, each on the session it was just given.
     let headers = [
-        [("x-test-login", "user-c")],
-        [("x-test-login", "user-d")],
-        [("x-test-login", "user-e")],
-        [("x-test-login", "user-f")],
+        [
+            ("x-test-login", logins[0]),
+            ("cookie", sessions[0].as_str()),
+        ],
+        [
+            ("x-test-login", logins[1]),
+            ("cookie", sessions[1].as_str()),
+        ],
+        [
+            ("x-test-login", logins[2]),
+            ("cookie", sessions[2].as_str()),
+        ],
+        [
+            ("x-test-login", logins[3]),
+            ("cookie", sessions[3].as_str()),
+        ],
     ];
     let (c, d, e, f) = tokio::join!(
         dispatch(&harness, Method::GET, STITCHED_PATH, &headers[0]),
@@ -1003,25 +1062,34 @@ async fn concurrent_principals_during_one_rebuild_each_receive_their_own_island(
     assert_eq!(
         handler_renders(STITCHED_PATH),
         before,
-        "every concurrent hit was assembled, none rendered"
+        "every one of those requests was assembled, none rendered"
     );
+
     let mut scopes = Vec::new();
-    for response in [&c, &d, &e, &f] {
+    for ((response, login), expected) in [&c, &d, &e, &f].into_iter().zip(logins).zip(&expected) {
         assert_eq!(response.status, StatusCode::OK, "{}", response.text());
-        let text = response.text();
-        scopes.push(
-            decoded_snapshot(island_tag(&text, "stitch-counter"))["body"]["scope"]
-                .as_str()
-                .expect("a scope in the emitted snapshot")
-                .to_owned(),
+        let scope = scope_of(&response.text());
+        assert_eq!(
+            &scope, expected,
+            "{login}'s concurrent response carries {login}'s own island, not \
+             another principal's"
         );
+        scopes.push(scope);
     }
     let distinct: std::collections::BTreeSet<&String> = scopes.iter().collect();
     assert_eq!(
         distinct.len(),
         scopes.len(),
-        "four concurrent principals received four different islands"
+        "and no two of the four shared one island"
     );
+}
+
+/// The scope the `stitch-counter` island in `html` was mounted under.
+fn scope_of(html: &str) -> String {
+    decoded_snapshot(island_tag(html, "stitch-counter"))["body"]["scope"]
+        .as_str()
+        .expect("a scope in the emitted snapshot")
+        .to_owned()
 }
 
 /// What the shared shell is allowed to contain, stated over its actual
@@ -1069,7 +1137,9 @@ async fn the_stored_shell_holds_no_island_markup_and_no_signed_snapshot() {
     );
     assert!(
         shell.contains("<html") && shell.contains("</html>"),
-        "what is left is the document around the island: {shell}"
+        "what is left is the document around the island: {} bytes starting {:?}",
+        shell.len(),
+        &shell[..shell.len().min(80)]
     );
 }
 
@@ -1132,10 +1202,29 @@ async fn a_document_that_was_never_rendered_is_not_published() {
 /// Two rendered documents in one request are two bodies, and the mounts
 /// recorded belong to both of them. No single shell can be cut from that,
 /// so the capture is marked invalid and the route publishes nothing.
+///
+/// `STITCHED_PATH` is the positive control: the same island, the same
+/// chain, one `LiveDocument::render`, and a Composite entry. Without it a
+/// boot that published nothing at all would satisfy every assertion here.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_request_that_rendered_two_documents_is_not_published() {
     let harness = boot().await;
+    let control = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(control.status, StatusCode::OK, "{}", control.text());
+    assert!(
+        RenderCache::inspect_route_for_test(STITCHED_PATH)
+            .await
+            .is_some(),
+        "the control route, which renders one document, publishes"
+    );
+
     let first = dispatch(
         &harness,
         Method::GET,

@@ -1408,9 +1408,11 @@ async fn the_uninstrumented_request_accessor_carries_no_identity_and_no_body_cro
 /// is meant to be mounted again for whoever asked.
 ///
 /// What must therefore hold instead: two principals share the shell byte for
-/// byte and share nothing else. Neither receives the other's island, its
-/// signed snapshot, or its identifier, and the scope each island is bound to
-/// is the scope of the visitor who received it.
+/// byte and share nothing else. Neither receives the other's island or its
+/// signed snapshot, and the island each one is sent is bound to that
+/// visitor's own session and principal - which is checked by pinning each
+/// visitor's session, since scopes that merely differ would differ anyway
+/// from the fresh session every cookie-less request mints.
 ///
 /// The positive control is on this same route: the second principal's
 /// request must actually be a hit, or a boot that stored nothing would pass
@@ -1428,6 +1430,7 @@ async fn two_principals_share_one_stitched_shell_and_never_see_each_others_islan
     let before = counting_route::renders();
     let alice = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "alice")]).await;
     assert_eq!(alice.status, StatusCode::OK, "{}", alice.text());
+    let alice_cookie = session_cookie(&alice);
     assert_eq!(
         counting_route::renders(),
         before + 1,
@@ -1444,6 +1447,7 @@ async fn two_principals_share_one_stitched_shell_and_never_see_each_others_islan
 
     let bob = dispatch_get(&harness, STITCHED_ROUTE, &[("x-test-login", "bob")]).await;
     assert_eq!(bob.status, StatusCode::OK, "{}", bob.text());
+    let bob_cookie = session_cookie(&bob);
     assert_eq!(
         counting_route::renders(),
         before + 1,
@@ -1458,11 +1462,6 @@ async fn two_principals_share_one_stitched_shell_and_never_see_each_others_islan
         alice_island, bob_island,
         "each principal has its own island"
     );
-    assert_ne!(
-        stitched_scope(&alice.text()),
-        stitched_scope(&bob.text()),
-        "and each island is bound to the scope of the visitor who received it"
-    );
     assert!(
         !bob.text().contains(&alice_island),
         "bob never receives alice's island"
@@ -1473,8 +1472,49 @@ async fn two_principals_share_one_stitched_shell_and_never_see_each_others_islan
         "nor the signed snapshot it carried"
     );
     assert!(
-        !alice.text().contains(&bob_island) && !bob.text().contains("alice"),
+        !alice.text().contains(&bob_island),
         "and nothing crosses in the other direction either"
+    );
+
+    // Which island each of them received, and not merely that the two differ.
+    // A mount's scope is a digest over (session, principal, tenant) and every
+    // request without a cookie mints a fresh session, so two different scopes
+    // would follow from session freshness alone even if the two responses had
+    // been swapped between the visitors who asked for them. Presenting each
+    // visitor's own cookie fixes their scope, and the tenant is absent here,
+    // so the scope a principal saw on its own session is the scope its island
+    // must carry again.
+    let alice_scope = stitched_scope(&alice.text());
+    let bob_scope = stitched_scope(&bob.text());
+    assert_ne!(alice_scope, bob_scope);
+    let alice_again = dispatch_get(
+        &harness,
+        STITCHED_ROUTE,
+        &[("x-test-login", "alice"), ("cookie", &alice_cookie)],
+    )
+    .await;
+    let bob_again = dispatch_get(
+        &harness,
+        STITCHED_ROUTE,
+        &[("x-test-login", "bob"), ("cookie", &bob_cookie)],
+    )
+    .await;
+    assert_eq!(alice_again.status, StatusCode::OK, "{}", alice_again.text());
+    assert_eq!(bob_again.status, StatusCode::OK, "{}", bob_again.text());
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "both were still assembled from the one stored shell"
+    );
+    assert_eq!(
+        stitched_scope(&alice_again.text()),
+        alice_scope,
+        "alice's island is bound to alice's own session and principal"
+    );
+    assert_eq!(
+        stitched_scope(&bob_again.text()),
+        bob_scope,
+        "and bob's to bob's, so neither is holding the other's"
     );
 
     // The shell around the island is the same bytes for both, which is the

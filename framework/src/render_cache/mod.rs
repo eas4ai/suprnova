@@ -491,6 +491,7 @@ impl RenderCache {
     /// so nothing a later visitor is sent can come from an earlier
     /// visitor's island. Proving it needs the bytes.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn shell_for_test(pattern: &str) -> Option<bytes::Bytes> {
         let runtime = Self::runtime().expect("RenderCache installed");
         let policy = runtime.table.effective_policy(pattern).expect("policy");
