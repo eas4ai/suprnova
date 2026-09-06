@@ -438,13 +438,24 @@ rendered document in one request: `public_seed_islands` and
 `identity_bound_islands` counts, the earliest `seed_deadline_ms` across
 every mounted public-seed island, a sticky `no_store` flag, and the
 `StitchCapture` a stitched shell would be cut from (see Composite stitching
-below), which is default and meaningless on every other class. Mount facts
-are recorded from `LiveDocument::mount` itself, immediately after a mount
-succeeds, rather than from `render` - a handler can mount an island and
-hand-build its own response from `MountedIsland::html()` without ever
-calling `render`, so recording at mount means the fact exists regardless of
-whether `render` is reached. A rendered document's cache intent is recorded
-separately, and only when it is `NoStore`: `Private` and `Public` intents
+below). Mount facts are recorded from `LiveDocument::mount` itself,
+immediately after a mount succeeds, rather than from `render` - a handler
+can mount an island and hand-build its own response from
+`MountedIsland::html()` without ever calling `render`, so recording at mount
+means the fact exists regardless of whether `render` is reached. The stitch
+capture is recorded there too, and on every route rather than only a
+stitched one: `LiveDocument::mount` records a public-seed island as staying
+inside the shell and an identity-bound island together with its own emitted
+markup, with no class check at either site, and the collector keeps whatever
+it is handed regardless of what the route declared. Only the consumption is
+class-gated - `document_declines` reads `stitch.invalid` for the stitched
+class alone, and the composite publisher runs for that class alone - so
+every other class ignores what was recorded. That is also why
+`CapturedSlot`'s `Debug` is hand-written to print lengths rather than
+markup: an island's bytes and its signed snapshot sit in the capture of
+every Live request, and the capture is reachable from a public derived
+`Debug`. A rendered document's cache intent is recorded separately, and
+only when it is `NoStore`: `Private` and `Public` intents
 neither narrow nor widen this server-side cache's class, since
 `DocumentResponseIntent::html()` defaults to `Private` and mapping that
 default to `RepresentationClass::PrivateCached` would demote every Live
@@ -569,18 +580,23 @@ representation when it is false.
 ### The six checks before publication
 
 Six checks stand between a stitched render and a stored shell. The first is
-the middleware's own, immediately after classification; the rest are
+the middleware's own, enforced in two different places; the rest are
 `stitch::build_composite_entry`'s, the only publisher for a stitched route
 that rendered a Live document. Every rejection is a decline counted under
 the existing `declined` lookup outcome, never an error:
 
 1. The handler began, and the Live document rules do not decline outright.
-   `document_declines(facts, declared)` takes the route's **declared** class,
-   because an identity-bound island is exactly what this class exists to
-   re-render on every hit: under `PublicShellStitched` that island is the
+   The handler-start half is enforced earliest, in `render_under_collector`:
+   a stitched report with no handler start is given no observed generation
+   set at all, which reuses the "no generation set" signal an overflowed
+   report already returns rather than adding a telemetry label. The Live
+   document half is `document_declines(facts, declared)`, which runs
+   immediately after classification and takes the route's **declared**
+   class, because an identity-bound island is exactly what this class exists
+   to re-render on every hit: under `PublicShellStitched` that island is the
    reason to stitch, and under every other class it is still a reason to
    decline. A capture marked invalid, a document that declared `NoStore`, or
-   a public-seed island with no resolvable deadline all decline here.
+   a public-seed island with no resolvable deadline all decline there.
 2. The capture accounts for every identity-bound island the request mounted
    (one captured slot each) and holds no more than `MAX_STITCH_SLOTS`.
 3. The response body is byte for byte the body `LiveDocument::render`
@@ -752,13 +768,15 @@ Each of these is ruled behaviour, not a defect.
   A follow-up capture may add reasons, as
   `iterations/next/declined-lookups-record-a-reason.md` proposes for the
   lookup outcome.
-- A stitched entry with slots is never served by the stale-on-error fallback
-  and never triggers a background rebuild. Serving the stored shell on a
-  failed foreground rebuild would answer a request the route's own chain
-  never got to gate, and a spawned background rebuild carries none of the
-  request's authorization task-locals, so its shell would be whatever the
-  gate renders for nobody. A stale-servable entry is still assembled
-  immediately, with the `Warning` header.
+- A stitched entry is never served by the stale-on-error fallback and never
+  triggers a background rebuild. Both gates key on the route's policy class,
+  so a zero-slot Composite is excluded from each as much as a slotted one
+  is. Serving the stored shell on a failed foreground rebuild would answer a
+  request the route's own chain never got to gate, and a spawned background
+  rebuild carries none of the request's authorization task-locals, so its
+  shell would be whatever the gate renders for nobody. A stale-servable
+  entry is still served immediately, assembled where it is a Composite one,
+  with the `Warning` header.
 - An unencodable read inside a private island's mount marks the whole
   collector report overflowed, so the shell is not stored. This is
   conservative: the read belongs to an island that is re-rendered on every
