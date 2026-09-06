@@ -15,7 +15,7 @@ const MAX_CLAIM_LEASE_MS: u64 = 300_000;
 /// Hard maximum for an instance lifetime: seven days.
 const MAX_INSTANCE_LIFETIME_MS: u64 = 604_800_000;
 /// Hard maximum retained accepted outcomes per instance.
-const MAX_ACCEPTED_OUTCOMES: usize = 64;
+pub(crate) const MAX_ACCEPTED_OUTCOMES: usize = 64;
 /// Hard maximum instances held by one embedded provider.
 const MAX_INSTANCES: usize = 1_000_000;
 
@@ -412,6 +412,12 @@ impl AcceptedOutcome {
     #[must_use]
     pub const fn kind(&self) -> AcceptedOutcomeKind {
         self.kind
+    }
+
+    /// Returns the fixed-size digest the outcome retained, which the record
+    /// codec writes and reads back.
+    pub(crate) const fn digest(&self) -> &ContentDigest {
+        &self.digest
     }
 }
 

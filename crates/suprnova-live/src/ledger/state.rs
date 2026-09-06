@@ -26,6 +26,7 @@ pub(crate) struct PromotionReservation {
     pub(crate) expires_at: UnixMillis,
 }
 
+#[derive(Debug)]
 pub(crate) struct PendingClaim {
     pub(crate) claim_id: u64,
     pub(crate) base_revision: Revision,
@@ -35,6 +36,7 @@ pub(crate) struct PendingClaim {
     pub(crate) lease_expires_at: UnixMillis,
 }
 
+#[derive(Debug)]
 pub(crate) enum InstancePhase {
     Ready,
     Pending(PendingClaim),
@@ -54,11 +56,8 @@ impl InstancePhase {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct InstanceRecord {
-    #[allow(
-        dead_code,
-        reason = "retained authority metadata is consumed by later provider adapters"
-    )]
     pub(crate) component_contract: Option<ContentDigest>,
     pub(crate) current_revision: Revision,
     pub(crate) expires_at: UnixMillis,

@@ -124,11 +124,24 @@ impl MemoryLeaseStore {
 
     /// Reads store time, reporting a clock the host cannot read as a provider
     /// failure rather than guessing a timestamp that would decide expiry.
+    ///
+    /// Callers read it while they hold the slots, so the time an operation
+    /// decides by and the state it decides over are one step, as a backend's
+    /// own clock inside its own statement would be.
     fn store_now_ms(&self) -> Result<u64, RenderCacheError> {
         self.clock
             .now()
             .map(UnixMillis::get)
             .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))
+    }
+
+    /// Returns the authority epoch recorded for `key`'s current or last
+    /// tenure, or `None` when the key has never been leased. A distributed
+    /// adapter keeps the same column; nothing about acquisition depends on
+    /// it, so reading it observes leadership without deciding it.
+    #[must_use]
+    pub fn epoch(&self, key: &RenderKey) -> Option<u64> {
+        self.lock_slots().get(key).map(|slot| slot.epoch)
     }
 
     /// Locks the slots, recovering them from poison rather than propagating a
@@ -148,8 +161,8 @@ impl LeaseStore for MemoryLeaseStore {
         epoch: u64,
         ttl_ms: u64,
     ) -> Result<LeaseAttempt, RenderCacheError> {
-        let now_ms = self.store_now_ms()?;
         let mut slots = self.lock_slots();
+        let now_ms = self.store_now_ms()?;
         let slot = slots.entry(key.clone()).or_insert(LeaseSlot {
             epoch,
             lease_id: None,
@@ -175,8 +188,8 @@ impl LeaseStore for MemoryLeaseStore {
         key: &RenderKey,
         lease_id: u64,
     ) -> Result<Option<u64>, RenderCacheError> {
-        let now_ms = self.store_now_ms()?;
         let mut slots = self.lock_slots();
+        let now_ms = self.store_now_ms()?;
         let Some(slot) = slots.get_mut(key) else {
             return Ok(None);
         };
@@ -247,9 +260,13 @@ impl<S: LeaseStore> RebuildCoordinator for FencedLeaseCoordinator<S> {
             // The store decided nothing, so this node leads nothing: hand the
             // local lease back before reporting the failure, or the waiters
             // behind it would park on a leader that will never publish. The
-            // store's failure is the one reported, and folding the local
-            // result in keeps a local failure from being lost.
-            Err(error) => self.local.release(*lease).await.and(Err(error)),
+            // store's failure is what admission failed on and is the one
+            // reported; handing the local lease back is cleanup on the way
+            // out, and its own outcome does not change why admission failed.
+            Err(error) => {
+                let _ = self.local.release(*lease).await;
+                Err(error)
+            }
         }
     }
 
@@ -395,6 +412,35 @@ mod tests {
             store.mint_token(&key, holder).await.expect("mint"),
             Some(1),
             "the holder still leads"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_takeover_records_the_epoch_of_the_holder_that_took_the_key() {
+        let clock = Arc::new(FixedClock::new(0));
+        let store = MemoryLeaseStore::new(clock.clone());
+        let key = key("/a");
+        assert_eq!(store.epoch(&key), None, "the key has never been leased");
+
+        acquired(store.try_acquire(&key, 3, 1_000).await.expect("acquire"));
+        assert_eq!(store.epoch(&key), Some(3));
+        assert_eq!(
+            store.try_acquire(&key, 9, 1_000).await.expect("attempt"),
+            LeaseAttempt::Held,
+            "a newer epoch does not preempt an unexpired lease"
+        );
+        assert_eq!(
+            store.epoch(&key),
+            Some(3),
+            "the refused attempt recorded nothing"
+        );
+
+        clock.set(1_000);
+        acquired(store.try_acquire(&key, 9, 1_000).await.expect("acquire"));
+        assert_eq!(
+            store.epoch(&key),
+            Some(9),
+            "the tenure that took the key over owns the recorded epoch"
         );
     }
 
