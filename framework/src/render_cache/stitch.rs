@@ -17,6 +17,18 @@
 //! The consequence, stated once: `PublicShellStitched` is meaningful only on
 //! routes whose chain ends in the Live completion middleware; elsewhere every
 //! hit is discarded and the route renders as if nothing were cached.
+//!
+//! A route under this class must not rewrite the response body in route
+//! middleware after the Live document rendered it. Such middleware runs again
+//! on every hit, so its output would be baked into the stored representation
+//! on the miss and then applied a second time on the hit, with the entry's
+//! `ETag` describing bytes no client ever received. The design closes this at
+//! publication rather than here: `LiveDocument::render` records a SHA-256 of
+//! the body it produced, and the composite publisher declines any stitched
+//! document whose response body digest differs from that recording -
+//! zero-island documents included - so no stitched entry ever holds
+//! post-processed bytes. A route that does rewrite its body is simply never
+//! published and is served uncached on every request.
 
 use suprnova_live::render_cache::composite::CompositeEntry;
 use suprnova_live::render_cache::entry::DecodedEntry;
@@ -34,9 +46,10 @@ use super::telemetry as render_cache_telemetry;
 /// route chain instead of serving itself.
 ///
 /// Everything [`serve_prepared`] needs to answer the request once the chain
-/// has run, and nothing the chain could invalidate: the freshness decision
-/// was already made against the entry's own header, and re-deciding it after
-/// the chain would compare the same values again.
+/// has run. The freshness decision and the `now_ms` it was taken at are both
+/// fixed at lookup time, before the chain ran: the entry is served under the
+/// state the middleware actually decided on, and the chain's own duration is
+/// not added to the `Age` the client sees.
 pub(crate) struct PreparedHit {
     /// The decoded stored representation.
     pub(crate) entry: DecodedEntry,
@@ -44,7 +57,8 @@ pub(crate) struct PreparedHit {
     pub(crate) policy: RenderCachePolicy,
     /// When the entry was published, for `Age`.
     pub(crate) published_at_ms: u64,
-    /// The instant the middleware evaluated freshness at.
+    /// The instant the middleware evaluated freshness at, fixed before the
+    /// chain ran; `Age` is measured from it, not from when the hit is served.
     pub(crate) now_ms: u64,
     /// The `Warning` header a stale-servable entry carries, if any.
     pub(crate) warning: Option<&'static str>,

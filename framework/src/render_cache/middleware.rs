@@ -1037,6 +1037,17 @@ fn is_stitched(policy: &RenderCachePolicy) -> bool {
 /// visitor the guard would have refused. An ineffective cache is the safe
 /// side of that trade.
 ///
+/// The same fact constrains what a stitched route's chain may do to the
+/// body. Route middleware that rewrites the response after the Live document
+/// rendered it runs again on every hit, so its output would be stored on the
+/// miss and applied a second time on the hit, leaving the entry's `ETag`
+/// describing bytes no client received. Nothing here has to detect that: the
+/// document records a SHA-256 of the body it rendered, and the composite
+/// publisher declines any stitched document whose response body digest
+/// differs from that recording, zero-island documents included. A route that
+/// rewrites its body under this class is therefore never published and is
+/// served uncached on every request.
+///
 /// Every other class keeps the behavior it has always had: the stored
 /// representation is a finished answer and is served right here. A Composite
 /// entry on such a route can only be a store defect - [`decode`] refuses a

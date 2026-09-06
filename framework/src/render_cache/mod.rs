@@ -39,7 +39,10 @@ pub mod middleware;
 pub mod migration;
 pub mod orm;
 pub mod registry;
-pub mod stitch;
+/// Every item inside is `pub(crate)`: a prepared hit is framework-internal
+/// machinery between the RenderCache middleware and the Live completion
+/// middleware, never an application-facing API.
+pub(crate) mod stitch;
 pub mod telemetry;
 #[doc(hidden)]
 pub mod testing;
