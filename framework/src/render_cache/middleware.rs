@@ -163,8 +163,8 @@ use suprnova_live::render_cache::coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
 };
 use suprnova_live::render_cache::entry::{
-    CompleteEntry, DecodedEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders, decode,
-    encode,
+    CompleteEntry, DecodedEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders,
+    Validator, decode, encode, encode_composite,
 };
 use suprnova_live::render_cache::generation::{
     CoherenceCheck, GenerationLedger, GenerationSet, ObservationWindow,
@@ -203,6 +203,7 @@ use super::config::RenderCacheConfig;
 use super::file_store::FileRenderStore;
 use super::live;
 use super::registry::RenderCachePolicyTable;
+use super::stitch;
 use super::telemetry as render_cache_telemetry;
 
 /// Domain separator for the route identity digest this middleware derives
@@ -1187,10 +1188,10 @@ pub(crate) fn conditional_response(
 /// granted at, and the declared variance the key was derived from. Bundled
 /// so `lead_render` and `publish` stay within a reasonable argument count
 /// rather than threading each field through separately.
-struct RenderJob {
-    key: RenderKey,
-    epoch: u64,
-    variance: VarianceDescriptor,
+pub(crate) struct RenderJob {
+    pub(crate) key: RenderKey,
+    pub(crate) epoch: u64,
+    pub(crate) variance: VarianceDescriptor,
 }
 
 async fn render_and_publish(
@@ -1422,29 +1423,6 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    // Task 7 replaces this guard with composite publication.
-    //
-    // A stitched route stops declining an identity-bound island (that is
-    // what declaring the class means), and the handler boundary is now
-    // marked on every Live request, so nothing else stands between a
-    // document that captured one principal's islands - their markup, their
-    // signed snapshots - and being published as this route's *shared*
-    // Complete shell. Until the Composite form those captures belong in can
-    // actually be written, such a document has no storable form at all, and
-    // this declines it under the existing `declined` outcome rather than
-    // adding a label for a state that is about to disappear. `invalid` is
-    // named here too, rather than left to `document_declines`, so this
-    // guard reads as the complete statement of what it refuses.
-    if is_stitched(policy)
-        && report
-            .live_document
-            .as_ref()
-            .is_some_and(|facts| !facts.stitch.slots.is_empty() || facts.stitch.invalid)
-    {
-        LookupOutcome::Declined.record();
-        let _ = runtime.coordinator.release(lease).await;
-        return Ok(response);
-    }
     // The invariant `key_used_different_values_than_the_render_saw` relies
     // on without stating it: every requirement it checks is driven off
     // `classification.reasons`, so a `PrivateCached` class with an empty
@@ -1456,7 +1434,7 @@ async fn lead_render(
     // R90: this check runs against a *copy*, never the real
     // `classification` - see `strip_classification_reasons_for_test`'s own
     // doc for why the test-only seam that copy exists for must never touch
-    // the value passed to the value guard or to `build_entry` below.
+    // the value passed to the value guard or to `entry_header` below.
     let classification_for_invariant = classification.clone();
     // Test-only, see `strip_classification_reasons_for_test`'s own doc: no
     // production code ever sets this flag, and `classify` never produces a
@@ -1506,7 +1484,7 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    let Some(entry) = build_entry(
+    let Some(header) = entry_header(
         &job,
         policy,
         classification.class,
@@ -1519,18 +1497,51 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     };
+    // A stitched route that rendered a Live document publishes through the
+    // composite publisher, which decides between a Composite entry and a
+    // Complete shell only after every check that makes a shared shell safe
+    // has passed, and declines the render outright when one has not (see
+    // `stitch::build_composite_entry`). Everything else - every other
+    // class, and a stitched route whose render mounted no Live document at
+    // all and so recorded nothing to check - publishes the response's own
+    // bytes as a Complete representation, exactly as before.
+    let published = match (is_stitched(policy), report.live_document.as_ref()) {
+        (true, Some(facts)) => stitch::build_composite_entry(header, response.body(), facts),
+        _ => Some(DecodedEntry::Complete(CompleteEntry::new(
+            header,
+            Bytes::copy_from_slice(response.body()),
+        ))),
+    };
+    let Some(entry) = published else {
+        LookupOutcome::Declined.record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    };
     store_entry(runtime, &lease, policy, &job, &entry, &observed, now).await;
     let _ = runtime.coordinator.release(lease).await;
+    // The validator this client is given describes the bytes this client is
+    // actually sent, which for a Composite publication is the leader's own
+    // rendered document rather than anything reconstructed from the shell.
+    let validator = match &entry {
+        DecodedEntry::Complete(entry) => *entry.validator(),
+        DecodedEntry::Composite(_) => Validator::strong_for(response.body()),
+    };
     // The client that triggered this render gets its own response back -
     // only the cache validators this middleware adds are attached, rather
     // than a response reconstructed from the stored entry. Reconstructing
     // is unavoidable for a later hit (the original response object no
     // longer exists by then), but here it is gratuitous: the entry's
     // headers are already filtered to the small replayable allowlist (see
-    // `build_entry`), so reconstructing on the render itself would silently
+    // `entry_header`), so reconstructing on the render itself would silently
     // drop any handler-set header outside that allowlist even on the very
     // request that produced it. See fix round 2, item 2.
-    finish_fresh_render(response, if_none_match.as_deref(), policy, &entry)
+    finish_fresh_render(
+        response,
+        if_none_match.as_deref(),
+        policy,
+        entry.header(),
+        &validator,
+    )
 }
 
 /// The fresh-render counterpart of [`conditional_response`]: serves the
@@ -1542,19 +1553,28 @@ async fn lead_render(
 /// the handler's own response is the authoritative one. `replace_header` is
 /// used for each validator so a value the handler already set (a
 /// `Cache-Control` of its own, say) is superseded rather than duplicated.
-/// Age is always `0`: this response and `entry` were published from the same
+/// Age is always `0`: this response and the entry were published from the same
 /// instant. Body suppression for `HEAD` is not this function's job - the
 /// server strips the body for `HEAD` regardless (see fix round 2, item 7),
 /// the same way it would for any handler's response with no cache in play.
+///
+/// `validator` is passed rather than read off the entry because a Composite
+/// publication has no stored bytes to validate: its entry holds a shell with
+/// holes, and this client is being sent the leader's own fully rendered
+/// document. The caller therefore passes a strong validator over exactly
+/// those bytes. A later hit on the same entry assembles a document from
+/// islands re-rendered for *that* request, under a nonce minted for it, and
+/// so legitimately carries a different validator - the two describe
+/// different bytes, and each is strong for the bytes it was sent with.
 fn finish_fresh_render(
     response: HttpResponse,
     if_none_match: Option<&str>,
     policy: &RenderCachePolicy,
-    entry: &CompleteEntry,
+    header: &EntryHeader,
+    validator: &Validator,
 ) -> Response {
-    let header = entry.header();
     let not_modified = matches!(
-        evaluate_conditional(if_none_match, entry.validator()),
+        evaluate_conditional(if_none_match, validator),
         ConditionalOutcome::NotModified
     );
     let mut out = if not_modified {
@@ -1562,7 +1582,7 @@ fn finish_fresh_render(
     } else {
         response
     };
-    out = out.replace_header("ETag", entry.validator().etag());
+    out = out.replace_header("ETag", validator.etag());
     // Age is always 0 here (see this function's own doc), so the seed's
     // remaining lifetime at this instant is the deadline minus the very
     // publication time already stored in `header`.
@@ -2107,11 +2127,15 @@ async fn fresh_reread_is_coherent(
 /// policy uses it), under a fence minted by the coordinator for this
 /// lease. Never fails the request: a publish failure (rejected, fenced, or
 /// a provider error) just means the next request stays a miss.
-/// Builds the candidate entry a render's response would publish as, or
+/// Builds the header a render's candidate entry would publish under, or
 /// `None` when its headers cannot be safely replayed (an unsafe or
 /// non-replayable header, or one exceeding a bound) - in which case the
 /// candidate is declined the same as an ineligible or uncacheable one.
-fn build_entry(
+///
+/// Only the header: whether the stored representation is the response's own
+/// bytes or a shell with holes cut in it is the caller's decision, and for a
+/// stitched route the publisher's (see `stitch::build_composite_entry`).
+fn entry_header(
     job: &RenderJob,
     policy: &RenderCachePolicy,
     class: RepresentationClass,
@@ -2119,14 +2143,14 @@ fn build_entry(
     response: &HttpResponse,
     now: u64,
     seed_deadline_ms: Option<u64>,
-) -> Option<CompleteEntry> {
+) -> Option<EntryHeader> {
     let safe_pairs: Vec<(String, String)> = response
         .headers()
         .filter(|(name, _)| REPLAYABLE_HEADERS.contains(&name.to_ascii_lowercase().as_str()))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
     let safe_headers = SafeHeaders::from_pairs(safe_pairs).ok()?;
-    let header = EntryHeader {
+    Some(EntryHeader {
         key: job.key.clone(),
         class,
         variance: job.variance.clone(),
@@ -2140,9 +2164,7 @@ fn build_entry(
         status: 200,
         headers: safe_headers,
         content_encoding: None,
-    };
-    let body = Bytes::copy_from_slice(response.body());
-    Some(CompleteEntry::new(header, body))
+    })
 }
 
 /// Encodes and publishes a built candidate to L0 (and L1 when the policy
@@ -2155,7 +2177,7 @@ async fn store_entry(
     lease: &RebuildLease,
     policy: &RenderCachePolicy,
     job: &RenderJob,
-    entry: &CompleteEntry,
+    entry: &DecodedEntry,
     observed: &GenerationSet,
     now: u64,
 ) {
@@ -2163,7 +2185,14 @@ async fn store_entry(
         return;
     };
     fence.generation_digest = observed.digest();
-    let Ok(encoded) = encode(entry, &runtime.keys) else {
+    // Each kind is framed by its own codec: a Complete entry around its
+    // final bytes, a Composite entry around its canonical header (which
+    // carries the segment graph) and the shell those segments partition.
+    let encoded = match entry {
+        DecodedEntry::Complete(entry) => encode(entry, &runtime.keys),
+        DecodedEntry::Composite(entry) => encode_composite(entry, &runtime.keys),
+    };
+    let Ok(encoded) = encoded else {
         return;
     };
     // L0 has no age-based expiry of its own; an epoch advance clears it

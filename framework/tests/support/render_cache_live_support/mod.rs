@@ -514,7 +514,7 @@ async fn unreasoned_handler(_request: Request) -> Response {
 /// `ClassificationReason::PrincipalObserved` inside `classify`), then calls
 /// the test-only seam, which strips that reason only from the copy
 /// `is_unreasoned_private_class` checks (R90) - the real classification the
-/// value guard and `build_entry` see keeps the reason.
+/// value guard and `entry_header` see keeps the reason.
 async fn strip_handler(_request: Request) -> Response {
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
     suprnova::render_cache::collector::strip_classification_reasons_for_test();

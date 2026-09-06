@@ -11,7 +11,8 @@ use suprnova::render_cache::{RenderCache, RepresentationClass};
 use suprnova_live::render_cache::entry::EntryKind;
 
 use crate::render_cache_stitch_support::{
-    SEED_ONLY_PATH, STITCHED_PATH, boot, chain_reaches, dispatch, handler_renders,
+    POST_PROCESSED_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH, STITCHED_PATH, boot,
+    chain_reaches, dispatch, handler_renders,
 };
 
 /// A stitched route whose document holds nothing principal-specific is still
@@ -106,17 +107,14 @@ async fn a_stitched_route_never_short_circuits_before_its_route_middleware() {
     );
 }
 
-/// Task 7 replaces this test with composite publication.
-///
-/// Until a stitched document with identity-bound islands can be published as
-/// a Composite entry, it must not be published at all: `document_declines`
-/// no longer declines a stitched route just because an identity-bound island
-/// mounted, so without this guard the shell one principal saw - islands,
-/// signed snapshots and all - would be stored as a Complete representation
-/// and replayed to the next visitor.
+/// The first render of a stitched document that mounted an identity-bound
+/// island publishes a Composite entry: a shell with a hole where the island
+/// was, plus the typed declaration a later hit re-mounts it from. The
+/// leader still receives its own bytes, so its `ETag` is a strong validator
+/// over exactly what it was sent.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_stitched_document_with_identity_bound_islands_is_never_stored_yet() {
+async fn the_first_render_of_a_stitched_document_publishes_a_composite_entry() {
     let harness = boot().await;
     let first = dispatch(
         &harness,
@@ -126,30 +124,79 @@ async fn a_stitched_document_with_identity_bound_islands_is_never_stored_yet() {
     )
     .await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.text());
-    assert_eq!(handler_renders(STITCHED_PATH), 1);
-    assert!(
-        RenderCache::inspect_route_for_test(STITCHED_PATH)
-            .await
-            .is_none(),
-        "a stitched document holding one principal's islands is never stored as a shared shell"
+    let expected_etag = suprnova_live::render_cache::Validator::strong_for(&first.body).etag();
+    assert_eq!(
+        first.header("etag"),
+        Some(expected_etag.as_str()),
+        "the leader's ETag is over its own bytes"
     );
-    let second = dispatch(
+    let stored = RenderCache::inspect_route_for_test(STITCHED_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(stored.kind, EntryKind::Composite);
+    assert_eq!(stored.slots, 1);
+    assert_eq!(stored.class, RepresentationClass::PublicShellStitched);
+    assert!(
+        stored.body_bytes < first.body.len(),
+        "the shell excludes the island bytes"
+    );
+    assert!(!String::from_utf8_lossy(&first.body).contains("user-1"));
+}
+
+/// A shell that reads the principal itself is not a shared shell: the bytes
+/// outside every island already depend on who asked, so nothing is
+/// published and every request renders again.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_shell_that_reads_the_principal_is_not_published() {
+    let harness = boot().await;
+    let first = dispatch(
         &harness,
         Method::GET,
-        STITCHED_PATH,
+        SHELL_READS_PRINCIPAL_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(
+        RenderCache::inspect_route_for_test(SHELL_READS_PRINCIPAL_PATH)
+            .await
+            .is_none(),
+        "declined: a content read of the principal narrows the shell"
+    );
+    let before = handler_renders(SHELL_READS_PRINCIPAL_PATH);
+    dispatch(
+        &harness,
+        Method::GET,
+        SHELL_READS_PRINCIPAL_PATH,
         &[("x-test-login", "user-2")],
     )
     .await;
-    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
-    assert_eq!(
-        handler_renders(STITCHED_PATH),
-        2,
-        "nothing was stored, so every request renders fresh"
-    );
+    assert_eq!(handler_renders(SHELL_READS_PRINCIPAL_PATH), before + 1);
+}
+
+/// Route middleware that rewrites the body after the Live document rendered
+/// it runs again on every hit, so its output must never be baked into the
+/// stored representation. The publisher catches it without knowing the
+/// middleware exists: the document recorded a digest of the body it
+/// rendered, and the response carries different bytes.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_post_processed_body_is_not_published() {
+    let harness = boot().await;
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        POST_PROCESSED_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(first.text().ends_with("<!-- footer -->"));
     assert!(
-        RenderCache::inspect_route_for_test(STITCHED_PATH)
+        RenderCache::inspect_route_for_test(POST_PROCESSED_PATH)
             .await
             .is_none(),
-        "still nothing stored after a second principal asked"
+        "declined: the body digest no longer matches the rendered document"
     );
 }
