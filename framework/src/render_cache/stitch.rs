@@ -13,6 +13,10 @@
 //! is what finally serves the hit, through `serve_prepared`. A request the
 //! chain refuses first never reaches here at all, and the prepared hit is
 //! dropped unread with the request.
+//!
+//! The consequence, stated once: `PublicShellStitched` is meaningful only on
+//! routes whose chain ends in the Live completion middleware; elsewhere every
+//! hit is discarded and the route renders as if nothing were cached.
 
 use suprnova_live::render_cache::composite::CompositeEntry;
 use suprnova_live::render_cache::entry::DecodedEntry;

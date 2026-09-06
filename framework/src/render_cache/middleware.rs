@@ -539,9 +539,7 @@ impl RenderCacheMiddleware {
                 // the shell it produced would be whatever the gate renders
                 // for nobody. The stale entry is still served immediately
                 // either way; only the background refresh is skipped.
-                if (is_stitched(policy) && chain_serves_prepared_hits(&request))
-                    || variance_depends_on_ambient_context(policy)
-                {
+                if is_stitched(policy) || variance_depends_on_ambient_context(policy) {
                     return Ok(deliver_hit(
                         request,
                         next,
@@ -592,7 +590,6 @@ impl RenderCacheMiddleware {
                 // request back - matching `lead_render`'s own capture.
                 let method = request.method().as_str().to_owned();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
-                let stitched_route = is_stitched(policy) && chain_serves_prepared_hits(&request);
                 let job = RenderJob {
                     key,
                     epoch,
@@ -620,7 +617,7 @@ impl RenderCacheMiddleware {
                 // this time round, which is precisely what this class
                 // exists to prevent. The failed rebuild's own outcome is
                 // what the client sees.
-                if !rebuild_failed || stitched_route {
+                if !rebuild_failed || is_stitched(policy) {
                     return outcome;
                 }
                 let DecodedEntry::Complete(complete) = entry else {
@@ -1016,24 +1013,6 @@ fn is_stitched(policy: &RenderCachePolicy) -> bool {
     policy.class() == RepresentationClass::PublicShellStitched
 }
 
-/// Whether this request's chain contains a layer that will serve a prepared
-/// hit.
-///
-/// The Live completion middleware is the only such layer, and the server
-/// appends it exactly when the matched route carries Live metadata - which
-/// is also exactly when `Request::live_operation` answers, because that
-/// operation is recorded on the request before the chain is built. Checking
-/// it here rather than assuming a consumer keeps the stitched class honest
-/// on a route that declared it without being a Live route at all: such a
-/// route has no island to stitch and nothing that could serve a hit handed
-/// past this point, so attaching one would silently discard every hit
-/// instead of deferring it, and the route would render on every request
-/// forever. It keeps the ordinary hit path instead, exactly as it had
-/// before stitched delivery existed.
-fn chain_serves_prepared_hits(request: &Request) -> bool {
-    request.live_operation().is_some()
-}
-
 /// Answers a hit, or hands it to the route chain when the route is stitched.
 ///
 /// A stitched route is never answered here. Its representation is a shared
@@ -1046,6 +1025,17 @@ fn chain_serves_prepared_hits(request: &Request) -> bool {
 /// middleware, the last middleware before the handler, serves it through
 /// [`super::stitch::serve_prepared`]. A chain that refuses the request first
 /// drops the hit unread, which is the point.
+///
+/// This is unconditional, and deliberately so: nothing here checks that a
+/// consumer exists downstream. A route that declares the stitched class
+/// without ending in the Live completion middleware simply drops every
+/// prepared hit and renders, which makes the cache a permanent no-op there.
+/// The alternative - answering such a hit here because nobody else will -
+/// is the exact short circuit this class exists to forbid, and a stitched
+/// shell is classified with its gate reads exempt, so serving one past an
+/// authorization guard that never ran would hand a shared shell to a
+/// visitor the guard would have refused. An ineffective cache is the safe
+/// side of that trade.
 ///
 /// Every other class keeps the behavior it has always had: the stored
 /// representation is a finished answer and is served right here. A Composite
@@ -1061,7 +1051,7 @@ async fn deliver_hit(
     now_ms: u64,
     warning: Option<&'static str>,
 ) -> Response {
-    if !is_stitched(policy) || !chain_serves_prepared_hits(&request) {
+    if !is_stitched(policy) {
         return match entry {
             DecodedEntry::Complete(complete) => respond_hit(
                 &request,

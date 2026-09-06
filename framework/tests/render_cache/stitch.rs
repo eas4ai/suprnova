@@ -38,6 +38,7 @@ async fn a_seed_only_document_under_the_stitched_class_stores_complete_and_still
     assert_eq!(stored.kind, EntryKind::Complete);
     assert_eq!(stored.class, RepresentationClass::PublicShellStitched);
     let before = handler_renders(SEED_ONLY_PATH);
+    let reaches_before = chain_reaches(SEED_ONLY_PATH);
     let hit = dispatch(
         &harness,
         Method::GET,
@@ -50,6 +51,11 @@ async fn a_seed_only_document_under_the_stitched_class_stores_complete_and_still
         handler_renders(SEED_ONLY_PATH),
         before,
         "served from the entry"
+    );
+    assert_eq!(
+        chain_reaches(SEED_ONLY_PATH),
+        reaches_before + 1,
+        "the chain ran and the Live completion middleware served the prepared hit"
     );
     assert_eq!(hit.header("age"), Some("0"));
     assert!(

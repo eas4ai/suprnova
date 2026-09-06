@@ -319,10 +319,13 @@ async fn a_stitched_shell_whose_handler_never_began_is_never_published() {
         "the same class publishes normally once the handler actually began"
     );
     dispatch_get(&harness, "/stitched-handler", &[]).await;
+    // A stitched hit is never short-circuited by the global middleware, and
+    // `/stitched-handler` has no Live completion to consume the prepared hit,
+    // so its handler renders again while the entry stays stored.
     assert_eq!(
         counting_route::renders(),
-        3,
-        "the published shell is a hit, so no second render happens"
+        4,
+        "the stored shell is handed to the chain, not served in place"
     );
 }
 
