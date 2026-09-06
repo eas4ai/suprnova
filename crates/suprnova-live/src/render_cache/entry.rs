@@ -521,6 +521,16 @@ pub fn decode(
             let composite: CompositeHeader =
                 serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
             let header = rebuild_header(composite.entry, limits)?;
+            // A Composite entry is only ever produced for the shell-stitched
+            // class; a header claiming any other class is not a defect the
+            // integrity tag could ever have caught (a valid tag only proves
+            // the bytes are unaltered, not that whatever produced them
+            // respected this contract), so it fails closed here rather than
+            // being trusted downstream as, say, an unassembled public-shared
+            // entry.
+            if header.class != RepresentationClass::PublicShellStitched {
+                return Err(invalid());
+            }
             if Validator::strong_for(&body) != Validator::Strong(stored_digest) {
                 return Err(invalid());
             }

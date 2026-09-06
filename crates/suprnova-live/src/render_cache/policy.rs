@@ -395,6 +395,15 @@ impl RenderCachePolicy {
         {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
+        // A Composite entry is assembled per request from typed slot
+        // outcomes; the bytes a downstream shared cache would see are never
+        // what the server actually cached, so a shell-stitched class may
+        // never declare `s-maxage` (see `http::cache_control_value`'s doc).
+        if self.class == RepresentationClass::PublicShellStitched
+            && matches!(self.shared, SharedCachePolicy::SMaxAge { .. })
+        {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
         Ok(())
     }
 

@@ -223,6 +223,12 @@ impl TrustedHtml {
         &self.reason
     }
 
+    /// Returns the trusted markup text without allocating.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.html
+    }
+
     pub(crate) fn engine_validated_island(html: String) -> Self {
         Self {
             html,

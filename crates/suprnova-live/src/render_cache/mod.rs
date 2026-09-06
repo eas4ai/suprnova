@@ -44,9 +44,10 @@ pub use coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
 };
 pub use composite::{
-    CompositeEntry, CompositeHeader, HeaderPiece, HeaderTemplate, MAX_STITCH_SLOTS, ParsedSlot,
-    Segment, SegmentGraph, ShellIsland, SlotFailurePolicy, StitchSlot, fresh_nonce,
-    surrounding_digest, valid_nonce,
+    AssembledDocument, AssemblyInput, CheckedIsland, CompositeEntry, CompositeHeader, HeaderPiece,
+    HeaderTemplate, MAX_STITCH_SLOTS, ParsedSlot, Segment, SegmentGraph, ShellIsland,
+    SlotFailurePolicy, SlotOutcome, StitchSlot, assemble, fresh_nonce, surrounding_digest,
+    valid_nonce,
 };
 pub use entry::{
     CompleteEntry, DecodedEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders,

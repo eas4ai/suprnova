@@ -79,6 +79,12 @@ impl DocumentMountScope {
         Ok(())
     }
 
+    /// Claims a document key that an already published shell owns, so a
+    /// later mount into this scope can never duplicate it.
+    pub fn reserve_existing(&mut self, key: DocumentMountKey) -> Result<(), MountError> {
+        self.reserve(key)
+    }
+
     pub(crate) fn release(&mut self, key: &DocumentMountKey) {
         self.keys.remove(key);
     }
@@ -246,5 +252,21 @@ impl fmt::Debug for PrivateMountOutput {
             .field("revision", &self.revision)
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_existing_claims_a_key_and_refuses_a_duplicate() {
+        let mut scope = DocumentMountScope::new();
+        let key = DocumentMountKey::parse("shell-seed").expect("key");
+        scope.reserve_existing(key.clone()).expect("reserved");
+        assert_eq!(
+            scope.reserve_existing(key).map_err(|e| e.kind()),
+            Err(MountErrorKind::DuplicateDocumentKey)
+        );
     }
 }

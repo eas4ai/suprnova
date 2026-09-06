@@ -494,3 +494,24 @@ fn a_composite_header_whose_graph_disagrees_with_its_shell_is_rejected() {
         Err(RenderCacheErrorKind::EntryInvalid)
     );
 }
+
+#[test]
+fn a_composite_header_whose_class_is_not_stitched_is_rejected() {
+    let keys = keys();
+    let entry = composite_entry(&keys);
+    let mut header =
+        serde_json::to_value(suprnova_live::render_cache::composite::CompositeHeader {
+            entry: entry.header().clone(),
+            graph: entry.graph().clone(),
+        })
+        .expect("header json");
+    header["class"] = serde_json::json!("public_shared");
+    let encoded =
+        encode_raw_header_for_test_with_kind(&header, entry.shell(), &keys, EntryKind::Composite);
+    assert_eq!(
+        decode(&encoded, &keys, &EntryLimits::default())
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid)
+    );
+}

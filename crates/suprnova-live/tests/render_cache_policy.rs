@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use suprnova_live::render_cache::{
     CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
-    QueryPolicy, RenderCachePolicy, RepresentationClass, ResponseSignals, SharedCachePolicy,
-    StorageLayers, VarianceDimension,
+    QueryPolicy, RenderCacheErrorKind, RenderCachePolicy, RepresentationClass, ResponseSignals,
+    SharedCachePolicy, StorageLayers, VarianceDimension,
 };
 
 fn public_policy() -> RenderCachePolicy {
@@ -227,4 +227,17 @@ fn freshness_bounds_are_explicit_and_bounded() {
         "fresh above 31 days"
     );
     assert!(FreshnessPolicy::new(1_000, 31 * 24 * 60 * 60 * 1000 + 1, 0).is_err());
+}
+
+#[test]
+fn a_stitched_class_refuses_a_shared_max_age() {
+    let error = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .shared(SharedCachePolicy::SMaxAge { seconds: 30 })
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.kind());
+    assert_eq!(error, Err(RenderCacheErrorKind::PolicyInvalid));
+    RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .build()
+        .expect("private sharing builds");
 }

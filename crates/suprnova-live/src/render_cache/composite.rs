@@ -16,11 +16,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
-use super::entry::{EntryHeader, REPLAYABLE_HEADERS};
+use super::entry::{EntryHeader, REPLAYABLE_HEADERS, SafeHeaders, Validator};
 use super::{RenderCacheError, RenderCacheErrorKind};
 use crate::canonical::CanonicalValue;
 use crate::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
 use crate::mount::{DocumentMountKey, MountFlags};
+use crate::view::TrustedHtml;
 
 /// Most identity-bound slots one Composite graph may declare.
 pub const MAX_STITCH_SLOTS: usize = 32;
@@ -525,6 +526,191 @@ pub fn fresh_nonce() -> Result<String, RenderCacheError> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// An island the host rendered and validated for this request.
+#[derive(Debug)]
+pub struct CheckedIsland {
+    html: TrustedHtml,
+    slot: IslandSlot,
+    document_key: DocumentMountKey,
+}
+
+impl CheckedIsland {
+    /// Binds validated island markup to the identity it was rendered for.
+    #[must_use]
+    pub const fn new(html: TrustedHtml, slot: IslandSlot, document_key: DocumentMountKey) -> Self {
+        Self {
+            html,
+            slot,
+            document_key,
+        }
+    }
+}
+
+/// The outcome of one slot for one request.
+#[derive(Debug)]
+pub enum SlotOutcome {
+    /// The island rendered under current authority.
+    Rendered(CheckedIsland),
+    /// The slot's declared fallback fragment is used.
+    Fallback,
+    /// The slot's declared omit behavior is used.
+    Omitted,
+}
+
+/// Everything assembly needs beyond the entry.
+#[derive(Debug)]
+pub struct AssemblyInput {
+    /// One outcome per slot, in slot order.
+    pub outcomes: Vec<SlotOutcome>,
+    /// The fresh nonce, present exactly when the graph needs one.
+    pub nonce: Option<String>,
+}
+
+/// A fully assembled representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssembledDocument {
+    body: Bytes,
+    validator: Validator,
+    headers: SafeHeaders,
+}
+
+impl AssembledDocument {
+    /// Final bytes.
+    #[must_use]
+    pub fn body(&self) -> &Bytes {
+        &self.body
+    }
+
+    /// Strong validator over exactly `body`.
+    #[must_use]
+    pub fn validator(&self) -> &Validator {
+        &self.validator
+    }
+
+    /// Replayable headers with every nonce template rendered.
+    #[must_use]
+    pub fn headers(&self) -> &SafeHeaders {
+        &self.headers
+    }
+}
+
+fn assembly_failed() -> RenderCacheError {
+    RenderCacheError::new(RenderCacheErrorKind::AssemblyFailed)
+}
+
+/// Turns one graph plus current-request outcomes into final bytes and headers.
+/// Pure and deterministic; every rejection is [`RenderCacheErrorKind::AssemblyFailed`].
+pub fn assemble(
+    entry: &CompositeEntry,
+    input: AssemblyInput,
+    max_body_bytes: usize,
+) -> Result<AssembledDocument, RenderCacheError> {
+    let graph = entry.graph();
+    if input.outcomes.len() != graph.slots.len() {
+        return Err(assembly_failed());
+    }
+    let nonce = match (&input.nonce, entry.needs_nonce()) {
+        (Some(nonce), true) if valid_nonce(nonce) => Some(nonce.as_str()),
+        (None, false) => None,
+        _ => return Err(assembly_failed()),
+    };
+    let mut slots_seen: BTreeSet<&str> = graph
+        .shell_islands
+        .iter()
+        .map(|island| island.slot.as_str())
+        .collect();
+    let mut keys_seen: BTreeSet<&str> = graph
+        .shell_islands
+        .iter()
+        .map(|island| island.document_key.as_str())
+        .collect();
+    for (slot, outcome) in graph.slots.iter().zip(&input.outcomes) {
+        match outcome {
+            SlotOutcome::Rendered(island) => {
+                if island.slot.as_str() != slot.slot
+                    || island.document_key.as_str() != slot.document_key
+                {
+                    return Err(assembly_failed());
+                }
+                if !slots_seen.insert(island.slot.as_str())
+                    || !keys_seen.insert(island.document_key.as_str())
+                {
+                    return Err(assembly_failed());
+                }
+            }
+            SlotOutcome::Fallback => {
+                if !matches!(slot.on_failure, SlotFailurePolicy::Fallback { .. }) {
+                    return Err(assembly_failed());
+                }
+            }
+            SlotOutcome::Omitted => {
+                if !matches!(slot.on_failure, SlotFailurePolicy::Omit) {
+                    return Err(assembly_failed());
+                }
+            }
+        }
+    }
+    for index in 0..graph.slots.len() {
+        if surrounding_digest(graph, entry.shell(), index)? != graph.slots[index].surrounding {
+            return Err(assembly_failed());
+        }
+    }
+    let shell = entry.shell();
+    let mut body: Vec<u8> = Vec::with_capacity(shell.len() + 4_096);
+    let mut cursor = 0usize;
+    let push = |body: &mut Vec<u8>, bytes: &[u8]| -> Result<(), RenderCacheError> {
+        body.extend_from_slice(bytes);
+        if body.len() > max_body_bytes {
+            Err(assembly_failed())
+        } else {
+            Ok(())
+        }
+    };
+    for segment in &graph.segments {
+        match segment {
+            Segment::Literal { len } => {
+                let end = cursor + *len as usize;
+                push(&mut body, &shell[cursor..end])?;
+                cursor = end;
+            }
+            Segment::Slot { index } => match &input.outcomes[usize::from(*index)] {
+                SlotOutcome::Rendered(island) => push(&mut body, island.html.as_str().as_bytes())?,
+                SlotOutcome::Fallback => match &graph.slots[usize::from(*index)].on_failure {
+                    SlotFailurePolicy::Fallback { html } => push(&mut body, html.as_bytes())?,
+                    SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
+                        return Err(assembly_failed());
+                    }
+                },
+                SlotOutcome::Omitted => {}
+            },
+            Segment::Nonce => push(&mut body, nonce.ok_or_else(assembly_failed)?.as_bytes())?,
+        }
+    }
+    let mut pairs: BTreeMap<String, String> = entry
+        .header()
+        .headers
+        .iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    for template in &graph.nonce_headers {
+        let mut value = String::new();
+        for piece in &template.pieces {
+            match piece {
+                HeaderPiece::Text { text } => value.push_str(text),
+                HeaderPiece::Nonce => value.push_str(nonce.ok_or_else(assembly_failed)?),
+            }
+        }
+        pairs.insert(template.name.clone(), value);
+    }
+    let headers = SafeHeaders::from_pairs(pairs).map_err(|_| assembly_failed())?;
+    let validator = Validator::strong_for(&body);
+    Ok(AssembledDocument {
+        body: Bytes::from(body),
+        validator,
+        headers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,5 +1165,236 @@ mod tests {
         let digest_1_after_a_changed =
             surrounding_digest(&graph, &shell_with_changed_a, 1).expect("computed");
         assert_eq!(digest_1, digest_1_after_a_changed, "slot 1 must not read a");
+    }
+
+    fn island(name: &str, key: &str, body: &str) -> CheckedIsland {
+        let html = TrustedHtml::framework_generated(
+            format!("<div data-suprnova-live-root=\"{name}\" data-suprnova-live-document-key=\"{key}\">{body}</div>"),
+            crate::view::TrustedMarkupReason::new("composite test island").expect("reason"),
+        )
+        .expect("trusted");
+        CheckedIsland::new(
+            html,
+            IslandSlot::parse(name).expect("slot"),
+            DocumentMountKey::parse(key).expect("key"),
+        )
+    }
+
+    fn entry() -> CompositeEntry {
+        let keys = keys();
+        let (graph, shell) = graph_and_shell();
+        CompositeEntry::new(header(&keys), graph, shell).expect("entry")
+    }
+
+    #[test]
+    fn assembly_is_deterministic_and_fills_every_hole() {
+        let entry = entry();
+        let input = || AssemblyInput {
+            outcomes: vec![
+                SlotOutcome::Rendered(island("a", "doc-a", "A")),
+                SlotOutcome::Omitted,
+            ],
+            nonce: Some("abcDEF123-_".to_owned()),
+        };
+        let first = assemble(&entry, input(), 1 << 20).expect("assembles");
+        let second = assemble(&entry, input(), 1 << 20).expect("assembles");
+        assert_eq!(first.body(), second.body());
+        assert_eq!(first.validator(), second.validator());
+        let body = std::str::from_utf8(first.body()).expect("utf8");
+        assert_eq!(
+            body,
+            "<!doctype html><html><body><p>head</p><div data-suprnova-live-root=\"a\" data-suprnova-live-document-key=\"doc-a\">A</div>abcDEF123-_<p>mid</p></body></html>"
+        );
+        assert_eq!(first.validator(), &Validator::strong_for(first.body()));
+        let csp = first
+            .headers()
+            .iter()
+            .find(|(name, _)| *name == "content-security-policy")
+            .map(|(_, v)| v.to_owned());
+        assert_eq!(csp.as_deref(), Some("script-src 'nonce-abcDEF123-_'"));
+        assert!(
+            first
+                .headers()
+                .iter()
+                .any(|(name, value)| name == "content-type" && value.starts_with("text/html"))
+        );
+    }
+
+    #[test]
+    fn outcome_count_and_kinds_must_match_the_declared_slots() {
+        let entry = entry();
+        let nonce = Some("n0nce".to_owned());
+        let failed = |input| {
+            assemble(&entry, input, 1 << 20)
+                .map(|_| ())
+                .map_err(|e| e.kind())
+        };
+        assert_eq!(
+            failed(AssemblyInput {
+                outcomes: vec![SlotOutcome::Omitted],
+                nonce: nonce.clone()
+            }),
+            Err(RenderCacheErrorKind::AssemblyFailed)
+        );
+        assert_eq!(
+            failed(AssemblyInput {
+                outcomes: vec![SlotOutcome::Omitted, SlotOutcome::Omitted],
+                nonce: nonce.clone()
+            }),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "slot a is fail-document, not omit"
+        );
+        assert_eq!(
+            failed(AssemblyInput {
+                outcomes: vec![
+                    SlotOutcome::Rendered(island("a", "doc-a", "A")),
+                    SlotOutcome::Fallback
+                ],
+                nonce: nonce.clone()
+            }),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "slot b declares omit, not fallback"
+        );
+        assert_eq!(
+            failed(AssemblyInput {
+                outcomes: vec![
+                    SlotOutcome::Rendered(island("b", "doc-a", "A")),
+                    SlotOutcome::Omitted
+                ],
+                nonce: nonce.clone()
+            }),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "rendered slot name must match"
+        );
+        assert_eq!(
+            failed(AssemblyInput {
+                outcomes: vec![
+                    SlotOutcome::Rendered(island("a", "doc-seed", "A")),
+                    SlotOutcome::Omitted
+                ],
+                nonce: nonce.clone()
+            }),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "a rendered island may not reuse a shell island's document key"
+        );
+    }
+
+    #[test]
+    fn the_nonce_is_required_exactly_when_the_graph_needs_one() {
+        let entry = entry();
+        let outcomes = || {
+            vec![
+                SlotOutcome::Rendered(island("a", "doc-a", "A")),
+                SlotOutcome::Omitted,
+            ]
+        };
+        assert!(
+            assemble(
+                &entry,
+                AssemblyInput {
+                    outcomes: outcomes(),
+                    nonce: None
+                },
+                1 << 20
+            )
+            .is_err()
+        );
+        assert!(
+            assemble(
+                &entry,
+                AssemblyInput {
+                    outcomes: outcomes(),
+                    nonce: Some("bad nonce".to_owned())
+                },
+                1 << 20
+            )
+            .is_err()
+        );
+        let keys = keys();
+        let (mut graph, shell) = graph_and_shell();
+        graph
+            .segments
+            .retain(|segment| !matches!(segment, Segment::Nonce));
+        graph.nonce_headers.clear();
+        for index in 0..graph.slots.len() {
+            graph.slots[index].surrounding =
+                surrounding_digest(&graph, &shell, index).expect("surrounding");
+        }
+        let no_nonce = CompositeEntry::new(header(&keys), graph, shell).expect("entry");
+        assert!(
+            assemble(
+                &no_nonce,
+                AssemblyInput {
+                    outcomes: outcomes(),
+                    nonce: Some("n0nce".to_owned())
+                },
+                1 << 20
+            )
+            .is_err()
+        );
+        let document = assemble(
+            &no_nonce,
+            AssemblyInput {
+                outcomes: outcomes(),
+                nonce: None,
+            },
+            1 << 20,
+        )
+        .expect("assembles");
+        let csp = document
+            .headers()
+            .iter()
+            .find(|(name, _)| *name == "content-security-policy")
+            .map(|(_, v)| v.to_owned());
+        assert_eq!(
+            csp.as_deref(),
+            Some("script-src 'nonce-OLDNONCE'"),
+            "an untemplated header replays as stored"
+        );
+    }
+
+    #[test]
+    fn fallback_inserts_the_declared_fragment() {
+        let keys = keys();
+        let (mut graph, shell) = graph_and_shell();
+        graph.slots[1].on_failure = SlotFailurePolicy::Fallback {
+            html: "<p>unavailable</p>".to_owned(),
+        };
+        let entry = CompositeEntry::new(header(&keys), graph, shell).expect("entry");
+        let document = assemble(
+            &entry,
+            AssemblyInput {
+                outcomes: vec![
+                    SlotOutcome::Rendered(island("a", "doc-a", "A")),
+                    SlotOutcome::Fallback,
+                ],
+                nonce: Some("n0nce".to_owned()),
+            },
+            1 << 20,
+        )
+        .expect("assembles");
+        assert!(
+            std::str::from_utf8(document.body())
+                .expect("utf8")
+                .contains("<p>mid</p><p>unavailable</p></body>")
+        );
+    }
+
+    #[test]
+    fn the_assembled_body_is_bounded() {
+        let entry = entry();
+        let input = AssemblyInput {
+            outcomes: vec![
+                SlotOutcome::Rendered(island("a", "doc-a", &"x".repeat(200))),
+                SlotOutcome::Omitted,
+            ],
+            nonce: Some("n0nce".to_owned()),
+        };
+        assert_eq!(
+            assemble(&entry, input, 128)
+                .map(|_| ())
+                .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed)
+        );
     }
 }
