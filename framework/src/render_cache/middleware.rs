@@ -1222,6 +1222,7 @@ async fn lead_render(
         next,
         job.epoch,
         key_carries_a_resolved_principal(&job.variance),
+        policy.class() == RepresentationClass::PublicShellStitched,
     )
     .await;
     let Ok(response) = response else {
@@ -1785,12 +1786,20 @@ fn key_carries_a_resolved_principal(variance: &VarianceDescriptor) -> bool {
 /// `observes_permission_generation` is set, the permission-version identity
 /// is observed first, so it lands in the report like any other read and
 /// counts toward the same bound.
+///
+/// `stitched` is whether this route publishes a stitched public shell,
+/// the one class whose gate runs again on every hit and which therefore
+/// classifies from content reads alone. Every other route folds the gate
+/// bucket back into content here, before the window is closed, so both
+/// the classification and the generation window cover exactly the
+/// undivided set they covered before attribution existed.
 async fn render_under_collector(
     request: Request,
     next: Next,
     epoch: u64,
     ledger: &dyn GenerationLedger,
     observes_permission_generation: bool,
+    stitched: bool,
 ) -> (
     Response,
     super::collector::CollectorReport,
@@ -1801,7 +1810,10 @@ async fn render_under_collector(
             collector::observe(collector::permission_version_identity());
         }
         let response = next(request).await;
-        let report = collector::current_report().unwrap_or_default();
+        let mut report = collector::current_report().unwrap_or_default();
+        if !stitched {
+            report.fold_gate_into_content();
+        }
         let observed = close_window(&report, epoch, ledger).await;
         (response, report, observed)
     })
@@ -1827,13 +1839,15 @@ async fn render_under_collector(
 ///
 /// `observes_permission_generation` is [`key_carries_a_resolved_principal`]
 /// for the job's variance; see that function for why the key, not the
-/// classification, decides it.
+/// classification, decides it. `stitched` is passed straight through to
+/// [`render_under_collector`], which documents what it selects.
 async fn run_render(
     runtime: &Arc<RenderCacheRuntime>,
     request: Request,
     next: Next,
     epoch: u64,
     observes_permission_generation: bool,
+    stitched: bool,
 ) -> (
     Response,
     super::collector::CollectorReport,
@@ -1849,6 +1863,7 @@ async fn run_render(
             epoch,
             runtime.ledger.as_ref(),
             observes_permission_generation,
+            stitched,
         )
         .await;
     };
@@ -1874,6 +1889,7 @@ async fn run_render(
                     epoch,
                     ledger.as_ref(),
                     observes_permission_generation,
+                    stitched,
                 )
                 .await,
             )
@@ -1900,6 +1916,7 @@ async fn run_render(
                 epoch,
                 runtime.ledger.as_ref(),
                 observes_permission_generation,
+                stitched,
             )
             .await
         }

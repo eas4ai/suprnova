@@ -528,6 +528,10 @@ mod tests {
         build_context: impl FnOnce() -> Context,
     ) -> CollectedContext {
         crate::render_cache::collector::Collector::scope(async {
+            // These reads stand in for what a handler reads mid-render, so
+            // attribute them to the content bucket the way the Live
+            // completion middleware does on a real request.
+            crate::render_cache::collector::begin_handler();
             featureflag::evaluator::with_default(evaluator.clone(), || {
                 let ctx = build_context();
                 evaluator.is_enabled(feature, &ctx);

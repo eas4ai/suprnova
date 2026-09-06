@@ -3,10 +3,16 @@
 //! pins the bound at its exact edge, the R29 record-key encoding, the
 //! incomplete-report signal on an unencodable dependency, and each
 //! production read hook that has no other test coverage.
+//!
+//! Every test below that asserts on the content bucket opens its scope
+//! with `collector::begin_handler()`, the marker the Live completion
+//! middleware sets on a real request just before the route handler runs.
+//! Without it a scope starts in the gate bucket and those reads would be
+//! recorded there instead; see the collector's own "Attribution" section.
 
 use serial_test::serial;
 use suprnova::render_cache::DependencyIdentity;
-use suprnova::render_cache::collector::{self, Collector};
+use suprnova::render_cache::collector::{self, Collector, current_report};
 use suprnova::testing::TestDatabase;
 use suprnova::{Model, attrs, model};
 use suprnova_live::render_cache::generation::MAX_OBSERVATIONS;
@@ -14,6 +20,7 @@ use suprnova_live::render_cache::generation::MAX_OBSERVATIONS;
 #[tokio::test]
 async fn observations_stay_within_their_scope_and_detached_tasks_see_none() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         collector::observe_table_read("posts");
         collector::observe_record_read("posts", b"42");
         collector::observe_principal_read();
@@ -49,8 +56,10 @@ async fn observations_stay_within_their_scope_and_detached_tasks_see_none() {
 #[tokio::test]
 async fn nested_scopes_report_independently() {
     let outer = Collector::scope(async {
+        collector::begin_handler();
         collector::observe(DependencyIdentity::table("outer"));
         let inner = Collector::scope(async {
+            collector::begin_handler();
             collector::observe(DependencyIdentity::table("inner"));
             collector::current_report().expect("inner")
         })
@@ -68,6 +77,7 @@ async fn nested_scopes_report_independently() {
 #[tokio::test]
 async fn observation_is_exact_at_the_cap_and_overflows_one_past_it() {
     let at_cap = Collector::scope(async {
+        collector::begin_handler();
         for index in 0..MAX_OBSERVATIONS - 1 {
             collector::observe(DependencyIdentity::record(
                 "t",
@@ -88,6 +98,7 @@ async fn observation_is_exact_at_the_cap_and_overflows_one_past_it() {
     );
 
     let one_past = Collector::scope(async {
+        collector::begin_handler();
         for index in 0..MAX_OBSERVATIONS {
             collector::observe(DependencyIdentity::record(
                 "t",
@@ -111,6 +122,7 @@ async fn observation_is_exact_at_the_cap_and_overflows_one_past_it() {
 async fn oversized_table_name_marks_the_report_incomplete_instead_of_vanishing() {
     let long_name = "t".repeat(200);
     let report = Collector::scope(async {
+        collector::begin_handler();
         collector::observe_table_read(&long_name);
         collector::current_report().expect("report")
     })
@@ -130,6 +142,7 @@ async fn oversized_table_name_marks_the_report_incomplete_instead_of_vanishing()
 async fn oversized_record_key_marks_the_report_incomplete_instead_of_vanishing() {
     let huge_key = vec![0u8; 600];
     let report = Collector::scope(async {
+        collector::begin_handler();
         collector::observe_record_read("t", &huge_key);
         collector::current_report().expect("report")
     })
@@ -168,6 +181,7 @@ fn record_identity_pins_the_json_key_encoding_for_three_shapes() {
 #[tokio::test]
 async fn framework_reads_register_automatically() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = suprnova::Lang::locale();
         let _ = suprnova::Auth::check();
         let _ = suprnova::session::session();
@@ -182,6 +196,7 @@ async fn framework_reads_register_automatically() {
 #[tokio::test]
 async fn gate_inspect_observes_authorization() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = suprnova::Gate::inspect("render-cache-collector-probe-action", &(), &());
         collector::current_report().expect("report")
     })
@@ -192,6 +207,7 @@ async fn gate_inspect_observes_authorization() {
 #[tokio::test]
 async fn gate_inspect_async_observes_authorization() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ =
             suprnova::Gate::inspect_async("render-cache-collector-probe-action", &(), &()).await;
         collector::current_report().expect("report")
@@ -207,6 +223,7 @@ async fn gate_inspect_async_observes_authorization() {
 #[tokio::test]
 async fn gate_raw_observes_authorization() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = suprnova::Gate::raw("render-cache-collector-probe-action", &(), &());
         collector::current_report().expect("report")
     })
@@ -218,11 +235,118 @@ async fn gate_raw_observes_authorization() {
 #[tokio::test]
 async fn gate_raw_async_observes_authorization() {
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = suprnova::Gate::raw_async("render-cache-collector-probe-action", &(), &()).await;
         collector::current_report().expect("report")
     })
     .await;
     assert!(report.context.authorization_read);
+}
+
+// ---- Attribution: gate, content, slot ---------------------------------
+//
+// A scope starts in the gate bucket; `begin_handler` switches it to
+// content; `slot_scope` counts reads and records them nowhere. Only a
+// stitched route classifies from content alone - every other route folds
+// the gate bucket back in and sees exactly the undivided report it saw
+// before attribution existed.
+
+#[tokio::test]
+async fn reads_before_begin_handler_land_in_the_gate_bucket_and_after_it_in_content() {
+    let report = Collector::scope(async {
+        collector::observe_principal_value("alice");
+        collector::observe_table_read("users");
+        collector::begin_handler();
+        collector::observe_table_read("posts");
+        collector::observe_session_read();
+        current_report().expect("report")
+    })
+    .await;
+    assert!(report.gate.context.principal_read);
+    assert!(report.gate.context.principal_material.contains("alice"));
+    assert_eq!(
+        report.gate.observed.len(),
+        1,
+        "the users read is a gate read"
+    );
+    assert!(!report.context.principal_read, "content saw no principal");
+    assert!(report.context.session_read);
+    assert_eq!(report.observed.len(), 1, "the posts read is a content read");
+}
+
+#[tokio::test]
+async fn begin_handler_is_idempotent_and_a_noop_outside_a_scope() {
+    collector::begin_handler();
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        collector::observe_table_read("a");
+        collector::begin_handler();
+        collector::observe_table_read("b");
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(report.observed.len(), 2);
+    assert!(report.gate.observed.is_empty());
+}
+
+#[tokio::test]
+async fn slot_scope_reads_are_counted_and_recorded_nowhere_else() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        collector::slot_scope(async {
+            collector::observe_principal_value("alice");
+            collector::observe_table_read("counters");
+            collector::observe_session_read();
+        })
+        .await;
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(report.slot_reads, 3);
+    assert!(!report.context.principal_read);
+    assert!(!report.context.session_read);
+    assert_eq!(report.observed.len(), 1);
+    assert!(report.gate.observed.is_empty());
+}
+
+#[tokio::test]
+async fn folding_the_gate_into_content_reproduces_the_undivided_report() {
+    let mut report = Collector::scope(async {
+        collector::observe_principal_value("alice");
+        collector::observe_table_read("users");
+        collector::begin_handler();
+        collector::observe_table_read("users");
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    report.fold_gate_into_content();
+    assert!(report.context.principal_read);
+    assert!(report.context.principal_material.contains("alice"));
+    let names: Vec<String> = report
+        .observed
+        .iter()
+        .map(|identity| format!("{identity:?}"))
+        .collect();
+    assert_eq!(
+        report.observed.len(),
+        2,
+        "users deduplicated across buckets, gate first: {names:?}"
+    );
+    assert!(report.gate.observed.is_empty());
+}
+
+#[tokio::test]
+async fn overflow_inside_any_bucket_marks_the_whole_report() {
+    let report = Collector::scope(async {
+        collector::observe_unobservable_read();
+        collector::begin_handler();
+        current_report().expect("report")
+    })
+    .await;
+    assert!(report.context.overflowed);
+    assert!(report.storable().is_none());
 }
 
 // ---- Eloquent read-seam coverage -------------------------------------
@@ -263,6 +387,7 @@ async fn eloquent_get_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::query().get().await.expect("get");
         collector::current_report().expect("report")
     })
@@ -280,6 +405,7 @@ async fn eloquent_aggregate_value_observes_the_table_through_count() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::query().count().await.expect("count");
         collector::current_report().expect("report")
     })
@@ -298,6 +424,7 @@ async fn eloquent_paginate_using_observes_the_table_even_when_the_count_query_fa
     let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let result = Probe::query().paginate_using("page", 10).await;
         assert!(
             result.is_err(),
@@ -319,6 +446,7 @@ async fn eloquent_find_observes_the_table_and_the_record() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::find(created.id).await.expect("find");
         collector::current_report().expect("report")
     })
@@ -344,6 +472,7 @@ async fn eloquent_find_many_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::find_many([a.id, b.id]).await.expect("find_many");
         collector::current_report().expect("report")
     })
@@ -361,6 +490,7 @@ async fn eloquent_all_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::all().await.expect("all");
         collector::current_report().expect("report")
     })
@@ -378,6 +508,7 @@ async fn eloquent_aggregate_optional_observes_the_table_through_min() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _: Option<f64> = Probe::query().min("amount").await.expect("min");
         collector::current_report().expect("report")
     })
@@ -395,6 +526,7 @@ async fn eloquent_value_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _: Option<f64> = Probe::query().value("amount").await.expect("value");
         collector::current_report().expect("report")
     })
@@ -412,6 +544,7 @@ async fn eloquent_pluck_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _: Vec<String> = Probe::query().pluck("name").await.expect("pluck");
         collector::current_report().expect("report")
     })
@@ -429,6 +562,7 @@ async fn eloquent_pluck_keyed_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _: std::collections::HashMap<i64, String> = Probe::query()
             .pluck_keyed("id", "name")
             .await
@@ -449,6 +583,7 @@ async fn eloquent_model_keys_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _ = Probe::query().model_keys().await.expect("model_keys");
         collector::current_report().expect("report")
     })
@@ -466,6 +601,7 @@ async fn eloquent_sole_value_observes_the_table() {
         .expect("create");
 
     let report = Collector::scope(async {
+        collector::begin_handler();
         let _: f64 = Probe::query()
             .sole_value("amount")
             .await

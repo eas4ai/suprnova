@@ -2,6 +2,29 @@
 //! reads register into. Absent outside a scope, so ordinary requests pay
 //! one `try_with` per read and nothing else.
 //!
+//! # Attribution
+//!
+//! Every read lands in one of three buckets, chosen by where the request
+//! was when it happened. A scope starts in the **gate** bucket: whatever
+//! ran before the route handler - an authorization guard, a tenant
+//! middleware - reads there, and those reads run again on every request,
+//! hit or miss. [`begin_handler`] switches the scope to the **content**
+//! bucket, which holds what the handler itself read to build the body.
+//! [`slot_scope`] runs an identity-bound island's mount in the **slot**
+//! bucket, whose reads are counted into [`CollectorReport::slot_reads`]
+//! and recorded nowhere else, because those islands are re-rendered on
+//! every hit.
+//!
+//! Only a [`crate::render_cache::RepresentationClass::PublicShellStitched`]
+//! route classifies from the content bucket alone. Every hit on that class
+//! runs its gate again before anything is served, so a principal or tenant
+//! the gate read is re-resolved per request and never baked into the
+//! shared shell; what the *handler* read is what the shell actually
+//! contains. Every other class folds the gate bucket back into content
+//! ([`CollectorReport::fold_gate_into_content`], called by the render
+//! cache middleware for every non-stitched route) and classifies from
+//! exactly the undivided report it produced before attribution existed.
+//!
 //! # Limitations, by design
 //!
 //! - **Config and Feature identities have no automatic producer.** No
@@ -156,6 +179,26 @@ pub struct CollectedContext {
     pub overflowed: bool,
 }
 
+/// Which bucket a read lands in. A scope starts in `Gate`; the Live
+/// completion middleware (the last middleware before the handler)
+/// switches it to `Content`; an identity-bound mount runs in `Slot`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Attribution {
+    #[default]
+    Gate,
+    Content,
+    Slot,
+}
+
+/// Reads made by middleware before the handler started.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GateReport {
+    /// Context flags from gate reads.
+    pub context: CollectedContext,
+    /// Dependencies from gate reads.
+    pub observed: Vec<DependencyIdentity>,
+}
+
 /// The collector's report.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectorReport {
@@ -163,6 +206,12 @@ pub struct CollectorReport {
     pub observed: Vec<DependencyIdentity>,
     /// Context flags.
     pub context: CollectedContext,
+    /// Reads made by middleware before the handler started; see
+    /// [`begin_handler`].
+    pub gate: GateReport,
+    /// Reads made inside identity-bound mounts; counted, never recorded,
+    /// because those islands are re-rendered on every hit.
+    pub slot_reads: usize,
     /// Undeclared request context names that affected rendering.
     pub undeclared: Vec<String>,
     /// Facts a rendered Live document recorded, if the render mounted one.
@@ -197,12 +246,50 @@ impl CollectorReport {
             Some(&self.observed)
         }
     }
+
+    /// Folds gate reads into the content buckets (gate first,
+    /// deduplicated), producing the undivided report every non-stitched
+    /// route classifies from.
+    ///
+    /// The gate bucket is emptied, so folding twice is a no-op the second
+    /// time. Gate first because these reads genuinely happened first, and
+    /// the observed order is what [`storable`](Self::storable) hands the
+    /// observation window.
+    pub fn fold_gate_into_content(&mut self) {
+        let gate = std::mem::take(&mut self.gate);
+        let content = &mut self.context;
+        content.principal_read |= gate.context.principal_read;
+        content
+            .principal_material
+            .extend(gate.context.principal_material);
+        content.tenant_read |= gate.context.tenant_read;
+        content.tenant_material.extend(gate.context.tenant_material);
+        content.locale_material.extend(gate.context.locale_material);
+        content.session_read |= gate.context.session_read;
+        content.authorization_read |= gate.context.authorization_read;
+        content.secret_context_read |= gate.context.secret_context_read;
+        content.overflowed |= gate.context.overflowed;
+        let mut merged = gate.observed;
+        let seen: BTreeSet<DependencyIdentity> = merged.iter().cloned().collect();
+        merged.extend(
+            self.observed
+                .drain(..)
+                .filter(|identity| !seen.contains(identity)),
+        );
+        self.observed = merged;
+    }
 }
 
 #[derive(Default)]
 struct State {
     report: CollectorReport,
     seen: std::collections::BTreeSet<DependencyIdentity>,
+    /// Which bucket the next read lands in; see the module documentation.
+    attribution: Attribution,
+    /// The gate bucket's own deduplication set, kept separate from `seen`
+    /// so a table read by both the gate and the handler is recorded once
+    /// in each bucket and once after they are folded together.
+    seen_gate: std::collections::BTreeSet<DependencyIdentity>,
 }
 
 /// A scope's collector.
@@ -229,6 +316,57 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
         .ok()
 }
 
+/// Runs `f` against the context of whichever bucket the current
+/// attribution selects, or counts a slot read and does nothing when the
+/// request is inside an identity-bound mount. `None` outside a scope, and
+/// `None` for a slot read, which has no context to hand back.
+fn with_context<R>(f: impl FnOnce(&mut CollectedContext) -> R) -> Option<R> {
+    with_state(|state| match state.attribution {
+        Attribution::Gate => Some(f(&mut state.report.gate.context)),
+        Attribution::Content => Some(f(&mut state.report.context)),
+        Attribution::Slot => {
+            state.report.slot_reads += 1;
+            None
+        }
+    })
+    .flatten()
+}
+
+/// Marks the start of the route handler: every later read is a content
+/// read. Idempotent; a no-op outside a scope. Called by the Live
+/// completion middleware, the last middleware before any Live route's
+/// handler.
+pub fn begin_handler() {
+    with_state(|state| {
+        if state.attribution == Attribution::Gate {
+            state.attribution = Attribution::Content;
+        }
+    });
+}
+
+/// Runs `future` with reads attributed to an identity-bound island slot.
+/// Restores the previous attribution afterwards, including on an early
+/// return, a panic, or the future being dropped part-way.
+///
+/// Nested calls stay in the slot bucket rather than being rejected: the
+/// inner scope's "previous" attribution is `Slot` itself, so a mount that
+/// nests another mount keeps counting reads the same way and the
+/// outermost scope restores gate or content exactly once. A slot read is
+/// recorded nowhere, so nesting cannot leak one into a recorded bucket.
+pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
+    struct Restore(Option<Attribution>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0 {
+                with_state(|state| state.attribution = previous);
+            }
+        }
+    }
+    let previous = with_state(|state| std::mem::replace(&mut state.attribution, Attribution::Slot));
+    let _restore = Restore(previous);
+    future.await
+}
+
 /// Whether a collector is active on this task.
 ///
 /// Read-site hooks check this before doing any work to build an identity
@@ -248,18 +386,39 @@ fn mark_incomplete() {
     with_state(|state| state.report.context.overflowed = true);
 }
 
-/// Records a typed dependency; bounded, idempotent, no-op outside a scope.
+/// Records a typed dependency into the bucket the current attribution
+/// selects; bounded, idempotent within a bucket, no-op outside a scope.
+///
+/// The bound is shared across the gate and content buckets, because both
+/// are folded into one observation window on every non-stitched route. A
+/// per-bucket bound would let a report sit under the cap in each bucket
+/// separately, overflow only once the two were folded, and be stored on a
+/// dependency set that had already dropped identities.
 pub fn observe(identity: DependencyIdentity) {
-    with_state(|state| {
-        if state.seen.contains(&identity) {
-            return;
+    with_state(|state| match state.attribution {
+        Attribution::Slot => state.report.slot_reads += 1,
+        Attribution::Gate => {
+            if state.seen_gate.contains(&identity) {
+                return;
+            }
+            if state.seen_gate.len() + state.seen.len() >= MAX_COLLECTED {
+                state.report.context.overflowed = true;
+                return;
+            }
+            state.seen_gate.insert(identity.clone());
+            state.report.gate.observed.push(identity);
         }
-        if state.seen.len() >= MAX_COLLECTED {
-            state.report.context.overflowed = true;
-            return;
+        Attribution::Content => {
+            if state.seen.contains(&identity) {
+                return;
+            }
+            if state.seen_gate.len() + state.seen.len() >= MAX_COLLECTED {
+                state.report.context.overflowed = true;
+                return;
+            }
+            state.seen.insert(identity.clone());
+            state.report.observed.push(identity);
         }
-        state.seen.insert(identity.clone());
-        state.report.observed.push(identity);
     });
 }
 
@@ -354,7 +513,7 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
 
 /// The principal was resolved or checked.
 pub fn observe_principal_read() {
-    with_state(|state| state.report.context.principal_read = true);
+    with_context(|context| context.principal_read = true);
 }
 /// The principal was resolved to a concrete value. Fix round 5: records
 /// what was actually read, not merely that something was; fix round 6:
@@ -362,25 +521,21 @@ pub fn observe_principal_read() {
 /// `CollectedContext::principal_material`'s own doc for why the collapse
 /// itself was a leak.
 pub fn observe_principal_value(id: &str) {
-    with_state(|state| {
-        state.report.context.principal_read = true;
-        state
-            .report
-            .context
-            .principal_material
-            .insert(id.to_owned());
+    with_context(|context| {
+        context.principal_read = true;
+        context.principal_material.insert(id.to_owned());
     });
 }
 /// The tenant was resolved or checked.
 pub fn observe_tenant_read() {
-    with_state(|state| state.report.context.tenant_read = true);
+    with_context(|context| context.tenant_read = true);
 }
 /// The tenant was resolved to a concrete value. Fix round 5: see
 /// `observe_principal_value`'s own doc; the same reasoning applies.
 pub fn observe_tenant_value(id: &str) {
-    with_state(|state| {
-        state.report.context.tenant_read = true;
-        state.report.context.tenant_material.insert(id.to_owned());
+    with_context(|context| {
+        context.tenant_read = true;
+        context.tenant_material.insert(id.to_owned());
     });
 }
 /// The locale was resolved to a concrete value, at the same
@@ -390,28 +545,24 @@ pub fn observe_tenant_value(id: &str) {
 /// locale after the render (round 5's approach) cannot substitute for
 /// recording it at the point of every read.
 pub fn observe_locale_value(locale: &str) {
-    with_state(|state| {
-        state
-            .report
-            .context
-            .locale_material
-            .insert(locale.to_owned());
+    with_context(|context| {
+        context.locale_material.insert(locale.to_owned());
     });
 }
 /// A session value was read.
 pub fn observe_session_read() {
-    with_state(|state| state.report.context.session_read = true);
+    with_context(|context| context.session_read = true);
 }
 /// An authorization decision was evaluated.
 pub fn observe_authorization_read() {
-    with_state(|state| state.report.context.authorization_read = true);
+    with_context(|context| context.authorization_read = true);
 }
 /// Secret configuration was read. No framework read hooks this
 /// automatically (see the module documentation); application code and
 /// later adapters call it explicitly to mark a representation as having
 /// touched secret configuration.
 pub fn observe_secret_context_read() {
-    with_state(|state| state.report.context.secret_context_read = true);
+    with_context(|context| context.secret_context_read = true);
 }
 /// Records one successful Live island mount; a no-op outside a scope.
 /// Accumulates rather than replaces, because a request can mount more than
