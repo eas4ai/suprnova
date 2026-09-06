@@ -50,7 +50,7 @@ pub mod testing;
 pub use config::{FailurePolicy, L0Limits, L1Config, RenderCacheConfig};
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
-pub use suprnova_live::render_cache::entry::EntryInspection;
+pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
     CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, PolicyPatch, QueryPolicy,

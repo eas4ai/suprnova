@@ -436,7 +436,9 @@ never disagree about when an entry is truly dead.
 `LiveDocumentFacts` accumulates across every island mount and every
 rendered document in one request: `public_seed_islands` and
 `identity_bound_islands` counts, the earliest `seed_deadline_ms` across
-every mounted public-seed island, and a sticky `no_store` flag. Mount facts
+every mounted public-seed island, a sticky `no_store` flag, and the
+`StitchCapture` a stitched shell would be cut from (see Composite stitching
+below), which is default and meaningless on every other class. Mount facts
 are recorded from `LiveDocument::mount` itself, immediately after a mount
 succeeds, rather than from `render` - a handler can mount an island and
 hand-build its own response from `MountedIsland::html()` without ever
@@ -451,14 +453,320 @@ guard to check the key against. The route's own `RenderCachePolicy`, not
 the document's intent, governs this server-side cache; the intent governs
 only the downstream `Cache-Control` a browser or CDN sees.
 
-`document_declines` can only decline a render, never narrow or widen what
-`classify` already decided: any identity-bound island mounted in the
-request, a document that declared `NoStore`, or a public-seed island whose
-promotion deadline could not be resolved, all decline storage outright. A
-seed's remaining time is also checked once more immediately before
-publication (`seed_remaining_ms`); if the deadline is reached between the
-render starting and this point, the candidate is declined rather than
-stored already dead.
+`document_declines(facts, declared)` can only decline a render, never narrow
+or widen what `classify` already decided: a document that declared
+`NoStore`, a public-seed island whose promotion deadline could not be
+resolved, an identity-bound island mounted on a route that did not declare
+`RepresentationClass::PublicShellStitched`, or a capture the stitched
+publisher cannot trust, all decline storage outright. The route's
+**declared** class is what it reads, not the class `classify` produced,
+because an identity-bound island is exactly what a stitched route exists to
+re-render on every hit: declaring that class is what turns the island from a
+reason to decline into the reason to stitch. A seed's remaining time is also
+checked once more immediately before publication (`seed_remaining_ms`); if
+the deadline is reached between the render starting and this point, the
+candidate is declined rather than stored already dead.
+
+## Composite stitching
+
+`RepresentationClass::PublicShellStitched` is the class for a document whose
+shared parts are the same for every visitor and whose islands are not. A
+render under it is stored as an `EntryKind::Composite` entry: a shared
+**shell** of bytes with typed holes cut in it, plus a **segment graph**
+saying what goes back into each hole. No identity-bound island's markup and
+no signed snapshot is ever inside the stored bytes. Every hit re-mounts
+every island for whoever is asking, under authority derived for that request
+alone, so a stitched route trades one shared render of the page frame for
+per-request rendering of exactly the parts that depend on identity.
+
+The engine owns the entry form and the assembler
+(`crates/suprnova-live/src/render_cache/composite.rs`, `entry.rs`); the
+framework owns capture, publication, and the hit path
+(`framework/src/render_cache/stitch.rs`, `collector.rs`, `live.rs`,
+`middleware.rs`, and `framework/src/live/document.rs`).
+
+### The segment graph and its bounds
+
+A `SegmentGraph` is an ordered list of segments over the shell: `Literal`
+(the next `len` bytes of the shell), `Slot` (the output of `slots[index]`),
+and `Nonce` (the nonce minted for this assembly). The literal segments
+always sum to exactly the shell's length, so the shell is partitioned rather
+than searched. Each `StitchSlot` records what a later hit needs to mount its
+island again - route identity, island slot, document mount key, component
+name, contract digest, protocol version, build id, RFC 8785 canonical mount
+parameters, inert mount flags - plus the declared failure policy and a
+`surrounding` digest over the shell bytes on either side of the slot. Public
+seeds are the same for everybody, so they stay inside the shell and the
+graph records only that they are there (`shell_islands`), which is how a hit
+knows their document mount keys are already taken.
+
+| Bound | Value |
+|---|---|
+| `MAX_STITCH_SLOTS` | 32 |
+| `MAX_NONCE_HOLES` | 64 |
+| `MAX_SEGMENTS` | 193 (`2 * (32 + 64) + 1`) |
+| `MAX_SLOT_PARAMETER_BYTES` | 4,096 |
+| `MAX_FALLBACK_BYTES` | 4,096 |
+| `MAX_SHELL_ISLANDS` | 128 |
+| `MAX_NONCE_HEADERS` | 4 |
+| `SURROUNDING_WINDOW_BYTES` | 64 |
+| `MAX_NONCE_BYTES` | 256 |
+
+`CompositeEntry::new` validates every structural rule and bound against the
+shell's length and binds the canonical header, the graph, and the shell into
+a `structural_digest`. That digest is not an HTTP validator, and a Composite
+entry has none: the bytes it stands for do not exist until a request
+assembles them.
+
+### Capture at mount time
+
+The facts a shell is cut from are recorded as the document is built, not
+afterwards. `LiveDocument::mount` records each identity-bound island's
+`StitchSlotDescriptor` together with the exact `TrustedHtml` bytes that mount
+produced (`record_stitch_slot`), records each public-seed island as staying
+inside the shell (`record_shell_island`), and marks the capture unusable
+when a mount's canonical parameters exceed the slot bound
+(`record_stitch_capture_invalid`) rather than turning a working document
+into an error. `LiveDocument::bootstrap` records the Content Security Policy
+nonce its markup stamped, and `LiveDocument::render` records a SHA-256 of
+the body it produced. All of it lands in `StitchCapture` inside
+`LiveDocumentFacts`, in mount order, which is also document order.
+`CapturedSlot` and `SlotFailurePolicy` both have hand-written `Debug`
+implementations that print lengths rather than markup, because the capture
+is reachable from a public derived `Debug` and an island's markup carries
+that principal's signed snapshot.
+
+An application declares a slot's failure behaviour on the mount itself, with
+`LiveMount::on_stitch_failure`. The default is
+`StitchFailurePolicy::FailDocument`; `Omit` and `Fallback(TrustedHtml)` are
+the alternatives, and a fallback fragment larger than `MAX_FALLBACK_BYTES`
+is rejected where it is written rather than silently at publication. On any
+other class the declaration is accepted and inert.
+
+### Attribution: gate, content, slot
+
+The request-scoped collector puts every read into one of three buckets. A
+scope starts in the **gate** bucket, which holds whatever ran before the
+route handler - an authorization guard, tenant middleware. `begin_handler`,
+called by the Live completion middleware, switches to the **content**
+bucket, which holds what the handler read to build the body. `slot_scope`
+runs an identity-bound island's mount in the **slot** bucket, whose reads
+are counted and recorded nowhere else.
+
+Only `PublicShellStitched` classifies from the content bucket alone. That
+exemption is earned by the hit path and by nothing else: every hit on this
+class runs the route's own gate again before a byte is served, so a
+principal or tenant the gate read is re-resolved per request and is never
+baked into the shared shell. Every other class folds the gate bucket back
+into content (`CollectorReport::fold_gate_into_content`) and classifies from
+exactly the undivided report it produced before attribution existed. A
+stitched route whose chain answered before the handler ever ran has an empty
+content bucket, and classifying from it would publish the gate's own
+response as the shared shell; the report records that in
+`CollectorReport::handler_began` and the middleware declines to store the
+representation when it is false.
+
+### The six checks before publication
+
+Six checks stand between a stitched render and a stored shell. The first is
+the middleware's own, immediately after classification; the rest are
+`stitch::build_composite_entry`'s, the only publisher for a stitched route
+that rendered a Live document. Every rejection is a decline counted under
+the existing `declined` lookup outcome, never an error:
+
+1. The handler began, and the Live document rules do not decline outright.
+   `document_declines(facts, declared)` takes the route's **declared** class,
+   because an identity-bound island is exactly what this class exists to
+   re-render on every hit: under `PublicShellStitched` that island is the
+   reason to stitch, and under every other class it is still a reason to
+   decline. A capture marked invalid, a document that declared `NoStore`, or
+   a public-seed island with no resolvable deadline all decline here.
+2. The capture accounts for every identity-bound island the request mounted
+   (one captured slot each) and holds no more than `MAX_STITCH_SLOTS`.
+3. The response body is byte for byte the body `LiveDocument::render`
+   produced. Route middleware that rewrites the body afterwards runs again
+   on every hit, so storing its output would apply it twice and leave the
+   entry's validator describing bytes no client ever received. This check is
+   also what bounds everything below: the body is now provably the rendered
+   document, which the view renderer already bounded.
+4. Every captured island's bytes occur exactly once in that body, and the
+   occurrences do not overlap. An island found twice, or not at all, cannot
+   be cut out, and a shell that kept it would be that principal's markup and
+   signed snapshot, shared.
+5. Every occurrence of the document's bootstrap nonce outside every island
+   is collected as a hole. The scan is bounded at `MAX_NONCE_HOLES + 1`
+   matches and declines the whole document the moment it reaches that limit,
+   before any filtering: a truncated scan cannot prove there is no further
+   occurrence, and one it did not see would be copied into the shared shell
+   as a fixed nonce while every hit rebuilt the header with a fresh one.
+6. Every replayable stored header whose value carries that nonce becomes a
+   `HeaderTemplate` of text and nonce pieces, within `MAX_NONCE_HEADERS`
+   templates and `MAX_NONCE_HOLES` pieces each.
+
+Only then is the form decided, and it can be decided because checks 4 to 6
+between them enumerated everything that has to come out. A document with no
+islands, no nonce holes, and no nonce-bearing header is a finished shared
+answer and is published `Complete`. Anything else is published `Composite`,
+including a document with no islands but a nonce: a `Complete` entry there
+would freeze the first visitor's nonce into both the stored body and the
+stored `Content-Security-Policy` and replay them to everybody, which is a
+nonce that proves nothing. The body is then walked once, cutting at every
+island and every hole; what is not cut out becomes the shell, and each
+slot's surrounding digest is taken over the shell that resulted.
+
+### The hit path
+
+The global `RenderCacheMiddleware` never answers a stitched route where it
+stands. On a hit it decodes the entry, fixes the freshness decision and the
+instant it was taken at, attaches the result to the request
+(`Request::attach_prepared_hit`) and calls the next layer, so the route's
+own authorization guard, tenant middleware, and anything else it declared
+run exactly as they do on a miss. The Live completion middleware - the last
+middleware before the handler - is what finally serves the hit, through
+`stitch::serve_prepared`. A request the chain refuses first never reaches
+that point at all, and the prepared hit is dropped unread with the request.
+A `Complete` entry prepared this way replays through the same conditional
+response a non-stitched hit would use; a `Composite` entry is assembled.
+
+Assembly re-derives every slot from the live mount catalog rather than
+trusting the entry. `render_slot` looks the registration up by route and
+island slot and accepts it only when it is still identity-bound and its
+component, contract digest, protocol, document mount key, and build all
+match what was stored; anything else is drift between the stored entry and
+the running build, and drift is a slot failure, never a substitution. The
+request context is then validated through the same path a handler's own
+mount would use, and the island is mounted inside `slot_scope`.
+Reauthorization is per request and is never cached. Before any slot is
+mounted, the document mount scope reserves the shell's public-seed keys, so
+a stitched slot can never re-mount under a key the assembled document
+already contains.
+
+Failure is per slot and follows that slot's declared policy: `Omit` and
+`Fallback` are recorded as such and assembly continues, `FailDocument`
+abandons the document. Anything that is not a slot's business - no runtime,
+an unparseable path or stored declaration, a shell whose islands cannot be
+reserved, an exhausted randomness source, an engine assembly that rejects
+the result - fails the document as a whole rather than serving a partial
+one. Every one of those paths ends at `fail_document`, which counts the
+outcome and lets the route's own handler answer, uncached, exactly as it
+would on a miss. There is no partial response.
+
+`assemble` itself is pure and deterministic. It checks that each outcome
+names the slot it was rendered for and obeys that slot's declared policy,
+recomputes every surrounding digest from the graph and the entry's own shell
+(so a shell that drifted after the digest was recorded is caught), computes
+the exact final length from typed facts alone and enforces the body bound
+before allocating a byte, walks the segments once, and rebuilds the
+replayable headers from the stored header plus every nonce template.
+
+### The assembled response
+
+The served headers come from the assembled document, not from the stored
+header, because a nonce-bearing header has been rebuilt around the nonce
+minted for this request; replaying the stored value would declare the
+leader's nonce over a body carrying somebody else's. `Vary`, `Age`, and
+`Warning` follow the shared contract. Two things differ from every other
+class, and both follow from the bytes being new:
+
+- **A Composite response never answers 304.** `If-None-Match` is not
+  evaluated at all. Every assembly is a distinct representation - a fresh
+  nonce, fresh instance identities - so a 304 would tell the client to pair
+  the body it already has with headers minted for this request. The
+  validator is still strong over exactly the bytes sent and still honest
+  about which representation this is; it simply never matches a later
+  request, which is the truth. `HEAD` still sends the headers with no body.
+- **A slotted assembly is `private, no-store`.** The bytes hold islands
+  mounted for one principal under authority re-derived for one request; a
+  `max-age` would let a shared browser profile replay them to whoever sits
+  down next and skip reauthorization for the whole window. A zero-slot
+  Composite has no per-principal bytes in it, only a per-request nonce, so
+  it keeps the class's private `max-age` like any other private
+  representation.
+
+The class refuses `SharedCachePolicy::SMaxAge` at policy build time, so no
+shared proxy is ever told to keep bytes the server never cached.
+
+### Telemetry and test seams
+
+Two counters, both with a closed `outcome` attribute:
+`suprnova.render_cache.stitch.assemblies` (`assembled`, `fail_document`) and
+`suprnova.render_cache.stitch.slots` (`rendered`, `omitted`, `fallback`,
+`failed`). They are declared in `framework/src/render_cache/telemetry.rs`
+alongside the four lookup, publication, and rebuild names, and are listed
+with them under Operations below.
+
+Two hidden test seams reach state no external test could otherwise produce.
+`RenderCache::shell_for_test` returns a stored Composite entry's shell bytes,
+which is what proves the shell holds no island markup and no signed
+snapshot; `EntryInspection` reports only a shell's length.
+`render_cache::testing::rewrite_composite_for_test` rewrites a stored graph
+in place and republishes it under the same key with a fresh fence, which is
+how a test reaches a redeploy: a stored slot naming a component or contract
+digest the running registry no longer has. Both are `#[doc(hidden)]` and
+gated on `cfg(test)` or the `testing` feature.
+
+The application dogfoods the class on its own dashboard: `app/src/live/mod.rs`
+declares `PublicShellStitched` for `/live`, whose three islands are
+identity-bound and whose shell reads nothing private, and
+`app/tests/live_render_cache.rs` proves through the running application that
+one shared shell is stored as a Composite entry with three slots, that a
+second principal is served from it without the handler running, that each
+principal's island carries its own scope, that the response is
+`private, no-store`, that a conditional GET is answered 200, and that an
+anonymous visitor gets the route's own login redirect.
+
+### Limitations
+
+Each of these is ruled behaviour, not a defect.
+
+- `PublicShellStitched` is meaningful only on routes whose chain ends in the
+  Live completion middleware. A non-Live route under the class never
+  short-circuits on a hit: the prepared hit is dropped unconsumed and the
+  handler re-renders, and the route still publishes an entry it can never
+  serve. This is unconditional on purpose, because answering such a hit in
+  the global middleware is the exact short circuit the class exists to
+  forbid.
+- A stitched route whose handler renders no Live document at all publishes a
+  `Complete` entry without the body-digest rule, so response-rewriting route
+  middleware on such a route applies again on every hit. Use the class only
+  with `LiveDocument::render`.
+- Response-rewriting route middleware on a stitched Live route makes the
+  document decline at publication (body digest mismatch), so the route is
+  served uncached on every request.
+- A document with more than 64 occurrences of its bootstrap nonce in the
+  rendered body (islands included, since the scan declines before it filters
+  them out), more than 32 identity-bound islands, or more than 193 graph
+  segments declines under the generic `declined` outcome; there is no
+  dedicated telemetry reason for a bound.
+- An assembled document with at least one private island is sent
+  `Cache-Control: private, no-store`; a zero-island Composite keeps the
+  class's private `max-age`.
+- Composite responses never answer 304, so `If-None-Match` is ignored and the
+  emitted `ETag` serves `HEAD` and same-response validation only.
+- A stitched hit whose route chain refuses it (authorization, tenant) has
+  already been counted as a hit before the chain ran; the stitch assembly
+  and slot counters are the ones that describe what assembly actually did.
+- A slot failure on a hit is not distinguished in telemetry by cause: a
+  missing registration, an identity mismatch, an authorization refusal, and
+  a mount error all count as `failed` or follow the slot's declared policy.
+  A follow-up capture may add reasons, as
+  `iterations/next/declined-lookups-record-a-reason.md` proposes for the
+  lookup outcome.
+- A stitched entry with slots is never served by the stale-on-error fallback
+  and never triggers a background rebuild. Serving the stored shell on a
+  failed foreground rebuild would answer a request the route's own chain
+  never got to gate, and a spawned background rebuild carries none of the
+  request's authorization task-locals, so its shell would be whatever the
+  gate renders for nobody. A stale-servable entry is still assembled
+  immediately, with the `Warning` header.
+- An unencodable read inside a private island's mount marks the whole
+  collector report overflowed, so the shell is not stored. This is
+  conservative: the read belongs to an island that is re-rendered on every
+  hit, but the report cannot say so.
+- A Composite entry found under a route whose class declaration changed is
+  not evicted. `deliver_hit` counts it as a miss and runs the chain, so
+  nothing composite is ever served, but the entry stays in L0 until eviction
+  pressure, an epoch advance, or a republish removes it.
 
 ## Operations
 
@@ -532,14 +840,17 @@ L1 is not touched by an epoch advance and keeps every pre-epoch file until
 
 ### Telemetry
 
-Four closed counter names: `suprnova.render_cache.lookups`,
+Six closed counter names: `suprnova.render_cache.lookups`,
 `suprnova.render_cache.hits`, `suprnova.render_cache.publications`,
-`suprnova.render_cache.rebuilds`. Only `lookups` and `hits` carry the
-`outcome` attribute, with the eight `LookupOutcome` values listed under
+`suprnova.render_cache.rebuilds`, `suprnova.render_cache.stitch.assemblies`,
+and `suprnova.render_cache.stitch.slots`. `lookups` and `hits` carry the
+`outcome` attribute with the eight `LookupOutcome` values listed under
 "Framework middleware and policy" above (`l0`, `l1`, `conditional`,
 `stale`, `miss`, `bypass`, `moved`, `declined`); `hits` increments only for
-`l0`, `l1`, `conditional`, and `stale`. `publications` and `rebuilds` are
-plain counts with no `outcome` attribute in this build.
+`l0`, `l1`, `conditional`, and `stale`. The two stitch counters carry their
+own closed `outcome` sets: `assembled` and `fail_document` for assemblies,
+`rendered`, `omitted`, `fallback`, and `failed` for slots. `publications`
+and `rebuilds` are plain counts with no `outcome` attribute in this build.
 
 ### Console commands
 
@@ -556,9 +867,10 @@ registers its own: neither ever prints a stored body or a raw key.
 
 ### What this build leaves out
 
-- **Composite stitching (plan B).** `RepresentationClass::PublicShellStitched`
-  and `EntryKind::Composite` exist as types, but no segment graph assembly,
-  and no provider that writes or reads one, is implemented in this build.
+- **Separately cached nested segments (fragment caching shared across
+  documents).** A stitched entry's slots are re-rendered per request and
+  never cached themselves, and a cached segment cannot contain another
+  cached segment; captured in `iterations/next/nested-cached-segments.md`.
 - **Database and Redis tiers (plan C).** The only storage providers are the
   in-process `MemoryRenderStore` (L0) and the file-backed `FileRenderStore`
   (L1); there is no shared, cross-process, or cross-node tier.

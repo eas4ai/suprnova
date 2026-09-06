@@ -1,5 +1,7 @@
 //! The dogfood public document is served from the RenderCache and its
-//! cached seed still promotes.
+//! cached seed still promotes, and the dogfood dashboard is served as a
+//! stitched document: one shared shell whose islands are re-mounted for
+//! whoever is asking.
 //!
 //! Ruling R78: asserting only that the route responds would pass whether the
 //! representation was stored or silently declined, so every claim here is
@@ -26,10 +28,10 @@ mod live_support;
 use hyper::{Method, StatusCode};
 use live_support::{
     ActionSpec, action_request, decoded_snapshot, empty, get, idempotency, invoke, island_tag,
-    render_counter, request, send, setup_app,
+    render_counter, request, seed_session, send, setup_app,
 };
 use serde_json::Value;
-use suprnova::render_cache::{RenderCache, RepresentationClass};
+use suprnova::render_cache::{EntryKind, RenderCache, RepresentationClass};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
@@ -175,5 +177,151 @@ async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
         render_counter::renders(),
         before,
         "the conditional GET is answered from the entry, not a render"
+    );
+}
+
+/// The dashboard is this application's stitched route: one shared shell is
+/// published once, and every hit re-mounts its three identity-bound islands
+/// for whoever is asking, behind the route's own login gate.
+///
+/// Ruling R78 in the form this class needs. `render_counter` cannot carry
+/// the "the handler did not run" claim here, and saying so is the point of
+/// this note: it is a global middleware registered after
+/// `RenderCache::install`, so it sits outside the route's own chain, and a
+/// stitched hit is deliberately forwarded through that whole chain before
+/// anything is served. It therefore counts every request to the dashboard,
+/// hit or miss. What only an assembled hit can produce is
+/// `Cache-Control: private, no-store`: the composite responder is the only
+/// writer of that value, it runs only after a whole document has been
+/// assembled, and that path never calls the handler. So the counter is
+/// asserted for what it actually is, and the stored Composite entry, the
+/// per-principal islands, and the no-store response carry the cache claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
+    let app = setup_app(6).await;
+    let alice = seed_session(&app).await;
+    let bob = seed_session(&app).await;
+
+    // 1. The first signed-in request renders and publishes a shell.
+    let before = render_counter::renders();
+    let first = get(&app, "/live", Some(&alice)).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(
+        render_counter::renders(),
+        before + 1,
+        "the first GET reaches the handler"
+    );
+    assert_eq!(
+        first.header("cache-control"),
+        Some("private, max-age=300"),
+        "the render that published the shell is not itself an assembly"
+    );
+
+    // 2. What was stored is a segment graph, not a finished answer: one
+    //    slot per identity-bound island, under the declared class.
+    let stored = RenderCache::inspect_route_for_test("/live")
+        .await
+        .expect("the entry is reachable under the route's own lookup key");
+    assert_eq!(stored.kind, EntryKind::Composite);
+    assert_eq!(
+        stored.class,
+        RepresentationClass::PublicShellStitched,
+        "stored under the declared class, undemoted by any observed identity"
+    );
+    assert_eq!(stored.status, 200);
+    assert_eq!(
+        stored.slots, 3,
+        "one slot for the counter, the uploader, and the feed"
+    );
+
+    // 3. A second principal is answered from that shell without the
+    //    handler running. `private, no-store` is written by nothing but the
+    //    composite responder, and the composite responder is reached only
+    //    after a document has been fully assembled from re-mounted islands.
+    //    The counter still moves, which is the fact this test's own note is
+    //    about: a stitched hit is forwarded through the chain the counting
+    //    middleware sits outside of.
+    let before = render_counter::renders();
+    let second = get(&app, "/live", Some(&bob)).await;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    assert_eq!(
+        render_counter::renders(),
+        before + 1,
+        "a stitched hit is forwarded through the route chain, so it is counted too"
+    );
+    assert_eq!(
+        second.header("cache-control"),
+        Some("private, no-store"),
+        "an assembled document holds one principal's islands: nothing may store it"
+    );
+    assert_eq!(second.header("age"), Some("0"));
+
+    // 4. The islands in it belong to the principal who asked, and nothing
+    //    else in the document does: two fresh principals differ only in the
+    //    identity-bearing island tags, which is exactly what the shell has
+    //    holes for.
+    let alice_counter = decoded_snapshot(island_tag(&first.text(), "dashboard-counter"));
+    let bob_counter = decoded_snapshot(island_tag(&second.text(), "dashboard-counter"));
+    assert_ne!(
+        alice_counter["body"]["scope"], bob_counter["body"]["scope"],
+        "each principal is mounted under its own scope"
+    );
+    let shell = |html: &str| {
+        let mut rest = html.to_owned();
+        for key in ["dashboard-counter", "dashboard-uploader", "dashboard-feed"] {
+            let island = island_tag(&rest, key).to_owned();
+            rest = rest.replace(&island, "");
+        }
+        rest
+    };
+    assert_eq!(
+        shell(&first.text()),
+        shell(&second.text()),
+        "the two documents differ only in their island tags"
+    );
+
+    // 5. The same login on the same session keeps the scope its island was
+    //    mounted under: a mount's scope is derived from the session as well
+    //    as the principal, so carrying the cookie is what makes the two
+    //    requests comparable at all.
+    let repeat = get(&app, "/live", Some(&alice)).await;
+    assert_eq!(repeat.status, StatusCode::OK, "{}", repeat.text());
+    assert_eq!(repeat.header("cache-control"), Some("private, no-store"));
+    assert_eq!(
+        decoded_snapshot(island_tag(&repeat.text(), "dashboard-counter"))["body"]["scope"],
+        alice_counter["body"]["scope"]
+    );
+
+    // 6. The gate runs on every hit: an anonymous visitor gets the route's
+    //    own redirect, never an assembled document. The prepared hit is
+    //    dropped unread when the chain refuses.
+    let anonymous = get(&app, "/live", None).await;
+    assert_eq!(anonymous.status, StatusCode::FOUND);
+    assert_eq!(anonymous.header("location"), Some("/login"));
+    assert!(anonymous.body.is_empty(), "a redirect carries no document");
+
+    // 7. A Composite response never answers 304. Each assembly is a
+    //    distinct representation - fresh instance identities, and a fresh
+    //    nonce where a document has one - so the validator is strong over
+    //    the bytes it was sent with and never matches a later request.
+    let etag = second.header("etag").expect("etag").to_owned();
+    let conditional = send(
+        app.addr,
+        request(&app, Method::GET, "/live", Some(&bob), false)
+            .header("if-none-match", &etag)
+            .body(empty())
+            .expect("build conditional request"),
+    )
+    .await;
+    assert_eq!(
+        conditional.status,
+        StatusCode::OK,
+        "Composite responses never answer 304: each assembly is a distinct representation"
+    );
+    assert!(!conditional.body.is_empty());
+    assert_ne!(
+        conditional.header("etag"),
+        Some(etag.as_str()),
+        "the validator describes this assembly, not the last one"
     );
 }

@@ -183,9 +183,31 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     // render that ever did observe an identity would be declined from
     // storage rather than published, so the declaration cannot become a
     // leak by drift.
-    router.try_render_cache(
+    let router = router.try_render_cache(
         PUBLIC_PATH,
         RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
+            .build()?,
+    )?;
+
+    // The dashboard is the stitched route. Its shell - everything outside
+    // the three islands - reads nothing private: `live/dashboard.html` is a
+    // static template with no translation, no feature flag, and no session
+    // read, and the handler hands it only the markup the mounts produced.
+    // The islands themselves are identity-bound, so none of their bytes may
+    // be shared, and none of them are: `PublicShellStitched` stores the
+    // shell alone and re-mounts every island on every hit, under authority
+    // derived for that request. The login redirect in front of the route is
+    // a gate read, not a content read, and it runs again on every hit
+    // because a stitched hit is served only after the route's own chain has
+    // had its say - an anonymous visitor is redirected exactly as on a
+    // miss. Freshness matches the public document (five minutes fresh, a
+    // minute of stale service, five minutes of stale-on-error), and the
+    // class refuses `s-maxage` outright, so no shared proxy is ever told to
+    // keep bytes that were assembled for one principal.
+    router.try_render_cache(
+        DASHBOARD_PATH,
+        RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
             .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
             .build()?,
     )

@@ -84,6 +84,7 @@ require_heading docs/implementation/render-cache.md "Framework middleware and po
 require_heading docs/implementation/render-cache.md "Privacy classification"
 require_heading docs/implementation/render-cache.md "Generations and coherence"
 require_heading docs/implementation/render-cache.md "Live documents"
+require_heading docs/implementation/render-cache.md "Composite stitching"
 require_heading docs/implementation/render-cache.md "Operations"
 require_heading docs/implementation/component-authoring.md "Application-facing authoring"
 require_heading docs/implementation/component-authoring.md "Generated metadata and registration"
