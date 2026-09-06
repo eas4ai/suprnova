@@ -1,11 +1,12 @@
-//! Versioned Complete entry codec with structural integrity and body-free
-//! inspection.
+//! Versioned Complete and Composite entry codec with structural integrity
+//! and body-free inspection.
 
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
+use super::composite::{CompositeEntry, CompositeHeader};
 use super::generation::GenerationSet;
 use super::key::RenderKey;
 use super::policy::{RepresentationClass, UNSAFE_RESPONSE_HEADERS};
@@ -46,7 +47,7 @@ impl Default for EntryLimits {
 pub enum EntryKind {
     /// Directly sendable final bytes.
     Complete,
-    /// Segment graph requiring assembly; unsupported in this build.
+    /// Segment graph requiring assembly.
     Composite,
 }
 
@@ -207,6 +208,44 @@ impl CompleteEntry {
     }
 }
 
+/// A decoded stored representation of either kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DecodedEntry {
+    /// Directly sendable final bytes.
+    Complete(CompleteEntry),
+    /// A segment graph that needs assembly.
+    Composite(CompositeEntry),
+}
+
+impl DecodedEntry {
+    /// The shared header.
+    #[must_use]
+    pub fn header(&self) -> &EntryHeader {
+        match self {
+            Self::Complete(entry) => entry.header(),
+            Self::Composite(entry) => entry.header(),
+        }
+    }
+
+    /// The kind.
+    #[must_use]
+    pub const fn kind(&self) -> EntryKind {
+        match self {
+            Self::Complete(_) => EntryKind::Complete,
+            Self::Composite(_) => EntryKind::Composite,
+        }
+    }
+
+    /// The Complete entry, if that is what this is.
+    #[must_use]
+    pub fn into_complete(self) -> Option<CompleteEntry> {
+        match self {
+            Self::Complete(entry) => Some(entry),
+            Self::Composite(_) => None,
+        }
+    }
+}
+
 /// Body-free metadata read from encoded bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntryInspection {
@@ -224,6 +263,8 @@ pub struct EntryInspection {
     pub epoch: u64,
     /// Number of observed dependencies.
     pub observations: usize,
+    /// Stitch slots (0 for a Complete entry).
+    pub slots: usize,
 }
 
 fn integrity(keys: &SnapshotKeyRing, bytes: &[u8]) -> [u8; 32] {
@@ -266,9 +307,9 @@ fn validate_header_bounds(
 
 /// Frames already-canonicalized header bytes and a body into the wire
 /// layout (magic, version, kind, lengths, header, body, digest, integrity
-/// tag) and signs it. Shared by [`encode_with_kind`] and the test-only raw
-/// header encoder below, since both produce the same wire shape from
-/// different header sources.
+/// tag) and signs it. Shared by [`encode_with_kind`], [`encode_composite`],
+/// and the test-only raw header encoder below, since all three produce the
+/// same wire shape from different header sources.
 fn frame(
     header_bytes: &[u8],
     body: &[u8],
@@ -315,17 +356,15 @@ pub fn encode(entry: &CompleteEntry, keys: &SnapshotKeyRing) -> Result<Bytes, Re
     encode_with_kind(entry, keys, EntryKind::Complete)
 }
 
-/// Test-only encoder that forces the stored kind byte, so tests can produce
-/// a structurally valid but unsupported entry (for example `Composite`)
-/// without a second, unaudited encoding path in production code.
-#[doc(hidden)]
-#[must_use]
-pub fn encode_with_kind_for_test(
-    entry: &CompleteEntry,
+/// Encodes a Composite entry: its canonical header (the shared entry header
+/// plus the segment graph) framed around the shell bytes, never a slot's
+/// rendered content.
+pub fn encode_composite(
+    entry: &CompositeEntry,
     keys: &SnapshotKeyRing,
-    kind: EntryKind,
-) -> Bytes {
-    encode_with_kind(entry, keys, kind).expect("test encoding")
+) -> Result<Bytes, RenderCacheError> {
+    let header_bytes = entry.canonical_header_bytes(EntryLimits::default().max_header_bytes)?;
+    frame(&header_bytes, entry.shell(), EntryKind::Composite, keys)
 }
 
 /// Test-only encoder that serializes an arbitrary `Serialize` value as the
@@ -343,13 +382,29 @@ pub fn encode_raw_header_for_test<T: serde::Serialize>(
     body: &Bytes,
     keys: &SnapshotKeyRing,
 ) -> Bytes {
+    encode_raw_header_for_test_with_kind(header, body, keys, EntryKind::Complete)
+}
+
+/// [`encode_raw_header_for_test`] with an explicit kind byte, so a test can
+/// produce a structurally valid, correctly-signed entry of either kind
+/// whose header carries content the typed constructors would have
+/// rejected. Used to prove that a Composite header disagreeing with its
+/// shell is rejected by `decode`, not merely by [`CompositeEntry::new`].
+#[doc(hidden)]
+#[must_use]
+pub fn encode_raw_header_for_test_with_kind<T: serde::Serialize>(
+    header: &T,
+    body: &Bytes,
+    keys: &SnapshotKeyRing,
+    kind: EntryKind,
+) -> Bytes {
     let header_json = serde_json::to_vec(header).expect("test header serializes");
     let limits =
         header_limits(EntryLimits::default().max_header_bytes).expect("default header limits");
     let header_bytes = crate::canonical::parse_canonical_value(&header_json, &limits)
         .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
         .expect("test header canonicalizes");
-    frame(&header_bytes, body, EntryKind::Complete, keys).expect("test framing")
+    frame(&header_bytes, body, kind, keys).expect("test framing")
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> Result<usize, RenderCacheError> {
@@ -359,12 +414,47 @@ fn read_u32(bytes: &[u8], at: usize) -> Result<usize, RenderCacheError> {
     Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize)
 }
 
-/// Decodes and verifies a Complete entry; every defect is a miss.
+/// Rebuilds a decoded [`EntryHeader`] through its validating constructors
+/// and re-checks the header, observation, and status bounds. The derived
+/// `Deserialize` for `SafeHeaders` and `VarianceDescriptor` rebuilds their
+/// private maps straight from JSON, bypassing the allowlist, charset,
+/// count, and length bounds their validating constructors apply. A correct
+/// integrity tag only proves the bytes were not corrupted in transit, not
+/// that whatever produced them respected those bounds, so what was read
+/// back is rebuilt through the same validating constructors before it is
+/// trusted. Shared by the Complete and Composite decode arms, since both
+/// carry the same [`EntryHeader`] shape.
+fn rebuild_header(
+    header: EntryHeader,
+    limits: &EntryLimits,
+) -> Result<EntryHeader, RenderCacheError> {
+    let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
+    if header.headers.0.len() > limits.max_headers
+        || header.observed.len() > limits.max_observations
+        || header.status != 200
+    {
+        return Err(invalid());
+    }
+    let rebuilt_headers = SafeHeaders::from_pairs(header.headers.iter()).map_err(|_| invalid())?;
+    let mut rebuilt_variance = VarianceDescriptor::new();
+    for (dimension, value) in header.variance.dimensions() {
+        rebuilt_variance
+            .declare(dimension.clone(), value.clone())
+            .map_err(|_| invalid())?;
+    }
+    Ok(EntryHeader {
+        headers: rebuilt_headers,
+        variance: rebuilt_variance,
+        ..header
+    })
+}
+
+/// Decodes and verifies a Complete or Composite entry; every defect is a miss.
 pub fn decode(
     bytes: &Bytes,
     keys: &SnapshotKeyRing,
     limits: &EntryLimits,
-) -> Result<CompleteEntry, RenderCacheError> {
+) -> Result<DecodedEntry, RenderCacheError> {
     let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
     if bytes.len() < 4 + 2 + 1 + 4 + 4 + 32 + 32 || &bytes[..4] != MAGIC {
         return Err(invalid());
@@ -379,15 +469,11 @@ pub fn decode(
             RenderCacheErrorKind::EntryUnsupported,
         ));
     }
-    match bytes[6] {
-        1 => {}
-        2 => {
-            return Err(RenderCacheError::new(
-                RenderCacheErrorKind::EntryUnsupported,
-            ));
-        }
+    let kind = match bytes[6] {
+        1 => EntryKind::Complete,
+        2 => EntryKind::Composite,
         _ => return Err(invalid()),
-    }
+    };
     let header_len = read_u32(bytes, 7)?;
     if header_len > limits.max_header_bytes {
         return Err(invalid());
@@ -398,32 +484,6 @@ pub fn decode(
         .ok_or_else(invalid)?;
     let canonical_limits = header_limits(limits.max_header_bytes)?;
     validate_header_bounds(header_bytes, &canonical_limits)?;
-    let header: EntryHeader = serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
-    if header.headers.0.len() > limits.max_headers
-        || header.observed.len() > limits.max_observations
-        || header.status != 200
-    {
-        return Err(invalid());
-    }
-    // The derived `Deserialize` for `SafeHeaders` and `VarianceDescriptor`
-    // rebuilds their private maps straight from JSON, bypassing the
-    // allowlist, charset, count, and length bounds their validating
-    // constructors apply. A correct integrity tag only proves the bytes
-    // were not corrupted in transit, not that whatever produced them
-    // respected those bounds, so what was read back is rebuilt through the
-    // same validating constructors before it is trusted.
-    let rebuilt_headers = SafeHeaders::from_pairs(header.headers.iter()).map_err(|_| invalid())?;
-    let mut rebuilt_variance = VarianceDescriptor::new();
-    for (dimension, value) in header.variance.dimensions() {
-        rebuilt_variance
-            .declare(dimension.clone(), value.clone())
-            .map_err(|_| invalid())?;
-    }
-    let header = EntryHeader {
-        headers: rebuilt_headers,
-        variance: rebuilt_variance,
-        ..header
-    };
     let body_len_at = header_start + header_len;
     let body_len = read_u32(bytes, body_len_at)?;
     if body_len > limits.max_body_bytes {
@@ -446,11 +506,28 @@ pub fn decode(
     if digest_at + 32 != payload.len() {
         return Err(invalid());
     }
-    let entry = CompleteEntry::new(header, body);
-    if entry.validator() != &Validator::Strong(stored_digest) {
-        return Err(invalid());
+    match kind {
+        EntryKind::Complete => {
+            let header: EntryHeader =
+                serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
+            let header = rebuild_header(header, limits)?;
+            let entry = CompleteEntry::new(header, body);
+            if entry.validator() != &Validator::Strong(stored_digest) {
+                return Err(invalid());
+            }
+            Ok(DecodedEntry::Complete(entry))
+        }
+        EntryKind::Composite => {
+            let composite: CompositeHeader =
+                serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
+            let header = rebuild_header(composite.entry, limits)?;
+            if Validator::strong_for(&body) != Validator::Strong(stored_digest) {
+                return Err(invalid());
+            }
+            let entry = CompositeEntry::new(header, composite.graph, body)?;
+            Ok(DecodedEntry::Composite(entry))
+        }
     }
-    Ok(entry)
 }
 
 /// Reads metadata without decoding or exposing the body. This is the
@@ -479,6 +556,14 @@ pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, R
     validate_header_bounds(header_bytes, &canonical_limits)?;
     let header: EntryHeader = serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
     let body_bytes = read_u32(bytes, 11 + header_len)?;
+    let slots = match kind {
+        EntryKind::Complete => 0,
+        EntryKind::Composite => {
+            let composite: CompositeHeader =
+                serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
+            composite.graph.slots.len()
+        }
+    };
     Ok(EntryInspection {
         kind,
         class: header.class,
@@ -487,6 +572,7 @@ pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, R
         published_at_ms: header.published_at_ms,
         epoch: header.epoch,
         observations: header.observed.len(),
+        slots,
     })
 }
 

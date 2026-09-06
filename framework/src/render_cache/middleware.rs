@@ -163,7 +163,8 @@ use suprnova_live::render_cache::coherence::{
     FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
 };
 use suprnova_live::render_cache::entry::{
-    CompleteEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders, decode, encode,
+    CompleteEntry, DecodedEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders, decode,
+    encode,
 };
 use suprnova_live::render_cache::generation::{
     CoherenceCheck, GenerationLedger, GenerationSet, ObservationWindow,
@@ -803,6 +804,11 @@ fn key_input(
 /// the wrong slot; this comparison is defence in depth against a store
 /// defect or a second writer sharing the key ring and directory, and it
 /// costs one comparison per hit.
+///
+/// A Composite entry is also treated as a miss on the layer it is found in,
+/// but never evicted: it is not defective, it is simply not servable by
+/// this Complete-only lookup until the assembler lands (Task 6 changes
+/// this).
 async fn lookup(
     runtime: &RenderCacheRuntime,
     key: &RenderKey,
@@ -810,21 +816,26 @@ async fn lookup(
     let l0_stored = runtime.l0.get(key).await.map_err(|_| ())?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-            Ok(entry) if entry.header().key == *key => {
+            Ok(DecodedEntry::Complete(entry)) if entry.header().key == *key => {
                 return Ok(Some((entry, stored, Layer::L0)));
             }
             // Defective (`Err`) or misplaced (`Ok` under another key): the
             // same treatment either way.
-            Ok(_) | Err(_) => {
+            Ok(DecodedEntry::Complete(_)) | Err(_) => {
                 let _ = runtime.l0.evict(key).await;
             }
+            // A Composite entry needs assembly this function does not yet
+            // perform (Task 3 adds the assembler; Task 6 changes `lookup`
+            // to use it). It is not defective, so it is left in place and
+            // simply treated as a miss for this Complete-only lookup.
+            Ok(DecodedEntry::Composite(_)) => {}
         }
     }
     if let Some(l1) = &runtime.l1 {
         let l1_stored = l1.get(key).await.map_err(|_| ())?;
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-                Ok(entry) if entry.header().key == *key => {
+                Ok(DecodedEntry::Complete(entry)) if entry.header().key == *key => {
                     // L0 has no age-based expiry of its own (see
                     // `MemoryRenderStore::publish`'s own doc); `u64::MAX`
                     // is the trait's documented "never age-swept" value,
@@ -844,9 +855,12 @@ async fn lookup(
                 }
                 // Defective or misplaced, as for L0 above; a misplaced L1
                 // entry is never promoted.
-                Ok(_) | Err(_) => {
+                Ok(DecodedEntry::Complete(_)) | Err(_) => {
                     let _ = l1.evict(key).await;
                 }
+                // As for L0 above: not servable by this Complete-only
+                // lookup yet, but not defective, so it stays on disk.
+                Ok(DecodedEntry::Composite(_)) => {}
             }
         }
     }

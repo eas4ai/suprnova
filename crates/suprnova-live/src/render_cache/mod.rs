@@ -19,8 +19,8 @@ pub mod key;
 /// contract, and the observation window that closes into a coherence check.
 pub mod generation;
 
-/// Versioned Complete entry codec with structural integrity and body-free
-/// inspection.
+/// Versioned Complete and Composite entry codec with structural integrity
+/// and body-free inspection.
 pub mod entry;
 
 /// Composite entries: typed segment graphs, stitch slots, and deterministic assembly.
@@ -49,8 +49,8 @@ pub use composite::{
     surrounding_digest, valid_nonce,
 };
 pub use entry::{
-    CompleteEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders, Validator,
-    decode, encode, inspect,
+    CompleteEntry, DecodedEntry, EntryHeader, EntryInspection, EntryKind, EntryLimits, SafeHeaders,
+    Validator, decode, encode, encode_composite, inspect,
 };
 pub use generation::{
     CoherenceCheck, DependencyIdentity, Generation, GenerationLedger, GenerationSet,

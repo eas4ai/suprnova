@@ -1,12 +1,19 @@
 //! Complete entries are bounded, versioned, integrity-protected, and
 //! inspectable without the body.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
-use suprnova_live::identity::{KeyId, UnixMillis};
+use suprnova_live::identity::{ContentDigest, KeyId, RouteIdentity, UnixMillis};
+use suprnova_live::render_cache::composite::{
+    CompositeEntry, HeaderPiece, HeaderTemplate, Segment, SegmentGraph, ShellIsland,
+    SlotFailurePolicy, StitchSlot, surrounding_digest,
+};
 use suprnova_live::render_cache::entry::{
-    CompleteEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, Validator, decode, encode,
-    encode_raw_header_for_test, encode_with_kind_for_test, inspect,
+    CompleteEntry, DecodedEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, Validator,
+    decode, encode, encode_composite, encode_raw_header_for_test,
+    encode_raw_header_for_test_with_kind, inspect,
 };
 use suprnova_live::render_cache::generation::GenerationSet;
 use suprnova_live::render_cache::key::RenderKey;
@@ -100,11 +107,63 @@ fn base_header_json(keys: &SnapshotKeyRing) -> serde_json::Value {
     })
 }
 
-/// Encodes the fixture header with the kind byte forced to `kind`, using the
-/// crate's `#[doc(hidden)]` test-only encoder so an unsupported-kind entry
-/// can still be produced with a correctly-computed integrity tag.
-fn encode_kind_for_test(keys: &SnapshotKeyRing, kind: EntryKind) -> Bytes {
-    encode_with_kind_for_test(&entry(keys), keys, kind)
+/// A minimal Composite entry: a shell with one nonce hole and one stitch
+/// slot, plus one shell island and one nonce-bearing header template - the
+/// same shape as `composite::tests::graph_and_shell`, reused here at the
+/// codec boundary rather than duplicated.
+fn composite_entry(keys: &SnapshotKeyRing) -> CompositeEntry {
+    let head = b"<!doctype html><html><body>".to_vec();
+    let tail = b"</body></html>".to_vec();
+    let shell = Bytes::from([head.as_slice(), tail.as_slice()].concat());
+    let mut graph = SegmentGraph {
+        segments: vec![
+            Segment::Literal {
+                len: head.len() as u32,
+            },
+            Segment::Slot { index: 0 },
+            Segment::Nonce,
+            Segment::Literal {
+                len: tail.len() as u32,
+            },
+        ],
+        slots: vec![StitchSlot {
+            route: RouteIdentity::from_bytes(&[4u8; 32])
+                .expect("route")
+                .to_base64url(),
+            slot: "counter".to_owned(),
+            document_key: "doc-counter".to_owned(),
+            component: "app.counter".to_owned(),
+            contract_digest: ContentDigest::from_bytes(&[2u8; 32])
+                .expect("digest")
+                .to_base64url(),
+            protocol: 1,
+            build: "suprnova-1.0.0".to_owned(),
+            parameters: "{}".to_owned(),
+            flags: BTreeMap::new(),
+            on_failure: SlotFailurePolicy::FailDocument,
+            surrounding: String::new(),
+        }],
+        shell_islands: vec![ShellIsland {
+            slot: "seed".to_owned(),
+            document_key: "doc-seed".to_owned(),
+        }],
+        nonce_headers: vec![HeaderTemplate {
+            name: "content-security-policy".to_owned(),
+            pieces: vec![
+                HeaderPiece::Text {
+                    text: "script-src 'nonce-".to_owned(),
+                },
+                HeaderPiece::Nonce,
+                HeaderPiece::Text {
+                    text: "'".to_owned(),
+                },
+            ],
+        }],
+    };
+    graph.slots[0].surrounding = surrounding_digest(&graph, &shell, 0).expect("surrounding");
+    let mut header = entry(keys).header().clone();
+    header.class = RepresentationClass::PublicShellStitched;
+    CompositeEntry::new(header, graph, shell).expect("composite entry")
 }
 
 /// Final review, F11: the stored header is JSON and every tag in it is
@@ -141,7 +200,9 @@ fn the_stored_header_uses_snake_case_enum_tags() {
     let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
     let encoded = encode_raw_header_for_test(&base_header_json(&keys), &body, &keys);
     let decoded = decode(&encoded, &keys, &EntryLimits::default())
-        .expect("a header written with snake_case tags decodes");
+        .expect("a header written with snake_case tags decodes")
+        .into_complete()
+        .expect("complete");
     assert_eq!(decoded.header().class, RepresentationClass::PublicShared);
 }
 
@@ -150,7 +211,10 @@ fn a_complete_entry_round_trips_with_a_strong_validator_over_exact_bytes() {
     let keys = keys();
     let entry = entry(&keys);
     let encoded = encode(&entry, &keys).expect("encode");
-    let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");
+    let decoded = decode(&encoded, &keys, &EntryLimits::default())
+        .expect("decode")
+        .into_complete()
+        .expect("complete");
     assert_eq!(decoded.header(), entry.header());
     assert_eq!(decoded.body(), entry.body());
     assert_eq!(decoded.validator(), &Validator::strong_for(entry.body()));
@@ -192,7 +256,7 @@ fn every_corruption_is_a_miss_and_never_a_partial_entry() {
 }
 
 #[test]
-fn bounds_unsafe_headers_and_unsupported_kinds_fail_closed() {
+fn bounds_and_unsafe_headers_fail_closed() {
     let keys = keys();
     let encoded = encode(&entry(&keys), &keys).expect("encode");
     let tiny = EntryLimits {
@@ -210,13 +274,6 @@ fn bounds_unsafe_headers_and_unsupported_kinds_fail_closed() {
     assert!(
         SafeHeaders::from_pairs([("x-request-id", "abc")]).is_err(),
         "per-request tracing headers never replay"
-    );
-    let composite = encode_kind_for_test(&keys, EntryKind::Composite);
-    assert_eq!(
-        decode(&composite, &keys, &EntryLimits::default())
-            .expect_err("composite")
-            .kind(),
-        RenderCacheErrorKind::EntryUnsupported
     );
 }
 
@@ -247,7 +304,10 @@ fn a_declared_application_dimension_round_trips_through_encode_and_decode() {
         .expect("declare");
     let original = entry_with_variance(&keys, variance);
     let encoded = encode(&original, &keys).expect("encode");
-    let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");
+    let decoded = decode(&encoded, &keys, &EntryLimits::default())
+        .expect("decode")
+        .into_complete()
+        .expect("complete");
     assert_eq!(
         decoded.header(),
         original.header(),
@@ -266,7 +326,10 @@ fn a_populated_observed_generation_set_round_trips_through_encode_and_decode() {
         .expect("within bound");
     let original = entry_with_observed(&keys, observed);
     let encoded = encode(&original, &keys).expect("encode");
-    let decoded = decode(&encoded, &keys, &EntryLimits::default()).expect("decode");
+    let decoded = decode(&encoded, &keys, &EntryLimits::default())
+        .expect("decode")
+        .into_complete()
+        .expect("complete");
     assert_eq!(
         decoded.header(),
         original.header(),
@@ -358,4 +421,76 @@ fn variance_beyond_the_declared_dimension_bound_with_a_valid_integrity_tag_still
          integrity tag",
     );
     assert_eq!(error.kind(), RenderCacheErrorKind::EntryInvalid);
+}
+
+#[test]
+fn a_composite_entry_round_trips_and_inspects_without_its_shell() {
+    let keys = keys();
+    let entry = composite_entry(&keys);
+    let encoded = encode_composite(&entry, &keys).expect("encodes");
+    let inspection = inspect(&encoded, &EntryLimits::default()).expect("inspects");
+    assert_eq!(inspection.kind, EntryKind::Composite);
+    assert_eq!(inspection.class, RepresentationClass::PublicShellStitched);
+    assert_eq!(inspection.slots, 1);
+    assert_eq!(inspection.body_bytes, entry.shell().len());
+    match decode(&encoded, &keys, &EntryLimits::default()).expect("decodes") {
+        DecodedEntry::Composite(decoded) => {
+            assert_eq!(&decoded, &entry);
+            assert_eq!(decoded.structural_digest(), entry.structural_digest());
+        }
+        DecodedEntry::Complete(_) => panic!("a composite entry decoded as complete"),
+    }
+}
+
+#[test]
+fn a_complete_entry_inspects_with_zero_slots() {
+    let keys = keys();
+    let encoded = encode(&entry(&keys), &keys).expect("encodes");
+    assert_eq!(
+        inspect(&encoded, &EntryLimits::default())
+            .expect("inspects")
+            .slots,
+        0
+    );
+}
+
+#[test]
+fn every_single_bit_flip_of_a_composite_entry_fails_to_decode() {
+    let keys = keys();
+    let encoded = encode_composite(&composite_entry(&keys), &keys).expect("encodes");
+    for byte in 0..encoded.len() {
+        for bit in 0..8 {
+            let mut corrupted = encoded.to_vec();
+            corrupted[byte] ^= 1 << bit;
+            let result = decode(&Bytes::from(corrupted), &keys, &EntryLimits::default());
+            assert!(result.is_err(), "byte {byte} bit {bit} decoded");
+        }
+    }
+}
+
+#[test]
+fn a_composite_entry_signed_by_another_ring_is_rejected() {
+    let encoded = encode_composite(&composite_entry(&keys()), &keys()).expect("encodes");
+    assert!(decode(&encoded, &keys_from(9), &EntryLimits::default()).is_err());
+}
+
+#[test]
+fn a_composite_header_whose_graph_disagrees_with_its_shell_is_rejected() {
+    let keys = keys();
+    let entry = composite_entry(&keys);
+    let mut header =
+        serde_json::to_value(suprnova_live::render_cache::composite::CompositeHeader {
+            entry: entry.header().clone(),
+            graph: entry.graph().clone(),
+        })
+        .expect("header json");
+    header["graph"]["segments"][0]["len"] = serde_json::json!(entry.shell().len() as u64 - 1);
+    let encoded =
+        encode_raw_header_for_test_with_kind(&header, entry.shell(), &keys, EntryKind::Composite);
+    assert_eq!(
+        decode(&encoded, &keys, &EntryLimits::default())
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid)
+    );
 }

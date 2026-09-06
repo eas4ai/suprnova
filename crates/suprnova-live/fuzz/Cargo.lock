@@ -679,6 +679,7 @@ dependencies = [
 name = "suprnova-live-fuzz"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "libfuzzer-sys",
  "suprnova-live",
 ]

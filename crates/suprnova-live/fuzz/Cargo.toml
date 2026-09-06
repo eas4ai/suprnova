@@ -12,6 +12,7 @@ members = ["."]
 resolver = "3"
 
 [dependencies]
+bytes = "=1.11.1"
 libfuzzer-sys = "=0.4.10"
 suprnova-live = { path = ".." }
 
@@ -116,6 +117,13 @@ bench = false
 [[bin]]
 name = "async_sequence"
 path = "fuzz_targets/async_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render_cache_entry"
+path = "fuzz_targets/render_cache_entry.rs"
 test = false
 doc = false
 bench = false
