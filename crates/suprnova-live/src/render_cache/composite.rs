@@ -28,8 +28,13 @@ use crate::view::TrustedHtml;
 pub const MAX_STITCH_SLOTS: usize = 32;
 /// Most nonce holes in one shell.
 pub const MAX_NONCE_HOLES: usize = 64;
-/// Most segments in one graph: a literal around every slot and hole, plus one.
-pub const MAX_SEGMENTS: usize = 2 * MAX_STITCH_SLOTS + MAX_NONCE_HOLES + 1;
+/// Most segments in one graph.
+///
+/// Every slot and every hole can be preceded and followed by a literal of
+/// its own, so a graph of `n` cuts holds at most `n` cut segments and `n + 1`
+/// literals between and around them: `2 * n + 1` with
+/// `n = MAX_STITCH_SLOTS + MAX_NONCE_HOLES`.
+pub const MAX_SEGMENTS: usize = 2 * (MAX_STITCH_SLOTS + MAX_NONCE_HOLES) + 1;
 /// Largest canonical parameter document one slot may carry, in bytes.
 pub const MAX_SLOT_PARAMETER_BYTES: usize = 4_096;
 /// Largest declared fallback fragment, in bytes (the canonical header string bound).

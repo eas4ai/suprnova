@@ -11,8 +11,8 @@ use suprnova::render_cache::{RenderCache, RepresentationClass};
 use suprnova_live::render_cache::entry::EntryKind;
 
 use crate::render_cache_stitch_support::{
-    POST_PROCESSED_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH, STITCHED_PATH, boot,
-    chain_reaches, dispatch, handler_renders,
+    POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH,
+    STITCHED_PATH, boot, chain_reaches, dispatch, handler_renders,
 };
 
 /// A stitched route whose document holds nothing principal-specific is still
@@ -198,5 +198,46 @@ async fn a_post_processed_body_is_not_published() {
             .await
             .is_none(),
         "declined: the body digest no longer matches the rendered document"
+    );
+}
+
+/// A stitched document with no identity-bound island at all is still a
+/// Composite entry when its bootstrap stamped a nonce: the shell has holes
+/// where the nonce was, so every hit mints a fresh one. Publishing it
+/// Complete would freeze the first visitor's nonce into the stored body and
+/// the stored `Content-Security-Policy` alike and replay both to everybody,
+/// which is a nonce that proves nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zero_slot_document_with_a_nonce_publishes_a_composite_entry() {
+    let harness = boot().await;
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_NONCE_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    let policy = first
+        .header("content-security-policy")
+        .expect("the document declared its own nonce header");
+    let stored = RenderCache::inspect_route_for_test(SEED_ONLY_NONCE_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(stored.kind, EntryKind::Composite);
+    assert_eq!(stored.slots, 0, "nothing principal-specific to re-mount");
+    assert_eq!(stored.class, RepresentationClass::PublicShellStitched);
+    assert!(
+        stored.body_bytes < first.body.len(),
+        "the shell excludes the nonce this render used"
+    );
+    let nonce = policy
+        .strip_prefix("script-src 'nonce-")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("the harness declares script-src 'nonce-<value>'");
+    assert!(
+        String::from_utf8_lossy(&first.body).contains(nonce),
+        "the rendered body carried the nonce the header declared"
     );
 }

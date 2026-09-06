@@ -2123,10 +2123,6 @@ async fn fresh_reread_is_coherent(
     }
 }
 
-/// Encodes and publishes a coherent candidate to L0 (and L1 when the
-/// policy uses it), under a fence minted by the coordinator for this
-/// lease. Never fails the request: a publish failure (rejected, fenced, or
-/// a provider error) just means the next request stays a miss.
 /// Builds the header a render's candidate entry would publish under, or
 /// `None` when its headers cannot be safely replayed (an unsafe or
 /// non-replayable header, or one exceeding a bound) - in which case the

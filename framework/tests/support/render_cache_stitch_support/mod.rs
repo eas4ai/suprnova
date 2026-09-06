@@ -94,8 +94,15 @@ pub const FALLBACK_PATH: &str = "/stitch/fallback";
 /// nonce per render and declares the matching `script-src` header.
 pub const NONCE_PATH: &str = "/stitch/nonce";
 
+/// [`NONCE_PATH`]'s shape around a public-seed island instead of an
+/// identity-bound one: a fresh nonce per render with nothing
+/// principal-specific in the document, so the shell has holes to cut but no
+/// slots. The one route that separates "has islands to stitch" from "has
+/// anything to cut out at all".
+pub const SEED_ONLY_NONCE_PATH: &str = "/stitch/seed-only-nonce";
+
 /// Every stitched route this harness registers, in registration order.
-pub const STITCH_PATHS: [&str; 7] = [
+pub const STITCH_PATHS: [&str; 8] = [
     STITCHED_PATH,
     SEED_ONLY_PATH,
     SHELL_READS_PRINCIPAL_PATH,
@@ -103,6 +110,7 @@ pub const STITCH_PATHS: [&str; 7] = [
     OMIT_PATH,
     FALLBACK_PATH,
     NONCE_PATH,
+    SEED_ONLY_NONCE_PATH,
 ];
 
 /// The fallback fragment `FALLBACK_PATH` declares.
@@ -325,6 +333,12 @@ pub async fn boot() -> Arc<Harness> {
         .on_stitch_failure(StitchFailurePolicy::Fallback(fallback_html))
         .expect("declare fallback failure policy");
     let nonce = identity_bound(NONCE_PATH, "stitch-nonce");
+    let seed_only_nonce = LiveMount::<DogfoodCounter>::public_seed(
+        SEED_ONLY_NONCE_PATH,
+        "counter",
+        "stitch-seed-nonce",
+    )
+    .expect("declare seed-only nonce mount");
 
     let mut router: Router = build_public_router();
     router = document_route(router, SEED_ONLY_PATH, &seed_only);
@@ -333,7 +347,8 @@ pub async fn boot() -> Arc<Harness> {
     router = post_processed_route(router, &post_processed);
     router = document_route(router, OMIT_PATH, &omit);
     router = document_route(router, FALLBACK_PATH, &fallback);
-    router = nonce_route(router, &nonce);
+    router = nonce_route(router, NONCE_PATH, &nonce);
+    router = nonce_route(router, SEED_ONLY_NONCE_PATH, &seed_only_nonce);
 
     for path in STITCH_PATHS {
         router = router
@@ -453,17 +468,19 @@ fn post_processed_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Ro
         .expect("register post-processed mount")
 }
 
-fn nonce_route(router: Router, mount: &LiveMount<DogfoodCounter>) -> Router {
+fn nonce_route(router: Router, path: &'static str, mount: &LiveMount<DogfoodCounter>) -> Router {
     let handler_mount = mount.clone();
     let router: Router = router
-        .get(NONCE_PATH, move |request: Request| {
+        .get(path, move |request: Request| {
             let mount = handler_mount.clone();
-            async move { render_nonce_document(request, mount).await }
+            async move { render_nonce_document(request, mount, path).await }
         })
         .middleware(AuthMiddleware::new())
         .middleware(LiveTenantMiddleware::new(Arc::new(Refusing)))
         .into();
-    router.try_live_mount(mount).expect("register nonce mount")
+    router
+        .try_live_mount(mount)
+        .unwrap_or_else(|_| panic!("register nonce mount for {path}"))
 }
 
 /// The document every plain stitched route renders: one island inside the
@@ -548,15 +565,19 @@ async fn render_principal_document(
     result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
 }
 
-/// `NONCE_PATH`'s handler: a fresh Content Security Policy nonce per render,
-/// stamped on the bootstrap's script elements and declared in the document's
-/// own `content-security-policy` header, so a stored shell and the header it
-/// was stored with can never quietly disagree.
+/// The handler behind `NONCE_PATH` and `SEED_ONLY_NONCE_PATH`: a fresh
+/// Content Security Policy nonce per render, stamped on the bootstrap's
+/// script elements and declared in the document's own
+/// `content-security-policy` header, so a stored shell and the header it was
+/// stored with can never quietly disagree. Which of the two routes is being
+/// served decides only whether the island it mounts is identity-bound; the
+/// document is otherwise identical.
 async fn render_nonce_document(
     request: Request,
     mount: LiveMount<DogfoodCounter>,
+    path: &'static str,
 ) -> Result<HttpResponse, HttpResponse> {
-    increment(&HANDLER_RENDERS, NONCE_PATH);
+    increment(&HANDLER_RENDERS, path);
     let result: Result<HttpResponse, FrameworkError> = async {
         let nonce = suprnova_live::render_cache::composite::fresh_nonce()
             .map_err(|_| FrameworkError::internal("fresh nonce"))?;

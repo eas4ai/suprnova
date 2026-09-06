@@ -157,10 +157,10 @@ fn count_slot(outcome: &'static str) {
 /// checks that make a stitched shell safe to share (a trustworthy capture,
 /// and a response body that is exactly what the document rendered) have to
 /// hold for it too. A document that fails any of them is declined; only a
-/// document that passes them all is then published as a Composite entry
-/// when it has islands to cut out, or as a Complete shell when it does not.
+/// document that passes them all is then published, and only then is its
+/// form decided.
 ///
-/// The checks, in order:
+/// The steps, numbered the same here and in the body:
 ///
 /// 1. The capture is a faithful account of the request: not marked
 ///    `invalid`, and holding exactly one captured slot per identity-bound
@@ -178,6 +178,21 @@ fn count_slot(outcome: &'static str) {
 ///    the occurrences do not overlap. An island that cannot be located
 ///    exactly once cannot be cut out, and a shell that kept it would be
 ///    that principal's markup and signed snapshot, shared.
+/// 4. Occurrences of the document's bootstrap nonce outside every island
+///    are collected as holes.
+/// 5. Every replayable stored header whose value carries that nonce is
+///    collected as a template.
+/// 6. Only now is the form decided. A document with no island to cut out,
+///    no hole, and no template is a finished shared answer and is published
+///    Complete. Anything else is published Composite - including a document
+///    with *no* islands but a nonce, whose graph is a legal zero-slot one:
+///    a Complete entry there would freeze the first visitor's nonce into
+///    the stored body and the stored `Content-Security-Policy` alike and
+///    replay both to everybody, which is a nonce that proves nothing.
+/// 7. The body is walked once, cutting at every island and every hole:
+///    what is not cut out becomes the shell, the cuts become typed
+///    segments, and each slot's surrounding digest is taken over the shell
+///    that resulted.
 ///
 /// Nothing here is fallible in the error sense: every rejection is a
 /// decline, and the caller records it under the existing declined outcome.
@@ -186,6 +201,7 @@ pub(crate) fn build_composite_entry(
     body: &[u8],
     facts: &LiveDocumentFacts,
 ) -> Option<DecodedEntry> {
+    // 1. The capture accounts for every identity-bound island, within bound.
     let capture = &facts.stitch;
     if capture.invalid
         || capture.slots.len() != facts.identity_bound_islands
@@ -193,18 +209,22 @@ pub(crate) fn build_composite_entry(
     {
         return None;
     }
+    // 2. The response body is the body the document rendered.
     let digest: [u8; 32] = Sha256::digest(body).into();
     if capture.document_digest != Some(digest) {
         return None;
     }
-    // 1. Locate every island exactly once, then prove the placements are
-    //    disjoint and put them in document order.
+    // 3. Locate every island exactly once, then prove the placements are
+    //    disjoint and put them in document order. `find_all` counts
+    //    overlapping occurrences too, so an island whose bytes match at two
+    //    positions is declined rather than half cut out; two is all the
+    //    caller needs to know, since anything but exactly one declines.
     let mut placed: Vec<(usize, usize, usize)> = Vec::with_capacity(capture.slots.len());
     for (index, slot) in capture.slots.iter().enumerate() {
         if slot.html.is_empty() {
             return None;
         }
-        let mut found = find_all(body, &slot.html);
+        let mut found = find_all(body, &slot.html, 2);
         if found.len() != 1 {
             return None;
         }
@@ -215,24 +235,20 @@ pub(crate) fn build_composite_entry(
     if placed.windows(2).any(|pair| pair[0].1 > pair[1].0) {
         return None;
     }
-    // Every check above has now run. A document with no identity-bound
-    // island has nothing to cut out and is a finished shared answer.
-    if capture.slots.is_empty() {
-        return Some(DecodedEntry::Complete(CompleteEntry::new(
-            header,
-            Bytes::copy_from_slice(body),
-        )));
-    }
-    // 2. Nonce holes: occurrences of this document's bootstrap nonce that
+    // 4. Nonce holes: occurrences of this document's bootstrap nonce that
     //    lie outside every island. One inside an island is that island's
     //    own business - it is re-rendered on every hit and brings its own
-    //    nonce with it - and is deliberately not a hole.
+    //    nonce with it - and is deliberately not a hole. An occurrence
+    //    overlapping one already taken is skipped as well, so the holes are
+    //    disjoint from each other exactly as they are from the islands.
     let nonce = capture.nonce.as_deref().filter(|nonce| !nonce.is_empty());
     let mut holes: Vec<(usize, usize)> = Vec::new();
     if let Some(nonce) = nonce {
-        for start in find_all(body, nonce.as_bytes()) {
+        for start in find_all(body, nonce.as_bytes(), MAX_NONCE_HOLES + 1) {
             let end = start + nonce.len();
-            if placed.iter().any(|(s, e, _)| start < *e && end > *s) {
+            if placed.iter().any(|(s, e, _)| start < *e && end > *s)
+                || holes.last().is_some_and(|(_, taken)| start < *taken)
+            {
                 continue;
             }
             holes.push((start, end));
@@ -241,44 +257,7 @@ pub(crate) fn build_composite_entry(
             }
         }
     }
-    // 3. Walk the body once, cutting at every island and every hole: what
-    //    is not cut out becomes the shell, and the cuts become typed
-    //    segments. The shell therefore holds no island bytes at all.
-    let mut cuts: Vec<(usize, usize, Cut)> = placed
-        .iter()
-        .map(|(start, end, index)| (*start, *end, Cut::Slot(*index)))
-        .chain(holes.iter().map(|(start, end)| (*start, *end, Cut::Nonce)))
-        .collect();
-    cuts.sort_by_key(|(start, _, _)| *start);
-    let mut segments = Vec::new();
-    let mut shell = Vec::with_capacity(body.len());
-    let mut slots = Vec::new();
-    let mut cursor = 0usize;
-    let mut slot_index: u16 = 0;
-    for (start, end, cut) in cuts {
-        if start > cursor {
-            shell.extend_from_slice(&body[cursor..start]);
-            segments.push(Segment::Literal {
-                len: u32::try_from(start - cursor).ok()?,
-            });
-        }
-        match cut {
-            Cut::Slot(capture_index) => {
-                segments.push(Segment::Slot { index: slot_index });
-                slots.push(stitch_slot(&capture.slots[capture_index].descriptor));
-                slot_index = slot_index.checked_add(1)?;
-            }
-            Cut::Nonce => segments.push(Segment::Nonce),
-        }
-        cursor = end;
-    }
-    if cursor < body.len() {
-        shell.extend_from_slice(&body[cursor..]);
-        segments.push(Segment::Literal {
-            len: u32::try_from(body.len() - cursor).ok()?,
-        });
-    }
-    // 4. Every replayable header whose value carries the nonce becomes a
+    // 5. Every replayable header whose value carries the nonce becomes a
     //    template, so a hit's fresh nonce reaches the header as well as the
     //    body and no stored header is left holding the miss's nonce as if
     //    it still described the response (the assembler rebuilds these
@@ -319,6 +298,53 @@ pub(crate) fn build_composite_entry(
             });
         }
     }
+    // 6. Every check has now run and everything that has to be cut out is
+    //    known. Only a document with nothing to cut out at all is a
+    //    finished shared answer; see this function's own doc for why a
+    //    nonce alone is enough to make it a Composite one.
+    if capture.slots.is_empty() && holes.is_empty() && nonce_headers.is_empty() {
+        return Some(DecodedEntry::Complete(CompleteEntry::new(
+            header,
+            Bytes::copy_from_slice(body),
+        )));
+    }
+    // 7. Walk the body once: what is not cut out becomes the shell, and the
+    //    cuts become typed segments. The shell therefore holds no island
+    //    bytes and no nonce at all.
+    let mut cuts: Vec<(usize, usize, Cut)> = placed
+        .iter()
+        .map(|(start, end, index)| (*start, *end, Cut::Slot(*index)))
+        .chain(holes.iter().map(|(start, end)| (*start, *end, Cut::Nonce)))
+        .collect();
+    cuts.sort_by_key(|(start, _, _)| *start);
+    let mut segments = Vec::new();
+    let mut shell = Vec::with_capacity(body.len());
+    let mut slots = Vec::new();
+    let mut cursor = 0usize;
+    let mut slot_index: u16 = 0;
+    for (start, end, cut) in cuts {
+        if start > cursor {
+            shell.extend_from_slice(&body[cursor..start]);
+            segments.push(Segment::Literal {
+                len: u32::try_from(start - cursor).ok()?,
+            });
+        }
+        match cut {
+            Cut::Slot(capture_index) => {
+                segments.push(Segment::Slot { index: slot_index });
+                slots.push(stitch_slot(&capture.slots[capture_index].descriptor));
+                slot_index = slot_index.checked_add(1)?;
+            }
+            Cut::Nonce => segments.push(Segment::Nonce),
+        }
+        cursor = end;
+    }
+    if cursor < body.len() {
+        shell.extend_from_slice(&body[cursor..]);
+        segments.push(Segment::Literal {
+            len: u32::try_from(body.len() - cursor).ok()?,
+        });
+    }
     let shell = Bytes::from(shell);
     let mut graph = SegmentGraph {
         segments,
@@ -346,27 +372,44 @@ enum Cut {
     Nonce,
 }
 
-/// Every non-overlapping occurrence of `needle` in `haystack`, left to
-/// right, as start offsets.
+/// Every occurrence of `needle` in `haystack`, left to right, as start
+/// offsets, stopping once `limit` of them have been found.
 ///
-/// An empty needle never matches, so the scan always advances. The result
-/// is bounded by `haystack.len() / needle.len()`, and every caller here
-/// scans a body the digest check has already proven to be the rendered
-/// document, which the view renderer bounded at the configuration's
-/// `max_response_bytes`.
-fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
-    let mut found = Vec::new();
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return found;
+/// Occurrences may overlap: the scan advances one byte past a match, not
+/// one needle. A caller that needs disjoint results says so itself (see
+/// step 4 of [`build_composite_entry`]); a caller that only needs to know
+/// whether something occurs more than once gets the honest count rather
+/// than a count that silently skipped a second, overlapping occurrence.
+///
+/// `limit` bounds the returned vector before it is allocated, so no caller
+/// depends on the body's own size for its bound. An empty needle never
+/// matches and a zero limit collects nothing, so the scan always
+/// terminates. Each step skips ahead to the next byte equal to the
+/// needle's first, which keeps the scan linear on any realistic body.
+fn find_all(haystack: &[u8], needle: &[u8], limit: usize) -> Vec<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() || limit == 0 {
+        return Vec::new();
     }
+    let mut found = Vec::with_capacity(limit);
+    let first = needle[0];
+    // Never underflows: `needle.len() <= haystack.len()` was just checked.
+    let last_start = haystack.len() - needle.len();
     let mut at = 0usize;
-    while at + needle.len() <= haystack.len() {
+    while at <= last_start {
+        let Some(offset) = haystack[at..=last_start]
+            .iter()
+            .position(|byte| *byte == first)
+        else {
+            break;
+        };
+        at += offset;
         if haystack[at..].starts_with(needle) {
             found.push(at);
-            at += needle.len();
-        } else {
-            at += 1;
+            if found.len() >= limit {
+                break;
+            }
         }
+        at += 1;
     }
     found
 }
@@ -394,5 +437,41 @@ fn stitch_slot(descriptor: &StitchSlotDescriptor) -> StitchSlot {
             .collect(),
         on_failure: descriptor.on_failure.clone(),
         surrounding: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_all;
+
+    /// Overlapping occurrences are counted, so a needle that matches twice
+    /// is reported twice rather than once. This is what makes step 3 of
+    /// [`super::build_composite_entry`] decline an island whose bytes could
+    /// be cut in more than one place instead of cutting the first and
+    /// leaving the second inside the shared shell.
+    #[test]
+    fn overlapping_occurrences_are_counted_separately() {
+        assert_eq!(find_all(b"aaaa", b"aaa", 2), vec![0, 1]);
+        assert_eq!(find_all(b"abab", b"abab", 2), vec![0]);
+    }
+
+    /// The limit stops the scan, so the returned vector is bounded before
+    /// it is allocated rather than by the size of the body being scanned.
+    #[test]
+    fn the_limit_stops_the_scan() {
+        assert_eq!(find_all(b"aaaa", b"a", 2), vec![0, 1]);
+        assert_eq!(find_all(b"aaaa", b"a", 4), vec![0, 1, 2, 3]);
+        assert!(find_all(b"aaaa", b"a", 0).is_empty());
+    }
+
+    /// Nothing occurs in nothing, and an empty needle never matches, so
+    /// neither can make the scan run away or the caller cut at a
+    /// zero-length range.
+    #[test]
+    fn an_empty_haystack_or_needle_finds_nothing() {
+        assert!(find_all(b"", b"a", 2).is_empty());
+        assert!(find_all(b"", b"", 2).is_empty());
+        assert!(find_all(b"abc", b"", 2).is_empty());
+        assert!(find_all(b"ab", b"abc", 2).is_empty());
     }
 }
