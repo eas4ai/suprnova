@@ -1230,11 +1230,13 @@ async fn lead_render(
         return response;
     };
     let Some(observed) = observed else {
-        // Either the report overflowed (ruling R55: an incomplete
-        // dependency set is never storable) or the in-transaction ledger
-        // read itself failed; either way there is nothing safe to compare
-        // against later, so this candidate is declined here rather than
-        // carrying a stand-in forward.
+        // The report overflowed (ruling R55: an incomplete dependency set
+        // is never storable), the in-transaction ledger read itself
+        // failed, or this is a stitched route whose handler never began
+        // and whose content bucket is therefore empty (see
+        // [`render_under_collector`]); in every case there is nothing
+        // safe to publish or to compare against later, so this candidate
+        // is declined here rather than carrying a stand-in forward.
         LookupOutcome::Declined.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -1793,6 +1795,15 @@ fn key_carries_a_resolved_principal(variance: &VarianceDescriptor) -> bool {
 /// bucket back into content here, before the window is closed, so both
 /// the classification and the generation window cover exactly the
 /// undivided set they covered before attribution existed.
+///
+/// A stitched route whose handler never began is declined outright: the
+/// chain answered before the route handler ran (an authorization guard
+/// that returns a page instead of calling the next layer, a tenant
+/// refusal), so the content bucket is empty and classifying from it alone
+/// would publish that gate response as the route's shared shell. The
+/// decline reuses the same "no generation set" signal an overflowed
+/// report already returns, so [`lead_render`] records the existing
+/// `declined` outcome and no new telemetry label is introduced.
 async fn render_under_collector(
     request: Request,
     next: Next,
@@ -1814,7 +1825,11 @@ async fn render_under_collector(
         if !stitched {
             report.fold_gate_into_content();
         }
-        let observed = close_window(&report, epoch, ledger).await;
+        let observed = if stitched && !report.handler_began {
+            None
+        } else {
+            close_window(&report, epoch, ledger).await
+        };
         (response, report, observed)
     })
     .await

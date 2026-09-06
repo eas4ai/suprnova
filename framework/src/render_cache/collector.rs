@@ -25,6 +25,12 @@
 //! cache middleware for every non-stitched route) and classifies from
 //! exactly the undivided report it produced before attribution existed.
 //!
+//! A stitched route whose chain answered before the handler ever ran has
+//! an empty content bucket, and classifying from it would publish the
+//! gate's own response as the shared shell. The report records that in
+//! [`CollectorReport::handler_began`] and the middleware declines to
+//! store the representation when it is `false`.
+//!
 //! # Limitations, by design
 //!
 //! - **Config and Feature identities have no automatic producer.** No
@@ -212,6 +218,21 @@ pub struct CollectorReport {
     /// Reads made inside identity-bound mounts; counted, never recorded,
     /// because those islands are re-rendered on every hit.
     pub slot_reads: usize,
+    /// Whether [`begin_handler`] ever ran in this scope, and therefore
+    /// whether the content bucket is an account of what the handler read
+    /// or merely of nothing having happened yet.
+    ///
+    /// A stitched shell is classified from content reads alone, so a
+    /// request whose chain answered before the handler ever started - an
+    /// authorization guard that returns a page instead of calling the
+    /// next layer, a tenant refusal - would be classified from an empty
+    /// content bucket and published as the shared shell for that route,
+    /// which is the gate's own response. The render cache middleware
+    /// declines to store a stitched representation whenever this is
+    /// `false`. [`fold_gate_into_content`](Self::fold_gate_into_content)
+    /// deliberately leaves it alone: it records what happened during the
+    /// request, not which bucket a read ended up in.
+    pub handler_began: bool,
     /// Undeclared request context names that affected rendering.
     pub undeclared: Vec<String>,
     /// Facts a rendered Live document recorded, if the render mounted one.
@@ -254,7 +275,8 @@ impl CollectorReport {
     /// The gate bucket is emptied, so folding twice is a no-op the second
     /// time. Gate first because these reads genuinely happened first, and
     /// the observed order is what [`storable`](Self::storable) hands the
-    /// observation window.
+    /// observation window. [`handler_began`](Self::handler_began) is left
+    /// as it was: it is a fact about the request, not about bucketing.
     pub fn fold_gate_into_content(&mut self) {
         let gate = std::mem::take(&mut self.gate);
         let content = &mut self.context;
@@ -338,6 +360,7 @@ fn with_context<R>(f: impl FnOnce(&mut CollectedContext) -> R) -> Option<R> {
 /// handler.
 pub fn begin_handler() {
     with_state(|state| {
+        state.report.handler_began = true;
         if state.attribution == Attribution::Gate {
             state.attribution = Attribution::Content;
         }

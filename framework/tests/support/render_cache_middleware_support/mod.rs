@@ -686,6 +686,21 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("overflow policy");
+    // A stitched public shell is the one class classified from content
+    // reads alone. The two routes below differ only in whether their
+    // handler marks the handler boundary the way the Live completion
+    // middleware does, which is what decides whether the shell may be
+    // published at all.
+    let stitched_gate_only_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("stitched gate-only policy");
+    let stitched_handler_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("stitched handler policy");
     // Fix round 1, item 1: deliberately declares no `Principal` variance,
     // matching the reviewer's proven shape exactly.
     let leaky_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
@@ -862,6 +877,12 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .into();
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
+    let router: Router = router
+        .get("/stitched-gate-only", stitched_gate_only_handler)
+        .into();
+    let router: Router = router
+        .get("/stitched-handler", stitched_handler_handler)
+        .into();
     let router: Router = router.get("/leaky", leaky_handler).into();
     let router: Router = router.get("/stale-principal/{id}", cached_handler).into();
     let router: Router = router.get("/leased/{id}", cached_handler).into();
@@ -1034,6 +1055,16 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach sets-cookie policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
+        .try_render_cache(
+            "/stitched-gate-only",
+            GroupPolicy::from(stitched_gate_only_policy),
+        )
+        .expect("attach stitched gate-only policy")
+        .try_render_cache(
+            "/stitched-handler",
+            GroupPolicy::from(stitched_handler_policy),
+        )
+        .expect("attach stitched handler policy")
         .try_render_cache("/leaky", GroupPolicy::from(leaky_policy))
         .expect("attach leaky policy")
         .try_render_cache(
@@ -1841,6 +1872,30 @@ async fn sets_cookie_handler(_request: Request) -> Response {
 /// can hold, so its report overflows. `4_200` clears
 /// `suprnova_live::render_cache::generation::MAX_OBSERVATIONS` (4_096) with
 /// room to spare without importing the constant just for this bound.
+/// A stitched shell whose chain answered before the handler boundary was
+/// ever marked: every read it makes is a gate read, so its content bucket
+/// is empty. Standing in for an authorization guard or tenant middleware
+/// that returns a page instead of calling the next layer, without needing
+/// a Live route to build the stitch.
+async fn stitched_gate_only_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("stitched gate only {n}")))
+}
+
+/// The positive control for [`stitched_gate_only_handler`]: identical
+/// except that it marks the handler boundary first, exactly as the Live
+/// completion middleware will, so its read is a content read and the
+/// shell is publishable.
+async fn stitched_handler_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    suprnova::render_cache::collector::begin_handler();
+    let _ = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("stitched handler {n}")))
+}
+
 async fn overflow_handler(_request: Request) -> Response {
     counting_route::on_render_start().await;
     for i in 0..4_200_u32 {

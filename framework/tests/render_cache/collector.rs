@@ -349,6 +349,42 @@ async fn overflow_inside_any_bucket_marks_the_whole_report() {
     assert!(report.storable().is_none());
 }
 
+#[tokio::test]
+async fn a_scope_whose_handler_never_began_says_so_and_folding_keeps_the_answer() {
+    let mut report = Collector::scope(async {
+        collector::observe_principal_value("alice");
+        collector::observe_table_read("users");
+        current_report().expect("report")
+    })
+    .await;
+    assert!(
+        !report.handler_began,
+        "nothing marked the handler boundary, so every read was a gate read"
+    );
+    report.fold_gate_into_content();
+    assert!(
+        !report.handler_began,
+        "folding moves reads between buckets; it does not invent a handler"
+    );
+}
+
+#[tokio::test]
+async fn a_scope_that_began_its_handler_says_so_and_folding_keeps_the_answer() {
+    let mut report = Collector::scope(async {
+        collector::observe_table_read("users");
+        collector::begin_handler();
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    assert!(report.handler_began);
+    report.fold_gate_into_content();
+    assert!(
+        report.handler_began,
+        "the flag records what the request did, not which bucket a read landed in"
+    );
+}
+
 // ---- Eloquent read-seam coverage -------------------------------------
 //
 // Each test below exercises exactly one production hook end to end

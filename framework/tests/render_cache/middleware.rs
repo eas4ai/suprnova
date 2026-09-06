@@ -273,6 +273,59 @@ async fn an_overflowed_report_is_never_published() {
     assert_eq!(counting_route::renders(), 2);
 }
 
+/// A stitched public shell is classified from content reads alone, because
+/// its gate runs again on every hit. A request whose chain answers before
+/// the route handler ever starts - an authorization guard that returns a
+/// page instead of calling the next layer, a tenant refusal - therefore
+/// arrives at classification with an empty content bucket, and publishing
+/// on that emptiness would install the gate's own response as the route's
+/// shared shell for every later visitor. `/stitched-gate-only` renders
+/// entirely before the handler boundary is marked and must never be
+/// stored; `/stitched-handler` is the same route with the boundary marked,
+/// and proves the decline is specific to the missing handler rather than
+/// to the class.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stitched_shell_whose_handler_never_began_is_never_published() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/stitched-gate-only", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    let gate_only_key = RenderCache::key_for_route_for_test("/stitched-gate-only", &[], None);
+    assert!(
+        RenderCache::inspect(&gate_only_key)
+            .await
+            .expect("inspect")
+            .is_none(),
+        "a stitched shell built entirely by the gate must never be published"
+    );
+    dispatch_get(&harness, "/stitched-gate-only", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "nothing was stored, so every request renders fresh"
+    );
+
+    let began = dispatch_get(&harness, "/stitched-handler", &[]).await;
+    assert_eq!(began.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 3);
+    let handler_key = RenderCache::key_for_route_for_test("/stitched-handler", &[], None);
+    assert!(
+        RenderCache::inspect(&handler_key)
+            .await
+            .expect("inspect")
+            .is_some(),
+        "the same class publishes normally once the handler actually began"
+    );
+    dispatch_get(&harness, "/stitched-handler", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "the published shell is a hit, so no second render happens"
+    );
+}
+
 /// Fix round 1, item 1 (Critical): classification narrows the served class
 /// and the `Cache-Control`/staleness rules, but it cannot repartition the
 /// lookup key, which was already derived from the route's *declared*
