@@ -4,7 +4,7 @@
 //! Run with `cargo test -p suprnova --test queue_redis -- --ignored`.
 
 use chrono::Utc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use suprnova::queue::driver::{QueueDriver, Settled};
 use suprnova::queue::redis::RedisQueueDriver;
 use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
@@ -728,9 +728,20 @@ async fn redis_driver_promotes_legacy_unprefixed_delayed_members() {
 /// `nack` with a non-zero `requeue_delay` MUST also route via the ZSET; an
 /// immediately-following pop must not see the redelivered envelope until the
 /// delay elapses.
+///
+/// The delayed set scores in whole seconds: a future deadline is rounded up
+/// when the envelope is parked and the promotion cutoff is floored, so the
+/// envelope surfaces no earlier than the delay and no later than one second
+/// after it. The test synchronises on the delivery itself instead of sleeping
+/// past a guessed deadline, and checks both edges of that contract.
 #[ignore = "requires a real Redis"]
 #[tokio::test]
 async fn redis_driver_nack_with_delay_defers_redelivery() {
+    const DELAY: Duration = Duration::from_millis(1_500);
+    // One second of score granularity plus a margin for the probe budget and
+    // scheduling; a broken promotion fails here instead of hanging.
+    const SURFACE_BOUND: Duration = Duration::from_secs(10);
+
     let stream = format!("test-{}", uuid::Uuid::new_v4());
     let d = RedisQueueDriver::connect(&redis_url(), &stream, "g4", "c4", Duration::from_secs(60))
         .await
@@ -739,9 +750,8 @@ async fn redis_driver_nack_with_delay_defers_redelivery() {
     d.push(env("retry")).await.unwrap();
     let r1 = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
 
-    d.nack(&r1.token, Duration::from_millis(1_500))
-        .await
-        .unwrap();
+    let nacked_at = Instant::now();
+    d.nack(&r1.token, DELAY).await.unwrap();
 
     // Immediate pop sees nothing (envelope is parked in the ZSET).
     let now_view = d.pop(Duration::from_millis(150)).await.unwrap();
@@ -750,12 +760,21 @@ async fn redis_driver_nack_with_delay_defers_redelivery() {
         "nack(delay=1.5s) re-delivered immediately"
     );
 
-    tokio::time::sleep(Duration::from_millis(2_000)).await;
-    let r2 = d
-        .pop(Duration::from_secs(5))
-        .await
-        .unwrap()
-        .expect("retry must surface after its delay");
+    // Each pop promotes what is due and then probes the stream for its fixed
+    // budget, so the loop paces itself on the driver's own work; no sleep.
+    let r2 = loop {
+        if let Some(reservation) = d.pop(Duration::from_secs(5)).await.unwrap() {
+            break reservation;
+        }
+        assert!(
+            nacked_at.elapsed() < SURFACE_BOUND,
+            "retry must surface within {SURFACE_BOUND:?} of a {DELAY:?} nack"
+        );
+    };
+    assert!(
+        nacked_at.elapsed() >= DELAY,
+        "nack(delay=1.5s) re-delivered before its delay elapsed"
+    );
     assert_eq!(r2.envelope.job_name, "retry");
     assert_eq!(r2.envelope.attempts, 1);
 }
