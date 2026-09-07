@@ -614,7 +614,10 @@ impl FileRenderStore {
     }
 }
 
-/// Outcome of one bounded [`FileRenderStore::sweep`] call.
+/// Outcome of one bounded sweep call: [`FileRenderStore::sweep`] here, and
+/// the database tier's own
+/// [`SqlRenderStore::sweep`](super::providers::SqlRenderStore::sweep),
+/// which reports the same two facts about the rows it removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SweepOutcome {
     /// Files actually removed from disk by this call.

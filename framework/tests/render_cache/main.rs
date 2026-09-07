@@ -15,6 +15,8 @@ mod render_cache_privacy_support;
 mod render_cache_stitch_support;
 #[path = "../support/render_cache_support/mod.rs"]
 mod render_cache_support;
+#[path = "../support/render_cache_tiers_support/mod.rs"]
+mod render_cache_tiers_support;
 
 pub mod collector;
 pub mod file_store;
@@ -27,3 +29,4 @@ pub mod privacy;
 pub mod races;
 pub mod registry;
 pub mod stitch;
+pub mod tiers;

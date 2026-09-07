@@ -1,5 +1,7 @@
-//! Durable generation truth: current generations, an append-only change log,
-//! and the authority epoch.
+//! The RenderCache schema: [`Migration`] creates durable generation truth
+//! (current generations, an append-only change log, and the authority
+//! epoch), and [`TierMigration`] creates the four tables the Tier 1 and
+//! Tier 2 providers need on top of it.
 //!
 //! The identity column holds the lowercase hex of a
 //! [`DependencyIdentity`](super::DependencyIdentity)'s 32-byte digest, never
@@ -188,4 +190,259 @@ enum Epochs {
     Table,
     Singleton,
     Epoch,
+}
+
+/// Creates the four tables the database-backed (Tier 1) providers use: the
+/// L1 render store, the fenced rebuild leases, and the Live instance and
+/// promotion records.
+///
+/// Registered next to [`Migration`] rather than folded into it: every
+/// RenderCache profile needs the generation ledger, and only a profile whose
+/// L1, rebuild coordinator, or Live instance ledger is database-backed needs
+/// these four, so an application on the embedded profile carries none of
+/// them. `RenderCache::install` refuses such a profile when they are absent
+/// (see
+/// [`ledger::tier_migration_present`](super::ledger::tier_migration_present)).
+///
+/// # Column types
+///
+/// Render keys are stored as
+/// [`RenderKey::to_base64url`](suprnova_live::render_cache::key::RenderKey::to_base64url)
+/// (`rk1.` plus 43 base64url characters, 47 in total), never a second hash
+/// of the key, in a `VARCHAR(48)` sized explicitly for the same reason
+/// [`Migration`]'s own `string_len(64)` is: SeaORM's default `.string()` is
+/// `VARCHAR(255)`, which under `utf8mb4` runs into MySQL's index key length
+/// limit on a primary key column. Scope, instance, idempotency, and
+/// generation digests are lowercase hex of a fixed-width digest, so they are
+/// `CHAR` of exactly that width. Every millisecond timestamp is a `BIGINT`
+/// holding milliseconds since the Unix epoch as the *database* reports it
+/// (see `render_cache::providers::sql_now_ms`), never a node clock.
+///
+/// Entry and record payloads are blobs, and the blob column type is the one
+/// dialect difference this migration cannot express portably: sea-query's
+/// `ColumnType::Blob` renders as `blob` on MySQL, which caps at 64 KiB - far
+/// below a cached document - so MySQL gets an explicit `LONGBLOB` while
+/// Postgres (`bytea`) and SQLite (`blob`) take the portable spelling.
+pub struct TierMigration;
+
+impl MigrationName for TierMigration {
+    // Explicit and file-stable, for the same reason [`Migration`]'s name is:
+    // `DeriveMigrationName` would derive "migration" from this file's stem
+    // for both migrations in it.
+    fn name(&self) -> &str {
+        "m20260906_000000_create_render_cache_tier_tables"
+    }
+}
+
+/// A blob column sized for the active backend. See [`TierMigration`]'s own
+/// documentation for why MySQL cannot take the portable spelling.
+fn blob_column<T: IntoIden>(backend: sea_orm::DbBackend, name: T) -> ColumnDef {
+    let mut column = ColumnDef::new(name);
+    if backend == sea_orm::DbBackend::MySql {
+        column.custom(Alias::new("LONGBLOB"));
+    } else {
+        column.blob();
+    }
+    column.not_null();
+    column.take()
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TierMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(RenderEntries::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(RenderEntries::RenderKey)
+                            .string_len(48)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(blob_column(backend, RenderEntries::Bytes))
+                    .col(
+                        ColumnDef::new(RenderEntries::Epoch)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderEntries::Token)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderEntries::GenerationDigest)
+                            .char_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderEntries::PublishedAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderEntries::ExpiresAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(RenderLeases::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(RenderLeases::RenderKey)
+                            .string_len(48)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(RenderLeases::Epoch).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(RenderLeases::LeaseId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderLeases::ExpiresAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RenderLeases::NextToken)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(LiveInstances::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(LiveInstances::Scope).char_len(64).not_null())
+                    .col(
+                        ColumnDef::new(LiveInstances::Instance)
+                            .char_len(32)
+                            .not_null(),
+                    )
+                    .col(blob_column(backend, LiveInstances::Record))
+                    .col(
+                        ColumnDef::new(LiveInstances::Version)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(LiveInstances::ExpiresAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(LiveInstances::Scope)
+                            .col(LiveInstances::Instance),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(LivePromotions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(LivePromotions::Scope)
+                            .char_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(LivePromotions::Idempotency)
+                            .char_len(32)
+                            .not_null(),
+                    )
+                    .col(blob_column(backend, LivePromotions::Record))
+                    .col(
+                        ColumnDef::new(LivePromotions::ExpiresAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(LivePromotions::Scope)
+                            .col(LivePromotions::Idempotency),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(LivePromotions::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(LiveInstances::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(RenderLeases::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(RenderEntries::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum RenderEntries {
+    #[sea_orm(iden = "suprnova_render_entries")]
+    Table,
+    RenderKey,
+    Bytes,
+    Epoch,
+    Token,
+    GenerationDigest,
+    PublishedAtMs,
+    ExpiresAtMs,
+}
+
+#[derive(DeriveIden)]
+enum RenderLeases {
+    #[sea_orm(iden = "suprnova_render_leases")]
+    Table,
+    RenderKey,
+    Epoch,
+    LeaseId,
+    ExpiresAtMs,
+    NextToken,
+}
+
+#[derive(DeriveIden)]
+enum LiveInstances {
+    #[sea_orm(iden = "suprnova_live_instances")]
+    Table,
+    Scope,
+    Instance,
+    Record,
+    Version,
+    ExpiresAtMs,
+}
+
+#[derive(DeriveIden)]
+enum LivePromotions {
+    #[sea_orm(iden = "suprnova_live_promotions")]
+    Table,
+    Scope,
+    Idempotency,
+    Record,
+    ExpiresAtMs,
 }

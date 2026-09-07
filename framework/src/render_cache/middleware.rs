@@ -198,9 +198,9 @@ use crate::localization::Lang;
 use crate::middleware::{Middleware, Next};
 use crate::telemetry::metrics::Metrics;
 
+use super::L1Provider;
 use super::collector::{self, Collector};
 use super::config::RenderCacheConfig;
-use super::file_store::FileRenderStore;
 use super::live;
 use super::registry::RenderCachePolicyTable;
 use super::stitch;
@@ -263,7 +263,11 @@ pub struct RenderCacheRuntime {
     pub(crate) build: BuildId,
     pub(crate) table: RenderCachePolicyTable,
     pub(crate) l0: MemoryRenderStore,
-    pub(crate) l1: Option<FileRenderStore>,
+    /// The configured L1 provider, or `None` when L1 is disabled. Held as
+    /// [`L1Provider`] rather than one concrete store so the profile decides
+    /// which tier serves this process; every read and publication below
+    /// goes through its `RenderStore` implementation.
+    pub(crate) l1: Option<L1Provider>,
     pub(crate) ledger: Arc<dyn GenerationLedger>,
     /// The same authority [`ledger::SqlGenerationLedger`] wrapped in
     /// `ledger` above, kept as its concrete type because

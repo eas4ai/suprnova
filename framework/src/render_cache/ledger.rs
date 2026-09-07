@@ -81,7 +81,15 @@ fn identity_column(identity: &DependencyIdentity) -> String {
 /// [`FrameworkError::database`](crate::FrameworkError::database)) without a
 /// second, drifting copy of these three phrasings.
 fn is_missing_table_error(message: &str) -> bool {
-    message.contains("suprnova_render_epochs")
+    is_missing_table_error_for(message, "suprnova_render_epochs")
+}
+
+/// The same check for any one of this module's tables, so
+/// [`tier_migration_present`] can probe its own table without a second copy
+/// of the three backend phrasings. The table name stays required for
+/// exactly the reasons [`is_missing_table_error`] documents.
+fn is_missing_table_error_for(message: &str, table: &str) -> bool {
+    message.contains(table)
         && (message.contains("no such table")
             || message.contains("does not exist")
             || message.contains("doesn't exist"))
@@ -141,6 +149,45 @@ pub(crate) async fn migration_present() -> Result<bool, FrameworkError> {
     match exec.query_one(statement).await {
         Ok(_) => Ok(true),
         Err(e) if is_missing_table_error(&e.to_string()) => Ok(false),
+        Err(e) => Err(database_error(e)),
+    }
+}
+
+/// Whether the tier migration's tables are present on the primary
+/// connection.
+///
+/// The Tier 1 and Tier 2 profiles need the four tables
+/// [`migration::TierMigration`](super::migration::TierMigration) creates,
+/// and that migration is opt-in for the same reason
+/// [`migration::Migration`](super::migration::Migration) is: an application
+/// on the embedded profile should carry neither. Install probes this before
+/// building a database-backed provider, so a profile whose schema is not
+/// there fails at boot with one actionable sentence rather than on every
+/// request.
+///
+/// Probes `suprnova_render_entries`, the first table that migration
+/// creates. Any database error other than that table being missing
+/// propagates unchanged, exactly as in this module's own
+/// `migration_present` (crate-private, so this is a plain code span rather
+/// than a link): "the migration is missing" is a specific answer, not a
+/// catch-all for a database that cannot be reached at all.
+///
+/// # Errors
+///
+/// Returns the database error when the probe fails for any reason other
+/// than the table being absent.
+pub async fn tier_migration_present() -> Result<bool, FrameworkError> {
+    let exec = primary_executor().await?;
+    let statement = sea_orm::Statement::from_sql_and_values(
+        exec.backend(),
+        "SELECT render_key FROM suprnova_render_entries WHERE render_key IS NULL",
+        vec![],
+    );
+    match exec.query_one(statement).await {
+        Ok(_) => Ok(true),
+        Err(e) if is_missing_table_error_for(&e.to_string(), "suprnova_render_entries") => {
+            Ok(false)
+        }
         Err(e) => Err(database_error(e)),
     }
 }

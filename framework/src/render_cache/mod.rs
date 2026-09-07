@@ -38,6 +38,7 @@ pub mod live;
 pub mod middleware;
 pub mod migration;
 pub mod orm;
+pub mod providers;
 pub mod registry;
 /// Every item inside is `pub(crate)`: a prepared hit is framework-internal
 /// machinery between the RenderCache middleware and the Live completion
@@ -50,6 +51,7 @@ pub mod testing;
 pub use config::{FailurePolicy, L0Limits, L1Config, RenderCacheConfig};
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
+pub use providers::SqlRenderStore;
 pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
@@ -62,10 +64,75 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use suprnova_live::render_cache::entry::EntryLimits;
 use suprnova_live::render_cache::singleflight::{LocalCoordinatorLimits, LocalRebuildCoordinator};
-use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits, RenderStore as _};
+use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits, RenderStore};
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 use crate::{FrameworkError, Router};
+
+/// The configured L1 provider, held as its concrete type rather than as a
+/// `dyn RenderStore`.
+///
+/// Every read and publication goes through this enum's own
+/// [`RenderStore`] implementation, which delegates and nothing more. The
+/// concrete type is kept for one reason: reclamation is provider-specific
+/// and is not part of the store contract - the file tier sweeps by
+/// retention *and* by epoch against a directory it owns alone, while the
+/// database tier deletes a bounded batch of expired rows from a table every
+/// node shares - so [`RenderCache::sweep`] has to reach the provider's own
+/// sweep, which a trait object could not offer.
+pub enum L1Provider {
+    /// One file per key under a directory this process owns.
+    File(file_store::FileRenderStore),
+    /// One row per key in `suprnova_render_entries`, shared by every node
+    /// pointed at the same database.
+    Database(SqlRenderStore),
+}
+
+#[async_trait::async_trait]
+impl RenderStore for L1Provider {
+    async fn get(
+        &self,
+        key: &suprnova_live::render_cache::key::RenderKey,
+    ) -> Result<Option<suprnova_live::render_cache::store::StoredEntry>, RenderCacheError> {
+        match self {
+            Self::File(store) => store.get(key).await,
+            Self::Database(store) => store.get(key).await,
+        }
+    }
+
+    async fn publish(
+        &self,
+        key: &suprnova_live::render_cache::key::RenderKey,
+        bytes: bytes::Bytes,
+        fence: suprnova_live::render_cache::store::PublicationFence,
+        now_ms: u64,
+        retention_ms: u64,
+    ) -> Result<suprnova_live::render_cache::store::PublishOutcome, RenderCacheError> {
+        match self {
+            Self::File(store) => store.publish(key, bytes, fence, now_ms, retention_ms).await,
+            Self::Database(store) => store.publish(key, bytes, fence, now_ms, retention_ms).await,
+        }
+    }
+
+    async fn evict(
+        &self,
+        key: &suprnova_live::render_cache::key::RenderKey,
+    ) -> Result<(), RenderCacheError> {
+        match self {
+            Self::File(store) => store.evict(key).await,
+            Self::Database(store) => store.evict(key).await,
+        }
+    }
+
+    async fn inspect(
+        &self,
+    ) -> Result<suprnova_live::render_cache::store::StoreInspection, RenderCacheError> {
+        match self {
+            Self::File(store) => store.inspect().await,
+            Self::Database(store) => store.inspect().await,
+        }
+    }
+}
 
 /// L0 occupancy, bounds, and the current authority epoch. See
 /// [`RenderCache::store_inspection`]'s own doc for why the epoch travels
@@ -266,7 +333,9 @@ impl RenderCache {
             L1Config::File {
                 directory,
                 max_bytes,
-            } => Some(file_store::FileRenderStore::open(directory, *max_bytes)?),
+            } => Some(L1Provider::File(file_store::FileRenderStore::open(
+                directory, *max_bytes,
+            )?)),
         };
         let clock = config
             .clock_override
@@ -427,9 +496,12 @@ impl RenderCache {
         })
     }
 
-    /// Removes on-disk L1 entries that are dead by retention or by epoch
-    /// (see [`file_store::FileRenderStore::sweep`]); returns how many were
-    /// removed and whether more dead entries remain, bounded per call. A
+    /// Removes L1 entries the configured provider considers dead, bounded
+    /// per call: for the file tier, entries dead by retention or by epoch
+    /// (see [`file_store::FileRenderStore::sweep`]); for the database tier,
+    /// a batch of rows past their expiry by store time (see
+    /// [`SqlRenderStore::sweep`]). Returns how many were removed and
+    /// whether more dead entries remain. A
     /// no-op returning `Ok(SweepOutcome { removed: 0, more_remain: false
     /// })` when no L1 provider is configured - disk hygiene has nothing to
     /// do in that case, not a misconfiguration. L0's unreachable-by-epoch
@@ -439,8 +511,9 @@ impl RenderCache {
     ///
     /// # Errors
     ///
-    /// Returns [`RenderCacheError`] when no runtime is installed or the
-    /// ledger epoch read fails.
+    /// Returns [`RenderCacheError`] when no runtime is installed, the
+    /// provider's own removal fails, or - for the file tier, which needs
+    /// the current epoch to judge deadness - the ledger epoch read fails.
     pub async fn sweep() -> Result<SweepOutcome, RenderCacheError> {
         let runtime = Self::runtime()
             .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
@@ -450,8 +523,18 @@ impl RenderCache {
                 more_remain: false,
             });
         };
-        let epoch = runtime.ledger.epoch().await?;
-        l1.sweep(runtime.now_ms(), epoch).await
+        match l1 {
+            L1Provider::File(store) => {
+                let epoch = runtime.ledger.epoch().await?;
+                store.sweep(runtime.now_ms(), epoch).await
+            }
+            // The database tier reads the epoch nowhere: an entry from an
+            // older epoch is already unreachable (every key embeds the
+            // epoch it was derived under), and its row leaves on its own
+            // retention like any other. Deadness there is one comparison,
+            // made by the database's own clock inside the delete.
+            L1Provider::Database(store) => store.sweep(providers::sql_store::SWEEP_BATCH).await,
+        }
     }
 
     /// Test-only: the key text for a route with default variance and an
