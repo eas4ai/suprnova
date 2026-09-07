@@ -30,8 +30,9 @@ pub enum LedgerErrorKind {
     /// promotion, or a compare-and-store lost its race twice.
     ///
     /// A distributed provider reports it for an identity another promotion
-    /// holds, for a mount whose identity a reservation another node made
-    /// already holds, and for a claim, commit, abandon, or queued retirement
+    /// holds, for a mount whose proposed identity an unexpired instance record
+    /// another node created already holds, and for a claim, commit, abandon,
+    /// or queued retirement
     /// that read a record another node had already replaced and was
     /// overtaken again on its one retry. Every form is a classified
     /// rejection and never a partial write: the caller retries the whole

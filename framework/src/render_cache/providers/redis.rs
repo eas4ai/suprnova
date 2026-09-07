@@ -205,7 +205,7 @@ impl RedisProvider {
         let client = redis::Client::open(config.url.as_str()).map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
-                %error,
+                kind = ?error.kind(),
                 setting,
                 "redis provider url is unusable",
             );
@@ -222,7 +222,7 @@ impl RedisProvider {
         let conn = ConnectionManager::new_lazy_with_config(client, manager).map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
-                %error,
+                kind = ?error.kind(),
                 setting,
                 "redis provider connection manager is unusable",
             );
@@ -297,7 +297,7 @@ pub async fn ping(
         .map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
-                %error,
+                kind = ?error.kind(),
                 setting,
                 "redis provider did not answer PING at boot",
             );
