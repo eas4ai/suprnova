@@ -72,9 +72,18 @@ use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
     App, Auth, AuthMiddleware, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
     MiddlewareRegistry, Next, Request, Response, Router, SessionConfig, SessionMiddleware,
-    StatusCode, handle_request, scope_locale,
+    StatusCode, handle_request,
 };
-use suprnova::{Lang, Locale};
+// `Lang`, `Locale`, and `scope_locale` exist only with the `localization`
+// feature, which the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves off. This support module is
+// shared with `render_cache/privacy.rs`, which is not localization-only, so
+// the gate is at item level: the two locale middlewares, the three locale
+// handlers, their route lines, and their global registrations. The policies
+// those routes are attached under name only `VarianceDimension::Locale`,
+// which is engine-side and always present, so they stay unconditional.
+#[cfg(feature = "localization")]
+use suprnova::{Lang, Locale, scope_locale};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
@@ -178,8 +187,10 @@ impl suprnova::live::LiveTenantResolver for TestTenantResolver {
 /// that the key genuinely partitions by locale. Registered before
 /// `RenderCache::install`, so the scope is already open when
 /// `RenderCacheMiddleware` reads `Lang::locale()` to build the key.
+#[cfg(feature = "localization")]
 pub struct TestLocaleMiddleware;
 
+#[cfg(feature = "localization")]
 #[async_trait]
 impl suprnova::Middleware for TestLocaleMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
@@ -213,8 +224,10 @@ impl suprnova::Middleware for ImpersonationMiddleware {
 /// its `scope_locale` pops the instant its own `next(request)` resolves -
 /// before any post-render re-read of the same task-local could look.
 /// Gated on `x-test-late-locale` so it changes nothing for any other test.
+#[cfg(feature = "localization")]
 pub struct LateLocaleMiddleware;
 
+#[cfg(feature = "localization")]
 #[async_trait]
 impl suprnova::Middleware for LateLocaleMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
@@ -397,6 +410,7 @@ async fn reads_cookie_handler(request: Request) -> Response {
 /// framework documents as supported, after the key has already been fixed
 /// at the pre-switch locale. The target comes from a header so two
 /// requests that derive the *same* key render two different bodies.
+#[cfg(feature = "localization")]
 async fn locale_switching_handler(request: Request) -> Response {
     let n = counting_route::record();
     let before = Lang::locale().as_str();
@@ -416,6 +430,7 @@ async fn locale_switching_handler(request: Request) -> Response {
 /// own documented API for a mid-render locale switch. The nested scope pops
 /// the instant its future resolves, before the handler returns, so nothing
 /// outside it can re-read what the body was rendered in.
+#[cfg(feature = "localization")]
 async fn nested_scope_locale_handler(request: Request) -> Response {
     let n = counting_route::record();
     let target = request
@@ -432,6 +447,7 @@ async fn nested_scope_locale_handler(request: Request) -> Response {
 /// Reads `Lang::locale()` plainly. [`LateLocaleMiddleware`] is what
 /// actually supplies the switched locale, in a scope that pops before its
 /// own `next(request)` returns.
+#[cfg(feature = "localization")]
 async fn reads_locale_handler(_request: Request) -> Response {
     let n = counting_route::record();
     let locale = Lang::locale().as_str();
@@ -764,16 +780,26 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         )
         .into();
     let router: Router = router.get(PRIVATE_ROUTE, reads_auth_id_handler).into();
+    // The five locale routes are gated with their handlers, for the reason
+    // this module's `Lang` import records. Their policies are still
+    // attached below: a policy attached to a pattern no route serves is
+    // inert, and keeping the chain unconditional keeps every other route's
+    // attachment exactly where it is.
+    #[cfg(feature = "localization")]
     let router: Router = router
         .get(LOCALE_SWITCHES_ROUTE, locale_switching_handler)
         .into();
+    #[cfg(feature = "localization")]
     let router: Router = router
         .get(LOCALE_NESTED_SCOPE_ROUTE, nested_scope_locale_handler)
         .into();
+    #[cfg(feature = "localization")]
     let router: Router = router
         .get(LOCALE_LATE_MIDDLEWARE_ROUTE, reads_locale_handler)
         .into();
+    #[cfg(feature = "localization")]
     let router: Router = router.get(LOCALE_VARIES_ROUTE, reads_locale_handler).into();
+    #[cfg(feature = "localization")]
     let router: Router = router
         .get(UNDECLARED_LOCALE_ROUTE, reads_locale_handler)
         .into();
@@ -954,6 +980,7 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
         Arc::new(TestTenantResolver),
     ));
+    #[cfg(feature = "localization")]
     suprnova::middleware::register_global_middleware(TestLocaleMiddleware);
     suprnova::middleware::register_global_middleware(
         suprnova::features::FeatureMiddleware::new().with_team_from_header("x-test-team"),
@@ -970,6 +997,7 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     // to the handler than any global middleware and therefore always run
     // after `RenderCacheMiddleware` has derived the key.
     suprnova::middleware::register_global_middleware(ImpersonationMiddleware);
+    #[cfg(feature = "localization")]
     suprnova::middleware::register_global_middleware(LateLocaleMiddleware);
 
     let middleware = Arc::new(MiddlewareRegistry::from_global());

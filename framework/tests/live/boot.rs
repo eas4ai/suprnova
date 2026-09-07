@@ -5,14 +5,24 @@ use suprnova::live::{
     AcceptedOutcomeKind, LiveComponent, LiveConfig, LiveConfigErrorKind, LiveOutcomeAccepted,
     LiveRegistry, LiveRuntime, live,
     testing::{
-        LiveTestOperation, LiveTestRuntimeProvider, LiveValidationHarness, inspect_runtime,
-        prepare_live_request_with_fixed_clock_for_test, project_live_response_for_test,
-        register_live_mount_for_test, report_live_outcome_for_test, same_runtime_instance,
-        validate_runtime_provider_omission_for_test,
+        LiveTestRuntimeProvider, LiveValidationHarness, inspect_runtime,
+        project_live_response_for_test, register_live_mount_for_test, report_live_outcome_for_test,
+        same_runtime_instance, validate_runtime_provider_omission_for_test,
     },
 };
+// The fixed-clock assertion inside
+// `runtime_is_bound_before_fallible_routes_and_reused_on_reentry` is the
+// only place in this file that needs a `Request`, and `Request::for_test`
+// is the only way a test can build one. It exists only with the `testing`
+// feature, which the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves off, so these three names are
+// gated with it rather than the whole file.
+#[cfg(feature = "testing")]
+use suprnova::Request;
+#[cfg(feature = "testing")]
+use suprnova::live::testing::{LiveTestOperation, prepare_live_request_with_fixed_clock_for_test};
 use suprnova::{
-    App, Application, EventFacade, FrameworkError, Request, Router, Server,
+    App, Application, EventFacade, FrameworkError, Router, Server,
     events::{assert_dispatched, assert_dispatched_times},
 };
 use validator::Validate;
@@ -210,14 +220,20 @@ fn runtime_is_bound_before_fallible_routes_and_reused_on_reentry() {
         );
     }
 
-    let expires_at = prepare_live_request_with_fixed_clock_for_test(
-        &after_routes,
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
-        LiveTestOperation::Action,
-        10_000,
-    )
-    .expect("fixed-clock provider override prepares a request");
-    assert_eq!(expires_at, 25_000);
+    // Gated for the reason this file's `Request` import records: without
+    // the `testing` feature there is no way to build the request this
+    // assertion needs, and the rest of the test still compiles.
+    #[cfg(feature = "testing")]
+    {
+        let expires_at = prepare_live_request_with_fixed_clock_for_test(
+            &after_routes,
+            Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+            LiveTestOperation::Action,
+            10_000,
+        )
+        .expect("fixed-clock provider override prepares a request");
+        assert_eq!(expires_at, 25_000);
+    }
 
     let second = Server::try_from_config_with_routes(|| {
         let rebound: LiveRuntime = App::resolve().map_err(|error| {

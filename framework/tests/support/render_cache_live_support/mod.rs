@@ -398,7 +398,12 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .try_live_mount(&uncached)
         .expect("register uncached capture identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
+    // Gated with their handlers, for the reason `strip_handler` records.
+    // The policies below stay attached unconditionally: a policy attached
+    // to a pattern no route serves is inert.
+    #[cfg(feature = "testing")]
     let router: Router = router.get(STRIP_PATH, strip_handler).into();
+    #[cfg(feature = "testing")]
     let router: Router = router.get(SEAM_LEAK_PATH, seam_leak_handler).into();
     let router: Router = router.get(SEAM_CONTROL_PATH, seam_control_handler).into();
     let router = router
@@ -560,6 +565,12 @@ async fn unreasoned_handler(_request: Request) -> Response {
 /// the test-only seam, which strips that reason only from the copy
 /// `is_unreasoned_private_class` checks (R90) - the real classification the
 /// value guard and `entry_header` see keeps the reason.
+/// Gated on `testing`: `strip_classification_reasons_for_test` is
+/// `#[cfg(any(test, feature = "testing"))]` in the framework, and the
+/// minimal profile checked by `scripts/check-feature-matrix.sh` leaves that
+/// feature off. The gate is at item level because this support module is
+/// shared with test modules that need none of it.
+#[cfg(feature = "testing")]
 async fn strip_handler(_request: Request) -> Response {
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
     suprnova::render_cache::collector::strip_classification_reasons_for_test();
@@ -573,6 +584,7 @@ async fn strip_handler(_request: Request) -> Response {
 /// touched the real classification again, this would store under a key
 /// that does not partition by principal and serve `user-9` the body
 /// rendered for `user-7`.
+#[cfg(feature = "testing")]
 async fn seam_leak_handler(_request: Request) -> Response {
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
     suprnova::render_cache::collector::strip_classification_reasons_for_test();

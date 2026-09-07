@@ -1580,6 +1580,12 @@ async fn an_anonymous_or_signed_out_visitor_never_receives_an_assembled_stitched
 /// This is what makes the stitched class different from `PrivateCached`,
 /// where a bump *is* what makes a pre-bump entry a miss: there the stored
 /// bytes are one principal's, and here they are nobody's.
+// `RenderCache::shell_for_test` is `#[cfg(any(test, feature = "testing"))]`
+// in the framework, and the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves that feature off. This is the
+// only test in the file that reads the stored shell bytes, so the gate is
+// on the test rather than the module.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_permission_version_bump_leaves_the_shared_shell_and_re_mounts_every_island() {

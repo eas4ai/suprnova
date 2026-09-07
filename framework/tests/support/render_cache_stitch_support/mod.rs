@@ -61,6 +61,9 @@ use suprnova::{
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
 use suprnova_live::mount::MountFlags;
+// Only `rewrite_stored_entry` names this type, and that helper is gated on
+// the `testing` feature for the reason its own doc records.
+#[cfg(feature = "testing")]
 use suprnova_live::render_cache::composite::SegmentGraph;
 
 use crate::live_dogfood_support::{
@@ -375,6 +378,14 @@ pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
 /// has cannot arise inside one process, because the registry and the entry
 /// are written by the same build. An `edit` that changes nothing is also how
 /// a test observes the stored graph, which nothing else here exposes.
+///
+/// Gated on `testing`: the seam it calls,
+/// `render_cache::testing::rewrite_composite_for_test`, is
+/// `#[cfg(any(test, feature = "testing"))]` in the framework, and the
+/// minimal profile checked by `scripts/check-feature-matrix.sh` leaves that
+/// feature off. The gate is at item level because this support module is
+/// shared with test modules that need none of it.
+#[cfg(feature = "testing")]
 pub async fn rewrite_stored_entry<F>(path: &str, edit: F)
 where
     F: FnOnce(&mut SegmentGraph),

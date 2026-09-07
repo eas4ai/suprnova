@@ -10,15 +10,24 @@ use suprnova::StatusCode;
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 use suprnova_live::render_cache::entry::EntryKind;
 
-use suprnova_live::render_cache::composite::Segment;
-
 use crate::render_cache_stitch_support::{
-    FALLBACK_HTML, FALLBACK_PATH, NO_DIGEST_PATH, NONCE_PATH, OMIT_PATH, OPTIONAL_FAIL_PATH,
-    OPTIONAL_FALLBACK_PATH, OPTIONAL_OMIT_PATH, POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH,
-    SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH, STITCHED_PATH, TWICE_RENDERED_PATH, TestResponse,
-    attribute, boot, boot_with_freshness, chain_reaches, clock, decoded_snapshot, dispatch,
-    handler_renders, island_tag, rewrite_stored_entry, set_tenant_refusing,
+    FALLBACK_HTML, NO_DIGEST_PATH, OPTIONAL_FAIL_PATH, OPTIONAL_FALLBACK_PATH, OPTIONAL_OMIT_PATH,
+    POST_PROCESSED_PATH, SEED_ONLY_NONCE_PATH, SEED_ONLY_PATH, SHELL_READS_PRINCIPAL_PATH,
+    STITCHED_PATH, TWICE_RENDERED_PATH, TestResponse, boot, boot_with_freshness, chain_reaches,
+    clock, decoded_snapshot, dispatch, handler_renders, island_tag, set_tenant_refusing,
 };
+
+// `rewrite_stored_entry` reaches `render_cache::testing::rewrite_composite_for_test`
+// and `RenderCache::shell_for_test` is the framework's own seam; both exist
+// only with the `testing` feature, which the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves off. The four tests that need
+// them - and the names only those tests use - carry the same gate.
+#[cfg(feature = "testing")]
+use crate::render_cache_stitch_support::{
+    FALLBACK_PATH, NONCE_PATH, OMIT_PATH, attribute, rewrite_stored_entry,
+};
+#[cfg(feature = "testing")]
+use suprnova_live::render_cache::composite::Segment;
 
 /// A stitched route whose document holds nothing principal-specific is still
 /// a Complete representation: the class says the gate runs again on every
@@ -765,6 +774,8 @@ async fn a_hit_binds_its_island_to_the_authority_of_the_request_in_front_of_it()
 ///
 /// A replayed nonce proves nothing, so the miss render's nonce must never
 /// appear again, and two hits by the same visitor must not share one either.
+// Needs `rewrite_stored_entry`; see this file's gated import.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn nonces_are_regenerated_in_the_body_and_the_csp_header_on_every_hit() {
@@ -859,6 +870,8 @@ async fn nonces_are_regenerated_in_the_body_and_the_csp_header_on_every_hit() {
 ///
 /// Each of the three policies is exercised against the same mismatch, so the
 /// policy - not the kind of failure - is what decides the outcome.
+// Needs `rewrite_stored_entry`; see this file's gated import.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_slot_whose_declaration_no_longer_matches_the_catalog_is_a_slot_failure() {
@@ -930,6 +943,8 @@ async fn a_slot_whose_declaration_no_longer_matches_the_catalog_is_a_slot_failur
 /// other direction: the route and slot still resolve, but what they resolve
 /// to is not what the entry recorded, and the declaration - not the running
 /// catalog - is what a stitched hit is checked against.
+// Needs `rewrite_stored_entry`; see this file's gated import.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_slot_naming_a_component_the_registry_does_not_have_is_a_slot_failure() {
@@ -1099,6 +1114,8 @@ fn scope_of(html: &str) -> String {
 /// `inspect_route_for_test` reports only a length, which shows the shell is
 /// smaller than the document but not what came out of it. This reads the
 /// stored bytes.
+// Needs `RenderCache::shell_for_test`; see this file's gated import.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn the_stored_shell_holds_no_island_markup_and_no_signed_snapshot() {

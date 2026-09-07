@@ -1,3 +1,16 @@
+//! Gated as a whole on the `testing` feature. This module's shared request
+//! builders (`complete_anonymous_request`, `drive_rate_limit`) and all but
+//! one of its tests go through `Request::for_test`,
+//! `Request::for_test_with_headers`, or
+//! `live::testing::remove_live_security_check_for_test`, none of which
+//! exist without that feature; the one remaining test builds the router
+//! those builders serve. The minimal profile checked by
+//! `scripts/check-feature-matrix.sh` leaves `testing` off, so with this
+//! gate such a build compiles the file to nothing instead of failing to
+//! resolve - the same ruling `render_cache/races.rs` records, for the same
+//! reason.
+#![cfg(feature = "testing")]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

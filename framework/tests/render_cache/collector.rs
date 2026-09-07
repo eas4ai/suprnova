@@ -178,6 +178,13 @@ fn record_identity_pins_the_json_key_encoding_for_three_shapes() {
     );
 }
 
+// `suprnova::Lang` exists only with the `localization` feature, which the
+// minimal profile checked by `scripts/check-feature-matrix.sh` leaves off.
+// The whole test is gated rather than only the `Lang::locale()` line,
+// because the locale read is one of the three framework reads this test
+// exists to pin and a version of it missing that read would be a different,
+// weaker test.
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn framework_reads_register_automatically() {
     let report = Collector::scope(async {

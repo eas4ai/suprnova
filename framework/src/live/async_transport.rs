@@ -560,6 +560,10 @@ mod tests {
         assert!(parse_position_part("-1").is_err());
     }
 
+    // `Request::for_test_with_headers` exists only with the `testing`
+    // feature, which the minimal profile checked by
+    // scripts/check-feature-matrix.sh leaves off.
+    #[cfg(feature = "testing")]
     #[test]
     fn stream_acceptance_ignores_parameters_and_case() {
         let request = Request::for_test_with_headers(
@@ -576,6 +580,7 @@ mod tests {
         assert!(!accepts_event_stream(&request));
     }
 
+    #[cfg(feature = "testing")]
     #[test]
     fn bearer_credentials_require_the_async_scheme() {
         let request = Request::for_test_with_headers(
