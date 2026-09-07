@@ -828,6 +828,75 @@ impl RenderCache {
         Some(suprnova_live::render_cache::inspect(&stored.bytes, &runtime.limits).expect("inspect"))
     }
 
+    /// Test-only: whether the L0 entry stored under `key_text` is served
+    /// hot - a Complete publication that carried a prepared entry, so a hit
+    /// on it replays header values formed once at publication instead of
+    /// decoding and forming them per request.
+    ///
+    /// `false` for a key with no entry, for a Composite entry (which is
+    /// never prepared: it has to be assembled per request), and for a
+    /// malformed key text.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn l0_hot_for_test(key_text: &str) -> bool {
+        Self::hot_entry_for_test(key_text).is_some()
+    }
+
+    /// Test-only: the address and length of the body the hot L0 entry stored
+    /// under `key_text` holds, or `None` when that key has no hot entry.
+    ///
+    /// The address is what makes the claim checkable: paired with
+    /// [`Self::hot_response_body_ptr_for_test`] it proves that serving a hit
+    /// hands back the stored buffer itself rather than a copy of it. It is
+    /// an address, deliberately, and never the bytes: no seam in this module
+    /// hands a stored body out.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn l0_body_ptr_for_test(key_text: &str) -> Option<(usize, usize)> {
+        let hot = Self::hot_entry_for_test(key_text)?;
+        let body = hot.entry().body();
+        Some((body.as_ptr() as usize, body.len()))
+    }
+
+    /// Test-only: the address and length of the body the middleware's own
+    /// hot-hit builder produces for the entry stored under `key_text`, or
+    /// `None` when that key has no hot entry.
+    ///
+    /// This runs [`middleware::hot_response`] - the exact function a hot hit
+    /// is served through - over a plain `GET` with no `If-None-Match`, at
+    /// the entry's own publication instant. A test compares the result with
+    /// [`Self::l0_body_ptr_for_test`]: equal addresses mean the served body
+    /// is the stored `Bytes`, shared, and a copy anywhere along that path
+    /// would move it.
+    ///
+    /// It exists because the claim is not observable from a dispatched
+    /// request: the body a test client reads back came off a TCP socket and
+    /// is a fresh allocation by construction, whichever buffer the server
+    /// wrote from.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn hot_response_body_ptr_for_test(key_text: &str) -> Option<(usize, usize)> {
+        let hot = Self::hot_entry_for_test(key_text)?;
+        let response =
+            middleware::hot_response(&hot, &hyper::Method::GET, None, hot.published_at_ms(), None);
+        let body = response.body();
+        Some((body.as_ptr() as usize, body.len()))
+    }
+
+    /// The hot entry stored under `key_text`, shared by the three seams
+    /// above so they can never disagree about which entry they describe.
+    #[cfg(any(test, feature = "testing"))]
+    fn hot_entry_for_test(
+        key_text: &str,
+    ) -> Option<std::sync::Arc<suprnova_live::render_cache::hot::HotEntry>> {
+        let runtime = Self::runtime()?;
+        let key = suprnova_live::render_cache::key::RenderKey::from_base64url(key_text).ok()?;
+        runtime.l0.hot_get(&key)
+    }
+
     /// Test-only: the number of entries currently held in the
     /// [`CoherenceMode::Lease`] validation-lease map. Added for fix round 2,
     /// item 6, to observe the map's bound from outside the crate: nothing

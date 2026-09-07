@@ -644,6 +644,84 @@ impl GenerationLedger for SqlGenerationLedger {
             .map_err(provider_error)
     }
 
+    async fn current_with_epoch(
+        &self,
+        dependencies: &[[u8; 32]],
+    ) -> Result<(GenerationSet, u64), RenderCacheError> {
+        // No `IN` list to bind and nothing to zero-fill: the epoch is the
+        // whole answer, so it is read the way `epoch` reads it rather than
+        // through a one-branch union.
+        if dependencies.is_empty() {
+            return Ok((GenerationSet::default(), self.epoch().await?));
+        }
+
+        // The same primary pin `current` and `epoch` take, for the same two
+        // reasons: a render's own transaction wins so the window-close read
+        // shares its snapshot, and a lagging replica must never answer for
+        // the authority `advance_epoch` writes to.
+        let exec = primary_executor().await.map_err(provider_error)?;
+        let backend = exec.backend();
+        let digests: Vec<String> = dependencies.iter().map(hex::encode).collect();
+        // One statement on all three dialects. The epoch arrives as an extra
+        // row under the empty identity, which no dependency can collide with:
+        // every real identity column value is the 64 hex characters
+        // `hex::encode` produces from a 32-byte digest.
+        let sql = format!(
+            "SELECT identity, generation FROM suprnova_render_generations \
+             WHERE identity IN ({}) \
+             UNION ALL \
+             SELECT '' AS identity, epoch AS generation FROM suprnova_render_epochs \
+             WHERE singleton = 1",
+            placeholders(backend, digests.len()).map_err(provider_error)?
+        );
+        let values: Vec<Value> = digests.into_iter().map(Value::from).collect();
+        let rows = exec
+            .query_all(sea_orm::Statement::from_sql_and_values(
+                backend, &sql, values,
+            ))
+            .await
+            .map_err(|e| provider_error(database_error(e)))?;
+
+        let mut found: HashMap<String, u64> = HashMap::new();
+        let mut epoch: Option<u64> = None;
+        for row in rows {
+            let identity: String = row
+                .try_get_by_index(0)
+                .map_err(|e| provider_error(database_error(e)))?;
+            let generation: i64 = row
+                .try_get_by_index(1)
+                .map_err(|e| provider_error(database_error(e)))?;
+            if identity.is_empty() {
+                epoch = Some(generation as u64);
+            } else {
+                found.insert(identity, generation as u64);
+            }
+        }
+
+        // A missing epoch row is the same failure `epoch` raises for it, for
+        // the same reason: without the singleton there is no authority to
+        // compare an entry against, and guessing one would report every
+        // stored entry coherent.
+        let Some(epoch) = epoch else {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                "current_with_epoch: suprnova_render_epochs has no singleton row",
+            );
+            return Err(RenderCacheError::new(
+                RenderCacheErrorKind::ProviderUnavailable,
+            ));
+        };
+
+        // Zero-filled exactly as `current` does, and for the reason spelled
+        // out there: an unobserved digest is `Some(0)`, never absent.
+        let mut set = GenerationSet::default();
+        for dependency in dependencies {
+            let generation = found.get(&hex::encode(dependency)).copied().unwrap_or(0);
+            set.insert_digest(*dependency, generation)?;
+        }
+        Ok((set, epoch))
+    }
+
     async fn epoch(&self) -> Result<u64, RenderCacheError> {
         // Same primary pin as `current`, and it matters even more here:
         // `advance_epoch` is the emergency invalidation lever, its `UPDATE`

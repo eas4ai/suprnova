@@ -294,6 +294,52 @@ async fn the_epoch_starts_at_one_and_advances_on_demand() {
 }
 
 #[tokio::test]
+async fn current_with_epoch_agrees_with_the_separate_current_and_epoch_reads() {
+    let _db = boot().await;
+    let ledger = SqlGenerationLedger::new();
+    let posts = DependencyIdentity::table("posts");
+    let comments = DependencyIdentity::table("comments");
+
+    DB::transaction(|_tx| {
+        Box::pin(async move {
+            advance_in_current_transaction(&[DependencyIdentity::table("posts")]).await
+        })
+    })
+    .await
+    .expect("commit");
+    ledger.advance_epoch().await.expect("advance epoch");
+
+    // A mix of observed and unobserved digests, which is the shape the
+    // batched statement has to zero-fill exactly as `current` does: `posts`
+    // has a row, `comments` has never been touched and has none.
+    let digests = [posts.digest(), comments.digest()];
+    let (batched, batched_epoch) = ledger
+        .current_with_epoch(&digests)
+        .await
+        .expect("current_with_epoch");
+    let separate = ledger.current(&digests).await.expect("current");
+    let separate_epoch = ledger.epoch().await.expect("epoch");
+
+    assert_eq!(batched.get_digest(&posts.digest()), Some(1));
+    assert_eq!(batched.get_digest(&comments.digest()), Some(0));
+    assert_eq!(batched_epoch, separate_epoch);
+    assert_eq!(
+        batched.digest(),
+        separate.digest(),
+        "the one batched read and the two separate reads describe the same generation set"
+    );
+
+    // The empty request is its own case: there is no `IN` list to bind, and
+    // the epoch still has to come back.
+    let (empty, empty_epoch) = ledger
+        .current_with_epoch(&[])
+        .await
+        .expect("current_with_epoch with no dependencies");
+    assert!(empty.digests().is_empty());
+    assert_eq!(empty_epoch, separate_epoch);
+}
+
+#[tokio::test]
 async fn migration_up_can_run_twice_without_erroring() {
     let db = boot().await;
 

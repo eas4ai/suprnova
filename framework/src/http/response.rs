@@ -111,6 +111,46 @@ impl HttpResponse {
         }
     }
 
+    /// Adopts a response the Live engine formed, changing the container and
+    /// nothing else.
+    ///
+    /// The engine's own builder
+    /// ([`suprnova_live::render_cache::hot::serve_hot`] for a hot RenderCache
+    /// hit, [`suprnova_live::render_cache::hot::respond`] for everything
+    /// else) is the single authority on a cached representation's status,
+    /// body treatment, and headers - `ETag`, `Cache-Control`, `Vary`, `Age`,
+    /// `Warning`, the 304 decision, and the body-free `HEAD` - so nothing
+    /// here re-decides any of them. The body is moved, never copied: a
+    /// `Bytes` the engine cloned off a stored entry stays that same buffer.
+    ///
+    /// A header value that is not valid UTF-8 is dropped rather than
+    /// lossily transcoded, since this container holds header values as
+    /// `String`. The engine only ever forms values from text it already
+    /// validated, so this is unreachable in practice and fails by omitting
+    /// one header rather than by mangling it.
+    pub fn from_engine_response(response: http::Response<Bytes>) -> Self {
+        let (parts, body) = response.into_parts();
+        // `bytes` records the content type as a header of its own, so it is
+        // set once here and skipped in the loop below rather than appended
+        // a second time.
+        let content_type = parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let mut out = Self::bytes(body, content_type).status(parts.status.as_u16());
+        for (name, value) in &parts.headers {
+            if name == http::header::CONTENT_TYPE {
+                continue;
+            }
+            if let Ok(value) = value.to_str() {
+                out = out.header(name.as_str().to_owned(), value.to_owned());
+            }
+        }
+        out
+    }
+
     /// Create an HTML response. Sets `Content-Type: text/html; charset=utf-8`.
     pub fn html(body: impl Into<String>) -> Self {
         Self {

@@ -113,6 +113,49 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
 
 #[tokio::test]
 #[serial_test::serial]
+async fn a_second_request_is_served_from_a_hot_entry_holding_the_stored_body() {
+    let harness = boot_with_render_cache().await;
+    let key = RenderCache::key_for_route_for_test("/cached/{id}", &[("id", "1")], None);
+    assert!(
+        !RenderCache::l0_hot_for_test(&key),
+        "nothing is published before the first render, so nothing is hot"
+    );
+
+    let first = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        RenderCache::l0_hot_for_test(&key),
+        "the leader's own publication prepares the hot entry the next request serves"
+    );
+
+    let second = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.body, first.body);
+    assert_eq!(counting_route::renders(), 1, "a hit runs no handler");
+
+    let stored = RenderCache::l0_body_ptr_for_test(&key).expect("a hot entry");
+    assert_eq!(
+        stored.1,
+        second.body.len(),
+        "the hot entry holds exactly the bytes the client was sent"
+    );
+    // The body a dispatched request hands back was read off a TCP socket by
+    // the client half of the harness, so its address can only ever be a
+    // fresh allocation - the same reason the empty-body checks above this
+    // test were dropped in fix round 2, item 7: which layer produced a byte
+    // is not observable through a full HTTP dispatch. What is observable is
+    // the response the middleware's own hot-hit builder forms, which is what
+    // this seam runs; its body being the stored `Bytes` itself, at the same
+    // address, is the no-copy claim.
+    let served = RenderCache::hot_response_body_ptr_for_test(&key).expect("a hot entry");
+    assert_eq!(
+        served, stored,
+        "the served body is the stored Bytes, not a copy"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn a_moved_generation_misses_and_a_write_during_the_render_discards_the_candidate() {
     let harness = boot_with_render_cache().await;
     dispatch_get(&harness, "/cached/1", &[]).await;

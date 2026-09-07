@@ -160,7 +160,7 @@ use suprnova_live::clock::Clock;
 use suprnova_live::crypto::SnapshotKeyRing;
 use suprnova_live::identity::{BuildId, RouteIdentity};
 use suprnova_live::render_cache::coherence::{
-    FreshnessState, ValidationLease, age_seconds, evaluate_freshness, warning_header,
+    FreshnessState, ValidationLease, evaluate_freshness, warning_header,
 };
 use suprnova_live::render_cache::entry::{
     CompleteEntry, DecodedEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders,
@@ -169,6 +169,7 @@ use suprnova_live::render_cache::entry::{
 use suprnova_live::render_cache::generation::{
     CoherenceCheck, GenerationLedger, GenerationSet, ObservationWindow,
 };
+use suprnova_live::render_cache::hot::{HotEntry, HotRequest, ResponseParts, respond, serve_hot};
 use suprnova_live::render_cache::http::{
     ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value,
 };
@@ -339,9 +340,84 @@ enum Coherence {
 
 /// Which layer answered a lookup, for telemetry and promotion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Layer {
+pub(crate) enum Layer {
     L0,
     L1,
+}
+
+/// What a lookup found: a Complete L0 publication prepared for hot service,
+/// or a stored entry this request had to decode.
+///
+/// The two are the same publication - the same bytes, the same fence, the
+/// same publication instant - and differ only in how much of the response
+/// was already formed. A hot entry carries every header value a hit can
+/// precompute, formed once when it was published (see
+/// [`suprnova_live::render_cache::hot::HotEntry`]); a decoded one forms them
+/// now. Everything the request flow reads off a hit - its header, its
+/// publication instant, the layer that answered, and the Complete
+/// representation behind it - is read through the accessors below, so both
+/// shapes travel one path and cannot be judged by different rules.
+pub(crate) enum FoundEntry {
+    /// A Complete L0 hit, prepared at publication.
+    Hot(Arc<HotEntry>),
+    /// A stored entry decoded on this request. Boxed so a hot hit carries a
+    /// pointer rather than a decoded entry's worth of stack: the decoding
+    /// path has already allocated for every string in that header by the
+    /// time this box is made, and the hot path is the one that must stay
+    /// cheap to move.
+    Decoded(Box<DecodedHit>),
+}
+
+/// A stored entry this request decoded, and where it came from.
+pub(crate) struct DecodedHit {
+    /// The decoded representation.
+    pub(crate) entry: DecodedEntry,
+    /// Its stored bytes and publication facts.
+    pub(crate) stored: StoredEntry,
+    /// The layer that answered.
+    pub(crate) layer: Layer,
+}
+
+impl FoundEntry {
+    /// The stored entry's header, for coherence and freshness.
+    fn header(&self) -> &EntryHeader {
+        match self {
+            Self::Hot(hot) => hot.entry().header(),
+            Self::Decoded(hit) => hit.entry.header(),
+        }
+    }
+
+    /// The publication instant `Age` and freshness are measured from. A hot
+    /// entry records the instant it was published under, which is the same
+    /// instant its stored bytes carry.
+    pub(crate) fn published_at_ms(&self) -> u64 {
+        match self {
+            Self::Hot(hot) => hot.published_at_ms(),
+            Self::Decoded(hit) => hit.stored.published_at_ms,
+        }
+    }
+
+    /// The layer that answered. A hot entry is an L0 slot by construction:
+    /// only [`MemoryRenderStore`] holds one.
+    const fn layer(&self) -> Layer {
+        match self {
+            Self::Hot(_) => Layer::L0,
+            Self::Decoded(hit) => hit.layer,
+        }
+    }
+
+    /// The Complete representation behind this hit, or `None` for a
+    /// Composite entry, which is a finished answer to nobody: it has to be
+    /// assembled for the request that asked for it.
+    fn complete(&self) -> Option<&CompleteEntry> {
+        match self {
+            Self::Hot(hot) => Some(hot.entry()),
+            Self::Decoded(hit) => match &hit.entry {
+                DecodedEntry::Complete(entry) => Some(entry),
+                DecodedEntry::Composite(_) => None,
+            },
+        }
+    }
 }
 
 /// Closed lookup outcome, for telemetry's `outcome` attribute.
@@ -479,11 +555,11 @@ impl RenderCacheMiddleware {
             return Ok(next(request).await);
         };
 
-        let hit = match lookup(runtime, &key).await {
+        let hit = match lookup(runtime, policy, &key).await {
             Ok(hit) => hit,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
-        let Some((entry, stored, layer)) = hit else {
+        let Some(found) = hit else {
             LookupOutcome::Miss.record();
             let job = RenderJob {
                 key,
@@ -493,7 +569,7 @@ impl RenderCacheMiddleware {
             return render_and_publish(runtime, request, next, policy, job, 0).await;
         };
 
-        let coherence = match coherence(runtime, &key, policy, entry.header()).await {
+        let coherence = match coherence(runtime, &key, policy, found.header()).await {
             Ok(coherence) => coherence,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
@@ -501,19 +577,19 @@ impl RenderCacheMiddleware {
         let state = freshness_state(
             policy,
             coherence,
-            entry.header().class,
-            stored.published_at_ms,
+            found.header().class,
+            found.published_at_ms(),
             now,
-            entry.header().seed_deadline_ms,
+            found.header().seed_deadline_ms,
         );
         match state {
             FreshnessState::Fresh => {
-                (match layer {
+                (match found.layer() {
                     Layer::L0 => LookupOutcome::L0Hit,
                     Layer::L1 => LookupOutcome::L1Hit,
                 })
                 .record();
-                if let DecodedEntry::Complete(complete) = &entry
+                if let Some(complete) = found.complete()
                     && matches!(
                         evaluate_conditional(request.header("if-none-match"), complete.validator()),
                         ConditionalOutcome::NotModified
@@ -521,16 +597,7 @@ impl RenderCacheMiddleware {
                 {
                     LookupOutcome::Conditional.record();
                 }
-                Ok(deliver_hit(
-                    request,
-                    next,
-                    policy,
-                    entry,
-                    stored.published_at_ms,
-                    now,
-                    None,
-                )
-                .await)
+                Ok(deliver_hit(request, next, policy, found, now, None).await)
             }
             FreshnessState::StaleServable => {
                 LookupOutcome::Stale.record();
@@ -549,8 +616,7 @@ impl RenderCacheMiddleware {
                         request,
                         next,
                         policy,
-                        entry,
-                        stored.published_at_ms,
+                        found,
                         now,
                         warning_header(state),
                     )
@@ -561,20 +627,21 @@ impl RenderCacheMiddleware {
                 // entry first - which only a Complete entry can be. A
                 // Composite entry here means a store defect (`decode`
                 // refuses a Composite entry under any other class, and this
-                // route did not declare the stitched one), so it is treated
-                // as `deliver_hit` treats it: a miss.
-                let DecodedEntry::Complete(complete) = entry else {
+                // route did not declare the stitched one), and so does a
+                // Complete entry that cannot be formed into a valid
+                // response; `hit_response` reports both as `None` and both
+                // are treated as `deliver_hit` treats them: a miss.
+                let Some(response) = hit_response(
+                    &found,
+                    request.method(),
+                    request.header("if-none-match"),
+                    policy,
+                    now,
+                    warning_header(state),
+                ) else {
                     LookupOutcome::Miss.record();
                     return Ok(next(request).await);
                 };
-                let response = respond_hit(
-                    &request,
-                    policy,
-                    &complete,
-                    stored.published_at_ms,
-                    now,
-                    warning_header(state),
-                );
                 self.spawn_background_rebuild(
                     Arc::clone(runtime),
                     request,
@@ -586,14 +653,14 @@ impl RenderCacheMiddleware {
                         variance,
                     },
                 );
-                Ok(response)
+                Ok(Ok(response))
             }
             FreshnessState::StaleOnError => {
                 LookupOutcome::Miss.record();
                 // Captured before `request` moves into the rebuild attempt,
                 // so a fallback to the stale entry (below) does not need the
                 // request back - matching `lead_render`'s own capture.
-                let method = request.method().as_str().to_owned();
+                let method = request.method().clone();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
                 let job = RenderJob {
                     key,
@@ -625,19 +692,22 @@ impl RenderCacheMiddleware {
                 if !rebuild_failed || is_stitched(policy) {
                     return outcome;
                 }
-                let DecodedEntry::Complete(complete) = entry else {
-                    return outcome;
-                };
-                LookupOutcome::Stale.record();
-                Ok(conditional_response(
+                // A Composite entry on a route that did not declare
+                // stitching, or a stored entry that cannot be formed into a
+                // valid response, leaves nothing to fall back to; the failed
+                // rebuild's own outcome is what the client sees.
+                let Some(response) = hit_response(
+                    &found,
                     &method,
                     if_none_match.as_deref(),
                     policy,
-                    &complete,
-                    stored.published_at_ms,
                     now,
                     warning_header(FreshnessState::StaleOnError),
-                ))
+                ) else {
+                    return outcome;
+                };
+                LookupOutcome::Stale.record();
+                Ok(Ok(response))
             }
             FreshnessState::Dead => {
                 LookupOutcome::Miss.record();
@@ -840,6 +910,13 @@ fn key_input(
 /// defective entry (decode failure) is evicted from the layer it was found
 /// in and treated as a miss on that layer.
 ///
+/// The hot L0 slot is consulted first, for every route: a Complete
+/// publication that carried a prepared entry answers with no decode, no
+/// integrity hash, and no key allocation at all (see
+/// [`suprnova_live::render_cache::hot::HotEntry`]). It is checked against
+/// the same misplacement guard as a decoded entry, below, and a mismatch is
+/// evicted and falls through to the decoding path rather than being served.
+///
 /// So is a misplaced one (final review, F7): an entry that decodes but whose
 /// stored header names a different key than the one it was found under. The
 /// store derives every path and map slot from the key alone and the entry's
@@ -853,13 +930,28 @@ fn key_input(
 /// function's.
 async fn lookup(
     runtime: &RenderCacheRuntime,
+    policy: &RenderCachePolicy,
     key: &RenderKey,
-) -> Result<Option<(DecodedEntry, StoredEntry, Layer)>, ()> {
+) -> Result<Option<FoundEntry>, ()> {
+    if let Some(hot) = runtime.l0.hot_get(key) {
+        if hot.entry().header().key == *key {
+            return Ok(Some(FoundEntry::Hot(hot)));
+        }
+        // Misplaced, exactly as below: evicted and never served. This drops
+        // the stored bytes with the hot slot, since the two are one
+        // publication in one map slot, so the decoding path below finds the
+        // same nothing.
+        let _ = runtime.l0.evict(key).await;
+    }
     let l0_stored = runtime.l0.get(key).await.map_err(|_| ())?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
             Ok(entry) if entry.header().key == *key => {
-                return Ok(Some((entry, stored, Layer::L0)));
+                return Ok(Some(FoundEntry::Decoded(Box::new(DecodedHit {
+                    entry,
+                    stored,
+                    layer: Layer::L0,
+                }))));
             }
             // Defective (`Err`) or misplaced (`Ok` under another key): the
             // same treatment either way.
@@ -873,22 +965,12 @@ async fn lookup(
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
                 Ok(entry) if entry.header().key == *key => {
-                    // L0 has no age-based expiry of its own (see
-                    // `MemoryRenderStore::publish`'s own doc); `u64::MAX`
-                    // is the trait's documented "never age-swept" value,
-                    // never `0`, which is now an ordinary, honoured
-                    // retention rather than a sentinel.
-                    let _ = runtime
-                        .l0
-                        .publish(
-                            key,
-                            stored.bytes.clone(),
-                            stored.fence,
-                            stored.published_at_ms,
-                            u64::MAX,
-                        )
-                        .await;
-                    return Ok(Some((entry, stored, Layer::L1)));
+                    promote_to_l0(runtime, policy, key, &entry, &stored).await;
+                    return Ok(Some(FoundEntry::Decoded(Box::new(DecodedHit {
+                        entry,
+                        stored,
+                        layer: Layer::L1,
+                    }))));
                 }
                 // Defective or misplaced, as for L0 above; a misplaced L1
                 // entry is never promoted.
@@ -899,6 +981,69 @@ async fn lookup(
         }
     }
     Ok(None)
+}
+
+/// Promotes a decoded L1 hit into L0 under the fence and publication instant
+/// it already carries.
+///
+/// A Complete entry is promoted hot, prepared from the frame that just
+/// decoded - the same rule the lead publication follows (see
+/// [`store_entry`]), so a promoted entry and a freshly published one are
+/// indistinguishable to the next request. A Composite entry, or a Complete
+/// one whose stored header values cannot be formed into HTTP headers, is
+/// promoted as plain bytes and decoded again on the next hit.
+///
+/// Never fails the request: a promotion that does not land only means the
+/// next request reads L1 again.
+async fn promote_to_l0(
+    runtime: &RenderCacheRuntime,
+    policy: &RenderCachePolicy,
+    key: &RenderKey,
+    entry: &DecodedEntry,
+    stored: &StoredEntry,
+) {
+    if let DecodedEntry::Complete(complete) = entry {
+        match HotEntry::prepare(
+            complete.clone(),
+            policy.shared(),
+            &policy.freshness(),
+            stored.published_at_ms,
+            stored.fence,
+        ) {
+            Ok(hot) => {
+                runtime.l0.publish_hot(
+                    key,
+                    stored.bytes.clone(),
+                    Arc::new(hot),
+                    stored.fence,
+                    stored.published_at_ms,
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "suprnova::render_cache",
+                    kind = %error,
+                    "an L1 entry could not be prepared for hot service; \
+                     promoting it as stored bytes instead",
+                );
+            }
+        }
+    }
+    // L0 has no age-based expiry of its own (see
+    // `MemoryRenderStore::publish`'s own doc); `u64::MAX` is the trait's
+    // documented "never age-swept" value, never `0`, which is an ordinary,
+    // honoured retention rather than a sentinel.
+    let _ = runtime
+        .l0
+        .publish(
+            key,
+            stored.bytes.clone(),
+            stored.fence,
+            stored.published_at_ms,
+            u64::MAX,
+        )
+        .await;
 }
 
 /// Checks a stored entry's coherence against the current authority.
@@ -966,8 +1111,15 @@ async fn authority_coherence(
     header: &EntryHeader,
 ) -> Result<Coherence, ()> {
     let digests = header.observed.digests();
-    let current = runtime.ledger.current(&digests).await.map_err(|_| ())?;
-    let epoch = runtime.ledger.epoch().await.map_err(|_| ())?;
+    // One statement, not two: the generation set and the authority epoch are
+    // read together (see
+    // [`GenerationLedger::current_with_epoch`]), so a hit that has to consult
+    // the authority costs one round trip rather than two.
+    let (current, epoch) = runtime
+        .ledger
+        .current_with_epoch(&digests)
+        .await
+        .map_err(|_| ())?;
     Ok(
         match CoherenceCheck::compare(&header.observed, &current, epoch, header.epoch) {
             CoherenceCheck::Coherent => Coherence::Coherent,
@@ -1062,126 +1214,155 @@ async fn deliver_hit(
     mut request: Request,
     next: Next,
     policy: &RenderCachePolicy,
-    entry: DecodedEntry,
-    published_at_ms: u64,
+    found: FoundEntry,
     now_ms: u64,
     warning: Option<&'static str>,
 ) -> Response {
     if !is_stitched(policy) {
-        return match entry {
-            DecodedEntry::Complete(complete) => respond_hit(
-                &request,
-                policy,
-                &complete,
-                published_at_ms,
-                now_ms,
-                warning,
-            ),
-            DecodedEntry::Composite(_) => {
+        return match hit_response(
+            &found,
+            request.method(),
+            request.header("if-none-match"),
+            policy,
+            now_ms,
+            warning,
+        ) {
+            Some(response) => Ok(response),
+            None => {
                 LookupOutcome::Miss.record();
                 next(request).await
             }
         };
     }
     request.attach_prepared_hit(Box::new(super::stitch::PreparedHit {
-        entry,
+        entry: found,
         policy: policy.clone(),
-        published_at_ms,
         now_ms,
         warning,
     }));
     next(request).await
 }
 
-/// Builds the served response for a hit: a 304 when the request's
-/// `If-None-Match` matches, the full representation otherwise (body-free
-/// for `HEAD`). Carries `ETag`, `Cache-Control`, `Vary`, `Age`, and
-/// `Warning` (when stale).
-fn respond_hit(
-    request: &Request,
+/// Forms the served response for a non-stitched hit, through the engine's
+/// one response builder either way.
+///
+/// A hot entry replays values formed once at publication
+/// ([`serve_hot`]); a decoded Complete entry forms them now
+/// ([`complete_response`]). Both end in the same builder inside the engine,
+/// so a hot hit and a decoded one cannot drift apart in status, header set,
+/// body treatment, or the 304 decision.
+///
+/// `None` means there is nothing servable here and the caller falls through
+/// to a render: a Composite entry on a route that never declared stitching
+/// can only be a store defect ([`decode`] refuses a Composite entry under
+/// any other class), and so is a Complete entry whose stored values cannot
+/// be formed into a valid response.
+fn hit_response(
+    found: &FoundEntry,
+    method: &hyper::Method,
+    if_none_match: Option<&str>,
     policy: &RenderCachePolicy,
-    entry: &CompleteEntry,
-    published_at_ms: u64,
     now_ms: u64,
     warning: Option<&'static str>,
-) -> Response {
-    conditional_response(
-        request.method().as_str(),
-        request.header("if-none-match"),
-        policy,
-        entry,
-        published_at_ms,
-        now_ms,
-        warning,
-    )
+) -> Option<HttpResponse> {
+    match found {
+        FoundEntry::Hot(hot) => Some(hot_response(hot, method, if_none_match, now_ms, warning)),
+        FoundEntry::Decoded(hit) => match &hit.entry {
+            DecodedEntry::Complete(entry) => complete_response(
+                method,
+                if_none_match,
+                policy,
+                entry,
+                hit.stored.published_at_ms,
+                now_ms,
+                warning,
+            ),
+            DecodedEntry::Composite(_) => None,
+        },
+    }
 }
 
-/// The shared tail of [`respond_hit`] and a freshly published candidate:
-/// builds the served response (a 304 when `if_none_match` matches, the
-/// full representation otherwise, body-free for `HEAD`) with `ETag`,
-/// `Cache-Control`, `Vary`, `Age`, and `Warning` (when stale). Takes the
-/// request's method and `If-None-Match` value rather than the `Request`
-/// itself, because a freshly rendered candidate's request has already been
-/// consumed by the render by the time this needs to run - see
-/// `lead_render`, which captures both before rendering.
-pub(crate) fn conditional_response(
-    method: &str,
+/// Forms a hot hit's response: the engine replays the values it formed when
+/// the entry was published and hands back the stored body itself, shared
+/// rather than copied, and this adopts that response into the framework's
+/// own container without touching either.
+pub(crate) fn hot_response(
+    hot: &HotEntry,
+    method: &hyper::Method,
+    if_none_match: Option<&str>,
+    now_ms: u64,
+    warning: Option<&'static str>,
+) -> HttpResponse {
+    HttpResponse::from_engine_response(serve_hot(
+        hot,
+        HotRequest {
+            method,
+            if_none_match,
+            now_ms,
+        },
+        warning,
+    ))
+}
+
+/// Forms a decoded Complete entry's response through the engine's
+/// [`respond`]: a 304 when `if_none_match` matches, the full representation
+/// otherwise, body-free for `HEAD`, carrying `ETag`, `Cache-Control`,
+/// `Vary`, `Age`, and `Warning` (when stale). The engine owns every one of
+/// those decisions; nothing here re-forms a header of its own.
+///
+/// Takes the request's method and `If-None-Match` value rather than the
+/// `Request` itself, because a stale-on-error fallback's request has
+/// already been consumed by the failed rebuild by the time this runs - see
+/// `serve`, which captures both before that attempt.
+///
+/// `None` when the stored entry cannot be formed into a valid response at
+/// all. Every value a candidate publishes under was already bounded and
+/// checked at publication (see `entry_header` and [`SafeHeaders`]), so this
+/// is a store defect rather than a reachable input; each caller falls
+/// through to a render rather than serving something malformed.
+pub(crate) fn complete_response(
+    method: &hyper::Method,
     if_none_match: Option<&str>,
     policy: &RenderCachePolicy,
     entry: &CompleteEntry,
     published_at_ms: u64,
     now_ms: u64,
     warning: Option<&'static str>,
-) -> Response {
+) -> Option<HttpResponse> {
     let header = entry.header();
-    let not_modified = matches!(
-        evaluate_conditional(if_none_match, entry.validator()),
-        ConditionalOutcome::NotModified
+    let freshness = policy.freshness();
+    let formed = respond(
+        ResponseParts {
+            status: header.status,
+            class: header.class,
+            shared: policy.shared(),
+            freshness: &freshness,
+            headers: &header.headers,
+            variance: &header.variance,
+            validator: entry.validator(),
+            body: entry.body(),
+            published_at_ms,
+            seed_deadline_ms: header.seed_deadline_ms,
+            cache_control_override: None,
+        },
+        HotRequest {
+            method,
+            if_none_match,
+            now_ms,
+        },
+        warning,
     );
-    let is_head = method == "HEAD";
-    let body = if not_modified || is_head {
-        Bytes::new()
-    } else {
-        entry.body().clone()
-    };
-    let content_type = header
-        .headers
-        .iter()
-        .find(|(name, _)| *name == "content-type")
-        .map(|(_, value)| value.to_owned())
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let mut response = HttpResponse::bytes(body, content_type).status(if not_modified {
-        304
-    } else {
-        header.status
-    });
-    for (name, value) in header.headers.iter() {
-        if name == "content-type" || name == "cache-control" || name == "vary" {
-            continue;
+    match formed {
+        Ok(response) => Some(HttpResponse::from_engine_response(response)),
+        Err(error) => {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                kind = %error,
+                "a stored entry could not be formed into a response; it was not served",
+            );
+            None
         }
-        response = response.header(name.to_owned(), value.to_owned());
     }
-    response = response.header("ETag", entry.validator().etag());
-    let seed_remaining = header
-        .seed_deadline_ms
-        .map(|deadline| deadline.saturating_sub(now_ms));
-    response = response.header(
-        "Cache-Control",
-        cache_control_value(
-            header.class,
-            policy.shared(),
-            &policy.freshness(),
-            seed_remaining,
-        ),
-    );
-    if let Some(vary) = vary_value(&header.variance) {
-        response = response.header("Vary", vary);
-    }
-    response = response.header("Age", age_seconds(published_at_ms, now_ms).to_string());
-    if let Some(warning) = warning {
-        response = response.header("Warning", warning);
-    }
-    Ok(response)
 }
 
 /// Admits a rebuild for `key` and either leads it (rendering and, if
@@ -1217,8 +1398,8 @@ async fn render_and_publish(
         }
         RebuildAdmission::Wait(wait) => {
             wait.wait().await;
-            match lookup(runtime, &job.key).await {
-                Ok(Some((entry, stored, layer))) => {
+            match lookup(runtime, policy, &job.key).await {
+                Ok(Some(found)) => {
                     // Fix round 1, item 4: the leader may have declined to
                     // publish (a moved dependency, an ineligible response,
                     // an overflowed report, an uncacheable classification)
@@ -1229,7 +1410,7 @@ async fn render_and_publish(
                     // primary hit path in `serve` applies to every hit,
                     // never served as if the wait itself were the proof.
                     let coherence_result =
-                        match coherence(runtime, &job.key, policy, entry.header()).await {
+                        match coherence(runtime, &job.key, policy, found.header()).await {
                             Ok(coherence) => coherence,
                             Err(()) => return Err(ProviderFailure(request, next)),
                         };
@@ -1237,28 +1418,19 @@ async fn render_and_publish(
                     let state = freshness_state(
                         policy,
                         coherence_result,
-                        entry.header().class,
-                        stored.published_at_ms,
+                        found.header().class,
+                        found.published_at_ms(),
                         now,
-                        entry.header().seed_deadline_ms,
+                        found.header().seed_deadline_ms,
                     );
                     match state {
                         FreshnessState::Fresh => {
-                            (match layer {
+                            (match found.layer() {
                                 Layer::L0 => LookupOutcome::L0Hit,
                                 Layer::L1 => LookupOutcome::L1Hit,
                             })
                             .record();
-                            Ok(deliver_hit(
-                                request,
-                                next,
-                                policy,
-                                entry,
-                                stored.published_at_ms,
-                                now,
-                                None,
-                            )
-                            .await)
+                            Ok(deliver_hit(request, next, policy, found, now, None).await)
                         }
                         FreshnessState::StaleServable => {
                             LookupOutcome::Stale.record();
@@ -1266,8 +1438,7 @@ async fn render_and_publish(
                                 request,
                                 next,
                                 policy,
-                                entry,
-                                stored.published_at_ms,
+                                found,
                                 now,
                                 warning_header(state),
                             )
@@ -2109,8 +2280,13 @@ async fn fresh_reread_is_coherent(
     epoch: u64,
 ) -> Result<(), ()> {
     let digests = observed.digests();
-    let current = runtime.ledger.current(&digests).await.map_err(|_| ())?;
-    let fresh_epoch = runtime.ledger.epoch().await.map_err(|_| ())?;
+    // One statement, for the reason `authority_coherence` gives: the reread
+    // and the epoch it is judged against are read together.
+    let (current, fresh_epoch) = runtime
+        .ledger
+        .current_with_epoch(&digests)
+        .await
+        .map_err(|_| ())?;
     match CoherenceCheck::compare(observed, &current, fresh_epoch, epoch) {
         CoherenceCheck::Coherent => {
             // Test-only race seam (R72/R83): fires after this reread has
@@ -2195,14 +2371,72 @@ async fn store_entry(
     let Ok(encoded) = encoded else {
         return;
     };
+    // Ruling R10: a Complete publication's hot entry is prepared from the
+    // frame that is about to be stored, decoded back out of `encoded`, not
+    // from the candidate that went into `encode`. Three things follow from
+    // that and from nothing else: the hot body is a `Bytes` slice of the
+    // stored frame, so L0 holds the body once rather than twice; the frame
+    // is proven to round-trip before anything is published under it; and
+    // this path and the L1 promotion path (see `promote_to_l0`) prepare
+    // from the same input, so a promoted entry and a freshly published one
+    // are the same thing.
+    let hot = match entry {
+        DecodedEntry::Complete(_) => {
+            match decode(&encoded, &runtime.keys, &runtime.limits) {
+                Ok(DecodedEntry::Complete(stored)) => match HotEntry::prepare(
+                    stored,
+                    policy.shared(),
+                    &policy.freshness(),
+                    now,
+                    fence,
+                ) {
+                    Ok(hot) => Some(Arc::new(hot)),
+                    // The entry is publishable, just not precomputable:
+                    // publish it cold rather than dropping a publication
+                    // over a header value the next hit could form for
+                    // itself.
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "suprnova::render_cache",
+                            kind = %error,
+                            "a candidate could not be prepared for hot service; \
+                             publishing it as stored bytes instead",
+                        );
+                        None
+                    }
+                },
+                // This crate encoded the frame one line above, so a frame
+                // that does not decode back into the kind it was encoded
+                // from is a defect in this process, not a stored-entry
+                // problem: publishing it would store bytes the next lookup
+                // is guaranteed to evict.
+                Ok(DecodedEntry::Composite(_)) | Err(_) => {
+                    tracing::warn!(
+                        target: "suprnova::render_cache",
+                        "a freshly encoded Complete entry did not decode back as one; \
+                         nothing was published",
+                    );
+                    return;
+                }
+            }
+        }
+        DecodedEntry::Composite(_) => None,
+    };
     // L0 has no age-based expiry of its own; an epoch advance clears it
     // outright instead (`RenderCache::advance_epoch`). `u64::MAX` is the
     // trait's documented "never age-swept" value.
-    if let Ok(PublishOutcome::Published) = runtime
-        .l0
-        .publish(&job.key, encoded.clone(), fence, now, u64::MAX)
-        .await
-    {
+    let outcome = match hot {
+        Some(hot) => Ok(runtime
+            .l0
+            .publish_hot(&job.key, encoded.clone(), hot, fence, now)),
+        None => {
+            runtime
+                .l0
+                .publish(&job.key, encoded.clone(), fence, now, u64::MAX)
+                .await
+        }
+    };
+    if let Ok(PublishOutcome::Published) = outcome {
         Metrics::counter(render_cache_telemetry::PUBLICATIONS).inc();
     }
     if policy.layers().l1()
@@ -2492,6 +2726,15 @@ mod tests {
         }
     }
 
+    /// The route policy `lookup` needs to prepare a promoted entry for hot
+    /// service. These tests never reach that path (no L1 is configured), so
+    /// the values are the plain public defaults.
+    fn lookup_only_policy() -> RenderCachePolicy {
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .build()
+            .expect("policy")
+    }
+
     fn entry_for(key: &RenderKey) -> CompleteEntry {
         CompleteEntry::new(
             EntryHeader {
@@ -2546,7 +2789,8 @@ mod tests {
             .publish(&own_key, encoded.clone(), fence, 1_000, u64::MAX)
             .await
             .expect("publish the misplaced entry");
-        let hit = lookup(&runtime, &own_key).await.expect("lookup");
+        let policy = lookup_only_policy();
+        let hit = lookup(&runtime, &policy, &own_key).await.expect("lookup");
         assert!(
             hit.is_none(),
             "an entry whose stored key is not the lookup key must be a miss, never served"
@@ -2562,11 +2806,9 @@ mod tests {
             .publish(&other_key, encoded, fence, 1_000, u64::MAX)
             .await
             .expect("publish the well-placed entry");
-        let hit = lookup(&runtime, &other_key).await.expect("lookup");
+        let hit = lookup(&runtime, &policy, &other_key).await.expect("lookup");
         assert!(
-            hit.is_some_and(
-                |(entry, _, layer)| entry.header().key == other_key && layer == Layer::L0
-            ),
+            hit.is_some_and(|found| found.header().key == other_key && found.layer() == Layer::L0),
             "control: a correctly placed entry is served from L0"
         );
     }

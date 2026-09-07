@@ -41,14 +41,13 @@
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use suprnova_live::mount::{DocumentMountKey, DocumentMountScope, PrivateMountRequest};
-use suprnova_live::render_cache::coherence::age_seconds;
 use suprnova_live::render_cache::composite::{
     AssembledDocument, AssemblyInput, CheckedIsland, CompositeEntry, HeaderPiece, HeaderTemplate,
     MAX_NONCE_HEADERS, MAX_NONCE_HOLES, MAX_STITCH_SLOTS, ParsedSlot, Segment, SegmentGraph,
     SlotFailurePolicy, SlotOutcome, StitchSlot, assemble, fresh_nonce, surrounding_digest,
 };
 use suprnova_live::render_cache::entry::{CompleteEntry, DecodedEntry, EntryHeader};
-use suprnova_live::render_cache::http::{cache_control_value, vary_value};
+use suprnova_live::render_cache::hot::{HotRequest, ResponseParts, respond as respond_with_engine};
 use suprnova_live::snapshot::MountedDocumentPath;
 
 use crate::http::{HttpResponse, Request, Response};
@@ -56,7 +55,7 @@ use crate::live::{LiveMountKind, LiveRuntime, StitchSlotDescriptor};
 use crate::middleware::Next;
 use crate::telemetry::metrics::Metrics;
 
-use super::middleware::conditional_response;
+use super::middleware::{FoundEntry, complete_response, hot_response};
 use super::telemetry as render_cache_telemetry;
 use super::{RenderCache, RenderCachePolicy, collector, live::LiveDocumentFacts};
 
@@ -69,12 +68,11 @@ use super::{RenderCache, RenderCachePolicy, collector, live::LiveDocumentFacts};
 /// state the middleware actually decided on, and the chain's own duration is
 /// not added to the `Age` the client sees.
 pub(crate) struct PreparedHit {
-    /// The decoded stored representation.
-    pub(crate) entry: DecodedEntry,
+    /// The stored representation the lookup found: a Complete L0 entry
+    /// prepared for hot service, or one this request decoded.
+    pub(crate) entry: FoundEntry,
     /// The route's effective policy, for the served cache metadata.
     pub(crate) policy: RenderCachePolicy,
-    /// When the entry was published, for `Age`.
-    pub(crate) published_at_ms: u64,
     /// The instant the middleware evaluated freshness at, fixed before the
     /// chain ran; `Age` is measured from it, not from when the hit is served.
     pub(crate) now_ms: u64,
@@ -97,28 +95,48 @@ pub(crate) async fn serve_prepared(mut request: Request, next: Next) -> Response
         return next(request).await;
     };
     let hit = *hit;
+    let published_at_ms = hit.entry.published_at_ms();
     match hit.entry {
-        DecodedEntry::Complete(entry) => conditional_response(
-            request.method().as_str(),
+        // A hot entry is a Complete one whose header values were formed at
+        // publication: it is served through the engine's hot builder,
+        // exactly as a non-stitched hit is, once the chain has let it
+        // through.
+        FoundEntry::Hot(hot) => Ok(hot_response(
+            &hot,
+            request.method(),
             request.header("if-none-match"),
-            &hit.policy,
-            &entry,
-            hit.published_at_ms,
             hit.now_ms,
             hit.warning,
-        ),
-        DecodedEntry::Composite(entry) => {
-            assemble_hit(
-                request,
-                next,
-                entry,
-                hit.policy,
-                hit.published_at_ms,
+        )),
+        FoundEntry::Decoded(decoded) => match decoded.entry {
+            DecodedEntry::Complete(entry) => match complete_response(
+                request.method(),
+                request.header("if-none-match"),
+                &hit.policy,
+                &entry,
+                published_at_ms,
                 hit.now_ms,
                 hit.warning,
-            )
-            .await
-        }
+            ) {
+                Some(response) => Ok(response),
+                // A stored entry that cannot be formed into a valid response
+                // is a store defect; the route renders it instead of this
+                // serving something malformed.
+                None => next(request).await,
+            },
+            DecodedEntry::Composite(entry) => {
+                assemble_hit(
+                    request,
+                    next,
+                    entry,
+                    hit.policy,
+                    published_at_ms,
+                    hit.now_ms,
+                    hit.warning,
+                )
+                .await
+            }
+        },
     }
 }
 
@@ -226,8 +244,7 @@ async fn assemble_hit(
     ) else {
         return fail_document(request, next).await;
     };
-    count_assembly("assembled");
-    respond(
+    let Some(response) = respond(
         &request,
         &policy,
         &entry,
@@ -235,7 +252,14 @@ async fn assemble_hit(
         published_at_ms,
         now_ms,
         warning,
-    )
+    ) else {
+        // Unreachable for an assembled document (see `respond`); the route
+        // renders it rather than this serving something malformed, and the
+        // attempt is counted as the abandoned assembly it is.
+        return fail_document(request, next).await;
+    };
+    count_assembly("assembled");
+    Ok(response)
 }
 
 /// Re-mounts one declared slot under this request's own authority.
@@ -332,8 +356,10 @@ async fn fail_document(request: Request, next: Next) -> Response {
 /// Builds the served response for an assembled document.
 ///
 /// The counterpart of
-/// [`conditional_response`](super::middleware::conditional_response) for a
-/// representation that had to be assembled first. Three things differ, and
+/// [`complete_response`](super::middleware::complete_response) for a
+/// representation that had to be assembled first, and formed through the
+/// same engine builder as every other RenderCache response
+/// ([`suprnova_live::render_cache::hot::respond`]). Three things differ, and
 /// all three follow from the bytes being new.
 ///
 /// The replayable headers come from the assembled document rather than from
@@ -372,52 +398,63 @@ fn respond(
     published_at_ms: u64,
     now_ms: u64,
     warning: Option<&'static str>,
-) -> Response {
+) -> Option<HttpResponse> {
     let header = entry.header();
-    let body = if request.method().as_str() == "HEAD" {
-        Bytes::new()
+    let freshness = policy.freshness();
+    // A zero-slot Composite has no per-principal bytes in it - only a
+    // per-request nonce - so it keeps the class's private `max-age` the
+    // engine computes for any other private representation; a slotted one
+    // is pinned to `private, no-store`, for the reason this function's doc
+    // gives.
+    let cache_control_override = if entry.graph().slots.is_empty() {
+        None
     } else {
-        document.body().clone()
+        Some("private, no-store")
     };
-    let content_type = document
-        .headers()
-        .iter()
-        .find(|(name, _)| *name == "content-type")
-        .map(|(_, value)| value.to_owned())
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let mut response = HttpResponse::bytes(body, content_type).status(header.status);
-    // The three names skipped here are the ones set explicitly below. This
-    // list is duplicated in `middleware::conditional_response`, which does
-    // the same for a Complete entry; the two must stay in step.
-    for (name, value) in document.headers().iter() {
-        if name == "content-type" || name == "cache-control" || name == "vary" {
-            continue;
+    let formed = respond_with_engine(
+        ResponseParts {
+            status: header.status,
+            class: header.class,
+            shared: policy.shared(),
+            freshness: &freshness,
+            // The assembled document's own headers, not the stored ones: a
+            // nonce-bearing header has been rebuilt around the nonce minted
+            // for this request.
+            headers: document.headers(),
+            variance: &header.variance,
+            validator: document.validator(),
+            body: document.body(),
+            published_at_ms,
+            seed_deadline_ms: header.seed_deadline_ms,
+            cache_control_override,
+        },
+        // `None` rather than the request's own value: an assembly never
+        // answers 304, for the reason this function's doc gives, and the
+        // engine only ever forms one from an `If-None-Match` it was handed.
+        HotRequest {
+            method: request.method(),
+            if_none_match: None,
+            now_ms,
+        },
+        warning,
+    );
+    match formed {
+        Ok(response) => Some(HttpResponse::from_engine_response(response)),
+        // Unreachable for an assembled document - every header in it came
+        // through `SafeHeaders`, which bounds and checks each pair - so this
+        // is the same fail-closed treatment a defective stored entry gets in
+        // [`complete_response`](super::middleware::complete_response): the
+        // caller abandons the assembly and the route renders.
+        Err(error) => {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                kind = %error,
+                "an assembled document could not be formed into a response; \
+                 it was not served",
+            );
+            None
         }
-        response = response.header(name.to_owned(), value.to_owned());
     }
-    response = response.header("ETag", document.validator().etag());
-    let cache_control = if entry.graph().slots.is_empty() {
-        let seed_remaining = header
-            .seed_deadline_ms
-            .map(|deadline| deadline.saturating_sub(now_ms));
-        cache_control_value(
-            header.class,
-            policy.shared(),
-            &policy.freshness(),
-            seed_remaining,
-        )
-    } else {
-        "private, no-store".to_owned()
-    };
-    response = response.header("Cache-Control", cache_control);
-    if let Some(vary) = vary_value(&header.variance) {
-        response = response.header("Vary", vary);
-    }
-    response = response.header("Age", age_seconds(published_at_ms, now_ms).to_string());
-    if let Some(warning) = warning {
-        response = response.header("Warning", warning);
-    }
-    Ok(response)
 }
 
 /// Counts one composite assembly attempt under its closed outcome label.
