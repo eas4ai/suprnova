@@ -121,14 +121,15 @@ and `scripts/check-mysql.sh`; the Postgres one fails with the isolation level
 removed. (The Tier 1 and Tier 2 providers later added a second, `tiers` block
 to each of those two scripts, and a `scripts/check-redis.sh` beside them for
 the Tier 2 adapters; see "Deployment tiers and providers" in
-`render-cache.md`.) The seams the `testing` default feature compiles into ordinary
-builds were captured in `iterations/next/test-seams-in-ordinary-builds.md`
-rather than changed. The English manual's matching prose (the raw-read
-decline, the `Auth::user()` consequence, the PostgreSQL serialization note,
-the autocommit qualification, and the bump's new asynchronous signature) was
-not edited in this round, because an English-only edit fails the repository
-gate's translation-lock step until the six locales are retranslated; it is
-recorded in the closing fix report for a translation pass before release.
+`render-cache.md`.) The seams the `testing` default feature compiles into
+ordinary builds were captured in
+`iterations/next/test-seams-in-ordinary-builds.md` rather than changed. The
+English manual's matching prose (the raw-read decline, the `Auth::user()`
+consequence, the PostgreSQL serialization note, the autocommit
+qualification, and the bump's new asynchronous signature) was not edited in
+this round, because an English-only edit fails the repository gate's
+translation-lock step until the six locales are retranslated; it is recorded
+in the closing fix report for a translation pass before release.
 
 ### The dogfood route and its proof
 
@@ -243,8 +244,8 @@ the install record still named the commit from before them, so the runner
 refused to start on tooling drift. (The Tier 1 and Tier 2 providers later
 gave both scripts a `tiers` block of the same shape and added
 `scripts/check-redis.sh` to the default tier, which is tooling of the same
-kind and carries the same re-record obligation.) Re-recording from this branch's own tip
-is what the record is for.
+kind and carries the same re-record obligation.) Re-recording from this
+branch's own tip is what the record is for.
 
 Every gate run this checkpoint produced, in order, with the tip it covered:
 

@@ -835,7 +835,7 @@ application-facing type changes between them.
 |---|---|---|---|---|
 | 0, Embedded | `embedded` | one file per key, or none | in process | in process |
 | 1, Database-coordinated | `database` | `suprnova_render_entries` | `suprnova_render_leases` | `suprnova_live_instances` and `suprnova_live_promotions` |
-| 2, Externally accelerated | `redis` | one Redis hash per key | one Redis hash per key | one Redis hash per record |
+| 2, Externally accelerated | `redis` | one Redis hash per key | one Redis hash per key, plus a token counter key | one Redis hash per record |
 
 Generation truth does not move. `SqlGenerationLedger` is the
 `GenerationLedger` at all three tiers, so the coherence check that runs on
@@ -905,9 +905,9 @@ distributed lease id. `Held` answers `Bypass`, after handing the local lease
 back so this node's own waiters wake and re-admit rather than parking behind
 a leader that will never publish. `publish_token` mints from the store and
 turns a `None` into `RenderCacheErrorKind::LeaseFenced`, on which the
-middleware discards the render's bytes and publishes nothing. Tokens are
-monotonic per key across tenures, so a token minted under an older lease can
-never outrank one minted under a newer one.
+middleware publishes nothing; the request's own response is still served.
+Tokens are monotonic per key across tenures, so a token minted under an older
+lease can never outrank one minted under a newer one.
 
 `ledger::distributed::DistributedInstanceLedger<S: InstanceRecordStore>`
 implements `LiveInstanceLedger` by loading a record, applying one of the pure
@@ -1012,15 +1012,21 @@ compares against.
   coordinator errors take the existing provider-failure path, and ledger
   errors become Live provider failures.
 - A lease is taken over once store time has passed its expiry. The former
-  leader's `publish_token` answers `LeaseFenced` and its render is discarded.
+  leader's `publish_token` answers `LeaseFenced`, so it publishes nothing;
+  the request's own response is still served, exactly as it is for any other
+  publication failure.
 - A record store `Conflict` that survives one retry is `Contention`.
 - Eviction, expiry, or a restart of Redis makes entries miss and instances
   missing. That is fresh-render recovery, never reconstructed authority: the
   coherence check against the database generation ledger runs on every hit
   regardless of which L1 served the bytes.
-- Bytes in a row or a hash are the signed codec frame, so a torn, truncated,
-  or tampered value fails its integrity check and is a miss rather than a
-  served page.
+- Entry bytes in a row or a hash are the signed codec frame, so a torn,
+  truncated, or tampered value fails its integrity check and is a miss rather
+  than a served page. A record is not signed: it is a version byte plus
+  canonical JSON, and its guarantee is that every identity in it is re-parsed
+  through its own validating constructor on decode, so bytes another process
+  can write are validated exactly as protocol input is and a frame that does
+  not decode is classified rather than trusted.
 
 The two record stores differ in one contracted way. `SqlInstanceRecordStore`
 joins the host's ambient transaction when one is open, so a claim taken
@@ -1127,7 +1133,8 @@ Each of these is ruled behaviour, not a defect.
   refuse.
 - `RedisRenderStore::inspect` is bounded rather than exhaustive: it reports
   what a capped `SCAN` found, stopping at 10,000 keys or 1,000 rounds, and
-  says that it stopped. `SCAN` guarantees only that a key present for the
+  logs that it stopped (a `tracing::warn!`, not a field on the returned
+  inspection). `SCAN` guarantees only that a key present for the
   whole scan is returned at least once, so the count is approximate in both
   directions rather than a floor.
 - `max_bytes` on the database and Redis L1 bounds one entry, checked before
@@ -1160,6 +1167,13 @@ Each of these is ruled behaviour, not a defect.
   transaction. Both facts are load-bearing together, and both are proved by
   the Database-profile middleware test on its one-connection pool, where
   either being false would deadlock.
+- A render key is stored as `RenderKey::to_base64url()` (`rk1.` plus 43
+  base64url characters), the lookup key itself and never a second hash of it.
+  That is deliberate - the key already is a bounded digest with a validating
+  parser, and hashing it again would make a stored row unattributable to the
+  key an operator holds - but it does mean a stored row or Redis key carries
+  the render key in full, so a backend an operator can read is a backend on
+  which render keys are readable.
 - `instance` and `idempotency` are `VARCHAR(64)`, sized for the 16- to
   32-byte identities this build issues carried as hex. A longer identity
   would need a migration.
@@ -1261,6 +1275,13 @@ It also reads the deployment-profile variables (`RENDER_CACHE_PROFILE`,
 `RENDER_CACHE_MAX_WAITERS`), which are tabled with their defaults under
 Deployment tiers and providers above, beside the Live instance ledger's own
 `LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL`, and `LIVE_REDIS_PREFIX`.
+
+The providers those variables select are exercised against real backends by
+three gate scripts: `scripts/check-redis.sh`, which runs the `live_redis_*`
+tests against a disposable `redis:7-alpine` container, and the `tiers` blocks
+in `scripts/check-postgres.sh` and `scripts/check-mysql.sh`, which run the
+`live_postgres_*` and `live_mysql_*` adapter tests by name against those
+servers.
 
 ### Telemetry
 
