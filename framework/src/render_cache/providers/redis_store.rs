@@ -396,7 +396,7 @@ mod tests {
     //! the retention rule.
     //!
     //! Behaviour is proven against a real Redis in
-    //! `framework/tests/render_cache/tiers.rs`. What those tests cannot show
+    //! `framework/tests/render_cache/tiers/redis.rs`. What those tests cannot show
     //! is the shape of the scripts themselves - which argument carries what,
     //! and that the fence comparison and the write are one step - which is
     //! the part a later edit could silently invert.

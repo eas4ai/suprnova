@@ -506,8 +506,12 @@ async fn crashed_hub_members_pruned_via_ttl() {
 /// ```sh
 /// REDIS_BROADCAST_URL=redis://127.0.0.1:6379 \
 ///     cargo test -p suprnova --features broadcasting-fanout \
-///     --test broadcasting_fanout -- --ignored
+///     --test broadcasting -- --ignored fanout::redis_
 /// ```
+///
+/// `scripts/check-redis.sh` runs exactly that against a disposable
+/// container, so the three tests below are gate-covered rather than
+/// developer-only.
 ///
 /// Uses a per-run UUID stream key so concurrent test runs and prior failed
 /// runs do not see each other's events.

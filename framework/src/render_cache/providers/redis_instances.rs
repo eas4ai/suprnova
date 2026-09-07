@@ -453,7 +453,7 @@ mod tests {
     //! The record scripts' key and argument layout.
     //!
     //! Behaviour is proven against a real Redis in
-    //! `framework/tests/render_cache/tiers.rs`, including the whole engine
+    //! `framework/tests/render_cache/tiers/redis.rs`, including the whole engine
     //! ledger conformance suite over this store. What those tests cannot show
     //! is that each decision is made inside one script against Redis's own
     //! clock, that reclamation is bounded to a batch, and that counting is a

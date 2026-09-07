@@ -1145,10 +1145,10 @@ async fn two_ledger_handles_over_one_database_answer_the_two_node_suite() {
 // database and pass `--ignored`:
 //
 //   PG_TEST_URL=postgres://postgres:pw@127.0.0.1:55998/suprnova_test \
-//     cargo test -p suprnova --test render_cache -- --ignored tiers::live_postgres
+//     cargo test -p suprnova --test render_cache -- --ignored tiers::sql::live_postgres
 //
 //   MYSQL_TEST_URL=mysql://root:pw@127.0.0.1:55997/suprnova_test \
-//     cargo test -p suprnova --test render_cache -- --ignored tiers::live_mysql
+//     cargo test -p suprnova --test render_cache -- --ignored tiers::sql::live_mysql
 
 /// Publishes, proves the fence in both directions, and reclaims by store
 /// time - the whole Tier 1 L1 contract that a dialect can break.

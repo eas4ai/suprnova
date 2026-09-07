@@ -428,9 +428,13 @@ impl RenderStore for FileRenderStore {
                 // would leave the disk and the tally disagreeing about a
                 // key that is genuinely present, exactly the divergence
                 // `evict` and `get` were fixed to avoid on the race side.
+                // The kind, never the `Display`: an `io::Error`'s message
+                // carries the path it failed on, and a render key is what
+                // names that path. The same shape every other warn site in
+                // this module's neighbours uses.
                 tracing::warn!(
                     target: "suprnova::render_cache",
-                    error = %sync_error,
+                    kind = ?sync_error.kind(),
                     "render cache L1 directory sync failed after a successful rename; \
                      the entry is live but its directory entry may not survive a crash",
                 );

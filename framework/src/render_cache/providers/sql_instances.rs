@@ -883,7 +883,7 @@ mod tests {
     //! The record statements' shape per dialect.
     //!
     //! Behaviour is proven against a real database in
-    //! `framework/tests/render_cache/tiers.rs`, including the whole engine
+    //! `framework/tests/render_cache/tiers/sql.rs`, including the whole engine
     //! ledger conformance suite over this store. What cannot be proven there
     //! on SQLite alone is that the PostgreSQL and MySQL spellings say the
     //! same thing: the numbered placeholders, the row-locking read, and the

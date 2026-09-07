@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Run every Redis-only suite in this repository against a real Redis.
+# Run every Redis-only suite in this repository against a real Redis:
+# integration suites, in-source unit suites, and the one behind a non-default
+# feature.
 #
 # The Redis provider's guarantees - one accepted publication per fence, an
 # evicted entry answering as a miss, a tampered hash decoding as a miss -
 # live in Lua scripts and in Redis's own expiry. Neither has a fake, so the
 # tests that prove them are `#[ignore]`d and nothing would run them. The same
 # is true of the older Redis suites this repository already carried: the
-# queue driver's streams and reclamation, the idempotency lease's takeover,
-# and the cache store's TTLs, tag indexes, and connection retry. This script
-# is what runs all of them, in one container, in one order.
+# queue driver's streams and reclamation, the queue's own in-source fenced
+# settlement and epoch revalidation proofs, the idempotency lease's takeover,
+# the cache store's TTLs, tag indexes, and connection retry, and the
+# broadcasting fanout hub, which needs `--features broadcasting-fanout` and
+# therefore a second build. This script is what runs all of them, in one
+# container, in one order.
 #
 # Usage:
 #   scripts/check-redis.sh
@@ -127,12 +132,18 @@ fi
 # nothing ran them. They reach the same disposable instance this run already
 # started, through the variable each one resolves:
 #
-#   QUEUE_REDIS_TEST_URL  framework/tests/queue/redis.rs
+#   QUEUE_REDIS_TEST_URL  framework/tests/queue/redis.rs, and the in-source
+#                         suite in framework/src/queue/redis.rs, whose
+#                         `configured_redis_test_url()` reads this name and
+#                         then REDIS_URL
 #   REDIS_URL             framework/tests/queue/reclaim_attempts.rs, which
 #                         reads that name and no other
 #   CACHE_REDIS_TEST_URL  framework/tests/cache/redis_integration.rs,
 #                         framework/tests/cache/redis_retry.rs, and the one
 #                         Redis test in framework/tests/idempotency
+#   REDIS_BROADCAST_URL   framework/tests/broadcasting/fanout.rs, exported at
+#                         its own block below because that suite needs a
+#                         feature build
 #
 # The order below is deliberate, and the last block is the reason: the cache
 # retry suite issues `CLIENT KILL TYPE normal`, which disconnects every other
@@ -196,6 +207,37 @@ if ! grep -qE "^test result: ok\. 2 passed" <<<"$reclaim_out"; then
     exit 1
 fi
 
+# The queue driver's own in-source proofs: fenced settlement (the receipt
+# replay, the live-PEL refusal, the stale prior-epoch receipt, the XACK
+# rollback, the preserved delayed member, the oversized batch) and epoch
+# revalidation. They are unit tests inside framework/src/queue/redis.rs, so
+# they need `--lib` rather than an integration binary - the same shape
+# check-postgres.sh uses for the SQL store's guarded upsert - and they resolve
+# their URL through `configured_redis_test_url()`, which reads
+# QUEUE_REDIS_TEST_URL and then REDIS_URL, both exported above.
+echo
+echo "==> cargo test -p suprnova --lib -- --ignored queue::redis::tests"
+if ! queue_lib_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 queue::redis::tests 2>&1)"; then
+    echo "$queue_lib_out"
+    exit 1
+fi
+echo "$queue_lib_out"
+for queue_lib_test in \
+    fenced_settlement_receipt_replays_a_lost_success_without_duplicates \
+    epoch_revalidation_reloads_the_recreated_stream_payload \
+    fenced_settlement_backend_rejects_oversized_batch_before_receipt; do
+    if ! grep -qE "^test queue::redis::tests::${queue_lib_test} \.\.\. ok" <<<"$queue_lib_out"; then
+        echo "check-redis: ${queue_lib_test} did not report ok (filter may have matched nothing)" >&2
+        exit 1
+    fi
+done
+# The exact number of `#[ignore]`d tests in framework/src/queue/redis.rs.
+# Update it when one is added or removed.
+if ! grep -qE "^test result: ok\. 7 passed" <<<"$queue_lib_out"; then
+    echo "check-redis: the in-source queue summary line does not report exactly 7 passed" >&2
+    exit 1
+fi
+
 # The idempotency lease against a real Redis: a body still running when its
 # lease is taken over must report `Unfenced`, which a memory cache cannot
 # show.
@@ -242,14 +284,60 @@ if ! grep -qE "^test result: ok\. 17 passed" <<<"$cache_redis_out"; then
     exit 1
 fi
 
+# The broadcasting fanout hub against a real Redis stream: two hubs over one
+# stream exchanging envelopes, and the two write-failure reports. This suite
+# is behind `--features broadcasting-fanout`, which is not in the default
+# feature set, so this block builds a second feature configuration - it is the
+# slowest block here on a cold target and the only one that compiles anything
+# the rest of the gate did not.
+#
+# The export is unconditional and derived from this run's own container port,
+# and that is what makes the block mean something: each of these three tests
+# reads REDIS_BROADCAST_URL and `return`s silently when it is unset or empty
+# (framework/tests/broadcasting/fanout.rs:519 and its twins), and a test that
+# returns early still prints `... ok`. A vacuous pass is therefore
+# indistinguishable from a real one in the output, so the named guards and the
+# count pin below cannot catch it; only the export can, and it cannot be unset
+# here because it is assigned from HOST_PORT above.
+export REDIS_BROADCAST_URL="$REDIS_TEST_URL"
+echo
+echo "==> cargo test -p suprnova --features broadcasting-fanout --test broadcasting -- --ignored fanout::redis_"
+if ! fanout_out="$(cargo test -p suprnova --features broadcasting-fanout --test broadcasting -- --ignored --test-threads=1 fanout::redis_ 2>&1)"; then
+    echo "$fanout_out"
+    exit 1
+fi
+echo "$fanout_out"
+for fanout_test in \
+    redis_backend_cross_hub_fanout \
+    redis_publish_reports_stream_write_failure \
+    redis_presence_reports_stream_write_failure; do
+    if ! grep -qE "^test fanout::${fanout_test} \.\.\. ok" <<<"$fanout_out"; then
+        echo "check-redis: ${fanout_test} did not report ok (filter may have matched nothing)" >&2
+        exit 1
+    fi
+done
+# The exact number of `#[ignore]`d tests in
+# framework/tests/broadcasting/fanout.rs. Update it when one is added or
+# removed.
+if ! grep -qE "^test result: ok\. 3 passed" <<<"$fanout_out"; then
+    echo "check-redis: the fanout summary line does not report exactly 3 passed" >&2
+    exit 1
+fi
+
 # LAST, and it must be: this suite kills every other client on the instance
 # (see the ordering note above). It also skips itself with a printed line
 # rather than failing when `CACHE_REDIS_TEST_URL` is unset, so the skip is
 # refused explicitly here - a silent skip would restore exactly the hole this
 # step exists to close.
+#
+# `--nocapture` is what makes that refusal able to fire: the skip is an
+# `eprintln!` inside a test that then passes, and libtest captures a passing
+# test's output unless it is told not to, so without this the marker never
+# reaches the variable the check below greps. check-postgres.sh's workflow
+# block passes it for the same reason.
 echo
 echo "==> cargo test -p suprnova --test cache -- --ignored redis_retry::"
-if ! cache_retry_out="$(cargo test -p suprnova --test cache -- --ignored --test-threads=1 redis_retry:: 2>&1)"; then
+if ! cache_retry_out="$(cargo test -p suprnova --test cache -- --ignored --test-threads=1 --nocapture redis_retry:: 2>&1)"; then
     echo "$cache_retry_out"
     exit 1
 fi

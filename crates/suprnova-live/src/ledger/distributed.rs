@@ -2068,6 +2068,17 @@ mod tests {
                 .expect("the store answers"),
             CasOutcome::Missing
         );
+        // `Missing` is a refusal, not a create: a compare-and-store that
+        // found no record must leave the key as empty as it found it, or a
+        // caller reading back after one would see state nothing authorised.
+        assert!(
+            store
+                .load(&instance_key(0x10))
+                .await
+                .expect("the store answers")
+                .is_none(),
+            "a missing compare-and-store creates nothing"
+        );
     }
 
     #[tokio::test]

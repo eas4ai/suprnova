@@ -846,7 +846,7 @@ async fn live_redis_a_run_leaves_nothing_behind_under_its_own_prefix() {
 
 // --- Tier 2 equivalents of the two-node proofs ---
 
-/// [`coordinator_over_the_database`](super::sql) 's Redis twin.
+/// The Redis twin of `sql`'s `coordinator_over_the_database`.
 async fn coordinator_over_redis(
     config: &RedisProviderConfig,
     lease_ms: u64,

@@ -1076,10 +1076,11 @@ The seams the tier tests reach:
 - `RedisPrefixGuard` in
   `framework/tests/support/render_cache_tiers_support/`, which deletes
   everything under one test's key prefix on drop, so a failed assertion
-  cannot leave keys behind; and in `framework/tests/render_cache/tiers.rs`,
-  `OffsetRecordStore`, the small trait that lets one generic conformance body
-  run over either record store, with `MirroredClockStore` keeping the suite's
-  `ControlledClock` and the store's own clock in step.
+  cannot leave keys behind; and in
+  `framework/tests/render_cache/tiers/mod.rs`, `OffsetRecordStore`, the small
+  trait that lets one generic conformance body run over either record store,
+  with `MirroredClockStore` keeping the suite's `ControlledClock` and the
+  store's own clock in step.
 
 Multi-node behaviour is proved at the provider layer, because the RenderCache
 runtime is a process singleton: two adapter handles over one backend stand in

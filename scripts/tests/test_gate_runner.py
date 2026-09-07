@@ -1576,6 +1576,18 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test redis_retry::redis_get_survives_a_killed_connection ... ok\\n'\n"
             "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
+            "        queue::redis::tests)\n"
+            "            printf 'test queue::redis::tests::fenced_settlement_receipt_replays_a_lost_success_without_duplicates ... ok\\n'\n"
+            "            printf 'test queue::redis::tests::epoch_revalidation_reloads_the_recreated_stream_payload ... ok\\n'\n"
+            "            printf 'test queue::redis::tests::fenced_settlement_backend_rejects_oversized_batch_before_receipt ... ok\\n'\n"
+            "            printf 'test result: ok. 7 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        fanout::redis_)\n"
+            "            printf 'test fanout::redis_backend_cross_hub_fanout ... ok\\n'\n"
+            "            printf 'test fanout::redis_publish_reports_stream_write_failure ... ok\\n'\n"
+            "            printf 'test fanout::redis_presence_reports_stream_write_failure ... ok\\n'\n"
+            "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
             "        live_postgres)\n"
             "            printf 'test render_cache::providers::sql_store::tests::live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one ... ok\\n'\n"
             "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
@@ -1715,7 +1727,9 @@ class ShellAssetContractTests(unittest.TestCase):
                 "--test queue -- --ignored --test-threads=1 reclaim_attempts::redis_",
                 "--test idempotency -- --ignored --test-threads=1 idempotency::redis_",
                 "--test cache -- --ignored --test-threads=1 redis_integration::",
-                "--test cache -- --ignored --test-threads=1 redis_retry::",
+                "--lib -- --ignored --test-threads=1 queue::redis::tests",
+                "--features broadcasting-fanout --test broadcasting -- --ignored --test-threads=1 fanout::redis_",
+                "--test cache -- --ignored --test-threads=1 --nocapture redis_retry::",
             ],
             "scripts/check-magnetar-live.sh": [],
         }

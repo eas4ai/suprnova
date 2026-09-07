@@ -1,5 +1,5 @@
-//! Shared setup for the Tier 1 database provider tests in
-//! `framework/tests/render_cache/tiers.rs`.
+//! Shared setup for the tier provider tests in
+//! `framework/tests/render_cache/tiers/`.
 //!
 //! Deliberately small and self-contained, the same way
 //! `render_cache_operations_support` is: these tests drive

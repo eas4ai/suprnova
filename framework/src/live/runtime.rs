@@ -2178,10 +2178,10 @@ mod ledger_backend_tests {
     //! What a Live ledger driver pointed at nothing does at boot.
     //!
     //! The database driver's own refusal needs a database and is proven in
-    //! `framework/tests/render_cache/tiers.rs`, where one is available. What
-    //! is proven here is the half that needs no backend at all: an endpoint
-    //! nothing answers stops the boot, and says so without repeating the
-    //! endpoint.
+    //! `framework/tests/render_cache/tiers/profiles.rs`, where one is
+    //! available. What is proven here is the half that needs no backend at
+    //! all: an endpoint nothing answers stops the boot, and says so without
+    //! repeating the endpoint.
     use super::*;
 
     /// A driver pointed at a loopback port nothing listens on. The port is

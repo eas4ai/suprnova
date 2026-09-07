@@ -488,7 +488,7 @@ mod tests {
     //! The lease statements' shape per dialect.
     //!
     //! Behaviour is proven against a real database in
-    //! `framework/tests/render_cache/tiers.rs`; what cannot be proven there
+    //! `framework/tests/render_cache/tiers/sql.rs`; what cannot be proven there
     //! on SQLite alone is that the Postgres and MySQL spellings say the same
     //! thing - the row-locking read, the store-time guards, and the counter
     //! arithmetic that carries this store's whole contract.

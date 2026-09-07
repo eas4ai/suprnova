@@ -261,7 +261,7 @@ mod tests {
     //! The lease scripts' key and argument layout.
     //!
     //! Behaviour is proven against a real Redis in
-    //! `framework/tests/render_cache/tiers.rs`. What those tests cannot show
+    //! `framework/tests/render_cache/tiers/redis.rs`. What those tests cannot show
     //! is that each decision is made inside one script against Redis's own
     //! clock, and that neither key is ever removed - the two properties this
     //! store's whole contract rests on.

@@ -496,7 +496,7 @@ mod tests {
     //! The key namespace, the store clock, and the glob escape.
     //!
     //! Behaviour is proven against a real Redis in
-    //! `framework/tests/render_cache/tiers.rs`; what those tests cannot show
+    //! `framework/tests/render_cache/tiers/redis.rs`; what those tests cannot show
     //! is the exact shape of the names, which is the part a later build could
     //! change without any test noticing until two deployments collided or a
     //! key stopped being found.
