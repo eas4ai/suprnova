@@ -29,8 +29,8 @@ use render_cache_tiers_support::{boot, boot_redis, keys, reset_and_migrate, try_
 /// The byte bound every store under conformance is built with.
 const MAX_BYTES: usize = 1024 * 1024;
 
-/// The same bound as the `u64` the framework's stores are configured with.
-const MAX_STORE_BYTES: u64 = 1024 * 1024;
+/// That same bound in the `u64` the framework's stores are configured with.
+const MAX_STORE_BYTES: u64 = MAX_BYTES as u64;
 
 /// Runs the suite over one store with the fixture key ring and the default
 /// decoding bounds.

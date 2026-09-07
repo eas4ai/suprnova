@@ -97,7 +97,21 @@ pub async fn run_all(
 }
 
 /// A key that was never published is a miss, not a failure.
+///
+/// This scenario runs first, so its opening assertion is also where a store
+/// that was not handed over empty is caught, and named as the caller's doing
+/// rather than as a scenario the suite failed to clean up after.
 async fn miss_on_empty(store: &dyn RenderStore, keys: &SnapshotKeyRing) {
+    assert_eq!(
+        inspect(store).await,
+        StoreInspection {
+            entries: 0,
+            bytes: 0
+        },
+        "run_all was handed a store that already holds entries; \
+         a store under conformance must be empty before the suite starts"
+    );
+
     let key = key_for(keys, "miss-on-empty");
 
     assert!(
@@ -115,7 +129,12 @@ async fn publish_then_get_returns_the_bytes_and_facts(
 ) {
     let name = "round-trip";
     let key = key_for(keys, name);
-    let bytes = encoded_entry(keys, name, b"<!doctype html><html><body>one</body></html>");
+    let bytes = encoded_entry(
+        keys,
+        name,
+        b"<!doctype html><html><body>one</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
+    );
 
     assert_eq!(
         publish(
@@ -167,11 +186,17 @@ async fn an_equal_or_older_fence_is_fenced_and_leaves_the_entry(
 ) {
     let name = "fenced";
     let key = key_for(keys, name);
-    let held = encoded_entry(keys, name, b"<!doctype html><html><body>held</body></html>");
+    let held = encoded_entry(
+        keys,
+        name,
+        b"<!doctype html><html><body>held</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
+    );
     let refused = encoded_entry(
         keys,
         name,
         b"<!doctype html><html><body>refused</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS + CONFORMANCE_REPUBLISH_AFTER_MS,
     );
 
     assert_eq!(
@@ -232,25 +257,29 @@ async fn an_equal_or_older_fence_is_fenced_and_leaves_the_entry(
 async fn a_newer_fence_replaces(store: &dyn RenderStore, keys: &SnapshotKeyRing) {
     let name = "replaced";
     let key = key_for(keys, name);
+    let later = CONFORMANCE_PUBLISHED_AT_MS + CONFORMANCE_REPUBLISH_AFTER_MS;
+    let latest = later + CONFORMANCE_REPUBLISH_AFTER_MS;
     let first = encoded_entry(
         keys,
         name,
         b"<!doctype html><html><body>first</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
     let second = encoded_entry(
         keys,
         name,
         b"<!doctype html><html><body>second</body></html>",
+        later,
     );
     let third = encoded_entry(
         keys,
         name,
         b"<!doctype html><html><body>third</body></html>",
+        latest,
     );
 
     publish(store, &key, first, fence(2, 5), CONFORMANCE_PUBLISHED_AT_MS).await;
 
-    let later = CONFORMANCE_PUBLISHED_AT_MS + CONFORMANCE_REPUBLISH_AFTER_MS;
     assert_eq!(
         publish(store, &key, second.clone(), fence(2, 6), later).await,
         PublishOutcome::Published,
@@ -271,7 +300,6 @@ async fn a_newer_fence_replaces(store: &dyn RenderStore, keys: &SnapshotKeyRing)
         "and the stored fence is the new one"
     );
 
-    let latest = later + CONFORMANCE_REPUBLISH_AFTER_MS;
     assert_eq!(
         publish(store, &key, third.clone(), fence(3, 0), latest).await,
         PublishOutcome::Published,
@@ -296,7 +324,12 @@ async fn a_newer_fence_replaces(store: &dyn RenderStore, keys: &SnapshotKeyRing)
 async fn evict_removes(store: &dyn RenderStore, keys: &SnapshotKeyRing) {
     let name = "evicted";
     let key = key_for(keys, name);
-    let bytes = encoded_entry(keys, name, b"<!doctype html><html><body>gone</body></html>");
+    let bytes = encoded_entry(
+        keys,
+        name,
+        b"<!doctype html><html><body>gone</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
+    );
 
     publish(store, &key, bytes, fence(1, 1), CONFORMANCE_PUBLISHED_AT_MS).await;
     assert!(
@@ -326,11 +359,13 @@ async fn two_keys_never_alias(store: &dyn RenderStore, keys: &SnapshotKeyRing) {
         keys,
         left_name,
         b"<!doctype html><html><body>left</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
     let right_bytes = encoded_entry(
         keys,
         right_name,
         b"<!doctype html><html><body>right</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
 
     publish(
@@ -400,6 +435,7 @@ async fn a_flipped_byte_and_a_truncated_frame_are_misses(
         keys,
         name,
         b"<!doctype html><html><body>intact</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
 
     publish(
@@ -525,11 +561,13 @@ async fn inspect_counts_entries_and_bytes(store: &dyn RenderStore, keys: &Snapsh
         keys,
         first_name,
         b"<!doctype html><html><body>counted once</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
     let second_bytes = encoded_entry(
         keys,
         second_name,
         b"<!doctype html><html><body>counted twice, and longer than the first</body></html>",
+        CONFORMANCE_PUBLISHED_AT_MS,
     );
 
     publish(
@@ -598,13 +636,22 @@ fn fence(epoch: u64, token: u64) -> PublicationFence {
 /// A real, signed Complete entry for one scenario's key: the bytes a
 /// publication actually carries, so a round trip is proven over an entry
 /// rather than over a string a codec would never produce.
-fn encoded_entry(keys: &SnapshotKeyRing, name: &str, body: &'static [u8]) -> Bytes {
+///
+/// `published_at_ms` is the instant the caller goes on to publish these
+/// bytes under, so an entry's own header never disagrees with the instant
+/// the store records for it.
+fn encoded_entry(
+    keys: &SnapshotKeyRing,
+    name: &str,
+    body: &'static [u8],
+    published_at_ms: u64,
+) -> Bytes {
     let entry = CompleteEntry::new(
         EntryHeader {
             key: key_for(keys, name),
             class: RepresentationClass::PublicShared,
             variance: VarianceDescriptor::new(),
-            published_at_ms: CONFORMANCE_PUBLISHED_AT_MS,
+            published_at_ms,
             fresh_ms: 60_000,
             stale_servable_ms: 0,
             stale_on_error_ms: 0,

@@ -48,10 +48,12 @@ const PUBLISHED_AT_MS: u64 = 1_000;
 /// suite's own namespace, so neither can disturb the other.
 const HOT_PATTERN: &str = "/memory-hot-slot";
 
+// The same key ring `tests/render_cache_entry.rs` derives from root seed 3;
+// each `tests/*.rs` file is its own crate, so the two cannot share a helper.
 fn keys() -> SnapshotKeyRing {
     let active = KeyRecord::new(
         KeyId::parse("render-cache-test").expect("key id"),
-        RootKey::new(vec![13; 32]).expect("root key"),
+        RootKey::new(vec![3; 32]).expect("root key"),
         UnixMillis::new(0),
         UnixMillis::new(u64::MAX / 2),
         UnixMillis::new(u64::MAX),
@@ -176,11 +178,16 @@ async fn the_in_process_store_conforms_and_fences_and_evicts_its_hot_slot_with_t
         "an evicted key accepts the fence it held before, having no fence left to compare against"
     );
 
-    let (replacement, _) = hot_fixture(
+    // Bytes alone: this publication is a plain one, so it has no hot entry
+    // to pair with and none is prepared.
+    let replacement = encode(
+        &complete_entry(
+            &keys,
+            b"<!doctype html><html><body>replacement</body></html>",
+        ),
         &keys,
-        b"<!doctype html><html><body>replacement</body></html>",
-        fence(1, 2),
-    );
+    )
+    .expect("the replacement entry encodes");
     assert_eq!(
         store
             .publish(
