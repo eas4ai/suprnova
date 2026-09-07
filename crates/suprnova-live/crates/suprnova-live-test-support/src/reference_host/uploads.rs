@@ -2356,6 +2356,40 @@ impl AxumChunkBody {
     fn into_hasher(self) -> Sha256 {
         self.hasher
     }
+
+    /// Read and discard the rest of the request body once the interrupt
+    /// fault has fired, so the connection closes with its body consumed.
+    ///
+    /// The fault interrupts the upload, not the socket: the host still
+    /// answers 408 on this connection. Returning before the client's
+    /// remaining chunks were read would leave them unread at close, and the
+    /// kernel answers an unread close with a reset rather than a FIN. A reset
+    /// discards the queued 408 and breaks the client's writes in flight,
+    /// which the conformance client saw as a broken pipe under gate load.
+    /// The drain is bounded by the declared part size, so a client that keeps
+    /// sending is not read forever, and it stops the moment the host shuts
+    /// down. The drained bytes are neither hashed nor stored.
+    async fn drain_after_interrupt(&mut self) {
+        let mut drained = self.pending.take().map_or(0, |pending| pending.len());
+        while drained < self.maximum_body_bytes {
+            let frame = tokio::select! {
+                biased;
+                changed = self.shutdown.changed() => {
+                    let _ = changed;
+                    return;
+                }
+                frame = self.body.frame() => frame,
+            };
+            match frame {
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        drained = drained.saturating_add(data.len());
+                    }
+                }
+                Some(Err(_)) | None => return,
+            }
+        }
+    }
 }
 
 impl ChunkBody for AxumChunkBody {
@@ -2365,6 +2399,7 @@ impl ChunkBody for AxumChunkBody {
     ) -> suprnova_live::upload::UploadFuture<'a, Result<Option<QuarantineBytes>, UploadError>> {
         Box::pin(async move {
             if self.interrupt_after_first && self.yielded_chunks > 0 {
+                self.drain_after_interrupt().await;
                 return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
             }
             if *self.shutdown.borrow() {
@@ -2419,6 +2454,92 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt as _;
+
+    /// A body of the given frames whose polled-frame count is observable.
+    fn counted_body(frames: &'static [&'static str], polled: &Arc<AtomicUsize>) -> Body {
+        let polled = Arc::clone(polled);
+        let stream = futures_util::stream::iter(
+            frames
+                .iter()
+                .map(|frame| Ok::<_, std::io::Error>(Bytes::from_static(frame.as_bytes()))),
+        )
+        .inspect(move |_| {
+            polled.fetch_add(1, Ordering::SeqCst);
+        });
+        Body::from_stream(stream)
+    }
+
+    #[tokio::test]
+    async fn the_interrupt_fault_drains_the_rest_of_the_body_before_it_is_reported() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let (_shutdown, shutdown) = watch::channel(false);
+        let mut body = AxumChunkBody::new(
+            counted_body(&["abc", "def", "ghi"], &polled),
+            Sha256::new(),
+            true,
+            9,
+            shutdown,
+        );
+
+        let first = body
+            .next_chunk(1024)
+            .await
+            .expect("first pull")
+            .expect("first frame");
+        assert_eq!(first.as_ref(), b"abc");
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            1,
+            "only the first frame was read"
+        );
+
+        let error = body
+            .next_chunk(1024)
+            .await
+            .expect_err("the fault interrupts the second pull");
+        assert_eq!(error.kind(), UploadErrorKind::BodyInterrupted);
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            3,
+            "the remaining frames were drained before the fault was reported"
+        );
+        assert!(body.pending.is_none(), "drained bytes were retained");
+        assert_eq!(body.yielded_chunks, 1, "drained bytes were yielded");
+        assert_eq!(
+            body.into_hasher().finalize().as_slice(),
+            Sha256::digest(b"abc").as_slice(),
+            "drained bytes were hashed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_post_interrupt_drain_stops_at_the_declared_part_size() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let (_shutdown, shutdown) = watch::channel(false);
+        let mut body = AxumChunkBody::new(
+            counted_body(&["abc", "def", "ghi", "jkl"], &polled),
+            Sha256::new(),
+            true,
+            6,
+            shutdown,
+        );
+
+        body.next_chunk(1024)
+            .await
+            .expect("first pull")
+            .expect("first frame");
+        let error = body
+            .next_chunk(1024)
+            .await
+            .expect_err("the fault interrupts the second pull");
+        assert_eq!(error.kind(), UploadErrorKind::BodyInterrupted);
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            3,
+            "the drain read the declared size and no further frame"
+        );
+    }
 
     #[tokio::test]
     async fn one_axum_frame_is_split_at_the_provider_pull_boundary_without_retained_excess() {
