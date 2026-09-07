@@ -134,9 +134,12 @@ impl RenderKey {
     }
 
     /// Parses `rk{KEY_FORMAT_VERSION}.<digest>`, the exact inverse of
-    /// [`Self::to_base64url`]. The encoded text carries no recoverable
-    /// request identity, which is all a lookup needs; inspection of a key
-    /// recovered this way has [`RenderKeyDimensions::opaque`] to show.
+    /// [`Self::to_base64url`]. A key is the digest and nothing else, so a
+    /// parsed one carries no dimensions at all: no part of the request that
+    /// derived it is recoverable from the text, which is all a lookup
+    /// needs. A caller that must still describe such a key has
+    /// [`RenderKeyDimensions::opaque`] to stand in for the input it does
+    /// not hold.
     pub fn from_base64url(text: &str) -> Result<Self, RenderCacheError> {
         let invalid = || RenderCacheError::new(RenderCacheErrorKind::KeyInvalid);
         let encoded = text
@@ -239,9 +242,10 @@ impl RenderKeyDimensions {
         }
     }
 
-    /// Marker dimensions for a key parsed from its encoded text alone;
-    /// carries no recoverable request identity, only enough shape to be
-    /// inspected.
+    /// A marker a caller uses when it has no key input to describe, such
+    /// as after parsing a key back from its encoded text. Nothing here was
+    /// read out of a key, and no key carries these values; they are fixed
+    /// placeholders that give an inspection the shape it expects.
     #[must_use]
     pub fn opaque() -> Self {
         Self {

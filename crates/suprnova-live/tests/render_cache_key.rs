@@ -194,6 +194,10 @@ fn for_test_is_deterministic_per_pattern_and_differs_across_patterns() {
 // The lookup key digest is byte-identical before and after the
 // allocation-free derivation: three fixed inputs pin the base64url form.
 
+// Deliberately independent of `keys_from`: the pinned base64url constants
+// below are only a regression fence while the ring that produced them is
+// spelled out here, so a later edit to the shared helper cannot silently
+// change what they are pinning.
 fn digest_fixture_keys() -> SnapshotKeyRing {
     let active = KeyRecord::new(
         KeyId::parse("render-key-test").expect("key id"),

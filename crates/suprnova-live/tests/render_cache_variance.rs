@@ -276,23 +276,73 @@ fn every_shape() -> VarianceDescriptor {
     descriptor
 }
 
+// Both canonical forms are compared against bytes written out by hand, not
+// against each other: `canonical_bytes` is implemented by `write_canonical`,
+// so comparing the two would pass no matter what either of them emitted.
 #[test]
-fn the_streamed_canonical_form_matches_its_declared_length_and_its_built_bytes() {
+fn the_streamed_canonical_form_matches_its_declared_length_and_the_expected_bytes() {
     let descriptor = every_shape();
-    let built = descriptor.canonical_bytes();
-    assert_eq!(
-        descriptor.canonical_len(),
-        built.len(),
-        "canonical_len must predict exactly what write_canonical writes"
-    );
+    let material = PrivateMaterial::principal(&keys_from(3), "user-7", 1);
+
+    // Dimension order is `VarianceDimension`'s declaration order: locale,
+    // tenant, principal, then the application dimension.
+    let mut expected: Vec<u8> = Vec::new();
+    expected.extend_from_slice(&6_u32.to_be_bytes());
+    expected.extend_from_slice(b"locale");
+    expected.push(1);
+    expected.extend_from_slice(&5_u32.to_be_bytes());
+    expected.extend_from_slice(b"de-DE");
+    expected.extend_from_slice(&6_u32.to_be_bytes());
+    expected.extend_from_slice(b"tenant");
+    expected.push(3);
+    expected.extend_from_slice(&9_u32.to_be_bytes());
+    expected.extend_from_slice(b"principal");
+    expected.push(2);
+    expected.extend_from_slice(material.as_bytes());
+    expected.extend_from_slice(&17_u32.to_be_bytes());
+    expected.extend_from_slice(b"app:theme_variant");
+    expected.push(1);
+    expected.extend_from_slice(&4_u32.to_be_bytes());
+    expected.extend_from_slice(b"dark");
 
     let mut streamed: Vec<u8> = Vec::new();
     descriptor.write_canonical(&mut |bytes| streamed.extend_from_slice(bytes));
-    assert_eq!(streamed, built, "both forms produce the same bytes");
-    assert!(
-        !built.is_empty(),
-        "the fixture must actually exercise the writer"
+    assert_eq!(streamed, expected, "the writer emits exactly these bytes");
+    assert_eq!(
+        descriptor.canonical_bytes(),
+        expected,
+        "the built form is the same bytes"
     );
+    assert_eq!(
+        descriptor.canonical_len(),
+        expected.len(),
+        "canonical_len must predict exactly what write_canonical writes"
+    );
+}
+
+#[test]
+fn a_private_dimension_writes_its_marker_byte_and_the_material_digest() {
+    let material = PrivateMaterial::principal(&keys_from(3), "user-7", 1);
+    let mut descriptor = VarianceDescriptor::new();
+    descriptor
+        .declare(
+            VarianceDimension::Principal,
+            DimensionValue::Private(material),
+        )
+        .expect("private");
+    let name = "principal";
+    let mut expected: Vec<u8> = Vec::new();
+    expected.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    expected.extend_from_slice(name.as_bytes());
+    expected.push(2);
+    expected.extend_from_slice(material.as_bytes());
+    assert_eq!(
+        expected.len(),
+        4 + name.len() + 1 + 32,
+        "a private dimension is the name, one marker byte, and the digest"
+    );
+    assert_eq!(descriptor.canonical_bytes(), expected);
+    assert_eq!(descriptor.canonical_len(), expected.len());
 }
 
 #[test]
