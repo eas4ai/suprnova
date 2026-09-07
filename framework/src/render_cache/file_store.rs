@@ -457,10 +457,14 @@ impl RenderStore for FileRenderStore {
         );
         drop(state);
         // Every 256th publication triggers a sweep using the epoch this
-        // very publication was fenced under - `key_input` reads the ledger
-        // epoch fresh on every dispatch (see `middleware.rs`'s own note on
-        // this), so `fence.epoch` here is exactly "the current ledger
-        // epoch" from this call's point of view. A publication must never
+        // very publication was fenced under, which is exactly "the current
+        // ledger epoch" from this call's point of view: nothing is published
+        // until `fresh_reread_is_coherent` has read the authority epoch and
+        // found it equal to the one the render carried (see `middleware.rs`,
+        // which since task 5b leases that epoch rather than reading it per
+        // dispatch, and re-derives the key whenever it moves).
+        //
+        // A publication must never
         // fail because its own housekeeping sweep did, so any error is
         // discarded; the lock above is already released, so this cannot
         // deadlock against `sweep`'s own locking. `sweep` itself is bounded

@@ -45,8 +45,16 @@ const ALLOWED_LINES: [&str; 1] = ["PERFORM pg_sleep(0.2);"];
 fn the_render_cache_tests_and_their_support_contain_no_timing_waits() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut offenders = Vec::new();
-    walk(&root.join("render_cache"), Scope::Everything, &mut offenders);
-    walk(&root.join("support"), Scope::RenderCacheOnly, &mut offenders);
+    walk(
+        &root.join("render_cache"),
+        Scope::Everything,
+        &mut offenders,
+    );
+    walk(
+        &root.join("support"),
+        Scope::RenderCacheOnly,
+        &mut offenders,
+    );
     assert!(
         offenders.is_empty(),
         "timing waits in RenderCache tests:\n{}",

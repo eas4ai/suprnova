@@ -545,6 +545,7 @@ impl RenderCache {
             clock,
             limits: EntryLimits::default(),
             leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            epoch_cache: middleware::EpochCache::empty(),
             #[cfg(any(test, feature = "testing"))]
             hot_serves: std::sync::atomic::AtomicU64::new(0),
         });
@@ -611,7 +612,21 @@ impl RenderCache {
 
     /// Emergency invalidation: advances the authority epoch, making every
     /// entry observed at the prior epoch unreachable at its next freshness
-    /// check, and clears L0 immediately (fix round 1, R94/F11).
+    /// check, drops this node's leased epoch, and clears L0 immediately
+    /// (fix round 1, R94/F11; task 5b).
+    ///
+    /// The leased epoch is dropped, not left to be renewed by whatever
+    /// reread happens next: since task 5b a request derives its lookup key
+    /// under the epoch this runtime holds rather than one it reads per
+    /// request (see `middleware::EpochCache`), so without this an operator's
+    /// emergency bump would reach a lease-mode route no sooner than that
+    /// route's own `max_age_ms` - exactly the delay the fix round 2 review
+    /// asked about. Dropping it here means the next request reads the
+    /// authority once, derives its key under the new epoch, and misses.
+    ///
+    /// Dropped before L0 is cleared: from the moment the lease is gone, no
+    /// request can begin under the old epoch, so the clear that follows has
+    /// only entries nothing will look for left to reclaim.
     ///
     /// L0 is cleared, not merely left to age out: every L0 key embeds the
     /// epoch it was derived under
@@ -638,6 +653,7 @@ impl RenderCache {
         // than constructing an unconnected one, so a future ledger override
         // reaches the epoch-advance operator too. See `epoch_ledger`'s doc.
         runtime.epoch_ledger.advance_epoch().await?;
+        runtime.epoch_cache.invalidate();
         runtime.l0.clear();
         Ok(())
     }

@@ -250,6 +250,76 @@ struct ProviderFailure(Request, Next);
 /// special case.
 pub struct RenderCacheMiddleware;
 
+/// The authority epoch this node currently believes in, held between
+/// requests instead of read from the ledger on each one.
+///
+/// The rule this type exists to enforce: **the epoch is read from authority
+/// only on first use, or together with a generation reread; never on its
+/// own, per request.** Before it, `serve` read
+/// [`GenerationLedger::epoch`] for every GET and HEAD to a policy-covered
+/// route - a cached route's hit could not cost less than one SQL statement,
+/// which `00-overview.md:330` (a Complete L0 hit is served "with no
+/// database/provider round trip") and spec 18's leases (lines 112-131:
+/// leases exist "to avoid querying authority on every hot hit", and a hot
+/// node holding one serves "without repeated authority reads") both forbid.
+/// The epoch is now leased exactly like the generation set it is compared
+/// against, and refreshed by the same reads: `authority_coherence`,
+/// `fresh_reread_is_coherent`, and the waiter's re-admission in
+/// `render_and_publish` each store the epoch the authority just reported.
+///
+/// A `Mutex<Option<u64>>` rather than atomics, deliberately. `None` is a
+/// state an integer sentinel cannot express honestly (every `u64` is a
+/// reachable epoch as far as this type is concerned), and a pair of atomics
+/// carrying "present" and "value" separately would need an ordering
+/// argument for a value read at most once per request. Under the lock there
+/// is no tearing to argue about: the `u64` is only ever read or written
+/// inside a critical section, and every one of those sections is a single
+/// statement with no `.await` in it, so no guard is ever held across a
+/// suspension point. Lock poisoning is absorbed with `into_inner`, matching
+/// [`RenderCacheRuntime::leases`]: a panic elsewhere must not turn every
+/// later request into an error.
+///
+/// Staleness is bounded, and by the same bound spec 18 already applies to a
+/// lease-mode route: see [`coherence`]'s own comment for the three paths an
+/// epoch advance takes to reach a request.
+pub(super) struct EpochCache(Mutex<Option<u64>>);
+
+impl EpochCache {
+    /// An empty cache. The first request that needs the epoch reads the
+    /// authority once and fills it.
+    pub(super) const fn empty() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// The critical section all three accessors share. Every caller below
+    /// dereferences the guard in the same statement it takes it, so the
+    /// section is one statement long and no `.await` can appear inside it.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The leased epoch, or `None` before the first authority read and
+    /// after an [`Self::invalidate`].
+    pub(super) fn get(&self) -> Option<u64> {
+        *self.slot()
+    }
+
+    /// Records the epoch an authority read just reported.
+    pub(super) fn refresh(&self, epoch: u64) {
+        *self.slot() = Some(epoch);
+    }
+
+    /// Drops the lease, so the next request that needs the epoch reads the
+    /// authority. Called by [`super::RenderCache::advance_epoch`], which is
+    /// what makes an emergency bump on this node reach the very next
+    /// request, lease-mode routes included.
+    pub(super) fn invalidate(&self) {
+        *self.slot() = None;
+    }
+}
+
 /// The assembled RenderCache runtime: stores, ledger, coordinator, keys,
 /// policy table, configuration, and clock. One instance per installed
 /// process; `super::RenderCache::runtime` hands out clones of the `Arc`.
@@ -299,6 +369,9 @@ pub struct RenderCacheRuntime {
     /// it is inert (coherence is only ever consulted after a store hit) and
     /// is swept the same way once its lease's own timer expires.
     pub(crate) leases: Mutex<BTreeMap<RenderKey, ValidationLease>>,
+    /// The leased authority epoch - see [`EpochCache`] for the rule it
+    /// enforces and why a hit must not read the epoch on its own.
+    pub(super) epoch_cache: EpochCache,
     /// Hot hits formed by [`hot_response`] on this runtime, for
     /// [`super::RenderCache::hot_serves_for_test`].
     ///
@@ -550,16 +623,29 @@ impl RenderCacheMiddleware {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
         }
-        let epoch = match runtime.ledger.epoch().await {
-            Ok(epoch) => epoch,
-            Err(_) => return Err(ProviderFailure(request, next)),
+        // The leased epoch, filled by one authority read on the first
+        // request of this runtime and renewed by every later read that
+        // returns an epoch - never read here on its own. See [`EpochCache`].
+        let epoch = match runtime.epoch_cache.get() {
+            Some(epoch) => epoch,
+            None => match runtime.ledger.epoch().await {
+                Ok(epoch) => {
+                    runtime.epoch_cache.refresh(epoch);
+                    epoch
+                }
+                Err(_) => return Err(ProviderFailure(request, next)),
+            },
         };
         // Test-only race seam (R72/R83): fires right after the epoch this
         // request's `RenderJob` will carry is captured, and before the
         // render it describes begins - so an epoch advance armed here is
         // baked into the job as already stale by the time that render's
         // own fresh reread checks it, proving such a render's candidate is
-        // never published.
+        // never published. Still true now the epoch is leased: an advance
+        // through `RenderCache::advance_epoch` drops the lease and clears
+        // L0, but this request already holds the value it captured, so its
+        // job carries the old epoch into a render whose reread reads the
+        // new one.
         #[cfg(any(test, feature = "testing"))]
         race_points::fire(&race_points::EPOCH_CAPTURED).await;
         let Ok(input) = key_input(runtime, &request, pattern, policy, epoch) else {
@@ -570,30 +656,36 @@ impl RenderCacheMiddleware {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
         };
-        let variance = input.variance.clone();
         let Ok(key) = RenderKey::derive(&input, &runtime.keys) else {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
         };
+        let mut job = RenderJob::new(input, key);
 
-        let hit = match lookup(runtime, policy, &key).await {
+        let hit = match lookup(runtime, policy, job.key()).await {
             Ok(hit) => hit,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
         let Some(found) = hit else {
             LookupOutcome::Miss.record();
-            let job = RenderJob {
-                key,
-                epoch,
-                variance,
-            };
             return render_and_publish(runtime, request, next, policy, job, 0).await;
         };
 
-        let coherence = match coherence(runtime, &key, policy, found.header()).await {
+        let coherence = match coherence(runtime, job.key(), policy, found.header()).await {
             Ok(coherence) => coherence,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
+        // A reread inside `coherence` may have renewed the leased epoch to a
+        // value this request's key was not derived under - another node
+        // advanced it, and this is where this node finds out. The rebuild
+        // below must publish under the epoch it is judged against, so the
+        // key is re-derived from the same input before the job goes any
+        // further; a `Moved` caused by the epoch is otherwise handled
+        // exactly like a `Moved` caused by a generation.
+        if job.restamp(runtime).is_err() {
+            LookupOutcome::Bypass.record();
+            return Ok(next(request).await);
+        }
         let now = runtime.now_ms();
         let state = freshness_state(
             policy,
@@ -676,11 +768,7 @@ impl RenderCacheMiddleware {
                     request,
                     next,
                     policy.clone(),
-                    RenderJob {
-                        key,
-                        epoch,
-                        variance,
-                    },
+                    job,
                 );
                 Ok(Ok(response))
             }
@@ -691,11 +779,6 @@ impl RenderCacheMiddleware {
                 // request back - matching `lead_render`'s own capture.
                 let method = request.method().clone();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
-                let job = RenderJob {
-                    key,
-                    epoch,
-                    variance,
-                };
                 let outcome = render_and_publish(runtime, request, next, policy, job, 0).await;
                 // Stale-on-error exists for a foreground rebuild that fails,
                 // not only for a provider failure before the handler ran: a
@@ -741,11 +824,6 @@ impl RenderCacheMiddleware {
             }
             FreshnessState::Dead => {
                 LookupOutcome::Miss.record();
-                let job = RenderJob {
-                    key,
-                    epoch,
-                    variance,
-                };
                 render_and_publish(runtime, request, next, policy, job, 0).await
             }
         }
@@ -1094,30 +1172,48 @@ async fn coherence(
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .is_some_and(|lease| lease.valid_at(now));
-        // Fix round 2, item 6: a valid lease reports Coherent without
-        // itself consulting the epoch. The review's stated concern was that
-        // this leaves an emergency `RenderCache::advance_epoch` unable to
-        // reach a lease-mode route until the lease expires naturally, which
-        // could be as long as `max_age_ms`. Investigated rather than
-        // assumed: `RenderKey::derive` bakes the epoch into the lookup key
-        // itself (`feed(10, &input.epoch.to_be_bytes())` in
-        // `suprnova_live::render_cache::key`), and `key_input` always
-        // derives that key from a freshly read epoch on every dispatch, in
-        // `serve`, before `coherence` (or any coherence mode) ever runs. So
-        // an epoch bump changes the lookup key for every route - lease mode
-        // included - making the previously-published entry unreachable by
-        // ordinary lookup on the very next request: a ordinary cache miss,
-        // which renders immediately, not a "Moved" result this function
-        // would need to detect. An explicit epoch comparison here would
-        // therefore check a condition (`header.epoch` disagreeing with the
-        // current epoch on a *found* entry) that cannot occur through this
-        // host's own key derivation, so this documents the finding - the
-        // narrower of the review's two offered fixes - rather than adding a
-        // comparison with no reachable path to prove or exercise. This
-        // reasoning is specific to this host: it would need re-establishing
-        // before anyone changes `RenderKey::derive` to stop keying on epoch,
-        // or introduces a lookup path that does not call `key_input` fresh
-        // per request.
+        // Fix round 2, item 6, restated for the leased epoch (task 5b). A
+        // valid lease reports Coherent without consulting the authority at
+        // all: not for the observed generations, and not for the epoch
+        // either. That is what a lease is for. Spec 18 ("Local validation
+        // leases and invalidation hints", lines 112-131) says leases exist
+        // "to avoid querying authority on every hot hit" and that a hot node
+        // holding one serves "without repeated authority reads", and
+        // `00-overview.md:330` budgets a Complete L0 hit with no
+        // database or provider round trip at all - which the previous
+        // version of this code could not honour, because `key_input` read
+        // `GenerationLedger::epoch` on every dispatch before `coherence`
+        // ever ran, so every request to a cached route cost one statement
+        // before it knew it was a hit.
+        //
+        // The epoch is therefore leased with the generations, and what a
+        // valid lease trusts about it is bounded by the same `max_age_ms`
+        // spec 18 already bounds staleness by. An epoch advance reaches a
+        // request by one of three paths, none of them a per-request read:
+        //
+        // - Advanced on this node, through `RenderCache::advance_epoch`:
+        //   that operator lever drops the runtime's leased epoch beside its
+        //   L0 clear, so the very next request reads the authority once,
+        //   derives its key under the new epoch, and misses - immediately,
+        //   lease mode included. This is the guarantee
+        //   `a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_bump`
+        //   asserts, and it now discriminates.
+        // - Advanced on another node, lease-mode route: this node finds out
+        //   at the first reread after the lease expires, at most
+        //   `max_age_ms` later. The reread below reports the new epoch,
+        //   `CoherenceCheck::compare` reports `Moved` against the entry's
+        //   own epoch, and `serve` re-derives the key under the refreshed
+        //   epoch before rebuilding.
+        // - Advanced on another node, authority-mode route: the same
+        //   comparison, at that route's very next hit, since it rereads on
+        //   every hit anyway.
+        //
+        // The epoch half of `CoherenceCheck::compare` is consequently
+        // reachable on a *found* entry now, which it was not while the key
+        // was derived from a freshly read epoch on every dispatch: the
+        // request and the entry can name the same key while the authority
+        // has moved past both. That is the condition the fix round 2 review
+        // asked about, and it is handled here rather than documented away.
         if leased {
             return Ok(Coherence::Coherent);
         }
@@ -1150,6 +1246,10 @@ async fn authority_coherence(
         .current_with_epoch(&digests)
         .await
         .map_err(|_| ())?;
+    // The one authority read a hit may make also renews the epoch lease, so
+    // no request ever reads the epoch on its own (task 5b). Done before the
+    // comparison, not after: this is the value the comparison judges by.
+    runtime.epoch_cache.refresh(epoch);
     Ok(
         match CoherenceCheck::compare(&header.observed, &current, epoch, header.epoch) {
             CoherenceCheck::Coherent => Coherence::Coherent,
@@ -1411,14 +1511,91 @@ pub(crate) fn complete_response(
 /// eligible and still coherent, publishing), reuses a leader's completed
 /// publication after waiting, or renders without publishing (`Wait`
 /// exhausted, or `Bypass`).
-/// One render's fixed identity: the lookup key, the epoch admission was
-/// granted at, and the declared variance the key was derived from. Bundled
-/// so `lead_render` and `publish` stay within a reasonable argument count
+/// One render's fixed identity: the lookup key, the epoch it was derived
+/// and admitted under, and the declared variance it carries. Bundled so
+/// `lead_render` and `publish` stay within a reasonable argument count
 /// rather than threading each field through separately.
+///
+/// The key and the epoch are not two independent fields. `RenderKey::derive`
+/// bakes the epoch into the key (tag 10 in
+/// `suprnova_live::render_cache::key`), so a job whose `epoch` says one
+/// thing and whose `key` was derived under another names a slot no later
+/// request can find, publishes a header whose `epoch` disagrees with the key
+/// it is stored at, and fences an L1 file under an epoch its own sweep will
+/// judge by. That is why this type owns the [`RenderKeyInput`] the key came
+/// from and exposes the epoch through it: refreshing the epoch and
+/// re-deriving the key is one operation, [`Self::restamp`], and there is no
+/// way to do half of it.
 pub(crate) struct RenderJob {
-    pub(crate) key: RenderKey,
-    pub(crate) epoch: u64,
-    pub(crate) variance: VarianceDescriptor,
+    /// Always `RenderKey::derive(&input, keys)` for the current `input`.
+    key: RenderKey,
+    /// The input `key` was derived from, epoch included.
+    input: RenderKeyInput,
+}
+
+impl RenderJob {
+    /// Bundles an already-derived key with the input it was derived from.
+    /// The caller has just called `RenderKey::derive(&input, keys)`, which
+    /// is what makes the two agree at construction.
+    fn new(input: RenderKeyInput, key: RenderKey) -> Self {
+        Self { key, input }
+    }
+
+    /// The lookup key this render publishes under.
+    fn key(&self) -> &RenderKey {
+        &self.key
+    }
+
+    /// The authority epoch this render is judged against.
+    fn epoch(&self) -> u64 {
+        self.input.epoch
+    }
+
+    /// The declared variance the key carries.
+    fn variance(&self) -> &VarianceDescriptor {
+        &self.input.variance
+    }
+
+    /// Brings this job up to the runtime's leased epoch, re-deriving the key
+    /// under it when it moved.
+    ///
+    /// A no-op in the ordinary case: the leased epoch is the one the key was
+    /// derived under, because `serve` derived it from that same lease. It
+    /// does work exactly when an authority read since then reported a
+    /// different epoch - another node advanced it - and in that case the key
+    /// must move with it, or this render would publish into the previous
+    /// epoch's namespace.
+    ///
+    /// Proven by revert: with the `serve` call to this function disabled,
+    /// both `an_epoch_advanced_by_another_node_reaches_a_lease_mode_route_when_its_lease_expires`
+    /// and `..._reaches_an_authority_mode_route_on_its_next_hit` read
+    /// `renders() == 3` at their final assertion instead of `2` - the
+    /// rebuild published where nothing would look for it, so the next
+    /// request rendered again.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `RenderKey::derive`'s error. Deriving the same input again
+    /// under a different `u64` cannot newly exceed any of that function's
+    /// bounds (none of them involve the epoch), so this is a fail-closed
+    /// path rather than a reachable one; callers treat it as a bypass.
+    fn restamp(&mut self, runtime: &RenderCacheRuntime) -> Result<(), RenderCacheError> {
+        let Some(epoch) = runtime.epoch_cache.get() else {
+            // The lease was dropped underneath this request by
+            // `RenderCache::advance_epoch`. There is no epoch to re-derive
+            // under without an authority read this function does not make;
+            // the render proceeds under the epoch it captured, and its own
+            // fresh reread declines the candidate - the same outcome the
+            // `EPOCH_CAPTURED` race seam proves.
+            return Ok(());
+        };
+        if epoch == self.input.epoch {
+            return Ok(());
+        }
+        self.input.epoch = epoch;
+        self.key = RenderKey::derive(&self.input, &runtime.keys)?;
+        Ok(())
+    }
 }
 
 async fn render_and_publish(
@@ -1430,7 +1607,7 @@ async fn render_and_publish(
     depth: u32,
 ) -> Result<Response, ProviderFailure> {
     let now = runtime.now_ms();
-    let admission = match runtime.coordinator.admit(&job.key, job.epoch, now).await {
+    let admission = match runtime.coordinator.admit(job.key(), job.epoch(), now).await {
         Ok(admission) => admission,
         Err(_) => return Err(ProviderFailure(request, next)),
     };
@@ -1440,7 +1617,7 @@ async fn render_and_publish(
         }
         RebuildAdmission::Wait(wait) => {
             wait.wait().await;
-            match lookup(runtime, policy, &job.key).await {
+            match lookup(runtime, policy, job.key()).await {
                 Ok(Some(found)) => {
                     // Fix round 1, item 4: the leader may have declined to
                     // publish (a moved dependency, an ineligible response,
@@ -1452,7 +1629,7 @@ async fn render_and_publish(
                     // primary hit path in `serve` applies to every hit,
                     // never served as if the wait itself were the proof.
                     let coherence_result =
-                        match coherence(runtime, &job.key, policy, found.header()).await {
+                        match coherence(runtime, job.key(), policy, found.header()).await {
                             Ok(coherence) => coherence,
                             Err(()) => return Err(ProviderFailure(request, next)),
                         };
@@ -1506,10 +1683,30 @@ async fn render_and_publish(
                             if depth >= MAX_WAIT_REBUILD_DEPTH {
                                 return Ok(next(request).await);
                             }
-                            job.epoch = match runtime.ledger.epoch().await {
-                                Ok(epoch) => epoch,
-                                Err(_) => return Err(ProviderFailure(request, next)),
-                            };
+                            // Re-admission under the current epoch. The
+                            // `coherence` call a few lines above renewed the
+                            // lease if it consulted the authority, so this
+                            // reads the lease rather than the ledger; only a
+                            // lease dropped underneath this request (an
+                            // `advance_epoch` on this node) costs a read.
+                            //
+                            // Task 5b: this used to re-stamp `job.epoch`
+                            // alone, leaving `job.key` derived under the
+                            // epoch the request started with - a
+                            // disagreement that published the rebuilt entry
+                            // into the previous epoch's namespace, under a
+                            // header whose `epoch` field named the new one.
+                            // `restamp` re-derives the key with the epoch,
+                            // which is the only way to change either.
+                            if runtime.epoch_cache.get().is_none() {
+                                match runtime.ledger.epoch().await {
+                                    Ok(epoch) => runtime.epoch_cache.refresh(epoch),
+                                    Err(_) => return Err(ProviderFailure(request, next)),
+                                }
+                            }
+                            if job.restamp(runtime).is_err() {
+                                return Ok(next(request).await);
+                            }
                             Box::pin(render_and_publish(
                                 runtime,
                                 request,
@@ -1559,8 +1756,8 @@ async fn lead_render(
         runtime,
         request,
         next,
-        job.epoch,
-        key_carries_a_resolved_principal(&job.variance),
+        job.epoch(),
+        key_carries_a_resolved_principal(job.variance()),
         policy.class() == RepresentationClass::PublicShellStitched,
     )
     .await;
@@ -1691,7 +1888,7 @@ async fn lead_render(
         return Ok(response);
     }
 
-    if let Err(()) = fresh_reread_is_coherent(runtime, &observed, job.epoch).await {
+    if let Err(()) = fresh_reread_is_coherent(runtime, &observed, job.epoch()).await {
         LookupOutcome::Moved.record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -2022,7 +2219,7 @@ fn key_used_different_values_than_the_render_saw(
     report: &super::collector::CollectorReport,
     runtime: &RenderCacheRuntime,
 ) -> bool {
-    let declared = job.variance.dimensions();
+    let declared = job.variance().dimensions();
 
     if !report.context.locale_material.is_empty() {
         match declared.get(&VarianceDimension::Locale) {
@@ -2342,6 +2539,11 @@ async fn fresh_reread_is_coherent(
         .current_with_epoch(&digests)
         .await
         .map_err(|_| ())?;
+    // Renews the epoch lease from the read that just returned it (task 5b),
+    // before the race seam below: a hook armed there that itself advances
+    // the epoch drops the lease, and re-filling it afterwards with the
+    // pre-hook value would undo that.
+    runtime.epoch_cache.refresh(fresh_epoch);
     // Test-only race seam (R72/R83): fires inside the reread, after the
     // values it will judge against have been read and before it judges
     // them, so a write armed here is on the far side of that read - the
@@ -2413,15 +2615,15 @@ fn entry_header(
         .collect();
     let safe_headers = SafeHeaders::from_pairs(safe_pairs).ok()?;
     Some(EntryHeader {
-        key: job.key.clone(),
+        key: job.key().clone(),
         class,
-        variance: job.variance.clone(),
+        variance: job.variance().clone(),
         published_at_ms: now,
         fresh_ms: policy.freshness().fresh_ms(),
         stale_servable_ms: policy.freshness().stale_servable_ms(),
         stale_on_error_ms: policy.freshness().stale_on_error_ms(),
         observed: observed.clone(),
-        epoch: job.epoch,
+        epoch: job.epoch(),
         seed_deadline_ms,
         status: 200,
         headers: safe_headers,
@@ -2523,11 +2725,11 @@ async fn store_entry(
     let outcome = match hot {
         Some(hot) => Ok(runtime
             .l0
-            .publish_hot(&job.key, encoded.clone(), hot, fence, now)),
+            .publish_hot(job.key(), encoded.clone(), hot, fence, now)),
         None => {
             runtime
                 .l0
-                .publish(&job.key, encoded.clone(), fence, now, u64::MAX)
+                .publish(job.key(), encoded.clone(), fence, now, u64::MAX)
                 .await
         }
     };
@@ -2557,7 +2759,7 @@ async fn store_entry(
         // value.
         let retention_ms = policy.freshness().dead_after_ms(entry.header().class);
         let _ = l1
-            .publish(&job.key, encoded, fence, now, retention_ms)
+            .publish(job.key(), encoded, fence, now, retention_ms)
             .await;
     }
 }
@@ -2720,13 +2922,23 @@ pub mod race_points {
     pub static DURING_REREAD: RacePoint = RacePoint::new();
 
     /// Fires from `RenderCacheMiddleware::serve`, immediately
-    /// after the epoch a new `RenderJob` will carry is read, and
+    /// after the epoch a new `RenderJob` will carry is captured, and
     /// before the render that job describes begins - the exact window an
     /// epoch advance must land in to be baked into the job as stale by the
     /// time that render's own fresh reread checks it. Fires on whichever
     /// *request* reaches that point next, not necessarily the next
-    /// *render*: `serve` reads the epoch before it knows whether the
+    /// *render*: `serve` captures the epoch before it knows whether the
     /// request will be a hit, a stale serve, or a render (fix round 1, F7).
+    ///
+    /// "Captured", not "read": since task 5b the epoch usually comes from
+    /// the runtime's `EpochCache`, and only the first request of a runtime
+    /// (or the first after an `advance_epoch`) reads the ledger here. The
+    /// property is unchanged either way, because it never depended on where
+    /// the value came from - only on the request already holding it when the
+    /// hook fires. An `advance_epoch` armed here drops the lease and clears
+    /// L0, so the lookup that follows misses, and the render it leads to
+    /// still carries the pre-advance epoch into a fresh reread that reads
+    /// the post-advance one: the candidate is discarded, never published.
     pub static EPOCH_CAPTURED: RacePoint = RacePoint::new();
 
     /// Arms `point` to run `hook` exactly once, the next time it fires.
@@ -2850,6 +3062,7 @@ mod tests {
             clock: Arc::new(suprnova_live::clock::SystemClock),
             limits: EntryLimits::default(),
             leases: Mutex::new(BTreeMap::new()),
+            epoch_cache: EpochCache::empty(),
             hot_serves: std::sync::atomic::AtomicU64::new(0),
         }
     }

@@ -1409,6 +1409,23 @@ pub fn ledger() -> suprnova::render_cache::ledger::SqlGenerationLedger {
     suprnova::render_cache::ledger::SqlGenerationLedger::new()
 }
 
+/// Task 5b: advances the authority epoch the way another node in the same
+/// deployment would - through a second [`ledger`] handle on the shared
+/// database, never through `RenderCache::advance_epoch`.
+///
+/// The distinction is the whole point. `RenderCache::advance_epoch` is this
+/// process's own operator lever: it clears L0 and drops the runtime's
+/// leased epoch, so the very next request here sees the new epoch. An
+/// advance committed by another node reaches this one only through the
+/// database, so the only thing that can tell this runtime about it is its
+/// next authority read - which is exactly what the leased epoch bounds.
+pub async fn advance_epoch_on_another_node(_harness: &Harness) {
+    ledger()
+        .advance_epoch()
+        .await
+        .expect("advance the authority epoch as another node would");
+}
+
 /// Advances the `posts` table's generation directly, through the ORM path,
 /// independent of any render.
 pub async fn advance_posts(_harness: &Harness) {

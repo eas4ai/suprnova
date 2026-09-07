@@ -42,14 +42,6 @@ const PROBE_PATH: &str = "/probe/1";
 /// shape, `CoherenceMode::Lease` instead of the default `Authority`.
 const LEASED_PROBE_PATH: &str = "/probe-leased/1";
 
-/// The statements a request to a policy-covered route costs before it knows
-/// whether it is a hit at all: `RenderCacheMiddleware::serve` reads the
-/// authority epoch for every GET and HEAD, because the lookup key is
-/// derived under it. It is not the hit's own cost, and it is the same on a
-/// hit, a miss, and a bypass - so the two tests below subtract it and
-/// measure only what each coherence mode adds.
-const EPOCH_READ_PER_REQUEST: u64 = 1;
-
 /// A miss runs everything a request would run without a cache at all: the
 /// handler once, its ORM query once, the template once, the serializer
 /// once, and at least the handler's own statement against the database.
@@ -82,13 +74,16 @@ async fn a_miss_runs_the_handler_the_query_the_template_and_the_serializer_once(
     );
 }
 
-/// A lease-mode hit runs none of the four, and consults the database only
-/// for the epoch every request reads before it knows whether it is a hit at
-/// all (see `RenderCacheMiddleware::serve`): the validation lease answers
-/// coherence without a ledger read of its own.
+/// A lease-mode hit runs none of the four and consults the database not at
+/// all. Both halves of "not at all" are load-bearing: the validation lease
+/// answers coherence without a ledger read, and the epoch the lookup key is
+/// derived under is leased alongside it rather than read per request
+/// (`00-overview.md:330` budgets a Complete L0 hit "with no
+/// database/provider round trip"; spec 18, lines 112-131, says leases exist
+/// "to avoid querying authority on every hot hit").
 #[tokio::test]
 #[serial_test::serial]
-async fn a_lease_mode_hit_runs_nothing_and_issues_no_statement_of_its_own() {
+async fn a_lease_mode_hit_runs_nothing_and_issues_no_statement() {
     let harness = boot_with_render_cache().await;
 
     dispatch_get(&harness, LEASED_PROBE_PATH, &[]).await;
@@ -119,25 +114,24 @@ async fn a_lease_mode_hit_runs_nothing_and_issues_no_statement_of_its_own() {
     assert_eq!(probe_route::serializations(), 0, "nothing was serialized");
     assert_eq!(
         statements::count(),
-        EPOCH_READ_PER_REQUEST,
-        "the hit itself issued nothing; a valid lease answers coherence without consulting \
-         the ledger at all"
+        0,
+        "a lease-mode hot hit reaches the database zero times: the lease answers coherence, \
+         and the epoch the key is derived under is leased with it"
     );
 }
 
-/// An authority-mode hit issues exactly one statement of its own: the
-/// batched reread that reads the observed generations and the authority
-/// epoch together (`GenerationLedger::current_with_epoch`, one
-/// `UNION ALL`). Read separately those would be two round trips, and
-/// nothing else in this suite would notice; this assertion is what holds
-/// them to one.
+/// An authority-mode hit issues exactly one statement: the batched reread
+/// that reads the observed generations and the authority epoch together
+/// (`GenerationLedger::current_with_epoch`, one `UNION ALL`). Read
+/// separately those would be two round trips, and nothing else in this
+/// suite would notice; this assertion is what holds them to one.
 ///
-/// Named "of its own" for the same reason the lease test above is: the
-/// per-request epoch read is not part of the hit, and
-/// [`EPOCH_READ_PER_REQUEST`] is what separates the two.
+/// One, not two: the epoch this request's lookup key was derived under came
+/// from the runtime's leased epoch, which that same reread renews - no
+/// request reads the epoch on its own.
 #[tokio::test]
 #[serial_test::serial]
-async fn an_authority_mode_hit_issues_exactly_one_statement_of_its_own() {
+async fn an_authority_mode_hit_issues_exactly_one_statement() {
     let harness = boot_with_render_cache().await;
 
     dispatch_get(&harness, PROBE_PATH, &[]).await;
@@ -178,8 +172,52 @@ async fn an_authority_mode_hit_issues_exactly_one_statement_of_its_own() {
     assert_eq!(probe_route::serializations(), 0, "nothing was serialized");
     assert_eq!(
         statements::count(),
-        EPOCH_READ_PER_REQUEST + 1,
-        "one batched coherence reread on top of the per-request epoch read, and nothing else"
+        1,
+        "one batched coherence reread, and nothing else"
+    );
+}
+
+/// The epoch costs one authority read per runtime, not one per request.
+///
+/// Measured as a difference rather than as an absolute, so it does not
+/// depend on how many statements a probe render happens to issue: two
+/// misses of the same shape on a fresh boot differ by exactly the one read
+/// that fills the epoch lease, and the second miss - and every request
+/// after it - pays nothing for the epoch at all.
+///
+/// `/probe/2` rather than a second request to `/probe/1`: the second
+/// request has to be a miss too, and after the first publication only a
+/// different key is one.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_epoch_is_read_once_at_first_use() {
+    let harness = boot_with_render_cache().await;
+
+    statements::reset();
+    let first = dispatch_get(&harness, PROBE_PATH, &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_miss = statements::count();
+
+    statements::reset();
+    let second = dispatch_get(&harness, "/probe/2", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    let second_miss = statements::count();
+
+    assert_eq!(
+        probe_route::handler_calls(),
+        2,
+        "both dispatches were misses and rendered, so they did the same work"
+    );
+    assert!(
+        second_miss >= 1,
+        "control: the second miss still reached the database for its own render; observed {second_miss}"
+    );
+    assert_eq!(
+        first_miss,
+        second_miss + 1,
+        "the first request of a runtime pays one statement more than an otherwise identical \
+         second one: the single authority read that fills the epoch lease. first {first_miss}, \
+         second {second_miss}"
     );
 }
 

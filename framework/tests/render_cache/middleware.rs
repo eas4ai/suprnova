@@ -22,11 +22,12 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    NON_ASCII_LINK, advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
+    NON_ASCII_LINK, advance_epoch_on_another_node, advance_posts, boot_with_render_cache,
+    boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
-    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user,
+    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user, statements,
 };
 use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
 use suprnova::{StatusCode, async_trait};
@@ -710,22 +711,25 @@ async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_
     assert_eq!(counting_route::renders(), 1);
     assert!(leased_hit.header("etag").is_some());
 
-    // Fix round 2, item 6: this asserts the observable guarantee the review
-    // asked for - an emergency epoch advance reaches a lease-mode route
-    // immediately, not after the lease's own `max_age_ms` expires - but it
-    // is *not* a discriminating test for a `coherence`-level epoch check,
-    // and this codebase does not have one. Investigated, not assumed:
-    // `RenderKey::derive` bakes the epoch into the lookup key itself, and
-    // `key_input` re-derives that key from a freshly read epoch on every
-    // dispatch, before `coherence` (lease mode or not) ever runs. So the
-    // epoch bump below changes the lookup key for `/leased/1`, and the
-    // previously-published entry becomes unreachable by ordinary lookup on
-    // the request below - an ordinary cache miss, which renders
-    // immediately regardless of coherence mode. This test passes
-    // identically whether or not `coherence`'s lease branch consults the
-    // epoch (confirmed: it still passed with that consultation removed),
-    // because the key mismatch already guarantees the outcome. See
-    // `coherence`'s own comment for the fuller reasoning and its scope.
+    // Fix round 2, item 6, restated for the leased epoch (task 5b): the
+    // guarantee is unchanged - an emergency epoch advance on *this* node
+    // reaches a lease-mode route immediately, not after the lease's own
+    // `max_age_ms` - but the mechanism behind it is no longer "`key_input`
+    // re-derives the key from a freshly read epoch on every dispatch",
+    // because no dispatch reads the epoch on its own any more (see
+    // `coherence`'s own comment, `00-overview.md:330` and spec 18, lines
+    // 112-131). What carries it now is `RenderCache::advance_epoch`
+    // dropping the runtime's leased epoch beside its L0 clear, so the
+    // request below reads the authority once, derives its key under the new
+    // epoch, and misses.
+    //
+    // That also makes this discriminating, which the pre-task-5b version
+    // said plainly it was not: with `epoch_cache.invalidate()` removed from
+    // `advance_epoch`, the dispatch immediately below still renders (L0 was
+    // cleared), but it renders under the *stale* leased epoch, so its own
+    // fresh reread finds the epoch moved and declines to publish - and the
+    // second dispatch below, which must be a hit, renders instead. Proven
+    // by revert: `renders()` reads 3 at the final assertion, not 2.
     RenderCache::advance_epoch().await.expect("advance epoch");
     let after_bump = dispatch_get(&harness, "/leased/1", &[]).await;
     assert_eq!(after_bump.status, StatusCode::OK);
@@ -734,6 +738,133 @@ async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_
         2,
         "an emergency epoch advance must reach a lease-mode route immediately, not wait out \
          the lease"
+    );
+
+    let republished = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(republished.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the rebuild ran under the advanced epoch and published under the key that epoch \
+         derives, so this dispatch is a hit"
+    );
+}
+
+/// An epoch another node advanced is not visible here until this node reads
+/// the authority again - and under `CoherenceMode::Lease` that is bounded
+/// by the lease's own `max_age_ms`, which is exactly the bound spec 18
+/// ("Local validation leases and invalidation hints", lines 112-131)
+/// already puts on how stale a leased answer may be. Within the lease the
+/// hit stands, epoch included; when the lease expires the reread reports the
+/// advance and the route rebuilds under the new epoch.
+///
+/// The complement of `a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_bump`
+/// above, which covers an advance made *on this node*.
+///
+/// Honest about what each assertion carries. The third dispatch is the
+/// load-bearing one: before the epoch was leased, an advance from anywhere
+/// changed the lookup key at the very next dispatch, so this was a miss and
+/// `renders()` read 2. The fourth dispatch's rebuild is over-determined -
+/// `/leased/{id}` sets `fresh_ms` and `max_age_ms` both to 60_000, so the
+/// clock advance below expires the entry and the lease together - but the
+/// fifth is not: it is a hit only if the rebuild published under the key the
+/// *refreshed* epoch derives, which is `serve`'s re-derivation after a
+/// `Moved` result.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_epoch_advanced_by_another_node_reaches_a_lease_mode_route_when_its_lease_expires() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first request renders and publishes"
+    );
+
+    // Grants the lease: this hit rereads the authority once and, finding
+    // the entry coherent, leases that answer for `max_age_ms`.
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1, "the second request is a hit");
+
+    advance_epoch_on_another_node(&harness).await;
+
+    let leased = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(leased.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "within the lease the epoch is leased with the generations: this dispatch derives \
+         its key under the leased epoch, finds the entry, trusts the lease, and serves"
+    );
+
+    // Past `max_age_ms` (60_000) for the lease granted above.
+    clock(&harness).advance_ms(61_000);
+
+    let rebuilt = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the expired lease rereads the authority, which reports the advance, so the entry \
+         is not fresh and the route rebuilds"
+    );
+
+    let served = dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the rebuild published under the epoch its reread refreshed, so this dispatch \
+         derives the same key and is a hit"
+    );
+    assert_eq!(
+        served.body, rebuilt.body,
+        "and it serves the bytes that rebuild produced"
+    );
+}
+
+/// The same external advance against an authority-coherence route reaches it
+/// at its very next hit: that mode rereads the authority on every hit
+/// anyway, and the reread carries the epoch, so
+/// `CoherenceCheck::compare` reports the entry moved. The hit after the
+/// rebuild costs one statement, not two - the reread renewed the leased
+/// epoch, so nothing reads the epoch on its own.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_epoch_advanced_by_another_node_reaches_an_authority_mode_route_on_its_next_hit() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first request renders and publishes"
+    );
+
+    advance_epoch_on_another_node(&harness).await;
+
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the very next hit's own reread reports the advanced epoch, so the entry it found \
+         is moved and the route rebuilds"
+    );
+
+    statements::reset();
+    let served = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the rebuild published under the refreshed epoch, so this dispatch is a hit"
+    );
+    assert_eq!(
+        statements::count(),
+        1,
+        "and it costs exactly the one batched coherence reread: no separate epoch read"
     );
 }
 
