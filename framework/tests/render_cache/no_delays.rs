@@ -45,9 +45,8 @@ const ALLOWED_LINES: [&str; 1] = ["PERFORM pg_sleep(0.2);"];
 fn the_render_cache_tests_and_their_support_contain_no_timing_waits() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut offenders = Vec::new();
-    for dir in ["render_cache", "support"] {
-        walk(&root.join(dir), &mut offenders);
-    }
+    walk(&root.join("render_cache"), Scope::Everything, &mut offenders);
+    walk(&root.join("support"), Scope::RenderCacheOnly, &mut offenders);
     assert!(
         offenders.is_empty(),
         "timing waits in RenderCache tests:\n{}",
@@ -55,21 +54,49 @@ fn the_render_cache_tests_and_their_support_contain_no_timing_waits() {
     );
 }
 
-/// Scans every `.rs` file under `dir`, recursing into subdirectories.
+/// Whether the entries directly inside the directory being scanned are
+/// filtered by name.
 ///
-/// Under `tests/support` only the `render_cache*` support modules are
-/// descended into: the other support directories there belong to suites
-/// this rule was not written for, and a scan that swept them would be
-/// making a claim about trees this test does not own.
-fn walk(dir: &Path, offenders: &mut Vec<String>) {
+/// `tests/support` is shared by every suite in this crate, so only its
+/// `render_cache*` entries belong to this rule - the rest belong to suites
+/// it was not written for, and sweeping them would make a claim about trees
+/// this test does not own. The filter applies to that one level: files
+/// sitting directly in `tests/support` (`common.rs`, `env_lock.rs`,
+/// `magnetar_auth.rs`) are outside it exactly as the sibling directories
+/// are, which is what this doc has always said and what Task 5b's review
+/// found the walker was not yet doing. Everything *below* a selected module
+/// is that module's own, so it is scanned whole.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// Scan every entry.
+    Everything,
+    /// Scan only entries whose own name starts with `render_cache`.
+    RenderCacheOnly,
+}
+
+impl Scope {
+    /// Whether an entry named `name` directly inside the scanned directory
+    /// is this rule's to scan.
+    fn admits(self, name: &str) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::RenderCacheOnly => name.starts_with("render_cache"),
+        }
+    }
+}
+
+/// Scans every `.rs` file under `dir` that `scope` admits, recursing into
+/// admitted subdirectories with [`Scope::Everything`]: the filter names
+/// which *modules* this rule owns, and it owns each of them entirely.
+fn walk(dir: &Path, scope: Scope, offenders: &mut Vec<String>) {
     for entry in std::fs::read_dir(dir).expect("readable test dir") {
         let path = entry.expect("entry").path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !scope.admits(name) {
+            continue;
+        }
         if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if dir.ends_with("support") && !name.starts_with("render_cache") {
-                continue;
-            }
-            walk(&path, offenders);
+            walk(&path, Scope::Everything, offenders);
         } else if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path).expect("utf-8 source");
             for (index, line) in text.lines().enumerate() {

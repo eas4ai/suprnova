@@ -384,6 +384,19 @@ async fn a_write_during_the_reread_publishes_a_stale_entry_that_the_next_lookup_
         "the first dispatch is a plain miss and renders"
     );
 
+    // Task 5b review: what separates this seam from `AFTER_VIEW_CLOSE` is
+    // that the candidate *is* published here and caught at the next lookup,
+    // rather than discarded before it is ever stored. Without this
+    // assertion the two seams are indistinguishable from the render counts
+    // alone - the sibling test above asserts `is_none()` at exactly this
+    // point for exactly that reason.
+    let key = RenderCache::key_for_route_for_test("/builder-read", &[], None);
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "the write landed inside the reread, so the comparison passed and the stale entry \
+         was published rather than discarded"
+    );
+
     let rebuilt = dispatch_get(&harness, "/builder-read", &[]).await;
     assert_eq!(
         counting_route::renders(),
