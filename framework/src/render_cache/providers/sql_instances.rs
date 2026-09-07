@@ -38,9 +38,9 @@
 //! # Bounds
 //!
 //! A record over
-//! [`MAX_RECORD_BYTES`](suprnova_live::ledger::MAX_RECORD_BYTES) is refused
+//! [`MAX_RECORD_BYTES`] is refused
 //! before any statement is built, and reclamation of elapsed records is
-//! bounded to [`RECLAIM_BATCH`] rows per creating operation - the same rule,
+//! bounded to `RECLAIM_BATCH` rows per creating operation - the same rule,
 //! and the same number, the in-memory reference store applies, so a burst of
 //! expiries that arrive together is paid for over the operations that
 //! follow rather than by whichever one is unlucky.

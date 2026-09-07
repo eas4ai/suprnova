@@ -8,17 +8,26 @@
 //!
 //! # Store time
 //!
-//! Expiry across nodes is decided by one clock: the database's. Every SQL
-//! adapter reads milliseconds since the Unix epoch from the backend itself
+//! Expiry across nodes is decided by one clock: the backend's. Every SQL
+//! adapter reads milliseconds since the Unix epoch from the database itself
 //! ([`sql_now_ms`], read through [`store_now_ms`] or compared inside the
-//! statement that guards the row), never from the node's own clock, so a
-//! node whose clock runs fast can neither extend a lease nor keep an
-//! expired entry alive for everyone else.
+//! statement that guards the row), and every Redis adapter reads
+//! `redis.call('TIME')` inside the script that guards the key. Never from the
+//! node's own clock, so a node whose clock runs fast can neither extend a
+//! lease nor keep an expired entry alive for everyone else.
 
+pub mod redis;
+pub mod redis_instances;
+pub mod redis_lease;
+pub mod redis_store;
 pub mod sql_instances;
 pub mod sql_lease;
 pub mod sql_store;
 
+pub use redis::RedisProviderConfig;
+pub use redis_instances::RedisInstanceRecordStore;
+pub use redis_lease::RedisLeaseStore;
+pub use redis_store::RedisRenderStore;
 pub use sql_instances::SqlInstanceRecordStore;
 pub use sql_lease::SqlLeaseStore;
 pub use sql_store::SqlRenderStore;

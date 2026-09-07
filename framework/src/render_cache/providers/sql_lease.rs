@@ -16,7 +16,7 @@
 //!
 //! Every expiry decision - whether a lease may be taken over, whether a
 //! token may still be minted - is a comparison against
-//! [`sql_now_ms`](super::sql_now_ms) inlined into the statement that guards
+//! [`sql_now_ms`] inlined into the statement that guards
 //! the row. A node whose clock runs fast can neither extend its own lease
 //! nor declare a peer's expired, which is the whole reason leadership lives
 //! in the database rather than in a process.

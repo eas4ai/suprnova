@@ -283,3 +283,150 @@ pub async fn reset_and_migrate(conn: sea_orm::DatabaseConnection) -> TestContain
     TestContainer::singleton(suprnova::DbConnection::from_raw(conn));
     guard
 }
+
+// --- Tier 2: Redis ---
+
+/// Where the live Redis tests connect.
+///
+/// `REDIS_TEST_URL` first so one throwaway instance can be pointed at
+/// without disturbing whatever `REDIS_URL` names, then `REDIS_URL`, then the
+/// default port - the same resolution order the cache and queue suites use.
+pub fn redis_url() -> String {
+    std::env::var("REDIS_TEST_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned())
+}
+
+/// A provider configuration whose key namespace no other test shares.
+///
+/// Every live Redis test scopes itself under a fresh UUID, so a concurrent
+/// run, a prior failed run, and whatever else happens to live in the
+/// instance are all invisible to it.
+pub fn redis_config() -> suprnova::render_cache::providers::RedisProviderConfig {
+    suprnova::render_cache::providers::RedisProviderConfig {
+        url: redis_url(),
+        prefix: format!("suprnova_tiers_test:{}:", uuid::Uuid::new_v4()),
+    }
+}
+
+/// A configuration pointed at a loopback port nothing listens on.
+///
+/// The port is taken and released, so a connection to it is refused rather
+/// than accepted and left hanging - which is what makes the failure a
+/// provider failure a test can assert on quickly.
+///
+/// # Panics
+///
+/// Panics when no loopback port can be bound, which is a broken environment
+/// rather than a provider failure.
+pub fn redis_config_on_a_closed_port() -> suprnova::render_cache::providers::RedisProviderConfig {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port for the closed-port fixture");
+    let port = listener
+        .local_addr()
+        .expect("the bound loopback address")
+        .port();
+    drop(listener);
+    suprnova::render_cache::providers::RedisProviderConfig {
+        url: format!("redis://127.0.0.1:{port}/"),
+        prefix: "suprnova_tiers_closed:".to_owned(),
+    }
+}
+
+/// A live connection for the assertions and the cleanup that have to look at
+/// Redis itself rather than through an adapter.
+///
+/// # Panics
+///
+/// Panics when the URL is unusable or the instance does not answer `PING`,
+/// which for an `--ignored` live test is a misconfigured run rather than a
+/// failure of the code under test.
+pub async fn boot_redis() -> (
+    suprnova::render_cache::providers::RedisProviderConfig,
+    redis::aio::ConnectionManager,
+) {
+    let config = redis_config();
+    let client =
+        redis::Client::open(config.url.clone()).expect("REDIS_TEST_URL is a valid Redis URL");
+    let mut conn = redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("live Redis is reachable - set REDIS_TEST_URL to a disposable instance");
+    let pong: String = redis::cmd("PING")
+        .query_async(&mut conn)
+        .await
+        .expect("the live Redis answers PING");
+    assert_eq!(pong, "PONG");
+    (config, conn)
+}
+
+/// Redis's own clock, as milliseconds since the Unix epoch.
+///
+/// Every expiry the Redis adapters write or compare is measured on this
+/// clock, exactly as the SQL adapters measure theirs on the database's, so a
+/// test that wants a record to outlive a scenario starts from the same
+/// number the adapter will.
+///
+/// # Panics
+///
+/// Panics when `TIME` cannot be read, which is a broken fixture.
+pub async fn redis_now_ms(conn: &mut redis::aio::ConnectionManager) -> u64 {
+    let clock: (u64, u64) = redis::cmd("TIME")
+        .query_async(conn)
+        .await
+        .expect("the Redis store clock");
+    clock
+        .0
+        .saturating_mul(1_000)
+        .saturating_add(clock.1 / 1_000)
+}
+
+/// An instant `after_ms` milliseconds ahead of Redis's own clock.
+pub async fn redis_deadline(conn: &mut redis::aio::ConnectionManager, after_ms: u64) -> UnixMillis {
+    UnixMillis::new(redis_now_ms(conn).await.saturating_add(after_ms))
+}
+
+/// Every key currently under `prefix`, in no particular order.
+///
+/// # Panics
+///
+/// Panics when the scan fails, which is a broken fixture.
+pub async fn redis_keys(conn: &mut redis::aio::ConnectionManager, prefix: &str) -> Vec<String> {
+    let mut cursor = "0".to_owned();
+    let mut found = Vec::new();
+    loop {
+        let (next, batch): (String, Vec<String>) = redis::cmd("SCAN")
+            .arg(&cursor)
+            .arg("MATCH")
+            .arg(format!("{prefix}*"))
+            .arg("COUNT")
+            .arg(512)
+            .query_async(conn)
+            .await
+            .expect("scan the test prefix");
+        found.extend(batch);
+        cursor = next;
+        if cursor == "0" {
+            return found;
+        }
+    }
+}
+
+/// Deletes every key this test wrote, so a shared instance is left as it was
+/// found.
+///
+/// # Panics
+///
+/// Panics when the deletion fails, which is a broken fixture.
+pub async fn clear_redis_prefix(conn: &mut redis::aio::ConnectionManager, prefix: &str) {
+    let keys = redis_keys(conn, prefix).await;
+    for batch in keys.chunks(256) {
+        let mut command = redis::cmd("DEL");
+        for key in batch {
+            command.arg(key);
+        }
+        let _: i64 = command
+            .query_async(conn)
+            .await
+            .expect("delete the test prefix");
+    }
+}
