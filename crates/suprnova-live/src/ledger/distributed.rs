@@ -275,11 +275,92 @@ impl RecordSlot {
     }
 }
 
+/// Elapsed records one store operation may reclaim.
+///
+/// Reclamation is bounded so that no single operation pays for a burst of
+/// expiries that arrived together: a store holding a million records that
+/// all elapse at once still answers in constant time, and the backlog drains
+/// over the operations that follow. Every adapter owes the same rule, which
+/// for a SQL or Redis store means a sweep statement with a batch limit
+/// (`DELETE ... WHERE expires_at_ms <= ? LIMIT 64`, or a bounded scan over a
+/// sorted expiry index) rather than an unbounded delete.
+const MAX_RECLAIMED_PER_OPERATION: usize = 64;
+
+/// One key a deadline entry reclaims, in whichever table holds it.
+enum Reclaimable {
+    Instance(InstanceRecordKey),
+    Promotion(PromotionRecordKey),
+}
+
 /// Both record tables under one lock, so each operation reads store time and
 /// the state it guards as a single atomic step.
+///
+/// `deadlines` is the reclamation index: one entry per record written, in
+/// deadline order, so an operation finds the records that have elapsed
+/// without walking the ones that have not, and counting instances stays a
+/// map length rather than a scan.
 struct RecordState {
     instances: BTreeMap<InstanceRecordKey, RecordSlot>,
     promotions: BTreeMap<PromotionRecordKey, RecordSlot>,
+    deadlines: BTreeMap<UnixMillis, Vec<Reclaimable>>,
+}
+
+impl RecordState {
+    /// Records that the key at `deadline` becomes reclaimable then.
+    fn schedule(&mut self, deadline: UnixMillis, key: Reclaimable) {
+        self.deadlines.entry(deadline).or_default().push(key);
+    }
+
+    /// Drops at most [`MAX_RECLAIMED_PER_OPERATION`] elapsed records.
+    ///
+    /// An entry whose record was already removed, replaced, or given another
+    /// deadline reclaims nothing and is simply spent, which is what keeps the
+    /// index from having to be kept in step with every write.
+    fn reclaim(&mut self, now: UnixMillis) {
+        for _ in 0..MAX_RECLAIMED_PER_OPERATION {
+            let Some((deadline, key)) = self.pop_due(now) else {
+                break;
+            };
+            match key {
+                Reclaimable::Instance(key) => {
+                    if self
+                        .instances
+                        .get(&key)
+                        .is_some_and(|slot| slot.expires_at == deadline)
+                    {
+                        self.instances.remove(&key);
+                    }
+                }
+                Reclaimable::Promotion(key) => {
+                    if self
+                        .promotions
+                        .get(&key)
+                        .is_some_and(|slot| slot.expires_at == deadline)
+                    {
+                        self.promotions.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Takes one scheduled key whose deadline has passed.
+    fn pop_due(&mut self, now: UnixMillis) -> Option<(UnixMillis, Reclaimable)> {
+        loop {
+            let mut entry = self.deadlines.first_entry()?;
+            let deadline = *entry.key();
+            if deadline > now {
+                return None;
+            }
+            let key = entry.get_mut().pop();
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+            if let Some(key) = key {
+                return Some((deadline, key));
+            }
+        }
+    }
 }
 
 /// In-process reference implementation of [`InstanceRecordStore`] over an
@@ -303,6 +384,7 @@ impl MemoryRecordStore {
             state: Mutex::new(RecordState {
                 instances: BTreeMap::new(),
                 promotions: BTreeMap::new(),
+                deadlines: BTreeMap::new(),
             }),
         }
     }
@@ -380,6 +462,7 @@ impl MemoryRecordStore {
         match timing {
             Timing::Elapsing => {
                 let now = self.store_now()?;
+                state.reclaim(now);
                 Ok(take_unexpired(&mut state.instances, key, now))
             }
             Timing::Regardless => Ok(state.instances.get(key).map(RecordSlot::stored)),
@@ -394,13 +477,12 @@ impl MemoryRecordStore {
     ) -> Result<bool, LedgerError> {
         let mut state = self.lock()?;
         let now = self.store_now()?;
-        Ok(insert_absent(
-            &mut state.instances,
-            key,
-            bytes,
-            expires_at,
-            now,
-        ))
+        state.reclaim(now);
+        if !insert_absent(&mut state.instances, key, bytes, expires_at, now) {
+            return Ok(false);
+        }
+        state.schedule(expires_at, Reclaimable::Instance(key.clone()));
+        Ok(true)
     }
 
     fn replace_record(
@@ -414,6 +496,7 @@ impl MemoryRecordStore {
         let mut state = self.lock()?;
         if let Timing::Elapsing = timing {
             let now = self.store_now()?;
+            state.reclaim(now);
             if state
                 .instances
                 .get(key)
@@ -432,9 +515,16 @@ impl MemoryRecordStore {
             .version
             .checked_add(1)
             .ok_or_else(|| LedgerError::new(LedgerErrorKind::CounterExhausted))?;
+        let rescheduled = slot.expires_at != expires_at;
         slot.bytes = bytes.to_vec();
         slot.version = version;
         slot.expires_at = expires_at;
+        // A replacement that keeps the record's deadline keeps its index
+        // entry too, so rewriting one record a thousand times costs the index
+        // nothing.
+        if rescheduled {
+            state.schedule(expires_at, Reclaimable::Instance(key.clone()));
+        }
         Ok(CasOutcome::Stored { version })
     }
 
@@ -449,6 +539,7 @@ impl MemoryRecordStore {
     ) -> Result<Option<StoredRecord>, LedgerError> {
         let mut state = self.lock()?;
         let now = self.store_now()?;
+        state.reclaim(now);
         Ok(take_unexpired(&mut state.promotions, key, now))
     }
 
@@ -460,22 +551,22 @@ impl MemoryRecordStore {
     ) -> Result<bool, LedgerError> {
         let mut state = self.lock()?;
         let now = self.store_now()?;
-        Ok(insert_absent(
-            &mut state.promotions,
-            key,
-            bytes,
-            expires_at,
-            now,
-        ))
+        state.reclaim(now);
+        if !insert_absent(&mut state.promotions, key, bytes, expires_at, now) {
+            return Ok(false);
+        }
+        state.schedule(expires_at, Reclaimable::Promotion(key.clone()));
+        Ok(true)
     }
 
-    /// Counting walks every instance record, so it reclaims the elapsed ones
-    /// it passes: an adapter answers the same question with a bounded query
-    /// over unexpired rows.
+    /// Counting is a map length: elapsed records are reclaimed by the bounded
+    /// sweep every operation runs, not by walking the table here. An adapter
+    /// answers the same question with a count over unexpired rows and sweeps
+    /// in batches of the same bounded size.
     fn count_records(&self) -> Result<usize, LedgerError> {
         let mut state = self.lock()?;
         let now = self.store_now()?;
-        state.instances.retain(|_, slot| slot.expires_at > now);
+        state.reclaim(now);
         Ok(state.instances.len())
     }
 }
@@ -633,7 +724,13 @@ pub struct DistributedInstanceLedger<S: InstanceRecordStore> {
     clock: Arc<dyn Clock>,
     limits: LedgerLimits,
     provider_identity: Arc<()>,
-    retirements: Arc<Mutex<VecDeque<CleanupOp>>>,
+    retirements: Arc<Mutex<VecDeque<QueuedRetirement>>>,
+}
+
+/// One queued retirement and whether it has already failed once.
+struct QueuedRetirement {
+    op: CleanupOp,
+    retried: bool,
 }
 
 impl<S: InstanceRecordStore> Clone for DistributedInstanceLedger<S> {
@@ -667,22 +764,16 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
         }
     }
 
-    /// Applies every retirement a synchronous drop queued, reporting the
-    /// first store or codec failure.
+    /// Applies the retirements a synchronous drop queued, stopping at the
+    /// first store, clock, or codec failure and reporting it.
     ///
     /// Each operation drains the queue before it runs, so calling this is
     /// only necessary when a caller needs a dropped claim retired without
-    /// making another ledger request.
+    /// making another ledger request. A retirement that failed is still
+    /// queued when this returns: it has one more attempt, and then the
+    /// claim's lease is what retires it.
     pub async fn flush_cleanup(&self) -> Result<(), LedgerError> {
-        let mut first = Ok(());
-        while let Some(op) = self.take_retirement() {
-            if let Err(error) = self.retire(&op).await
-                && first.is_ok()
-            {
-                first = Err(error);
-            }
-        }
-        first
+        self.drain_retirements().await
     }
 
     /// Returns metadata-only provider inspection for tests and trusted
@@ -692,7 +783,7 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
         scope: &ScopeFingerprint,
         instance_id: &InstanceId,
     ) -> Result<Option<LedgerInspection>, LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         let now = self.now()?;
         let key = InstanceRecordKey {
             scope: scope.clone(),
@@ -867,9 +958,11 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
     ///
     /// A token this handle did not issue is dropped rather than queued: it
     /// belongs to another provider, whose own queue is the only one that can
-    /// resolve it. A queue at its bound drops the retirement too, and the
-    /// claim's lease is the backstop, because an unretired claim becomes
-    /// terminally expired rather than retryable.
+    /// resolve it. A queue at its bound drops its **oldest** entry to make
+    /// room, because the oldest retirement names the claim whose lease is
+    /// closest to elapsing and is therefore the one the lease backstop
+    /// already covers; discarding the newest would throw away the release
+    /// most likely still to be worth something.
     fn queue_retirement(&self, op: CleanupOp) {
         if !self.owns(op.token()) {
             return;
@@ -877,27 +970,48 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
         let Ok(mut queue) = self.retirements.lock() else {
             return;
         };
-        if queue.len() >= self.limits.max_instances() {
-            return;
+        while queue.len() >= self.limits.max_instances() {
+            queue.pop_front();
         }
-        queue.push_back(op);
+        queue.push_back(QueuedRetirement { op, retried: false });
     }
 
     /// Takes the next queued retirement.
-    fn take_retirement(&self) -> Option<CleanupOp> {
+    fn take_retirement(&self) -> Option<QueuedRetirement> {
         self.retirements.lock().ok()?.pop_front()
     }
 
-    /// Applies every queued retirement before an operation runs.
-    ///
-    /// A retirement that the store could not apply is dropped rather than
-    /// retried without bound: the claim's lease is the backstop, and it fails
-    /// towards terminal authority, never towards a base revision that could
-    /// be claimed twice.
-    async fn drain_retirements(&self) {
-        while let Some(op) = self.take_retirement() {
-            let _ = self.retire(&op).await;
+    /// Returns one retirement to the head of the queue for its second and
+    /// last attempt.
+    fn requeue_retirement(&self, op: CleanupOp) {
+        if let Ok(mut queue) = self.retirements.lock() {
+            queue.push_front(QueuedRetirement { op, retried: true });
         }
+    }
+
+    /// Applies queued retirements, stopping at the first the store could not
+    /// take.
+    ///
+    /// A retirement that failed goes back to the head of the queue for one
+    /// more attempt at the next operation, and a second failure drops it: the
+    /// claim's lease is the backstop, and dropping fails towards terminal
+    /// authority, never towards a base revision that could be claimed twice.
+    /// Draining stops on that first failure because a store that refused one
+    /// retirement will refuse the next.
+    ///
+    /// Returns the first failure, which only [`Self::flush_cleanup`] reports;
+    /// an ordinary operation drains and carries on.
+    async fn drain_retirements(&self) -> Result<(), LedgerError> {
+        while let Some(queued) = self.take_retirement() {
+            let Err(error) = self.retire(&queued.op).await else {
+                continue;
+            };
+            if !queued.retried {
+                self.requeue_retirement(queued.op);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Runs one retirement, reporting only store, clock, and codec failures.
@@ -931,7 +1045,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
         &self,
         record: MountInstanceRecord,
     ) -> Result<InstanceAuthority, LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         let key = InstanceRecordKey {
             scope: record.scope.clone(),
             instance_id: record.instance_id.clone(),
@@ -962,7 +1076,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
     }
 
     async fn promote(&self, request: PromotionRecord) -> Result<PromotionOutcome, LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         let promotion_key = PromotionRecordKey {
             scope: request.scope.clone(),
             idempotency_key: request.idempotency_key.clone(),
@@ -980,6 +1094,15 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
             let created = state::created_record(None, request.initial_revision, request.expires_at);
             match self.create(&instance_key, now, &created).await? {
                 Created::Held => {
+                    // The proposed identity is held, which is a collision only
+                    // when nothing explains it. A node that reached this retry
+                    // identity first, proposing the same identity, created
+                    // this very record, and its reservation is the answer this
+                    // call owes: reporting a conflict would make an exact
+                    // retry fail for having been retried.
+                    if let Some(outcome) = self.recover_promotion(&promotion_key, &request).await? {
+                        return Ok(outcome);
+                    }
                     return Err(LedgerError::new(LedgerErrorKind::InstanceConflict));
                 }
                 Created::Raced => continue,
@@ -1005,6 +1128,12 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
                     request.expires_at,
                 )));
             }
+            // Another node reserved this retry identity first, so its
+            // reservation is the authority and the instance this call created
+            // a moment ago is unreachable: nobody will ever be told its
+            // identity. Compensate for it here, or it would sit out its whole
+            // lifetime against the configured instance capacity.
+            self.store.remove(&instance_key).await?;
             if let Some(outcome) = self.recover_promotion(&promotion_key, &request).await? {
                 return Ok(outcome);
             }
@@ -1013,7 +1142,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
     }
 
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         let key = InstanceRecordKey {
             scope: request.scope.clone(),
             instance_id: request.instance_id.clone(),
@@ -1034,7 +1163,11 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
             // rise for as long as a record lives and only one write can land
             // at any of them, so within a record's life no two claims share a
             // name, and a token from a released claim can never match the
-            // claim that replaced it.
+            // claim that replaced it. Across lives the name may repeat, so
+            // the guarantee then rests on the token's other half: a record
+            // recreated at the same key would have to carry the same
+            // server-generated instance identity, which the runtime's
+            // 128 bit random generator makes negligible.
             let state::Transition { stored, outcome } =
                 state::claim(record, &request, now, self.limits, version)?;
             let outcome = match outcome {
@@ -1064,7 +1197,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
         scope: &ScopeFingerprint,
         instance_id: &InstanceId,
     ) -> Result<Option<Revision>, LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         let now = self.now()?;
         let key = InstanceRecordKey {
             scope: scope.clone(),
@@ -1083,7 +1216,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
         claim: &ClaimToken,
         outcome: AcceptedOutcome,
     ) -> Result<(), LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         if !self.owns(claim) {
             return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
         }
@@ -1118,7 +1251,7 @@ impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanc
     }
 
     async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
-        self.drain_retirements().await;
+        let _ = self.drain_retirements().await;
         if !self.owns(claim) {
             return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
         }
@@ -1296,16 +1429,62 @@ mod tests {
         }
     }
 
-    /// A store whose compare-and-store never lands, which is what a record
-    /// under continuous contention looks like from one node.
+    /// How a [`ContendedStore`] answers a compare-and-store.
+    #[derive(Clone, Copy)]
+    enum Contention {
+        /// Answer exactly as the inner store would.
+        Faithful,
+        /// Never let a write land, which is what a record under continuous
+        /// contention looks like from one node.
+        RefuseEvery,
+        /// Let the first write land and report it as a conflict anyway, which
+        /// is what a node sees when another node's write reached the record
+        /// between its read and its own write.
+        StealFirst,
+    }
+
+    /// A store that decides for the test rather than for the record: it can
+    /// refuse or steal a write, stop answering reads, and hide a promotion
+    /// reservation that another node has already made, which is the one
+    /// interleaving a single-threaded test cannot otherwise reach.
     struct ContendedStore {
         inner: MemoryRecordStore,
+        contention: Contention,
         refused: AtomicU64,
+        stolen: AtomicBool,
+        unreadable: AtomicBool,
+        hidden_reservations: AtomicU64,
+    }
+
+    impl ContendedStore {
+        fn new(clock: Arc<FixedClock>, contention: Contention) -> Self {
+            Self {
+                inner: MemoryRecordStore::new(clock),
+                contention,
+                refused: AtomicU64::new(0),
+                stolen: AtomicBool::new(false),
+                unreadable: AtomicBool::new(false),
+                hidden_reservations: AtomicU64::new(0),
+            }
+        }
+
+        fn set_unreadable(&self, unreadable: bool) {
+            self.unreadable.store(unreadable, Ordering::SeqCst);
+        }
+
+        /// Makes the next `reads` reservation loads answer as though the
+        /// reservation had not been made yet.
+        fn hide_reservation(&self, reads: u64) {
+            self.hidden_reservations.store(reads, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
     impl InstanceRecordStore for ContendedStore {
         async fn load(&self, key: &InstanceRecordKey) -> Result<Option<StoredRecord>, LedgerError> {
+            if self.unreadable.load(Ordering::SeqCst) {
+                return Err(LedgerError::new(LedgerErrorKind::ProviderUnavailable));
+            }
             self.inner.load(key).await
         }
 
@@ -1320,13 +1499,29 @@ mod tests {
 
         async fn compare_and_store(
             &self,
-            _key: &InstanceRecordKey,
-            _expected_version: u64,
-            _bytes: &[u8],
-            _expires_at: UnixMillis,
+            key: &InstanceRecordKey,
+            expected_version: u64,
+            bytes: &[u8],
+            expires_at: UnixMillis,
         ) -> Result<CasOutcome, LedgerError> {
-            self.refused.fetch_add(1, Ordering::SeqCst);
-            Ok(CasOutcome::Conflict)
+            match self.contention {
+                Contention::RefuseEvery => {
+                    self.refused.fetch_add(1, Ordering::SeqCst);
+                    Ok(CasOutcome::Conflict)
+                }
+                Contention::StealFirst if !self.stolen.swap(true, Ordering::SeqCst) => {
+                    self.refused.fetch_add(1, Ordering::SeqCst);
+                    self.inner
+                        .compare_and_store(key, expected_version, bytes, expires_at)
+                        .await?;
+                    Ok(CasOutcome::Conflict)
+                }
+                Contention::Faithful | Contention::StealFirst => {
+                    self.inner
+                        .compare_and_store(key, expected_version, bytes, expires_at)
+                        .await
+                }
+            }
         }
 
         async fn remove(&self, key: &InstanceRecordKey) -> Result<(), LedgerError> {
@@ -1337,6 +1532,15 @@ mod tests {
             &self,
             key: &PromotionRecordKey,
         ) -> Result<Option<StoredRecord>, LedgerError> {
+            if self
+                .hidden_reservations
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |hidden| {
+                    hidden.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(None);
+            }
             self.inner.load_promotion(key).await
         }
 
@@ -1372,6 +1576,44 @@ mod tests {
             digest(0x30),
             Revision::new(0),
             UnixMillis::new(5_000),
+        )
+    }
+
+    fn kernel_token(
+        ledger: &DistributedInstanceLedger<MemoryRecordStore>,
+        claim_id: u64,
+    ) -> ClaimToken {
+        let key = instance_key(0x10);
+        ClaimToken {
+            provider_identity: Arc::clone(&ledger.provider_identity),
+            scope: key.scope,
+            instance_id: key.instance_id,
+            claim_id,
+        }
+    }
+
+    fn kernel_promotion(instance_start: u8, retry: u8, digest_start: u8) -> PromotionRecord {
+        PromotionRecord::new(
+            instance_key(0x10).scope,
+            InstanceId::from_bytes(&bytes::<16>(instance_start)).expect("instance is valid"),
+            IdempotencyKey::from_bytes(&bytes::<16>(retry)).expect("retry key is valid"),
+            digest(digest_start),
+            Revision::new(0),
+            UnixMillis::new(5_000),
+        )
+    }
+
+    /// Two provider handles over one store, which is what two nodes are.
+    fn two_nodes(
+        store: &Arc<ContendedStore>,
+        clock: &Arc<FixedClock>,
+    ) -> (
+        DistributedInstanceLedger<ContendedStore>,
+        DistributedInstanceLedger<ContendedStore>,
+    ) {
+        (
+            DistributedInstanceLedger::new(Arc::clone(store), clock.clone(), limits()),
+            DistributedInstanceLedger::new(Arc::clone(store), clock.clone(), limits()),
         )
     }
 
@@ -1454,12 +1696,257 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_loser_of_a_promotion_race_leaves_no_instance_behind() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::Faithful));
+        let (first, second) = two_nodes(&store, &clock);
+        first
+            .promote(kernel_promotion(0x20, 0x40, 0x50))
+            .await
+            .expect("the first node promotes");
+
+        // The second node read the retry identity before the first node
+        // reserved it, proposing an identity of its own. It creates that
+        // instance, finds the reservation taken, and must compensate: nobody
+        // will ever be told the identity it made.
+        store.hide_reservation(1);
+        let recovered = second
+            .promote(kernel_promotion(0x21, 0x40, 0x50))
+            .await
+            .expect("the losing node recovers the reservation");
+
+        let PromotionOutcome::Existing(authority) = recovered else {
+            panic!("a raced promotion recovers the winner's authority, not {recovered:?}");
+        };
+        assert_eq!(
+            authority.instance_id().as_bytes(),
+            bytes::<16>(0x20),
+            "the winner's instance is the authority"
+        );
+        assert_eq!(
+            store.count_instances().await.expect("the store answers"),
+            1,
+            "the instance the losing promotion created is compensated for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_identity_yields_to_the_reservation_that_explains_it() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::Faithful));
+        let (first, second) = two_nodes(&store, &clock);
+        first
+            .promote(kernel_promotion(0x20, 0x40, 0x50))
+            .await
+            .expect("the first node promotes");
+
+        // The same proposal, from a node that read the retry identity before
+        // it was reserved: the identity it proposes is held by the record the
+        // winner created, and the reservation is what explains that.
+        store.hide_reservation(1);
+        let recovered = second
+            .promote(kernel_promotion(0x20, 0x40, 0x50))
+            .await
+            .expect("a held identity with a reservation behind it is not a conflict");
+
+        assert!(
+            matches!(recovered, PromotionOutcome::Existing(_)),
+            "an exact retry recovers rather than colliding, got {recovered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_identity_with_nothing_behind_it_is_still_a_conflict() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::Faithful));
+        let (first, second) = two_nodes(&store, &clock);
+        first
+            .mount_instance(kernel_mount())
+            .await
+            .expect("the identity is taken by a mount");
+
+        assert_eq!(
+            second
+                .promote(kernel_promotion(0x10, 0x40, 0x50))
+                .await
+                .expect_err("nothing explains the held identity")
+                .kind(),
+            LedgerErrorKind::InstanceConflict
+        );
+    }
+
+    #[tokio::test]
+    async fn one_operation_reclaims_a_bounded_number_of_elapsed_records() {
+        let clock = Arc::new(FixedClock::new(0));
+        let store = MemoryRecordStore::new(clock.clone());
+        let due = 200_usize;
+        for start in 0..due {
+            store
+                .insert_if_absent(
+                    &instance_key(u8::try_from(start).expect("the fixture fits a byte")),
+                    b"record",
+                    UnixMillis::new(1_000),
+                )
+                .await
+                .expect("the store answers");
+        }
+
+        clock.set(1_000);
+
+        assert_eq!(
+            store.count_instances().await.expect("the store answers"),
+            due - MAX_RECLAIMED_PER_OPERATION,
+            "one operation reclaims at most its bounded share of a burst"
+        );
+        assert_eq!(
+            store.count_instances().await.expect("the store answers"),
+            due - 2 * MAX_RECLAIMED_PER_OPERATION,
+            "the backlog drains over the operations that follow"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_read_is_read_again_and_reclassified_rather_than_forced() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::StealFirst));
+        let ledger = DistributedInstanceLedger::new(Arc::clone(&store), clock, limits());
+        ledger
+            .mount_instance(kernel_mount())
+            .await
+            .expect("the mount is created");
+
+        // The first write lands and is reported as a conflict, which is a
+        // node discovering that someone else's write got there first.
+        let outcome = ledger
+            .claim(kernel_claim())
+            .await
+            .expect("the claim classifies");
+
+        assert_eq!(store.refused.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(outcome, ClaimOutcome::InProgress { .. }),
+            "a stale read is read again and classified against what is there now"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_retirement_gets_one_more_attempt_and_is_then_dropped() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::Faithful));
+        let ledger = DistributedInstanceLedger::new(Arc::clone(&store), clock, limits());
+        ledger
+            .mount_instance(kernel_mount())
+            .await
+            .expect("the mount is created");
+        let ClaimOutcome::Granted(grant) = ledger
+            .claim(kernel_claim())
+            .await
+            .expect("the claim classifies")
+        else {
+            panic!("the current base revision is claimable");
+        };
+
+        store.set_unreadable(true);
+        ledger.abandon_on_drop(grant.into_token());
+        assert_eq!(
+            ledger
+                .flush_cleanup()
+                .await
+                .expect_err("a store that cannot answer cannot retire a claim")
+                .kind(),
+            LedgerErrorKind::ProviderUnavailable
+        );
+
+        store.set_unreadable(false);
+        ledger
+            .flush_cleanup()
+            .await
+            .expect("the second attempt reaches the store");
+        assert!(
+            matches!(
+                ledger
+                    .claim(kernel_claim())
+                    .await
+                    .expect("the claim classifies"),
+                ClaimOutcome::Granted(_)
+            ),
+            "the retirement that was retried released its base revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retirement_that_fails_twice_is_dropped_and_left_to_the_lease() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::Faithful));
+        let ledger = DistributedInstanceLedger::new(Arc::clone(&store), clock, limits());
+        ledger
+            .mount_instance(kernel_mount())
+            .await
+            .expect("the mount is created");
+        let ClaimOutcome::Granted(grant) = ledger
+            .claim(kernel_claim())
+            .await
+            .expect("the claim classifies")
+        else {
+            panic!("the current base revision is claimable");
+        };
+
+        store.set_unreadable(true);
+        ledger.abandon_on_drop(grant.into_token());
+        for _ in 0..2 {
+            ledger
+                .flush_cleanup()
+                .await
+                .expect_err("a store that cannot answer cannot retire a claim");
+        }
+
+        store.set_unreadable(false);
+        ledger
+            .flush_cleanup()
+            .await
+            .expect("the queue is empty, so there is nothing left to fail");
+        assert!(
+            matches!(
+                ledger
+                    .claim(kernel_claim())
+                    .await
+                    .expect("the claim classifies"),
+                ClaimOutcome::InProgress { .. }
+            ),
+            "a retirement dropped after two attempts leaves the claim to its lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_retirement_queue_drops_its_oldest_entry() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let ledger = DistributedInstanceLedger::new(
+            Arc::new(MemoryRecordStore::new(clock.clone())),
+            clock,
+            LedgerLimits::new(100, 10_000, 2, 1).expect("limits are valid"),
+        );
+
+        ledger.abandon_on_drop(kernel_token(&ledger, 1));
+        ledger.abandon_on_drop(kernel_token(&ledger, 2));
+
+        let queue = ledger.retirements.lock().expect("the queue is readable");
+        assert_eq!(queue.len(), 1, "the queue holds its configured bound");
+        assert_eq!(
+            queue
+                .front()
+                .expect("the queue holds one retirement")
+                .op
+                .token()
+                .claim_id,
+            2,
+            "the newest retirement survives and the oldest makes room"
+        );
+    }
+
+    #[tokio::test]
     async fn a_write_that_never_lands_is_a_classified_rejection_after_one_retry() {
         let clock = Arc::new(FixedClock::new(1_000));
-        let store = Arc::new(ContendedStore {
-            inner: MemoryRecordStore::new(clock.clone()),
-            refused: AtomicU64::new(0),
-        });
+        let store = Arc::new(ContendedStore::new(clock.clone(), Contention::RefuseEvery));
         let ledger = DistributedInstanceLedger::new(Arc::clone(&store), clock, limits());
         ledger
             .mount_instance(kernel_mount())

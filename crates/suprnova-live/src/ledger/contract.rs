@@ -329,6 +329,14 @@ impl ClaimRequest {
 }
 
 /// Opaque single-use proof that one successor revision was claimed.
+///
+/// A token names a provider, a scoped instance, and one claim on it. The
+/// claim's name is unique for as long as the instance's record lives, so no
+/// two claims on one record ever share a token. Across recreations of the
+/// same scope and instance identity the name may repeat, and the guarantee
+/// then rests on the instance identity itself: the runtime generates it from
+/// 128 bits of randomness, so a recreated instance is never the one an old
+/// token names.
 pub struct ClaimToken {
     pub(crate) provider_identity: Arc<()>,
     pub(crate) scope: ScopeFingerprint,

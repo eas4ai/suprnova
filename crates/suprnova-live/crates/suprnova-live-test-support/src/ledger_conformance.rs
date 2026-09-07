@@ -3,11 +3,16 @@
 //!
 //! Every scenario the Tier 0 integration suite covers is written here in
 //! terms a distributed provider can answer: mount, promotion and its exact
-//! retry, claim and its classified rejections, commit, abandon, the two
-//! synchronous drop paths, claim-lease and instance expiry, bounded retained
-//! outcomes, and configured capacity. Nothing here reaches for provider
-//! internals or diagnostics, so the same suite runs over the engine's kernels
-//! and over a framework adapter against a real backend.
+//! retry, the expiry of a retry identity, claim and its classified
+//! rejections, two claims racing for one base revision, commit, abandon, the
+//! two synchronous drop paths, claim-lease and instance expiry, bounded
+//! retained outcomes, and configured capacity. Nothing here reaches for
+//! provider internals or diagnostics, so the same suite runs over the
+//! engine's kernels and over a framework adapter against a real backend.
+//!
+//! One thing the Tier 0 suite proves is deliberately not here. Its
+//! `opaque_claim_tokens_are_bound_to_the_provider_that_issued_them` needs two
+//! providers, so it lives in [`run_two_node`] rather than [`run_all`].
 //!
 //! Two rules make the suite portable. It never waits: time only moves when
 //! the caller's [`ControlledClock`] is set, and the suite sets it. And it
@@ -80,7 +85,9 @@ pub async fn run_all(
     let clock = clock.as_ref();
     mount_creates_authority_and_is_create_only(ledger, clock).await?;
     promotion_recovers_an_exact_retry_and_refuses_a_changed_one(ledger, clock).await?;
+    a_retry_identity_is_free_again_once_its_reservation_elapses(ledger, clock).await?;
     a_claim_advances_authority_and_an_exact_duplicate_observes_it(ledger, clock).await?;
+    two_claims_for_one_base_revision_grant_exactly_one_token(ledger, clock).await?;
     stale_bases_and_reused_retry_identities_are_classified(ledger, clock).await?;
     an_abandoned_claim_leaves_no_authority(ledger, clock).await?;
     a_dropped_claim_releases_its_base_revision(ledger, clock).await?;
@@ -373,6 +380,103 @@ async fn promotion_recovers_an_exact_retry_and_refuses_a_changed_one(
         PromotionOutcome::IdempotencyConflict => Ok(()),
         _ => Err("a retry identity reused for another request is a conflict".to_owned()),
     }
+}
+
+async fn a_retry_identity_is_free_again_once_its_reservation_elapses(
+    ledger: &dyn LiveInstanceLedger,
+    clock: &ControlledClock,
+) -> Result<(), String> {
+    let short = read_now(clock)?
+        .get()
+        .checked_add(200)
+        .ok_or_else(|| "the conformance clock overflowed".to_owned())?;
+    let record = PromotionRecord::new(
+        scope(),
+        instance(0x2d),
+        idempotency(0x4c),
+        digest(0x57),
+        Revision::new(0),
+        UnixMillis::new(short),
+    );
+
+    match ledger
+        .promote(record.clone())
+        .await
+        .map_err(|error| failed("promote", error))?
+    {
+        PromotionOutcome::Created(_) => {}
+        _ => return Err("a first promotion must create authority".to_owned()),
+    }
+    match ledger
+        .promote(record.clone().with_instance_id(instance(0x2e)))
+        .await
+        .map_err(|error| failed("promote", error))?
+    {
+        PromotionOutcome::Existing(authority) => require(
+            authority.instance_id() == &instance(0x2d),
+            "an exact retry inside the reservation's life recovers authority",
+        )?,
+        _ => return Err("an exact retry must recover authority while it can".to_owned()),
+    }
+
+    advance(clock, 200)?;
+
+    // The same retry identity and the same request, after the reservation
+    // that held it elapsed. Nothing may recover the authority it named.
+    let renewed = PromotionRecord::new(
+        scope(),
+        instance(0x2f),
+        idempotency(0x4c),
+        digest(0x57),
+        Revision::new(0),
+        lifetime_from_now(clock)?,
+    );
+    match ledger
+        .promote(renewed)
+        .await
+        .map_err(|error| failed("promote", error))?
+    {
+        PromotionOutcome::Created(authority) => require(
+            authority.instance_id() == &instance(0x2f),
+            "an elapsed reservation frees its retry identity for a new promotion",
+        ),
+        _ => Err("an elapsed retry identity must not recover the authority it held".to_owned()),
+    }
+}
+
+async fn two_claims_for_one_base_revision_grant_exactly_one_token(
+    ledger: &dyn LiveInstanceLedger,
+    clock: &ControlledClock,
+) -> Result<(), String> {
+    mounted(ledger, clock, 0x30).await?;
+    let request = claim_request(0x30, 0, 0x4d);
+
+    // Over a provider whose store never yields these run in order and prove
+    // that a second claim joins the first; over one that does, they interleave
+    // and prove that a stale read never becomes a second grant. Either way,
+    // exactly one token comes out.
+    let (first, second) = tokio::join!(ledger.claim(request.clone()), ledger.claim(request));
+
+    let outcomes = [
+        first.map_err(|error| failed("claim", error))?,
+        second.map_err(|error| failed("claim", error))?,
+    ];
+    let granted = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ClaimOutcome::Granted(_)))
+        .count();
+    let joined = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ClaimOutcome::InProgress { .. }))
+        .count();
+    require(
+        granted == 1,
+        "exactly one of two claims takes the successor",
+    )?;
+    require(
+        joined == 1,
+        "the claim that did not take the successor observes the one that did",
+    )
 }
 
 async fn a_claim_advances_authority_and_an_exact_duplicate_observes_it(
@@ -926,6 +1030,8 @@ async fn a_release_on_one_node_frees_the_base_revision_on_the_other(
     )?;
 
     first.abandon_on_drop(grant.into_token());
+    // A retirement a drop queued is applied at the provider's next
+    // asynchronous operation, so this read is here to make one happen.
     accepted(first, 0x62).await?;
 
     let retry = granted(
