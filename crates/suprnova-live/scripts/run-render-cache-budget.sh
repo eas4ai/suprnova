@@ -7,15 +7,12 @@
 # workload bench, then the checked-result contract. Both benches run by
 # default. `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` runs the engine bench alone.
 #
-# Temporary condition: `framework/benches/render_cache_workloads.rs` does
-# not exist yet, so until it lands every caller has to set
-# `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` or the second step fails with an unknown
-# bench target. The default is `0` because that is the state the runner is
-# written for; the export is the workaround, not the design.
-#
 # `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`) pins both benches.
 # `SUPRNOVA_LIVE_BENCH_RESULT` and `SUPRNOVA_LIVE_WORKLOADS_RESULT`
 # redirect the two result files away from the checked-in ones.
+# `PG_TEST_URL`, when set, adds a PostgreSQL run to the workload bench's
+# result; that server must be disposable, since the run drops and recreates
+# every table it uses.
 
 set -euo pipefail
 

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "profile": "release",
+  "measured_at_unix_ms": 1788825056584,
+  "environment": {
+    "classification": "local_exploratory",
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "selected_cpu_affinity": "0,2,4,6,8,10,12,14",
+    "selected_cpu_count": 8,
+    "memory_bytes": 100993044480,
+    "kernel": "Linux 7.0.0-30-generic",
+    "cpu_governor": "powersave",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "database": "sqlite_and_postgres",
+    "provider_versions": {
+      "generation_ledger": "sql_v1",
+      "lease_store": "sql_fenced_v1",
+      "render_store": "sql_l1_v1"
+    },
+    "dedicated_vcpus_attested": false,
+    "warm_filesystem_cache": true,
+    "loopback_providers": true,
+    "s1_requirements_met": false
+  },
+  "runs": [
+    {
+      "database": "sqlite",
+      "accelerator": "none",
+      "c64_middleware": {
+        "warmup": 200,
+        "samples": 200,
+        "p50_microseconds": 49.309,
+        "p95_microseconds": 59.964999999999996,
+        "statements_per_hit": 0
+      },
+      "generation_reread": {
+        "keys": 12,
+        "warmup": 200,
+        "samples": 200,
+        "p50_milliseconds": 0.01777,
+        "p95_milliseconds": 0.020278,
+        "cap_milliseconds": 3.0,
+        "statements_per_reread": 1
+      },
+      "invalidation_storm": {
+        "keys": 64,
+        "identities": 12,
+        "writes": 1000,
+        "hits": 1280,
+        "rebuilds": 1280,
+        "rebuilds_per_write": 1.28,
+        "statements_per_hit": 1,
+        "hit_p95_microseconds": 121.67,
+        "final_bodies_coherent": true
+      },
+      "multi_node": {
+        "nodes": 2,
+        "concurrent_requests": 64,
+        "publications": 1,
+        "duplicate_renders": 1,
+        "fan_in_p95_microseconds": 157.47299999999998,
+        "takeover_p95_milliseconds": 0.147937
+      }
+    },
+    {
+      "database": "postgres",
+      "accelerator": "none",
+      "generation_reread": {
+        "keys": 12,
+        "warmup": 200,
+        "samples": 200,
+        "p50_milliseconds": 0.061789000000000004,
+        "p95_milliseconds": 0.088336,
+        "cap_milliseconds": 3.0,
+        "statements_per_reread": 1
+      },
+      "multi_node": {
+        "nodes": 2,
+        "concurrent_requests": 64,
+        "publications": 1,
+        "duplicate_renders": 1,
+        "fan_in_p95_microseconds": 2348.672,
+        "takeover_p95_milliseconds": 1.858167
+      }
+    }
+  ]
+}

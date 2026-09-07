@@ -175,6 +175,100 @@ fn render_cache_budget_result_holds_the_c64_allocation_and_copy_bounds() {
 }
 
 #[test]
+fn render_cache_workloads_result_reports_every_workload_with_its_correctness_conditions() {
+    let result = benchmark_result("render-cache-workloads-v1.json");
+
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["profile"], "release");
+    assert_eq!(result["environment"]["classification"], "local_exploratory");
+    assert!(
+        result["environment"]["cpu_model"]
+            .as_str()
+            .is_some_and(|value| value != "unavailable")
+    );
+
+    let runs = result["runs"]
+        .as_array()
+        .expect("the result records one run per database it measured");
+    let sqlite = runs
+        .iter()
+        .find(|run| run["database"] == "sqlite")
+        .expect("every result carries the SQLite run, which needs no server");
+    assert_eq!(
+        sqlite["accelerator"], "none",
+        "the checked-in run measures the database tier alone"
+    );
+
+    let middleware = &sqlite["c64_middleware"];
+    assert!(middleware["warmup"].as_u64().expect("number") >= 30);
+    assert!(middleware["samples"].as_u64().expect("number") >= 30);
+    assert!(middleware["p50_microseconds"].as_f64().is_some());
+    assert!(middleware["p95_microseconds"].as_f64().is_some());
+    assert_eq!(
+        middleware["statements_per_hit"], 0,
+        "a lease-mode hot hit reaches the database not at all"
+    );
+
+    let storm = &sqlite["invalidation_storm"];
+    assert_eq!(storm["keys"], 64);
+    assert_eq!(storm["identities"], 12);
+    assert_eq!(storm["writes"], 1_000);
+    assert!(storm["hits"].as_u64().expect("number") >= 30);
+    assert!(storm["rebuilds"].as_u64().expect("number") >= 1);
+    assert!(storm["rebuilds_per_write"].as_f64().expect("number") >= 0.0);
+    assert_eq!(
+        storm["statements_per_hit"], 1,
+        "an authority-mode hit is one batched coherence reread and nothing else"
+    );
+    assert!(storm["hit_p95_microseconds"].as_f64().is_some());
+    assert_eq!(
+        storm["final_bodies_coherent"], true,
+        "a write storm leaves every key serving the generation it ended on"
+    );
+
+    // The two conditions below are about the engine rather than about a
+    // backend, so every recorded run answers them, not only the SQLite one.
+    for run in runs {
+        let database = run["database"].as_str().expect("a run names its database");
+
+        let reread = &run["generation_reread"];
+        assert_eq!(reread["keys"], 12, "{database}");
+        assert!(
+            reread["warmup"].as_u64().expect("number") >= 30,
+            "{database}"
+        );
+        assert!(
+            reread["samples"].as_u64().expect("number") >= 30,
+            "{database}"
+        );
+        assert!(reread["p50_milliseconds"].as_f64().is_some(), "{database}");
+        assert!(reread["p95_milliseconds"].as_f64().is_some(), "{database}");
+        assert_eq!(reread["cap_milliseconds"], 3.0, "{database}");
+        assert_eq!(
+            reread["statements_per_reread"], 1,
+            "{database}: one batched reread, never a generation read plus a separate epoch read"
+        );
+
+        let node = &run["multi_node"];
+        assert_eq!(node["nodes"], 2, "{database}");
+        assert_eq!(node["concurrent_requests"], 64, "{database}");
+        assert_eq!(
+            node["publications"], 1,
+            "{database}: sixty-four concurrent cold requests across two nodes publish exactly once"
+        );
+        assert!(node["duplicate_renders"].as_u64().is_some(), "{database}");
+        assert!(
+            node["fan_in_p95_microseconds"].as_f64().is_some(),
+            "{database}"
+        );
+        assert!(
+            node["takeover_p95_milliseconds"].as_f64().is_some(),
+            "{database}"
+        );
+    }
+}
+
+#[test]
 fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
     let live_gate =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/gate.sh"))
@@ -207,5 +301,22 @@ fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
     assert!(
         runner.contains("SUPRNOVA_LIVE_S1_CPUSET") && !runner.contains("-D warnings"),
         "the runner pins the S1 processor set and never denies warnings wholesale"
+    );
+    assert!(
+        runner.contains("${SUPRNOVA_LIVE_SKIP_WORKLOADS:-0}"),
+        "the framework workloads run by default; the variable is an explicit opt-out, not a default"
+    );
+
+    let framework_manifest = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../framework/Cargo.toml"),
+    )
+    .expect("the framework manifest exists");
+    assert!(
+        framework_manifest.contains("name = \"render_cache_workloads\""),
+        "the framework workloads bench is a registered target"
+    );
+    assert!(
+        !steps.contains("render_cache_workloads") && !steps.contains("render-cache-workloads"),
+        "the repository gate must not run the workloads bench either"
     );
 }

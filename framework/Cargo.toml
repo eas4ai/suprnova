@@ -381,6 +381,16 @@ webauthn-authenticator-rs = { version = "0.5.5", default-features = false, featu
 ] }
 wiremock = "0.6"
 
+# On-demand RenderCache workload measurement, run by
+# `crates/suprnova-live/scripts/run-render-cache-budget.sh` and never by a
+# gate. It reuses the render-cache test support modules, so it needs the
+# `testing` seams and a database driver; `required-features` keeps a bare
+# `cargo bench` from trying to build it without them.
+[[bench]]
+name = "render_cache_workloads"
+harness = false
+required-features = ["testing", "database-sqlite"]
+
 # Standalone binaries: these files register link-time inventory entries whose
 # exact contents their tests assert, which collide inside a shared module
 # binary. They stay in their module folder but compile as their own targets.
