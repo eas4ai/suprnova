@@ -16,7 +16,9 @@ use http::{Method, Response, StatusCode};
 
 use super::coherence::age_seconds;
 use super::entry::{CompleteEntry, SafeHeaders, Validator};
-use super::http::{ConditionalOutcome, cache_control_value, conditional_matches, vary_value};
+use super::http::{
+    ConditionalOutcome, cache_control_value, conditional_matches, vary_value, write_cache_control,
+};
 use super::policy::{FreshnessPolicy, RepresentationClass, SharedCachePolicy};
 use super::store::PublicationFence;
 use super::variance::VarianceDescriptor;
@@ -27,6 +29,53 @@ const CONTENT_TYPE_FALLBACK: &str = "application/octet-stream";
 /// Headers formed at serve time on top of the stored ones: content type,
 /// entity tag, cache control, vary, age, and warning.
 const FORMED_HEADERS: usize = 6;
+/// Room for the longest `Cache-Control` this crate forms. The widest shape
+/// is `public, max-age=<u64>, s-maxage=<u64>`: 27 fixed bytes and two
+/// 20-digit numbers, 67 bytes at the absolute ceiling, and far less in
+/// practice since a freshness interval is bounded at 31 days. 96 leaves the
+/// margin visible.
+const CACHE_CONTROL_CAPACITY: usize = 96;
+
+/// A fixed-size [`core::fmt::Write`] sink over a caller's buffer, so the one
+/// header value a seeded hit cannot precompute is formed without a heap
+/// allocation. A write that would run past the end fails; it never
+/// truncates, so a short buffer can never produce a valid-looking but
+/// clipped directive.
+struct Cursor<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl core::fmt::Write for Cursor<'_> {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+        let slot = self.buf.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        slot.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Forms one request's `Cache-Control` on the stack and lifts it into a
+/// header value, so the seeded path allocates for the value itself and
+/// nothing else. `None` only when the directive did not fit `buf`, which
+/// [`CACHE_CONTROL_CAPACITY`] makes unreachable; the caller falls back to
+/// the allocating formatter rather than dropping the header.
+fn stack_cache_control(
+    buf: &mut [u8; CACHE_CONTROL_CAPACITY],
+    class: RepresentationClass,
+    shared: SharedCachePolicy,
+    freshness: &FreshnessPolicy,
+    seed_remaining_ms: Option<u64>,
+) -> Option<HeaderValue> {
+    let mut cursor = Cursor {
+        buf: &mut buf[..],
+        len: 0,
+    };
+    write_cache_control(&mut cursor, class, shared, freshness, seed_remaining_ms).ok()?;
+    let len = cursor.len;
+    HeaderValue::from_bytes(&buf[..len]).ok()
+}
 
 /// Every header value a response can precompute, formed once from one
 /// [`ResponseParts`].
@@ -43,12 +92,17 @@ struct FormedValues {
 }
 
 impl FormedValues {
-    /// Pays, once at publication, the single promotion `bytes` performs the
-    /// first time a vector-backed buffer is cloned. Every later clone is
-    /// then a reference-count increment, so a hit allocates nothing for the
-    /// values it replays; dropping the clone here leaves the original in
-    /// the promoted representation. It is a cost move, never a correctness
-    /// requirement: the values are identical either way.
+    /// Pays, once at publication, the single promotion `bytes` 1.11.1
+    /// performs the first time a `Vec`-backed `Bytes` is cloned: it
+    /// allocates the shared handle and swaps it into the original, after
+    /// which every clone is a reference-count increment. Doing it here
+    /// means a hit allocates nothing for the values it replays.
+    ///
+    /// This relies on that version's representation, so it is written as a
+    /// cost move and nothing more: if a later `bytes` drops the promotable
+    /// representation, these clones become no-ops and the first hit pays
+    /// what this call would have. The values served are identical either
+    /// way, so correctness never depends on it.
     fn promote(&self) {
         drop(self.etag.clone());
         drop(self.content_type.clone());
@@ -176,9 +230,23 @@ fn build(
             let remaining = formed
                 .seed_deadline_ms
                 .map(|deadline| deadline.saturating_sub(request.now_ms));
-            let value =
-                cache_control_value(formed.class, formed.shared, formed.freshness, remaining);
-            if let Ok(value) = HeaderValue::from_str(&value) {
+            let mut buf = [0_u8; CACHE_CONTROL_CAPACITY];
+            let value = stack_cache_control(
+                &mut buf,
+                formed.class,
+                formed.shared,
+                formed.freshness,
+                remaining,
+            )
+            .or_else(|| {
+                // Unreachable with the capacity above; the allocating
+                // formatter is here so an unforeseen shape loses a heap
+                // allocation rather than the header.
+                let text =
+                    cache_control_value(formed.class, formed.shared, formed.freshness, remaining);
+                HeaderValue::from_str(&text).ok()
+            });
+            if let Some(value) = value {
                 headers.insert(http::header::CACHE_CONTROL, value);
             }
         }
@@ -204,6 +272,13 @@ fn build(
 }
 
 /// A Complete entry prepared for hot service. See the module doc.
+///
+/// The shared-cache and freshness policies handed to [`Self::prepare`] are
+/// the route's policy at that moment, and they are pinned here for the life
+/// of the entry. In this framework a route policy is fixed when the route
+/// is installed, so the pin is correct by construction. A host that changed
+/// a route's policy at runtime would have to drop the hot entries prepared
+/// under the old one; nothing here detects that for it.
 pub struct HotEntry {
     entry: CompleteEntry,
     fence: PublicationFence,
@@ -382,6 +457,10 @@ impl std::fmt::Debug for ResponseParts<'_> {
 /// through the same builder. Allocates per header; use [`serve_hot`] on the
 /// hot path.
 ///
+/// It always evaluates `If-None-Match` and will answer 304. A caller that
+/// must never answer 304 - a slotted Composite assembly, whose bytes are
+/// request-specific - passes `if_none_match: None`.
+///
 /// `warning` carries the same requirement [`serve_hot`] states.
 pub fn respond(
     parts: ResponseParts<'_>,
@@ -398,4 +477,97 @@ pub fn respond(
         published_at_ms: parts.published_at_ms,
     };
     Ok(build(&formed, parts.body, request, warning))
+}
+
+#[cfg(test)]
+mod tests {
+    use core::fmt::Write as _;
+
+    use super::{
+        CACHE_CONTROL_CAPACITY, Cursor, FreshnessPolicy, RepresentationClass, SharedCachePolicy,
+        cache_control_value, stack_cache_control,
+    };
+
+    #[test]
+    fn the_stack_formed_cache_control_is_the_allocating_formatter_byte_for_byte() {
+        let freshness = FreshnessPolicy::new(600_000, 30_000, 30_000).expect("freshness policy");
+        let cases = [
+            (
+                RepresentationClass::PublicShared,
+                SharedCachePolicy::SMaxAge { seconds: 30 },
+                Some(45_000),
+            ),
+            (
+                RepresentationClass::PublicShared,
+                SharedCachePolicy::SMaxAge { seconds: 30 },
+                None,
+            ),
+            (
+                RepresentationClass::PrivateCached,
+                SharedCachePolicy::Private,
+                Some(45_000),
+            ),
+            (
+                RepresentationClass::PrivateCached,
+                SharedCachePolicy::Private,
+                None,
+            ),
+        ];
+        for (class, shared, seed_remaining_ms) in cases {
+            let mut buf = [0_u8; CACHE_CONTROL_CAPACITY];
+            let formed =
+                stack_cache_control(&mut buf, class, shared, &freshness, seed_remaining_ms)
+                    .expect("the directive fits the fixed buffer");
+            let allocated = cache_control_value(class, shared, &freshness, seed_remaining_ms);
+            assert_eq!(
+                formed.to_str().expect("the directive is text"),
+                allocated,
+                "the two formations disagree for {class:?}/{shared:?}/{seed_remaining_ms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_public_and_private_shapes_are_exactly_what_is_documented() {
+        let freshness = FreshnessPolicy::new(600_000, 0, 0).expect("freshness policy");
+        let mut buf = [0_u8; CACHE_CONTROL_CAPACITY];
+        let public = stack_cache_control(
+            &mut buf,
+            RepresentationClass::PublicShared,
+            SharedCachePolicy::SMaxAge { seconds: 30 },
+            &freshness,
+            Some(45_000),
+        )
+        .expect("fits");
+        assert_eq!(
+            public.to_str().expect("text"),
+            "public, max-age=45, s-maxage=30",
+            "the seed's remaining lifetime caps max-age"
+        );
+        let mut buf = [0_u8; CACHE_CONTROL_CAPACITY];
+        let private = stack_cache_control(
+            &mut buf,
+            RepresentationClass::PrivateCached,
+            SharedCachePolicy::Private,
+            &freshness,
+            Some(45_000),
+        )
+        .expect("fits");
+        assert_eq!(private.to_str().expect("text"), "private, max-age=45");
+    }
+
+    #[test]
+    fn a_write_past_the_end_fails_rather_than_truncating() {
+        let mut buf = [0_u8; 8];
+        let mut cursor = Cursor {
+            buf: &mut buf,
+            len: 0,
+        };
+        cursor.write_str("12345678").expect("exactly fills");
+        assert!(
+            cursor.write_str("9").is_err(),
+            "one byte past the end is refused"
+        );
+        assert_eq!(cursor.len, 8, "and the refused write left nothing behind");
+    }
 }

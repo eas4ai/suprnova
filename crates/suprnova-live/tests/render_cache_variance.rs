@@ -320,6 +320,11 @@ fn the_streamed_canonical_form_matches_its_declared_length_and_the_expected_byte
     );
 }
 
+// The 32 digest bytes in `expected` are recomputed from the same
+// derivation, so what this pins is the format and the position of the
+// material - a name length, the name, one marker byte, then exactly 32
+// bytes - never the digest value itself. The digest is pinned where it
+// belongs, against the key fixtures in `render_cache_key.rs`.
 #[test]
 fn a_private_dimension_writes_its_marker_byte_and_the_material_digest() {
     let material = PrivateMaterial::principal(&keys_from(3), "user-7", 1);

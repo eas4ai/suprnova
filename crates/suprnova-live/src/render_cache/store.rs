@@ -137,6 +137,20 @@ impl MemoryRenderStore {
 
     /// [`RenderStore::publish`] with a prepared hot entry beside the bytes,
     /// under the same fence, bound, and LRU rules. See [`Self::hot_get`].
+    ///
+    /// The caller owes one thing this store cannot check for itself: `hot`
+    /// must have been prepared from exactly the entry `bytes` encodes, for
+    /// exactly `key`. Checking it here would mean decoding on the
+    /// publication path, which is the work a hot entry exists to avoid, so
+    /// the obligation stays with the publisher and a debug build asserts
+    /// the one part of it that is free to check - that the prepared entry
+    /// names this key.
+    ///
+    /// `max_bytes` still counts only the encoded `bytes`, exactly as it
+    /// does for a plain publication, while a hot slot additionally holds a
+    /// decoded body and its formed header values. The bound is therefore a
+    /// bound on stored encoded bytes, not on this store's total memory,
+    /// once hot slots are in use.
     pub fn publish_hot(
         &self,
         key: &RenderKey,
@@ -145,12 +159,21 @@ impl MemoryRenderStore {
         fence: PublicationFence,
         now_ms: u64,
     ) -> PublishOutcome {
+        debug_assert_eq!(
+            hot.entry().header().key,
+            *key,
+            "a hot entry is published under the key it was prepared for"
+        );
         self.publish_sync(key, bytes, Some(hot), fence, now_ms)
     }
 
     /// The hot entry published for `key`, if the current publication
-    /// carried one; touches the LRU order exactly as a `get` does and takes
-    /// no async step, so it allocates nothing.
+    /// carried one. It takes no async step and allocates nothing.
+    ///
+    /// It touches the LRU order only when it hands back a hot entry. A key
+    /// that is present without a hot slot is left untouched, since the
+    /// caller must fall through to [`RenderStore::get`] for it and that
+    /// call does the touching; a miss here is never a use.
     pub fn hot_get(&self, key: &RenderKey) -> Option<Arc<HotEntry>> {
         let mut state = self.lock_state();
         let hot = state.entries.get(key).and_then(|(_, hot)| hot.clone())?;
@@ -168,6 +191,11 @@ impl MemoryRenderStore {
     /// advance) - so retention is accepted by the trait, per its own
     /// contract, and ignored rather than tracked for a sweep this store
     /// does not perform.
+    ///
+    /// Both bounds count the encoded `bytes` alone. A hot slot rides along
+    /// free of charge against `max_bytes` while holding a decoded body, so
+    /// with hot slots in use the byte bound bounds stored encoded bytes,
+    /// not total memory. See [`Self::publish_hot`].
     fn publish_sync(
         &self,
         key: &RenderKey,

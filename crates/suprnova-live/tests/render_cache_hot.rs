@@ -80,6 +80,7 @@ fn locale_variance() -> VarianceDescriptor {
 
 fn entry_with(
     keys: &SnapshotKeyRing,
+    pattern: &str,
     variance: VarianceDescriptor,
     seed_deadline_ms: Option<u64>,
     headers: SafeHeaders,
@@ -87,7 +88,7 @@ fn entry_with(
 ) -> CompleteEntry {
     CompleteEntry::new(
         EntryHeader {
-            key: RenderKey::for_test(keys, "/hot"),
+            key: RenderKey::for_test(keys, pattern),
             class: RepresentationClass::PublicShared,
             variance,
             published_at_ms: PUBLISHED_AT_MS,
@@ -113,9 +114,10 @@ fn safe_headers() -> SafeHeaders {
     .expect("safe headers")
 }
 
-fn plain_entry(keys: &SnapshotKeyRing, body: &'static [u8]) -> CompleteEntry {
+fn plain_entry(keys: &SnapshotKeyRing, pattern: &str, body: &'static [u8]) -> CompleteEntry {
     entry_with(
         keys,
+        pattern,
         VarianceDescriptor::new(),
         None,
         safe_headers(),
@@ -123,10 +125,13 @@ fn plain_entry(keys: &SnapshotKeyRing, body: &'static [u8]) -> CompleteEntry {
     )
 }
 
-fn hot_fixture(keys: &SnapshotKeyRing, body: &'static [u8]) -> Arc<HotEntry> {
+/// A hot entry prepared for `pattern`'s key. Every store test publishes one
+/// under exactly that key: `publish_hot` asserts the pairing in a debug
+/// build, and it is the obligation the store's own doc puts on the caller.
+fn hot_fixture(keys: &SnapshotKeyRing, pattern: &str, body: &'static [u8]) -> Arc<HotEntry> {
     Arc::new(
         HotEntry::prepare(
-            plain_entry(keys, body),
+            plain_entry(keys, pattern, body),
             shared(),
             &freshness(),
             PUBLISHED_AT_MS,
@@ -187,7 +192,7 @@ fn a_hot_get_returns_the_same_arc_that_was_published() {
         max_bytes: 4_096,
     });
     let key = RenderKey::for_test(&keys, "/a");
-    let hot = hot_fixture(&keys, BODY);
+    let hot = hot_fixture(&keys, "/a", BODY);
     assert_eq!(
         store.publish_hot(
             &key,
@@ -241,7 +246,7 @@ async fn a_trait_publish_has_no_hot_entry_and_a_hot_publish_replaces_it_under_a_
     );
     assert!(store.get(&key).await.expect("get").is_some());
 
-    let first = hot_fixture(&keys, BODY);
+    let first = hot_fixture(&keys, "/a", BODY);
     assert_eq!(
         store.publish_hot(
             &key,
@@ -257,7 +262,7 @@ async fn a_trait_publish_has_no_hot_entry_and_a_hot_publish_replaces_it_under_a_
         "the newer fence installs the hot entry"
     );
 
-    let second = hot_fixture(&keys, OTHER_BODY);
+    let second = hot_fixture(&keys, "/a", OTHER_BODY);
     assert_eq!(
         store.publish_hot(
             &key,
@@ -298,7 +303,7 @@ async fn hot_and_plain_entries_share_one_byte_budget_and_one_lru_order() {
         store.publish_hot(
             &first,
             first_bytes,
-            hot_fixture(&keys, BODY),
+            hot_fixture(&keys, "/a", BODY),
             fence(1),
             1_000
         ),
@@ -315,7 +320,7 @@ async fn hot_and_plain_entries_share_one_byte_budget_and_one_lru_order() {
         store.publish_hot(
             &third,
             third_bytes.clone(),
-            hot_fixture(&keys, OTHER_BODY),
+            hot_fixture(&keys, "/c", OTHER_BODY),
             fence(1),
             3_000
         ),
@@ -347,24 +352,145 @@ async fn hot_and_plain_entries_share_one_byte_budget_and_one_lru_order() {
     );
 }
 
+#[tokio::test]
+async fn a_trait_publish_under_a_newer_fence_clears_the_hot_slot() {
+    let keys = keys();
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 4,
+        max_bytes: 4_096,
+    });
+    let key = RenderKey::for_test(&keys, "/a");
+    assert_eq!(
+        store.publish_hot(
+            &key,
+            Bytes::from_static(b"hot-1"),
+            hot_fixture(&keys, "/a", BODY),
+            fence(1),
+            1_000
+        ),
+        PublishOutcome::Published
+    );
+    assert!(store.hot_get(&key).is_some());
+    assert_eq!(
+        store
+            .publish(
+                &key,
+                Bytes::from_static(b"plain"),
+                fence(2),
+                2_000,
+                u64::MAX
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published
+    );
+    assert!(
+        store.hot_get(&key).is_none(),
+        "the replacement carried no hot entry, so the slot is empty, never stale"
+    );
+    assert_eq!(
+        store.get(&key).await.expect("get").expect("entry").bytes,
+        Bytes::from_static(b"plain")
+    );
+}
+
+#[tokio::test]
+async fn evict_and_clear_both_drop_the_hot_entry() {
+    let keys = keys();
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 4,
+        max_bytes: 4_096,
+    });
+    let key = RenderKey::for_test(&keys, "/a");
+    let publish = || {
+        store.publish_hot(
+            &key,
+            Bytes::from_static(b"hot-1"),
+            hot_fixture(&keys, "/a", BODY),
+            fence(1),
+            1_000,
+        )
+    };
+
+    assert_eq!(publish(), PublishOutcome::Published);
+    store.evict(&key).await.expect("evict");
+    assert!(store.hot_get(&key).is_none(), "evict drops the hot entry");
+    assert!(store.get(&key).await.expect("get").is_none());
+
+    assert_eq!(publish(), PublishOutcome::Published);
+    store.clear();
+    assert!(store.hot_get(&key).is_none(), "clear drops the hot entry");
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 0);
+    assert_eq!(inspection.bytes, 0);
+}
+
+#[tokio::test]
+async fn byte_pressure_evicts_the_oldest_entry_and_its_hot_slot() {
+    let keys = keys();
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 8,
+        max_bytes: 100,
+    });
+    let first = RenderKey::for_test(&keys, "/a");
+    let second = RenderKey::for_test(&keys, "/b");
+    let third = RenderKey::for_test(&keys, "/c");
+    let bytes = Bytes::from(vec![7_u8; 40]);
+    for (key, pattern, now_ms) in [
+        (&first, "/a", 1_000),
+        (&second, "/b", 2_000),
+        (&third, "/c", 3_000),
+    ] {
+        assert_eq!(
+            store.publish_hot(
+                key,
+                bytes.clone(),
+                hot_fixture(&keys, pattern, BODY),
+                fence(1),
+                now_ms
+            ),
+            PublishOutcome::Published
+        );
+    }
+
+    assert!(
+        store.get(&first).await.expect("get").is_none(),
+        "40 + 40 + 40 is past the 100-byte bound, so the oldest goes"
+    );
+    assert!(store.hot_get(&first).is_none(), "with its hot entry");
+    assert!(store.hot_get(&second).is_some());
+    assert!(store.hot_get(&third).is_some());
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 2);
+    assert_eq!(
+        inspection.bytes,
+        bytes.len() * 2,
+        "the tally is the survivors' encoded lengths, and a hot slot adds nothing to it"
+    );
+}
+
 #[test]
 fn serve_hot_matches_respond_for_every_request_shape() {
     let keys = keys();
     let policy = freshness();
     let stale = warning_header(FreshnessState::StaleServable);
-    assert!(
-        stale.is_some(),
-        "the stale case must actually carry a warning"
+    assert_eq!(
+        stale,
+        Some("110 - \"Response is Stale\""),
+        "the stale case carries exactly this warning"
     );
     for seed_deadline_ms in [None, Some(PUBLISHED_AT_MS + 45_000)] {
         let entry = entry_with(
             &keys,
+            "/hot",
             locale_variance(),
             seed_deadline_ms,
             safe_headers(),
             Bytes::from_static(BODY),
         );
         let etag = entry.validator().etag();
+        let entry_status =
+            StatusCode::from_u16(entry.header().status).expect("the fixture status is a status");
         let hot = HotEntry::prepare(entry.clone(), shared(), &policy, PUBLISHED_AT_MS, fence(1))
             .expect("prepare");
         for method in [Method::GET, Method::HEAD] {
@@ -399,6 +525,47 @@ fn serve_hot_matches_respond_for_every_request_shape() {
                         cold_response.body(),
                         "body differs for {shape}"
                     );
+
+                    // The two agreeing is only half of it; each shape has
+                    // one right answer, asserted here rather than inferred
+                    // from the other builder.
+                    if if_none_match == Some(etag.as_str()) {
+                        assert_eq!(
+                            hot_response.status(),
+                            StatusCode::NOT_MODIFIED,
+                            "a matching tag is 304 for {shape}"
+                        );
+                        assert!(
+                            hot_response.body().is_empty(),
+                            "a 304 carries no body for {shape}"
+                        );
+                    } else if method == Method::HEAD {
+                        assert_eq!(
+                            hot_response.status(),
+                            entry_status,
+                            "HEAD keeps the entry's status for {shape}"
+                        );
+                        assert!(
+                            hot_response.body().is_empty(),
+                            "HEAD carries no body for {shape}"
+                        );
+                    } else {
+                        assert_eq!(
+                            hot_response.status(),
+                            entry_status,
+                            "a plain GET keeps the entry's status for {shape}"
+                        );
+                        assert_eq!(
+                            hot_response.body().len(),
+                            entry.body().len(),
+                            "a plain GET carries the whole body for {shape}"
+                        );
+                    }
+                    assert_eq!(
+                        header_text(&hot_response, WARNING).as_deref(),
+                        warning,
+                        "the warning is present exactly when one was passed, for {shape}"
+                    );
                 }
             }
         }
@@ -410,7 +577,14 @@ fn serve_hot_shares_the_stored_body_and_forms_the_documented_headers() {
     let keys = keys();
     let policy = freshness();
     let body = Bytes::from(vec![b'x'; 65_536]);
-    let entry = entry_with(&keys, locale_variance(), None, safe_headers(), body.clone());
+    let entry = entry_with(
+        &keys,
+        "/hot",
+        locale_variance(),
+        None,
+        safe_headers(),
+        body.clone(),
+    );
     let hot = HotEntry::prepare(entry.clone(), shared(), &policy, PUBLISHED_AT_MS, fence(1))
         .expect("prepare");
     let now_ms = PUBLISHED_AT_MS + 7_500;
@@ -475,7 +649,7 @@ fn serve_hot_shares_the_stored_body_and_forms_the_documented_headers() {
     );
 
     let unvarying = HotEntry::prepare(
-        plain_entry(&keys, BODY),
+        plain_entry(&keys, "/hot", BODY),
         shared(),
         &policy,
         PUBLISHED_AT_MS,
@@ -514,6 +688,7 @@ fn a_cache_control_override_replaces_the_computed_value() {
     for seed_deadline_ms in [None, Some(PUBLISHED_AT_MS + 45_000)] {
         let entry = entry_with(
             &keys,
+            "/hot",
             VarianceDescriptor::new(),
             seed_deadline_ms,
             safe_headers(),
@@ -557,6 +732,7 @@ fn prepare_fails_closed_on_an_unrepresentable_header() {
         .expect("the entry's own rule allows this value");
     let entry = entry_with(
         &keys,
+        "/hot",
         VarianceDescriptor::new(),
         None,
         headers,
@@ -583,7 +759,7 @@ fn prepare_fails_closed_on_an_unrepresentable_header() {
 #[test]
 fn conditional_matches_is_the_rule_evaluate_conditional_applies() {
     let keys = keys();
-    let entry = plain_entry(&keys, BODY);
+    let entry = plain_entry(&keys, "/hot", BODY);
     let validator = *entry.validator();
     let etag = validator.etag();
     let listed = format!("\"sha256-other\", {etag}");
