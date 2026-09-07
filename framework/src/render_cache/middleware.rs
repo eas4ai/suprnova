@@ -2981,8 +2981,8 @@ pub mod race_points {
     /// L0-only route (every route the race suite drives) the lookup that
     /// follows also misses, because the clear emptied the only tier there
     /// was. On an L1-backed route it need not: `advance_epoch` does not
-    /// clear L1 (see [`crate::render_cache::RenderCache::advance_epoch`]),
-    /// so the lookup
+    /// clear L1 (see
+    /// [`crate::render_cache::RenderCache::advance_epoch`]), so the lookup
     /// can still find the pre-advance entry, `coherence` refreshes the
     /// epoch off its reread, `RenderJob::restamp` moves the rebuild to the
     /// post-advance epoch, and *that* candidate is published - correctly,
