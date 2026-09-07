@@ -2717,18 +2717,30 @@ async fn chunked_upload(
         host.address(),
         bytes.len()
     );
-    stream.write_all(request.as_bytes()).await.unwrap();
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write the request head");
     for chunk in chunks {
         stream
             .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
             .await
-            .unwrap();
-        stream.write_all(chunk).await.unwrap();
-        stream.write_all(b"\r\n").await.unwrap();
+            .expect("write the chunk size line");
+        stream.write_all(chunk).await.expect("write the chunk body");
+        stream
+            .write_all(b"\r\n")
+            .await
+            .expect("write the chunk terminator");
     }
-    stream.write_all(b"0\r\n\r\n").await.unwrap();
+    stream
+        .write_all(b"0\r\n\r\n")
+        .await
+        .expect("write the body terminator");
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.unwrap();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read the response to EOF");
     String::from_utf8(response).expect("HTTP response")
 }
 

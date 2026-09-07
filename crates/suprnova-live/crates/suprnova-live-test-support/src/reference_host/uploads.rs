@@ -2542,6 +2542,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_post_interrupt_drain_stops_when_the_host_shuts_down() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let mut body = AxumChunkBody::new(
+            counted_body(&["abc", "def", "ghi"], &polled),
+            Sha256::new(),
+            true,
+            9,
+            shutdown,
+        );
+
+        body.next_chunk(1024)
+            .await
+            .expect("first pull")
+            .expect("first frame");
+        shutdown_tx.send(true).expect("shutdown signal");
+        let error = body
+            .next_chunk(1024)
+            .await
+            .expect_err("the fault interrupts the second pull");
+        assert_eq!(error.kind(), UploadErrorKind::BodyInterrupted);
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            1,
+            "the drain read the body after the host shut down"
+        );
+    }
+
+    #[tokio::test]
     async fn one_axum_frame_is_split_at_the_provider_pull_boundary_without_retained_excess() {
         const PROVIDER_PULL_BYTES: usize = 256 * 1024;
         let expected = (0..=PROVIDER_PULL_BYTES)
