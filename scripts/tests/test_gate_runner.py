@@ -1549,6 +1549,18 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test tiers::redis::live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it ... ok\\n'\n"
             "            printf 'test result: ok. 16 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
+            "        store_conformance::live_postgres_)\n"
+            "            printf 'test store_conformance::live_postgres_render_store_conforms ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        store_conformance::live_mysql_)\n"
+            "            printf 'test store_conformance::live_mysql_render_store_conforms ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        store_conformance::live_redis_)\n"
+            "            printf 'test store_conformance::live_redis_render_store_conforms ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
             "        redis::)\n"
             "            printf 'test redis::redis_driver_push_pop_ack_round_trip ... ok\\n'\n"
             "            printf 'test redis::redis_driver_concurrent_pops_claim_one_distinct_entry_each ... ok\\n'\n"
@@ -1713,16 +1725,19 @@ class ShellAssetContractTests(unittest.TestCase):
                 "--test eloquent -- --ignored --test-threads=1 relations_pivot_filters_postgres::",
                 "workflow::tests::test_claim_reclaims_expired_running_row",
                 "--test render_cache -- --ignored --test-threads=1 tiers::sql::live_postgres",
+                "--test render_cache -- --ignored --test-threads=1 store_conformance::live_postgres_",
                 "--lib -- --ignored --test-threads=1 live_postgres",
             ],
             "scripts/check-mysql.sh": [
                 "--test eloquent -- --ignored --test-threads=1 mass_write_mysql::",
                 "workflow::tests::test_mysql_",
                 "--test render_cache -- --ignored --test-threads=1 tiers::sql::live_mysql",
+                "--test render_cache -- --ignored --test-threads=1 store_conformance::live_mysql_",
                 "--lib -- --ignored --test-threads=1 live_mysql",
             ],
             "scripts/check-redis.sh": [
                 "--test render_cache -- --ignored --test-threads=1 tiers::redis::live_redis",
+                "--test render_cache -- --ignored --test-threads=1 store_conformance::live_redis_",
                 "--test queue -- --ignored --test-threads=1 redis::",
                 "--test queue -- --ignored --test-threads=1 reclaim_attempts::redis_",
                 "--test idempotency -- --ignored --test-threads=1 idempotency::redis_",

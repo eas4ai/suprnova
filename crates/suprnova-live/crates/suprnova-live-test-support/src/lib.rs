@@ -14,6 +14,7 @@ mod harness;
 mod host;
 pub mod ledger_conformance;
 mod reference_host;
+pub mod render_store_conformance;
 mod trace;
 mod upload;
 

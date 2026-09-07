@@ -124,6 +124,29 @@ if ! grep -qE "^test result: ok\. 16 passed" <<<"$redis_out"; then
     exit 1
 fi
 
+# The `RenderStore` conformance suite is one suite over every provider, so
+# its Redis-tagged test sits in `store_conformance` rather than in the tier
+# submodule above and is selected separately. It is deliberately not folded
+# into the count pinned above: the two filters select different tests, and
+# folding them would make either count unable to say which run shrank.
+echo
+echo "==> cargo test -p suprnova --test render_cache -- --ignored store_conformance::live_redis_"
+if ! store_redis_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 store_conformance::live_redis_ 2>&1)"; then
+    echo "$store_redis_out"
+    exit 1
+fi
+echo "$store_redis_out"
+if ! grep -qE "^test store_conformance::live_redis_render_store_conforms \.\.\. ok" <<<"$store_redis_out"; then
+    echo "check-redis: the RenderStore conformance suite did not report ok (filter may have matched nothing)" >&2
+    exit 1
+fi
+# The exact number of `store_conformance::live_redis_` tests. Update it when
+# one is added or removed.
+if ! grep -qE "^test result: ok\. 1 passed" <<<"$store_redis_out"; then
+    echo "check-redis: the store conformance summary line does not report exactly 1 passed" >&2
+    exit 1
+fi
+
 # --- The other Redis suites, which no gate step has ever run ---------------
 #
 # Everything above is the RenderCache tier. What follows is older: the queue

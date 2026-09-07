@@ -33,4 +33,5 @@ pub mod privacy;
 pub mod races;
 pub mod registry;
 pub mod stitch;
+pub mod store_conformance;
 pub mod tiers;

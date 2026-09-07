@@ -178,6 +178,30 @@ if ! grep -qE "^test result: ok\. 3 passed" <<<"$tiers_pg_out"; then
     exit 1
 fi
 
+# `store_conformance` is mixed the same way once more, and for a different
+# reason: one `RenderStore` conformance suite runs over every provider, so
+# the file and SQLite variants run unconditionally beside Postgres-, MySQL-,
+# and Redis-tagged `#[ignore]`d ones in the same submodule. Select the
+# Postgres-tagged one by name, and assert on the output for the same reason
+# as above.
+echo
+echo "==> cargo test -p suprnova --test render_cache -- --ignored store_conformance::live_postgres_"
+if ! store_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 store_conformance::live_postgres_ 2>&1)"; then
+    echo "$store_pg_out"
+    exit 1
+fi
+echo "$store_pg_out"
+if ! grep -qE "^test store_conformance::live_postgres_render_store_conforms \.\.\. ok" <<<"$store_pg_out"; then
+    echo "check-postgres: the RenderStore conformance suite did not report ok (filter may have matched nothing)" >&2
+    exit 1
+fi
+# The exact number of `store_conformance::live_postgres_` tests. Update it
+# when one is added or removed.
+if ! grep -qE "^test result: ok\. 1 passed" <<<"$store_pg_out"; then
+    echo "check-postgres: the store conformance summary line does not report exactly 1 passed" >&2
+    exit 1
+fi
+
 # The SQL record store's guarded upsert - the statement that must refuse a
 # lower fence and accept a higher one - is proved by an in-source unit test,
 # so it needs `--lib` rather than the integration binary. Same silent-pass
