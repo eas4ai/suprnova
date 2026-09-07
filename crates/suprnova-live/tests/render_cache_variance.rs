@@ -244,3 +244,73 @@ fn tenant_and_authorization_observations_both_accumulate() {
         "both reasons are recorded, in evaluation order"
     );
 }
+
+// The streamed canonical form is what the lookup key length-prefixes, so a
+// disagreement between the declared length and the written bytes would move
+// every digest. Cover every dimension shape, including an application
+// dimension whose canonical name is built from two pieces.
+fn every_shape() -> VarianceDescriptor {
+    let keys = keys_from(3);
+    let mut descriptor = VarianceDescriptor::new();
+    descriptor
+        .declare(
+            VarianceDimension::Locale,
+            DimensionValue::Public("de-DE".to_owned()),
+        )
+        .expect("public");
+    descriptor
+        .declare(
+            VarianceDimension::Principal,
+            DimensionValue::Private(PrivateMaterial::principal(&keys, "user-7", 1)),
+        )
+        .expect("private");
+    descriptor
+        .declare(VarianceDimension::Tenant, DimensionValue::Anonymous)
+        .expect("anonymous");
+    descriptor
+        .declare(
+            VarianceDimension::Application("theme_variant".to_owned()),
+            DimensionValue::Public("dark".to_owned()),
+        )
+        .expect("application");
+    descriptor
+}
+
+#[test]
+fn the_streamed_canonical_form_matches_its_declared_length_and_its_built_bytes() {
+    let descriptor = every_shape();
+    let built = descriptor.canonical_bytes();
+    assert_eq!(
+        descriptor.canonical_len(),
+        built.len(),
+        "canonical_len must predict exactly what write_canonical writes"
+    );
+
+    let mut streamed: Vec<u8> = Vec::new();
+    descriptor.write_canonical(&mut |bytes| streamed.extend_from_slice(bytes));
+    assert_eq!(streamed, built, "both forms produce the same bytes");
+    assert!(
+        !built.is_empty(),
+        "the fixture must actually exercise the writer"
+    );
+}
+
+#[test]
+fn an_application_dimension_writes_its_prefixed_canonical_name_exactly_once() {
+    let mut descriptor = VarianceDescriptor::new();
+    descriptor
+        .declare(
+            VarianceDimension::Application("theme_variant".to_owned()),
+            DimensionValue::Public("dark".to_owned()),
+        )
+        .expect("application");
+    let name = "app:theme_variant";
+    let mut expected: Vec<u8> = Vec::new();
+    expected.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    expected.extend_from_slice(name.as_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&4_u32.to_be_bytes());
+    expected.extend_from_slice(b"dark");
+    assert_eq!(descriptor.canonical_bytes(), expected);
+    assert_eq!(descriptor.canonical_len(), expected.len());
+}

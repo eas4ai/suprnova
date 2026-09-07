@@ -99,13 +99,29 @@ impl SnapshotKeyRing {
         purpose: SnapshotPurpose,
         parts: &[&[u8]],
     ) -> Result<[u8; 32], KeyError> {
+        self.mac_with(purpose, |writer| {
+            for part in parts {
+                writer.part(&[part]);
+            }
+        })
+    }
+
+    /// The same MAC with the parts streamed in rather than materialized:
+    /// `write` receives a [`PartWriter`] and calls `part` once per logical
+    /// part. A part given as several pieces produces exactly the bytes the
+    /// concatenated part would through [`Self::mac`], so a caller can avoid
+    /// building tag-prefixed buffers without changing any digest. Nothing
+    /// here allocates: the derived key is a stack array and the HMAC state
+    /// lives on the stack.
+    pub(crate) fn mac_with(
+        &self,
+        purpose: SnapshotPurpose,
+        write: impl FnOnce(&mut PartWriter<'_>),
+    ) -> Result<[u8; 32], KeyError> {
         let derived = self.active.derive(purpose)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(derived.as_ref())
             .map_err(|_| KeyError::new(KeyErrorKind::DerivationFailure))?;
-        for part in parts {
-            mac.update(&(part.len() as u64).to_be_bytes());
-            mac.update(part);
-        }
+        write(&mut PartWriter { mac: &mut mac });
         let tag = mac.finalize().into_bytes();
         let mut out = [0_u8; 32];
         out.copy_from_slice(&tag);
@@ -119,6 +135,42 @@ impl SnapshotKeyRing {
         self.verification
             .iter()
             .find(|record| record.key_id() == key_id)
+    }
+}
+
+/// Feeds length-prefixed parts into a purpose-separated MAC. See
+/// [`SnapshotKeyRing::mac_with`].
+pub(crate) struct PartWriter<'m> {
+    mac: &'m mut Hmac<Sha256>,
+}
+
+impl PartWriter<'_> {
+    /// One part given as pieces: the 8-byte big-endian total length, then
+    /// each piece in order.
+    pub(crate) fn part(&mut self, pieces: &[&[u8]]) {
+        let total: u64 = pieces.iter().map(|piece| piece.len() as u64).sum();
+        self.mac.update(&total.to_be_bytes());
+        for piece in pieces {
+            self.mac.update(piece);
+        }
+    }
+
+    /// One part whose `len` bytes arrive through `write`'s sink calls. The
+    /// caller is responsible for `len` matching what it writes; a mismatch
+    /// is a programming error and a debug assertion catches it.
+    pub(crate) fn part_streamed(&mut self, len: usize, write: impl FnOnce(&mut dyn FnMut(&[u8]))) {
+        self.mac.update(&(len as u64).to_be_bytes());
+        let mac = &mut *self.mac;
+        let mut written = 0_usize;
+        let mut sink = |bytes: &[u8]| {
+            mac.update(bytes);
+            written += bytes.len();
+        };
+        write(&mut sink);
+        debug_assert_eq!(
+            written, len,
+            "streamed part length must match its declared length"
+        );
     }
 }
 

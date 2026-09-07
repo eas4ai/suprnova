@@ -50,18 +50,30 @@ impl VarianceDimension {
         }
     }
 
-    fn canonical_name(&self) -> String {
+    /// The canonical name in two pieces: a fixed prefix and, for
+    /// [`Self::Application`], the declared name that follows it. Joining the
+    /// pieces in order yields exactly [`Self::canonical_name`], so a caller
+    /// that streams bytes never has to build the joined string.
+    fn canonical_name_pieces(&self) -> (&'static str, &str) {
         match self {
-            Self::Host => "host".to_owned(),
-            Self::Locale => "locale".to_owned(),
-            Self::Media => "media".to_owned(),
-            Self::Encoding => "encoding".to_owned(),
-            Self::Tenant => "tenant".to_owned(),
-            Self::Principal => "principal".to_owned(),
-            Self::FeatureVersion => "feature_version".to_owned(),
-            Self::ConfigVersion => "config_version".to_owned(),
-            Self::Application(name) => format!("app:{name}"),
+            Self::Host => ("host", ""),
+            Self::Locale => ("locale", ""),
+            Self::Media => ("media", ""),
+            Self::Encoding => ("encoding", ""),
+            Self::Tenant => ("tenant", ""),
+            Self::Principal => ("principal", ""),
+            Self::FeatureVersion => ("feature_version", ""),
+            Self::ConfigVersion => ("config_version", ""),
+            Self::Application(name) => ("app:", name.as_str()),
         }
+    }
+
+    fn canonical_name(&self) -> String {
+        let (prefix, suffix) = self.canonical_name_pieces();
+        let mut name = String::with_capacity(prefix.len() + suffix.len());
+        name.push_str(prefix);
+        name.push_str(suffix);
+        name
     }
 }
 
@@ -267,28 +279,54 @@ impl VarianceDescriptor {
         headers
     }
 
+    /// Length of [`Self::canonical_bytes`] without building it.
+    #[must_use]
+    pub fn canonical_len(&self) -> usize {
+        self.dimensions
+            .iter()
+            .map(|(dimension, value)| {
+                let (prefix, suffix) = dimension.canonical_name_pieces();
+                4 + prefix.len()
+                    + suffix.len()
+                    + match value {
+                        DimensionValue::Public(text) => 1 + 4 + text.len(),
+                        DimensionValue::Private(material) => 1 + material.as_bytes().len(),
+                        DimensionValue::Anonymous => 1,
+                    }
+            })
+            .sum()
+    }
+
+    /// Writes exactly the bytes of [`Self::canonical_bytes`] to `sink`, in
+    /// pieces, without allocating.
+    pub fn write_canonical(&self, sink: &mut dyn FnMut(&[u8])) {
+        for (dimension, value) in &self.dimensions {
+            let (prefix, suffix) = dimension.canonical_name_pieces();
+            let name_len = prefix.len() + suffix.len();
+            sink(&(name_len as u32).to_be_bytes());
+            sink(prefix.as_bytes());
+            sink(suffix.as_bytes());
+            match value {
+                DimensionValue::Public(text) => {
+                    sink(&[1]);
+                    sink(&(text.len() as u32).to_be_bytes());
+                    sink(text.as_bytes());
+                }
+                DimensionValue::Private(material) => {
+                    sink(&[2]);
+                    sink(material.as_bytes());
+                }
+                DimensionValue::Anonymous => sink(&[3]),
+            }
+        }
+    }
+
     /// Canonical bytes that join the lookup key: length-prefixed name and
     /// value pairs in dimension order; private values as their digests.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (dimension, value) in &self.dimensions {
-            let name = dimension.canonical_name();
-            out.extend_from_slice(&(name.len() as u32).to_be_bytes());
-            out.extend_from_slice(name.as_bytes());
-            match value {
-                DimensionValue::Public(text) => {
-                    out.push(1);
-                    out.extend_from_slice(&(text.len() as u32).to_be_bytes());
-                    out.extend_from_slice(text.as_bytes());
-                }
-                DimensionValue::Private(material) => {
-                    out.push(2);
-                    out.extend_from_slice(material.as_bytes());
-                }
-                DimensionValue::Anonymous => out.push(3),
-            }
-        }
+        let mut out = Vec::with_capacity(self.canonical_len());
+        self.write_canonical(&mut |bytes| out.extend_from_slice(bytes));
         out
     }
 }

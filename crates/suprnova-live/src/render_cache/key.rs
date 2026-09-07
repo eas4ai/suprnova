@@ -54,43 +54,16 @@ pub struct RenderKeyInput {
 
 /// A purpose-separated digest of one representation identity.
 ///
-/// Equality, ordering, and hashing compare `digest` alone: `dimensions` is
-/// inspection metadata, not part of the key's identity. Two keys with the
-/// same digest must be the same key regardless of how they were built, since
-/// [`Self::from_base64url`] recovers only the digest and deliberately
-/// carries [`RenderKeyDimensions::opaque`] instead of the original
-/// dimensions; a lookup by a key parsed back from storage must land on the
-/// same map slot as the key it was published under.
-#[derive(Clone)]
+/// The digest is the whole key, so equality, ordering, and hashing compare
+/// it alone and a key parsed back from storage with
+/// [`Self::from_base64url`] lands on the same map slot as the key it was
+/// published under. Inspectable dimensions are not carried here; they are
+/// described on demand from the input by
+/// [`RenderKeyDimensions::describe`], which is what lets derivation run
+/// without cloning any request material.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RenderKey {
     digest: [u8; 32],
-    dimensions: RenderKeyDimensions,
-}
-
-impl PartialEq for RenderKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.digest == other.digest
-    }
-}
-
-impl Eq for RenderKey {}
-
-impl std::hash::Hash for RenderKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.digest.hash(state);
-    }
-}
-
-impl PartialOrd for RenderKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RenderKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.digest.cmp(&other.digest)
-    }
 }
 
 impl RenderKey {
@@ -120,40 +93,35 @@ impl RenderKey {
         {
             return Err(invalid());
         }
-        let mut parts: Vec<Vec<u8>> = Vec::new();
-        let mut feed = |tag: u8, bytes: &[u8]| {
-            let mut part = Vec::with_capacity(bytes.len() + 1);
-            part.push(tag);
-            part.extend_from_slice(bytes);
-            parts.push(part);
-        };
-        feed(0, &[KEY_FORMAT_VERSION]);
-        feed(1, input.route.as_bytes());
-        for (name, value) in &input.params {
-            feed(2, name.as_bytes());
-            feed(3, value.as_bytes());
-        }
-        for (name, value) in &input.query {
-            feed(4, name.as_bytes());
-            feed(5, value.as_bytes());
-        }
-        feed(6, input.host.as_deref().unwrap_or("").as_bytes());
-        feed(7, input.media.as_bytes());
-        feed(
-            8,
-            input.encoding.as_deref().unwrap_or("identity").as_bytes(),
-        );
-        feed(9, input.build.as_str().as_bytes());
-        feed(10, &input.epoch.to_be_bytes());
-        feed(11, &input.variance.canonical_bytes());
-        let borrowed: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+        let epoch = input.epoch.to_be_bytes();
+        let variance_len = input.variance.canonical_len();
         let digest = keys
-            .mac(crate::crypto::SnapshotPurpose::RenderKeyV1, &borrowed)
+            .mac_with(crate::crypto::SnapshotPurpose::RenderKeyV1, |mac| {
+                mac.part(&[&[0][..], &[KEY_FORMAT_VERSION][..]]);
+                mac.part(&[&[1][..], input.route.as_bytes()]);
+                for (name, value) in &input.params {
+                    mac.part(&[&[2][..], name.as_bytes()]);
+                    mac.part(&[&[3][..], value.as_bytes()]);
+                }
+                for (name, value) in &input.query {
+                    mac.part(&[&[4][..], name.as_bytes()]);
+                    mac.part(&[&[5][..], value.as_bytes()]);
+                }
+                mac.part(&[&[6][..], input.host.as_deref().unwrap_or("").as_bytes()]);
+                mac.part(&[&[7][..], input.media.as_bytes()]);
+                mac.part(&[
+                    &[8][..],
+                    input.encoding.as_deref().unwrap_or("identity").as_bytes(),
+                ]);
+                mac.part(&[&[9][..], input.build.as_str().as_bytes()]);
+                mac.part(&[&[10][..], &epoch[..]]);
+                mac.part_streamed(1 + variance_len, |sink| {
+                    sink(&[11]);
+                    input.variance.write_canonical(sink);
+                });
+            })
             .map_err(|_| invalid())?;
-        Ok(Self {
-            digest,
-            dimensions: RenderKeyDimensions::from_input(input),
-        })
+        Ok(Self { digest })
     }
 
     /// `rk1.` followed by the base64url digest; at most 48 characters.
@@ -167,8 +135,8 @@ impl RenderKey {
 
     /// Parses `rk{KEY_FORMAT_VERSION}.<digest>`, the exact inverse of
     /// [`Self::to_base64url`]. The encoded text carries no recoverable
-    /// request identity, so the returned key's dimensions are the opaque
-    /// marker; this is sufficient for lookup and stored-entry inspection.
+    /// request identity, which is all a lookup needs; inspection of a key
+    /// recovered this way has [`RenderKeyDimensions::opaque`] to show.
     pub fn from_base64url(text: &str) -> Result<Self, RenderCacheError> {
         let invalid = || RenderCacheError::new(RenderCacheErrorKind::KeyInvalid);
         let encoded = text
@@ -176,22 +144,13 @@ impl RenderKey {
             .ok_or_else(invalid)?;
         let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
         let digest: [u8; 32] = decoded.try_into().map_err(|_| invalid())?;
-        Ok(Self {
-            digest,
-            dimensions: RenderKeyDimensions::opaque(),
-        })
+        Ok(Self { digest })
     }
 
     /// The raw digest.
     #[must_use]
     pub const fn digest(&self) -> &[u8; 32] {
         &self.digest
-    }
-
-    /// Safe decoded dimensions for inspection.
-    #[must_use]
-    pub const fn dimensions(&self) -> &RenderKeyDimensions {
-        &self.dimensions
     }
 
     /// Test-only fixture key derived from a route pattern with empty
@@ -250,7 +209,11 @@ pub struct RenderKeyDimensions {
 }
 
 impl RenderKeyDimensions {
-    fn from_input(input: &RenderKeyInput) -> Self {
+    /// Describes one key input for inspection. This is deliberately separate
+    /// from [`RenderKey::derive`]: describing clones request material, and
+    /// derivation must not.
+    #[must_use]
+    pub fn describe(input: &RenderKeyInput) -> Self {
         Self {
             route: input.route_pattern.clone(),
             params: input.params.clone(),
