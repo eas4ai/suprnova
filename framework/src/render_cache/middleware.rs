@@ -675,17 +675,6 @@ impl RenderCacheMiddleware {
             Ok(coherence) => coherence,
             Err(()) => return Err(ProviderFailure(request, next)),
         };
-        // A reread inside `coherence` may have renewed the leased epoch to a
-        // value this request's key was not derived under - another node
-        // advanced it, and this is where this node finds out. The rebuild
-        // below must publish under the epoch it is judged against, so the
-        // key is re-derived from the same input before the job goes any
-        // further; a `Moved` caused by the epoch is otherwise handled
-        // exactly like a `Moved` caused by a generation.
-        if job.restamp(runtime).is_err() {
-            LookupOutcome::Bypass.record();
-            return Ok(next(request).await);
-        }
         let now = runtime.now_ms();
         let state = freshness_state(
             policy,
@@ -695,6 +684,19 @@ impl RenderCacheMiddleware {
             now,
             found.header().seed_deadline_ms,
         );
+        // A reread inside `coherence` may have renewed the leased epoch to a
+        // value this request's key was not derived under - another node
+        // advanced it, and this is where this node finds out. Every arm
+        // below that rebuilds has to publish under the epoch it is judged
+        // against, so each one re-derives the key from the same input first
+        // (`RenderJob::restamp`); a `Moved` caused by the epoch is otherwise
+        // handled exactly like a `Moved` caused by a generation.
+        //
+        // Per arm rather than once here, deliberately: the `Fresh` arm never
+        // touches `job`, and it is the hottest path in this module. Restamping
+        // before the match would cost it a second `epoch_cache` lock for no
+        // effect at all - the one `serve` already took to derive the key is
+        // the only one a fresh hit pays.
         match state {
             FreshnessState::Fresh => {
                 (match found.layer() {
@@ -719,6 +721,12 @@ impl RenderCacheMiddleware {
                 Ok(deliver_hit(runtime, request, next, policy, found, now, None).await)
             }
             FreshnessState::StaleServable => {
+                // The background rebuild below runs under `job`. Exercised by
+                // `an_epoch_advanced_by_another_node_serves_a_stale_servable_entry_once_then_rebuilds`.
+                if job.restamp(runtime).is_err() {
+                    LookupOutcome::Bypass.record();
+                    return Ok(next(request).await);
+                }
                 LookupOutcome::Stale.record();
                 // Fix round 2, item 4: a route whose variance depends on
                 // ambient (task-local) context does not get a background
@@ -773,6 +781,12 @@ impl RenderCacheMiddleware {
                 Ok(Ok(response))
             }
             FreshnessState::StaleOnError => {
+                // The foreground rebuild below runs under `job`; see the
+                // note above the match for why this is per arm.
+                if job.restamp(runtime).is_err() {
+                    LookupOutcome::Bypass.record();
+                    return Ok(next(request).await);
+                }
                 LookupOutcome::Miss.record();
                 // Captured before `request` moves into the rebuild attempt,
                 // so a fallback to the stale entry (below) does not need the
@@ -823,6 +837,14 @@ impl RenderCacheMiddleware {
                 Ok(Ok(response))
             }
             FreshnessState::Dead => {
+                // The rebuild below runs under `job`. Exercised by
+                // `an_epoch_advanced_by_another_node_reaches_an_authority_mode_route_on_its_next_hit`
+                // and by its lease-mode sibling, whose routes both declare a
+                // zero stale window, so a `Moved` entry lands here.
+                if job.restamp(runtime).is_err() {
+                    LookupOutcome::Bypass.record();
+                    return Ok(next(request).await);
+                }
                 LookupOutcome::Miss.record();
                 render_and_publish(runtime, request, next, policy, job, 0).await
             }
@@ -1195,18 +1217,33 @@ async fn coherence(
         //   that operator lever drops the runtime's leased epoch beside its
         //   L0 clear, so the very next request reads the authority once,
         //   derives its key under the new epoch, and misses - immediately,
-        //   lease mode included. This is the guarantee
+        //   lease mode included. That is spec 18's "Global epoch bump
+        //   provides a bounded emergency invalidation path" (line 253), and
+        //   dropping the lease is what keeps the bound at one request
+        //   rather than at `max_age_ms`. It is the guarantee
         //   `a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_bump`
         //   asserts, and it now discriminates.
         // - Advanced on another node, lease-mode route: this node finds out
         //   at the first reread after the lease expires, at most
-        //   `max_age_ms` later. The reread below reports the new epoch,
+        //   `max_age_ms` later. The reread below reports the new epoch and
         //   `CoherenceCheck::compare` reports `Moved` against the entry's
-        //   own epoch, and `serve` re-derives the key under the refreshed
-        //   epoch before rebuilding.
+        //   own epoch.
         // - Advanced on another node, authority-mode route: the same
         //   comparison, at that route's very next hit, since it rereads on
         //   every hit anyway.
+        //
+        // What `serve` does with that `Moved` result is the route's own
+        // freshness policy's business, not this function's, and it is not
+        // always a foreground rebuild. `freshness_state` floors a moved
+        // entry's effective age at `fresh_ms`, so a policy with a zero
+        // stale-servable window lands on `Dead` and rebuilds in the
+        // foreground; a policy with a non-zero one lands on `StaleServable`,
+        // and the first request per key after the advance is served the
+        // stored bytes once under a `Warning` header while a background
+        // rebuild runs. Both re-derive the key under the refreshed epoch
+        // before rebuilding (`RenderJob::restamp`), and both are bounded:
+        // the stale window is the bound in the second case. See
+        // `an_epoch_advanced_by_another_node_serves_a_stale_servable_entry_once_then_rebuilds`.
         //
         // The epoch half of `CoherenceCheck::compare` is consequently
         // reachable on a *found* entry now, which it was not while the key
@@ -2936,9 +2973,22 @@ pub mod race_points {
     /// property is unchanged either way, because it never depended on where
     /// the value came from - only on the request already holding it when the
     /// hook fires. An `advance_epoch` armed here drops the lease and clears
-    /// L0, so the lookup that follows misses, and the render it leads to
-    /// still carries the pre-advance epoch into a fresh reread that reads
-    /// the post-advance one: the candidate is discarded, never published.
+    /// L0, so this request's job carries the pre-advance epoch into a fresh
+    /// reread that reads the post-advance one, and that candidate is
+    /// discarded rather than published.
+    ///
+    /// Scoped to what is actually true on both kinds of route. On an
+    /// L0-only route (every route the race suite drives) the lookup that
+    /// follows also misses, because the clear emptied the only tier there
+    /// was. On an L1-backed route it need not: `advance_epoch` does not
+    /// clear L1 (see [`crate::render_cache::RenderCache::advance_epoch`]),
+    /// so the lookup
+    /// can still find the pre-advance entry, `coherence` refreshes the
+    /// epoch off its reread, `RenderJob::restamp` moves the rebuild to the
+    /// post-advance epoch, and *that* candidate is published - correctly,
+    /// under the new key. What the seam proves is the first sentence, the
+    /// fate of the job that carried the stale epoch; it is not a claim
+    /// that no entry is published at all.
     pub static EPOCH_CAPTURED: RacePoint = RacePoint::new();
 
     /// Arms `point` to run `hook` exactly once, the next time it fires.

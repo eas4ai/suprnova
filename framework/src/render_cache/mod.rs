@@ -624,9 +624,19 @@ impl RenderCache {
     /// asked about. Dropping it here means the next request reads the
     /// authority once, derives its key under the new epoch, and misses.
     ///
-    /// Dropped before L0 is cleared: from the moment the lease is gone, no
-    /// request can begin under the old epoch, so the clear that follows has
-    /// only entries nothing will look for left to reclaim.
+    /// Dropped before L0 is cleared, so a request that starts after this
+    /// point derives its key under the new epoch and the clear that follows
+    /// has only entries nothing will look for left to reclaim. That is an
+    /// ordering preference, not a barrier: an authority read already in
+    /// flight when this commits can still `refresh` the lease back to the
+    /// pre-advance value afterwards, and a request that captured the old
+    /// epoch before the drop keeps using it. Neither is a correctness
+    /// problem, because both self-heal within one request. L0 is empty, so
+    /// such a request misses and renders; its own
+    /// `fresh_reread_is_coherent` reads the post-advance epoch, finds it
+    /// unequal to the one the render carried, and declines to publish - and
+    /// that same reread stores the new epoch, so the lease is correct again
+    /// from there on.
     ///
     /// L0 is cleared, not merely left to age out: every L0 key embeds the
     /// epoch it was derived under
@@ -749,6 +759,33 @@ impl RenderCache {
         let runtime = Self::runtime().expect("RenderCache installed");
         let policy = runtime.table.effective_policy(pattern).expect("policy");
         let input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
+        suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
+            .expect("key")
+            .to_base64url()
+    }
+
+    /// Test-only: the same key text as [`Self::key_for_route_for_test`], but
+    /// under an explicit authority epoch.
+    ///
+    /// [`Self::key_for_route_for_test`] hardcodes epoch 1 (see
+    /// `middleware::key_input_for_test`'s own doc: the migration's seeded
+    /// value, so a helper that never advances the epoch always lands on the
+    /// same key). A test that advances the epoch - on this node or, since
+    /// task 5b, on another one - needs to name the key the *new* epoch
+    /// derives, which that helper cannot express. This one takes the epoch
+    /// rather than reading it, so the caller states which epoch it means.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn key_for_route_at_epoch_for_test(
+        pattern: &str,
+        params: &[(&str, &str)],
+        login: Option<&str>,
+        epoch: u64,
+    ) -> String {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        let policy = runtime.table.effective_policy(pattern).expect("policy");
+        let mut input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
+        input.epoch = epoch;
         suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
             .expect("key")
             .to_base64url()

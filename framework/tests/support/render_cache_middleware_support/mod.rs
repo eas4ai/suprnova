@@ -2237,6 +2237,37 @@ pub mod statements {
     }
 }
 
+/// Waits until at least `n` admitted leads (foreground or background) have
+/// finished their whole publish-decision pipeline and released their
+/// coordinator lease, regardless of whether they actually published - the
+/// same race-free "enable-then-check" shape as
+/// [`counting_route::wait_until_waiting`], over
+/// [`WaiterTrackingCoordinator::released`] instead of its `waiting`
+/// counter. See that field's own doc for exactly which point in
+/// `lead_render` calls `release` on each return path; every one of them has
+/// already made its publish decision (and applied it to the store, when
+/// there is one) by the time `release` runs, so this is true exactly when a
+/// render's outcome (published, declined, or discarded as moved) is already
+/// final and observable - unlike a render merely having *started*
+/// ([`counting_route::wait_until_rendering_count`]), which a background
+/// rebuild reaches long before its own publish decision is made.
+///
+/// Task 5b fix round 1: lives here rather than inside [`race`], where it
+/// started. It touches no race point, so the `testing` feature gate that
+/// module needs was never its own - and a stale-while-revalidate test
+/// outside the race suite needs exactly this barrier. [`race`] re-exports
+/// it, so `race::wait_until_background_finished` still resolves for the
+/// race suite's existing callers.
+pub async fn wait_until_background_finished(harness: &Harness, n: u64) {
+    loop {
+        let notified = harness.waiting.released_notify.notified();
+        if harness.waiting.released.load(Ordering::SeqCst) >= n {
+            return;
+        }
+        notified.await;
+    }
+}
+
 /// Task 17: the deterministic race suite's own hooks.
 ///
 /// Three of the five hooks a race suite over this middleware needs already
@@ -2355,30 +2386,7 @@ pub mod race {
         race_points::arm(&race_points::EPOCH_CAPTURED, hook);
     }
 
-    /// Waits until at least `n` admitted leads (foreground or background)
-    /// have finished their whole publish-decision pipeline and released
-    /// their coordinator lease, regardless of whether they actually
-    /// published - the same race-free "enable-then-check" shape as
-    /// [`counting_route::wait_until_waiting`], over
-    /// [`WaiterTrackingCoordinator::released`] instead of its `waiting`
-    /// counter. See that field's own doc for exactly which point in
-    /// `lead_render` calls `release` on each return path; every one of
-    /// them has already made its publish decision (and applied it to the
-    /// store, when there is one) by the time `release` runs, so this is
-    /// true exactly when a render's outcome (published, declined, or
-    /// discarded as moved) is already final and observable - unlike a
-    /// render merely having *started* ([`counting_route::wait_until_rendering_count`]),
-    /// which a background rebuild reaches long before its own publish
-    /// decision is made.
-    pub async fn wait_until_background_finished(harness: &Harness, n: u64) {
-        loop {
-            let notified = harness.waiting.released_notify.notified();
-            if harness.waiting.released.load(Ordering::SeqCst) >= n {
-                return;
-            }
-            notified.await;
-        }
-    }
+    pub use super::wait_until_background_finished;
 
     /// Disarms every race point. Fix round 1, F4: nothing previously
     /// cleared an arm a test made but never consumed - `AFTER_REREAD` only

@@ -28,6 +28,7 @@ use render_cache_middleware_support::{
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
     reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user, statements,
+    wait_until_background_finished,
 };
 use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
 use suprnova::{StatusCode, async_trait};
@@ -721,7 +722,10 @@ async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_
     // 112-131). What carries it now is `RenderCache::advance_epoch`
     // dropping the runtime's leased epoch beside its L0 clear, so the
     // request below reads the authority once, derives its key under the new
-    // epoch, and misses.
+    // epoch, and misses. That drop is what keeps spec 18's "Global epoch
+    // bump provides a bounded emergency invalidation path" (line 253)
+    // bounded at one request rather than at the lease's `max_age_ms`, which
+    // is exactly what this test measures.
     //
     // That also makes this discriminating, which the pre-task-5b version
     // said plainly it was not: with `epoch_cache.invalidate()` removed from
@@ -798,7 +802,10 @@ async fn an_epoch_advanced_by_another_node_reaches_a_lease_mode_route_when_its_l
          its key under the leased epoch, finds the entry, trusts the lease, and serves"
     );
 
-    // Past `max_age_ms` (60_000) for the lease granted above.
+    // Past `max_age_ms` (60_000) for the lease granted above - and past
+    // `fresh_ms`, which `/leased/{id}` sets to the same 60_000, so this
+    // dispatch's rebuild is over-determined and the message below claims
+    // only that it happened, not what caused it.
     clock(&harness).advance_ms(61_000);
 
     let rebuilt = dispatch_get(&harness, "/leased/1", &[]).await;
@@ -806,8 +813,7 @@ async fn an_epoch_advanced_by_another_node_reaches_a_lease_mode_route_when_its_l
     assert_eq!(
         counting_route::renders(),
         2,
-        "the expired lease rereads the authority, which reports the advance, so the entry \
-         is not fresh and the route rebuilds"
+        "past the window the entry is not served as fresh and the route rebuilds"
     );
 
     let served = dispatch_get(&harness, "/leased/1", &[]).await;
@@ -865,6 +871,109 @@ async fn an_epoch_advanced_by_another_node_reaches_an_authority_mode_route_on_it
         statements::count(),
         1,
         "and it costs exactly the one batched coherence reread: no separate epoch read"
+    );
+}
+
+/// A route with a real stale-servable window does not rebuild in the
+/// foreground when another node advances the epoch: the entry is found, the
+/// reread reports the advance, `freshness_state` floors the moved entry's
+/// effective age at `fresh_ms`, and the first request per key after the
+/// advance is served the stored bytes once under `Warning` while a
+/// background rebuild runs under the re-derived key.
+///
+/// This is a behaviour change task 5b introduced and this test is its
+/// guard; it passes unchanged on the commit that introduced the change, so
+/// there is no RED of its own to quote. What it guards is proven by revert
+/// instead: restoring the per-request `ledger.epoch()` read in `serve`
+/// makes the advance change the lookup key again, the entry unreachable,
+/// and the dispatch a plain foreground miss - the body assertion below then
+/// reads `stale render 2` where it requires `stale render 1`, and the
+/// `Warning` assertion after it would fail for the same reason.
+///
+/// Bounded, and that matters: the stale window is the bound. The advance is
+/// visible to this node at the very first request (the reread reports it);
+/// what the policy chooses to do about it is to answer that one request
+/// from the entry it already holds, exactly as it would for any other
+/// dependency that moved.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_epoch_advanced_by_another_node_serves_a_stale_servable_entry_once_then_rebuilds() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first request renders and publishes"
+    );
+    assert!(
+        first.header("warning").is_none(),
+        "precondition: a fresh publish is not stale"
+    );
+
+    advance_epoch_on_another_node(&harness).await;
+
+    let stale = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(stale.status, StatusCode::OK);
+    assert_eq!(
+        stale.body, first.body,
+        "the entry is still reachable under the leased epoch, so this request is answered \
+         from the bytes already stored, not from a fresh render"
+    );
+    assert_eq!(
+        stale.header("warning"),
+        Some("110 - \"Response is Stale\""),
+        "and it is answered honestly: the reread reported the advance, so the entry is \
+         served stale rather than as if nothing had moved"
+    );
+
+    // The rebuild is a detached `tokio::spawn`, so the dispatch above
+    // returned before its publish decision was final. Waiting on the
+    // coordinator's own release counter is the barrier the race suite
+    // already uses for exactly this; nothing here waits on time.
+    wait_until_background_finished(&harness, 2).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the background rebuild ran once"
+    );
+
+    let epoch = RenderCache::store_inspection()
+        .await
+        .expect("store inspection")
+        .epoch;
+    let new_key =
+        RenderCache::key_for_route_at_epoch_for_test("/stale/{id}", &[("id", "1")], None, epoch);
+    assert!(
+        RenderCache::inspect(&new_key)
+            .await
+            .expect("inspect")
+            .is_some(),
+        "the rebuild published under the key the advanced epoch derives, not the one the \
+         stale entry was found at"
+    );
+
+    let hot_before = RenderCache::hot_serves_for_test();
+    let rebuilt = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the republished entry is coherent under the advanced epoch, so this dispatch is a hit"
+    );
+    assert!(
+        rebuilt.header("warning").is_none(),
+        "and a fresh one: nothing about it is stale any more"
+    );
+    assert_ne!(
+        rebuilt.body, first.body,
+        "it serves what the rebuild produced, not the bytes the stale serve replayed"
+    );
+    assert_eq!(
+        RenderCache::hot_serves_for_test(),
+        hot_before + 1,
+        "off the hot path, under the new epoch"
     );
 }
 
