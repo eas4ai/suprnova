@@ -8,22 +8,30 @@
 //! it could not. Everything a record means, and every transition between
 //! records, belongs to the kernel that runs over this port.
 //!
-//! `DistributedInstanceLedger`, the kernel that implements
-//! [`LiveInstanceLedger`](super::LiveInstanceLedger) over the port, arrives
-//! with the state machine extracted from the Tier 0 provider. This module
-//! owns what that kernel runs against, and [`MemoryRecordStore`] is both the
-//! conformance reference every adapter must match and the kernel's test
-//! double.
+//! [`DistributedInstanceLedger`] is the kernel that implements
+//! [`LiveInstanceLedger`] over the port. It owns no rule of its own: every
+//! decision is a pure function in [`state`](super::state), and this module is
+//! the loop that reads a record, applies one of those functions, and writes
+//! the result back at exactly the version it read. `MemoryInstanceLedger` is
+//! this kernel over [`MemoryRecordStore`], so Tier 0 and every distributed
+//! tier run one state machine and answer one conformance suite.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
-use super::{ClaimToken, LedgerError, LedgerErrorKind};
+use super::record::{decode_record, decode_reservation, encode_record, encode_reservation};
+use super::state::{self, ClaimDecision, InstanceRecord, PromotionReservation};
+use super::{
+    AcceptedOutcome, ClaimGrant, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority,
+    LedgerError, LedgerErrorKind, LedgerInspection, LedgerLimits, LiveInstanceLedger,
+    MountInstanceRecord, PromotionOutcome, PromotionRecord, RefreshReason,
+};
 use crate::clock::Clock;
-use crate::identity::{IdempotencyKey, InstanceId, ScopeFingerprint, UnixMillis};
+use crate::identity::{IdempotencyKey, InstanceId, Revision, ScopeFingerprint, UnixMillis};
 
 /// The version an [`InstanceRecordStore`] gives a record it has just created.
 const FIRST_VERSION: u64 = 1;
@@ -87,7 +95,7 @@ impl PartialOrd for PromotionRecordKey {
 }
 
 /// A record as a store holds it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct StoredRecord {
     /// The encoded record. Only the kernel's codec reads these bytes; a store
     /// keeps and returns them unchanged.
@@ -103,6 +111,26 @@ pub struct StoredRecord {
     /// for an elapsed record exactly as it answers for one that was never
     /// written.
     pub expires_at: UnixMillis,
+}
+
+impl fmt::Debug for StoredRecord {
+    /// Prints the record's version, expiry, and size, never its bytes.
+    ///
+    /// Those bytes are an encoded record: revision metadata and the
+    /// identities that scope it. This crate redacts identities everywhere
+    /// else, and a derived `Debug` would put them in any line that formats a
+    /// store's answer.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredRecord")
+            .field("version", &self.version)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "bytes",
+                &format_args!("<{} bytes:redacted>", self.bytes.len()),
+            )
+            .finish()
+    }
 }
 
 /// What one compare-and-store did.
@@ -134,6 +162,35 @@ pub enum CleanupOp {
     /// Retire the claim without ever restoring base-revision authority,
     /// because coordinated host effects may already have committed.
     Fence(ClaimToken),
+}
+
+impl CleanupOp {
+    /// The claim this retirement acts on.
+    pub(crate) const fn token(&self) -> &ClaimToken {
+        match self {
+            Self::Abandon(token) | Self::Fence(token) => token,
+        }
+    }
+
+    /// Whether retiring this claim lets store time decide what holds the key.
+    const fn timing(&self) -> Timing {
+        match self {
+            Self::Abandon(_) => Timing::Elapsing,
+            Self::Fence(_) => Timing::Regardless,
+        }
+    }
+}
+
+/// Whether one store operation lets store time decide what is there.
+#[derive(Clone, Copy)]
+enum Timing {
+    /// An elapsed record is gone, which is what the port promises and what
+    /// every operation that grants or restores authority is decided under.
+    Elapsing,
+    /// Whatever holds the key is there. Fencing a claim never restores
+    /// authority and is retiring it precisely because something failed, so it
+    /// must not need a clock the host may be unable to read.
+    Regardless,
 }
 
 /// Provider contract for distributed instance authority. A backend supplies
@@ -192,16 +249,13 @@ pub trait InstanceRecordStore: Send + Sync {
 
     /// Counts the unexpired instance records the store holds, which is what
     /// the kernel's configured instance capacity is checked against.
-    async fn count_instances(&self) -> Result<usize, LedgerError>;
-
-    /// Runs one queued synchronous cleanup ([`CleanupOp`]) that the backend
-    /// can retire on its own.
     ///
-    /// A store that cannot retire a claim without the kernel's own
-    /// read-modify-write reports success and leaves the transition to the
-    /// kernel's next step; it must never invent one, because it cannot read
-    /// the record it would be transitioning.
-    async fn apply_cleanup(&self, op: CleanupOp) -> Result<(), LedgerError>;
+    /// A retirement a synchronous drop queued is not part of this port: the
+    /// kernel drains its own queue through [`InstanceRecordStore::load`] and
+    /// [`InstanceRecordStore::compare_and_store`], exactly as it runs every
+    /// other operation, so a backend never has to read a record to retire a
+    /// claim it cannot interpret.
+    async fn count_instances(&self) -> Result<usize, LedgerError>;
 }
 
 /// One key's row in [`MemoryRecordStore`].
@@ -309,15 +363,30 @@ fn insert_absent<K: Clone + Ord>(
     true
 }
 
-#[async_trait]
-impl InstanceRecordStore for MemoryRecordStore {
-    async fn load(&self, key: &InstanceRecordKey) -> Result<Option<StoredRecord>, LedgerError> {
+/// The store's operations, each one atomic under the table lock.
+///
+/// They are inherent and synchronous because nothing an in-process store does
+/// can yield. The [`InstanceRecordStore`] implementation below is these
+/// methods and nothing else, and the Tier 0 ledger reaches the same methods
+/// directly when a synchronous drop has to retire a claim without an
+/// executor.
+impl MemoryRecordStore {
+    fn load_record(
+        &self,
+        key: &InstanceRecordKey,
+        timing: Timing,
+    ) -> Result<Option<StoredRecord>, LedgerError> {
         let mut state = self.lock()?;
-        let now = self.store_now()?;
-        Ok(take_unexpired(&mut state.instances, key, now))
+        match timing {
+            Timing::Elapsing => {
+                let now = self.store_now()?;
+                Ok(take_unexpired(&mut state.instances, key, now))
+            }
+            Timing::Regardless => Ok(state.instances.get(key).map(RecordSlot::stored)),
+        }
     }
 
-    async fn insert_if_absent(
+    fn insert_record_if_absent(
         &self,
         key: &InstanceRecordKey,
         bytes: &[u8],
@@ -334,21 +403,24 @@ impl InstanceRecordStore for MemoryRecordStore {
         ))
     }
 
-    async fn compare_and_store(
+    fn replace_record(
         &self,
         key: &InstanceRecordKey,
         expected_version: u64,
         bytes: &[u8],
         expires_at: UnixMillis,
+        timing: Timing,
     ) -> Result<CasOutcome, LedgerError> {
         let mut state = self.lock()?;
-        let now = self.store_now()?;
-        if state
-            .instances
-            .get(key)
-            .is_some_and(|slot| slot.expires_at <= now)
-        {
-            state.instances.remove(key);
+        if let Timing::Elapsing = timing {
+            let now = self.store_now()?;
+            if state
+                .instances
+                .get(key)
+                .is_some_and(|slot| slot.expires_at <= now)
+            {
+                state.instances.remove(key);
+            }
         }
         let Some(slot) = state.instances.get_mut(key) else {
             return Ok(CasOutcome::Missing);
@@ -366,12 +438,12 @@ impl InstanceRecordStore for MemoryRecordStore {
         Ok(CasOutcome::Stored { version })
     }
 
-    async fn remove(&self, key: &InstanceRecordKey) -> Result<(), LedgerError> {
+    fn remove_record(&self, key: &InstanceRecordKey) -> Result<(), LedgerError> {
         self.lock()?.instances.remove(key);
         Ok(())
     }
 
-    async fn load_promotion(
+    fn load_reservation(
         &self,
         key: &PromotionRecordKey,
     ) -> Result<Option<StoredRecord>, LedgerError> {
@@ -380,7 +452,7 @@ impl InstanceRecordStore for MemoryRecordStore {
         Ok(take_unexpired(&mut state.promotions, key, now))
     }
 
-    async fn insert_promotion_if_absent(
+    fn insert_reservation_if_absent(
         &self,
         key: &PromotionRecordKey,
         bytes: &[u8],
@@ -400,49 +472,792 @@ impl InstanceRecordStore for MemoryRecordStore {
     /// Counting walks every instance record, so it reclaims the elapsed ones
     /// it passes: an adapter answers the same question with a bounded query
     /// over unexpired rows.
-    async fn count_instances(&self) -> Result<usize, LedgerError> {
+    fn count_records(&self) -> Result<usize, LedgerError> {
         let mut state = self.lock()?;
         let now = self.store_now()?;
         state.instances.retain(|_, slot| slot.expires_at > now);
         Ok(state.instances.len())
     }
+}
 
-    /// This store has no deferred work to run. Every record it holds is in
-    /// this process behind one lock, so the kernel applies each queued
-    /// cleanup through [`InstanceRecordStore::load`] and
-    /// [`InstanceRecordStore::compare_and_store`] before its next step, and
-    /// there is nothing to hand a backend. The store cannot read a record and
-    /// therefore never invents a transition of its own.
-    async fn apply_cleanup(&self, _op: CleanupOp) -> Result<(), LedgerError> {
+#[async_trait]
+impl InstanceRecordStore for MemoryRecordStore {
+    async fn load(&self, key: &InstanceRecordKey) -> Result<Option<StoredRecord>, LedgerError> {
+        self.load_record(key, Timing::Elapsing)
+    }
+
+    async fn insert_if_absent(
+        &self,
+        key: &InstanceRecordKey,
+        bytes: &[u8],
+        expires_at: UnixMillis,
+    ) -> Result<bool, LedgerError> {
+        self.insert_record_if_absent(key, bytes, expires_at)
+    }
+
+    async fn compare_and_store(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+        bytes: &[u8],
+        expires_at: UnixMillis,
+    ) -> Result<CasOutcome, LedgerError> {
+        self.replace_record(key, expected_version, bytes, expires_at, Timing::Elapsing)
+    }
+
+    async fn remove(&self, key: &InstanceRecordKey) -> Result<(), LedgerError> {
+        self.remove_record(key)
+    }
+
+    async fn load_promotion(
+        &self,
+        key: &PromotionRecordKey,
+    ) -> Result<Option<StoredRecord>, LedgerError> {
+        self.load_reservation(key)
+    }
+
+    async fn insert_promotion_if_absent(
+        &self,
+        key: &PromotionRecordKey,
+        bytes: &[u8],
+        expires_at: UnixMillis,
+    ) -> Result<bool, LedgerError> {
+        self.insert_reservation_if_absent(key, bytes, expires_at)
+    }
+
+    async fn count_instances(&self) -> Result<usize, LedgerError> {
+        self.count_records()
+    }
+}
+
+/// Attempts one operation makes before it reports contention: the first
+/// read, and one more from a fresh read after a stale one.
+const APPLY_ATTEMPTS: usize = 2;
+
+/// How long a store keeps an instance record after the instance lifetime the
+/// node clock measures has run out.
+///
+/// The node clock decides the lifetime and the store's expiry decides
+/// eviction, so the two need a gap, and the gap buys two things. A node whose
+/// clock trails the store's still finds the record it is entitled to decide
+/// about, which is the clock-skew allowance the rest of the crate gives at
+/// the same 60 seconds. And a request that arrives just after an instance
+/// elapsed is told its instance expired, the exact fresh-render reason,
+/// rather than that it never existed.
+///
+/// A promotion reservation gets no such window: its retry identity has to be
+/// free the instant it elapses, or an exact retry after expiry could recover
+/// authority over an instance that is gone.
+const ELAPSED_RECORD_RETENTION_MS: u64 = 60_000;
+
+/// The store deadline one record's instance expiry earns.
+fn store_expiry(expires_at: UnixMillis) -> UnixMillis {
+    UnixMillis::new(expires_at.get().saturating_add(ELAPSED_RECORD_RETENTION_MS))
+}
+
+/// What one load found at an instance key.
+///
+/// It carries no expiry decision. Node time is read by the transitions that
+/// need it and by nothing else, so retiring a claim whose host effects may
+/// have committed still works when the clock provider does not.
+enum Loaded {
+    /// No record holds the key: either none was ever written, or the store
+    /// evicted the one that did.
+    Absent,
+    /// A record holds the key.
+    Present {
+        /// The decoded record.
+        record: InstanceRecord,
+        /// The version it was read at, which is the only version a write
+        /// derived from this read may replace.
+        version: u64,
+    },
+}
+
+/// One attempt's decision: what it observed, and the record it must store
+/// first for that observation to be true.
+struct Attempt<T> {
+    /// The version to replace and the record to replace it with, or `None`
+    /// when the attempt read the record and changed nothing.
+    write: Option<(u64, InstanceRecord)>,
+    /// What the caller observes once any write lands.
+    outcome: T,
+}
+
+impl<T> Attempt<T> {
+    /// An attempt that decided without writing.
+    const fn read(outcome: T) -> Self {
+        Self {
+            write: None,
+            outcome,
+        }
+    }
+
+    /// An attempt whose transition must reach the store at `version`.
+    fn from_transition<D>(transition: state::Transition<D>, version: u64, outcome: T) -> Self {
+        Self {
+            write: transition.stored.map(|record| (version, record)),
+            outcome,
+        }
+    }
+}
+
+/// Whether one creation attempt created the record, found the key held, or
+/// lost a race and should read again.
+enum Created {
+    /// This attempt created the record.
+    Yes,
+    /// An unexpired record already holds the key.
+    Held,
+    /// Another writer got there first; the key must be read again.
+    Raced,
+}
+
+/// Scoped instance revision authority over any store that holds bytes.
+///
+/// The kernel owns the whole state machine and the store owns atomicity and
+/// time, so one implementation serves every deployment tier: the same
+/// transitions run over an in-process map, a database row, or an external
+/// key-value store. Each operation reads the record, applies one pure
+/// transition function, and replaces the record at exactly the version it
+/// read. A stale read is read again once and then reported as
+/// [`LedgerErrorKind::InstanceConflict`], which is a classified rejection and
+/// never a partial state.
+///
+/// Claim tokens belong to the handle that issued them. Two handles over one
+/// store are two providers: each mints tokens against its own identity, and a
+/// token minted by one is [`LedgerErrorKind::ClaimMismatch`] on the other,
+/// so a claim is always resolved by the node that took it or by its lease.
+pub struct DistributedInstanceLedger<S: InstanceRecordStore> {
+    store: Arc<S>,
+    clock: Arc<dyn Clock>,
+    limits: LedgerLimits,
+    provider_identity: Arc<()>,
+    retirements: Arc<Mutex<VecDeque<CleanupOp>>>,
+}
+
+impl<S: InstanceRecordStore> Clone for DistributedInstanceLedger<S> {
+    /// Clones the handle, not the provider: a clone shares the store, the
+    /// retirement queue, and the identity its tokens are bound to.
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            clock: Arc::clone(&self.clock),
+            limits: self.limits,
+            provider_identity: Arc::clone(&self.provider_identity),
+            retirements: Arc::clone(&self.retirements),
+        }
+    }
+}
+
+impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
+    /// Creates one provider handle over `store`, bounded by `limits`.
+    ///
+    /// `clock` is node time: it measures instance lifetimes and claim leases.
+    /// The store's own clock decides eviction, and the two are independent by
+    /// design.
+    #[must_use]
+    pub fn new(store: Arc<S>, clock: Arc<dyn Clock>, limits: LedgerLimits) -> Self {
+        Self {
+            store,
+            clock,
+            limits,
+            provider_identity: Arc::new(()),
+            retirements: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Applies every retirement a synchronous drop queued, reporting the
+    /// first store or codec failure.
+    ///
+    /// Each operation drains the queue before it runs, so calling this is
+    /// only necessary when a caller needs a dropped claim retired without
+    /// making another ledger request.
+    pub async fn flush_cleanup(&self) -> Result<(), LedgerError> {
+        let mut first = Ok(());
+        while let Some(op) = self.take_retirement() {
+            if let Err(error) = self.retire(&op).await
+                && first.is_ok()
+            {
+                first = Err(error);
+            }
+        }
+        first
+    }
+
+    /// Returns metadata-only provider inspection for tests and trusted
+    /// diagnostics.
+    pub async fn inspect(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<LedgerInspection>, LedgerError> {
+        self.drain_retirements().await;
+        let now = self.now()?;
+        let key = InstanceRecordKey {
+            scope: scope.clone(),
+            instance_id: instance_id.clone(),
+        };
+        match self.load(&key).await? {
+            Loaded::Present { record, .. } if record.expires_at > now => {
+                Ok(Some(state::inspection(&record, now)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Reads node time, reporting a clock the host cannot read rather than
+    /// deciding an expiry without one.
+    fn now(&self) -> Result<UnixMillis, LedgerError> {
+        self.clock
+            .now()
+            .map_err(|_| LedgerError::new(LedgerErrorKind::ClockUnavailable))
+    }
+
+    /// Whether this handle issued `claim`.
+    fn owns(&self, claim: &ClaimToken) -> bool {
+        Arc::ptr_eq(&self.provider_identity, &claim.provider_identity)
+    }
+
+    /// The key one token's claim lives at.
+    fn token_key(claim: &ClaimToken) -> InstanceRecordKey {
+        InstanceRecordKey {
+            scope: claim.scope.clone(),
+            instance_id: claim.instance_id.clone(),
+        }
+    }
+
+    /// Reads and decodes the record at `key`.
+    async fn load(&self, key: &InstanceRecordKey) -> Result<Loaded, LedgerError> {
+        interpret(self.store.load(key).await?)
+    }
+
+    /// Decides one queued retirement against the record it was read from.
+    ///
+    /// A retirement is an ordinary transition, and the two differ in more
+    /// than which state function they run. Releasing a claim restores a
+    /// retryable base revision, so it must know whether the instance is still
+    /// alive and therefore needs node time. Fencing one never restores
+    /// anything, so it asks the clock nothing: a claim whose host effects may
+    /// already have committed has to be retirable even when the clock
+    /// provider is the reason the commit failed.
+    fn retirement(
+        &self,
+        op: &CleanupOp,
+        loaded: Loaded,
+    ) -> Result<Attempt<Result<(), LedgerError>>, LedgerError> {
+        let Loaded::Present { record, version } = loaded else {
+            return Ok(Attempt::read(Err(LedgerError::new(
+                LedgerErrorKind::ClaimMismatch,
+            ))));
+        };
+        let claim_id = op.token().claim_id;
+        let transition = match op {
+            CleanupOp::Abandon(_) => {
+                let now = self.now()?;
+                if record.expires_at <= now {
+                    return Ok(Attempt::read(Err(LedgerError::new(
+                        LedgerErrorKind::InstanceExpired,
+                    ))));
+                }
+                state::release(record, claim_id, now)
+            }
+            CleanupOp::Fence(_) => state::fence(record, claim_id),
+        };
+        let outcome = match &transition.outcome {
+            Ok(()) => Ok(()),
+            Err(error) => Err(*error),
+        };
+        Ok(Attempt::from_transition(transition, version, outcome))
+    }
+
+    /// Runs one transition against the record at `key`: read, apply, and
+    /// replace at the version that was read. A stale read is read again once,
+    /// and then the operation is a classified rejection.
+    async fn apply<T: Send>(
+        &self,
+        key: &InstanceRecordKey,
+        mut step: impl FnMut(Loaded) -> Result<Attempt<T>, LedgerError> + Send,
+    ) -> Result<T, LedgerError> {
+        for _ in 0..APPLY_ATTEMPTS {
+            let loaded = self.load(key).await?;
+            let attempt = step(loaded)?;
+            let Some((version, record)) = attempt.write else {
+                return Ok(attempt.outcome);
+            };
+            let bytes = encode_record(&record)?;
+            match self
+                .store
+                .compare_and_store(key, version, &bytes, store_expiry(record.expires_at))
+                .await?
+            {
+                CasOutcome::Stored { .. } => return Ok(attempt.outcome),
+                CasOutcome::Conflict | CasOutcome::Missing => {}
+            }
+        }
+        Err(LedgerError::new(LedgerErrorKind::InstanceConflict))
+    }
+
+    /// Creates `record` at `key` unless an unexpired record already holds it.
+    ///
+    /// An elapsed record does not hold its key: it is replaced at the version
+    /// it was read at, which is the distributed form of the pruning an
+    /// in-process ledger did under its lock. Only a key nothing holds is
+    /// measured against the configured instance capacity, so replacing an
+    /// elapsed record never fails for capacity.
+    async fn create(
+        &self,
+        key: &InstanceRecordKey,
+        now: UnixMillis,
+        record: &InstanceRecord,
+    ) -> Result<Created, LedgerError> {
+        match self.load(key).await? {
+            Loaded::Present { record, .. } if record.expires_at > now => Ok(Created::Held),
+            Loaded::Present { version, .. } => {
+                let bytes = encode_record(record)?;
+                match self
+                    .store
+                    .compare_and_store(key, version, &bytes, store_expiry(record.expires_at))
+                    .await?
+                {
+                    CasOutcome::Stored { .. } => Ok(Created::Yes),
+                    CasOutcome::Conflict | CasOutcome::Missing => Ok(Created::Raced),
+                }
+            }
+            Loaded::Absent => {
+                if self.store.count_instances().await? >= self.limits.max_instances() {
+                    return Err(LedgerError::new(LedgerErrorKind::CapacityExceeded));
+                }
+                let bytes = encode_record(record)?;
+                if self
+                    .store
+                    .insert_if_absent(key, &bytes, store_expiry(record.expires_at))
+                    .await?
+                {
+                    Ok(Created::Yes)
+                } else {
+                    Ok(Created::Raced)
+                }
+            }
+        }
+    }
+
+    /// Resolves a promotion against the reservation its retry identity holds,
+    /// or `None` when the identity is free.
+    async fn recover_promotion(
+        &self,
+        key: &PromotionRecordKey,
+        request: &PromotionRecord,
+    ) -> Result<Option<PromotionOutcome>, LedgerError> {
+        let Some(stored) = self.store.load_promotion(key).await? else {
+            return Ok(None);
+        };
+        let reservation = decode_reservation(&stored.bytes)?;
+        if reservation.request_digest == request.request_digest {
+            return Ok(Some(PromotionOutcome::Existing(InstanceAuthority::new(
+                reservation.instance_id,
+                reservation.initial_revision,
+                reservation.expires_at,
+            ))));
+        }
+        Ok(Some(PromotionOutcome::IdempotencyConflict))
+    }
+
+    /// Queues one retirement for the next asynchronous step.
+    ///
+    /// A token this handle did not issue is dropped rather than queued: it
+    /// belongs to another provider, whose own queue is the only one that can
+    /// resolve it. A queue at its bound drops the retirement too, and the
+    /// claim's lease is the backstop, because an unretired claim becomes
+    /// terminally expired rather than retryable.
+    fn queue_retirement(&self, op: CleanupOp) {
+        if !self.owns(op.token()) {
+            return;
+        }
+        let Ok(mut queue) = self.retirements.lock() else {
+            return;
+        };
+        if queue.len() >= self.limits.max_instances() {
+            return;
+        }
+        queue.push_back(op);
+    }
+
+    /// Takes the next queued retirement.
+    fn take_retirement(&self) -> Option<CleanupOp> {
+        self.retirements.lock().ok()?.pop_front()
+    }
+
+    /// Applies every queued retirement before an operation runs.
+    ///
+    /// A retirement that the store could not apply is dropped rather than
+    /// retried without bound: the claim's lease is the backstop, and it fails
+    /// towards terminal authority, never towards a base revision that could
+    /// be claimed twice.
+    async fn drain_retirements(&self) {
+        while let Some(op) = self.take_retirement() {
+            let _ = self.retire(&op).await;
+        }
+    }
+
+    /// Runs one retirement, reporting only store, clock, and codec failures.
+    ///
+    /// What the state machine answered about the claim is not a failure to
+    /// retire it: a claim that already committed, expired, or belongs to a
+    /// record that is gone has nothing left to release.
+    async fn retire(&self, op: &CleanupOp) -> Result<(), LedgerError> {
+        let key = Self::token_key(op.token());
+        let _resolved: Result<(), LedgerError> = self
+            .apply(&key, |loaded| self.retirement(op, loaded))
+            .await?;
         Ok(())
+    }
+}
+
+/// Decodes what a store returned into what the kernel decides against.
+fn interpret(stored: Option<StoredRecord>) -> Result<Loaded, LedgerError> {
+    let Some(stored) = stored else {
+        return Ok(Loaded::Absent);
+    };
+    Ok(Loaded::Present {
+        record: decode_record(&stored.bytes)?,
+        version: stored.version,
+    })
+}
+
+#[async_trait]
+impl<S: InstanceRecordStore + 'static> LiveInstanceLedger for DistributedInstanceLedger<S> {
+    async fn mount_instance(
+        &self,
+        record: MountInstanceRecord,
+    ) -> Result<InstanceAuthority, LedgerError> {
+        self.drain_retirements().await;
+        let key = InstanceRecordKey {
+            scope: record.scope.clone(),
+            instance_id: record.instance_id.clone(),
+        };
+        for _ in 0..APPLY_ATTEMPTS {
+            let now = self.now()?;
+            state::validate_expiry(now, record.expires_at, self.limits)?;
+            let created = state::created_record(
+                Some(record.component_contract.clone()),
+                record.initial_revision,
+                record.expires_at,
+            );
+            match self.create(&key, now, &created).await? {
+                Created::Yes => {
+                    return Ok(InstanceAuthority::new(
+                        record.instance_id,
+                        record.initial_revision,
+                        record.expires_at,
+                    ));
+                }
+                Created::Held => {
+                    return Err(LedgerError::new(LedgerErrorKind::InstanceConflict));
+                }
+                Created::Raced => {}
+            }
+        }
+        Err(LedgerError::new(LedgerErrorKind::InstanceConflict))
+    }
+
+    async fn promote(&self, request: PromotionRecord) -> Result<PromotionOutcome, LedgerError> {
+        self.drain_retirements().await;
+        let promotion_key = PromotionRecordKey {
+            scope: request.scope.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+        };
+        let instance_key = InstanceRecordKey {
+            scope: request.scope.clone(),
+            instance_id: request.instance_id.clone(),
+        };
+        for _ in 0..APPLY_ATTEMPTS {
+            let now = self.now()?;
+            state::validate_expiry(now, request.expires_at, self.limits)?;
+            if let Some(outcome) = self.recover_promotion(&promotion_key, &request).await? {
+                return Ok(outcome);
+            }
+            let created = state::created_record(None, request.initial_revision, request.expires_at);
+            match self.create(&instance_key, now, &created).await? {
+                Created::Held => {
+                    return Err(LedgerError::new(LedgerErrorKind::InstanceConflict));
+                }
+                Created::Raced => continue,
+                Created::Yes => {}
+            }
+            // The instance exists before its retry identity is reserved. The
+            // other order would let an exact retry recover authority over an
+            // instance that was never created.
+            let reservation = encode_reservation(&PromotionReservation {
+                request_digest: request.request_digest.clone(),
+                instance_id: request.instance_id.clone(),
+                initial_revision: request.initial_revision,
+                expires_at: request.expires_at,
+            })?;
+            if self
+                .store
+                .insert_promotion_if_absent(&promotion_key, &reservation, request.expires_at)
+                .await?
+            {
+                return Ok(PromotionOutcome::Created(InstanceAuthority::new(
+                    request.instance_id,
+                    request.initial_revision,
+                    request.expires_at,
+                )));
+            }
+            if let Some(outcome) = self.recover_promotion(&promotion_key, &request).await? {
+                return Ok(outcome);
+            }
+        }
+        Err(LedgerError::new(LedgerErrorKind::InstanceConflict))
+    }
+
+    async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
+        self.drain_retirements().await;
+        let key = InstanceRecordKey {
+            scope: request.scope.clone(),
+            instance_id: request.instance_id.clone(),
+        };
+        self.apply(&key, |loaded| {
+            let Loaded::Present { record, version } = loaded else {
+                return Ok(Attempt::read(ClaimOutcome::RefreshRequired(
+                    RefreshReason::Missing,
+                )));
+            };
+            let now = self.now()?;
+            if record.expires_at <= now {
+                return Ok(Attempt::read(ClaimOutcome::RefreshRequired(
+                    RefreshReason::InstanceExpired,
+                )));
+            }
+            // The version the record was read at names the claim. Versions
+            // rise for as long as a record lives and only one write can land
+            // at any of them, so within a record's life no two claims share a
+            // name, and a token from a released claim can never match the
+            // claim that replaced it.
+            let state::Transition { stored, outcome } =
+                state::claim(record, &request, now, self.limits, version)?;
+            let outcome = match outcome {
+                ClaimDecision::Granted { successor_revision } => {
+                    ClaimOutcome::Granted(ClaimGrant::new(
+                        ClaimToken {
+                            provider_identity: Arc::clone(&self.provider_identity),
+                            scope: request.scope.clone(),
+                            instance_id: request.instance_id.clone(),
+                            claim_id: version,
+                        },
+                        successor_revision,
+                    ))
+                }
+                ClaimDecision::Classified(classified) => classified,
+            };
+            Ok(Attempt {
+                write: stored.map(|record| (version, record)),
+                outcome,
+            })
+        })
+        .await
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        self.drain_retirements().await;
+        let now = self.now()?;
+        let key = InstanceRecordKey {
+            scope: scope.clone(),
+            instance_id: instance_id.clone(),
+        };
+        match self.load(&key).await? {
+            Loaded::Present { record, .. } if record.expires_at > now => {
+                Ok(state::accepted_revision(&record, now))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn commit(
+        &self,
+        claim: &ClaimToken,
+        outcome: AcceptedOutcome,
+    ) -> Result<(), LedgerError> {
+        self.drain_retirements().await;
+        if !self.owns(claim) {
+            return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
+        }
+        let key = Self::token_key(claim);
+        self.apply(&key, |loaded| {
+            let Loaded::Present { record, version } = loaded else {
+                return Ok(Attempt::read(Err(LedgerError::new(
+                    LedgerErrorKind::ClaimMismatch,
+                ))));
+            };
+            let now = self.now()?;
+            if record.expires_at <= now {
+                return Ok(Attempt::read(Err(LedgerError::new(
+                    LedgerErrorKind::InstanceExpired,
+                ))));
+            }
+            let transition = state::commit(
+                record,
+                &key,
+                claim.claim_id,
+                outcome.clone(),
+                now,
+                self.limits,
+            );
+            let resolved = match &transition.outcome {
+                Ok(()) => Ok(()),
+                Err(error) => Err(*error),
+            };
+            Ok(Attempt::from_transition(transition, version, resolved))
+        })
+        .await?
+    }
+
+    async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
+        self.drain_retirements().await;
+        if !self.owns(claim) {
+            return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
+        }
+        let key = Self::token_key(claim);
+        self.apply(&key, |loaded| {
+            let Loaded::Present { record, version } = loaded else {
+                return Ok(Attempt::read(Err(LedgerError::new(
+                    LedgerErrorKind::ClaimMismatch,
+                ))));
+            };
+            let now = self.now()?;
+            if record.expires_at <= now {
+                return Ok(Attempt::read(Err(LedgerError::new(
+                    LedgerErrorKind::InstanceExpired,
+                ))));
+            }
+            let transition = state::abandon(record, claim.claim_id, now);
+            let resolved = match &transition.outcome {
+                Ok(()) => Ok(()),
+                Err(error) => Err(*error),
+            };
+            Ok(Attempt::from_transition(transition, version, resolved))
+        })
+        .await?
+    }
+
+    fn abandon_on_drop(&self, claim: ClaimToken) {
+        self.queue_retirement(CleanupOp::Abandon(claim));
+    }
+
+    fn fence_on_drop(&self, claim: ClaimToken) {
+        self.queue_retirement(CleanupOp::Fence(claim));
+    }
+}
+
+impl DistributedInstanceLedger<MemoryRecordStore> {
+    /// Reads inspection without an executor.
+    ///
+    /// Every [`MemoryRecordStore`] operation completes under one lock without
+    /// yielding, so the Tier 0 provider can answer a synchronous caller by
+    /// running the same read the asynchronous [`Self::inspect`] runs.
+    pub(crate) fn inspect_in_process(
+        &self,
+        scope: &ScopeFingerprint,
+        instance_id: &InstanceId,
+    ) -> Result<Option<LedgerInspection>, LedgerError> {
+        let now = self.now()?;
+        let key = InstanceRecordKey {
+            scope: scope.clone(),
+            instance_id: instance_id.clone(),
+        };
+        match interpret(self.store.load_record(&key, Timing::Elapsing)?)? {
+            Loaded::Present { record, .. } if record.expires_at > now => {
+                Ok(Some(state::inspection(&record, now)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Retires one claim immediately rather than queueing it.
+    ///
+    /// An in-process store has no remote input or output to block on, so a
+    /// dropped claim releases its base revision before the caller's next
+    /// statement, which is what lets an exact retry proceed at once. The
+    /// transition is the same one the queue would have run.
+    pub(crate) fn retire_in_process(&self, op: CleanupOp) {
+        if !self.owns(op.token()) {
+            return;
+        }
+        let key = Self::token_key(op.token());
+        let timing = op.timing();
+        let _resolved = self.apply_in_process(&key, timing, |loaded| self.retirement(&op, loaded));
+    }
+
+    /// The synchronous twin of [`Self::apply`], over a store that never
+    /// yields.
+    fn apply_in_process<T>(
+        &self,
+        key: &InstanceRecordKey,
+        timing: Timing,
+        mut step: impl FnMut(Loaded) -> Result<Attempt<T>, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        for _ in 0..APPLY_ATTEMPTS {
+            let loaded = interpret(self.store.load_record(key, timing)?)?;
+            let attempt = step(loaded)?;
+            let Some((version, record)) = attempt.write else {
+                return Ok(attempt.outcome);
+            };
+            let bytes = encode_record(&record)?;
+            match self.store.replace_record(
+                key,
+                version,
+                &bytes,
+                store_expiry(record.expires_at),
+                timing,
+            )? {
+                CasOutcome::Stored { .. } => return Ok(attempt.outcome),
+                CasOutcome::Conflict | CasOutcome::Missing => {}
+            }
+        }
+        Err(LedgerError::new(LedgerErrorKind::InstanceConflict))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::*;
     use crate::clock::ClockError;
+    use crate::identity::ContentDigest;
 
     struct FixedClock {
         now: AtomicU64,
+        failing: AtomicBool,
     }
 
     impl FixedClock {
         fn new(now: u64) -> Self {
             Self {
                 now: AtomicU64::new(now),
+                failing: AtomicBool::new(false),
             }
         }
 
         fn set(&self, now: u64) {
             self.now.store(now, Ordering::SeqCst);
         }
+
+        fn set_failing(&self, failing: bool) {
+            self.failing.store(failing, Ordering::SeqCst);
+        }
     }
 
     impl Clock for FixedClock {
         fn now(&self) -> Result<UnixMillis, ClockError> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(ClockError::timestamp_overflow());
+            }
             Ok(UnixMillis::new(self.now.load(Ordering::SeqCst)))
         }
     }
@@ -479,6 +1294,204 @@ mod tests {
             CasOutcome::Stored { version } => version,
             other => panic!("the record was expected to be replaced, not {other:?}"),
         }
+    }
+
+    /// A store whose compare-and-store never lands, which is what a record
+    /// under continuous contention looks like from one node.
+    struct ContendedStore {
+        inner: MemoryRecordStore,
+        refused: AtomicU64,
+    }
+
+    #[async_trait]
+    impl InstanceRecordStore for ContendedStore {
+        async fn load(&self, key: &InstanceRecordKey) -> Result<Option<StoredRecord>, LedgerError> {
+            self.inner.load(key).await
+        }
+
+        async fn insert_if_absent(
+            &self,
+            key: &InstanceRecordKey,
+            bytes: &[u8],
+            expires_at: UnixMillis,
+        ) -> Result<bool, LedgerError> {
+            self.inner.insert_if_absent(key, bytes, expires_at).await
+        }
+
+        async fn compare_and_store(
+            &self,
+            _key: &InstanceRecordKey,
+            _expected_version: u64,
+            _bytes: &[u8],
+            _expires_at: UnixMillis,
+        ) -> Result<CasOutcome, LedgerError> {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+            Ok(CasOutcome::Conflict)
+        }
+
+        async fn remove(&self, key: &InstanceRecordKey) -> Result<(), LedgerError> {
+            self.inner.remove(key).await
+        }
+
+        async fn load_promotion(
+            &self,
+            key: &PromotionRecordKey,
+        ) -> Result<Option<StoredRecord>, LedgerError> {
+            self.inner.load_promotion(key).await
+        }
+
+        async fn insert_promotion_if_absent(
+            &self,
+            key: &PromotionRecordKey,
+            bytes: &[u8],
+            expires_at: UnixMillis,
+        ) -> Result<bool, LedgerError> {
+            self.inner
+                .insert_promotion_if_absent(key, bytes, expires_at)
+                .await
+        }
+
+        async fn count_instances(&self) -> Result<usize, LedgerError> {
+            self.inner.count_instances().await
+        }
+    }
+
+    fn digest(start: u8) -> ContentDigest {
+        ContentDigest::from_bytes(&bytes::<32>(start)).expect("digest is valid")
+    }
+
+    fn limits() -> LedgerLimits {
+        LedgerLimits::new(100, 10_000, 2, 64).expect("limits are valid")
+    }
+
+    fn kernel_mount() -> MountInstanceRecord {
+        let key = instance_key(0x10);
+        MountInstanceRecord::new(
+            key.scope,
+            key.instance_id,
+            digest(0x30),
+            Revision::new(0),
+            UnixMillis::new(5_000),
+        )
+    }
+
+    fn kernel_claim() -> ClaimRequest {
+        let key = instance_key(0x10);
+        ClaimRequest::new(
+            key.scope,
+            key.instance_id,
+            Revision::new(0),
+            IdempotencyKey::from_bytes(&bytes::<16>(0x40)).expect("retry key is valid"),
+            digest(0x50),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stored_record_never_prints_the_bytes_it_carries() {
+        let store = MemoryRecordStore::new(Arc::new(FixedClock::new(0)));
+        let key = instance_key(0x10);
+        store
+            .insert_if_absent(&key, b"a-record-of-authority", UnixMillis::new(1_000))
+            .await
+            .expect("the store answers");
+
+        let printed = format!(
+            "{:?}",
+            store
+                .load(&key)
+                .await
+                .expect("the store answers")
+                .expect("the record is there")
+        );
+
+        assert!(
+            printed.contains("<21 bytes:redacted>"),
+            "a store's answer reports the size of what it holds: {printed}"
+        );
+        assert!(
+            !printed.contains("97"),
+            "a store's answer never prints the record itself: {printed}"
+        );
+        assert!(printed.contains("version: 1"), "{printed}");
+    }
+
+    #[tokio::test]
+    async fn a_fence_retires_a_claim_even_when_the_clock_cannot_be_read() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let ledger = DistributedInstanceLedger::new(
+            Arc::new(MemoryRecordStore::new(clock.clone())),
+            clock.clone(),
+            limits(),
+        );
+        ledger
+            .mount_instance(kernel_mount())
+            .await
+            .expect("the mount is created");
+        let ClaimOutcome::Granted(grant) = ledger
+            .claim(kernel_claim())
+            .await
+            .expect("the claim classifies")
+        else {
+            panic!("the current base revision is claimable");
+        };
+
+        // An unreadable clock is exactly what makes a commit fail, and the
+        // claim it leaves behind is the one that must never come back.
+        clock.set_failing(true);
+        ledger.retire_in_process(CleanupOp::Fence(grant.into_token()));
+        clock.set_failing(false);
+
+        assert!(
+            matches!(
+                ledger
+                    .claim(kernel_claim())
+                    .await
+                    .expect("the claim classifies"),
+                ClaimOutcome::RefreshRequired(RefreshReason::Consumed)
+            ),
+            "a fenced claim never restores its base revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_that_never_lands_is_a_classified_rejection_after_one_retry() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(ContendedStore {
+            inner: MemoryRecordStore::new(clock.clone()),
+            refused: AtomicU64::new(0),
+        });
+        let ledger = DistributedInstanceLedger::new(Arc::clone(&store), clock, limits());
+        ledger
+            .mount_instance(kernel_mount())
+            .await
+            .expect("creating a record does not compare and store");
+
+        let error = ledger
+            .claim(kernel_claim())
+            .await
+            .expect_err("a claim whose write never lands is rejected");
+
+        assert_eq!(
+            error.kind(),
+            LedgerErrorKind::InstanceConflict,
+            "contention is a classified rejection, not a partial state"
+        );
+        assert_eq!(
+            store.refused.load(Ordering::SeqCst),
+            APPLY_ATTEMPTS as u64,
+            "the transition is read again once and then reported"
+        );
+        assert_eq!(
+            ledger
+                .current_accepted_revision(
+                    &instance_key(0x10).scope,
+                    &instance_key(0x10).instance_id
+                )
+                .await
+                .expect("the store answers"),
+            Some(Revision::new(0)),
+            "a rejected claim left the record exactly as it was"
+        );
     }
 
     #[tokio::test]
@@ -705,42 +1718,6 @@ mod tests {
                 .expect_err("no expiry decision is possible")
                 .kind(),
             LedgerErrorKind::ClockUnavailable
-        );
-    }
-
-    #[tokio::test]
-    async fn a_queued_cleanup_is_accepted_without_the_store_inventing_a_transition() {
-        let store = MemoryRecordStore::new(Arc::new(FixedClock::new(0)));
-        let key = instance_key(0x10);
-        store
-            .insert_if_absent(&key, b"first", UnixMillis::new(1_000))
-            .await
-            .expect("the store answers");
-        let token = || ClaimToken {
-            provider_identity: Arc::new(()),
-            scope: key.scope.clone(),
-            instance_id: key.instance_id.clone(),
-            claim_id: 1,
-        };
-
-        store
-            .apply_cleanup(CleanupOp::Abandon(token()))
-            .await
-            .expect("the store answers");
-        store
-            .apply_cleanup(CleanupOp::Fence(token()))
-            .await
-            .expect("the store answers");
-
-        let stored = store
-            .load(&key)
-            .await
-            .expect("the store answers")
-            .expect("the record is there");
-        assert_eq!(stored.bytes, b"first".to_vec());
-        assert_eq!(
-            stored.version, FIRST_VERSION,
-            "the store cannot read a record, so it never rewrites one"
         );
     }
 }

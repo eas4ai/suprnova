@@ -11,6 +11,7 @@ mod endpoint;
 mod file_quarantine_store;
 mod harness;
 mod host;
+pub mod ledger_conformance;
 mod reference_host;
 mod trace;
 mod upload;

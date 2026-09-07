@@ -13,8 +13,8 @@ pub use contract::{
     PromotionRecord, RefreshReason,
 };
 pub use distributed::{
-    CasOutcome, CleanupOp, InstanceRecordKey, InstanceRecordStore, MemoryRecordStore,
-    PromotionRecordKey, StoredRecord,
+    CasOutcome, CleanupOp, DistributedInstanceLedger, InstanceRecordKey, InstanceRecordStore,
+    MemoryRecordStore, PromotionRecordKey, StoredRecord,
 };
 pub use memory::MemoryInstanceLedger;
 pub use record::{MAX_RECORD_BYTES, RECORD_VERSION};

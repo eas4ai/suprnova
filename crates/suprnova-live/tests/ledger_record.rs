@@ -261,7 +261,7 @@ fn the_record_frame_is_versioned_and_bounded() {
         "the record version is part of the stored format and changes deliberately"
     );
     assert_eq!(
-        MAX_RECORD_BYTES, 16_384,
+        MAX_RECORD_BYTES, 32_768,
         "the record bound is part of the stored format and changes deliberately"
     );
 }

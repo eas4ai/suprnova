@@ -12,6 +12,10 @@
 //! another process can write is validated exactly as protocol input is:
 //! decoding classifies and never panics, whatever the bytes are.
 //!
+//! The same frame carries a [`PromotionReservation`], the small record a
+//! retry identity resolves to, so an exact promotion retry recovers its
+//! authority through the store rather than through node memory.
+//!
 //! Records carry revision metadata only. No component state, rendered HTML,
 //! action arguments, or response bytes reach a store, and no error raised
 //! here repeats a record's bytes or identities.
@@ -21,7 +25,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use super::contract::MAX_ACCEPTED_OUTCOMES;
-use super::state::{InstancePhase, InstanceRecord, PendingClaim};
+use super::state::{InstancePhase, InstanceRecord, PendingClaim, PromotionReservation};
 use super::{
     AcceptedOutcome, AcceptedOutcomeKind, AcceptedOutcomeMetadata, LedgerError, LedgerErrorKind,
     RefreshReason,
@@ -38,7 +42,12 @@ use crate::limits::InputLimits;
 pub const RECORD_VERSION: u8 = 1;
 
 /// Maximum bytes one encoded record may occupy, version byte included.
-pub const MAX_RECORD_BYTES: usize = 16_384;
+///
+/// A record holding the `MAX_ACCEPTED_OUTCOMES` ceiling of retained
+/// outcomes measures about 22 KiB, so this bound holds every record the
+/// ledger can produce with headroom, and every SQL blob dialect holds this
+/// bound. It is a bound on hostile input, not a budget the ledger spends.
+pub const MAX_RECORD_BYTES: usize = 32_768;
 
 /// The canonical JSON body's share of [`MAX_RECORD_BYTES`]; the leading
 /// version byte takes the rest.
@@ -95,10 +104,6 @@ fn body_limits() -> Result<InputLimits, LedgerError> {
 /// whose body does not fit [`MAX_RECORD_BYTES`], is reported rather than
 /// truncated: dropping retained authority silently would let an exact
 /// duplicate be executed twice.
-#[allow(
-    dead_code,
-    reason = "the codec's caller is the distributed kernel that follows; this module's tests prove it"
-)]
 pub(crate) fn encode_record(record: &InstanceRecord) -> Result<Vec<u8>, LedgerError> {
     if record.accepted.len() > MAX_ACCEPTED_OUTCOMES {
         return Err(size_error());
@@ -119,10 +124,6 @@ pub(crate) fn encode_record(record: &InstanceRecord) -> Result<Vec<u8>, LedgerEr
 /// The byte bound is checked before anything is parsed, and every remaining
 /// bound is the canonical parser's, so arbitrary input costs bounded work and
 /// is classified rather than trusted.
-#[allow(
-    dead_code,
-    reason = "the codec's caller is the distributed kernel that follows; this module's tests prove it"
-)]
 pub(crate) fn decode_record(frame: &[u8]) -> Result<InstanceRecord, LedgerError> {
     if frame.len() > MAX_RECORD_BYTES {
         return Err(size_error());
@@ -135,6 +136,41 @@ pub(crate) fn decode_record(frame: &[u8]) -> Result<InstanceRecord, LedgerError>
     let serde_value = canonical.to_serde_value().map_err(map_canonical)?;
     let mirror: RecordV1 = serde_json::from_value(serde_value).map_err(|_| shape_error())?;
     mirror.into_record()
+}
+
+/// Encodes one promotion reservation in the record frame.
+///
+/// A reservation is what a retry identity resolves to, so it travels under
+/// the same version byte, the same canonical body, and the same bounds as an
+/// instance record. It holds the recovered authority and the request digest
+/// that decides whether a repeat is the same request, and nothing else.
+pub(crate) fn encode_reservation(
+    reservation: &PromotionReservation,
+) -> Result<Vec<u8>, LedgerError> {
+    let serde_value = serde_json::to_value(ReservationV1::from_reservation(reservation))
+        .map_err(|_| shape_error())?;
+    let canonical = CanonicalValue::from_serde_value(serde_value).map_err(map_canonical)?;
+    let body = to_canonical_bytes(&canonical, &body_limits()?).map_err(map_canonical)?;
+    let mut frame = Vec::with_capacity(body.len().saturating_add(1));
+    frame.push(RECORD_VERSION);
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
+/// Decodes one promotion reservation frame under the rules
+/// [`decode_record`] decodes an instance record under.
+pub(crate) fn decode_reservation(frame: &[u8]) -> Result<PromotionReservation, LedgerError> {
+    if frame.len() > MAX_RECORD_BYTES {
+        return Err(size_error());
+    }
+    let (version, body) = frame.split_first().ok_or_else(shape_error)?;
+    if *version != RECORD_VERSION {
+        return Err(shape_error());
+    }
+    let canonical = parse_canonical_value(body, &body_limits()?).map_err(map_canonical)?;
+    let serde_value = canonical.to_serde_value().map_err(map_canonical)?;
+    let mirror: ReservationV1 = serde_json::from_value(serde_value).map_err(|_| shape_error())?;
+    mirror.into_reservation()
 }
 
 /// Writes one unsigned integer as the canonical decimal the codec reads back.
@@ -237,6 +273,37 @@ impl RecordV1 {
     }
 }
 
+/// Version 1 of a stored promotion reservation: the authority an exact retry
+/// recovers, with every identity as the text its own constructor accepts.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationV1 {
+    expires_at: String,
+    initial_revision: String,
+    instance_id: String,
+    request_digest: String,
+}
+
+impl ReservationV1 {
+    fn from_reservation(reservation: &PromotionReservation) -> Self {
+        Self {
+            expires_at: decimal(reservation.expires_at.get()),
+            initial_revision: decimal(reservation.initial_revision.get()),
+            instance_id: reservation.instance_id.to_base64url(),
+            request_digest: reservation.request_digest.to_base64url(),
+        }
+    }
+
+    fn into_reservation(self) -> Result<PromotionReservation, LedgerError> {
+        Ok(PromotionReservation {
+            request_digest: decode_digest(&self.request_digest)?,
+            instance_id: decode_instance(&self.instance_id)?,
+            initial_revision: decode_revision(&self.initial_revision)?,
+            expires_at: decode_millis(&self.expires_at)?,
+        })
+    }
+}
+
 /// The lifecycle phase, tagged by the closed `kind` the grammar names.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
@@ -285,14 +352,24 @@ impl PhaseV1 {
                 lease_expires_at,
                 request_digest,
                 successor_revision,
-            } => Ok(InstancePhase::Pending(PendingClaim {
-                claim_id: decode_decimal(&claim_id)?,
-                base_revision: decode_revision(&base_revision)?,
-                successor_revision: decode_revision(&successor_revision)?,
-                idempotency_key: decode_idempotency(&idempotency_key)?,
-                request_digest: decode_digest(&request_digest)?,
-                lease_expires_at: decode_millis(&lease_expires_at)?,
-            })),
+            } => {
+                let base_revision = decode_revision(&base_revision)?;
+                let successor_revision = decode_revision(&successor_revision)?;
+                // A pending claim whose successor does not advance on its base
+                // is not a record this build can have written: honouring it
+                // would let one base revision be claimed twice.
+                if successor_revision <= base_revision {
+                    return Err(shape_error());
+                }
+                Ok(InstancePhase::Pending(PendingClaim {
+                    claim_id: decode_decimal(&claim_id)?,
+                    base_revision,
+                    successor_revision,
+                    idempotency_key: decode_idempotency(&idempotency_key)?,
+                    request_digest: decode_digest(&request_digest)?,
+                    lease_expires_at: decode_millis(&lease_expires_at)?,
+                }))
+            }
             Self::Consumed { claim_id, reason } => Ok(InstancePhase::Consumed {
                 reason: reason.into_reason(),
                 claim_id: claim_id.as_deref().map(decode_decimal).transpose()?,
@@ -365,11 +442,19 @@ impl AcceptedV1 {
     }
 
     fn into_metadata(self) -> Result<AcceptedOutcomeMetadata, LedgerError> {
+        let base_revision = decode_revision(&self.base_revision)?;
+        let successor_revision = decode_revision(&self.successor_revision)?;
+        // The same monotonicity the pending phase carries: a retained outcome
+        // whose successor does not advance on its base would let an exact
+        // duplicate observe an outcome for a revision that was never claimed.
+        if successor_revision <= base_revision {
+            return Err(shape_error());
+        }
         Ok(AcceptedOutcomeMetadata {
             scope: decode_scope(&self.scope)?,
             instance_id: decode_instance(&self.instance_id)?,
-            base_revision: decode_revision(&self.base_revision)?,
-            successor_revision: decode_revision(&self.successor_revision)?,
+            base_revision,
+            successor_revision,
             idempotency_key: decode_idempotency(&self.idempotency_key)?,
             request_digest: decode_digest(&self.request_digest)?,
             outcome: AcceptedOutcome::new(
@@ -481,6 +566,15 @@ mod tests {
             request_digest: digest(0x40),
             lease_expires_at: UnixMillis::new(4_000),
         })
+    }
+
+    /// A reservation carries identities and therefore no `Debug`, so a
+    /// refusal is read through its kind rather than printed.
+    fn reservation_refusal(frame: &[u8]) -> LedgerErrorKind {
+        match decode_reservation(frame) {
+            Ok(_) => panic!("this reservation must not decode"),
+            Err(error) => error.kind(),
+        }
     }
 
     fn frame(body: &str) -> Vec<u8> {
@@ -634,24 +728,152 @@ mod tests {
     }
 
     #[test]
-    fn the_byte_bound_stops_short_of_the_retained_outcome_ceiling() {
+    fn the_byte_bound_holds_the_retained_outcome_ceiling_with_headroom() {
         // One retained outcome costs about 333 bytes of canonical JSON: five
-        // base64url identities plus their field names. `MAX_RECORD_BYTES`
-        // therefore holds 48 of them, fewer than the `MAX_ACCEPTED_OUTCOMES`
-        // a `LedgerLimits` may configure, and a record at that ceiling is
-        // reported rather than truncated. This pins the budget: changing
-        // either bound, or a field name, moves this line.
-        let largest = encode_record(&record(pending(), 48)).expect("the record encodes");
+        // base64url identities plus their field names, so a record at the
+        // `MAX_ACCEPTED_OUTCOMES` ceiling measures about 22 KiB and every
+        // record the ledger can build fits the bound. This pins the budget:
+        // changing either bound, or a field name, moves this line.
+        let largest = encode_record(&record(pending(), MAX_ACCEPTED_OUTCOMES))
+            .expect("the retention ceiling encodes");
         assert!(
             largest.len() <= MAX_RECORD_BYTES,
-            "48 retained outcomes fit the record bound, at {} bytes",
+            "the retention ceiling fits the record bound, at {} bytes",
+            largest.len()
+        );
+        assert!(
+            largest.len() > MAX_RECORD_BYTES / 2,
+            "the bound is sized for the ceiling rather than far above it, at {} bytes",
             largest.len()
         );
         assert_eq!(
-            encode_record(&record(pending(), MAX_ACCEPTED_OUTCOMES))
-                .expect_err("the retention ceiling does not fit the record bound")
+            encode_record(&record(pending(), MAX_ACCEPTED_OUTCOMES + 1))
+                .expect_err("more outcomes than the ledger retains is still refused")
                 .kind(),
             LedgerErrorKind::CapacityExceeded
+        );
+        assert_eq!(
+            decode_record(&vec![RECORD_VERSION; MAX_RECORD_BYTES * 2])
+                .expect_err("a frame materially over the bound is refused before parsing")
+                .kind(),
+            LedgerErrorKind::CapacityExceeded
+        );
+    }
+
+    #[test]
+    fn every_refresh_reason_and_outcome_kind_survives_the_frame() {
+        let reasons = [
+            RefreshReason::Missing,
+            RefreshReason::InstanceExpired,
+            RefreshReason::Consumed,
+            RefreshReason::ClaimExpired,
+            RefreshReason::RevisionExhausted,
+        ];
+        for reason in reasons {
+            let original = record(
+                InstancePhase::Consumed {
+                    reason,
+                    claim_id: Some(11),
+                },
+                1,
+            );
+            let decoded = decode_record(&encode_record(&original).expect("the record encodes"))
+                .expect("the record decodes");
+            assert_same_phase(&decoded.phase, &original.phase);
+        }
+
+        let kinds = [
+            AcceptedOutcomeKind::Rendered,
+            AcceptedOutcomeKind::Validation,
+            AcceptedOutcomeKind::NoRender,
+            AcceptedOutcomeKind::Redirect,
+            AcceptedOutcomeKind::Recovery,
+        ];
+        for kind in kinds {
+            let mut original = record(InstancePhase::Ready, 1);
+            let retained = original
+                .accepted
+                .front()
+                .expect("the record retains one outcome")
+                .clone();
+            original.accepted = VecDeque::from([AcceptedOutcomeMetadata {
+                outcome: AcceptedOutcome::new(kind, digest(0x55)),
+                ..retained
+            }]);
+            let decoded = decode_record(&encode_record(&original).expect("the record encodes"))
+                .expect("the record decodes");
+            assert_eq!(decoded.accepted, original.accepted, "outcome kind {kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_reservation_round_trips_and_rejects_what_it_did_not_write() {
+        let original = PromotionReservation {
+            request_digest: digest(0x11),
+            instance_id: instance(0x22),
+            initial_revision: Revision::new(3),
+            expires_at: UnixMillis::new(9_000),
+        };
+
+        let encoded = encode_reservation(&original).expect("the reservation encodes");
+        assert_eq!(encoded.first().copied(), Some(RECORD_VERSION));
+        let decoded = decode_reservation(&encoded).expect("the reservation decodes");
+        assert_eq!(decoded.request_digest, original.request_digest);
+        assert_eq!(decoded.instance_id, original.instance_id);
+        assert_eq!(decoded.initial_revision, original.initial_revision);
+        assert_eq!(decoded.expires_at, original.expires_at);
+        assert_eq!(
+            encode_reservation(&decoded).expect("the decoded reservation encodes"),
+            encoded
+        );
+
+        assert_eq!(
+            reservation_refusal(&vec![RECORD_VERSION; MAX_RECORD_BYTES + 1]),
+            LedgerErrorKind::CapacityExceeded,
+            "the byte bound holds before any allocation"
+        );
+        assert_eq!(
+            reservation_refusal(
+                &encode_record(&record(InstancePhase::Ready, 0)).expect("the record encodes")
+            ),
+            LedgerErrorKind::InvalidConfiguration,
+            "an instance record is not a reservation"
+        );
+        for cut in 0..encoded.len() {
+            assert!(
+                matches!(
+                    reservation_refusal(&encoded[..cut]),
+                    LedgerErrorKind::InvalidConfiguration | LedgerErrorKind::CapacityExceeded
+                ),
+                "a truncated reservation names a bound or a shape"
+            );
+        }
+    }
+
+    #[test]
+    fn a_successor_revision_that_does_not_advance_its_base_is_refused() {
+        let pending_body = std::str::from_utf8(
+            &encode_record(&record(pending(), 0)).expect("the record encodes")[1..],
+        )
+        .expect("the body is UTF-8")
+        .replace(r#""successor_revision":"7""#, r#""successor_revision":"6""#);
+        assert_eq!(
+            decode_record(&frame(&pending_body))
+                .expect_err("a pending claim must advance its base revision")
+                .kind(),
+            LedgerErrorKind::InvalidConfiguration
+        );
+
+        let accepted_body = std::str::from_utf8(
+            &encode_record(&record(InstancePhase::Ready, 1)).expect("the record encodes")[1..],
+        )
+        .expect("the body is UTF-8")
+        .replace(r#""successor_revision":"1""#, r#""successor_revision":"0""#);
+        assert_eq!(
+            decode_record(&frame(&accepted_body))
+                .expect_err("a retained outcome must advance its base revision")
+                .kind(),
+            LedgerErrorKind::InvalidConfiguration
         );
     }
 
@@ -675,9 +897,11 @@ mod tests {
             inputs.push(valid[..cut].to_vec());
         }
         for index in 0..valid.len() {
-            let mut flipped = valid.clone();
-            flipped[index] ^= 0x80;
-            inputs.push(flipped);
+            for mask in [0x01_u8, 0x80] {
+                let mut flipped = valid.clone();
+                flipped[index] ^= mask;
+                inputs.push(flipped);
+            }
         }
 
         for input in inputs {
