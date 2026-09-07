@@ -167,14 +167,15 @@ pub struct CollectedContext {
     /// Every distinct tenant id the render actually observed. See
     /// `principal_material`'s own doc; the same reasoning applies.
     pub tenant_material: BTreeSet<String>,
-    /// Every distinct locale value [`crate::Lang::locale`] returned during
+    /// Every distinct locale value (`Lang::locale`, a localization-only
+    /// item) returned during
     /// the render, recorded at the same observation point that already
     /// emits a [`DependencyIdentity::Locale`] dependency (fix round 6).
     ///
     /// Round 5 instead re-read `Lang::locale()` a second time, after the
     /// render, reasoning that the task-local was "still installed" then.
     /// That is only true for the outer scope: a handler that renders inside
-    /// [`crate::scope_locale`] (the framework's own documented, supported
+    /// `scope_locale` (the framework's own documented, supported
     /// API for a mid-render locale switch) has its nested scope pop the
     /// instant that future resolves, before the guard ever gets to re-read
     /// it - so the re-read silently saw the *outer*, pre-switch locale
@@ -610,7 +611,7 @@ pub fn observe_tenant_value(id: &str) {
     });
 }
 /// The locale was resolved to a concrete value, at the same
-/// [`crate::Lang::locale`] call that already emits a
+/// `Lang::locale` call (a localization-only item) that already emits a
 /// [`DependencyIdentity::Locale`] dependency. Fix round 6: see
 /// `CollectedContext::locale_material`'s own doc for why re-deriving the
 /// locale after the render (round 5's approach) cannot substitute for
