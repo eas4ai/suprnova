@@ -358,6 +358,18 @@ pub trait GenerationLedger: Send + Sync {
     async fn advance(&self, identities: &[DependencyIdentity]) -> Result<(), RenderCacheError>;
     /// The authority epoch.
     async fn epoch(&self) -> Result<u64, RenderCacheError>;
+    /// Current generations for the digests together with the authority
+    /// epoch. The default is the two reads in order; a database ledger
+    /// overrides it with one batched statement so a publication's fresh
+    /// reread is one round trip.
+    async fn current_with_epoch(
+        &self,
+        dependencies: &[[u8; 32]],
+    ) -> Result<(GenerationSet, u64), RenderCacheError> {
+        let current = self.current(dependencies).await?;
+        let epoch = self.epoch().await?;
+        Ok((current, epoch))
+    }
 }
 
 struct LedgerState {

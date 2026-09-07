@@ -13,28 +13,36 @@ pub enum ConditionalOutcome {
     Full,
 }
 
-/// Strong comparison of `If-None-Match` against the represented validator.
+/// Strong comparison of `If-None-Match` against an already formed entity
+/// tag; [`evaluate_conditional`] is this rule applied to a validator. A hot
+/// hit holds its tag as text already, so it compares without forming one.
 #[must_use]
-pub fn evaluate_conditional(
-    if_none_match: Option<&str>,
-    validator: &Validator,
-) -> ConditionalOutcome {
+pub fn conditional_matches(if_none_match: Option<&str>, etag: &str) -> ConditionalOutcome {
     let Some(header) = if_none_match else {
         return ConditionalOutcome::Full;
     };
     if header.trim() == "*" {
         return ConditionalOutcome::NotModified;
     }
-    let etag = validator.etag();
-    let matched = header
+    if header
         .split(',')
         .map(str::trim)
-        .any(|candidate| candidate == etag);
-    if matched {
+        .any(|candidate| candidate == etag)
+    {
         ConditionalOutcome::NotModified
     } else {
         ConditionalOutcome::Full
     }
+}
+
+/// Strong comparison of `If-None-Match` against the represented validator;
+/// exactly [`conditional_matches`] over the validator's entity tag.
+#[must_use]
+pub fn evaluate_conditional(
+    if_none_match: Option<&str>,
+    validator: &Validator,
+) -> ConditionalOutcome {
+    conditional_matches(if_none_match, &validator.etag())
 }
 
 /// `Cache-Control` for a class, shared policy, freshness, and optional seed

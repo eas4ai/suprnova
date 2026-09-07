@@ -1,12 +1,13 @@
 //! The RenderStore contract and the immutable in-process L0 store.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::RenderCacheError;
+use super::hot::HotEntry;
 use super::key::RenderKey;
 
 /// Coherence fence attached to a publication: a newer epoch or a higher
@@ -103,8 +104,13 @@ pub struct MemoryStoreLimits {
     pub max_bytes: usize,
 }
 
+/// Each key holds its stored bytes and, when the publication carried one,
+/// the hot entry prepared from exactly those bytes. One map, so both are
+/// published, evicted, and fenced together and can never disagree.
+type Slot = (StoredEntry, Option<Arc<HotEntry>>);
+
 struct MemoryState {
-    entries: BTreeMap<RenderKey, StoredEntry>,
+    entries: BTreeMap<RenderKey, Slot>,
     order: VecDeque<RenderKey>,
     bytes: usize,
 }
@@ -127,6 +133,88 @@ impl MemoryRenderStore {
                 bytes: 0,
             }),
         }
+    }
+
+    /// [`RenderStore::publish`] with a prepared hot entry beside the bytes,
+    /// under the same fence, bound, and LRU rules. See [`Self::hot_get`].
+    pub fn publish_hot(
+        &self,
+        key: &RenderKey,
+        bytes: Bytes,
+        hot: Arc<HotEntry>,
+        fence: PublicationFence,
+        now_ms: u64,
+    ) -> PublishOutcome {
+        self.publish_sync(key, bytes, Some(hot), fence, now_ms)
+    }
+
+    /// The hot entry published for `key`, if the current publication
+    /// carried one; touches the LRU order exactly as a `get` does and takes
+    /// no async step, so it allocates nothing.
+    pub fn hot_get(&self, key: &RenderKey) -> Option<Arc<HotEntry>> {
+        let mut state = self.lock_state();
+        let hot = state.entries.get(key).and_then(|(_, hot)| hot.clone())?;
+        Self::touch(&mut state.order, key);
+        Some(hot)
+    }
+
+    /// The publication both entry points share; the trait's `publish`
+    /// passes no hot entry, [`Self::publish_hot`] passes one, and every
+    /// bound, fence, and eviction rule below applies to both.
+    ///
+    /// `retention_ms` never reaches here: this in-process store has no
+    /// age-based expiry of its own - it only ever evicts under LRU pressure
+    /// on insert (the `while` loop below) or a full `clear()` (an epoch
+    /// advance) - so retention is accepted by the trait, per its own
+    /// contract, and ignored rather than tracked for a sweep this store
+    /// does not perform.
+    fn publish_sync(
+        &self,
+        key: &RenderKey,
+        bytes: Bytes,
+        hot: Option<Arc<HotEntry>>,
+        fence: PublicationFence,
+        now_ms: u64,
+    ) -> PublishOutcome {
+        if self.limits.max_entries == 0
+            || self.limits.max_bytes == 0
+            || bytes.len() > self.limits.max_bytes
+        {
+            return PublishOutcome::Rejected;
+        }
+        let mut state = self.lock_state();
+        if let Some((current, _)) = state.entries.get(key)
+            && !fence.supersedes(&current.fence)
+        {
+            return PublishOutcome::Fenced;
+        }
+        if let Some((previous, _)) = state.entries.remove(key) {
+            state.bytes -= previous.bytes.len();
+        }
+        while state.entries.len() >= self.limits.max_entries
+            || state.bytes + bytes.len() > self.limits.max_bytes
+        {
+            let Some(oldest) = state.order.pop_front() else {
+                break;
+            };
+            if let Some((evicted, _)) = state.entries.remove(&oldest) {
+                state.bytes -= evicted.bytes.len();
+            }
+        }
+        state.bytes += bytes.len();
+        state.entries.insert(
+            key.clone(),
+            (
+                StoredEntry {
+                    bytes,
+                    published_at_ms: now_ms,
+                    fence,
+                },
+                hot,
+            ),
+        );
+        Self::touch(&mut state.order, key);
+        PublishOutcome::Published
     }
 
     fn touch(order: &mut VecDeque<RenderKey>, key: &RenderKey) {
@@ -166,7 +254,7 @@ impl MemoryRenderStore {
 impl RenderStore for MemoryRenderStore {
     async fn get(&self, key: &RenderKey) -> Result<Option<StoredEntry>, RenderCacheError> {
         let mut state = self.lock_state();
-        let Some(entry) = state.entries.get(key).cloned() else {
+        let Some(entry) = state.entries.get(key).map(|(entry, _)| entry.clone()) else {
             return Ok(None);
         };
         Self::touch(&mut state.order, key);
@@ -181,52 +269,12 @@ impl RenderStore for MemoryRenderStore {
         now_ms: u64,
         _retention_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
-        // This in-process store has no age-based expiry of its own - it
-        // only ever evicts under LRU pressure on insert (`while` loop
-        // below) or a full `clear()` (an epoch advance) - so retention is
-        // accepted, per the trait's own contract, and ignored rather than
-        // tracked for a sweep this store does not perform.
-        if self.limits.max_entries == 0
-            || self.limits.max_bytes == 0
-            || bytes.len() > self.limits.max_bytes
-        {
-            return Ok(PublishOutcome::Rejected);
-        }
-        let mut state = self.lock_state();
-        if let Some(current) = state.entries.get(key)
-            && !fence.supersedes(&current.fence)
-        {
-            return Ok(PublishOutcome::Fenced);
-        }
-        if let Some(previous) = state.entries.remove(key) {
-            state.bytes -= previous.bytes.len();
-        }
-        while state.entries.len() >= self.limits.max_entries
-            || state.bytes + bytes.len() > self.limits.max_bytes
-        {
-            let Some(oldest) = state.order.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = state.entries.remove(&oldest) {
-                state.bytes -= evicted.bytes.len();
-            }
-        }
-        state.bytes += bytes.len();
-        state.entries.insert(
-            key.clone(),
-            StoredEntry {
-                bytes,
-                published_at_ms: now_ms,
-                fence,
-            },
-        );
-        Self::touch(&mut state.order, key);
-        Ok(PublishOutcome::Published)
+        Ok(self.publish_sync(key, bytes, None, fence, now_ms))
     }
 
     async fn evict(&self, key: &RenderKey) -> Result<(), RenderCacheError> {
         let mut state = self.lock_state();
-        if let Some(previous) = state.entries.remove(key) {
+        if let Some((previous, _)) = state.entries.remove(key) {
             state.bytes -= previous.bytes.len();
         }
         state.order.retain(|k| k != key);

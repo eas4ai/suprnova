@@ -36,6 +36,10 @@ pub mod coherence;
 /// Conditional evaluation and cache metadata for represented variants.
 pub mod http;
 
+/// Complete hits prepared at publication and the one response builder both
+/// the hot and the cold path form their bytes through.
+pub mod hot;
+
 /// Fenced rebuild coordination: one accepted publication per key and
 /// coherence fence, bounded waiters, expiry, and release.
 pub mod singleflight;
@@ -61,7 +65,10 @@ pub use generation::{
     CoherenceCheck, DependencyIdentity, Generation, GenerationLedger, GenerationSet,
     IDENTITY_VERSION, MAX_OBSERVATIONS, MemoryGenerationLedger, ObservationWindow,
 };
-pub use http::{ConditionalOutcome, cache_control_value, evaluate_conditional, vary_value};
+pub use hot::{HotEntry, HotRequest, ResponseParts, respond, serve_hot};
+pub use http::{
+    ConditionalOutcome, cache_control_value, conditional_matches, evaluate_conditional, vary_value,
+};
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use lease::{FencedLeaseCoordinator, LeaseAttempt, LeaseStore, MemoryLeaseStore};
 pub use policy::{
