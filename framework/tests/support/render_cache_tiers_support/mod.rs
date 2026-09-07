@@ -378,8 +378,76 @@ pub fn redis_config_on_a_closed_port() -> suprnova::render_cache::providers::Red
     }
 }
 
+/// Deletes everything written under one test's prefix when that test ends,
+/// however it ends.
+///
+/// A trailing [`clear_redis_prefix`] call cleans up only a test that reached
+/// it; a failed assertion unwinds past it and leaves the prefix behind, so
+/// the next run of a suite against a long-lived instance inherits keys from a
+/// run that failed. This drops instead, which a panic cannot skip.
+///
+/// The cleanup runs on its own thread with its own runtime and its own
+/// connection: this `Drop` can run inside the test's runtime (where blocking
+/// on that runtime would panic) and can run while a panic unwinds (where a
+/// second panic would abort the process), so every failure here is swallowed
+/// rather than reported.
+pub struct RedisPrefixGuard {
+    url: String,
+    prefix: String,
+}
+
+impl Drop for RedisPrefixGuard {
+    fn drop(&mut self) {
+        let url = self.url.clone();
+        let prefix = self.prefix.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let Ok(client) = redis::Client::open(url) else {
+                    return;
+                };
+                let Ok(mut conn) = redis::aio::ConnectionManager::new(client).await else {
+                    return;
+                };
+                let mut cursor = "0".to_owned();
+                loop {
+                    let Ok((next, batch)) = redis::cmd("SCAN")
+                        .arg(&cursor)
+                        .arg("MATCH")
+                        .arg(format!("{prefix}*"))
+                        .arg("COUNT")
+                        .arg(512)
+                        .query_async::<(String, Vec<String>)>(&mut conn)
+                        .await
+                    else {
+                        return;
+                    };
+                    for keys in batch.chunks(256) {
+                        let mut command = redis::cmd("DEL");
+                        for key in keys {
+                            command.arg(key);
+                        }
+                        let _ = command.query_async::<i64>(&mut conn).await;
+                    }
+                    cursor = next;
+                    if cursor == "0" {
+                        return;
+                    }
+                }
+            });
+        })
+        .join();
+    }
+}
+
 /// A live connection for the assertions and the cleanup that have to look at
-/// Redis itself rather than through an adapter.
+/// Redis itself rather than through an adapter, plus the guard that removes
+/// this test's prefix however the test ends (see [`RedisPrefixGuard`]).
 ///
 /// # Panics
 ///
@@ -389,6 +457,7 @@ pub fn redis_config_on_a_closed_port() -> suprnova::render_cache::providers::Red
 pub async fn boot_redis() -> (
     suprnova::render_cache::providers::RedisProviderConfig,
     redis::aio::ConnectionManager,
+    RedisPrefixGuard,
 ) {
     let config = redis_config();
     let client =
@@ -401,7 +470,11 @@ pub async fn boot_redis() -> (
         .await
         .expect("the live Redis answers PING");
     assert_eq!(pong, "PONG");
-    (config, conn)
+    let cleanup = RedisPrefixGuard {
+        url: config.url.clone(),
+        prefix: config.prefix.clone(),
+    };
+    (config, conn, cleanup)
 }
 
 /// Redis's own clock, as milliseconds since the Unix epoch.

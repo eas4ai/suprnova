@@ -1,6 +1,8 @@
 //! Integration tests for the `render_cache` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+#[path = "../support/env_lock.rs"]
+mod env_lock;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
 #[path = "../support/render_cache_live_support/mod.rs"]

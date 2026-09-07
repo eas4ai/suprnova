@@ -30,16 +30,32 @@
 //! claim made inside a host transaction that rolls back leaves no row. The
 //! kernel over it answers the engine's own ledger conformance suite.
 //!
-//! The Tier 2 Redis adapters answer the same contracts at the bottom of this
-//! file, through `#[ignore]`d `live_redis_*` tests against a disposable
-//! instance, plus two tests that need no Redis at all: an unreachable
-//! endpoint is a provider failure whose message carries no URL, and an
-//! unusable URL is refused without being echoed.
+//! The Tier 2 Redis adapters answer the same contracts further down, through
+//! `#[ignore]`d `live_redis_*` tests against a disposable instance, plus two
+//! tests that need no Redis at all: an unreachable endpoint is a provider
+//! failure whose message carries no URL, and an unusable URL is refused
+//! without being echoed.
+//!
+//! The last section closes the gaps an adapter test cannot reach: that an
+//! ordinary request through the real middleware reaches these providers and
+//! comes back from them (a publication becomes a shared row or key, an
+//! emptied L0 is refilled from it without the handler running, a stitched
+//! document's Composite entry round-trips, and the operator's own sweep
+//! dispatches to the configured tier), that a Live action on a distributed
+//! ledger driver advances a revision a second handle reads, and that two
+//! coordinators over one backend publish exactly once - the leader's bytes
+//! under the leader's fence, the elapsed leader refused with `LeaseFenced`,
+//! and a restarted process finding the records the previous one left.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
+use hyper::Method;
+use serde_json::Value;
+use suprnova::StatusCode;
+use suprnova::live::testing::prepare_live_router_for_test;
 use suprnova::live::{LedgerDriver, verify_ledger_driver_for_test};
+use suprnova::render_cache::RenderCache;
 use suprnova::render_cache::ledger::tier_migration_present;
 use suprnova::render_cache::providers::{
     RedisInstanceRecordStore, RedisLeaseStore, RedisProviderConfig, RedisRenderStore,
@@ -47,13 +63,14 @@ use suprnova::render_cache::providers::{
 };
 use suprnova::render_cache::{CoordinatorConfig, L1Config, L1Provider, sweep_l1};
 use suprnova::{DB, FrameworkError};
-use suprnova_live::clock::Clock;
-use suprnova_live::identity::UnixMillis;
+use suprnova_live::clock::{Clock, SystemClock};
+use suprnova_live::identity::{InstanceId, Revision, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{
     CasOutcome, DistributedInstanceLedger, InstanceRecordKey, InstanceRecordStore, LedgerError,
-    LedgerErrorKind, MAX_RECORD_BYTES, PromotionRecordKey, StoredRecord,
+    LedgerErrorKind, LedgerLimits, LiveInstanceLedger, MAX_RECORD_BYTES, PromotionRecordKey,
+    StoredRecord,
 };
-use suprnova_live::render_cache::entry::{EntryLimits, decode};
+use suprnova_live::render_cache::entry::{EntryKind, EntryLimits, decode};
 use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, RebuildAdmission, RebuildCoordinator,
 };
@@ -63,12 +80,23 @@ use suprnova_live::render_cache::{
 };
 use suprnova_live_test_support::{ControlledClock, ledger_conformance};
 
+use crate::live_dogfood_support;
+use crate::render_cache_stitch_support;
 use crate::render_cache_tiers_support;
+use live_dogfood_support::{
+    ActionRequest, DOCUMENT_PATH, PRIVATE_DOCUMENT_PATH, build_public_router,
+    dispatch as dispatch_live, get as live_get, private_action_request, production_middleware,
+    session_cookie,
+};
+use render_cache_stitch_support::{
+    SEED_ONLY_PATH, STITCHED_PATH, boot_on_the_database_profile_for_test,
+    boot_on_the_redis_profile_for_test, dispatch as dispatch_route, handler_renders, island_tag,
+};
 use render_cache_tiers_support::{
     boot, boot_redis, boot_without_the_tier_tables, clear_redis_prefix, encoded_entry, fence,
     install, instance_key, key, keys, promotion_key, redis_config_on_a_closed_port, redis_deadline,
-    redis_keys, redis_now_ms, reset_and_migrate, store_deadline, store_now_ms, tier_config,
-    try_connect_live, wide_instance_key, wide_promotion_key,
+    redis_keys, redis_now_ms, redis_url, reset_and_migrate, store_deadline, store_now_ms,
+    tier_config, try_connect_live, wide_instance_key, wide_promotion_key,
 };
 
 /// Rows currently in the entries table, counted in SQL rather than through
@@ -1150,12 +1178,17 @@ trait OffsetRecordStore: InstanceRecordStore {
 
 impl OffsetRecordStore for SqlInstanceRecordStore {
     fn set_time_offset_for_test(&self, offset_ms: u64) {
+        // The adapter's own inherent method, not this trait method: an
+        // inherent method wins over a trait method of the same name, so this
+        // is a delegation rather than the infinite recursion it reads as.
         Self::set_time_offset_for_test(self, offset_ms);
     }
 }
 
 impl OffsetRecordStore for RedisInstanceRecordStore {
     fn set_time_offset_for_test(&self, offset_ms: u64) {
+        // The adapter's own inherent method; see the note on the database
+        // store's copy of this delegation.
         Self::set_time_offset_for_test(self, offset_ms);
     }
 }
@@ -1617,6 +1650,11 @@ async fn a_redis_store_on_a_closed_port_reports_a_provider_failure_without_the_u
         .await
         .expect_err("nothing answers");
     assert_eq!(failed.kind(), LedgerErrorKind::ProviderUnavailable);
+    // The ledger's own failure is held to the render cache arm's standard:
+    // neither the address nor the scheme reaches an operator's log.
+    let rendered = format!("{failed} {failed:?}");
+    assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+    assert!(!rendered.contains("redis://"), "{rendered}");
 
     // And nothing any of the three prints carries the endpoint either.
     let printed = format!("{entries:?} {leases:?} {records:?} {config:?}");
@@ -1640,7 +1678,7 @@ async fn a_redis_provider_url_that_is_not_a_url_is_refused_without_being_echoed(
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_publish_fences_and_eviction_is_a_miss() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisRenderStore::connect(&config, 1024 * 1024)
         .await
         .expect("connect the Redis L1 store");
@@ -1785,14 +1823,12 @@ async fn live_redis_publish_fences_and_eviction_is_a_miss() {
     store.evict(&key).await.expect("evict");
     assert!(store.get(&key).await.expect("get").is_none());
     assert_eq!(store.inspect().await.expect("inspect").entries, 0);
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_bytes_tampered_with_in_the_hash_decode_as_a_miss() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisRenderStore::connect(&config, 1024 * 1024)
         .await
         .expect("connect the Redis L1 store");
@@ -1823,14 +1859,12 @@ async fn live_redis_bytes_tampered_with_in_the_hash_decode_as_a_miss() {
         .expect("the row is there");
     decode(&served.bytes, &keys(), &EntryLimits::default())
         .expect_err("a tampered entry is the codec's miss, never the store's hit");
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_inspection_stops_at_the_scan_cap() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisRenderStore::connect(&config, 1024 * 1024)
         .await
         .expect("connect the Redis L1 store");
@@ -1866,14 +1900,12 @@ async fn live_redis_inspection_stops_at_the_scan_cap() {
         i64::try_from(inspection.entries).expect("a count") < seeded,
         "and never the whole keyspace: {inspection:?}"
     );
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is_fenced() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let first = RedisLeaseStore::connect(&config).await.expect("connect");
     let second = RedisLeaseStore::connect(&config).await.expect("connect");
     let key = key("/tier-two");
@@ -1953,14 +1985,12 @@ async fn live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is
             .expect("read the key lifetime");
         assert_eq!(lifetime, -1, "{name} must outlive every tenure");
     }
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_two_coordinators_lead_once_and_bypass_once() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, _conn, _cleanup) = boot_redis().await;
     let limits = LocalCoordinatorLimits {
         lease_ms: 30_000,
         max_waiters: 4,
@@ -1999,14 +2029,12 @@ async fn live_redis_two_coordinators_lead_once_and_bypass_once() {
         "exactly one token per fence, and never a reissued one"
     );
     peer.release(*next).await.expect("release");
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_records_are_created_once_and_compare_and_store_fences_a_stale_read() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let first = RedisInstanceRecordStore::connect(&config)
         .await
         .expect("connect");
@@ -2108,14 +2136,12 @@ async fn live_redis_records_are_created_once_and_compare_and_store_fences_a_stal
         1,
         "and a refused record reaches no command"
     );
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_an_elapsed_record_answers_as_one_that_was_never_written() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisInstanceRecordStore::connect(&config)
         .await
         .expect("connect");
@@ -2186,14 +2212,12 @@ async fn live_redis_an_elapsed_record_answers_as_one_that_was_never_written() {
     let stored = store.load(&key).await.expect("load").expect("a record");
     assert_eq!(stored.version, 1);
     assert_eq!(stored.bytes, b"fresh".to_vec());
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_reclamation_is_bounded_and_drains_over_the_operations_that_follow() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisInstanceRecordStore::connect(&config)
         .await
         .expect("connect");
@@ -2238,14 +2262,12 @@ async fn live_redis_reclamation_is_bounded_and_drains_over_the_operations_that_f
         "and the backlog drains over the operations that follow"
     );
     assert_eq!(store.count_instances().await.expect("count"), 2);
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_the_ledger_kernel_over_the_redis_store_answers_the_conformance_suite() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let base_ms = redis_now_ms(&mut conn).await;
     let clock = Arc::new(ControlledClock::new(UnixMillis::new(base_ms)));
     let store = RedisInstanceRecordStore::connect(&config)
@@ -2258,14 +2280,12 @@ async fn live_redis_the_ledger_kernel_over_the_redis_store_answers_the_conforman
     )
     .await
     .expect("the Redis record store answers the ledger conformance suite");
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_two_ledger_handles_over_one_redis_answer_the_two_node_suite() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let base_ms = redis_now_ms(&mut conn).await;
     let clock = Arc::new(ControlledClock::new(UnixMillis::new(base_ms)));
 
@@ -2288,14 +2308,12 @@ async fn live_redis_two_ledger_handles_over_one_redis_answer_the_two_node_suite(
     )
     .await
     .expect("two Redis-backed ledgers answer the two-node conformance suite");
-
-    clear_redis_prefix(&mut conn, &config.prefix).await;
 }
 
 #[tokio::test]
 #[ignore = "requires live Redis; run with --ignored live_redis"]
 async fn live_redis_a_run_leaves_nothing_behind_under_its_own_prefix() {
-    let (config, mut conn) = boot_redis().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
     let store = RedisRenderStore::connect(&config, 1024 * 1024)
         .await
         .expect("connect");
@@ -2504,4 +2522,898 @@ async fn the_live_database_ledger_driver_boots_once_the_migration_is_applied() {
     verify_ledger_driver_for_test(&LedgerDriver::Database)
         .await
         .expect("the database ledger driver boots against the tier tables");
+}
+
+// --- End to end: the profiles through the middleware, the Live ledger, and
+// --- two nodes over one backend ---
+//
+// Everything above proves one adapter against one backend. What follows
+// proves the two things an adapter alone cannot: that an ordinary request
+// through the real middleware reaches these providers and comes back from
+// them, and that two nodes sharing one backend agree about who may publish
+// and what the current revision is.
+//
+// Two nodes are two adapter handles and two coordinators over one backend,
+// for the same reason the sections above give: the RenderCache runtime and
+// the Live runtime are process singletons, so a second runtime is not
+// something a test process can have. What a single-node middleware test does
+// prove is the wiring - that `RenderCache::install` on a profile actually
+// puts these providers on the request path - and that is what it is here for.
+
+/// The `admit`, `publish_token`, and `release` calls the middleware makes,
+/// paired here with the publication they fence, so a test that says "one node
+/// publishes" is exercising the coordinator the middleware uses rather than
+/// the lease store underneath it.
+fn coordinator_over_the_database(lease_ms: u64) -> FencedLeaseCoordinator<SqlLeaseStore> {
+    FencedLeaseCoordinator::new(
+        Arc::new(SqlLeaseStore::new()),
+        LocalCoordinatorLimits {
+            lease_ms,
+            max_waiters: 4,
+        },
+    )
+}
+
+#[tokio::test]
+async fn two_nodes_publish_one_entry_and_the_node_that_bypassed_publishes_nothing() {
+    let _db = boot().await;
+    let leader = coordinator_over_the_database(30_000);
+    let peer = coordinator_over_the_database(30_000);
+    let leader_entries = SqlRenderStore::new(1024 * 1024);
+    let peer_entries = SqlRenderStore::new(1024 * 1024);
+    let key = key("/tier-one");
+
+    let RebuildAdmission::Lead(lease) = leader.admit(&key, 1, 0).await.expect("admit") else {
+        panic!("the node the store admits leads");
+    };
+    assert!(
+        matches!(
+            peer.admit(&key, 1, 0).await.expect("admit"),
+            RebuildAdmission::Bypass
+        ),
+        "the other node renders without publishing"
+    );
+
+    let fence = leader
+        .publish_token(&lease, 0)
+        .await
+        .expect("the leader mints exactly one fence");
+    assert_eq!(
+        leader_entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the leader's bytes"),
+                fence,
+                1_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published,
+        "one publication is accepted per fence"
+    );
+    leader.release(*lease).await.expect("release");
+
+    // A `Bypass` carries no lease, so the bypassing node has nothing to mint
+    // a fence from and never reaches `publish` at all - which is exactly what
+    // the middleware does with it. Were it to publish anyway, under the only
+    // fence it could have observed, the store refuses it: an equal fence does
+    // not supersede.
+    assert_eq!(
+        peer_entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the bypassing node's bytes"),
+                fence,
+                2_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Fenced
+    );
+
+    assert_eq!(row_count().await, 1, "one fence, one row, one publication");
+    let stored = peer_entries
+        .get(&key)
+        .await
+        .expect("get")
+        .expect("both nodes read the same row");
+    assert_eq!(
+        stored.bytes.as_ref(),
+        b"the leader's bytes",
+        "the bytes every node serves are the leader's"
+    );
+    assert_eq!(stored.fence, fence);
+    assert_eq!(stored.published_at_ms, 1_000);
+}
+
+#[tokio::test]
+async fn a_leader_whose_lease_elapsed_is_fenced_and_the_takeover_publishes_instead() {
+    let _db = boot().await;
+    let dying_store = Arc::new(SqlLeaseStore::new());
+    let taking_store = Arc::new(SqlLeaseStore::new());
+    let limits = LocalCoordinatorLimits {
+        lease_ms: 1_000,
+        max_waiters: 4,
+    };
+    let dying = FencedLeaseCoordinator::new(Arc::clone(&dying_store), limits);
+    let taking = FencedLeaseCoordinator::new(Arc::clone(&taking_store), limits);
+    let entries = SqlRenderStore::new(1024 * 1024);
+    let key = key("/tier-one");
+
+    let RebuildAdmission::Lead(dead) = dying.admit(&key, 1, 0).await.expect("admit") else {
+        panic!("the first node leads");
+    };
+
+    // Store time, never a node's: both handles read the database's own clock,
+    // and moving their offsets is what a real pair of nodes reaches by the
+    // leader simply not coming back before its lease ran out. Nothing waits.
+    dying_store.set_time_offset_for_test(2_000);
+    taking_store.set_time_offset_for_test(2_000);
+
+    let RebuildAdmission::Lead(taken) = taking.admit(&key, 1, 5_000).await.expect("admit") else {
+        panic!("an elapsed lease is taken over");
+    };
+    let fence = taking.publish_token(&taken, 5_000).await.expect("token");
+    assert_eq!(
+        fence.token, 1,
+        "the leader died before it minted anything, so this is the key's first \
+         token - tokens count publications, not tenures"
+    );
+    assert_eq!(
+        entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the takeover's bytes"),
+                fence,
+                5_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published
+    );
+    taking.release(*taken).await.expect("release");
+
+    // The former leader finishes its render and comes back to publish. It is
+    // refused before it reaches the store at all, and its result is discarded.
+    let refused = dying
+        .publish_token(&dead, 5_000)
+        .await
+        .expect_err("an elapsed lease mints nothing");
+    assert_eq!(refused.kind(), RenderCacheErrorKind::LeaseFenced);
+    // And its own clock buys it nothing: `publish_token` is answered by store
+    // time, so asking as though no time had passed is refused identically.
+    let refused = dying
+        .publish_token(&dead, 0)
+        .await
+        .expect_err("a node clock never extends a distributed lease");
+    assert_eq!(refused.kind(), RenderCacheErrorKind::LeaseFenced);
+    dying.release(*dead).await.expect("release");
+
+    assert_eq!(row_count().await, 1);
+    assert_eq!(
+        entries
+            .get(&key)
+            .await
+            .expect("get")
+            .expect("a hit")
+            .bytes
+            .as_ref(),
+        b"the takeover's bytes",
+        "the row is the node that held the lease when it published"
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_node_reads_the_instance_records_the_previous_one_left() {
+    let _db = boot().await;
+    let key = instance_key(0x70);
+    let expires_at = store_deadline(120_000).await;
+
+    // Everything the previous process did, inside its own scope: a restart
+    // takes every handle and every byte of in-process state with it, and the
+    // scope ending is what stands in for that here.
+    {
+        let before = SqlInstanceRecordStore::new();
+        assert!(
+            before
+                .insert_if_absent(&key, b"written before the restart", expires_at)
+                .await
+                .expect("insert")
+        );
+        assert_eq!(
+            before
+                .compare_and_store(&key, 1, b"advanced before the restart", expires_at)
+                .await
+                .expect("compare and store"),
+            CasOutcome::Stored { version: 2 }
+        );
+    }
+
+    // The record is in the database, so the process that comes up next finds
+    // the key held at exactly the version the last one left it at.
+    let after = SqlInstanceRecordStore::new();
+    let stored = after
+        .load(&key)
+        .await
+        .expect("load")
+        .expect("the record outlived the handle that wrote it");
+    assert_eq!(stored.bytes, b"advanced before the restart".to_vec());
+    assert_eq!(stored.version, 2);
+    assert_eq!(after.count_instances().await.expect("count"), 1);
+    assert!(
+        !after
+            .insert_if_absent(&key, b"a restart is not a free key", expires_at)
+            .await
+            .expect("insert"),
+        "a restart does not release the instances the previous process held"
+    );
+    assert_eq!(
+        after
+            .compare_and_store(&key, 2, b"advanced after the restart", expires_at)
+            .await
+            .expect("compare and store"),
+        CasOutcome::Stored { version: 3 },
+        "and the new process continues the record's versions"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_database_profile_publishes_to_sql_l1_serves_from_it_and_sweeps_through_the_facade() {
+    let harness = boot_on_the_database_profile_for_test().await;
+
+    // The publication reaches the shared table, not only this process's L0.
+    let first = dispatch_route(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(
+        row_count().await,
+        1,
+        "the entry is a row every node can read"
+    );
+
+    // With L0 emptied and the epoch untouched, the next request derives the
+    // same key and can only be answered from L1.
+    RenderCache::clear_l0_for_test();
+    assert!(
+        RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+            .await
+            .is_none(),
+        "precondition: nothing is left in memory"
+    );
+    let before = handler_renders(SEED_ONLY_PATH);
+    let hit = dispatch_route(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-2")],
+    )
+    .await;
+    assert_eq!(hit.status, StatusCode::OK, "{}", hit.text());
+    assert_eq!(
+        handler_renders(SEED_ONLY_PATH),
+        before,
+        "an L1 hit runs no handler"
+    );
+    assert!(
+        RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+            .await
+            .is_some(),
+        "and the entry it served is promoted back into L0"
+    );
+
+    // A stitched document's Composite entry round-trips through the same
+    // table: the shell comes back from SQL and the island inside it is
+    // mounted here and now, for whoever is asking.
+    let a1 = dispatch_route(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(a1.status, StatusCode::OK, "{}", a1.text());
+    let stored = RenderCache::inspect_route_for_test(STITCHED_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(stored.kind, EntryKind::Composite);
+    assert_eq!(stored.slots, 1);
+    assert_eq!(row_count().await, 2);
+
+    RenderCache::clear_l0_for_test();
+    let before = handler_renders(STITCHED_PATH);
+    let b1 = dispatch_route(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(b1.status, StatusCode::OK, "{}", b1.text());
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "the composite entry came back from SQL and the handler never ran"
+    );
+    let island_a = island_tag(&a1.text(), "stitch-counter").to_owned();
+    let island_b = island_tag(&b1.text(), "stitch-counter").to_owned();
+    assert_ne!(
+        island_a, island_b,
+        "each principal's island is mounted for that principal"
+    );
+    let shell = |text: &str| text.replace(island_tag(text, "stitch-counter"), "");
+    assert_eq!(
+        shell(&a1.text()),
+        shell(&b1.text()),
+        "and the shell around it is the bytes the leader stored"
+    );
+
+    // `RenderCache::sweep` is the database arm here. Nothing published above
+    // is due yet, and a row another node published with a retention of zero
+    // is due by the database's own clock the instant it was written - so this
+    // waits on nothing and still proves the facade reached the arm that reads
+    // store time rather than a directory or a no-op.
+    let swept = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(swept.removed, 0);
+    assert!(!swept.more_remain);
+    assert_eq!(row_count().await, 2);
+
+    SqlRenderStore::new(1024 * 1024)
+        .publish(
+            &key("/another-node"),
+            Bytes::from_static(b"due immediately"),
+            fence(1, 1),
+            1_000,
+            0,
+        )
+        .await
+        .expect("publish");
+    assert_eq!(row_count().await, 3);
+    let swept = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(
+        swept.removed, 1,
+        "the facade dispatched to the database arm"
+    );
+    assert!(!swept.more_remain);
+    assert_eq!(
+        row_count().await,
+        2,
+        "and the rows that are still live are left alone"
+    );
+}
+
+/// Sets `LIVE_LEDGER_DRIVER` (and, for the Redis driver, its endpoint and key
+/// namespace) for the body of one test and unsets them however that test
+/// ends, so a failed assertion never leaves the variable set for whatever
+/// runs next in this process. Every caller holds the environment lock.
+struct LedgerDriverEnv {
+    names: Vec<&'static str>,
+}
+
+impl LedgerDriverEnv {
+    fn set(pairs: &[(&'static str, String)]) -> Self {
+        for (name, value) in pairs {
+            // SAFETY: the environment lock each caller holds is what
+            // serialises every environment mutation in this test binary.
+            unsafe { std::env::set_var(name, value) };
+        }
+        Self {
+            names: pairs.iter().map(|(name, _)| *name).collect(),
+        }
+    }
+}
+
+impl Drop for LedgerDriverEnv {
+    fn drop(&mut self) {
+        for name in &self.names {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+}
+
+/// The revision carried by a Live snapshot body or an accepted action, which
+/// the wire spells as a decimal string.
+fn revision_of(value: &Value) -> Revision {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        other => panic!("no revision here: {other}"),
+    };
+    Revision::parse(&text).expect("a canonical decimal revision")
+}
+
+/// The scope and instance identities of the single row in
+/// `suprnova_live_instances`, decoded from the hex the columns store.
+///
+/// Read out of the table rather than out of the snapshot: the columns are
+/// what a second node addresses a record by, so taking the identities from
+/// there is what makes the read that follows a genuine second reader of this
+/// row rather than a second decoding of the first reader's own state.
+async fn the_only_instance_identity() -> (ScopeFingerprint, InstanceId) {
+    assert_eq!(instance_row_count().await, 1, "exactly one mounted island");
+    let scope: String = DB::scalar("SELECT scope FROM suprnova_live_instances", vec![])
+        .await
+        .expect("the stored scope");
+    let instance: String = DB::scalar("SELECT instance FROM suprnova_live_instances", vec![])
+        .await
+        .expect("the stored instance identity");
+    (
+        ScopeFingerprint::from_bytes(&hex::decode(scope).expect("hex")).expect("a scope"),
+        InstanceId::from_bytes(&hex::decode(instance).expect("hex")).expect("an instance identity"),
+    )
+}
+
+/// A ledger handle with nothing in common with the running runtime's but the
+/// backend: its own record store, its own clock, and the limits the runtime
+/// itself builds. This is the "second process" of these tests.
+fn a_second_nodes_ledger<S: InstanceRecordStore + 'static>(
+    store: S,
+) -> Arc<dyn LiveInstanceLedger> {
+    Arc::new(DistributedInstanceLedger::new(
+        Arc::new(store),
+        Arc::new(SystemClock),
+        LedgerLimits::new(30_000, 604_800_000, 64, 100_000).expect("the runtime's ledger limits"),
+    ))
+}
+
+/// Mounts the identity-bound dogfood island, acts on it once, and answers
+/// with the revision the mount carried and the revision the action committed.
+///
+/// Shared by the database and Redis ledger tests: what differs between them
+/// is which driver the runtime bound, never what the browser does.
+async fn mount_and_act_on_the_identity_bound_island() -> (Revision, Revision) {
+    live_dogfood_support::fixture();
+    let router = Arc::new(build_public_router());
+    prepare_live_router_for_test(&router).expect("prepare the Live runtime");
+    let middleware = production_middleware();
+
+    // Sign in on one request, as a login handler would, so the identity-bound
+    // render on the next request binds the session that survives the
+    // framework's fixation rotation.
+    let mut login = live_get(DOCUMENT_PATH);
+    login
+        .headers_mut()
+        .insert("x-test-login", "user-7".parse().expect("header"));
+    let (status, headers, body) =
+        dispatch_live(Arc::clone(&router), Arc::clone(&middleware), login).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let signed_in = session_cookie(&headers);
+
+    let mut private = live_get(PRIVATE_DOCUMENT_PATH);
+    private
+        .headers_mut()
+        .insert("x-test-login", "user-7".parse().expect("header"));
+    private
+        .headers_mut()
+        .insert("cookie", signed_in.parse().expect("cookie"));
+    let (status, headers, body) =
+        dispatch_live(Arc::clone(&router), Arc::clone(&middleware), private).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let snapshot = live_dogfood_support::decoded_snapshot(&body);
+    let mounted = revision_of(&snapshot["body"]["revision"]);
+
+    let (status, _, body) = dispatch_live(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        private_action_request(ActionRequest {
+            snapshot,
+            cookie: &cookie,
+            fetch_site: Some("same-origin"),
+            login: Some("user-7"),
+            idempotency_key: "QEFCQ0RFRkdISUpLTE1OTw",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let accepted: Value = serde_json::from_slice(&body).expect("an accepted action");
+    assert_eq!(
+        accepted["outcome"],
+        "accepted",
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    // The action's own response carries the successor envelope, and the
+    // revision inside it is the one the ledger committed.
+    let committed = revision_of(&accepted["snapshot"]["body"]["revision"]);
+    assert_eq!(
+        committed.get(),
+        mounted.get() + 1,
+        "the action committed the mounted revision's successor"
+    );
+    (mounted, committed)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn live_actions_on_the_database_ledger_driver_advance_a_revision_a_second_node_reads() {
+    let _env = crate::env_lock::lock_env_async().await;
+    let _driver = LedgerDriverEnv::set(&[("LIVE_LEDGER_DRIVER", "database".to_owned())]);
+    let _db = boot().await;
+
+    let (_mounted, committed) = mount_and_act_on_the_identity_bound_island().await;
+
+    let (scope, instance) = the_only_instance_identity().await;
+    assert_eq!(
+        a_second_nodes_ledger(SqlInstanceRecordStore::new())
+            .current_accepted_revision(&scope, &instance)
+            .await
+            .expect("the second node's read"),
+        Some(committed),
+        "a second process reads the revision this one committed, out of the database"
+    );
+}
+
+// --- Tier 2 equivalents of everything above ---
+
+/// [`coordinator_over_the_database`]'s Redis twin.
+async fn coordinator_over_redis(
+    config: &RedisProviderConfig,
+    lease_ms: u64,
+) -> FencedLeaseCoordinator<RedisLeaseStore> {
+    FencedLeaseCoordinator::new(
+        Arc::new(RedisLeaseStore::connect(config).await.expect("connect")),
+        LocalCoordinatorLimits {
+            lease_ms,
+            max_waiters: 4,
+        },
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_two_nodes_publish_one_entry_and_the_node_that_bypassed_publishes_nothing() {
+    let (config, _conn, _cleanup) = boot_redis().await;
+    let leader = coordinator_over_redis(&config, 30_000).await;
+    let peer = coordinator_over_redis(&config, 30_000).await;
+    let leader_entries = RedisRenderStore::connect(&config, 1024 * 1024)
+        .await
+        .expect("connect");
+    let peer_entries = RedisRenderStore::connect(&config, 1024 * 1024)
+        .await
+        .expect("connect");
+    let key = key("/tier-two");
+
+    let RebuildAdmission::Lead(lease) = leader.admit(&key, 1, 0).await.expect("admit") else {
+        panic!("the node the store admits leads");
+    };
+    assert!(
+        matches!(
+            peer.admit(&key, 1, 0).await.expect("admit"),
+            RebuildAdmission::Bypass
+        ),
+        "the other node renders without publishing"
+    );
+
+    let fence = leader
+        .publish_token(&lease, 0)
+        .await
+        .expect("the leader mints exactly one fence");
+    assert_eq!(
+        leader_entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the leader's bytes"),
+                fence,
+                1_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published
+    );
+    leader.release(*lease).await.expect("release");
+
+    assert_eq!(
+        peer_entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the bypassing node's bytes"),
+                fence,
+                2_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Fenced,
+        "one publication is accepted per fence, here as in SQL"
+    );
+    let stored = peer_entries
+        .get(&key)
+        .await
+        .expect("get")
+        .expect("both nodes read the same key");
+    assert_eq!(stored.bytes.as_ref(), b"the leader's bytes");
+    assert_eq!(stored.fence, fence);
+    assert_eq!(peer_entries.inspect().await.expect("inspect").entries, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_a_leader_whose_lease_elapsed_is_fenced_and_the_takeover_publishes_instead() {
+    let (config, _conn, _cleanup) = boot_redis().await;
+    let dying_store = Arc::new(RedisLeaseStore::connect(&config).await.expect("connect"));
+    let taking_store = Arc::new(RedisLeaseStore::connect(&config).await.expect("connect"));
+    let limits = LocalCoordinatorLimits {
+        lease_ms: 1_000,
+        max_waiters: 4,
+    };
+    let dying = FencedLeaseCoordinator::new(Arc::clone(&dying_store), limits);
+    let taking = FencedLeaseCoordinator::new(Arc::clone(&taking_store), limits);
+    let entries = RedisRenderStore::connect(&config, 1024 * 1024)
+        .await
+        .expect("connect");
+    let key = key("/tier-two");
+
+    let RebuildAdmission::Lead(dead) = dying.admit(&key, 1, 0).await.expect("admit") else {
+        panic!("the first node leads");
+    };
+
+    // Redis's own clock, moved by the store's test offset, exactly as the
+    // database tier moves the database's. Nothing waits.
+    dying_store.set_time_offset_for_test(2_000);
+    taking_store.set_time_offset_for_test(2_000);
+
+    let RebuildAdmission::Lead(taken) = taking.admit(&key, 1, 5_000).await.expect("admit") else {
+        panic!("an elapsed lease is taken over");
+    };
+    let fence = taking.publish_token(&taken, 5_000).await.expect("token");
+    assert_eq!(
+        fence.token, 1,
+        "the leader died before it minted anything, so this is the key's first token"
+    );
+    assert_eq!(
+        entries
+            .publish(
+                &key,
+                Bytes::from_static(b"the takeover's bytes"),
+                fence,
+                5_000,
+                60_000
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published
+    );
+    taking.release(*taken).await.expect("release");
+
+    let refused = dying
+        .publish_token(&dead, 5_000)
+        .await
+        .expect_err("an elapsed lease mints nothing");
+    assert_eq!(refused.kind(), RenderCacheErrorKind::LeaseFenced);
+    let refused = dying
+        .publish_token(&dead, 0)
+        .await
+        .expect_err("a node clock never extends a distributed lease");
+    assert_eq!(refused.kind(), RenderCacheErrorKind::LeaseFenced);
+    dying.release(*dead).await.expect("release");
+
+    assert_eq!(
+        entries
+            .get(&key)
+            .await
+            .expect("get")
+            .expect("a hit")
+            .bytes
+            .as_ref(),
+        b"the takeover's bytes"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_a_restarted_node_reads_the_instance_records_the_previous_one_left() {
+    let (config, mut conn, _cleanup) = boot_redis().await;
+    let key = instance_key(0x71);
+    let expires_at = redis_deadline(&mut conn, 120_000).await;
+
+    // The previous process, in its own scope; see the database twin's note.
+    {
+        let before = RedisInstanceRecordStore::connect(&config)
+            .await
+            .expect("connect");
+        assert!(
+            before
+                .insert_if_absent(&key, b"written before the restart", expires_at)
+                .await
+                .expect("insert")
+        );
+        assert_eq!(
+            before
+                .compare_and_store(&key, 1, b"advanced before the restart", expires_at)
+                .await
+                .expect("compare and store"),
+            CasOutcome::Stored { version: 2 }
+        );
+    }
+
+    let after = RedisInstanceRecordStore::connect(&config)
+        .await
+        .expect("connect");
+    let stored = after
+        .load(&key)
+        .await
+        .expect("load")
+        .expect("the record outlived the handle that wrote it");
+    assert_eq!(stored.bytes, b"advanced before the restart".to_vec());
+    assert_eq!(stored.version, 2);
+    assert_eq!(after.count_instances().await.expect("count"), 1);
+    assert!(
+        !after
+            .insert_if_absent(&key, b"a restart is not a free key", expires_at)
+            .await
+            .expect("insert")
+    );
+    assert_eq!(
+        after
+            .compare_and_store(&key, 2, b"advanced after the restart", expires_at)
+            .await
+            .expect("compare and store"),
+        CasOutcome::Stored { version: 3 }
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it() {
+    let (config, mut conn, _cleanup) = boot_redis().await;
+    let harness = boot_on_the_redis_profile_for_test(config.clone()).await;
+
+    let first = dispatch_route(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    let entries = redis_keys(&mut conn, &format!("{}entry:", config.prefix)).await;
+    assert_eq!(
+        entries.len(),
+        1,
+        "the publication reached the accelerator every node reads: {entries:?}"
+    );
+
+    RenderCache::clear_l0_for_test();
+    let before = handler_renders(SEED_ONLY_PATH);
+    let hit = dispatch_route(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-2")],
+    )
+    .await;
+    assert_eq!(hit.status, StatusCode::OK, "{}", hit.text());
+    assert_eq!(
+        handler_renders(SEED_ONLY_PATH),
+        before,
+        "an L1 hit runs no handler"
+    );
+    assert!(
+        RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+            .await
+            .is_some(),
+        "and the entry it served is promoted back into L0"
+    );
+
+    let a1 = dispatch_route(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(a1.status, StatusCode::OK, "{}", a1.text());
+    assert_eq!(
+        RenderCache::inspect_route_for_test(STITCHED_PATH)
+            .await
+            .expect("stored")
+            .kind,
+        EntryKind::Composite
+    );
+    RenderCache::clear_l0_for_test();
+    let before = handler_renders(STITCHED_PATH);
+    let b1 = dispatch_route(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(b1.status, StatusCode::OK, "{}", b1.text());
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        before,
+        "the composite entry came back from Redis and the handler never ran"
+    );
+    let shell = |text: &str| text.replace(island_tag(text, "stitch-counter"), "");
+    assert_eq!(shell(&a1.text()), shell(&b1.text()));
+    assert_ne!(
+        island_tag(&a1.text(), "stitch-counter"),
+        island_tag(&b1.text(), "stitch-counter")
+    );
+
+    // Redis expires its own keys, so the facade's sweep has nothing to do on
+    // this tier - it is a no-op, not a misconfiguration.
+    let swept = RenderCache::sweep().await.expect("sweep");
+    assert_eq!(swept.removed, 0);
+    assert!(!swept.more_remain);
+    assert_eq!(
+        redis_keys(&mut conn, &format!("{}entry:", config.prefix))
+            .await
+            .len(),
+        2,
+        "and the entries the sweep left alone are still there"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_live_actions_on_the_redis_ledger_driver_advance_a_revision_a_second_node_reads()
+{
+    let _env = crate::env_lock::lock_env_async().await;
+    let (config, mut conn, _cleanup) = boot_redis().await;
+    // Under the run's own prefix, so the guard that clears it clears this too.
+    let live_prefix = format!("{}live:", config.prefix);
+    let _driver = LedgerDriverEnv::set(&[
+        ("LIVE_LEDGER_DRIVER", "redis".to_owned()),
+        ("LIVE_REDIS_URL", redis_url()),
+        ("LIVE_REDIS_PREFIX", live_prefix.clone()),
+    ]);
+    let _db = boot().await;
+
+    let (_mounted, committed) = mount_and_act_on_the_identity_bound_island().await;
+
+    let instances = redis_keys(&mut conn, &format!("{live_prefix}instance:")).await;
+    assert_eq!(
+        instances.len(),
+        1,
+        "exactly one mounted island: {instances:?}"
+    );
+    let mut parts = instances[0]
+        .strip_prefix(&format!("{live_prefix}instance:"))
+        .expect("the record key is under the configured namespace")
+        .split(':');
+    let scope = ScopeFingerprint::from_bytes(
+        &hex::decode(parts.next().expect("a scope segment")).expect("hex"),
+    )
+    .expect("a scope");
+    let instance = InstanceId::from_bytes(
+        &hex::decode(parts.next().expect("an instance segment")).expect("hex"),
+    )
+    .expect("an instance identity");
+
+    assert_eq!(
+        a_second_nodes_ledger(
+            RedisInstanceRecordStore::connect(&config_at(&live_prefix))
+                .await
+                .expect("connect")
+        )
+        .current_accepted_revision(&scope, &instance)
+        .await
+        .expect("the second node's read"),
+        Some(committed),
+        "a second process reads the revision this one committed, out of Redis"
+    );
+}
+
+/// The Live ledger's own namespace as a provider configuration, so a second
+/// node's record store addresses exactly the keys the runtime wrote.
+fn config_at(prefix: &str) -> RedisProviderConfig {
+    RedisProviderConfig {
+        url: redis_url(),
+        prefix: prefix.to_owned(),
+    }
 }

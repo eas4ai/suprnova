@@ -314,6 +314,39 @@ impl MigratorTrait for StitchRenderCacheMigrator {
     }
 }
 
+/// Both RenderCache migrations, for [`Providers::Database`]: the tier tables
+/// carry the SQL L1 rows and the fenced lease rows, and `RenderCache::install`
+/// refuses a database tier without them.
+struct StitchTierMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for StitchTierMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![
+            Box::new(suprnova::render_cache::migration::Migration),
+            Box::new(suprnova::render_cache::migration::TierMigration),
+        ]
+    }
+}
+
+/// Which deployment profile a boot installs. Everything else about the
+/// harness - the routes, the policies, the guards, the clock, the counters -
+/// is identical whichever is chosen, which is the point: a profile changes
+/// where entries and leases live, never what a route does.
+enum Providers {
+    /// Tier 0: no L1 provider and the in-process coordinator.
+    Embedded,
+    /// Tier 1: the SQL L1 store and the database-backed fenced lease
+    /// coordinator, over a database carrying both migrations.
+    Database,
+    /// Tier 2: the Redis L1 store and the Redis-backed fenced lease
+    /// coordinator, under the caller's own key namespace. Generation truth
+    /// stays in the database, which therefore still carries the original
+    /// migration - and only that one, because a Redis profile reaches no
+    /// tier table.
+    Redis(suprnova::render_cache::providers::RedisProviderConfig),
+}
+
 /// Everything one test needs: the router and middleware registry to dispatch
 /// through, and the clock both the Live runtime and the RenderCache runtime
 /// read.
@@ -323,7 +356,10 @@ pub struct Harness {
     clock: Arc<AdjustableTestClock>,
     _conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
-    _tempdir: tempfile::TempDir,
+    /// The directory holding the SQLite file a [`Providers::Embedded`] boot
+    /// created; `None` for the distributed profiles, whose database is in
+    /// memory and has no directory to keep alive.
+    _tempdir: Option<tempfile::TempDir>,
 }
 
 /// The adjustable clock this harness shares between both runtimes.
@@ -351,7 +387,39 @@ where
 /// policy, installs RenderCache, and prepares the Live runtime on the same
 /// router with the same clock.
 pub async fn boot() -> Arc<Harness> {
-    boot_with_stitched_freshness(generous_freshness()).await
+    boot_with_stitched_freshness(generous_freshness(), Providers::Embedded).await
+}
+
+/// [`boot`] on the Database deployment profile: the same routes, policies,
+/// guards, and counters, over a database carrying both render cache
+/// migrations, with `L1Config::Database` and `CoordinatorConfig::Database`
+/// installed in place of a disabled L1 and the in-process coordinator.
+///
+/// Written here rather than as a second harness beside this one so that what
+/// a profile changes is exactly one thing: a test that dispatches the same
+/// request through the same route is comparing the providers and nothing
+/// else. The database is `sqlite::memory:` with a **single** connection, the
+/// same shape `TestDatabase::fresh` uses, which is also what makes this boot
+/// prove something no larger pool could: `SqlLeaseStore` and `SqlRenderStore`
+/// each open a transaction of their own rather than joining the caller's, so
+/// a coordinator or publish call made inside the render's own read
+/// transaction would deadlock here instead of merely being slower.
+pub async fn boot_on_the_database_profile_for_test() -> Arc<Harness> {
+    boot_with_stitched_freshness(generous_freshness(), Providers::Database).await
+}
+
+/// [`boot_on_the_database_profile_for_test`]'s Tier 2 twin: the same routes
+/// over the Redis L1 store and the Redis rebuild coordinator, under
+/// `config`'s own key namespace. Generation truth stays in the database, so
+/// the boot still carries the original render cache migration; it carries no
+/// tier tables, because a Redis profile reaches none.
+///
+/// Only ever called from an `#[ignore]`d live Redis test: `RenderCache::install`
+/// pings the endpoint and refuses a boot that nothing answers.
+pub async fn boot_on_the_redis_profile_for_test(
+    config: suprnova::render_cache::providers::RedisProviderConfig,
+) -> Arc<Harness> {
+    boot_with_stitched_freshness(generous_freshness(), Providers::Redis(config)).await
 }
 
 /// [`boot`] with [`STITCHED_PATH`] given the named intervals instead of the
@@ -366,13 +434,20 @@ pub async fn boot_with_freshness(
     boot_with_stitched_freshness(
         FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)
             .expect("stitched freshness intervals"),
+        Providers::Embedded,
     )
     .await
 }
 
-/// The shared body of [`boot`] and [`boot_with_freshness`]: everything but
-/// the freshness [`STITCHED_PATH`] is registered with is identical.
-async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Arc<Harness> {
+/// The shared body of [`boot`], [`boot_with_freshness`],
+/// [`boot_on_the_database_profile_for_test`], and
+/// [`boot_on_the_redis_profile_for_test`]: everything but the freshness
+/// [`STITCHED_PATH`] is registered with and the providers `install` is given
+/// is identical.
+async fn boot_with_stitched_freshness(
+    stitched_freshness: FreshnessPolicy,
+    providers: Providers,
+) -> Arc<Harness> {
     static CRYPT_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT_ONCE.get_or_init(|| {
         suprnova::Crypt::init(suprnova::EncryptionKey::generate());
@@ -389,20 +464,47 @@ async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Ar
             .build(),
     );
 
-    let tempdir = tempfile::tempdir().expect("tempdir for render cache stitch test database");
-    let db_path = tempdir.path().join("render-cache-stitch.sqlite3");
-    let config = suprnova::database::DatabaseConfig::builder()
-        .url(format!("sqlite://{}", db_path.display()))
-        .max_connections(4)
-        .min_connections(1)
-        .logging(false)
-        .build();
-    let conn = suprnova::database::DbConnection::connect(&config)
-        .await
-        .expect("connect sqlite");
-    StitchRenderCacheMigrator::up(conn.inner(), None)
-        .await
-        .expect("apply render cache migration");
+    let (conn, tempdir) = match providers {
+        Providers::Embedded => {
+            let tempdir =
+                tempfile::tempdir().expect("tempdir for render cache stitch test database");
+            let db_path = tempdir.path().join("render-cache-stitch.sqlite3");
+            let config = suprnova::database::DatabaseConfig::builder()
+                .url(format!("sqlite://{}", db_path.display()))
+                .max_connections(4)
+                .min_connections(1)
+                .logging(false)
+                .build();
+            let conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            StitchRenderCacheMigrator::up(conn.inner(), None)
+                .await
+                .expect("apply render cache migration");
+            (conn, Some(tempdir))
+        }
+        Providers::Database | Providers::Redis(_) => {
+            let config = suprnova::database::DatabaseConfig::builder()
+                .url("sqlite::memory:")
+                .max_connections(1)
+                .min_connections(1)
+                .logging(false)
+                .build();
+            let conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            if matches!(providers, Providers::Database) {
+                StitchTierMigrator::up(conn.inner(), None)
+                    .await
+                    .expect("apply both render cache migrations");
+            } else {
+                StitchRenderCacheMigrator::up(conn.inner(), None)
+                    .await
+                    .expect("apply the render cache migration");
+            }
+            (conn, None)
+        }
+    };
     TestContainer::singleton(conn.clone());
 
     let clock = Arc::new(AdjustableTestClock::new(1_000_000));
@@ -476,14 +578,41 @@ async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Ar
         .expect("the test environment configures a valid render cache")
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     render_cache_config.enabled = true;
-    render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
-    // Pinned alongside the L1 tier, and for the same reason: an ambient
-    // RENDER_CACHE_PROFILE or RENDER_CACHE_COORDINATOR must not change which
-    // providers this suite installs.
-    render_cache_config.coordinator = suprnova::render_cache::CoordinatorConfig::Local {
-        lease_ms: 30_000,
-        max_waiters: 128,
-    };
+    // Pinned, never inherited: an ambient RENDER_CACHE_PROFILE,
+    // RENDER_CACHE_L1, or RENDER_CACHE_COORDINATOR must not change which
+    // providers this suite installs - the boot's own `Providers` is the only
+    // thing that decides.
+    match providers {
+        Providers::Embedded => {
+            render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
+            render_cache_config.coordinator = suprnova::render_cache::CoordinatorConfig::Local {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            };
+        }
+        Providers::Database => {
+            render_cache_config.l1 = suprnova::render_cache::L1Config::Database {
+                max_bytes: 4 * 1024 * 1024,
+            };
+            render_cache_config.coordinator = suprnova::render_cache::CoordinatorConfig::Database {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            };
+        }
+        Providers::Redis(ref redis) => {
+            render_cache_config.l1 = suprnova::render_cache::L1Config::Redis {
+                url: redis.url.clone(),
+                prefix: redis.prefix.clone(),
+                max_bytes: 4 * 1024 * 1024,
+            };
+            render_cache_config.coordinator = suprnova::render_cache::CoordinatorConfig::Redis {
+                url: redis.url.clone(),
+                prefix: redis.prefix.clone(),
+                lease_ms: 30_000,
+                max_waiters: 128,
+            };
+        }
+    }
 
     // Registered globally, and before `RenderCache::install`, for the same
     // ordering reason `render_cache_live_support::boot_with_render_cache_and_live`
@@ -543,9 +672,14 @@ fn generous_freshness() -> FreshnessPolicy {
     FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness")
 }
 
+/// Every stitched route stores in both tiers. A no-op under
+/// [`Providers::Embedded`], whose runtime has no L1 provider at all to
+/// publish into; under the distributed profiles it is what sends a published
+/// shell to the shared L1 as well as to L0.
 fn stitched_policy(freshness: FreshnessPolicy) -> RenderCachePolicy {
     RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
         .freshness(freshness)
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
         .build()
         .expect("stitched policy")
 }

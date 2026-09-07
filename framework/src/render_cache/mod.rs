@@ -744,6 +744,27 @@ impl RenderCache {
         Self::inspect(&key).await.expect("inspect")
     }
 
+    /// Test-only: empties L0 and leaves everything else - L1, the authority
+    /// epoch, the coordinator - exactly as it was.
+    ///
+    /// The only way a test can prove that a later request was served from L1
+    /// rather than from memory. [`Self::advance_epoch`] also clears L0, but
+    /// it advances the epoch every key is derived under, so the next request
+    /// derives a key nothing was ever published under and misses in both
+    /// tiers; and the L0 capacity trick the file tier's own test uses (fill
+    /// L0 until it evicts) needs a runtime installed with a one-entry L0,
+    /// which is a boot-time choice rather than something a test can reach on
+    /// an already-installed runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no runtime is installed.
+    #[doc(hidden)]
+    pub fn clear_l0_for_test() {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        runtime.l0.clear();
+    }
+
     /// Test-only: the shell bytes of the Composite entry stored for a route
     /// with empty params and anonymous variance, or `None` when nothing is
     /// stored for it. Panics when the stored entry is a Complete one.
