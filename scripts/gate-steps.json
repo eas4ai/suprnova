@@ -135,6 +135,15 @@
       "capabilities": ["bash", "cargo", "docker"]
     },
     {
+      "id": "redis-tests",
+      "name": "Redis tier regressions",
+      "tiers": ["default", "full"],
+      "argv": ["scripts/check-redis.sh"],
+      "timeout_seconds": 600,
+      "category": "environment",
+      "capabilities": ["bash", "cargo", "docker"]
+    },
+    {
       "id": "scaffold-tests",
       "name": "scaffold compile tests",
       "tiers": ["default", "full"],

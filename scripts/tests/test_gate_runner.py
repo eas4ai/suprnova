@@ -196,6 +196,12 @@ class StepRegistryTests(unittest.TestCase):
                 ["scripts/check-postgres.sh"],
             ),
             (
+                "redis-tests",
+                ["default", "full"],
+                600,
+                ["scripts/check-redis.sh"],
+            ),
+            (
                 "scaffold-tests",
                 ["default", "full"],
                 2400,
@@ -1442,6 +1448,7 @@ class ShellAssetContractTests(unittest.TestCase):
             ".githooks/pre-push",
             "scripts/check-postgres.sh",
             "scripts/check-mysql.sh",
+            "scripts/check-redis.sh",
             "scripts/check-magnetar-live.sh",
         ]:
             destination = self.repo / relative
@@ -1476,14 +1483,21 @@ class ShellAssetContractTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
             "case \"${1-}\" in\n"
-            "    info|exec|rm|logs) exit 0 ;;\n"
+            "    info|rm|logs) exit 0 ;;\n"
+            "    exec)\n"
+            "        # Only the Redis readiness probe reads the probe's own\n"
+            "        # output; the others check the exit status alone.\n"
+            "        if [[ \"$*\" == *'redis-cli ping'* ]]; then\n"
+            "            printf 'PONG\\n'\n"
+            "        fi\n"
+            "        ;;\n"
             "    run) printf 'fake-container\\n' ;;\n"
             "    port)\n"
-            "        if [[ \"${3-}\" == '5432/tcp' ]]; then\n"
-            "            printf '127.0.0.1:15432\\n'\n"
-            "        else\n"
-            "            printf '127.0.0.1:13306\\n'\n"
-            "        fi\n"
+            "        case \"${3-}\" in\n"
+            "            5432/tcp) printf '127.0.0.1:15432\\n' ;;\n"
+            "            6379/tcp) printf '127.0.0.1:16379\\n' ;;\n"
+            "            *) printf '127.0.0.1:13306\\n' ;;\n"
+            "        esac\n"
             "        ;;\n"
             "esac\n",
         )
@@ -1515,6 +1529,33 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test ledger::live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock ... ok\\n'\n"
             "            printf 'test ledger::live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        tiers::live_postgres)\n"
+            "            printf 'test tiers::live_postgres_record_creation_and_cas_conflict ... ok\\n'\n"
+            "            printf 'test tiers::live_postgres_publish_fencing_and_sweep ... ok\\n'\n"
+            "            printf 'test tiers::live_postgres_lease_takeover_and_fencing ... ok\\n'\n"
+            "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        tiers::live_mysql)\n"
+            "            printf 'test tiers::live_mysql_record_creation_and_cas_conflict ... ok\\n'\n"
+            "            printf 'test tiers::live_mysql_publish_fencing_and_sweep ... ok\\n'\n"
+            "            printf 'test tiers::live_mysql_lease_takeover_and_fencing ... ok\\n'\n"
+            "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        tiers::live_redis)\n"
+            "            printf 'test tiers::live_redis_publish_fences_and_eviction_is_a_miss ... ok\\n'\n"
+            "            printf 'test tiers::live_redis_two_coordinators_lead_once_and_bypass_once ... ok\\n'\n"
+            "            printf 'test tiers::live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is_fenced ... ok\\n'\n"
+            "            printf 'test tiers::live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it ... ok\\n'\n"
+            "            printf 'test result: ok. 16 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        live_postgres)\n"
+            "            printf 'test render_cache::providers::sql_store::tests::live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        live_mysql)\n"
+            "            printf 'test render_cache::providers::sql_store::tests::live_mysql_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
             "    esac\n"
             "done\n",
@@ -1608,6 +1649,7 @@ class ShellAssetContractTests(unittest.TestCase):
         for relative in [
             "scripts/check-postgres.sh",
             "scripts/check-mysql.sh",
+            "scripts/check-redis.sh",
             "scripts/check-magnetar-live.sh",
         ]:
             with self.subTest(relative=relative):
@@ -1621,6 +1663,7 @@ class ShellAssetContractTests(unittest.TestCase):
         expectations = {
             "scripts/check-postgres.sh": ["postgres:17-alpine"],
             "scripts/check-mysql.sh": ["mariadb:11-jammy"],
+            "scripts/check-redis.sh": ["redis:7-alpine"],
             "scripts/check-magnetar-live.sh": [
                 "postgres:17-alpine",
                 "mysql:8.4",
@@ -1630,10 +1673,17 @@ class ShellAssetContractTests(unittest.TestCase):
             "scripts/check-postgres.sh": [
                 "--test eloquent -- --ignored --test-threads=1 relations_pivot_filters_postgres::",
                 "workflow::tests::test_claim_reclaims_expired_running_row",
+                "--test render_cache -- --ignored --test-threads=1 tiers::live_postgres",
+                "--lib -- --ignored --test-threads=1 live_postgres",
             ],
             "scripts/check-mysql.sh": [
                 "--test eloquent -- --ignored --test-threads=1 mass_write_mysql::",
                 "workflow::tests::test_mysql_",
+                "--test render_cache -- --ignored --test-threads=1 tiers::live_mysql",
+                "--lib -- --ignored --test-threads=1 live_mysql",
+            ],
+            "scripts/check-redis.sh": [
+                "--test render_cache -- --ignored --test-threads=1 tiers::live_redis",
             ],
             "scripts/check-magnetar-live.sh": [],
         }

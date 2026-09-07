@@ -21,6 +21,7 @@ EXPECTED_INDEX_MODES = {
     "scripts/check-mysql.sh": "100755",
     "scripts/check-postgres.sh": "100755",
     "scripts/check-prose-dashes.sh": "100755",
+    "scripts/check-redis.sh": "100755",
     "scripts/gate-assets.json": "100644",
     "scripts/gate-runner.py": "100755",
     "scripts/gate-steps.json": "100644",

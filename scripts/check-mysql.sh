@@ -81,6 +81,37 @@ for render_cache_mysql_test in \
     fi
 done
 
+# `tiers` is mixed the same way, with one more dialect in it: SQLite tier
+# tests run unconditionally beside Postgres-, MySQL-, and Redis-tagged
+# `#[ignore]`d ones. Select the MySQL-tagged ones by name, and assert on the
+# output for the same reason as above.
+echo
+echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::live_mysql"
+tiers_mysql_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_mysql 2>&1)"
+echo "$tiers_mysql_out"
+for tiers_mysql_test in \
+    live_mysql_record_creation_and_cas_conflict \
+    live_mysql_publish_fencing_and_sweep \
+    live_mysql_lease_takeover_and_fencing; do
+    if ! grep -qE "^test tiers::${tiers_mysql_test} \.\.\. ok" <<<"$tiers_mysql_out"; then
+        echo "check-mysql: ${tiers_mysql_test} did not report ok (filter may have matched nothing)" >&2
+        exit 1
+    fi
+done
+
+# The SQL record store's guarded upsert - the statement that must refuse a
+# lower fence and accept a higher one - is proved by an in-source unit test,
+# so it needs `--lib` rather than the integration binary. Same silent-pass
+# hazard, same output assertion.
+echo
+echo "==> cargo test -p suprnova --lib -- --ignored live_mysql"
+sql_store_mysql_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 live_mysql 2>&1)"
+echo "$sql_store_mysql_out"
+if ! grep -qE "^test render_cache::providers::sql_store::tests::live_mysql_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one \.\.\. ok" <<<"$sql_store_mysql_out"; then
+    echo "check-mysql: the SQL store guarded-upsert test did not report ok (filter may have matched nothing)" >&2
+    exit 1
+fi
+
 cargo test -p suprnova --test queue after_commit::savepoint_aliases_mysql_rows_and_jobs_agree -- --ignored --exact
 
 echo

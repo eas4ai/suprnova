@@ -181,7 +181,7 @@ class InstallGateTests(unittest.TestCase):
         self.assertEqual(hooks_path, ".githooks")
         self.assertEqual(record.schema, 2)
         self.assertEqual(record.capabilities, self.manifest_capabilities)
-        self.assertEqual(len(record.assets), 23)
+        self.assertEqual(len(record.assets), 24)
         self.assertEqual(set(record.assets), set(self.manifest_assets))
         self.assertEqual(record.branch, "local/gate-infra")
         self.assertEqual(record.commit, self.local_commit)
@@ -195,7 +195,7 @@ class InstallGateTests(unittest.TestCase):
 
 
     def test_manifest_contains_itself_and_complete_canonical_closure(self):
-        self.assertEqual(len(self.manifest_assets), 23)
+        self.assertEqual(len(self.manifest_assets), 24)
         self.assertTrue(REQUIRED_CANONICAL_ASSETS.issubset(self.manifest_assets))
 
     def test_manifest_missing_required_asset_fails_before_copy(self):
@@ -314,7 +314,7 @@ class InstallGateTests(unittest.TestCase):
 
         self.assertEqual(outside.read_bytes(), sentinel)
         self.assertTrue(predictable_temp.is_symlink())
-        self.assertEqual(len(record.assets), 23)
+        self.assertEqual(len(record.assets), 24)
         verify_install(self.public_repo)
 
     def test_source_swap_to_symlink_immediately_before_open_fails_closed(self):

@@ -13,6 +13,7 @@
     "scripts/check-manual-structure.py",
     "scripts/check-postgres.sh",
     "scripts/check-mysql.sh",
+    "scripts/check-redis.sh",
     "scripts/check-magnetar-live.sh",
     "scripts/check-msrv.sh",
     "scripts/check-feature-matrix.sh",
