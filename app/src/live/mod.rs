@@ -234,5 +234,5 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
 /// middleware establish the request-scoped state the cache middleware reads
 /// while building a lookup key.
 pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
-    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()).await
+    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()?).await
 }

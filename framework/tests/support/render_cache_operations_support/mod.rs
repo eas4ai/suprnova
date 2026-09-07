@@ -269,8 +269,9 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
         .expect("attach private l1 policy");
 
-    let mut config =
-        RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
     config.l1 = match l1_directory {
         Some(directory) => L1Config::File {

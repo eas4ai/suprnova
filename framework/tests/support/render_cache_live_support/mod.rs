@@ -419,8 +419,9 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .try_render_cache(SEAM_CONTROL_PATH, seam_policy)
         .expect("attach seam control policy");
 
-    let mut render_cache_config =
-        RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut render_cache_config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     render_cache_config.enabled = true;
     render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
 

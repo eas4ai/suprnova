@@ -2457,11 +2457,16 @@ mod tests {
         RenderCacheRuntime {
             config: RenderCacheConfig {
                 enabled: true,
+                profile: super::super::Profile::Embedded,
                 l0: super::super::L0Limits {
                     max_entries: 8,
                     max_bytes: 1024 * 1024,
                 },
                 l1: super::super::L1Config::Disabled,
+                coordinator: super::super::CoordinatorConfig::Local {
+                    lease_ms: 30_000,
+                    max_waiters: 128,
+                },
                 failure: FailurePolicy::Open,
                 build_id: "test".to_owned(),
                 clock_override: None,

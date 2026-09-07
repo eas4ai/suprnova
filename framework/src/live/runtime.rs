@@ -37,8 +37,8 @@ use suprnova_live::identity::{
     ModelField, Revision, RouteIdentity, ScopeFingerprint, UnixMillis,
 };
 use suprnova_live::ledger::{
-    AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, LedgerLimits,
-    LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
+    AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, DistributedInstanceLedger,
+    LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
 };
 use suprnova_live::limits::{InputLimits, UploadLimitConfig, UploadLimits};
 use suprnova_live::mount::{
@@ -68,8 +68,11 @@ use uuid::Uuid;
 use super::async_updates::{AsyncErrorKind, AsyncState};
 use super::context::SubscriptionCapabilities;
 use super::ports::subscription::{FixedSubscriptionBaseline, SuprnovaSubscriptionRegistry};
-use super::{LiveConfig, LiveRegistry};
+use super::{LedgerDriver, LiveConfig, LiveRegistry};
 use crate::Request;
+use crate::render_cache::providers::{
+    RedisInstanceRecordStore, RedisProviderConfig, SqlInstanceRecordStore,
+};
 
 struct RuntimeGraph {
     config: LiveConfig,
@@ -352,8 +355,30 @@ impl RuntimeProviderCandidates {
         let key_ring = Arc::new(build_key_ring()?);
         let ledger_limits =
             LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())?;
-        let ledger: Arc<dyn LiveInstanceLedger> =
-            Arc::new(MemoryInstanceLedger::new(Arc::clone(&clock), ledger_limits));
+        // The limits above are the same in every driver: what
+        // `LIVE_LEDGER_DRIVER` chooses is where the records live, never what
+        // the state machine over them permits. Building the store reaches no
+        // backend - a SQL store resolves its executor per operation and a
+        // Redis store is a handle - so a driver that cannot be reached is
+        // refused by `verify_ledger_backend` at boot rather than here.
+        let ledger: Arc<dyn LiveInstanceLedger> = match LedgerDriver::from_env()? {
+            LedgerDriver::Memory => {
+                Arc::new(MemoryInstanceLedger::new(Arc::clone(&clock), ledger_limits))
+            }
+            LedgerDriver::Database => Arc::new(DistributedInstanceLedger::new(
+                Arc::new(SqlInstanceRecordStore::new()),
+                Arc::clone(&clock),
+                ledger_limits,
+            )),
+            LedgerDriver::Redis { url, prefix } => Arc::new(DistributedInstanceLedger::new(
+                Arc::new(RedisInstanceRecordStore::open(&RedisProviderConfig {
+                    url,
+                    prefix,
+                })?),
+                Arc::clone(&clock),
+                ledger_limits,
+            )),
+        };
         Ok(Self {
             clock: Some(clock),
             random: Some(random),
@@ -1848,6 +1873,67 @@ fn assemble_runtime(
     })
 }
 
+/// Proves the backend the configured Live instance ledger driver needs is
+/// actually there.
+///
+/// The instance ledger is revision authority, so a deployment whose ledger
+/// backend is absent must stop at boot rather than fail every mount: a
+/// missing tier migration and an endpoint nothing answers are both
+/// deployment mistakes with one-line fixes, and both would otherwise surface
+/// as a provider failure on every request.
+///
+/// [`LedgerDriver::Memory`] reaches nothing and therefore always passes.
+///
+/// Called by `Server::run` during the same bootstrap sequence that fails
+/// closed on an unreachable cache driver. It is a separate step rather than
+/// part of `LiveRuntime::bind` because that function is synchronous - it is
+/// reached from synchronous public constructors and from tooling - and both
+/// probes here are I/O.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming `LIVE_LEDGER_DRIVER` when the database
+/// driver's tables are absent, and `LIVE_REDIS_URL` when the Redis driver's
+/// endpoint does not answer. Neither message repeats a configured value.
+pub async fn verify_ledger_backend(driver: &LedgerDriver) -> Result<(), FrameworkError> {
+    match driver {
+        LedgerDriver::Memory => Ok(()),
+        LedgerDriver::Database => {
+            if crate::render_cache::ledger::tier_migration_present().await? {
+                Ok(())
+            } else {
+                Err(FrameworkError::internal(
+                    "LIVE_LEDGER_DRIVER=database, but the Live instance ledger tables are \
+                     missing. Add suprnova::render_cache::migration::TierMigration \
+                     (m20260906_000000_create_render_cache_tier_tables) to your Migrator's \
+                     migrations() list and apply migrations, or unset LIVE_LEDGER_DRIVER to \
+                     run the in-process ledger.",
+                ))
+            }
+        }
+        LedgerDriver::Redis { url, prefix } => {
+            crate::render_cache::providers::redis::ping(&RedisProviderConfig {
+                url: url.clone(),
+                prefix: prefix.clone(),
+            })
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "suprnova::live",
+                    %error,
+                    "live instance ledger Redis did not answer PING at boot",
+                );
+                FrameworkError::internal(
+                    "LIVE_LEDGER_DRIVER=redis, but the configured Redis did not answer PING. \
+                     Fix LIVE_REDIS_URL, start the instance it names, or unset \
+                     LIVE_LEDGER_DRIVER to run the in-process ledger. The endpoint is not \
+                     repeated here: it can carry a password.",
+                )
+            })
+        }
+    }
+}
+
 pub(super) fn assemble_for_harness(
     config: LiveConfig,
     registry: LiveRegistry,
@@ -2027,5 +2113,52 @@ fn missing_provider(name: &'static str) -> FrameworkError {
 impl fmt::Debug for LiveRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<LiveRuntime:redacted>")
+    }
+}
+
+#[cfg(test)]
+mod ledger_backend_tests {
+    //! What a Live ledger driver pointed at nothing does at boot.
+    //!
+    //! The database driver's own refusal needs a database and is proven in
+    //! `framework/tests/render_cache/tiers.rs`, where one is available. What
+    //! is proven here is the half that needs no backend at all: an endpoint
+    //! nothing answers stops the boot, and says so without repeating the
+    //! endpoint.
+    use super::*;
+
+    /// A driver pointed at a loopback port nothing listens on. The port is
+    /// bound and released, so a connection to it is refused rather than
+    /// accepted and left hanging.
+    fn closed_port_driver() -> LedgerDriver {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("the bound address").port();
+        drop(listener);
+        LedgerDriver::Redis {
+            url: format!("redis://someone:hunter2@127.0.0.1:{port}/"),
+            prefix: "suprnova_live_boot_test:".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redis_ledger_that_answers_nothing_stops_the_boot_without_naming_the_endpoint() {
+        let driver = closed_port_driver();
+        let refused = verify_ledger_backend(&driver)
+            .await
+            .expect_err("a ledger backend nothing answers must not boot");
+        let message = refused.to_string();
+        assert!(
+            message.contains("LIVE_REDIS_URL"),
+            "the refusal names the setting to fix: {message}"
+        );
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn the_in_process_ledger_needs_no_backend_and_is_always_reachable() {
+        verify_ledger_backend(&LedgerDriver::Memory)
+            .await
+            .expect("the in-process ledger reaches nothing and so can fail nothing");
     }
 }

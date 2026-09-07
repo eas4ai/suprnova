@@ -45,7 +45,9 @@ pub mod tooling_protocol;
 pub mod __private;
 
 pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
-pub use config::{LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind};
+pub use config::{
+    LedgerDriver, LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind,
+};
 pub use document::{
     LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind,
     MountedIsland, StitchFailurePolicy, StitchSlotDescriptor,
@@ -54,7 +56,7 @@ pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
 pub use routes::LiveRouteGuard;
-pub use runtime::LiveRuntime;
+pub use runtime::{LiveRuntime, verify_ledger_backend};
 pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};

@@ -258,8 +258,26 @@ impl RedisInstanceRecordStore {
     /// Redis connection URL. The message names the setting and never repeats
     /// its value, which can carry a password.
     pub async fn connect(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
+        Self::open(config)
+    }
+
+    /// [`Self::connect`] without the `async` marker.
+    ///
+    /// The Live instance ledger is built by `LiveRuntime::bind`, which is
+    /// synchronous, so this store has to be constructible without an `await`
+    /// to give it. Nothing is awaited in either form; see `RedisProvider::open`
+    /// (crate-private, so this is a plain code span rather than a link) for
+    /// what still has to be true of the caller and how that is checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when no asynchronous runtime is running on
+    /// this thread or the configured URL is not a usable Redis connection
+    /// URL. The message names the setting and never repeats its value, which
+    /// can carry a password.
+    pub fn open(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
         Ok(Self {
-            provider: RedisProvider::connect(config).await?,
+            provider: RedisProvider::open(config)?,
             time_offset_ms: StoreTimeOffset::default(),
         })
     }
@@ -479,6 +497,68 @@ mod tests {
         assert!(
             LOAD_LUA.contains("return {1, held[1], tonumber(held[2]), expires_at}"),
             "and a hit carries the record, its version, and its deadline: {LOAD_LUA}"
+        );
+    }
+
+    #[test]
+    fn creation_binds_every_argument_the_script_reads() {
+        // Spelled out on both sides, the way `redis_store`'s publication
+        // test pins `PUBLISH_LUA`: an edit to either that forgets the other
+        // would store a deadline as a reclamation batch, or reclaim against
+        // an offset, with nothing failing until a live Redis saw it.
+        assert!(
+            INSERT_LUA.contains("'record', ARGV[1], 'version', 1, 'expires_at_ms', ARGV[2]"),
+            "ARGV[1] is the encoded record and ARGV[2] its deadline: {INSERT_LUA}"
+        );
+        assert!(
+            INSERT_LUA.contains("redis.call('PEXPIREAT', KEYS[1], ARGV[2])"),
+            "and the same deadline is the key's own lifetime: {INSERT_LUA}"
+        );
+        assert!(
+            INSERT_LUA.contains("redis.call('ZADD', KEYS[2], ARGV[2], KEYS[1])"),
+            "and its score in the expiry index: {INSERT_LUA}"
+        );
+        assert!(
+            INSERT_LUA.contains("suprnova_store_now(tonumber(ARGV[3]))"),
+            "ARGV[3] is the store-time test offset: {INSERT_LUA}"
+        );
+        assert!(
+            INSERT_LUA.contains("'LIMIT', 0, tonumber(ARGV[4])"),
+            "ARGV[4] is the reclamation batch: {INSERT_LUA}"
+        );
+        assert!(
+            !INSERT_LUA.contains("ARGV[5]"),
+            "four arguments, and the call site binds exactly four: {INSERT_LUA}"
+        );
+    }
+
+    #[test]
+    fn the_replacement_binds_every_argument_the_script_reads() {
+        assert!(
+            COMPARE_AND_STORE_LUA
+                .contains("'record', ARGV[1], 'version', next_version, 'expires_at_ms', ARGV[3]"),
+            "ARGV[1] is the encoded record and ARGV[3] the new deadline: \
+             {COMPARE_AND_STORE_LUA}"
+        );
+        assert!(
+            COMPARE_AND_STORE_LUA.contains("if version ~= tonumber(ARGV[2]) then"),
+            "ARGV[2] is the version the caller read: {COMPARE_AND_STORE_LUA}"
+        );
+        assert!(
+            COMPARE_AND_STORE_LUA.contains("redis.call('PEXPIREAT', KEYS[1], ARGV[3])"),
+            "and the new deadline is the key's own lifetime: {COMPARE_AND_STORE_LUA}"
+        );
+        assert!(
+            COMPARE_AND_STORE_LUA.contains("redis.call('ZADD', KEYS[2], ARGV[3], KEYS[1])"),
+            "and its score in the expiry index: {COMPARE_AND_STORE_LUA}"
+        );
+        assert!(
+            COMPARE_AND_STORE_LUA.contains("suprnova_store_now(tonumber(ARGV[4]))"),
+            "ARGV[4] is the store-time test offset: {COMPARE_AND_STORE_LUA}"
+        );
+        assert!(
+            !COMPARE_AND_STORE_LUA.contains("ARGV[5]"),
+            "four arguments, and the call site binds exactly four: {COMPARE_AND_STORE_LUA}"
         );
     }
 

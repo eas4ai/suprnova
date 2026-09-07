@@ -394,6 +394,15 @@ impl Server {
         // no silent downgrade. See `Cache::bootstrap` for the contract.
         Cache::bootstrap().await?;
 
+        // Prove the Live instance ledger's backend is there, on the same
+        // fail-closed terms: a distributed ledger driver whose tables are
+        // missing or whose Redis answers nothing must stop the boot rather
+        // than fail every mount. `LiveRuntime::bind` above cannot do this
+        // itself - it is synchronous, and both probes are I/O - so it builds
+        // the configured provider and this proves it. See
+        // `crate::live::verify_ledger_backend`.
+        crate::live::verify_ledger_backend(&crate::live::LedgerDriver::from_env()?).await?;
+
         // Bootstrap localization - binds the default `FluentTranslator`
         // from `lang/` unless the app already bound its own `Translator`.
         // See `Localization::bootstrap` for the contract.

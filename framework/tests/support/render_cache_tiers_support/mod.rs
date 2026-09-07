@@ -20,9 +20,11 @@
 use bytes::Bytes;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::database::transaction::ExecutorChoice;
+use suprnova::render_cache::RenderCache;
+use suprnova::render_cache::config::{CoordinatorConfig, L1Config, RenderCacheConfig};
 use suprnova::render_cache::providers::sql_now_ms;
 use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
-use suprnova::{DB, PRIMARY_CONNECTION_NAME};
+use suprnova::{App, Crypt, DB, EncryptionKey, FrameworkError, PRIMARY_CONNECTION_NAME, Router};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{IdempotencyKey, InstanceId, KeyId, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{InstanceRecordKey, PromotionRecordKey};
@@ -282,6 +284,47 @@ pub async fn reset_and_migrate(conn: sea_orm::DatabaseConnection) -> TestContain
     let guard = TestContainer::fake();
     TestContainer::singleton(suprnova::DbConnection::from_raw(conn));
     guard
+}
+
+/// A configuration carrying exactly `l1` and `coordinator`, with everything
+/// else at the shape the install tests need: the cache on, a build id that
+/// parses, and no test seams.
+///
+/// Built from [`RenderCacheConfig::from_env`] and then overridden rather
+/// than from a literal, so a field added to the configuration reaches these
+/// tests with its default instead of failing to compile here.
+///
+/// # Panics
+///
+/// Panics when the ambient environment does not parse, which is a broken
+/// test environment rather than a failure of the code under test.
+pub fn tier_config(l1: L1Config, coordinator: CoordinatorConfig) -> RenderCacheConfig {
+    let mut config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache");
+    config.enabled = true;
+    config.build_id = "tier-install-test".to_owned();
+    config.l1 = l1;
+    config.coordinator = coordinator;
+    config
+}
+
+/// Installs a RenderCache runtime over whatever database is mounted, on a
+/// router with no routes of its own.
+///
+/// Initialises the encryption key once per process (the key ring `install`
+/// derives needs one) and the container, exactly as the middleware suite's
+/// own boot does. The returned router is dropped: these tests are about
+/// what `install` accepts and refuses, not about serving a request.
+///
+/// # Errors
+///
+/// Returns whatever `RenderCache::install` returns, which is the point of
+/// the tests that call it.
+pub async fn install(config: RenderCacheConfig) -> Result<(), FrameworkError> {
+    static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
+    App::init();
+    RenderCache::install(Router::new(), config).await.map(|_| ())
 }
 
 // --- Tier 2: Redis ---

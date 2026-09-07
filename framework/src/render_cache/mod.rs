@@ -48,10 +48,12 @@ pub mod telemetry;
 #[doc(hidden)]
 pub mod testing;
 
-pub use config::{FailurePolicy, L0Limits, L1Config, RenderCacheConfig};
+pub use config::{
+    CoordinatorConfig, FailurePolicy, L0Limits, L1Config, Profile, RenderCacheConfig,
+};
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
-pub use providers::SqlRenderStore;
+pub use providers::{RedisRenderStore, SqlRenderStore};
 pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
@@ -62,8 +64,11 @@ pub use suprnova_live::render_cache::{
 
 use std::sync::{Arc, OnceLock, RwLock};
 
+use suprnova_live::render_cache::FencedLeaseCoordinator;
 use suprnova_live::render_cache::entry::EntryLimits;
-use suprnova_live::render_cache::singleflight::{LocalCoordinatorLimits, LocalRebuildCoordinator};
+use suprnova_live::render_cache::singleflight::{
+    LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildCoordinator,
+};
 use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits, RenderStore};
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
@@ -92,6 +97,9 @@ pub enum L1Provider {
     /// One row per key in `suprnova_render_entries`, shared by every node
     /// pointed at the same database.
     Database(SqlRenderStore),
+    /// One hash per key in Redis, shared by every node pointed at the same
+    /// instance and prefix.
+    Redis(RedisRenderStore),
 }
 
 #[async_trait::async_trait]
@@ -103,6 +111,7 @@ impl RenderStore for L1Provider {
         match self {
             Self::File(store) => store.get(key).await,
             Self::Database(store) => store.get(key).await,
+            Self::Redis(store) => store.get(key).await,
         }
     }
 
@@ -117,6 +126,7 @@ impl RenderStore for L1Provider {
         match self {
             Self::File(store) => store.publish(key, bytes, fence, now_ms, retention_ms).await,
             Self::Database(store) => store.publish(key, bytes, fence, now_ms, retention_ms).await,
+            Self::Redis(store) => store.publish(key, bytes, fence, now_ms, retention_ms).await,
         }
     }
 
@@ -127,6 +137,7 @@ impl RenderStore for L1Provider {
         match self {
             Self::File(store) => store.evict(key).await,
             Self::Database(store) => store.evict(key).await,
+            Self::Redis(store) => store.evict(key).await,
         }
     }
 
@@ -136,6 +147,7 @@ impl RenderStore for L1Provider {
         match self {
             Self::File(store) => store.inspect().await,
             Self::Database(store) => store.inspect().await,
+            Self::Redis(store) => store.inspect().await,
         }
     }
 }
@@ -157,6 +169,91 @@ pub struct StoreInspection {
     pub bytes: usize,
     /// The current authority epoch.
     pub epoch: u64,
+}
+
+/// Whether this configuration reaches any table the tier migration creates.
+///
+/// The L1 tier and the coordinator are chosen independently, so a
+/// configuration can need the tier tables through either one alone - a
+/// database coordinator in front of a file L1 is a legitimate shape, and it
+/// still needs `suprnova_render_leases`.
+fn needs_tier_tables(config: &RenderCacheConfig) -> bool {
+    matches!(config.l1, L1Config::Database { .. })
+        || matches!(config.coordinator, CoordinatorConfig::Database { .. })
+}
+
+/// Every distinct Redis endpoint this configuration would reach.
+///
+/// Distinct, because the L1 tier and the coordinator each carry their own
+/// endpoint and a deployment may point them at different instances; one
+/// `PING` per instance is what proves the boot, and pinging the same one
+/// twice proves nothing further.
+fn redis_endpoints(config: &RenderCacheConfig) -> Vec<providers::RedisProviderConfig> {
+    let mut endpoints: Vec<providers::RedisProviderConfig> = Vec::new();
+    let mut push = |url: &str, prefix: &str| {
+        let endpoint = providers::RedisProviderConfig {
+            url: url.to_owned(),
+            prefix: prefix.to_owned(),
+        };
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
+        }
+    };
+    if let L1Config::Redis { url, prefix, .. } = &config.l1 {
+        push(url, prefix);
+    }
+    if let CoordinatorConfig::Redis { url, prefix, .. } = &config.coordinator {
+        push(url, prefix);
+    }
+    endpoints
+}
+
+/// The coordinator [`CoordinatorConfig`] describes.
+///
+/// Always a trait object: the profile decides which one this process runs,
+/// and nothing above this line needs to know which - unlike
+/// [`L1Provider`], whose concrete type
+/// [`RenderCache::sweep`] has to reach.
+async fn build_coordinator(
+    config: &CoordinatorConfig,
+) -> Result<Arc<dyn RebuildCoordinator>, FrameworkError> {
+    Ok(match config {
+        CoordinatorConfig::Local {
+            lease_ms,
+            max_waiters,
+        } => Arc::new(LocalRebuildCoordinator::new(LocalCoordinatorLimits {
+            lease_ms: *lease_ms,
+            max_waiters: *max_waiters,
+        })),
+        CoordinatorConfig::Database {
+            lease_ms,
+            max_waiters,
+        } => Arc::new(FencedLeaseCoordinator::new(
+            Arc::new(providers::SqlLeaseStore::new()),
+            LocalCoordinatorLimits {
+                lease_ms: *lease_ms,
+                max_waiters: *max_waiters,
+            },
+        )),
+        CoordinatorConfig::Redis {
+            url,
+            prefix,
+            lease_ms,
+            max_waiters,
+        } => Arc::new(FencedLeaseCoordinator::new(
+            Arc::new(
+                providers::RedisLeaseStore::connect(&providers::RedisProviderConfig {
+                    url: url.clone(),
+                    prefix: prefix.clone(),
+                })
+                .await?,
+            ),
+            LocalCoordinatorLimits {
+                lease_ms: *lease_ms,
+                max_waiters: *max_waiters,
+            },
+        )),
+    })
 }
 
 /// The RenderCache facade: install, observe, inspect, and epoch control.
@@ -334,6 +431,23 @@ impl RenderCache {
             max_entries: config.l0.max_entries,
             max_bytes: config.l0.max_bytes,
         });
+        // Fail closed before anything is built: a profile whose backend is
+        // not there must stop the boot with one actionable sentence rather
+        // than fail every request against a missing table or an endpoint
+        // nothing answers. Both probes are cheap and neither is reachable
+        // from a profile that does not need it.
+        if needs_tier_tables(&config) && !ledger::tier_migration_present().await? {
+            return Err(FrameworkError::internal(
+                "RenderCache::install: the RenderCache tier tables are missing. Add \
+                 suprnova::render_cache::migration::TierMigration \
+                 (m20260906_000000_create_render_cache_tier_tables) to your Migrator's \
+                 migrations() list and apply migrations before selecting a database L1 tier \
+                 or a database rebuild coordinator, or set RENDER_CACHE_PROFILE=embedded.",
+            ));
+        }
+        for endpoint in redis_endpoints(&config) {
+            providers::redis::ping(&endpoint).await?;
+        }
         let l1 = match &config.l1 {
             L1Config::Disabled => None,
             L1Config::File {
@@ -342,17 +456,32 @@ impl RenderCache {
             } => Some(L1Provider::File(file_store::FileRenderStore::open(
                 directory, *max_bytes,
             )?)),
+            L1Config::Database { max_bytes } => {
+                Some(L1Provider::Database(SqlRenderStore::new(*max_bytes)))
+            }
+            L1Config::Redis {
+                url,
+                prefix,
+                max_bytes,
+            } => Some(L1Provider::Redis(
+                RedisRenderStore::connect(
+                    &providers::RedisProviderConfig {
+                        url: url.clone(),
+                        prefix: prefix.clone(),
+                    },
+                    *max_bytes,
+                )
+                .await?,
+            )),
         };
         let clock = config
             .clock_override
             .clone()
             .unwrap_or_else(|| Arc::new(suprnova_live::clock::SystemClock));
-        let coordinator = config.coordinator_override.clone().unwrap_or_else(|| {
-            Arc::new(LocalRebuildCoordinator::new(LocalCoordinatorLimits {
-                lease_ms: 30_000,
-                max_waiters: 128,
-            }))
-        });
+        let coordinator = match config.coordinator_override.clone() {
+            Some(injected) => injected,
+            None => build_coordinator(&config.coordinator).await?,
+        };
         let epoch_ledger = ledger::SqlGenerationLedger::new();
         let runtime = Arc::new(RenderCacheRuntime {
             config,
@@ -506,11 +635,13 @@ impl RenderCache {
     /// per call: for the file tier, entries dead by retention or by epoch
     /// (see [`file_store::FileRenderStore::sweep`]); for the database tier,
     /// a batch of rows past their expiry by store time (see
-    /// [`SqlRenderStore::sweep`]). Returns how many were removed and
+    /// [`SqlRenderStore::sweep`]); for the Redis tier, nothing, because
+    /// Redis expires its own keys. Returns how many were removed and
     /// whether more dead entries remain. A
     /// no-op returning `Ok(SweepOutcome { removed: 0, more_remain: false
-    /// })` when no L1 provider is configured - disk hygiene has nothing to
-    /// do in that case, not a misconfiguration. L0's unreachable-by-epoch
+    /// })` when no L1 provider is configured, and the same on the Redis
+    /// tier - disk hygiene has nothing to do in either case, not a
+    /// misconfiguration. L0's unreachable-by-epoch
     /// entries are not this method's concern: [`Self::advance_epoch`]
     /// clears them immediately, since L0 has no filesystem to bound the
     /// work against (see that method's own doc).
@@ -540,6 +671,18 @@ impl RenderCache {
             // retention like any other. Deadness there is one comparison,
             // made by the database's own clock inside the delete.
             L1Provider::Database(store) => store.sweep(providers::sql_store::SWEEP_BATCH).await,
+            // The Redis tier has no sweep to run, and reporting one would be
+            // a lie rather than a courtesy. Every entry it stores carries a
+            // key lifetime (`PEXPIRE` to the retention), so Redis reclaims a
+            // dead entry's bytes itself, on its own schedule, without this
+            // process asking. Nothing was removed by this call, and nothing
+            // is left for a later one: `SweepOutcome { removed: 0,
+            // more_remain: false }` is the honest answer, the same one a
+            // configuration with no L1 at all gets above.
+            L1Provider::Redis(_) => Ok(SweepOutcome {
+                removed: 0,
+                more_remain: false,
+            }),
         }
     }
 
@@ -666,11 +809,16 @@ mod tests {
     fn disabled_config() -> RenderCacheConfig {
         RenderCacheConfig {
             enabled: false,
+            profile: Profile::Embedded,
             l0: L0Limits {
                 max_entries: 1,
                 max_bytes: 1024,
             },
             l1: L1Config::Disabled,
+            coordinator: CoordinatorConfig::Local {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            },
             failure: FailurePolicy::Open,
             build_id: "disabled-install-test".to_owned(),
             clock_override: None,
@@ -718,7 +866,9 @@ mod tests {
         // The shipped default must parse, or every install would now fail:
         // `RenderCacheConfig::from_env` falls back to the application's
         // `CARGO_PKG_VERSION`, which is plain dotted digits.
-        let default_build_id = RenderCacheConfig::from_env().build_id;
+        let default_build_id = RenderCacheConfig::from_env()
+            .expect("an unset environment parses")
+            .build_id;
         assert!(
             suprnova_live::identity::BuildId::parse(&default_build_id).is_ok(),
             "the default build id {default_build_id:?} must satisfy the grammar install enforces"

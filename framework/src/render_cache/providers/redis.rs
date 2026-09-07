@@ -42,6 +42,13 @@
 //! that returns an explicit status code, so the state it read and the state
 //! it wrote are one atomic step. Scripts receive `KEYS` and `ARGV`; no
 //! caller value is ever spliced into script text.
+//!
+//! # What these adapters are pointed at
+//!
+//! One Redis instance, running Redis 7 or newer: the scripts here touch keys
+//! they do not declare in `KEYS` (the reclamation pass deletes the members
+//! its own range read found), which Redis Cluster refuses, and they read the
+//! store clock with `TIME` inside a script, which older servers refuse.
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -72,6 +79,16 @@ const CONNECT_RETRIES: usize = 3;
 /// The ceiling on the delay between reconnection attempts.
 const MAX_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
+/// What a Redis endpoint prints as, everywhere one is printed at all.
+///
+/// One constant rather than one literal per `Debug` implementation, so the
+/// redaction cannot be right in [`RedisProviderConfig`] and quietly absent in
+/// the configuration types that carry the same URL
+/// ([`L1Config`](crate::render_cache::L1Config),
+/// [`CoordinatorConfig`](crate::render_cache::CoordinatorConfig), and Live's
+/// own ledger driver).
+pub(crate) const REDACTED_URL: &str = "redis://<redacted>";
+
 /// Where a Redis-backed tier provider connects, and under what namespace.
 ///
 /// One configuration serves all three adapters, so a deployment points every
@@ -95,7 +112,7 @@ impl fmt::Debug for RedisProviderConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RedisProviderConfig")
-            .field("url", &"redis://<redacted>")
+            .field("url", &REDACTED_URL)
             .field("prefix", &self.prefix)
             .finish()
     }
@@ -135,6 +152,35 @@ impl RedisProvider {
     /// it can carry a password, and a configuration failure is reported by
     /// naming the setting, never its value.
     pub(crate) async fn connect(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
+        Self::open(config)
+    }
+
+    /// [`Self::connect`] without the `async` marker, for the one caller that
+    /// has no `await` to give it.
+    ///
+    /// `LiveRuntime::bind` is synchronous and public, and it is where the
+    /// Live instance ledger is built, so the Redis record store has to be
+    /// constructible from a synchronous function. Nothing is awaited here in
+    /// either form - the body is the same - but the connection manager
+    /// spawns its own background task as it is built, so an executor still
+    /// has to be present. That is checked explicitly and reported as a
+    /// configuration failure, because the alternative is `tokio::spawn`'s
+    /// panic in whichever caller happened to have no runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when no asynchronous runtime is running on
+    /// this thread, when the URL is not a Redis connection URL, or when the
+    /// manager cannot be created. No message repeats the URL: it can carry a
+    /// password.
+    pub(crate) fn open(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(FrameworkError::internal(
+                "a Redis provider was built outside an asynchronous runtime, which its \
+                 connection manager needs; build it from within the server's runtime."
+                    .to_owned(),
+            ));
+        }
         let client = redis::Client::open(config.url.as_str()).map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
@@ -190,6 +236,45 @@ impl fmt::Debug for RedisProvider {
             .field("prefix", &self.prefix)
             .finish()
     }
+}
+
+/// Proves the configured Redis is actually there, by asking it.
+///
+/// `RedisProvider::connect` (crate-private, so this is a plain code span
+/// rather than a link) builds a handle and reaches nothing, which is what
+/// makes a runtime outage a provider failure rather than a construction
+/// error. A profile pointed at an endpoint that is not there is a different
+/// thing entirely - a deployment misconfiguration - and it must fail once, at
+/// boot, rather than on every request. This is the check that makes that
+/// difference: `install` calls it before it builds a Redis-backed provider,
+/// exactly as it probes for the tier migration before building a
+/// database-backed one.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when the URL is unusable, the instance cannot
+/// be reached, or `PING` does not answer. The message names the setting that
+/// has to change and never repeats the URL, which routinely carries a
+/// password.
+pub async fn ping(config: &RedisProviderConfig) -> Result<(), FrameworkError> {
+    let provider = RedisProvider::connect(config).await?;
+    let mut conn = provider.connection();
+    redis::cmd("PING")
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                %error,
+                "render cache Redis provider did not answer PING at install",
+            );
+            FrameworkError::internal(
+                "RenderCache::install: the configured Redis did not answer PING. Fix \
+                 RENDER_CACHE_REDIS_URL, start the instance it names, or select a profile that \
+                 needs no Redis. The endpoint is not repeated here: it can carry a password."
+                    .to_owned(),
+            )
+        })
 }
 
 /// Milliseconds added to the store time every script computes, for tests

@@ -1674,7 +1674,7 @@ impl From<opendal::Error> for FrameworkError {
 // reported by the engine is an internal fault of the application's own
 // declaration, not a client error, so it is `Internal` and carries the
 // framework's 500. The message names the violated contract through
-// `RenderCacheError`'s own closed `Display` (one of seven fixed
+// `RenderCacheError`'s own closed `Display` (one of nine fixed
 // `render_cache_*` tokens) and nothing else: no key text, no digest, no
 // stored bytes, and no identity ever reaches it.
 impl From<suprnova_live::render_cache::RenderCacheError> for FrameworkError {
@@ -1730,6 +1730,8 @@ mod render_cache_error_bridge_tests {
             RenderCacheErrorKind::EntryUnsupported,
             RenderCacheErrorKind::ProviderUnavailable,
             RenderCacheErrorKind::PublicationFenced,
+            RenderCacheErrorKind::LeaseFenced,
+            RenderCacheErrorKind::AssemblyFailed,
         ] {
             let error = outer(kind).expect_err("the kind converts");
             assert_eq!(error.status_code(), 500);

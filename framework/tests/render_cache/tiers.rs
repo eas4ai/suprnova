@@ -39,7 +39,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use suprnova::live::{LedgerDriver, verify_ledger_backend};
 use suprnova::render_cache::L1Provider;
+use suprnova::render_cache::config::{CoordinatorConfig, L1Config};
 use suprnova::render_cache::ledger::tier_migration_present;
 use suprnova::render_cache::providers::{
     RedisInstanceRecordStore, RedisLeaseStore, RedisProviderConfig, RedisRenderStore,
@@ -65,9 +67,9 @@ use suprnova_live_test_support::{ControlledClock, ledger_conformance};
 use crate::render_cache_tiers_support;
 use render_cache_tiers_support::{
     boot, boot_redis, boot_without_the_tier_tables, clear_redis_prefix, encoded_entry, fence,
-    instance_key, key, keys, promotion_key, redis_config_on_a_closed_port, redis_deadline,
-    redis_keys, redis_now_ms, reset_and_migrate, store_deadline, store_now_ms, try_connect_live,
-    wide_instance_key, wide_promotion_key,
+    install, instance_key, key, keys, promotion_key, redis_config_on_a_closed_port, redis_deadline,
+    redis_keys, redis_now_ms, reset_and_migrate, store_deadline, store_now_ms, tier_config,
+    try_connect_live, wide_instance_key, wide_promotion_key,
 };
 
 /// Rows currently in the entries table, counted in SQL rather than through
@@ -2352,4 +2354,167 @@ async fn live_redis_a_run_leaves_nothing_behind_under_its_own_prefix() {
 
     clear_redis_prefix(&mut conn, &config.prefix).await;
     assert!(redis_keys(&mut conn, &config.prefix).await.is_empty());
+}
+
+// --- Profiles: what `install` and the Live ledger boot accept and refuse ---
+
+#[tokio::test]
+async fn the_database_profile_refuses_to_install_without_the_tier_migration() {
+    let _db = boot_without_the_tier_tables().await;
+
+    let refused = install(tier_config(
+        L1Config::Database {
+            max_bytes: 1024 * 1024,
+        },
+        CoordinatorConfig::Local {
+            lease_ms: 30_000,
+            max_waiters: 128,
+        },
+    ))
+    .await
+    .expect_err("a database L1 tier without its table must not install");
+    let message = refused.to_string();
+    assert!(
+        message.contains("m20260906_000000_create_render_cache_tier_tables"),
+        "the refusal names the migration to add: {message}"
+    );
+
+    // The coordinator reaches a different table of the same migration, so it
+    // has to be refused on its own too - a database coordinator in front of
+    // a file L1 is a legitimate shape, and it still needs the tables.
+    let refused = install(tier_config(
+        L1Config::Disabled,
+        CoordinatorConfig::Database {
+            lease_ms: 30_000,
+            max_waiters: 128,
+        },
+    ))
+    .await
+    .expect_err("a database coordinator without its table must not install");
+    assert!(
+        refused
+            .to_string()
+            .contains("m20260906_000000_create_render_cache_tier_tables"),
+        "{refused}"
+    );
+}
+
+/// The whole database profile end to end: it installs against the tier
+/// tables, builds both providers from the configuration, and its L1 is
+/// reachable through the operator-facing sweep.
+///
+/// One test rather than three deliberately. Installing binds a *process*
+/// singleton, and this binary runs its files' tests on shared threads under
+/// plain `cargo test`, so every install here is visible to whatever else is
+/// mid-request; keeping the installing surface to one test keeps that window
+/// as small as the coverage allows. (Under `cargo nextest`, the gate's
+/// runner, each test is its own process and the question does not arise.)
+#[tokio::test]
+async fn the_database_profile_installs_both_providers_and_sweeps_through_the_facade() {
+    let _db = boot().await;
+    install(tier_config(
+        L1Config::Database {
+            max_bytes: 1024 * 1024,
+        },
+        CoordinatorConfig::Database {
+            lease_ms: 30_000,
+            max_waiters: 128,
+        },
+    ))
+    .await
+    .expect("the database profile installs against the tier tables");
+
+    // Written through a second handle on the same database, which is what a
+    // second node would be. A retention of zero makes the row due by the
+    // database's own clock the moment it is written, so nothing here waits
+    // on a timer: the sweep's `now` is read after the publication's.
+    let store = SqlRenderStore::new(1024 * 1024);
+    for pattern in ["/facade-a", "/facade-b"] {
+        store
+            .publish(
+                &key(pattern),
+                Bytes::from_static(b"due immediately"),
+                fence(1, 1),
+                1_000,
+                0,
+            )
+            .await
+            .expect("publish");
+    }
+    assert_eq!(row_count().await, 2);
+
+    // The facade, not the store: this is the `L1Provider::Database` arm of
+    // `RenderCache::sweep`, which nothing else reaches.
+    let swept = suprnova::render_cache::RenderCache::sweep()
+        .await
+        .expect("the installed database tier sweeps");
+    assert_eq!(swept.removed, 2);
+    assert!(!swept.more_remain);
+    assert_eq!(row_count().await, 0);
+}
+
+#[tokio::test]
+async fn a_redis_profile_whose_endpoint_answers_nothing_refuses_to_install() {
+    let _db = boot().await;
+    let closed = redis_config_on_a_closed_port();
+
+    let refused = install(tier_config(
+        L1Config::Redis {
+            url: closed.url.clone(),
+            prefix: closed.prefix.clone(),
+            max_bytes: 1024 * 1024,
+        },
+        CoordinatorConfig::Local {
+            lease_ms: 30_000,
+            max_waiters: 128,
+        },
+    ))
+    .await
+    .expect_err("a Redis tier nothing answers must not install");
+    let message = refused.to_string();
+    assert!(
+        message.contains("RENDER_CACHE_REDIS_URL"),
+        "the refusal names the setting to fix: {message}"
+    );
+    assert!(!message.contains("127.0.0.1"), "{message}");
+    assert!(!message.contains(&closed.url), "{message}");
+
+    // And the coordinator alone is refused on the same terms.
+    let refused = install(tier_config(
+        L1Config::Disabled,
+        CoordinatorConfig::Redis {
+            url: closed.url.clone(),
+            prefix: closed.prefix.clone(),
+            lease_ms: 30_000,
+            max_waiters: 128,
+        },
+    ))
+    .await
+    .expect_err("a Redis coordinator nothing answers must not install");
+    assert!(
+        refused.to_string().contains("RENDER_CACHE_REDIS_URL"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn the_live_database_ledger_driver_needs_the_same_migration() {
+    let _db = boot_without_the_tier_tables().await;
+    let refused = verify_ledger_backend(&LedgerDriver::Database)
+        .await
+        .expect_err("a database ledger without its tables must not boot");
+    let message = refused.to_string();
+    assert!(message.contains("LIVE_LEDGER_DRIVER"), "{message}");
+    assert!(
+        message.contains("m20260906_000000_create_render_cache_tier_tables"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn the_live_database_ledger_driver_boots_once_the_migration_is_applied() {
+    let _db = boot().await;
+    verify_ledger_backend(&LedgerDriver::Database)
+        .await
+        .expect("the database ledger driver boots against the tier tables");
 }

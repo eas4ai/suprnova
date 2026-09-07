@@ -1189,6 +1189,7 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach tenant and principal declared reads authz policy");
 
     let config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;

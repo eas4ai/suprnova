@@ -71,7 +71,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
 /// `RENDER_CACHE_ENABLED=false` to turn the cache off; the install then
 /// returns the router untouched and probes nothing.
 pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
-    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()).await
+    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()?).await
 }
 
 /// This application serves one tenant, so every Live request is tenantless.

@@ -472,8 +472,9 @@ async fn boot_with_stitched_freshness(stitched_freshness: FreshnessPolicy) -> Ar
             .unwrap_or_else(|_| panic!("attach stitched render cache policy for {path}"));
     }
 
-    let mut render_cache_config =
-        RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut render_cache_config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     render_cache_config.enabled = true;
     render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
 

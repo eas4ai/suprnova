@@ -61,7 +61,11 @@ use crate::FrameworkError;
 /// Inspection answers an operator's question about how large L1 has grown,
 /// against a keyspace every node writes to, so it is bounded rather than
 /// exhaustive: a store holding millions of entries answers in predictable
-/// time and reports a floor instead of stalling on a full keyspace walk.
+/// time and reports an approximate, bounded count instead of stalling on a
+/// full keyspace walk. Approximate in both directions, not a floor: `SCAN`
+/// guarantees only that every key present for the whole scan is returned at
+/// least once, so a key returned by two rounds is counted twice, while the
+/// caps below stop the scan before it has seen everything.
 const INSPECT_KEY_CAP: usize = 10_000;
 
 /// Entry hashes one `SCAN` round asks Redis for. A hint, not a guarantee -
@@ -200,6 +204,18 @@ fn retention_argument(retention_ms: u64) -> i64 {
     }
 }
 
+/// The text of one hash field, or `None` when the field is not UTF-8.
+///
+/// Every field this build writes but `bytes` is decimal or hex, which is
+/// ASCII. A field holding anything else was written by something else, and
+/// the decoders below have to be given the chance to say so: asking the
+/// driver for a `String` instead would make it a decoding *error*, which
+/// this store would have to report as a provider failure - an outage - for
+/// a hash Redis is holding perfectly well.
+fn field_text(field: Vec<u8>) -> Option<String> {
+    String::from_utf8(field).ok()
+}
+
 /// A 64-character lowercase hex fence digest, or `None` when the field does
 /// not hold one.
 fn decode_digest(text: &str) -> Option<[u8; 32]> {
@@ -221,12 +237,19 @@ fn decode_number(text: &str) -> Option<u64> {
 impl RenderStore for RedisRenderStore {
     async fn get(&self, key: &RenderKey) -> Result<Option<StoredEntry>, RenderCacheError> {
         let mut conn = self.provider.connection();
+        // Every field comes back as bytes, the text ones included: a hash
+        // holding something that is not UTF-8 in a field this build writes
+        // as decimal or hex is another writer's key or a torn write, and
+        // asking the driver for a `String` would make that a decoding error
+        // - a provider failure, which the middleware's failure policy can
+        // turn into a failed request. It is a miss, exactly as a missing
+        // field is.
         let (bytes, epoch, token, digest, published_at_ms): (
             Option<Vec<u8>>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
         ) = redis::cmd("HMGET")
             .arg(entry_key(self.provider.prefix(), key))
             .arg("bytes")
@@ -247,17 +270,19 @@ impl RenderStore for RedisRenderStore {
         else {
             return Ok(None);
         };
-        // The fields come back as text, and every one of them is decoded here
-        // rather than by the driver, so a value this build did not write is a
-        // miss rather than a provider failure. A hash Redis is holding
-        // perfectly well is not an outage, and reporting one would put the
-        // middleware's failure policy - which can fail the request outright -
-        // on the wrong side of a merely unreadable entry.
+        // Every one of the four is decoded here rather than by the driver,
+        // so a value this build did not write is a miss rather than a
+        // provider failure. A hash Redis is holding perfectly well is not an
+        // outage, and reporting one would put the middleware's failure
+        // policy - which can fail the request outright - on the wrong side
+        // of a merely unreadable entry.
         let (Some(epoch), Some(token), Some(published_at_ms), Some(generation_digest)) = (
-            decode_number(&epoch),
-            decode_number(&token),
-            decode_number(&published_at_ms),
-            decode_digest(&digest),
+            field_text(epoch).as_deref().and_then(decode_number),
+            field_text(token).as_deref().and_then(decode_number),
+            field_text(published_at_ms)
+                .as_deref()
+                .and_then(decode_number),
+            field_text(digest).as_deref().and_then(decode_digest),
         ) else {
             tracing::warn!(
                 target: "suprnova::render_cache",
@@ -353,11 +378,13 @@ impl RenderStore for RedisRenderStore {
             }
         }
         // Reported rather than silently partial: an operator reading these
-        // numbers has to know they are a floor.
+        // numbers has to know they are approximate and bounded - the scan
+        // stopped early, and `SCAN` may have returned one key more than once
+        // along the way.
         tracing::warn!(
             target: "suprnova::render_cache",
             entries = inspection.entries,
-            "render cache Redis inspection stopped at its scan cap and reports a floor",
+            "render cache Redis inspection stopped at its scan cap; the counts are approximate",
         );
         Ok(inspection)
     }
@@ -472,6 +499,24 @@ mod tests {
         assert_eq!(
             retention_argument(MAX_FINITE_RETENTION_MS - 1),
             as_i64(MAX_FINITE_RETENTION_MS - 1)
+        );
+    }
+
+    #[test]
+    fn a_field_that_is_not_text_at_all_reads_back_as_nothing() {
+        // The gate in front of both decoders. Without it the driver decodes
+        // the field, and a hash carrying a stray byte in `epoch` becomes a
+        // provider failure - which the middleware's closed failure policy
+        // can turn into a failed request - rather than the miss it is.
+        assert_eq!(field_text(b"1730".to_vec()).as_deref(), Some("1730"));
+        assert_eq!(field_text(vec![0xff, 0xfe]), None);
+        assert_eq!(
+            field_text(vec![0xff]).as_deref().and_then(decode_number),
+            None
+        );
+        assert_eq!(
+            field_text(vec![0xff]).as_deref().and_then(decode_digest),
+            None
         );
     }
 

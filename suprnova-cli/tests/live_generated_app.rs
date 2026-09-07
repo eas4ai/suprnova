@@ -69,7 +69,7 @@ fn a_generated_application_is_live_ready() {
         "{module}"
     );
     assert!(
-        module.contains("RenderCache::install(routes(router)?, RenderCacheConfig::from_env())"),
+        module.contains("RenderCache::install(routes(router)?, RenderCacheConfig::from_env()?)"),
         "{module}"
     );
     assert!(module.contains("AuthMiddleware::new()"), "{module}");

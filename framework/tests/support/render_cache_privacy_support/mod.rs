@@ -918,8 +918,9 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .try_render_cache(STITCHED_ROUTE, GroupPolicy::from(stitched_declared))
         .expect("attach stitched policy");
 
-    let mut config =
-        RenderCacheConfig::from_env().with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
     config.l1 = L1Config::Disabled;
 
