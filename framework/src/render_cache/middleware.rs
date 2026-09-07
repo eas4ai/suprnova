@@ -1547,6 +1547,12 @@ async fn lead_render(
     policy: &RenderCachePolicy,
     job: RenderJob,
 ) -> Response {
+    // Test-only race seam (R72/R83): fires before `run_render` opens the
+    // render's consistent read view, so a write armed here has already
+    // committed when that view opens and the render reads it - the one
+    // arrival near a render that must publish rather than discard.
+    #[cfg(any(test, feature = "testing"))]
+    race_points::fire(&race_points::BEFORE_VIEW).await;
     let method = request.method().as_str().to_owned();
     let if_none_match = request.header("if-none-match").map(str::to_owned);
     let (response, report, observed) = run_render(
@@ -1558,6 +1564,12 @@ async fn lead_render(
         policy.class() == RepresentationClass::PublicShellStitched,
     )
     .await;
+    // Test-only race seam (R72/R83): fires the instant the read view has
+    // closed and the observed generation set is fixed, before anything
+    // judges it. A write armed here is invisible to the render and visible
+    // to the fresh reread below, which discards the candidate.
+    #[cfg(any(test, feature = "testing"))]
+    race_points::fire(&race_points::AFTER_VIEW_CLOSE).await;
     let Ok(response) = response else {
         let _ = runtime.coordinator.release(lease).await;
         return response;
@@ -2330,6 +2342,12 @@ async fn fresh_reread_is_coherent(
         .current_with_epoch(&digests)
         .await
         .map_err(|_| ())?;
+    // Test-only race seam (R72/R83): fires inside the reread, after the
+    // values it will judge against have been read and before it judges
+    // them, so a write armed here is on the far side of that read - the
+    // comparison passes and the entry publishes already behind the ledger.
+    #[cfg(any(test, feature = "testing"))]
+    race_points::fire(&race_points::DURING_REREAD).await;
     match CoherenceCheck::compare(observed, &current, fresh_epoch, epoch) {
         CoherenceCheck::Coherent => {
             // Test-only race seam (R72/R83): fires after this reread has
@@ -2668,6 +2686,38 @@ pub mod race_points {
     /// be caught by this same reread, early enough that the entry this
     /// request publishes still carries the observations from before it.
     pub static AFTER_REREAD: RacePoint = RacePoint::new();
+
+    /// Fires from `lead_render`, as its first statement - before
+    /// `run_render` opens the consistent read view the render's own data
+    /// reads and its window close share. A write armed here has therefore
+    /// already committed when that view opens, so the render reads it, the
+    /// window records the generation it produced, and the fresh reread
+    /// agrees: the entry publishes and serves. This is the race window's
+    /// lower boundary, and the one arrival a candidate must *not* be
+    /// discarded for.
+    pub static BEFORE_VIEW: RacePoint = RacePoint::new();
+
+    /// Fires from `lead_render`, immediately after `run_render` returns -
+    /// the read view has closed and the observed generation set is already
+    /// fixed, and nothing has yet judged it. A write armed here is invisible
+    /// to the render but fully visible to the fresh reread that follows, so
+    /// the candidate is discarded and nothing is published at all. Fired
+    /// before the eligibility, classification, and document checks that can
+    /// each return early, so the arm is consumed on every path a render
+    /// reaches, not only on the one that reaches the reread.
+    pub static AFTER_VIEW_CLOSE: RacePoint = RacePoint::new();
+
+    /// Fires from `fresh_reread_is_coherent`, between the ledger read and
+    /// `CoherenceCheck::compare` - inside the reread itself, after it has
+    /// read the generations it will judge against and before it judges
+    /// them. A write armed here is on the far side of that read, so the
+    /// comparison passes on values that are already behind and the entry
+    /// publishes stale; the lookup-time coherence check on the next
+    /// request is where it is caught. Paired
+    /// with [`AFTER_REREAD`], which lands a write just outside the same
+    /// window, this proves the comparison judges what the reread read
+    /// rather than re-reading at comparison time.
+    pub static DURING_REREAD: RacePoint = RacePoint::new();
 
     /// Fires from `RenderCacheMiddleware::serve`, immediately
     /// after the epoch a new `RenderJob` will carry is read, and

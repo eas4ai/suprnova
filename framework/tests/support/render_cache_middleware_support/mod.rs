@@ -9,8 +9,8 @@
 
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -571,6 +571,7 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
     counting_route::reset();
+    probe_route::reset();
     // Fix round 1, F4: disarms any race point a previous test in this same
     // binary armed but never fired (see `race::reset`'s own doc). Gated the
     // same as `race` itself: `race_points` only exists in the library under
@@ -593,9 +594,19 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
                 .min_connections(1)
                 .logging(false)
                 .build();
-            let conn = suprnova::database::DbConnection::connect(&config)
+            let mut conn = suprnova::database::DbConnection::connect(&config)
                 .await
                 .expect("connect sqlite");
+            // Task 5: the only boot path that owns a pool nothing has
+            // cloned yet, which is what installing a metric callback
+            // needs - see `statements::install`. The two other
+            // `BootDatabase` arms are handed a connection somebody else
+            // already holds, so they cannot install one and the bypass
+            // suite does not use them.
+            assert!(
+                statements::install(&mut conn),
+                "a freshly connected pool must accept the statement observer"
+            );
             conn.inner()
                 .execute_unprepared("PRAGMA journal_mode=WAL")
                 .await
@@ -891,8 +902,26 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
             .build()
             .expect("principal declared reads authz policy");
 
+    // Task 5: the bypass probe's two policies. Identical `PublicShared`
+    // shapes with no declared variance, differing only in coherence mode,
+    // so the statement a hit costs is the only thing that separates them.
+    // Two routes rather than two boot helpers: a policy is attached per
+    // pattern, so one boot can carry both modes and every other test in
+    // this binary is untouched by their presence.
+    let probe_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("probe policy");
+    let leased_probe_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
+        .build()
+        .expect("leased probe policy");
+
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
+    let router: Router = router.get("/probe/{id}", probe_handler).into();
+    let router: Router = router.get("/probe-leased/{id}", probe_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
     let router: Router = router.get("/private-l1/{id}", private_handler).into();
     let router: Router = router.get("/builder-read", builder_read_handler).into();
@@ -1077,6 +1106,10 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach cached policy")
         .try_render_cache("/stale/{id}", GroupPolicy::from(stale_policy))
         .expect("attach stale policy")
+        .try_render_cache("/probe/{id}", GroupPolicy::from(probe_policy))
+        .expect("attach probe policy")
+        .try_render_cache("/probe-leased/{id}", GroupPolicy::from(leased_probe_policy))
+        .expect("attach leased probe policy")
         .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
         .expect("attach private policy")
         .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
@@ -1336,6 +1369,11 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
 
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 
+    // Last, deliberately: migrations, the harness's own DDL, and
+    // `RenderCache::install`'s migration checks are all statements, and a
+    // test that measures a request must not start with them in its count.
+    statements::reset();
+
     Arc::new(Harness {
         router: Arc::new(router),
         middleware,
@@ -1420,6 +1458,54 @@ async fn cached_handler(request: Request) -> Response {
     counting_route::maybe_write_during_render().await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("cached render {n}")))
+}
+
+/// Task 5: the bypass probe. One handler behind `/probe/{id}` (authority
+/// coherence) and `/probe-leased/{id}` (lease coherence), doing one of each
+/// thing a hit is supposed to remove: a handler call, an ORM query, a
+/// template render, and a serialization. Each is counted separately in
+/// [`probe_route`], so "a hit ran nothing" is four observations rather than
+/// one inference from a render count.
+///
+/// It never touches [`counting_route`]: the two counter sets stay
+/// independent so a probe dispatch cannot perturb any other test in this
+/// binary, and so a bypass test reads only counters it owns.
+async fn probe_handler(request: Request) -> Response {
+    probe_route::on_handler_call();
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    probe_route::on_query();
+    let title = Post::query()
+        .first()
+        .await?
+        .map_or_else(|| "none".to_owned(), |post| post.title);
+    let payload = probe_route::serialize(&serde_json::json!({
+        "id": id,
+        "title": title.clone(),
+    }));
+    Ok(HttpResponse::html(probe_route::render(ProbeTemplate {
+        id,
+        title,
+        payload,
+    })))
+}
+
+/// The probe's template. Declared inline rather than as a file under
+/// `tests/templates/`: the point is only that a real Askama render happens
+/// on a miss and does not happen on a hit, and an inline source keeps the
+/// whole probe - handler, template, counters - readable in one place.
+#[derive(askama::Template)]
+#[template(
+    source = "<p>probe {{ id }} over {{ title }} carrying {{ payload }}</p>",
+    ext = "html"
+)]
+struct ProbeTemplate {
+    id: i64,
+    title: String,
+    payload: String,
 }
 
 /// A `link` value carrying `0x7f` (DEL): a byte `SafeHeaders` used to accept
@@ -2129,6 +2215,112 @@ pub mod counting_route {
     }
 }
 
+/// Task 5: what the bypass probe route did, counted one cost at a time.
+///
+/// Process-global atomics with the same lifetime rules as
+/// [`counting_route`]'s own counters: zeroed by [`reset`], which every boot
+/// calls, and readable by a test at any point. A bypass test resets them
+/// after the miss it needs as a baseline and then reads them again after
+/// the hit, so what it measures is one request, never a whole test.
+pub mod probe_route {
+    use super::*;
+
+    static HANDLER_CALLS: AtomicU64 = AtomicU64::new(0);
+    static QUERIES: AtomicU64 = AtomicU64::new(0);
+    static TEMPLATE_RENDERS: AtomicU64 = AtomicU64::new(0);
+    static SERIALIZATIONS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many times the probe handler has been entered.
+    pub fn handler_calls() -> u64 {
+        HANDLER_CALLS.load(Ordering::SeqCst)
+    }
+
+    /// How many ORM queries the probe handler has issued.
+    pub fn queries() -> u64 {
+        QUERIES.load(Ordering::SeqCst)
+    }
+
+    /// How many Askama renders the probe handler has run.
+    pub fn template_renders() -> u64 {
+        TEMPLATE_RENDERS.load(Ordering::SeqCst)
+    }
+
+    /// How many payload serializations the probe handler has run.
+    pub fn serializations() -> u64 {
+        SERIALIZATIONS.load(Ordering::SeqCst)
+    }
+
+    /// Zeroes all four counters.
+    pub fn reset() {
+        HANDLER_CALLS.store(0, Ordering::SeqCst);
+        QUERIES.store(0, Ordering::SeqCst);
+        TEMPLATE_RENDERS.store(0, Ordering::SeqCst);
+        SERIALIZATIONS.store(0, Ordering::SeqCst);
+    }
+
+    pub(crate) fn on_handler_call() {
+        HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn on_query() {
+        QUERIES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Renders `template`, counting the render. The wrapper is what makes
+    /// the render observable: `Template::render` itself reports nothing.
+    pub(crate) fn render<T: askama::Template>(template: T) -> String {
+        TEMPLATE_RENDERS.fetch_add(1, Ordering::SeqCst);
+        template.render().expect("the probe template renders")
+    }
+
+    /// Serializes `value`, counting the serialization.
+    pub(crate) fn serialize(value: &serde_json::Value) -> String {
+        SERIALIZATIONS.fetch_add(1, Ordering::SeqCst);
+        serde_json::to_string(value).expect("a probe payload serializes")
+    }
+}
+
+/// Task 5: how many statements this harness's database connection has
+/// executed.
+///
+/// The one cost a handler-side counter cannot see. A cache that skipped
+/// the handler but still consulted the database on every hit would satisfy
+/// every counter in [`probe_route`] and still cost a round trip per
+/// request; this is what holds it to the round trips the coherence mode
+/// actually requires.
+///
+/// Counted through SeaORM's own metric callback, which fires once per
+/// executed statement on the pool and on every transaction started from
+/// it - so it sees the render's reads, the ledger's epoch read, and the
+/// coherence reread alike. The callback is told nothing about the
+/// statement (see `DbConnection::observe_statements_for_test`): no SQL
+/// text and no bound value reaches this test module.
+pub mod statements {
+    use super::*;
+
+    static STATEMENTS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many statements have run since the last [`reset`].
+    pub fn count() -> u64 {
+        STATEMENTS.load(Ordering::SeqCst)
+    }
+
+    /// Zeroes the counter.
+    pub fn reset() {
+        STATEMENTS.store(0, Ordering::SeqCst);
+    }
+
+    /// Points `conn`'s metric callback at this counter, reporting whether
+    /// it took. Installing needs sole ownership of the pool, so this has
+    /// to run before the connection is cloned anywhere - see
+    /// [`super::boot`], which calls it immediately after connecting.
+    pub(crate) fn install(conn: &mut suprnova::database::DbConnection) -> bool {
+        conn.observe_statements_for_test(|| {
+            STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
 /// Task 17: the deterministic race suite's own hooks.
 ///
 /// Three of the five hooks a race suite over this middleware needs already
@@ -2140,11 +2332,16 @@ pub mod counting_route {
 /// module does not duplicate them; a race test calls them directly. What
 /// this module adds:
 ///
-/// - [`write_posts_after_reread`] and [`advance_epoch_during_next_render`]
-///   arm the two race points in [`suprnova::render_cache::middleware::race_points`]
-///   that do not correspond to anything `counting_route` already exposes,
-///   because they fire from the coherence check around a render, not from
-///   the render itself.
+/// - [`write_posts_after_reread`], [`write_posts_before_view`],
+///   [`write_posts_after_view_close`], [`write_posts_during_reread`], and
+///   [`advance_epoch_during_next_render`] arm the race points in
+///   [`suprnova::render_cache::middleware::race_points`] that do not
+///   correspond to anything `counting_route` already exposes, because they
+///   fire from the render's own read view and the coherence checks around
+///   it, not from the render itself. The four write hooks between them
+///   place one write on each side of every boundary a render has: before
+///   the read view opens, after it closes, inside the fresh reread, and
+///   after that reread has already passed.
 /// - [`wait_until_background_finished`] is a barrier `counting_route` has
 ///   no reason to provide: a background rebuild is a detached `tokio::spawn`
 ///   inside the middleware (see `RenderCacheMiddleware::spawn_background_rebuild`),
@@ -2177,6 +2374,45 @@ pub mod race {
         let hook: race_points::Hook =
             Box::new(|| Box::pin(create_extra_post("raced-after-reread")));
         race_points::arm(&race_points::AFTER_REREAD, hook);
+    }
+
+    /// Arms the next admitted lead to land one more write to the `posts`
+    /// table before its own consistent read view opens - so the render
+    /// reads that write, the window it closes records the generation the
+    /// write produced, and the fresh reread agrees. The candidate must
+    /// publish: this is the arrival near a render that is not a race.
+    /// One-shot: consumed the first time [`race_points::BEFORE_VIEW`]
+    /// fires after this call.
+    pub fn write_posts_before_view(_harness: &Harness) {
+        let hook: race_points::Hook = Box::new(|| Box::pin(create_extra_post("raced-before-view")));
+        race_points::arm(&race_points::BEFORE_VIEW, hook);
+    }
+
+    /// Arms the next admitted lead to land one more write to the `posts`
+    /// table the instant its read view closes - after the render's own
+    /// reads and its window close are fixed, before the fresh reread runs.
+    /// That reread sees the write and discards the candidate, so nothing is
+    /// published at all. One-shot: consumed the first time
+    /// [`race_points::AFTER_VIEW_CLOSE`] fires after this call, which is
+    /// every render that completes, including one whose candidate a later
+    /// check would have declined anyway.
+    pub fn write_posts_after_view_close(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-after-view-close")));
+        race_points::arm(&race_points::AFTER_VIEW_CLOSE, hook);
+    }
+
+    /// Arms the fresh reread of whichever render reaches it next to land
+    /// one more write to the `posts` table *inside* that reread - after it
+    /// has read the generations it will judge against, before it judges
+    /// them. The comparison therefore passes on values that are already
+    /// behind and the entry publishes stale; the next lookup's own
+    /// coherence check is where it is caught. One-shot: consumed the first
+    /// time [`race_points::DURING_REREAD`] fires after this call.
+    pub fn write_posts_during_reread(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-during-reread")));
+        race_points::arm(&race_points::DURING_REREAD, hook);
     }
 
     /// Arms the next *request's* epoch capture (in
@@ -2228,18 +2464,25 @@ pub mod race {
         }
     }
 
-    /// Disarms both race points. Fix round 1, F4: nothing previously
+    /// Disarms every race point. Fix round 1, F4: nothing previously
     /// cleared an arm a test made but never consumed - `AFTER_REREAD` only
     /// fires on a coherent reread, and `lead_render` has several decline
     /// paths that return before reaching it, so a test that armed it and
     /// then hit one of those paths would otherwise leave the hook loaded
     /// for whichever test runs next in the same process. Called from
     /// [`super::boot`] alongside [`counting_route::reset`], so every test
-    /// starts with both race points disarmed regardless of what the
-    /// previous test in the same binary armed and never fired.
+    /// starts with every race point disarmed regardless of what the
+    /// previous test in the same binary armed and never fired. Task 5:
+    /// extended to the three new points, which have the same exposure -
+    /// `BEFORE_VIEW` and `AFTER_VIEW_CLOSE` never fire for a request that
+    /// is a hit or that no coordinator admits, and `DURING_REREAD` never
+    /// fires for a candidate declined before the reread.
     pub(crate) fn reset() {
         race_points::disarm(&race_points::AFTER_REREAD);
         race_points::disarm(&race_points::EPOCH_CAPTURED);
+        race_points::disarm(&race_points::BEFORE_VIEW);
+        race_points::disarm(&race_points::AFTER_VIEW_CLOSE);
+        race_points::disarm(&race_points::DURING_REREAD);
     }
 }
 
@@ -2265,11 +2508,83 @@ impl TestResponse {
     }
 }
 
+/// Where a recording dispatch collects one entry per response body frame:
+/// the frame's address and its length, never its bytes.
+pub type FrameLog = Arc<Mutex<Vec<(usize, usize)>>>;
+
+/// A response body that records the address and length of every data frame
+/// hyper pulls out of it, and changes nothing else - it forwards each frame
+/// on untouched, so what it reports is what the connection went on to
+/// write.
+///
+/// Task 5: this is the only way to prove that serving a hit hands hyper the
+/// bytes L0 stores rather than a copy of them. The client side of
+/// [`dispatch`] reads the response back over a real TCP connection, so the
+/// body it collects is a fresh allocation whichever buffer the server wrote
+/// from, and its address proves nothing either way. The frame this wrapper
+/// sees is the last point at which the server still holds that buffer.
+pub struct CountingBody<B> {
+    inner: B,
+    frames: FrameLog,
+}
+
+impl<B> CountingBody<B> {
+    fn new(inner: B, frames: FrameLog) -> Self {
+        Self { inner, frames }
+    }
+}
+
+impl<B> hyper::body::Body for CountingBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        // Sound without `unsafe` and without a projection crate because
+        // the bound above requires `B: Unpin`, which makes the whole
+        // wrapper `Unpin` (its other field is an `Arc`).
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        if let std::task::Poll::Ready(Some(Ok(frame))) = &polled
+            && let Some(data) = frame.data_ref()
+        {
+            this.frames
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((data.as_ptr() as usize, data.len()));
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 async fn dispatch(
     harness: &Harness,
     method: hyper::Method,
     path: &str,
     extra_headers: &[(&str, &str)],
+) -> TestResponse {
+    dispatch_recording(harness, method, path, extra_headers, None).await
+}
+
+async fn dispatch_recording(
+    harness: &Harness,
+    method: hyper::Method,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+    frames: Option<FrameLog>,
 ) -> TestResponse {
     let mut builder = hyper::Request::builder()
         .method(method)
@@ -2293,8 +2608,17 @@ async fn dispatch(
         let service = service_fn(move |request| {
             let router = Arc::clone(&router);
             let middleware = Arc::clone(&middleware);
+            let frames = frames.clone();
             async move {
-                Ok::<_, std::convert::Infallible>(handle_request(router, middleware, request).await)
+                let response = handle_request(router, middleware, request).await;
+                // Wrapped only when a test asked for a recording, so every
+                // other dispatch in this suite hands hyper exactly the body
+                // the framework produced, with no extra layer in the way.
+                let response = match frames {
+                    Some(frames) => response.map(|body| CountingBody::new(body, frames).boxed()),
+                    None => response,
+                };
+                Ok::<_, std::convert::Infallible>(response)
             }
         });
         let _ = hyper::server::conn::http1::Builder::new()
@@ -2343,6 +2667,25 @@ pub async fn dispatch_get(
     extra_headers: &[(&str, &str)],
 ) -> TestResponse {
     dispatch(harness, hyper::Method::GET, path, extra_headers).await
+}
+
+/// Dispatches a `GET` request to `path`, recording the address and length
+/// of every body frame the server hands hyper into `frames`. See
+/// [`CountingBody`] for why the recording has to happen there and not on
+/// the client side of this connection.
+pub async fn dispatch_get_recording(
+    harness: &Harness,
+    path: &str,
+    frames: &FrameLog,
+) -> TestResponse {
+    dispatch_recording(
+        harness,
+        hyper::Method::GET,
+        path,
+        &[],
+        Some(Arc::clone(frames)),
+    )
+    .await
 }
 
 /// Dispatches a `HEAD` request to `path`.

@@ -268,3 +268,144 @@ async fn two_keys_rebuild_independently_while_one_leader_is_held() {
         );
     }
 }
+
+/// A write that commits *before* the render's consistent read view even
+/// opens is not a race at all, and the middleware must not mistake it for
+/// one: the render reads the written row, the window it closes records the
+/// generation that write produced, and the fresh reread agrees with it. The
+/// entry publishes and the next request is served from it.
+///
+/// This is the lower boundary of the race window `AFTER_REREAD` and
+/// `AFTER_VIEW_CLOSE` bound from the other side. Without it, "a write near
+/// a render discards the candidate" would be satisfied by a middleware that
+/// discards on *every* nearby write, which would make the cache useless on
+/// any write-active table rather than merely correct.
+///
+/// `/builder-read` rather than `/cached/{id}`: its body carries the row
+/// count (`sees N posts`), so the served bytes themselves show which side
+/// of the view the write landed on - the render count alone cannot.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_write_before_the_read_view_opens_is_rendered_into_the_entry_and_served() {
+    let harness = boot_with_render_cache().await;
+    race::write_posts_before_view(&harness);
+
+    let rendered = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first dispatch is a plain miss and renders"
+    );
+    assert!(
+        String::from_utf8_lossy(&rendered.body).contains("sees 1 posts"),
+        "the write landed before the read view opened, so the render read it - got {:?}",
+        String::from_utf8_lossy(&rendered.body)
+    );
+
+    let served = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "nothing moved between the render and its own reread, so the candidate published \
+         and this dispatch is a hit"
+    );
+    assert_eq!(
+        served.body, rendered.body,
+        "the stored body is the one that saw the write"
+    );
+}
+
+/// A write that commits after the render's read view has closed but before
+/// the fresh reread runs is caught by that reread: the candidate is
+/// discarded and nothing is published at all - not published and then
+/// missed on the next lookup, the way a write landing *after* the reread is
+/// (see the first test in this file). Proven by inspecting the store
+/// directly.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_write_after_the_read_view_closes_is_caught_by_the_reread_and_discards_the_candidate() {
+    let harness = boot_with_render_cache().await;
+    race::write_posts_after_view_close(&harness);
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the render still runs; only publication is declined"
+    );
+
+    let key = RenderCache::key_for_route_for_test("/cached/{id}", &[("id", "1")], None);
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_none(),
+        "the reread saw the write and the candidate was never published"
+    );
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "nothing was stored, so the next request renders again"
+    );
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "the race hook was one-shot; this second render published"
+    );
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "control: the second render did publish, so this dispatch is a hit"
+    );
+}
+
+/// A write that lands *inside* the fresh reread - after it has read the
+/// ledger, before it compares what it read against what the render observed
+/// - is on the far side of the reread's own snapshot, so the comparison
+/// passes and the candidate publishes carrying observations that are
+/// already behind. The lookup-time coherence check is where it is caught:
+/// the next request finds the stored entry moved and renders instead of
+/// serving it.
+///
+/// The upper boundary of the same window `AFTER_REREAD` covers from just
+/// outside it: this proves the comparison genuinely judges the values the
+/// reread read, not values re-read at comparison time (which would catch
+/// this write and publish nothing).
+#[tokio::test]
+#[serial_test::serial]
+async fn a_write_during_the_reread_publishes_a_stale_entry_that_the_next_lookup_misses() {
+    let harness = boot_with_render_cache().await;
+    race::write_posts_during_reread(&harness);
+
+    dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first dispatch is a plain miss and renders"
+    );
+
+    let rebuilt = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "whatever the first dispatch left behind, this lookup does not serve it: the write \
+         landed inside the reread, so any entry it published carries observations the \
+         ledger has already moved past"
+    );
+    assert!(
+        String::from_utf8_lossy(&rebuilt.body).contains("sees 1 posts"),
+        "the re-render reads the raced write - got {:?}",
+        String::from_utf8_lossy(&rebuilt.body)
+    );
+
+    let served = dispatch_get(&harness, "/builder-read", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the race hook was one-shot; the rebuilt entry is coherent and this dispatch is a hit"
+    );
+    assert_eq!(
+        served.body, rebuilt.body,
+        "and it serves the body that saw the write"
+    );
+}

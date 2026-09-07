@@ -190,6 +190,36 @@ impl DbConnection {
     pub fn conn(&self) -> &DatabaseConnection {
         &self.inner
     }
+
+    /// Test-only: calls `observer` once for every statement this
+    /// connection executes, including statements executed on transactions
+    /// started from it. Returns whether the observer was installed.
+    ///
+    /// `observer` takes nothing and is told nothing: SeaORM's callback
+    /// carries the statement text and its bound values, and no test needs
+    /// either. A counter is the whole point - a test that can see how many
+    /// round trips a request cost can prove that a cache hit costs none.
+    ///
+    /// Installing needs unique ownership of the pool (SeaORM's
+    /// `set_metric_callback` takes `&mut self`), which a connection has
+    /// only before it is cloned or shared - in practice immediately after
+    /// [`Self::connect`]. `false` means the connection was already shared
+    /// and nothing was installed; callers that need the observer must
+    /// treat that as a failure rather than as an empty count.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn observe_statements_for_test<F>(&mut self, observer: F) -> bool
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        match Arc::get_mut(&mut self.inner) {
+            Some(connection) => {
+                connection.set_metric_callback(move |_info| observer());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Map a seconds value onto the `Option<Duration>` sqlx wants for the
