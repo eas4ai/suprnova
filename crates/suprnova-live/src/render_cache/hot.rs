@@ -1,14 +1,17 @@
 //! Complete L0 hits without decode, hashing, or key allocations: a
 //! [`HotEntry`] is decoded once at publication and keeps every header value
-//! a hit can precompute; [`serve_hot`] forms the response with at most a
-//! header-map allocation and an `Age` value (see its doc for the one
-//! per-request value a public seed deadline adds). [`respond`] is the same
-//! formation for bytes that are not a hot entry, so hosts have one builder.
+//! a hit can precompute; [`serve_hot`] forms the response with at most the
+//! header map's own two allocations and one for the `Age` value (see its
+//! doc for the one per-request value a public seed deadline adds).
+//! [`respond`] is the same formation for bytes that are not a hot entry, so
+//! hosts have one builder.
 //!
 //! Both public functions end in the same private builder over the same
 //! precomputed values, so a hot hit and a cold response can never drift
 //! apart in status, header order, or body treatment; the only difference is
 //! where the values came from.
+
+use core::fmt::Write as _;
 
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -35,6 +38,8 @@ const FORMED_HEADERS: usize = 6;
 /// practice since a freshness interval is bounded at 31 days. 96 leaves the
 /// margin visible.
 const CACHE_CONTROL_CAPACITY: usize = 96;
+/// Room for the longest `Age` this crate forms: `u64::MAX` is 20 digits.
+const AGE_CAPACITY: usize = 20;
 
 /// A fixed-size [`core::fmt::Write`] sink over a caller's buffer, so the one
 /// header value a seeded hit cannot precompute is formed without a heap
@@ -73,6 +78,28 @@ fn stack_cache_control(
         len: 0,
     };
     write_cache_control(&mut cursor, class, shared, freshness, seed_remaining_ms).ok()?;
+    let len = cursor.len;
+    HeaderValue::from_bytes(&buf[..len]).ok()
+}
+
+/// Forms the `Age` seconds on the stack and lifts them into a header value.
+///
+/// `HeaderValue::from(u64)` would be shorter, and it allocates twice: it
+/// writes the digits into a `BytesMut` sized for the widest possible number
+/// and then freezes a buffer whose length is far short of its capacity,
+/// which is exactly the case `bytes` completes by boxing a shared handle.
+/// Copying an exactly-sized slice instead pays one allocation, so a hit
+/// spends one allocation per request on this header rather than two.
+///
+/// `None` only when the digits did not fit `buf`, which [`AGE_CAPACITY`]
+/// makes unreachable; the caller falls back to the integer conversion
+/// rather than dropping the header.
+fn stack_age(buf: &mut [u8; AGE_CAPACITY], seconds: u64) -> Option<HeaderValue> {
+    let mut cursor = Cursor {
+        buf: &mut buf[..],
+        len: 0,
+    };
+    write!(&mut cursor, "{seconds}").ok()?;
     let len = cursor.len;
     HeaderValue::from_bytes(&buf[..len]).ok()
 }
@@ -254,9 +281,14 @@ fn build(
     if let Some(vary) = &values.vary {
         headers.insert(http::header::VARY, vary.clone());
     }
+    let age = age_seconds(formed.published_at_ms, request.now_ms);
+    let mut age_buf = [0_u8; AGE_CAPACITY];
     headers.insert(
         http::header::AGE,
-        HeaderValue::from(age_seconds(formed.published_at_ms, request.now_ms)),
+        // Unreachable with the capacity above; the integer conversion is
+        // here so an unforeseen shape loses one allocation rather than the
+        // header.
+        stack_age(&mut age_buf, age).unwrap_or_else(|| HeaderValue::from(age)),
     );
     if let Some(warning) = warning {
         headers.insert(http::header::WARNING, HeaderValue::from_static(warning));
@@ -391,11 +423,12 @@ pub struct HotRequest<'a> {
     pub now_ms: u64,
 }
 
-/// Forms the response for a hot hit. Allocates at most the header map and
-/// the `Age` value; the body is the stored `Bytes`, shared, and every other
-/// header value was formed at publication. The one exception is an entry
-/// whose body embeds a public seed deadline: its `Cache-Control` shrinks
-/// with the clock, so that single value is formed per request.
+/// Forms the response for a hot hit. Allocates at most the header map's own
+/// two tables and one `Age` value; the body is the stored `Bytes`, shared,
+/// and every other header value was formed at publication. The one
+/// exception is an entry whose body embeds a public seed deadline: its
+/// `Cache-Control` shrinks with the clock, so that single value is formed
+/// per request, for one more allocation.
 ///
 /// `warning` is an engine constant, such as the one
 /// [`super::coherence::warning_header`] returns, and must be a valid header
@@ -484,8 +517,9 @@ mod tests {
     use core::fmt::Write as _;
 
     use super::{
-        CACHE_CONTROL_CAPACITY, Cursor, FreshnessPolicy, RepresentationClass, SharedCachePolicy,
-        cache_control_value, stack_cache_control,
+        AGE_CAPACITY, CACHE_CONTROL_CAPACITY, Cursor, FreshnessPolicy, HeaderValue,
+        RepresentationClass, SharedCachePolicy, cache_control_value, stack_age,
+        stack_cache_control,
     };
 
     #[test]
@@ -554,6 +588,19 @@ mod tests {
         )
         .expect("fits");
         assert_eq!(private.to_str().expect("text"), "private, max-age=45");
+    }
+
+    #[test]
+    fn the_stack_formed_age_is_the_integer_conversion_byte_for_byte() {
+        for seconds in [0, 1, 9, 10, 999, 1_000_000, u64::MAX - 1, u64::MAX] {
+            let mut buf = [0_u8; AGE_CAPACITY];
+            let formed = stack_age(&mut buf, seconds).expect("the digits fit the fixed buffer");
+            assert_eq!(
+                formed,
+                HeaderValue::from(seconds),
+                "the two formations disagree for {seconds}"
+            );
+        }
     }
 
     #[test]

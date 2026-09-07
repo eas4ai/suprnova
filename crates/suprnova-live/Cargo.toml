@@ -40,7 +40,11 @@ tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "sync", 
 
 [lints.rust]
 missing_docs = "deny"
-unsafe_code = "forbid"
+# `deny` rather than `forbid` so exactly one benchmark target can carry the
+# counting global allocator the Complete L0 allocation budget is measured
+# with. The library itself keeps `#![forbid(unsafe_code)]` in `src/lib.rs`,
+# so no library, test, or example code can opt in.
+unsafe_code = "deny"
 
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
@@ -59,4 +63,8 @@ harness = false
 
 [[bench]]
 name = "async_framework_budget"
+harness = false
+
+[[bench]]
+name = "render_cache_budget"
 harness = false

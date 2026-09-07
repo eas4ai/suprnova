@@ -53,8 +53,13 @@ unrelated Suprnova and Magnetar work remains untouched.
   Panics are limited to proven internal invariants in tests or unreachable
   generated states; hostile input, provider failure, and application mistakes
   are never panic paths.
-- Production code contains no `unsafe`. A later proposal requiring `unsafe`
-  needs a separately approved, documented safety case and cannot enter as an
+- Production code contains no `unsafe`; the engine crate keeps
+  `#![forbid(unsafe_code)]`. The `suprnova-live` package lint is `deny`
+  rather than `forbid` for one recorded reason: `benches/render_cache_budget.rs`
+  allows `unsafe` with a written reason for the counting global allocator that
+  measures the Complete L0 allocation budget, and that benchmark holds the only
+  `unsafe` in the subtree. A later proposal requiring `unsafe` needs a
+  separately approved, documented safety case and cannot enter as an
   implementation convenience.
 - Public items have useful rustdoc because `suprnova` denies missing docs and
   broken or private intra-doc links.

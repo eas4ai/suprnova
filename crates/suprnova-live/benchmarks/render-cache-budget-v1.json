@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "profile": "release",
+  "measured_at_unix_ms": 1788806518783,
+  "environment": {
+    "classification": "local_exploratory",
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "selected_cpu_affinity": "0,2,4,6,8,10,12,14",
+    "selected_cpu_count": 8,
+    "memory_bytes": 100993044480,
+    "kernel": "Linux 7.0.0-30-generic",
+    "cpu_governor": "powersave",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "database": "not_used_by_render_cache_budget_benchmark",
+    "provider_versions": {
+      "render_store": "in_process_memory_l0_v1",
+      "snapshot_key_ring": "in_process_v1"
+    },
+    "dedicated_vcpus_attested": false,
+    "warm_filesystem_cache": true,
+    "loopback_providers": true,
+    "s1_requirements_met": false
+  },
+  "c64": {
+    "body_bytes": 65536,
+    "dependencies": 12,
+    "warmup_iterations": 200,
+    "measured_samples": 40,
+    "batch_iterations": 50,
+    "p50_microseconds": 0.73448,
+    "p95_microseconds": 0.77104,
+    "p95_cap_microseconds": 250.0,
+    "allocation_passes": 100,
+    "allocations_max": 3,
+    "allocations_cap": 4,
+    "allocations_distribution": {
+      "3": 100
+    },
+    "allocated_bytes_max": 1313,
+    "body_shared": true,
+    "not_modified": {
+      "p50_microseconds": 0.7404600000000001,
+      "p95_microseconds": 0.7569800000000001,
+      "allocation_passes": 100,
+      "allocations_max": 3,
+      "allocations_distribution": {
+        "3": 100
+      },
+      "allocated_bytes_max": 1313
+    },
+    "seed_deadline": {
+      "seed_remaining_ms": 45000,
+      "allocation_passes": 100,
+      "allocations_max": 4,
+      "allocations_cap": 4,
+      "allocations_distribution": {
+        "4": 100
+      },
+      "allocated_bytes_max": 1332
+    }
+  },
+  "c64_plus_4": {
+    "shell_bytes": 65536,
+    "slots": 4,
+    "slot_bytes": 4096,
+    "assembled_bytes": 81942,
+    "warmup_iterations": 200,
+    "measured_samples": 40,
+    "batch_iterations": 50,
+    "p50_microseconds": 33.06526,
+    "p95_microseconds": 33.58902,
+    "p95_cap_microseconds": 2000.0,
+    "allocation_passes": 100,
+    "allocated_bytes_max": 85019,
+    "copy_ratio_max": 1.03782958984375,
+    "copy_ratio_cap": 2.0
+  }
+}

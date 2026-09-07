@@ -122,3 +122,86 @@ fn macro_expansion_evidence_is_fixed_and_does_not_grow_superlinearly() {
         assert!(hundred / ten <= 12.0, "{metric} grew superlinearly at 100");
     }
 }
+
+#[test]
+fn render_cache_budget_result_holds_the_c64_allocation_and_copy_bounds() {
+    let result = benchmark_result("render-cache-budget-v1.json");
+
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["profile"], "release");
+    assert_eq!(result["environment"]["classification"], "local_exploratory");
+    assert!(
+        result["environment"]["cpu_model"]
+            .as_str()
+            .is_some_and(|value| value != "unavailable")
+    );
+
+    let c64 = &result["c64"];
+    assert_eq!(c64["body_bytes"], 65_536);
+    assert_eq!(c64["dependencies"], 12);
+    assert!(c64["warmup_iterations"].as_u64().expect("number") >= 30);
+    assert!(c64["measured_samples"].as_u64().expect("number") >= 30);
+    assert!(c64["allocations_max"].as_u64().expect("number") <= 4);
+    assert_eq!(c64["allocations_cap"], 4);
+    assert_eq!(c64["body_shared"], true);
+    assert_eq!(c64["p95_cap_microseconds"], 250.0);
+    assert!(c64["p95_microseconds"].as_f64().is_some());
+    assert!(
+        c64["not_modified"]["allocations_max"]
+            .as_u64()
+            .expect("number")
+            <= 4
+    );
+    assert!(
+        c64["seed_deadline"]["allocations_max"]
+            .as_u64()
+            .expect("number")
+            <= 4,
+        "the one entry shape that forms a header value per request stays inside the cap"
+    );
+
+    let composite = &result["c64_plus_4"];
+    assert_eq!(composite["shell_bytes"], 65_536);
+    assert_eq!(composite["slots"], 4);
+    assert_eq!(composite["slot_bytes"], 4_096);
+    assert!(composite["copy_ratio_max"].as_f64().expect("number") <= 2.0);
+    assert_eq!(composite["copy_ratio_cap"], 2.0);
+    assert_eq!(composite["p95_cap_microseconds"], 2_000.0);
+    assert!(composite["p95_microseconds"].as_f64().is_some());
+}
+
+#[test]
+fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
+    let live_gate =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/gate.sh"))
+            .expect("the Live gate script exists");
+    assert!(
+        !live_gate.contains("run-render-cache-budget.sh"),
+        "the render-cache budget is an on-demand tool, not a gate phase"
+    );
+
+    let steps = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gate-steps.json"),
+    )
+    .expect("the repository gate steps exist");
+    assert!(
+        !steps.contains("render_cache_budget") && !steps.contains("render-cache-budget"),
+        "the repository gate must not run the budget"
+    );
+
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("the Live manifest exists");
+    assert!(
+        manifest.contains("name = \"render_cache_budget\""),
+        "the budget bench is a registered target"
+    );
+
+    let runner = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run-render-cache-budget.sh"),
+    )
+    .expect("the runner exists");
+    assert!(
+        runner.contains("SUPRNOVA_LIVE_S1_CPUSET") && !runner.contains("-D warnings"),
+        "the runner pins the S1 processor set and never denies warnings wholesale"
+    );
+}

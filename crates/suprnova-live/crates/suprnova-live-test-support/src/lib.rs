@@ -5,6 +5,8 @@
 
 mod assertions;
 mod async_reference_host;
+/// Environment evidence and the percentile rule shared by benchmarks.
+pub mod bench_environment;
 mod context;
 mod direct_provider;
 mod endpoint;
