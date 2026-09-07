@@ -188,7 +188,7 @@ async fn a_header_value_the_wire_cannot_carry_is_dropped_at_publication_not_repu
     assert_eq!(
         first.header("link"),
         None,
-        "hyper drops a header value it cannot write, and always has: no client ever          receives this one"
+        "hyper drops a header value it cannot write, and always has: no client ever receives this one"
     );
     assert!(
         RenderCache::l0_hot_for_test(&key),
@@ -201,7 +201,7 @@ async fn a_header_value_the_wire_cannot_carry_is_dropped_at_publication_not_repu
     assert_eq!(
         counting_route::renders(),
         1,
-        "the second request is a hit; storing a value the response builder cannot form          would miss, render, republish and warn on every request forever"
+        "the second request is a hit; storing a value the response builder cannot form would miss, render, republish and warn on every request forever"
     );
     assert_eq!(second.header("link"), None);
 }
@@ -226,7 +226,7 @@ async fn a_non_ascii_header_value_survives_publication_and_the_hit_byte_for_byte
     assert_eq!(
         second.header("link"),
         Some(NON_ASCII_LINK),
-        "a hit replays the stored value byte for byte; reading it back through          HeaderValue::to_str would silently drop it"
+        "a hit replays the stored value byte for byte; reading it back through HeaderValue::to_str would silently drop it"
     );
 }
 
