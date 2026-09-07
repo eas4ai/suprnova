@@ -10,6 +10,7 @@ use suprnova_live::render_cache::generation::{
 };
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
+use super::providers::framework_error_kind;
 use crate::database::transaction::{ExecutorChoice, TxHandle};
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
@@ -111,15 +112,21 @@ static WARNED_MISSING_TABLE_AFTER_INSTALL: std::sync::Once = std::sync::Once::ne
 /// [`RenderCacheError`] exposes for this contract. The underlying message
 /// is dropped from the returned error deliberately: `RenderCacheError`'s
 /// messages never carry keys, bodies, or identity material, and a raw
-/// `DbErr` string could echo bound values back into a response. It is not
-/// thrown away entirely, though: logged first at `warn`, so "no owning
-/// transaction" (a programming error at the call site) stays distinguishable
-/// from "the database is down" in whatever collects these logs, even though
-/// both surface identically to the caller.
+/// `DbErr` string could echo bound values back into a response.
+///
+/// It does not reach the log either. What is logged is the failure's own
+/// variant name through [`framework_error_kind`], so "no owning
+/// transaction" (`kind="internal"`, a programming error at the call site)
+/// stays distinguishable from "the database is down" (`kind="database"`) in
+/// whatever collects these logs, and no bound value travels with it: the
+/// statements this module runs bind hex dependency identities and epoch
+/// numbers, and `FrameworkError::Database`'s message is the driver's own
+/// string, which repeats them. The providers module makes the same collapse
+/// for the tier adapters.
 fn provider_error(error: FrameworkError) -> RenderCacheError {
     tracing::warn!(
         target: "suprnova::render_cache",
-        %error,
+        kind = framework_error_kind(&error),
         "render cache generation ledger provider failure",
     );
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
@@ -663,5 +670,59 @@ impl GenerationLedger for SqlGenerationLedger {
             .try_get_by_index(0)
             .map_err(|e| provider_error(database_error(e)))?;
         Ok(epoch as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! What a generation ledger failure is allowed to say.
+    //!
+    //! The behaviour of this module is proven against a real database in
+    //! `framework/tests/render_cache/ledger.rs`; what a live test cannot
+    //! show is what reaches the log on the way past, which is where a bound
+    //! value would otherwise escape.
+    use super::*;
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn a_ledger_provider_failure_logs_its_kind_and_never_the_driver_message() {
+        // What a failing statement in this module actually carries back: the
+        // driver repeats the statement and its bound values, which here are
+        // hex dependency identities.
+        let error = database_error(sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(
+            "error returned from database: INSERT INTO suprnova_render_generations \
+             VALUES ('0123456789abcdef')"
+                .to_owned(),
+        )));
+        // The message is the leak this guards against, so prove it is really
+        // in the error before proving it is not in what is logged.
+        let message = error.to_string();
+        assert!(message.contains("0123456789abcdef"), "{message}");
+
+        assert_eq!(
+            provider_error(error).kind(),
+            RenderCacheErrorKind::ProviderUnavailable,
+            "every database failure is one closed kind to the caller"
+        );
+
+        assert!(
+            logs_contain("render cache generation ledger provider failure"),
+            "the failure is logged"
+        );
+        assert!(logs_contain("kind=\"database\""), "as a closed-set kind");
+        assert!(
+            !logs_contain("0123456789abcdef"),
+            "and never as the driver's message"
+        );
+        assert!(!logs_contain("suprnova_render_generations"));
+
+        // The distinction the log exists for: a call with no owning
+        // transaction is a programming error at the call site, not an
+        // outage.
+        assert_eq!(
+            provider_error(FrameworkError::internal("no owning transaction".to_owned())).kind(),
+            RenderCacheErrorKind::ProviderUnavailable
+        );
+        assert!(logs_contain("kind=\"internal\""));
     }
 }

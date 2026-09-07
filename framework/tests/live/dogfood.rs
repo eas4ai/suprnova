@@ -154,3 +154,32 @@ async fn the_guard_and_the_configured_csrf_proof_fail_closed() {
         "public, max-age=31536000, immutable"
     );
 }
+
+/// `Server::run` fails closed on a Live ledger driver whose backend is not
+/// there, and the check it runs is `verify_ledger_backend`. What that check
+/// must never do is fail a deployment that configured nothing: the default
+/// driver keeps its records in this process and reaches no backend at all,
+/// so a runtime bound with `LIVE_LEDGER_DRIVER` unset has to pass it.
+///
+/// The two drivers that do reach a backend are proved by the tier tests,
+/// through the `verify_ledger_driver_for_test` seam; this is the one case
+/// that needs no seam, because it needs no backend - so it is proved here,
+/// against a runtime that was really bound, rather than against a driver
+/// value a test named.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_default_ledger_driver_verifies_its_backend_at_boot() {
+    let _env = crate::env_lock::lock_env_async().await;
+    assert!(
+        std::env::var("LIVE_LEDGER_DRIVER").is_err(),
+        "this test is about the unset default; nothing in this binary may leave it set"
+    );
+    let _container = TestContainer::fake();
+    fixture();
+    let router = Arc::new(build_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+
+    suprnova::live::verify_ledger_backend()
+        .await
+        .expect("the memory ledger driver reaches nothing, so it always verifies");
+}

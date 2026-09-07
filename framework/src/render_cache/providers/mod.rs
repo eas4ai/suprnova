@@ -161,8 +161,14 @@ pub(crate) fn provider_error_kind(kind: &'static str) -> RenderCacheError {
 /// these adapters run bind render keys, hex identities, and encoded
 /// records, so that message is exactly the thing that must not be logged.
 /// The variant name says which layer failed and carries none of it.
-/// `DbErr` is `#[non_exhaustive]`, so an unrecognised future variant
-/// answers `"other"` rather than falling back to the message.
+///
+/// Every variant the pinned SeaORM defines is named here, including the
+/// three an application's own RBAC and locking can raise
+/// (`RbacError`, `AccessDenied`, `MutexPoisonError`), because a name is
+/// what makes one failure distinguishable from another in a log that
+/// carries nothing else. `DbErr` is `#[non_exhaustive]`, so the default arm
+/// stays: an unrecognised future variant answers `"other"` rather than
+/// falling back to the message.
 pub(crate) fn db_error_kind(error: &DbErr) -> &'static str {
     match error {
         DbErr::ConnectionAcquire(_) => "connection_acquire",
@@ -184,6 +190,9 @@ pub(crate) fn db_error_kind(error: &DbErr) -> &'static str {
         DbErr::BackendNotSupported { .. } => "backend_not_supported",
         DbErr::KeyArityMismatch { .. } => "key_arity_mismatch",
         DbErr::PrimaryKeyNotSet { .. } => "primary_key_not_set",
+        DbErr::RbacError(_) => "rbac",
+        DbErr::AccessDenied { .. } => "access_denied",
+        DbErr::MutexPoisonError => "mutex_poison",
         _ => "other",
     }
 }
@@ -417,6 +426,24 @@ mod tests {
         assert_eq!(
             db_error_kind(&sea_orm::DbErr::RecordNotInserted),
             "record_not_inserted"
+        );
+        // The three an application's own RBAC and locking raise. Their
+        // payloads are a caller's own strings, so they are exactly the kind
+        // of value the name exists to leave behind.
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::RbacError("0123456789abcdef".to_owned())),
+            "rbac"
+        );
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::AccessDenied {
+                permission: "0123456789abcdef".to_owned(),
+                resource: "0123456789abcdef".to_owned(),
+            }),
+            "access_denied"
+        );
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::MutexPoisonError),
+            "mutex_poison"
         );
     }
 

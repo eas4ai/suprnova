@@ -447,7 +447,15 @@ binary_identity!(
     32
 );
 
-fn parse_decimal(value: &str) -> Result<u64, IdentityError> {
+/// Parses the canonical unsigned decimal every wire form in this engine
+/// uses: digits only, no leading zero except `"0"` itself, and within
+/// `u64`.
+///
+/// `pub(crate)` rather than private because the ledger's record codec reads
+/// the same form back out of a stored frame and must accept exactly what
+/// these identities accept - one grammar, one implementation, so a build
+/// can never write a decimal one reader takes and another refuses.
+pub(crate) fn parse_decimal(value: &str) -> Result<u64, IdentityError> {
     let canonical = value == "0"
         || (!value.starts_with('0')
             && !value.is_empty()

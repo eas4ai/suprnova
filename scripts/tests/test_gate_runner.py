@@ -1530,24 +1530,51 @@ class ShellAssetContractTests(unittest.TestCase):
             "            printf 'test ledger::live_mysql_a_write_committed_during_a_cached_render_is_never_published_as_current ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
-            "        tiers::live_postgres)\n"
-            "            printf 'test tiers::live_postgres_record_creation_and_cas_conflict ... ok\\n'\n"
-            "            printf 'test tiers::live_postgres_publish_fencing_and_sweep ... ok\\n'\n"
-            "            printf 'test tiers::live_postgres_lease_takeover_and_fencing ... ok\\n'\n"
+            "        tiers::sql::live_postgres)\n"
+            "            printf 'test tiers::sql::live_postgres_record_creation_and_cas_conflict ... ok\\n'\n"
+            "            printf 'test tiers::sql::live_postgres_publish_fencing_and_sweep ... ok\\n'\n"
+            "            printf 'test tiers::sql::live_postgres_lease_takeover_and_fencing ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
-            "        tiers::live_mysql)\n"
-            "            printf 'test tiers::live_mysql_record_creation_and_cas_conflict ... ok\\n'\n"
-            "            printf 'test tiers::live_mysql_publish_fencing_and_sweep ... ok\\n'\n"
-            "            printf 'test tiers::live_mysql_lease_takeover_and_fencing ... ok\\n'\n"
+            "        tiers::sql::live_mysql)\n"
+            "            printf 'test tiers::sql::live_mysql_record_creation_and_cas_conflict ... ok\\n'\n"
+            "            printf 'test tiers::sql::live_mysql_publish_fencing_and_sweep ... ok\\n'\n"
+            "            printf 'test tiers::sql::live_mysql_lease_takeover_and_fencing ... ok\\n'\n"
             "            printf 'test result: ok. 3 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
-            "        tiers::live_redis)\n"
-            "            printf 'test tiers::live_redis_publish_fences_and_eviction_is_a_miss ... ok\\n'\n"
-            "            printf 'test tiers::live_redis_two_coordinators_lead_once_and_bypass_once ... ok\\n'\n"
-            "            printf 'test tiers::live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is_fenced ... ok\\n'\n"
-            "            printf 'test tiers::live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it ... ok\\n'\n"
+            "        tiers::redis::live_redis)\n"
+            "            printf 'test tiers::redis::live_redis_publish_fences_and_eviction_is_a_miss ... ok\\n'\n"
+            "            printf 'test tiers::redis::live_redis_two_coordinators_lead_once_and_bypass_once ... ok\\n'\n"
+            "            printf 'test tiers::redis::live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is_fenced ... ok\\n'\n"
+            "            printf 'test tiers::redis::live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it ... ok\\n'\n"
             "            printf 'test result: ok. 16 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        redis::)\n"
+            "            printf 'test redis::redis_driver_push_pop_ack_round_trip ... ok\\n'\n"
+            "            printf 'test redis::redis_driver_concurrent_pops_claim_one_distinct_entry_each ... ok\\n'\n"
+            "            printf 'test redis::redis_driver_reclaims_another_consumers_expired_delivery_to_itself ... ok\\n'\n"
+            "            printf 'test redis::redis_driver_clear_epoch_fences_an_identical_recreated_delivery ... ok\\n'\n"
+            "            printf 'test result: ok. 19 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        reclaim_attempts::redis_)\n"
+            "            printf 'test reclaim_attempts::redis_driver::redis_reclaim_after_worker_loss_consumes_an_attempt ... ok\\n'\n"
+            "            printf 'test reclaim_attempts::redis_driver::redis_first_delivery_does_not_consume_an_attempt ... ok\\n'\n"
+            "            printf 'test result: ok. 2 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        idempotency::redis_)\n"
+            "            printf 'test idempotency::redis_synchronously_blocked_body_reports_unfenced_after_takeover ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        redis_integration::)\n"
+            "            printf 'test redis_integration::redis_put_with_subsecond_ttl_expires_correctly ... ok\\n'\n"
+            "            printf 'test redis_integration::redis_flush_uses_scan_and_clears_the_keyspace ... ok\\n'\n"
+            "            printf 'test redis_integration::redis_tagged_writes_can_be_flushed_by_tag ... ok\\n'\n"
+            "            printf 'test redis_integration::redis_flush_tags_spans_multiple_scan_rounds ... ok\\n'\n"
+            "            printf 'test result: ok. 17 passed; 0 failed; 0 ignored\\n'\n"
+            "            ;;\n"
+            "        redis_retry::)\n"
+            "            printf 'test redis_retry::redis_get_survives_a_killed_connection ... ok\\n'\n"
+            "            printf 'test result: ok. 1 passed; 0 failed; 0 ignored\\n'\n"
             "            ;;\n"
             "        live_postgres)\n"
             "            printf 'test render_cache::providers::sql_store::tests::live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one ... ok\\n'\n"
@@ -1673,17 +1700,22 @@ class ShellAssetContractTests(unittest.TestCase):
             "scripts/check-postgres.sh": [
                 "--test eloquent -- --ignored --test-threads=1 relations_pivot_filters_postgres::",
                 "workflow::tests::test_claim_reclaims_expired_running_row",
-                "--test render_cache -- --ignored --test-threads=1 tiers::live_postgres",
+                "--test render_cache -- --ignored --test-threads=1 tiers::sql::live_postgres",
                 "--lib -- --ignored --test-threads=1 live_postgres",
             ],
             "scripts/check-mysql.sh": [
                 "--test eloquent -- --ignored --test-threads=1 mass_write_mysql::",
                 "workflow::tests::test_mysql_",
-                "--test render_cache -- --ignored --test-threads=1 tiers::live_mysql",
+                "--test render_cache -- --ignored --test-threads=1 tiers::sql::live_mysql",
                 "--lib -- --ignored --test-threads=1 live_mysql",
             ],
             "scripts/check-redis.sh": [
-                "--test render_cache -- --ignored --test-threads=1 tiers::live_redis",
+                "--test render_cache -- --ignored --test-threads=1 tiers::redis::live_redis",
+                "--test queue -- --ignored --test-threads=1 redis::",
+                "--test queue -- --ignored --test-threads=1 reclaim_attempts::redis_",
+                "--test idempotency -- --ignored --test-threads=1 idempotency::redis_",
+                "--test cache -- --ignored --test-threads=1 redis_integration::",
+                "--test cache -- --ignored --test-threads=1 redis_retry::",
             ],
             "scripts/check-magnetar-live.sh": [],
         }

@@ -180,15 +180,17 @@ fn decimal(value: u64) -> String {
 
 /// Parses the canonical unsigned decimal the codec writes: digits only, no
 /// leading zero except `"0"` itself, and within `u64`.
+///
+/// The grammar is [`identity::parse_decimal`](crate::identity), which is
+/// what every decimal identity in this engine parses through; a second copy
+/// of it here could drift, and a decimal one reader took and another
+/// refused would make a stored record decodable by one build and not the
+/// next. Only the failure is this module's: an identity error means the
+/// frame is not the shape this codec writes, which is what `shape_error`
+/// (crate-private, so this is a plain code span rather than a link) answers
+/// for every other field in it.
 fn decode_decimal(value: &str) -> Result<u64, LedgerError> {
-    let canonical = value == "0"
-        || (!value.is_empty()
-            && !value.starts_with('0')
-            && value.bytes().all(|byte| byte.is_ascii_digit()));
-    if !canonical {
-        return Err(shape_error());
-    }
-    value.parse().map_err(|_| shape_error())
+    crate::identity::parse_decimal(value).map_err(|_| shape_error())
 }
 
 fn decode_revision(value: &str) -> Result<Revision, LedgerError> {

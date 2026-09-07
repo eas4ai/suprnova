@@ -136,7 +136,7 @@
     },
     {
       "id": "redis-tests",
-      "name": "Redis tier regressions",
+      "name": "Redis regressions",
       "tiers": ["default", "full"],
       "argv": ["scripts/check-redis.sh"],
       "timeout_seconds": 600,

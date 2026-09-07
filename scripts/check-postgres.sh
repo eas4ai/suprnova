@@ -149,13 +149,15 @@ for render_cache_pg_test in \
     fi
 done
 
-# `render_cache/tiers` is mixed the same way, with one more dialect in it:
-# SQLite tier tests run unconditionally beside Postgres-, MySQL-, and
-# Redis-tagged `#[ignore]`d ones. Select the Postgres-tagged ones by name,
-# and assert on the output for the same reason as above.
+# `render_cache/tiers/sql` is mixed the same way, with one more dialect in
+# it: SQLite tier tests run unconditionally beside Postgres- and MySQL-tagged
+# `#[ignore]`d ones. Select the Postgres-tagged ones by name, and assert on
+# the output for the same reason as above. The submodule is part of the
+# filter (the tier proofs are split by backend), so a renamed or moved
+# submodule stops this step rather than quietly selecting nothing.
 echo
-echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::live_postgres"
-if ! tiers_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_postgres 2>&1)"; then
+echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::sql::live_postgres"
+if ! tiers_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::sql::live_postgres 2>&1)"; then
     echo "$tiers_pg_out"
     exit 1
 fi
@@ -164,12 +166,12 @@ for tiers_pg_test in \
     live_postgres_record_creation_and_cas_conflict \
     live_postgres_publish_fencing_and_sweep \
     live_postgres_lease_takeover_and_fencing; do
-    if ! grep -qE "^test tiers::${tiers_pg_test} \.\.\. ok" <<<"$tiers_pg_out"; then
+    if ! grep -qE "^test tiers::sql::${tiers_pg_test} \.\.\. ok" <<<"$tiers_pg_out"; then
         echo "check-postgres: ${tiers_pg_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
     fi
 done
-# The exact number of `tiers::live_postgres` tests. Update it when one is
+# The exact number of `tiers::sql::live_postgres` tests. Update it when one is
 # added or removed.
 if ! grep -qE "^test result: ok\. 3 passed" <<<"$tiers_pg_out"; then
     echo "check-postgres: the tiers summary line does not report exactly 3 passed" >&2

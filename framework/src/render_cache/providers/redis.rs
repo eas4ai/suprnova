@@ -469,11 +469,21 @@ pub(crate) fn unreadable_status() -> RenderCacheError {
     super::provider_error_kind("unreadable_script_status")
 }
 
-/// [`unreadable_status`] for the ledger side.
+/// [`unreadable_status`] for the ledger side, in the same shape: the
+/// message its sibling [`ledger_error`] carries, plus the closed-set `kind`
+/// that says which failure this was.
+///
+/// The two ledger-side sites cannot share one `warn` the way the two
+/// provider-side ones do, because the kinds they carry have different
+/// types: this one is a name this module owns, and [`ledger_error`]'s is a
+/// driver enum's `Debug`. What they do share is the shape a log consumer
+/// reads - one message per contract, one closed `kind` field - so a filter
+/// written for either finds both.
 pub(crate) fn unreadable_ledger_status() -> LedgerError {
     tracing::warn!(
         target: "suprnova::render_cache",
-        "live instance record store script returned a status this build does not define",
+        kind = "unreadable_script_status",
+        "live instance record store provider failure",
     );
     LedgerError::new(LedgerErrorKind::ProviderUnavailable)
 }
@@ -594,6 +604,7 @@ mod tests {
         );
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn a_driver_failure_is_logged_as_a_kind_and_never_as_its_message() {
         // What a failing script or command actually carries back: the
@@ -612,13 +623,46 @@ mod tests {
         assert!(message.contains("rk1."), "{message}");
         assert!(message.contains("0123456789abcdef"), "{message}");
 
-        // `kind = ?error.kind()` is the field both warn sites log.
-        let logged = format!("{:?}", error.kind());
-        assert_eq!(logged, "Extension");
-        assert!(!logged.contains("rk1."), "{logged}");
-        assert!(!logged.contains("0123456789abcdef"), "{logged}");
-        assert!(!logged.contains("EVALSHA"), "{logged}");
-        assert!(!logged.contains("instance:"), "{logged}");
+        // The real helpers, under a subscriber that captures what they
+        // actually emit - not a hand-copied proxy for it.
+        assert_eq!(
+            provider_error(&error).kind(),
+            RenderCacheErrorKind::ProviderUnavailable,
+            "every driver failure is one closed kind to the caller"
+        );
+        assert_eq!(
+            ledger_error(&error).kind(),
+            LedgerErrorKind::ProviderUnavailable
+        );
+        assert_eq!(
+            unreadable_ledger_status().kind(),
+            LedgerErrorKind::ProviderUnavailable
+        );
+        assert_eq!(
+            unreadable_status().kind(),
+            RenderCacheErrorKind::ProviderUnavailable,
+            "and the script-status siblings answer their own contracts"
+        );
+
+        assert!(
+            logs_contain("render cache tier provider failure"),
+            "the provider side logs its failure"
+        );
+        assert!(
+            logs_contain("live instance record store provider failure"),
+            "the ledger side logs its own"
+        );
+        // `redis::ErrorKind` is a fieldless enum, so its `Debug` is a name
+        // and nothing else; the script-status site names itself.
+        assert!(logs_contain("kind=Extension"), "as a closed-set kind");
+        assert!(logs_contain("kind=\"unreadable_script_status\""));
+
+        // And none of the three carried a byte of the driver's message.
+        assert!(!logs_contain("rk1."));
+        assert!(!logs_contain("0123456789abcdef"));
+        assert!(!logs_contain("EVALSHA"));
+        assert!(!logs_contain("instance:"));
+        assert!(!logs_contain("script failed"));
     }
 
     #[test]

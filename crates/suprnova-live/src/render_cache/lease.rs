@@ -259,12 +259,18 @@ impl<S: LeaseStore> RebuildCoordinator for FencedLeaseCoordinator<S> {
             }
             // The store decided nothing, so this node leads nothing: hand the
             // local lease back before reporting the failure, or the waiters
-            // behind it would park on a leader that will never publish. The
-            // store's failure is what admission failed on and is the one
-            // reported; handing the local lease back is cleanup on the way
-            // out, and its own outcome does not change why admission failed.
+            // behind it would park on a leader that will never publish.
+            //
+            // The hand-back propagates with `?`, exactly as the `Held` arm
+            // above does, and for the same reason: a local release that
+            // failed would leave this node's waiters parked behind a leader
+            // that is not coming back, which is a worse answer than the
+            // store's own. Either way admission fails closed - the caller
+            // renders without caching - so the difference is only which
+            // failure the caller is told about, and a coordinator that
+            // cannot release its own lease is the more urgent one.
             Err(error) => {
-                let _ = self.local.release(*lease).await;
+                self.local.release(*lease).await?;
                 Err(error)
             }
         }
@@ -551,5 +557,78 @@ mod tests {
             ),
             "the failed admission left no local lease behind to park waiters on"
         );
+    }
+
+    #[tokio::test]
+    async fn the_hand_back_on_a_failed_admission_is_propagated_and_not_discarded() {
+        // Both arms that hand the local lease back do it with `?`, so a
+        // failure of the hand-back itself is admission's answer rather than
+        // something swallowed on the way out. What that failure would be is
+        // unreachable in this build - `LocalRebuildCoordinator::release`
+        // recovers a poisoned lock and returns `Ok(())` unconditionally, and
+        // the field it releases through is that concrete type rather than a
+        // port a test could stand a failing double in front of. So what is
+        // proved here is the reachable half: when the hand-back succeeds,
+        // the store's own failure is the one reported, with its kind intact,
+        // and the released lease really is free afterwards.
+        //
+        // The store answers a kind nothing else in this path answers, so the
+        // assertions below are about which failure surfaced rather than
+        // merely that one did.
+        struct RefusingStore;
+
+        #[async_trait]
+        impl LeaseStore for RefusingStore {
+            async fn try_acquire(
+                &self,
+                _key: &RenderKey,
+                _epoch: u64,
+                _ttl_ms: u64,
+            ) -> Result<LeaseAttempt, RenderCacheError> {
+                Err(RenderCacheError::new(RenderCacheErrorKind::KeyInvalid))
+            }
+
+            async fn mint_token(
+                &self,
+                _key: &RenderKey,
+                _lease_id: u64,
+            ) -> Result<Option<u64>, RenderCacheError> {
+                Ok(None)
+            }
+
+            async fn release(
+                &self,
+                _key: &RenderKey,
+                _lease_id: u64,
+            ) -> Result<(), RenderCacheError> {
+                Ok(())
+            }
+        }
+
+        let limits = LocalCoordinatorLimits {
+            lease_ms: 1_000,
+            max_waiters: 4,
+        };
+        let coordinator = FencedLeaseCoordinator::new(Arc::new(RefusingStore), limits);
+        let key = key("/a");
+
+        let failure = coordinator
+            .admit(&key, 1, 0)
+            .await
+            .expect_err("the store decides leadership");
+        assert_eq!(
+            failure.kind(),
+            RenderCacheErrorKind::KeyInvalid,
+            "a successful hand-back reports the store's own failure, not its own success"
+        );
+
+        // The local coordinator really did take the lease back: a fresh
+        // admission at the same instant reaches the store again rather than
+        // parking behind the request that failed.
+        let again = coordinator
+            .admit(&key, 1, 0)
+            .await
+            .expect_err("the store still refuses");
+        assert_eq!(again.kind(), RenderCacheErrorKind::KeyInvalid);
     }
 }
