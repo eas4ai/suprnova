@@ -212,11 +212,18 @@ enum Epochs {
 /// of the key, in a `VARCHAR(48)` sized explicitly for the same reason
 /// [`Migration`]'s own `string_len(64)` is: SeaORM's default `.string()` is
 /// `VARCHAR(255)`, which under `utf8mb4` runs into MySQL's index key length
-/// limit on a primary key column. Scope, instance, idempotency, and
-/// generation digests are lowercase hex of a fixed-width digest, so they are
-/// `CHAR` of exactly that width. Every millisecond timestamp is a `BIGINT`
-/// holding milliseconds since the Unix epoch as the *database* reports it
-/// (see `render_cache::providers::sql_now_ms`), never a node clock.
+/// limit on a primary key column. Scope fingerprints and generation digests
+/// are lowercase hex of a fixed 32-byte digest, so they are `CHAR(64)`,
+/// exactly that width. Instance and idempotency identities are *not* fixed
+/// width: both accept 16 to 32 bytes, and an idempotency key is built from a
+/// browser-proposed nonce, so 32-byte values arrive from the wire and their
+/// hex runs from 32 to 64 characters. Those two columns are therefore
+/// `VARCHAR(64)`, sized for the longest identity the engine accepts - a
+/// `CHAR(32)` would have made PostgreSQL refuse every full-width identity
+/// and let a non-strict MySQL truncate two distinct ones onto one row. Every
+/// millisecond timestamp is a `BIGINT` holding milliseconds since the Unix
+/// epoch as the *database* reports it (see
+/// `render_cache::providers::sql_now_ms`), never a node clock.
 ///
 /// Entry and record payloads are blobs, and the blob column type is the one
 /// dialect difference this migration cannot express portably: sea-query's
@@ -353,7 +360,7 @@ impl MigrationTrait for TierMigration {
                     .col(ColumnDef::new(LiveInstances::Scope).char_len(64).not_null())
                     .col(
                         ColumnDef::new(LiveInstances::Instance)
-                            .char_len(32)
+                            .string_len(64)
                             .not_null(),
                     )
                     .col(blob_column(backend, LiveInstances::Record))
@@ -398,7 +405,7 @@ impl MigrationTrait for TierMigration {
                     )
                     .col(
                         ColumnDef::new(LivePromotions::Idempotency)
-                            .char_len(32)
+                            .string_len(64)
                             .not_null(),
                     )
                     .col(blob_column(backend, LivePromotions::Record))

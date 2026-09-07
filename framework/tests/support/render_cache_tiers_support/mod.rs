@@ -19,10 +19,10 @@
 
 use bytes::Bytes;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use suprnova::DB;
 use suprnova::database::transaction::ExecutorChoice;
 use suprnova::render_cache::providers::sql_now_ms;
 use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
+use suprnova::{DB, PRIMARY_CONNECTION_NAME};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{IdempotencyKey, InstanceId, KeyId, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{InstanceRecordKey, PromotionRecordKey};
@@ -146,7 +146,7 @@ pub fn encoded_entry(pattern: &str) -> Bytes {
 /// dialect expression is proven against, or when the clock read fails -
 /// each of which is a broken fixture rather than a provider failure.
 pub async fn store_now_ms() -> u64 {
-    let exec = ExecutorChoice::resolve_read(None, None, None)
+    let exec = ExecutorChoice::resolve_read(None, Some(PRIMARY_CONNECTION_NAME), None)
         .await
         .expect("a read executor over the test database");
     let sql = format!(
@@ -171,7 +171,8 @@ pub fn scope() -> ScopeFingerprint {
     ScopeFingerprint::from_bytes(&varied::<32>(0x10)).expect("the fixture scope is valid")
 }
 
-/// One instance record address, distinct per `tag`.
+/// One instance record address at the *shortest* identity the engine
+/// accepts, distinct per `tag`.
 ///
 /// # Panics
 ///
@@ -184,7 +185,27 @@ pub fn instance_key(tag: u8) -> InstanceRecordKey {
     }
 }
 
-/// One promotion reservation address, distinct per `tag`.
+/// One instance record address at the *longest* identity the engine accepts.
+///
+/// `InstanceId` is 16 to 32 bytes, so its hex runs from 32 to 64 characters
+/// and the column has to hold the wide end. A fixture that only ever used
+/// the narrow end would pass against a column half the size it needs, while
+/// PostgreSQL refused every real full-width identity and a non-strict MySQL
+/// truncated two distinct ones onto one row.
+///
+/// # Panics
+///
+/// Panics when the fixture bytes stop being a valid instance identity.
+pub fn wide_instance_key(tag: u8) -> InstanceRecordKey {
+    InstanceRecordKey {
+        scope: scope(),
+        instance_id: InstanceId::from_bytes(&varied::<32>(tag))
+            .expect("the widest fixture instance identity is valid"),
+    }
+}
+
+/// One promotion reservation address at the shortest retry identity the
+/// engine accepts, distinct per `tag`.
 ///
 /// # Panics
 ///
@@ -194,6 +215,25 @@ pub fn promotion_key(tag: u8) -> PromotionRecordKey {
         scope: scope(),
         idempotency_key: IdempotencyKey::from_bytes(&varied::<16>(tag))
             .expect("the fixture retry identity is valid"),
+    }
+}
+
+/// One promotion reservation address at the longest retry identity the
+/// engine accepts.
+///
+/// This is the width that actually arrives: a retry identity is built from
+/// the browser-proposed nonce, which may be a full 32 bytes, so 64-character
+/// hex reaches the column straight off the wire. See [`wide_instance_key`]
+/// for what a column sized for the narrow end would do with it.
+///
+/// # Panics
+///
+/// Panics when the fixture bytes stop being a valid retry identity.
+pub fn wide_promotion_key(tag: u8) -> PromotionRecordKey {
+    PromotionRecordKey {
+        scope: scope(),
+        idempotency_key: IdempotencyKey::from_bytes(&varied::<32>(tag))
+            .expect("the widest fixture retry identity is valid"),
     }
 }
 

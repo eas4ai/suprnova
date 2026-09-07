@@ -44,6 +44,14 @@
 //! and the same number, the in-memory reference store applies, so a burst of
 //! expiries that arrive together is paid for over the operations that
 //! follow rather than by whichever one is unlucky.
+//!
+//! Reclamation runs in the operation's transaction, which inside a host
+//! transaction is the host's: its `DELETE` holds row locks until the host
+//! commits, and is rolled back with the host if the host rolls back. That is
+//! the price of the coupling above, it is bounded by the batch size, and it
+//! costs correctness nothing - an elapsed record a rollback puts back is
+//! still elapsed, still invisible to every read, and still the next creating
+//! operation's to reclaim.
 
 use async_trait::async_trait;
 use sea_orm::{DbBackend, Value};
@@ -53,7 +61,7 @@ use suprnova_live::ledger::{
     MAX_RECORD_BYTES, PromotionRecordKey, StoredRecord,
 };
 
-use super::{as_i64, as_u64, is_unique_violation, sql_now_ms};
+use super::{as_i64, as_u64, bind, is_unique_violation, row_lock, sql_now_ms};
 use crate::database::transaction::ExecutorChoice;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
@@ -181,7 +189,7 @@ impl SqlInstanceRecordStore {
             .await
         {
             Ok(_) => Ok(true),
-            Err(error) if is_unique_violation(&error.to_string()) => Ok(false),
+            Err(error) if is_unique_violation(&error.to_string(), table.name()) => Ok(false),
             Err(error) => Err(ledger_error(FrameworkError::database(error.to_string()))),
         }
     }
@@ -194,6 +202,16 @@ impl SqlInstanceRecordStore {
     /// delete: that keeps the delete bounded to exactly the rows this
     /// operation looked at, on every dialect, and needs no subquery over the
     /// table a `DELETE` targets - which MySQL refuses outright (error 1093).
+    ///
+    /// It runs in whatever transaction the operation runs in, so inside a
+    /// host transaction this delete takes row locks that are held until the
+    /// *host* commits, and is rolled back with the host if it does not. That
+    /// is why the batch is small and why reclamation is only ever hygiene:
+    /// a rolled-back host transaction leaves the elapsed rows exactly where
+    /// they were, and the next creating operation reclaims them instead.
+    /// Nothing reads a reclaimed row in the meantime - every read and guard
+    /// refuses a record past its deadline whether or not a batch has reached
+    /// it.
     async fn reclaim(&self, exec: &ExecutorChoice, table: RecordTable) -> Result<(), LedgerError> {
         let backend = exec.backend();
         let limit = i64::try_from(RECLAIM_BATCH).unwrap_or(i64::MAX);
@@ -241,6 +259,13 @@ impl SqlInstanceRecordStore {
     /// unambiguous because the version it must see is one past the version
     /// the locked read observed, and nothing else can move the row while
     /// this transaction holds it.
+    ///
+    /// The re-read carries the update's own store-time guard, so a record
+    /// that elapses between the locked read and the update - which
+    /// PostgreSQL reaches inside one transaction, its `clock_timestamp()`
+    /// advancing within it - answers [`CasOutcome::Missing`]. Nothing was
+    /// written in that case, and "missing" is what the port promises for a
+    /// record that is no longer there.
     async fn replace_through(
         &self,
         exec: &ExecutorChoice,
@@ -294,17 +319,22 @@ impl SqlInstanceRecordStore {
             .query_one(sea_orm::Statement::from_sql_and_values(
                 backend,
                 select_version_sql(backend).map_err(ledger_error)?,
-                vec![Value::from(address.scope), Value::from(address.member)],
+                vec![
+                    Value::from(address.scope),
+                    Value::from(address.member),
+                    Value::from(offset),
+                ],
             ))
             .await
             .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?
         else {
-            // The row was read live under a lock a statement ago and nothing
-            // here deletes one, so its absence is a broken store rather than
-            // a lost record; answering "missing" would hide it.
-            return Err(ledger_error(FrameworkError::database(
-                "live instance row is absent immediately after its own update".to_owned(),
-            )));
+            // The record elapsed between the locked read and the guarded
+            // update, which PostgreSQL can genuinely reach inside one
+            // transaction because `clock_timestamp()` advances within it.
+            // Nothing was written - the update carries the same guard - so
+            // this is the same answer the port gives for a record that was
+            // never there.
+            return Ok(CasOutcome::Missing);
         };
         let stored: i64 = row
             .try_get_by_index(0)
@@ -642,22 +672,6 @@ impl InstanceRecordStore for SqlInstanceRecordStore {
     }
 }
 
-/// One `?` (MySQL and SQLite) or `$N` (PostgreSQL) placeholder for position
-/// `index`, counted from one.
-///
-/// The dialects diverge on placeholder syntax alone, so every statement
-/// below is written once and its placeholders are rendered here.
-/// `DbBackend` is `#[non_exhaustive]`, so an unrecognised future variant is
-/// refused explicitly rather than silently guessing a syntax it was never
-/// proven against.
-fn bind(backend: DbBackend, index: usize) -> Result<String, FrameworkError> {
-    match backend {
-        DbBackend::Postgres => Ok(format!("${index}")),
-        DbBackend::MySql | DbBackend::Sqlite => Ok("?".to_owned()),
-        _ => Err(crate::database::unsupported_database_backend(backend)),
-    }
-}
-
 /// `SELECT` for one live record's payload: the row exists and its deadline
 /// has not passed by store time.
 ///
@@ -695,28 +709,32 @@ fn select_live_sql(backend: DbBackend, table: RecordTable) -> Result<String, Fra
         RecordTable::Instances => "version",
         RecordTable::Promotions => "1",
     };
-    let locked = match backend {
-        DbBackend::Postgres | DbBackend::MySql => " FOR UPDATE",
-        // SQLite serialises writers, so there is no lock to take.
-        _ => "",
-    };
     Ok(format!(
         "SELECT {column} FROM {name} WHERE scope = {} AND {member} = {} \
-         AND expires_at_ms > ({now}) + {}{locked}",
+         AND expires_at_ms > ({now}) + {}{}",
         bind(backend, 1)?,
         bind(backend, 2)?,
-        bind(backend, 3)?
+        bind(backend, 3)?,
+        row_lock(backend)
     ))
 }
 
-/// `SELECT` for the version a compare-and-store just wrote, read back
-/// without the expiry guard: the update it confirms has already moved the
-/// deadline, and what this has to report is which version holds the row.
+/// `SELECT` for the version a compare-and-store just wrote, under the same
+/// store-time guard as the update it confirms.
+///
+/// The guard is not redundant. PostgreSQL's `clock_timestamp()` advances
+/// inside a transaction, so a record whose deadline sits between the locked
+/// read and the update genuinely elapses mid-operation; the update refuses
+/// it, and this read must then say `Missing` rather than compare a version
+/// that no longer holds anything and call it a conflict.
 fn select_version_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    let now = sql_now_ms(backend)?;
     Ok(format!(
-        "SELECT version FROM suprnova_live_instances WHERE scope = {} AND instance = {}",
+        "SELECT version FROM suprnova_live_instances \
+         WHERE scope = {} AND instance = {} AND expires_at_ms > ({now}) + {}",
         bind(backend, 1)?,
-        bind(backend, 2)?
+        bind(backend, 2)?,
+        bind(backend, 3)?
     ))
 }
 
@@ -728,8 +746,8 @@ fn select_version_sql(backend: DbBackend) -> Result<String, FrameworkError> {
 fn insert_record_sql(backend: DbBackend, table: RecordTable) -> Result<String, FrameworkError> {
     let (name, member) = (table.name(), table.member_column());
     let (columns, version) = match table {
-        RecordTable::Instances => (", version", ", 1"),
-        RecordTable::Promotions => ("", ""),
+        RecordTable::Instances => (", version", format!(", {FIRST_VERSION}")),
+        RecordTable::Promotions => ("", String::new()),
     };
     Ok(format!(
         "INSERT INTO {name} (scope, {member}, record{columns}, expires_at_ms) \
@@ -852,7 +870,7 @@ mod tests {
     const DIALECTS: [DbBackend; 3] = [DbBackend::Postgres, DbBackend::MySql, DbBackend::Sqlite];
 
     #[test]
-    fn placeholders_are_numbered_on_postgres_and_positional_elsewhere() {
+    fn the_statements_render_their_placeholders_through_the_shared_binder() {
         let postgres =
             select_record_sql(DbBackend::Postgres, RecordTable::Instances).expect("postgres");
         assert!(postgres.contains("scope = $1"), "{postgres}");
@@ -888,6 +906,13 @@ mod tests {
                     .expect("a dialect")
                     .contains(&format!("({now})")),
                 "a replacement must refuse an elapsed record"
+            );
+            assert!(
+                select_version_sql(backend)
+                    .expect("a dialect")
+                    .contains(&format!("({now})")),
+                "and its confirming re-read must refuse one too, or a record \
+                 that elapsed mid-transaction reads back as a conflict"
             );
             assert!(
                 count_live_sql(backend)

@@ -59,7 +59,7 @@ use suprnova_live::render_cache::store::{
     PublicationFence, PublishOutcome, RenderStore, StoreInspection, StoredEntry,
 };
 
-use super::{as_i64, as_u64, provider_error, sql_now_ms, store_now_ms};
+use super::{as_i64, as_u64, bind, binds, provider_error, row_lock, sql_now_ms, store_now_ms};
 use crate::database::transaction::ExecutorChoice;
 use crate::render_cache::SweepOutcome;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
@@ -494,33 +494,25 @@ fn decode_digest(text: &str) -> Option<[u8; 32]> {
 /// value. Every caller value in this module is bound.
 fn select_entry_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "SELECT bytes, epoch, token, generation_digest, published_at_ms \
-             FROM suprnova_render_entries \
-             WHERE render_key = $1 AND expires_at_ms > ({now}) + $2"
-        ),
-        _ => format!(
-            "SELECT bytes, epoch, token, generation_digest, published_at_ms \
-             FROM suprnova_render_entries \
-             WHERE render_key = ? AND expires_at_ms > ({now}) + ?"
-        ),
-    })
+    Ok(format!(
+        "SELECT bytes, epoch, token, generation_digest, published_at_ms \
+         FROM suprnova_render_entries \
+         WHERE render_key = {} AND expires_at_ms > ({now}) + {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?
+    ))
 }
 
 /// `SELECT` for the stored publication, locked for the publication that is
 /// about to replace it where the dialect can lock it. SQLite has no
 /// `FOR UPDATE` and needs none: it serialises writers.
-fn select_publication_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
-    match backend {
-        DbBackend::Postgres => Ok("SELECT epoch, token, published_at_ms \
-             FROM suprnova_render_entries WHERE render_key = $1 FOR UPDATE"),
-        DbBackend::MySql => Ok("SELECT epoch, token, published_at_ms \
-             FROM suprnova_render_entries WHERE render_key = ? FOR UPDATE"),
-        DbBackend::Sqlite => Ok("SELECT epoch, token, published_at_ms \
-             FROM suprnova_render_entries WHERE render_key = ?"),
-        _ => Err(crate::database::unsupported_database_backend(backend)),
-    }
+fn select_publication_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    Ok(format!(
+        "SELECT epoch, token, published_at_ms \
+         FROM suprnova_render_entries WHERE render_key = {}{}",
+        bind(backend, 1)?,
+        row_lock(backend)
+    ))
 }
 
 /// The per-backend insert-or-replace for one entry, with
@@ -546,11 +538,13 @@ fn select_publication_sql(backend: DbBackend) -> Result<&'static str, FrameworkE
 /// left to right and a later expression sees a column already assigned, so
 /// `token` and `epoch` come last, after every condition that reads their
 /// stored values has been evaluated.
-fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
+fn upsert_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    let values = binds(backend, 1, 7)?;
     match backend {
-        DbBackend::Postgres => Ok("INSERT INTO suprnova_render_entries \
+        DbBackend::Postgres => Ok(format!(
+            "INSERT INTO suprnova_render_entries \
              (render_key, bytes, epoch, token, generation_digest, published_at_ms, expires_at_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             VALUES ({values}) \
              ON CONFLICT (render_key) DO UPDATE SET bytes = EXCLUDED.bytes, \
              epoch = EXCLUDED.epoch, token = EXCLUDED.token, \
              generation_digest = EXCLUDED.generation_digest, \
@@ -558,10 +552,12 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
              expires_at_ms = EXCLUDED.expires_at_ms \
              WHERE suprnova_render_entries.epoch < EXCLUDED.epoch \
              OR (suprnova_render_entries.epoch = EXCLUDED.epoch \
-             AND suprnova_render_entries.token < EXCLUDED.token)"),
-        DbBackend::Sqlite => Ok("INSERT INTO suprnova_render_entries \
+             AND suprnova_render_entries.token < EXCLUDED.token)"
+        )),
+        DbBackend::Sqlite => Ok(format!(
+            "INSERT INTO suprnova_render_entries \
              (render_key, bytes, epoch, token, generation_digest, published_at_ms, expires_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             VALUES ({values}) \
              ON CONFLICT (render_key) DO UPDATE SET bytes = excluded.bytes, \
              epoch = excluded.epoch, token = excluded.token, \
              generation_digest = excluded.generation_digest, \
@@ -569,10 +565,12 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
              expires_at_ms = excluded.expires_at_ms \
              WHERE suprnova_render_entries.epoch < excluded.epoch \
              OR (suprnova_render_entries.epoch = excluded.epoch \
-             AND suprnova_render_entries.token < excluded.token)"),
-        DbBackend::MySql => Ok("INSERT INTO suprnova_render_entries \
+             AND suprnova_render_entries.token < excluded.token)"
+        )),
+        DbBackend::MySql => Ok(format!(
+            "INSERT INTO suprnova_render_entries \
              (render_key, bytes, epoch, token, generation_digest, published_at_ms, expires_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             VALUES ({values}) \
              ON DUPLICATE KEY UPDATE \
              bytes = IF(epoch < VALUES(epoch) \
              OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(bytes), bytes), \
@@ -588,20 +586,18 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
              token = IF(epoch < VALUES(epoch) \
              OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(token), token), \
              epoch = IF(epoch < VALUES(epoch) \
-             OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(epoch), epoch)"),
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(epoch), epoch)"
+        )),
         _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }
 
 /// `DELETE` for one key.
-fn delete_entry_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
-    match backend {
-        DbBackend::Postgres => Ok("DELETE FROM suprnova_render_entries WHERE render_key = $1"),
-        DbBackend::MySql | DbBackend::Sqlite => {
-            Ok("DELETE FROM suprnova_render_entries WHERE render_key = ?")
-        }
-        _ => Err(crate::database::unsupported_database_backend(backend)),
-    }
+fn delete_entry_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    Ok(format!(
+        "DELETE FROM suprnova_render_entries WHERE render_key = {}",
+        bind(backend, 1)?
+    ))
 }
 
 /// `DELETE` for at most one batch of expired rows, oldest expiry first.
@@ -614,31 +610,22 @@ fn delete_entry_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> 
 /// itself.
 fn delete_expired_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "DELETE FROM suprnova_render_entries WHERE render_key IN \
-             (SELECT render_key FROM (SELECT render_key FROM suprnova_render_entries \
-             WHERE expires_at_ms <= ({now}) + $1 ORDER BY expires_at_ms LIMIT $2) AS due)"
-        ),
-        _ => format!(
-            "DELETE FROM suprnova_render_entries WHERE render_key IN \
-             (SELECT render_key FROM (SELECT render_key FROM suprnova_render_entries \
-             WHERE expires_at_ms <= ({now}) + ? ORDER BY expires_at_ms LIMIT ?) AS due)"
-        ),
-    })
+    Ok(format!(
+        "DELETE FROM suprnova_render_entries WHERE render_key IN \
+         (SELECT render_key FROM (SELECT render_key FROM suprnova_render_entries \
+         WHERE expires_at_ms <= ({now}) + {} ORDER BY expires_at_ms LIMIT {}) AS due)",
+        bind(backend, 1)?,
+        bind(backend, 2)?
+    ))
 }
 
 /// Whether any expired row remains, asked as cheaply as the dialect allows.
 fn select_expired_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "SELECT 1 FROM suprnova_render_entries WHERE expires_at_ms <= ({now}) + $1 LIMIT 1"
-        ),
-        _ => format!(
-            "SELECT 1 FROM suprnova_render_entries WHERE expires_at_ms <= ({now}) + ? LIMIT 1"
-        ),
-    })
+    Ok(format!(
+        "SELECT 1 FROM suprnova_render_entries WHERE expires_at_ms <= ({now}) + {} LIMIT 1",
+        bind(backend, 1)?
+    ))
 }
 
 /// Row and byte occupancy.

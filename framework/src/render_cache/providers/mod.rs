@@ -143,7 +143,8 @@ pub(crate) fn as_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
-/// Whether a backend's failure message is "that key is already taken".
+/// Whether a backend's failure message is "that key of `table` is already
+/// taken".
 ///
 /// Two adapters here decide an outcome by letting a unique key raise rather
 /// than by overwriting: a lease and an instance record are each created by a
@@ -155,18 +156,82 @@ pub(crate) fn as_u64(value: i64) -> u64 {
 /// Classifying by message is the technique this module's neighbours already
 /// use for the same class of signal (see
 /// [`ledger`](super::ledger)'s missing-table check and the transaction
-/// layer's deadlock detection); a driver's typed error kinds are not
-/// uniform across the three backends this framework supports. Anything this
-/// does not recognise stays a provider failure, which fails towards
-/// reporting a broken store rather than towards silently answering "someone
-/// else leads".
-pub(crate) fn is_unique_violation(message: &str) -> bool {
+/// layer's deadlock detection); a driver's typed error kinds are not uniform
+/// across the three backends this framework supports. The table name is
+/// required alongside the phrase for the same reason that check requires
+/// one: a message naming some *other* table's constraint is not this
+/// statement's collision, and reading it as one would make a creation answer
+/// "someone else has it" with no row written anywhere.
+///
+/// Anything this does not recognise stays a provider failure, which is the
+/// safe direction: a caller told "the store failed" retries or reports,
+/// while a caller told "a peer holds it" stops looking. One backend lands
+/// there in practice - a MySQL or MariaDB build old enough to report
+/// `for key 'PRIMARY'` without the table prefix 8.0.19 added - and a genuine
+/// collision on it degrades to a provider failure rather than to a peer's
+/// win. Nothing is granted twice either way.
+pub(crate) fn is_unique_violation(message: &str, table: &str) -> bool {
     // SQLite: "UNIQUE constraint failed: suprnova_render_leases.render_key".
     // PostgreSQL (SQLSTATE 23505): "duplicate key value violates unique
-    // constraint". MySQL and MariaDB (1062): "Duplicate entry '...' for key".
-    message.contains("UNIQUE constraint failed")
-        || message.contains("duplicate key value")
-        || message.contains("Duplicate entry")
+    // constraint \"suprnova_live_instances_pkey\"". MySQL and MariaDB (1062):
+    // "Duplicate entry '...' for key 'suprnova_live_promotions.PRIMARY'".
+    message.contains(table)
+        && (message.contains("UNIQUE constraint failed")
+            || message.contains("duplicate key value")
+            || message.contains("Duplicate entry"))
+}
+
+/// One `?` (MySQL and SQLite) or `$N` (PostgreSQL) placeholder for the bound
+/// value at `index`, counted from one.
+///
+/// Every statement in these adapters is written once and asks for its
+/// placeholders here, so the one thing all three dialects genuinely disagree
+/// about is expressed in a single place rather than in a `match` arm per
+/// statement. `DbBackend` is `#[non_exhaustive]`, so an unrecognised future
+/// variant is refused explicitly rather than silently guessing a syntax it
+/// was never proven against.
+///
+/// # Errors
+///
+/// Returns an error for any backend other than PostgreSQL, MySQL, or SQLite.
+pub(crate) fn bind(backend: DbBackend, index: usize) -> Result<String, FrameworkError> {
+    match backend {
+        DbBackend::Postgres => Ok(format!("${index}")),
+        DbBackend::MySql | DbBackend::Sqlite => Ok("?".to_owned()),
+        _ => Err(crate::database::unsupported_database_backend(backend)),
+    }
+}
+
+/// The clause that locks the rows a `SELECT` reads until the transaction
+/// ends, where the dialect has one.
+///
+/// SQLite is the empty string, and needs to be: it has no `FOR UPDATE`
+/// syntax and no use for one, because it serialises writers outright. Every
+/// adapter here follows the same pattern - a locked read that decides, then
+/// a guarded write, then a re-read that confirms - so the suffix is written
+/// once rather than in a `match` arm per statement.
+pub(crate) fn row_lock(backend: DbBackend) -> &'static str {
+    match backend {
+        DbBackend::Postgres | DbBackend::MySql => " FOR UPDATE",
+        _ => "",
+    }
+}
+
+/// [`bind`] for `count` consecutive values starting at `first`, joined with
+/// `", "` - the shape a `VALUES (...)` list needs.
+///
+/// # Errors
+///
+/// Returns an error for any backend other than PostgreSQL, MySQL, or SQLite.
+pub(crate) fn binds(
+    backend: DbBackend,
+    first: usize,
+    count: usize,
+) -> Result<String, FrameworkError> {
+    (first..first + count)
+        .map(|index| bind(backend, index))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|rendered| rendered.join(", "))
 }
 
 #[cfg(test)]
@@ -201,13 +266,16 @@ mod tests {
     fn a_taken_key_is_recognised_in_every_backend_and_nothing_else_is() {
         // The real phrasings, one per backend this framework supports.
         assert!(is_unique_violation(
-            "error returned from database: (code: 2067) UNIQUE constraint failed:              suprnova_render_leases.render_key"
+            "error returned from database: (code: 2067) UNIQUE constraint failed: suprnova_render_leases.render_key",
+            "suprnova_render_leases"
         ));
         assert!(is_unique_violation(
-            "error returned from database: duplicate key value violates unique              constraint \"suprnova_live_instances_pkey\""
+            "error returned from database: duplicate key value violates unique constraint \"suprnova_live_instances_pkey\"",
+            "suprnova_live_instances"
         ));
         assert!(is_unique_violation(
-            "error returned from database: 1062 (23000): Duplicate entry              'abc-def' for key 'PRIMARY'"
+            "error returned from database: 1062 (23000): Duplicate entry 'abc-def' for key 'suprnova_live_promotions.PRIMARY'",
+            "suprnova_live_promotions"
         ));
 
         // A store that is simply broken must never be read as "a peer got
@@ -217,7 +285,31 @@ mod tests {
             "pool timed out while waiting for an open connection",
             "error returned from database: deadlock detected",
         ] {
-            assert!(!is_unique_violation(other), "{other}");
+            assert!(
+                !is_unique_violation(other, "suprnova_render_leases"),
+                "{other}"
+            );
+        }
+
+        // Another table's collision is not this statement's collision, and
+        // reading it as one would answer "a peer holds it" with no row
+        // written anywhere.
+        assert!(!is_unique_violation(
+            "error returned from database: (code: 2067) UNIQUE constraint failed: suprnova_live_promotions.idempotency",
+            "suprnova_live_instances"
+        ));
+    }
+
+    #[test]
+    fn placeholders_are_numbered_on_postgres_and_positional_elsewhere() {
+        assert_eq!(bind(DbBackend::Postgres, 3).expect("postgres"), "$3");
+        assert_eq!(
+            binds(DbBackend::Postgres, 1, 4).expect("postgres"),
+            "$1, $2, $3, $4"
+        );
+        for backend in [DbBackend::MySql, DbBackend::Sqlite] {
+            assert_eq!(bind(backend, 3).expect("a dialect"), "?");
+            assert_eq!(binds(backend, 1, 4).expect("a dialect"), "?, ?, ?, ?");
         }
     }
 }

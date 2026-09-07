@@ -55,6 +55,7 @@ use crate::render_cache_tiers_support;
 use render_cache_tiers_support::{
     boot, boot_without_the_tier_tables, encoded_entry, fence, instance_key, key, keys,
     promotion_key, reset_and_migrate, store_deadline, store_now_ms, try_connect_live,
+    wide_instance_key, wide_promotion_key,
 };
 
 /// Rows currently in the entries table, counted in SQL rather than through
@@ -991,6 +992,91 @@ async fn expired_records_are_reclaimed_in_bounded_batches() {
     assert_eq!(store.count_instances().await.expect("count"), 1);
 }
 
+/// A 32-byte identity is the widest the engine accepts, and its hex is
+/// exactly twice as long as a 16-byte one's - and, by construction, the
+/// narrow fixture's whole hex is the wide one's first half. So a column
+/// sized for the narrow end truncates the wide identity onto the narrow
+/// one's row: PostgreSQL refuses the insert outright, and a non-strict MySQL
+/// silently collides two distinct identities. Proving the two stay their own
+/// records is what pins the column width, and a retry identity reaches the
+/// wide end straight off the wire, because it is built from the browser's
+/// proposed nonce.
+async fn assert_full_width_identities_are_their_own_rows() {
+    let store = SqlInstanceRecordStore::new();
+    let expires_at = store_deadline(60_000).await;
+
+    assert!(
+        store
+            .insert_if_absent(&instance_key(0x50), b"narrow", expires_at)
+            .await
+            .expect("insert")
+    );
+    assert!(
+        store
+            .insert_if_absent(&wide_instance_key(0x50), b"wide", expires_at)
+            .await
+            .expect("insert"),
+        "a 32-byte instance identity is its own record, not the 16-byte one widened"
+    );
+    assert_eq!(
+        store
+            .load(&instance_key(0x50))
+            .await
+            .expect("load")
+            .expect("the narrow record")
+            .bytes,
+        b"narrow".to_vec()
+    );
+    assert_eq!(
+        store
+            .load(&wide_instance_key(0x50))
+            .await
+            .expect("load")
+            .expect("the wide record")
+            .bytes,
+        b"wide".to_vec(),
+        "and a truncating column would have handed back the other one"
+    );
+
+    assert!(
+        store
+            .insert_promotion_if_absent(&promotion_key(0x60), b"narrow", expires_at)
+            .await
+            .expect("reserve")
+    );
+    assert!(
+        store
+            .insert_promotion_if_absent(&wide_promotion_key(0x60), b"wide", expires_at)
+            .await
+            .expect("reserve"),
+        "a 32-byte retry identity - the width a browser nonce actually reaches - is its own reservation"
+    );
+    assert_eq!(
+        store
+            .load_promotion(&promotion_key(0x60))
+            .await
+            .expect("load")
+            .expect("the narrow reservation")
+            .bytes,
+        b"narrow".to_vec()
+    );
+    assert_eq!(
+        store
+            .load_promotion(&wide_promotion_key(0x60))
+            .await
+            .expect("load")
+            .expect("the wide reservation")
+            .bytes,
+        b"wide".to_vec()
+    );
+}
+
+#[tokio::test]
+async fn full_width_identities_are_their_own_rows() {
+    let _db = boot().await;
+    assert_full_width_identities_are_their_own_rows().await;
+}
+
 #[tokio::test]
 async fn a_record_over_the_bound_is_refused_before_any_statement() {
     let _db = boot().await;
@@ -1066,7 +1152,11 @@ impl MirroredClockStore {
     }
 
     fn mirror(&self) {
-        let node_ms = self.clock.now().map_or(self.base_ms, UnixMillis::get);
+        let node_ms = self
+            .clock
+            .now()
+            .expect("the conformance clock is readable")
+            .get();
         self.inner
             .set_time_offset_for_test(node_ms.saturating_sub(self.base_ms));
     }
@@ -1401,6 +1491,7 @@ async fn live_postgres_record_creation_and_cas_conflict() {
     let _guard = reset_and_migrate(conn).await;
 
     assert_record_creation_and_cas_conflict().await;
+    assert_full_width_identities_are_their_own_rows().await;
 }
 
 #[tokio::test]
@@ -1414,4 +1505,5 @@ async fn live_mysql_record_creation_and_cas_conflict() {
     let _guard = reset_and_migrate(conn).await;
 
     assert_record_creation_and_cas_conflict().await;
+    assert_full_width_identities_are_their_own_rows().await;
 }

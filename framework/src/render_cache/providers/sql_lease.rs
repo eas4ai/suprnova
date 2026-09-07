@@ -45,14 +45,21 @@ use suprnova_live::render_cache::RenderCacheError;
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
 
-use super::{as_i64, as_u64, is_unique_violation, provider_error, sql_now_ms};
+use super::{as_i64, as_u64, bind, is_unique_violation, provider_error, row_lock, sql_now_ms};
 use crate::database::transaction::ExecutorChoice;
 use crate::{DB, FrameworkError, Transaction};
+
+/// The table this store owns. Named once so the statements and the
+/// collision classifier that reads the backend's message cannot drift apart.
+const LEASES: &str = "suprnova_render_leases";
 
 /// The lease id a key's first tenure is created with. Each takeover writes
 /// one more than the row currently carries, so a tenure id is never reused
 /// and a fenced-out holder is always detectable.
 const FIRST_LEASE_ID: u64 = 1;
+
+/// The token counter a key's row starts at, so the first mint returns one.
+const FIRST_TOKEN: u64 = 0;
 
 /// Database-backed rebuild lease store. See the module documentation for the
 /// row layout, the clock, and why release keeps the row.
@@ -137,7 +144,7 @@ impl SqlLeaseStore {
                     // PostgreSQL the read above locked nothing, because
                     // there was nothing to lock, so the unique key is what
                     // decides - and the node that lost it leads nothing.
-                    Err(error) if is_unique_violation(&error.to_string()) => {
+                    Err(error) if is_unique_violation(&error.to_string(), LEASES) => {
                         return Ok(AcquireStep::Collided);
                     }
                     Err(error) => {
@@ -379,16 +386,12 @@ async fn mint_through(
 /// `SELECT` for one key's tenure, locked for the acquisition that is about
 /// to replace it where the dialect can lock it. SQLite has no `FOR UPDATE`
 /// and needs none: it serialises writers.
-fn select_lease_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
-    match backend {
-        DbBackend::Postgres => Ok("SELECT lease_id, expires_at_ms \
-             FROM suprnova_render_leases WHERE render_key = $1 FOR UPDATE"),
-        DbBackend::MySql => Ok("SELECT lease_id, expires_at_ms \
-             FROM suprnova_render_leases WHERE render_key = ? FOR UPDATE"),
-        DbBackend::Sqlite => Ok("SELECT lease_id, expires_at_ms \
-             FROM suprnova_render_leases WHERE render_key = ?"),
-        _ => Err(crate::database::unsupported_database_backend(backend)),
-    }
+fn select_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    Ok(format!(
+        "SELECT lease_id, expires_at_ms FROM {LEASES} WHERE render_key = {}{}",
+        bind(backend, 1)?,
+        row_lock(backend)
+    ))
 }
 
 /// `INSERT` for a key that has never been leased: the first tenure, a token
@@ -399,22 +402,19 @@ fn select_lease_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> 
 /// between this transaction's read and its write, and the answer to that is
 /// that the peer leads - not that this caller should overwrite it. The
 /// store-time expression is interpolated because it is one of three
-/// constants chosen by a closed match on the backend; every caller value is
-/// bound.
+/// constants chosen by a closed match on the backend, and the tenure and
+/// token the first row starts at are this module's own constants; every
+/// caller value is bound.
 fn insert_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "INSERT INTO suprnova_render_leases \
-             (render_key, epoch, lease_id, expires_at_ms, next_token) \
-             VALUES ($1, $2, 1, ({now}) + $3 + $4, 0)"
-        ),
-        _ => format!(
-            "INSERT INTO suprnova_render_leases \
-             (render_key, epoch, lease_id, expires_at_ms, next_token) \
-             VALUES (?, ?, 1, ({now}) + ? + ?, 0)"
-        ),
-    })
+    Ok(format!(
+        "INSERT INTO {LEASES} (render_key, epoch, lease_id, expires_at_ms, next_token) \
+         VALUES ({}, {}, {FIRST_LEASE_ID}, ({now}) + {} + {}, {FIRST_TOKEN})",
+        bind(backend, 1)?,
+        bind(backend, 2)?,
+        bind(backend, 3)?,
+        bind(backend, 4)?
+    ))
 }
 
 /// `UPDATE` that takes an expired tenure over, guarded by store time so a
@@ -427,64 +427,52 @@ fn insert_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
 /// token an older one already published under.
 fn takeover_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "UPDATE suprnova_render_leases \
-             SET epoch = $1, lease_id = lease_id + 1, expires_at_ms = ({now}) + $2 + $3 \
-             WHERE render_key = $4 AND expires_at_ms <= ({now}) + $5"
-        ),
-        _ => format!(
-            "UPDATE suprnova_render_leases \
-             SET epoch = ?, lease_id = lease_id + 1, expires_at_ms = ({now}) + ? + ? \
-             WHERE render_key = ? AND expires_at_ms <= ({now}) + ?"
-        ),
-    })
+    Ok(format!(
+        "UPDATE {LEASES} SET epoch = {}, lease_id = lease_id + 1, \
+         expires_at_ms = ({now}) + {} + {} \
+         WHERE render_key = {} AND expires_at_ms <= ({now}) + {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?,
+        bind(backend, 3)?,
+        bind(backend, 4)?,
+        bind(backend, 5)?
+    ))
 }
 
 /// `UPDATE` that mints the next token, guarded by the caller's tenure and by
 /// store time.
 fn mint_token_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "UPDATE suprnova_render_leases SET next_token = next_token + 1 \
-             WHERE render_key = $1 AND lease_id = $2 AND expires_at_ms > ({now}) + $3"
-        ),
-        _ => format!(
-            "UPDATE suprnova_render_leases SET next_token = next_token + 1 \
-             WHERE render_key = ? AND lease_id = ? AND expires_at_ms > ({now}) + ?"
-        ),
-    })
+    Ok(format!(
+        "UPDATE {LEASES} SET next_token = next_token + 1 \
+         WHERE render_key = {} AND lease_id = {} AND expires_at_ms > ({now}) + {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?,
+        bind(backend, 3)?
+    ))
 }
 
 /// `SELECT` for the token just minted, under the same guard as the update
 /// that minted it.
 fn select_token_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     let now = sql_now_ms(backend)?;
-    Ok(match backend {
-        DbBackend::Postgres => format!(
-            "SELECT next_token FROM suprnova_render_leases \
-             WHERE render_key = $1 AND lease_id = $2 AND expires_at_ms > ({now}) + $3"
-        ),
-        _ => format!(
-            "SELECT next_token FROM suprnova_render_leases \
-             WHERE render_key = ? AND lease_id = ? AND expires_at_ms > ({now}) + ?"
-        ),
-    })
+    Ok(format!(
+        "SELECT next_token FROM {LEASES} \
+         WHERE render_key = {} AND lease_id = {} AND expires_at_ms > ({now}) + {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?,
+        bind(backend, 3)?
+    ))
 }
 
 /// `UPDATE` that ends the caller's tenure by expiring it, never a `DELETE`.
 /// See the module documentation for why the row has to stay.
-fn release_lease_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
-    match backend {
-        DbBackend::Postgres => Ok("UPDATE suprnova_render_leases SET expires_at_ms = 0 \
-             WHERE render_key = $1 AND lease_id = $2"),
-        DbBackend::MySql | DbBackend::Sqlite => {
-            Ok("UPDATE suprnova_render_leases SET expires_at_ms = 0 \
-             WHERE render_key = ? AND lease_id = ?")
-        }
-        _ => Err(crate::database::unsupported_database_backend(backend)),
-    }
+fn release_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    Ok(format!(
+        "UPDATE {LEASES} SET expires_at_ms = 0 WHERE render_key = {} AND lease_id = {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?
+    ))
 }
 
 #[cfg(test)]
