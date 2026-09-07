@@ -26,11 +26,19 @@
 //!
 //! # Fencing
 //!
-//! A publication reads the stored `(epoch, token)` and writes in one
-//! transaction, `FOR UPDATE` on the dialects that have it, so
-//! [`PublicationFence::supersedes`] decides every replacement: a fence that
-//! does not supersede the stored one is [`PublishOutcome::Fenced`] and the
-//! row is left exactly as it was.
+//! [`PublicationFence::supersedes`] decides every replacement, and it
+//! decides it twice. A publication first reads the stored `(epoch, token)`
+//! in its own transaction, `FOR UPDATE` on the dialects that have it, and
+//! answers [`PublishOutcome::Fenced`] without writing when that row already
+//! supersedes it. Then the upsert itself carries the same comparison into
+//! SQL (`ON CONFLICT ... DO UPDATE ... WHERE`, or `IF(...)` per column on
+//! MySQL), because the read cannot lock a row that does not exist yet: two
+//! nodes publishing the same brand-new key can both find it absent, and
+//! without the guard in the write the loser's conflict branch would
+//! overwrite the winner. The same transaction then re-reads `(epoch,
+//! token)` to see which fence holds the key, so the outcome is a stored
+//! fact rather than a dialect-specific affected-row count. Either way, a
+//! fence that does not supersede leaves the row exactly as it was.
 //!
 //! # Bounds
 //!
@@ -154,7 +162,16 @@ impl SqlRenderStore {
     }
 
     /// The publication body, run on one executor that is already inside a
-    /// transaction: read the stored fence, compare, then upsert.
+    /// transaction: read the stored fence, compare, then run the guarded
+    /// upsert.
+    ///
+    /// The read is the cheap path, not the guard. It answers `Fenced`
+    /// without writing anything when a stored row already supersedes this
+    /// publication, and on MySQL and SQLite its `FOR UPDATE` (or the
+    /// engine's own write serialisation) keeps two publishers for an
+    /// existing key in line. What it cannot do is lock a row that is not
+    /// there, so [`Self::upsert_fenced`] carries the same comparison into
+    /// the write itself.
     async fn publish_through(
         &self,
         exec: &ExecutorChoice,
@@ -165,34 +182,40 @@ impl SqlRenderStore {
         retention_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
         let backend = exec.backend();
-        let name = key.to_base64url();
-        let stored = exec
-            .query_one(sea_orm::Statement::from_sql_and_values(
-                backend,
-                select_fence_sql(backend).map_err(provider_error)?,
-                vec![Value::from(name.clone())],
-            ))
-            .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-        if let Some(row) = stored {
-            let epoch: i64 = row
-                .try_get_by_index(0)
-                .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-            let token: i64 = row
-                .try_get_by_index(1)
-                .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-            let current = PublicationFence {
-                epoch: as_u64(epoch),
-                // Never read for the comparison: `supersedes` comes down to
-                // the epoch and the token alone, so the stored digest is
-                // not fetched here at all.
-                generation_digest: [0; 32],
-                token: as_u64(token),
-            };
-            if !fence.supersedes(&current) {
-                return Ok(PublishOutcome::Fenced);
-            }
+        if let Some(current) = read_fence(exec, backend, &key.to_base64url()).await?
+            && !fence.supersedes(&current)
+        {
+            return Ok(PublishOutcome::Fenced);
         }
+        self.upsert_fenced(exec, key, bytes, fence, now_ms, retention_ms)
+            .await
+    }
+
+    /// The guarded write and its confirmation, with no read-compare in
+    /// front of it: the conflict branch of [`upsert_sql`] replaces the
+    /// stored row only when this fence supersedes it, and the same
+    /// transaction then re-reads `(epoch, token)` to see which fence
+    /// actually holds the key.
+    ///
+    /// The confirmation is a re-read rather than an affected-row count on
+    /// purpose: what "affected" means differs between dialects and even by
+    /// driver flag (MySQL reports 2 for a row it changed, 0 for one it did
+    /// not, and 0 again for an update whose values matched), while the
+    /// stored fence is the fact the caller actually needs. Equal to this
+    /// publication's fence means it stands; anything else means another
+    /// publication holds the key and this one is
+    /// [`PublishOutcome::Fenced`].
+    async fn upsert_fenced(
+        &self,
+        exec: &ExecutorChoice,
+        key: &RenderKey,
+        bytes: Bytes,
+        fence: PublicationFence,
+        now_ms: u64,
+        retention_ms: u64,
+    ) -> Result<PublishOutcome, RenderCacheError> {
+        let backend = exec.backend();
+        let name = key.to_base64url();
         // Read on this executor, so it is the database's clock, taken
         // inside the same transaction as the write it bounds.
         let now = store_now_ms(exec, backend, self.offset()).await?;
@@ -200,7 +223,7 @@ impl SqlRenderStore {
             backend,
             upsert_sql(backend).map_err(provider_error)?,
             vec![
-                Value::from(name),
+                Value::from(name.clone()),
                 Value::from(bytes.to_vec()),
                 Value::from(as_i64(fence.epoch)),
                 Value::from(as_i64(fence.token)),
@@ -211,8 +234,56 @@ impl SqlRenderStore {
         ))
         .await
         .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-        Ok(PublishOutcome::Published)
+        let held = read_fence(exec, backend, &name).await?.ok_or_else(|| {
+            // The row was written in this very transaction, so it cannot be
+            // absent: a missing row here is a broken store, not a lost
+            // fence, and saying "fenced" would hide it.
+            provider_error(FrameworkError::database(
+                "render cache L1 row is absent immediately after its own upsert".to_owned(),
+            ))
+        })?;
+        if held.epoch == fence.epoch && held.token == fence.token {
+            Ok(PublishOutcome::Published)
+        } else {
+            Ok(PublishOutcome::Fenced)
+        }
     }
+}
+
+/// The `(epoch, token)` currently stored for `name`, locked for the
+/// publication about to replace it where the dialect can lock it.
+///
+/// The returned fence's digest is a placeholder: nothing this function
+/// serves reads it. [`PublicationFence::supersedes`] compares the epoch and
+/// the token alone, and the digest column is fetched only by
+/// [`RenderStore::get`], which needs the real one.
+async fn read_fence(
+    exec: &ExecutorChoice,
+    backend: DbBackend,
+    name: &str,
+) -> Result<Option<PublicationFence>, RenderCacheError> {
+    let Some(row) = exec
+        .query_one(sea_orm::Statement::from_sql_and_values(
+            backend,
+            select_fence_sql(backend).map_err(provider_error)?,
+            vec![Value::from(name.to_owned())],
+        ))
+        .await
+        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+    else {
+        return Ok(None);
+    };
+    let epoch: i64 = row
+        .try_get_by_index(0)
+        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+    let token: i64 = row
+        .try_get_by_index(1)
+        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+    Ok(Some(PublicationFence {
+        epoch: as_u64(epoch),
+        generation_digest: [0; 32],
+        token: as_u64(token),
+    }))
 }
 
 #[async_trait]
@@ -446,13 +517,29 @@ fn select_fence_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> 
     }
 }
 
-/// The per-backend insert-or-replace for one entry. The caller has already
-/// decided the stored fence is superseded, so the conflict branch replaces
-/// unconditionally.
+/// The per-backend insert-or-replace for one entry, with
+/// [`PublicationFence::supersedes`]'s own comparison carried into the
+/// conflict branch: the stored row is overwritten only when its
+/// `(epoch, token)` is below the incoming one, and left untouched otherwise.
 ///
-/// MySQL keeps the `VALUES(col)` spelling rather than the newer row alias:
-/// the alias form needs MySQL 8.0.19 and MariaDB does not have it at all,
-/// and this framework supports both.
+/// This condition is not redundant with the `FOR UPDATE` read that precedes
+/// it. That read locks a row that exists; it locks nothing when the key is
+/// absent, so two nodes publishing the same brand-new key can both read
+/// "absent" and both insert - and with an unconditional conflict branch the
+/// loser would then overwrite the winner, standing a lower fence up as
+/// current. With the condition, the write itself is the fence, on every
+/// dialect. The caller confirms which side won by re-reading `(epoch,
+/// token)` in the same transaction rather than by an affected-row count,
+/// which differs by dialect and by driver flag.
+///
+/// MySQL says the same thing with `IF(...)` per column, since
+/// `ON DUPLICATE KEY UPDATE` takes no `WHERE`, and keeps the `VALUES(col)`
+/// spelling rather than the newer row alias (the alias form needs MySQL
+/// 8.0.19 and MariaDB does not have it at all, and this framework supports
+/// both). The order of those assignments is load-bearing: MySQL applies them
+/// left to right and a later expression sees a column already assigned, so
+/// `token` and `epoch` come last, after every condition that reads their
+/// stored values has been evaluated.
 fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
     match backend {
         DbBackend::Postgres => Ok("INSERT INTO suprnova_render_entries \
@@ -462,7 +549,10 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
              epoch = EXCLUDED.epoch, token = EXCLUDED.token, \
              generation_digest = EXCLUDED.generation_digest, \
              published_at_ms = EXCLUDED.published_at_ms, \
-             expires_at_ms = EXCLUDED.expires_at_ms"),
+             expires_at_ms = EXCLUDED.expires_at_ms \
+             WHERE suprnova_render_entries.epoch < EXCLUDED.epoch \
+             OR (suprnova_render_entries.epoch = EXCLUDED.epoch \
+             AND suprnova_render_entries.token < EXCLUDED.token)"),
         DbBackend::Sqlite => Ok("INSERT INTO suprnova_render_entries \
              (render_key, bytes, epoch, token, generation_digest, published_at_ms, expires_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -470,13 +560,29 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
              epoch = excluded.epoch, token = excluded.token, \
              generation_digest = excluded.generation_digest, \
              published_at_ms = excluded.published_at_ms, \
-             expires_at_ms = excluded.expires_at_ms"),
+             expires_at_ms = excluded.expires_at_ms \
+             WHERE suprnova_render_entries.epoch < excluded.epoch \
+             OR (suprnova_render_entries.epoch = excluded.epoch \
+             AND suprnova_render_entries.token < excluded.token)"),
         DbBackend::MySql => Ok("INSERT INTO suprnova_render_entries \
              (render_key, bytes, epoch, token, generation_digest, published_at_ms, expires_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
-             ON DUPLICATE KEY UPDATE bytes = VALUES(bytes), epoch = VALUES(epoch), \
-             token = VALUES(token), generation_digest = VALUES(generation_digest), \
-             published_at_ms = VALUES(published_at_ms), expires_at_ms = VALUES(expires_at_ms)"),
+             ON DUPLICATE KEY UPDATE \
+             bytes = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(bytes), bytes), \
+             generation_digest = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), \
+             VALUES(generation_digest), generation_digest), \
+             published_at_ms = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), \
+             VALUES(published_at_ms), published_at_ms), \
+             expires_at_ms = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), \
+             VALUES(expires_at_ms), expires_at_ms), \
+             token = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(token), token), \
+             epoch = IF(epoch < VALUES(epoch) \
+             OR (epoch = VALUES(epoch) AND token < VALUES(token)), VALUES(epoch), epoch)"),
         _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }
@@ -547,5 +653,271 @@ fn inspect_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
             Ok("SELECT COUNT(*), COALESCE(SUM(LENGTH(bytes)), 0) FROM suprnova_render_entries")
         }
         _ => Err(crate::database::unsupported_database_backend(backend)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The publication fence as the database enforces it.
+    //!
+    //! [`SqlRenderStore::publish`]'s read-compare answers `Fenced` cheaply,
+    //! but it cannot lock a row that does not exist yet, so the guard that
+    //! actually has to hold is the one inside the upsert. These tests pin
+    //! its shape on all three dialects and its behaviour on SQLite, calling
+    //! [`SqlRenderStore::upsert_fenced`] directly - no read-compare in front
+    //! of it, which is exactly the situation two nodes racing on a
+    //! brand-new key produce.
+    use super::*;
+    use crate::container::testing::{TestContainer, TestContainerGuard};
+    use crate::database::testing::TestDatabase;
+    use sea_orm_migration::{MigrationTrait, MigratorTrait};
+    use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+    use suprnova_live::identity::{KeyId, UnixMillis};
+
+    struct Migrator;
+
+    #[async_trait::async_trait]
+    impl MigratorTrait for Migrator {
+        fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+            vec![Box::new(crate::render_cache::migration::TierMigration)]
+        }
+    }
+
+    fn keys() -> SnapshotKeyRing {
+        let active = KeyRecord::new(
+            KeyId::parse("render-cache-test").expect("key id"),
+            RootKey::new(vec![4; 32]).expect("root key"),
+            UnixMillis::new(0),
+            UnixMillis::new(u64::MAX / 2),
+            UnixMillis::new(u64::MAX),
+        )
+        .expect("key record");
+        SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
+    }
+
+    fn test_key() -> RenderKey {
+        RenderKey::for_test(&keys(), "/guarded")
+    }
+
+    fn test_fence(epoch: u64, token: u64) -> PublicationFence {
+        PublicationFence {
+            epoch,
+            generation_digest: [u8::try_from(token % 251).expect("a byte"); 32],
+            token,
+        }
+    }
+
+    async fn write_executor() -> ExecutorChoice {
+        ExecutorChoice::resolve_write(None, Some(PRIMARY_CONNECTION_NAME), None)
+            .await
+            .expect("a write executor over the test database")
+    }
+
+    #[test]
+    fn the_upsert_carries_the_fence_into_the_conflict_branch_on_every_dialect() {
+        let postgres = upsert_sql(DbBackend::Postgres).expect("postgres");
+        assert!(postgres.contains("VALUES ($1, $2, $3, $4, $5, $6, $7)"));
+        assert!(
+            postgres.contains(
+                "ON CONFLICT (render_key) DO UPDATE SET bytes = EXCLUDED.bytes, \
+                 epoch = EXCLUDED.epoch, token = EXCLUDED.token"
+            ),
+            "{postgres}"
+        );
+        assert!(
+            postgres.contains(
+                "WHERE suprnova_render_entries.epoch < EXCLUDED.epoch \
+                 OR (suprnova_render_entries.epoch = EXCLUDED.epoch \
+                 AND suprnova_render_entries.token < EXCLUDED.token)"
+            ),
+            "the conflict branch must replace only what this fence supersedes: {postgres}"
+        );
+
+        let sqlite = upsert_sql(DbBackend::Sqlite).expect("sqlite");
+        assert!(sqlite.contains("VALUES (?, ?, ?, ?, ?, ?, ?)"));
+        assert!(
+            sqlite.contains(
+                "WHERE suprnova_render_entries.epoch < excluded.epoch \
+                 OR (suprnova_render_entries.epoch = excluded.epoch \
+                 AND suprnova_render_entries.token < excluded.token)"
+            ),
+            "{sqlite}"
+        );
+
+        // MySQL has no `WHERE` on `ON DUPLICATE KEY UPDATE`, so every
+        // written column carries the same condition through `IF(...)`.
+        let mysql = upsert_sql(DbBackend::MySql).expect("mysql");
+        assert!(mysql.contains("VALUES (?, ?, ?, ?, ?, ?, ?)"));
+        assert_eq!(
+            mysql.matches("IF(epoch < VALUES(epoch)").count(),
+            6,
+            "all six written columns must be guarded, not just some: {mysql}"
+        );
+        for column in [
+            "bytes",
+            "generation_digest",
+            "published_at_ms",
+            "expires_at_ms",
+            "token",
+            "epoch",
+        ] {
+            assert!(
+                mysql.contains(&format!("{column} = IF(epoch < VALUES(epoch)")),
+                "{column} is written unguarded: {mysql}"
+            );
+        }
+        // Load-bearing order: MySQL applies these assignments left to right
+        // and a later condition sees a column already assigned, so the two
+        // columns every condition reads must be assigned last.
+        let bytes_at = mysql.find("bytes = IF(").expect("bytes assignment");
+        let token_at = mysql.find("token = IF(").expect("token assignment");
+        let epoch_at = mysql.find("epoch = IF(").expect("epoch assignment");
+        assert!(
+            bytes_at < token_at && token_at < epoch_at,
+            "epoch and token must be assigned after every condition that reads them: {mysql}"
+        );
+    }
+
+    /// Seeds a row at `(2, 5)`, then proves the guard both ways with no
+    /// read-compare in front of it: a lower fence changes nothing, a higher
+    /// one replaces everything.
+    async fn assert_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one() {
+        let store = SqlRenderStore::new(1024 * 1024);
+        let key = test_key();
+        let exec = write_executor().await;
+
+        assert_eq!(
+            store
+                .upsert_fenced(
+                    &exec,
+                    &key,
+                    Bytes::from_static(b"held"),
+                    test_fence(2, 5),
+                    1_000,
+                    60_000
+                )
+                .await
+                .expect("the first publication"),
+            PublishOutcome::Published
+        );
+
+        assert_eq!(
+            store
+                .upsert_fenced(
+                    &exec,
+                    &key,
+                    Bytes::from_static(b"lower"),
+                    test_fence(2, 4),
+                    9_000,
+                    60_000
+                )
+                .await
+                .expect("the lower publication"),
+            PublishOutcome::Fenced,
+            "the SQL guard is the only thing between this write and the row"
+        );
+        let held = store.get(&key).await.expect("get").expect("a hit");
+        assert_eq!(held.bytes.as_ref(), b"held", "no column may have moved");
+        assert_eq!(held.fence.epoch, 2);
+        assert_eq!(held.fence.token, 5);
+        assert_eq!(held.published_at_ms, 1_000);
+
+        assert_eq!(
+            store
+                .upsert_fenced(
+                    &exec,
+                    &key,
+                    Bytes::from_static(b"higher"),
+                    test_fence(3, 1),
+                    9_000,
+                    60_000
+                )
+                .await
+                .expect("the higher publication"),
+            PublishOutcome::Published,
+            "a superseding fence must still replace the row"
+        );
+        let taken = store.get(&key).await.expect("get").expect("a hit");
+        assert_eq!(taken.bytes.as_ref(), b"higher");
+        assert_eq!(taken.fence.epoch, 3);
+        assert_eq!(taken.fence.token, 1);
+        assert_eq!(taken.published_at_ms, 9_000);
+    }
+
+    #[tokio::test]
+    async fn the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one() {
+        let _db = TestDatabase::fresh::<Migrator>()
+            .await
+            .expect("the tier migration applies to a fresh SQLite database");
+        assert_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one().await;
+    }
+
+    // --- Live-DB tests (gated by `#[ignore]`) ---
+    //
+    // The guard exists for a race only a real server can have: on
+    // PostgreSQL a `SELECT ... FOR UPDATE` for an absent key locks nothing,
+    // so two publishers can both insert. These run the same direct upserts
+    // there and on MySQL, whose `IF(...)` spelling of the condition is a
+    // different statement altogether and cannot be proven by SQLite.
+    //
+    //   PG_TEST_URL=postgres://postgres:pw@127.0.0.1:55998/suprnova_test \
+    //     cargo test -p suprnova --lib -- --ignored live_postgres
+    //
+    //   MYSQL_TEST_URL=mysql://root:pw@127.0.0.1:55997/suprnova_test \
+    //     cargo test -p suprnova --lib -- --ignored live_mysql
+
+    /// Drops the entries table if a prior failed run left it behind,
+    /// applies the tier migration, and mounts the connection on the
+    /// thread-local test container so `DB::*` resolves to it.
+    async fn reset_and_migrate(url: &str) -> TestContainerGuard {
+        use sea_orm::{ConnectOptions, ConnectionTrait};
+        let mut options = ConnectOptions::new(url.to_owned());
+        options
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .acquire_timeout(std::time::Duration::from_secs(2));
+        let conn = sea_orm::Database::connect(options)
+            .await
+            .expect("the live test database is not reachable - check the URL");
+        for table in [
+            "suprnova_render_entries",
+            "suprnova_render_leases",
+            "suprnova_live_instances",
+            "suprnova_live_promotions",
+        ] {
+            let _ = conn
+                .execute_raw(sea_orm::Statement::from_string(
+                    conn.get_database_backend(),
+                    format!("DROP TABLE IF EXISTS {table}"),
+                ))
+                .await;
+        }
+        let manager = sea_orm_migration::SchemaManager::new(&conn);
+        crate::render_cache::migration::TierMigration
+            .up(&manager)
+            .await
+            .expect("the tier migration applies to the live database");
+        let guard = TestContainer::fake();
+        TestContainer::singleton(crate::DbConnection::from_raw(conn));
+        guard
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Postgres; run with --ignored live_postgres"]
+    async fn live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one() {
+        let url = std::env::var("PG_TEST_URL").expect(
+            "set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables",
+        );
+        let _guard = reset_and_migrate(&url).await;
+        assert_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live MySQL; run with --ignored live_mysql"]
+    async fn live_mysql_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one() {
+        let url = std::env::var("MYSQL_TEST_URL").expect(
+            "set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables",
+        );
+        let _guard = reset_and_migrate(&url).await;
+        assert_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one().await;
     }
 }

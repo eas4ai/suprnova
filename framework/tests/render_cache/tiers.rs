@@ -490,6 +490,20 @@ async fn assert_publish_fencing_and_sweep() {
             .expect("publish"),
         PublishOutcome::Fenced
     );
+    let held = store.get(&key).await.expect("get").expect("a hit");
+    assert_eq!(
+        held.bytes.as_ref(),
+        b"first",
+        "a fenced publication leaves every column of the stored row alone"
+    );
+    assert_eq!(held.published_at_ms, 1_000);
+
+    // A superseding fence must still land: this is the direction that
+    // proves the dialect's guarded conflict branch (`WHERE` on Postgres,
+    // `IF(...)` per column on MySQL) is satisfiable rather than merely
+    // strict. The same guard is exercised with no read-compare in front of
+    // it by `live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one`
+    // and its MySQL twin, the unit tests inside `sql_store.rs`.
     assert_eq!(
         store
             .publish(

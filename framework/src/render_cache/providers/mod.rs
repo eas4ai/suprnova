@@ -34,6 +34,14 @@ use crate::database::transaction::ExecutorChoice;
 /// [`store_now_ms`] when an adapter needs the number itself to compute an
 /// expiry column.
 ///
+/// Every dialect's expression is integer-typed, and on MySQL that takes an
+/// explicit cast: `UNIX_TIMESTAMP(NOW(3))` returns `DECIMAL`, which a driver
+/// will not decode into `i64`. The cast lives here rather than at the one
+/// call site that decodes a value, so every consumer - the lease takeover
+/// and token minting of Task 5, the record expiry guards of Task 6, this
+/// store's own expiry comparisons - gets one shape per dialect and none of
+/// them has to know which dialect needed help.
+///
 /// `DbBackend` is `#[non_exhaustive]`, so an unrecognised future variant is
 /// refused explicitly rather than silently guessing an expression it was
 /// never proven against - the same rule
@@ -46,7 +54,7 @@ pub fn sql_now_ms(backend: DbBackend) -> Result<&'static str, FrameworkError> {
     match backend {
         DbBackend::Sqlite => Ok("CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"),
         DbBackend::Postgres => Ok("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
-        DbBackend::MySql => Ok("UNIX_TIMESTAMP(NOW(3)) * 1000"),
+        DbBackend::MySql => Ok("CAST(UNIX_TIMESTAMP(NOW(3)) * 1000 AS SIGNED)"),
         _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }
@@ -75,18 +83,9 @@ pub async fn store_now_ms(
     backend: DbBackend,
     offset_ms: u64,
 ) -> Result<u64, RenderCacheError> {
-    // MySQL's `UNIX_TIMESTAMP(NOW(3))` returns DECIMAL, not an integer, and
-    // a DECIMAL column will not decode into `i64`; a comparison inside a
-    // statement is unaffected (the value is numeric either way), so the
-    // cast belongs here at the one site that reads the value out, rather
-    // than in `sql_now_ms`, whose expression the rest of the adapters
-    // inline verbatim.
-    let expression = sql_now_ms(backend).map_err(provider_error)?;
-    let sql = if backend == DbBackend::MySql {
-        format!("SELECT CAST({expression} AS SIGNED)")
-    } else {
-        format!("SELECT {expression}")
-    };
+    // Selected verbatim: `sql_now_ms` already returns an integer-typed
+    // expression on every dialect, so nothing is wrapped here.
+    let sql = format!("SELECT {}", sql_now_ms(backend).map_err(provider_error)?);
     let row = exec
         .query_one(sea_orm::Statement::from_sql_and_values(
             backend,
@@ -122,4 +121,33 @@ pub(crate) fn provider_error(error: FrameworkError) -> RenderCacheError {
         "render cache tier provider failure",
     );
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The store clock's shape per dialect. Every adapter in this module
+    //! either inlines [`sql_now_ms`] into a comparison or decodes it through
+    //! [`store_now_ms`], and the second only works if the expression is
+    //! integer-typed - which on MySQL it is not without the cast asserted
+    //! below.
+    use super::*;
+
+    #[test]
+    fn the_store_clock_is_integer_typed_on_every_supported_dialect() {
+        assert_eq!(
+            sql_now_ms(DbBackend::Sqlite).expect("sqlite"),
+            "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+        );
+        assert_eq!(
+            sql_now_ms(DbBackend::Postgres).expect("postgres"),
+            "(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"
+        );
+        // `UNIX_TIMESTAMP(NOW(3))` alone returns DECIMAL, which no driver
+        // decodes into `i64`. Without this cast `store_now_ms` fails on
+        // MySQL, and every expiry an adapter writes there fails with it.
+        assert_eq!(
+            sql_now_ms(DbBackend::MySql).expect("mysql"),
+            "CAST(UNIX_TIMESTAMP(NOW(3)) * 1000 AS SIGNED)"
+        );
+    }
 }
