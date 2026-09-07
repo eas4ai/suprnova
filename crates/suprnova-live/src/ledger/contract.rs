@@ -70,7 +70,19 @@ pub struct LedgerError {
 }
 
 impl LedgerError {
-    pub(crate) const fn new(kind: LedgerErrorKind) -> Self {
+    /// Creates an error of one closed kind.
+    ///
+    /// Public because a host implements
+    /// [`InstanceRecordStore`](super::InstanceRecordStore) outside this
+    /// crate and has to be able to say why its backend could not answer -
+    /// [`LedgerErrorKind::ProviderUnavailable`] for a store that failed,
+    /// [`LedgerErrorKind::CapacityExceeded`] for bytes over the record
+    /// bound. It carries a kind and nothing else, so no adapter can attach
+    /// a driver message to it. Mirrors
+    /// [`RenderCacheError::new`](crate::render_cache::RenderCacheError::new),
+    /// which the sibling store ports already expose for the same reason.
+    #[must_use]
+    pub const fn new(kind: LedgerErrorKind) -> Self {
         Self { kind }
     }
 

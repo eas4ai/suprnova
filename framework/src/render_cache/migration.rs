@@ -223,6 +223,17 @@ enum Epochs {
 /// `ColumnType::Blob` renders as `blob` on MySQL, which caps at 64 KiB - far
 /// below a cached document - so MySQL gets an explicit `LONGBLOB` while
 /// Postgres (`bytea`) and SQLite (`blob`) take the portable spelling.
+///
+/// # Indexes
+///
+/// Three of the four tables carry a non-unique index on `expires_at_ms`,
+/// because three of them are reclaimed by a bounded sweep that reads
+/// `ORDER BY expires_at_ms LIMIT n` - the L1 store's own `sweep`, and the
+/// record store's per-operation reclamation of elapsed instances and
+/// promotions. Without the index that ordered read is a full table scan on
+/// every sweep, which is exactly the shape a shared table cannot afford.
+/// `suprnova_render_leases` needs none: a lease is only ever read, taken
+/// over, or released by its primary key, and nothing sweeps it.
 pub struct TierMigration;
 
 impl MigrationName for TierMigration {
@@ -292,6 +303,16 @@ impl MigrationTrait for TierMigration {
                     .to_owned(),
             )
             .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_suprnova_render_entries_expires")
+                    .table(RenderEntries::Table)
+                    .col(RenderEntries::ExpiresAtMs)
+                    .to_owned(),
+            )
+            .await?;
 
         manager
             .create_table(
@@ -354,6 +375,16 @@ impl MigrationTrait for TierMigration {
                     .to_owned(),
             )
             .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_suprnova_live_instances_expires")
+                    .table(LiveInstances::Table)
+                    .col(LiveInstances::ExpiresAtMs)
+                    .to_owned(),
+            )
+            .await?;
 
         manager
             .create_table(
@@ -383,18 +414,58 @@ impl MigrationTrait for TierMigration {
                     )
                     .to_owned(),
             )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_suprnova_live_promotions_expires")
+                    .table(LivePromotions::Table)
+                    .col(LivePromotions::ExpiresAtMs)
+                    .to_owned(),
+            )
             .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Symmetric with `up`, indexes included, and each index is dropped
+        // before its table so a backend that refuses to drop an index of a
+        // table that is already gone never sees that order.
+        manager
+            .drop_index(
+                Index::drop()
+                    .if_exists()
+                    .name("idx_suprnova_live_promotions_expires")
+                    .table(LivePromotions::Table)
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(LivePromotions::Table).to_owned())
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .if_exists()
+                    .name("idx_suprnova_live_instances_expires")
+                    .table(LiveInstances::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(LiveInstances::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(RenderLeases::Table).to_owned())
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .if_exists()
+                    .name("idx_suprnova_render_entries_expires")
+                    .table(RenderEntries::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(RenderEntries::Table).to_owned())

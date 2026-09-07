@@ -80,6 +80,12 @@ use crate::{FrameworkError, Router};
 /// database tier deletes a bounded batch of expired rows from a table every
 /// node shares - so [`RenderCache::sweep`] has to reach the provider's own
 /// sweep, which a trait object could not offer.
+///
+/// `#[non_exhaustive]`: an externally accelerated profile adds a variant
+/// here, and an application matching on this enum must not stop compiling
+/// when it does. Constructing a variant still works unchanged; only an
+/// exhaustive match outside this crate needs a wildcard arm.
+#[non_exhaustive]
 pub enum L1Provider {
     /// One file per key under a directory this process owns.
     File(file_store::FileRenderStore),

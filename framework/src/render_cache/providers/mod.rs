@@ -15,8 +15,12 @@
 //! node whose clock runs fast can neither extend a lease nor keep an
 //! expired entry alive for everyone else.
 
+pub mod sql_instances;
+pub mod sql_lease;
 pub mod sql_store;
 
+pub use sql_instances::SqlInstanceRecordStore;
+pub use sql_lease::SqlLeaseStore;
 pub use sql_store::SqlRenderStore;
 
 use sea_orm::DbBackend;
@@ -65,7 +69,9 @@ pub fn sql_now_ms(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 /// Run this on the executor that carries the guarded statement - inside a
 /// publication's own transaction, not on a second connection - so the
 /// expiry an adapter writes is measured on the same clock, and the same
-/// snapshot, as the row it writes.
+/// snapshot, as the row it writes. The dialect comes from that executor
+/// rather than from a parameter, so the clock an adapter reads can never be
+/// the wrong dialect's for the connection it reads it on.
 ///
 /// `offset_ms` is a test seam, and it is per adapter instance rather than
 /// process-wide on purpose: several stores share one test binary, and a
@@ -78,11 +84,8 @@ pub fn sql_now_ms(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 /// Returns [`RenderCacheErrorKind::ProviderUnavailable`] when the backend
 /// is unsupported, the read fails, or the backend returns no row - none of
 /// which carry a key, a byte, or a SQL value into the message.
-pub async fn store_now_ms(
-    exec: &ExecutorChoice,
-    backend: DbBackend,
-    offset_ms: u64,
-) -> Result<u64, RenderCacheError> {
+pub async fn store_now_ms(exec: &ExecutorChoice, offset_ms: u64) -> Result<u64, RenderCacheError> {
+    let backend = exec.backend();
     // Selected verbatim: `sql_now_ms` already returns an integer-typed
     // expression on every dialect, so nothing is wrapped here.
     let sql = format!("SELECT {}", sql_now_ms(backend).map_err(provider_error)?);
@@ -123,6 +126,49 @@ pub(crate) fn provider_error(error: FrameworkError) -> RenderCacheError {
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
 }
 
+/// Milliseconds, counters, and identities as a `BIGINT` column stores them.
+///
+/// Values above `i64::MAX` are unreachable - epochs count emergency
+/// invalidations, tokens count publications, versions count replacements,
+/// and an instant is milliseconds since 1970 - so clamping keeps the
+/// conversion total without a panic and without wrapping a saturated
+/// `u64::MAX` retention into the distant past.
+pub(crate) fn as_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The inverse of [`as_i64`]. A negative column value cannot occur: every
+/// writer in these adapters is [`as_i64`].
+pub(crate) fn as_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+/// Whether a backend's failure message is "that key is already taken".
+///
+/// Two adapters here decide an outcome by letting a unique key raise rather
+/// than by overwriting: a lease and an instance record are each created by a
+/// plain `INSERT`, because a conflict means a peer got there first and the
+/// peer's row is the one that stands. PostgreSQL's `SELECT ... FOR UPDATE`
+/// locks nothing when the row is absent, so on that backend the unique key
+/// is the only thing standing between two nodes creating the same key.
+///
+/// Classifying by message is the technique this module's neighbours already
+/// use for the same class of signal (see
+/// [`ledger`](super::ledger)'s missing-table check and the transaction
+/// layer's deadlock detection); a driver's typed error kinds are not
+/// uniform across the three backends this framework supports. Anything this
+/// does not recognise stays a provider failure, which fails towards
+/// reporting a broken store rather than towards silently answering "someone
+/// else leads".
+pub(crate) fn is_unique_violation(message: &str) -> bool {
+    // SQLite: "UNIQUE constraint failed: suprnova_render_leases.render_key".
+    // PostgreSQL (SQLSTATE 23505): "duplicate key value violates unique
+    // constraint". MySQL and MariaDB (1062): "Duplicate entry '...' for key".
+    message.contains("UNIQUE constraint failed")
+        || message.contains("duplicate key value")
+        || message.contains("Duplicate entry")
+}
+
 #[cfg(test)]
 mod tests {
     //! The store clock's shape per dialect. Every adapter in this module
@@ -149,5 +195,29 @@ mod tests {
             sql_now_ms(DbBackend::MySql).expect("mysql"),
             "CAST(UNIX_TIMESTAMP(NOW(3)) * 1000 AS SIGNED)"
         );
+    }
+
+    #[test]
+    fn a_taken_key_is_recognised_in_every_backend_and_nothing_else_is() {
+        // The real phrasings, one per backend this framework supports.
+        assert!(is_unique_violation(
+            "error returned from database: (code: 2067) UNIQUE constraint failed:              suprnova_render_leases.render_key"
+        ));
+        assert!(is_unique_violation(
+            "error returned from database: duplicate key value violates unique              constraint \"suprnova_live_instances_pkey\""
+        ));
+        assert!(is_unique_violation(
+            "error returned from database: 1062 (23000): Duplicate entry              'abc-def' for key 'PRIMARY'"
+        ));
+
+        // A store that is simply broken must never be read as "a peer got
+        // there first": that would turn an outage into a silent bypass.
+        for other in [
+            "error returned from database: no such table: suprnova_render_leases",
+            "pool timed out while waiting for an open connection",
+            "error returned from database: deadlock detected",
+        ] {
+            assert!(!is_unique_violation(other), "{other}");
+        }
     }
 }

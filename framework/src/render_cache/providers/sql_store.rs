@@ -59,7 +59,7 @@ use suprnova_live::render_cache::store::{
     PublicationFence, PublishOutcome, RenderStore, StoreInspection, StoredEntry,
 };
 
-use super::{provider_error, sql_now_ms, store_now_ms};
+use super::{as_i64, as_u64, provider_error, sql_now_ms, store_now_ms};
 use crate::database::transaction::ExecutorChoice;
 use crate::render_cache::SweepOutcome;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
@@ -182,8 +182,8 @@ impl SqlRenderStore {
         retention_ms: u64,
     ) -> Result<PublishOutcome, RenderCacheError> {
         let backend = exec.backend();
-        if let Some(current) = read_fence(exec, backend, &key.to_base64url()).await?
-            && !fence.supersedes(&current)
+        if let Some(current) = read_publication(exec, backend, &key.to_base64url()).await?
+            && !fence.supersedes(&current.fence)
         {
             return Ok(PublishOutcome::Fenced);
         }
@@ -201,10 +201,16 @@ impl SqlRenderStore {
     /// purpose: what "affected" means differs between dialects and even by
     /// driver flag (MySQL reports 2 for a row it changed, 0 for one it did
     /// not, and 0 again for an update whose values matched), while the
-    /// stored fence is the fact the caller actually needs. Equal to this
-    /// publication's fence means it stands; anything else means another
-    /// publication holds the key and this one is
-    /// [`PublishOutcome::Fenced`].
+    /// stored publication is the fact the caller actually needs.
+    ///
+    /// It compares the publication instant alongside the fence. Two nodes
+    /// can reach this with the *same* `(epoch, token)` and different bodies -
+    /// the fence is minted per key per tenure, and a peer that took the lease
+    /// over mints from the same counter - and `supersedes` is strict, so
+    /// neither replaces the other. Comparing the fence alone would tell both
+    /// of them they published; comparing the instant their own publication
+    /// stamped the row with tells the one whose bytes are not in the row that
+    /// it is [`PublishOutcome::Fenced`], which is what it is.
     async fn upsert_fenced(
         &self,
         exec: &ExecutorChoice,
@@ -218,7 +224,7 @@ impl SqlRenderStore {
         let name = key.to_base64url();
         // Read on this executor, so it is the database's clock, taken
         // inside the same transaction as the write it bounds.
-        let now = store_now_ms(exec, backend, self.offset()).await?;
+        let now = store_now_ms(exec, self.offset()).await?;
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,
             upsert_sql(backend).map_err(provider_error)?,
@@ -234,15 +240,20 @@ impl SqlRenderStore {
         ))
         .await
         .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-        let held = read_fence(exec, backend, &name).await?.ok_or_else(|| {
-            // The row was written in this very transaction, so it cannot be
-            // absent: a missing row here is a broken store, not a lost
-            // fence, and saying "fenced" would hide it.
-            provider_error(FrameworkError::database(
-                "render cache L1 row is absent immediately after its own upsert".to_owned(),
-            ))
-        })?;
-        if held.epoch == fence.epoch && held.token == fence.token {
+        let held = read_publication(exec, backend, &name)
+            .await?
+            .ok_or_else(|| {
+                // The row was written in this very transaction, so it cannot be
+                // absent: a missing row here is a broken store, not a lost
+                // fence, and saying "fenced" would hide it.
+                provider_error(FrameworkError::database(
+                    "render cache L1 row is absent immediately after its own upsert".to_owned(),
+                ))
+            })?;
+        if held.fence.epoch == fence.epoch
+            && held.fence.token == fence.token
+            && held.published_at_ms == now_ms
+        {
             Ok(PublishOutcome::Published)
         } else {
             Ok(PublishOutcome::Fenced)
@@ -250,22 +261,29 @@ impl SqlRenderStore {
     }
 }
 
-/// The `(epoch, token)` currently stored for `name`, locked for the
-/// publication about to replace it where the dialect can lock it.
+/// The publication a row currently stands under: its fence, and the instant
+/// its publisher stamped it with.
 ///
-/// The returned fence's digest is a placeholder: nothing this function
-/// serves reads it. [`PublicationFence::supersedes`] compares the epoch and
-/// the token alone, and the digest column is fetched only by
-/// [`RenderStore::get`], which needs the real one.
-async fn read_fence(
+/// The fence's digest is a placeholder: nothing this type serves reads it.
+/// [`PublicationFence::supersedes`] compares the epoch and the token alone,
+/// and the digest column is fetched only by [`RenderStore::get`], which
+/// needs the real one.
+struct HeldPublication {
+    fence: PublicationFence,
+    published_at_ms: u64,
+}
+
+/// The publication currently stored for `name`, locked for the publication
+/// about to replace it where the dialect can lock it.
+async fn read_publication(
     exec: &ExecutorChoice,
     backend: DbBackend,
     name: &str,
-) -> Result<Option<PublicationFence>, RenderCacheError> {
+) -> Result<Option<HeldPublication>, RenderCacheError> {
     let Some(row) = exec
         .query_one(sea_orm::Statement::from_sql_and_values(
             backend,
-            select_fence_sql(backend).map_err(provider_error)?,
+            select_publication_sql(backend).map_err(provider_error)?,
             vec![Value::from(name.to_owned())],
         ))
         .await
@@ -279,10 +297,16 @@ async fn read_fence(
     let token: i64 = row
         .try_get_by_index(1)
         .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
-    Ok(Some(PublicationFence {
-        epoch: as_u64(epoch),
-        generation_digest: [0; 32],
-        token: as_u64(token),
+    let published_at_ms: i64 = row
+        .try_get_by_index(2)
+        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+    Ok(Some(HeldPublication {
+        fence: PublicationFence {
+            epoch: as_u64(epoch),
+            generation_digest: [0; 32],
+            token: as_u64(token),
+        },
+        published_at_ms: as_u64(published_at_ms),
     }))
 }
 
@@ -455,21 +479,6 @@ impl RenderStore for SqlRenderStore {
     }
 }
 
-/// Milliseconds as the column stores them. Epochs, tokens, and instants
-/// above `i64::MAX` are unreachable - epochs count emergency invalidations,
-/// tokens count publications, and the instant is milliseconds since 1970 -
-/// so clamping keeps the conversion total without a panic and without
-/// wrapping a saturated `u64::MAX` retention into the distant past.
-fn as_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-/// The inverse of [`as_i64`]. A negative column value cannot occur: every
-/// writer here is [`as_i64`].
-fn as_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
 /// A 64-character lowercase hex fence digest, or `None` when the column
 /// does not hold one.
 fn decode_digest(text: &str) -> Option<[u8; 32]> {
@@ -499,20 +508,17 @@ fn select_entry_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     })
 }
 
-/// `SELECT` for the stored fence, locked for the publication that is about
-/// to replace it where the dialect can lock it. SQLite has no `FOR UPDATE`
-/// and needs none: it serialises writers.
-fn select_fence_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
+/// `SELECT` for the stored publication, locked for the publication that is
+/// about to replace it where the dialect can lock it. SQLite has no
+/// `FOR UPDATE` and needs none: it serialises writers.
+fn select_publication_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
     match backend {
-        DbBackend::Postgres => {
-            Ok("SELECT epoch, token FROM suprnova_render_entries WHERE render_key = $1 FOR UPDATE")
-        }
-        DbBackend::MySql => {
-            Ok("SELECT epoch, token FROM suprnova_render_entries WHERE render_key = ? FOR UPDATE")
-        }
-        DbBackend::Sqlite => {
-            Ok("SELECT epoch, token FROM suprnova_render_entries WHERE render_key = ?")
-        }
+        DbBackend::Postgres => Ok("SELECT epoch, token, published_at_ms \
+             FROM suprnova_render_entries WHERE render_key = $1 FOR UPDATE"),
+        DbBackend::MySql => Ok("SELECT epoch, token, published_at_ms \
+             FROM suprnova_render_entries WHERE render_key = ? FOR UPDATE"),
+        DbBackend::Sqlite => Ok("SELECT epoch, token, published_at_ms \
+             FROM suprnova_render_entries WHERE render_key = ?"),
         _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }

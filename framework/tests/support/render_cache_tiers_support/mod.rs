@@ -19,9 +19,13 @@
 
 use bytes::Bytes;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::DB;
+use suprnova::database::transaction::ExecutorChoice;
+use suprnova::render_cache::providers::sql_now_ms;
 use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
-use suprnova_live::identity::{KeyId, UnixMillis};
+use suprnova_live::identity::{IdempotencyKey, InstanceId, KeyId, ScopeFingerprint, UnixMillis};
+use suprnova_live::ledger::{InstanceRecordKey, PromotionRecordKey};
 use suprnova_live::render_cache::RepresentationClass;
 use suprnova_live::render_cache::entry::{CompleteEntry, EntryHeader, SafeHeaders, encode};
 use suprnova_live::render_cache::generation::GenerationSet;
@@ -56,7 +60,6 @@ impl MigratorTrait for BaseOnlyMigrator {
 
 /// A fresh SQLite database with both render cache migrations applied.
 pub async fn boot() -> TestDatabase {
-    suprnova::render_cache::mark_installed();
     TestDatabase::fresh::<TierMigrator>()
         .await
         .expect("both render cache migrations apply cleanly to a fresh SQLite database")
@@ -65,7 +68,6 @@ pub async fn boot() -> TestDatabase {
 /// A fresh SQLite database carrying only the original render cache
 /// migration, so the tier tables are genuinely absent.
 pub async fn boot_without_the_tier_tables() -> TestDatabase {
-    suprnova::render_cache::mark_installed();
     TestDatabase::fresh::<BaseOnlyMigrator>()
         .await
         .expect("the original render cache migration applies cleanly to a fresh SQLite database")
@@ -127,6 +129,78 @@ pub fn encoded_entry(pattern: &str) -> Bytes {
         Bytes::from_static(b"<!doctype html><html><body>tier one</body></html>"),
     );
     encode(&entry, &ring).expect("encode the fixture entry")
+}
+
+/// The database's own clock, as milliseconds since the Unix epoch.
+///
+/// Every expiry a tier adapter writes or compares is measured on this
+/// clock, so a test that wants a record to outlive a scenario - or to have
+/// elapsed before one - has to start from the same number the adapter will.
+/// Reading it through [`sql_now_ms`] rather than a hard-coded SQLite
+/// expression keeps the live Postgres and MySQL copies of these tests
+/// honest.
+///
+/// # Panics
+///
+/// Panics when no test database is mounted, when the backend is one no
+/// dialect expression is proven against, or when the clock read fails -
+/// each of which is a broken fixture rather than a provider failure.
+pub async fn store_now_ms() -> u64 {
+    let exec = ExecutorChoice::resolve_read(None, None, None)
+        .await
+        .expect("a read executor over the test database");
+    let sql = format!(
+        "SELECT {}",
+        sql_now_ms(exec.backend()).expect("a supported dialect")
+    );
+    let now: i64 = DB::scalar(&sql, vec![]).await.expect("the store clock");
+    u64::try_from(now).expect("the store clock is after the Unix epoch")
+}
+
+/// An instant `after_ms` milliseconds ahead of the database's own clock.
+pub async fn store_deadline(after_ms: u64) -> UnixMillis {
+    UnixMillis::new(store_now_ms().await.saturating_add(after_ms))
+}
+
+/// The one trusted scope every record fixture in these tests belongs to.
+///
+/// # Panics
+///
+/// Panics when the fixture bytes stop being a valid scope fingerprint.
+pub fn scope() -> ScopeFingerprint {
+    ScopeFingerprint::from_bytes(&varied::<32>(0x10)).expect("the fixture scope is valid")
+}
+
+/// One instance record address, distinct per `tag`.
+///
+/// # Panics
+///
+/// Panics when the fixture bytes stop being a valid instance identity.
+pub fn instance_key(tag: u8) -> InstanceRecordKey {
+    InstanceRecordKey {
+        scope: scope(),
+        instance_id: InstanceId::from_bytes(&varied::<16>(tag))
+            .expect("the fixture instance identity is valid"),
+    }
+}
+
+/// One promotion reservation address, distinct per `tag`.
+///
+/// # Panics
+///
+/// Panics when the fixture bytes stop being a valid retry identity.
+pub fn promotion_key(tag: u8) -> PromotionRecordKey {
+    PromotionRecordKey {
+        scope: scope(),
+        idempotency_key: IdempotencyKey::from_bytes(&varied::<16>(tag))
+            .expect("the fixture retry identity is valid"),
+    }
+}
+
+/// Identity bytes that vary within one fixture as well as between two, so
+/// no fixture is a run of one repeated byte.
+fn varied<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {
+    std::array::from_fn(|offset| start.wrapping_add(u8::try_from(offset % 256).unwrap_or(0)))
 }
 
 /// Connects to a live database, returning `None` when it is not reachable.
