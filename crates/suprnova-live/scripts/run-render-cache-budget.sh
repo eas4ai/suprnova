@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+#
+# On-demand RenderCache budget run; never a gate step.
+#
+# Runs the engine bench (the `C64` Complete L0 hot hit and `C64+4`
+# Composite assembly, with the counting allocator), then the framework
+# workload bench, then the checked-result contract. Both benches run by
+# default. `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` runs the engine bench alone.
+#
+# Temporary condition: `framework/benches/render_cache_workloads.rs` does
+# not exist yet, so until it lands every caller has to set
+# `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` or the second step fails with an unknown
+# bench target. The default is `0` because that is the state the runner is
+# written for; the export is the workaround, not the design.
+#
+# `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`) pins both benches.
+# `SUPRNOVA_LIVE_BENCH_RESULT` and `SUPRNOVA_LIVE_WORKLOADS_RESULT`
+# redirect the two result files away from the checked-in ones.
+
 set -euo pipefail
 
 live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -28,7 +46,7 @@ rtk env \
         --package suprnova-live \
         --bench render_cache_budget
 
-if [[ ${SUPRNOVA_LIVE_SKIP_WORKLOADS:-1} != 1 ]]; then
+if [[ ${SUPRNOVA_LIVE_SKIP_WORKLOADS:-0} != 1 ]]; then
     printf '%s\n' "[render-cache-budget] release framework workloads on CPU set ${cpu_set}"
     rtk env \
         CARGO_INCREMENTAL=0 \
@@ -40,7 +58,7 @@ if [[ ${SUPRNOVA_LIVE_SKIP_WORKLOADS:-1} != 1 ]]; then
             --bench render_cache_workloads
 else
     printf '%s\n' \
-        "[render-cache-budget] framework workloads skipped (SUPRNOVA_LIVE_SKIP_WORKLOADS)"
+        "[render-cache-budget] framework workloads skipped: SUPRNOVA_LIVE_SKIP_WORKLOADS=1"
 fi
 
 printf '%s\n' "[render-cache-budget] checked-result contract"

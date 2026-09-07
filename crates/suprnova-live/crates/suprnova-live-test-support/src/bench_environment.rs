@@ -2,10 +2,20 @@
 //!
 //! Every benchmark in this workspace records the machine it ran on beside
 //! its numbers, and classifies that machine against the S1 reference
-//! environment. The rules are the same for every benchmark, so they live
-//! here once rather than being copied into each bench target. The three
-//! benches that predate this module keep their own copies; nothing here
-//! changes what they record.
+//! environment. Those rules are shared, so they live here once rather than
+//! being copied into each new bench target.
+//!
+//! The benches that predate this module deliberately keep their own copies
+//! and are not migrated, so this is not the only implementation in the
+//! tree, and one of them differs: `benches/action_framework_budget.rs`
+//! takes its percentiles at rank `ceil((n - 1) * p)`, zero-based, while
+//! [`percentile`] here takes them at `ceil(p * n)`, one-based, which is the
+//! rule `benches/snapshot_budget.rs` uses and the rule this module's
+//! callers are specified against. One rank is the other shifted by up to
+//! one sample, so the two can name different samples of the same run (at 40
+//! samples they do, for both the fiftieth and the ninety-fifth), and a
+//! number from one is not comparable to a number from the other without
+//! saying which rank produced it.
 //!
 //! Nothing collected here is secret: the record is processor, memory,
 //! kernel, governor, and toolchain facts plus the classification derived
@@ -71,6 +81,49 @@ pub struct EnvironmentEvidence {
     pub s1_requirements_met: bool,
 }
 
+impl EnvironmentEvidence {
+    /// Each S1 requirement this run does not satisfy, in the order
+    /// [`collect`] evaluates them, as one short phrase apiece. Empty
+    /// exactly when [`Self::s1_requirements_met`] is `true`, so a caller
+    /// that refuses to measure outside S1 can say which condition it
+    /// refused on rather than only that something was missing.
+    #[must_use]
+    pub fn unmet_s1_requirements(&self) -> Vec<String> {
+        let mut unmet = Vec::new();
+        if self.operating_system != "linux" {
+            unmet.push(format!(
+                "operating system is {}, not linux",
+                self.operating_system
+            ));
+        }
+        if self.architecture != "x86_64" {
+            unmet.push(format!("architecture is {}, not x86_64", self.architecture));
+        }
+        if self.selected_cpu_count != S1_CPU_COUNT {
+            unmet.push(format!(
+                "{} selected processors, not {S1_CPU_COUNT}",
+                self.selected_cpu_count
+            ));
+        }
+        if self.memory_bytes < S1_MEMORY_BYTES {
+            unmet.push(format!(
+                "{} bytes of memory, below {S1_MEMORY_BYTES}",
+                self.memory_bytes
+            ));
+        }
+        if self.cpu_governor != "performance" {
+            unmet.push(format!(
+                "processor governor is {}, not performance",
+                self.cpu_governor
+            ));
+        }
+        if !self.dedicated_vcpus_attested {
+            unmet.push("SUPRNOVA_LIVE_S1_DEDICATED is not 1".to_owned());
+        }
+        unmet
+    }
+}
+
 /// Reads this machine's facts and classifies them against S1.
 ///
 /// S1 requires Linux on `x86_64`, exactly eight selected processors, at
@@ -124,6 +177,9 @@ pub fn collect() -> EnvironmentEvidence {
 }
 
 /// Nearest-rank percentile over sorted samples: `ceil(p * n)`, one-based.
+///
+/// See the module doc for the one predating bench that uses a different
+/// rank.
 ///
 /// # Panics
 ///
@@ -197,7 +253,85 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cpu_list, percentile};
+    use super::{
+        EnvironmentEvidence, S1_CPU_COUNT, S1_MEMORY_BYTES, collect, cpu_list, percentile,
+    };
+    use std::collections::BTreeMap;
+
+    /// An evidence record that satisfies every S1 requirement, so each test
+    /// below can break exactly one and see exactly one phrase come back.
+    fn qualified() -> EnvironmentEvidence {
+        EnvironmentEvidence {
+            classification: "validated_s1",
+            operating_system: "linux",
+            architecture: "x86_64",
+            cpu_model: "test".to_owned(),
+            selected_cpu_affinity: "0-7".to_owned(),
+            selected_cpu_count: S1_CPU_COUNT,
+            memory_bytes: S1_MEMORY_BYTES,
+            kernel: "test".to_owned(),
+            cpu_governor: "performance".to_owned(),
+            rustc: "test".to_owned(),
+            database: "not_used",
+            provider_versions: BTreeMap::new(),
+            dedicated_vcpus_attested: true,
+            warm_filesystem_cache: true,
+            loopback_providers: true,
+            s1_requirements_met: true,
+        }
+    }
+
+    #[test]
+    fn a_qualified_record_has_nothing_unmet_and_each_defect_names_itself() {
+        assert!(qualified().unmet_s1_requirements().is_empty());
+
+        let mut wrong_governor = qualified();
+        wrong_governor.cpu_governor = "powersave".to_owned();
+        assert_eq!(
+            wrong_governor.unmet_s1_requirements(),
+            ["processor governor is powersave, not performance"]
+        );
+
+        let mut no_attestation = qualified();
+        no_attestation.dedicated_vcpus_attested = false;
+        assert_eq!(
+            no_attestation.unmet_s1_requirements(),
+            ["SUPRNOVA_LIVE_S1_DEDICATED is not 1"]
+        );
+
+        let mut too_small = qualified();
+        too_small.selected_cpu_count = 4;
+        too_small.memory_bytes = 1;
+        assert_eq!(
+            too_small.unmet_s1_requirements().len(),
+            2,
+            "two broken requirements report two phrases, in evaluation order"
+        );
+        assert!(too_small.unmet_s1_requirements()[0].contains("selected processors"));
+        assert!(too_small.unmet_s1_requirements()[1].contains("bytes of memory"));
+    }
+
+    /// Asserted as an agreement rather than as a fixed verdict: this test
+    /// has to pass on a workstation and on a qualified S1 runner alike, so
+    /// it pins that the two readings of the same rules cannot drift apart,
+    /// never which reading a given machine produces.
+    #[test]
+    fn a_collected_record_agrees_with_its_own_classification_and_unmet_list() {
+        let environment = collect();
+        assert_eq!(
+            environment.s1_requirements_met,
+            environment.unmet_s1_requirements().is_empty(),
+            "the classification rules and the unmet list are the same rules read two ways"
+        );
+        assert_eq!(
+            environment.classification,
+            if environment.s1_requirements_met {
+                "validated_s1"
+            } else {
+                "local_exploratory"
+            }
+        );
+    }
 
     #[test]
     fn the_percentile_rule_is_nearest_rank_and_one_based() {

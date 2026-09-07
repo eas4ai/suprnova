@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile": "release",
-  "measured_at_unix_ms": 1788806518783,
+  "measured_at_unix_ms": 1788807427953,
   "environment": {
     "classification": "local_exploratory",
     "operating_system": "linux",
@@ -29,8 +29,8 @@
     "warmup_iterations": 200,
     "measured_samples": 40,
     "batch_iterations": 50,
-    "p50_microseconds": 0.73448,
-    "p95_microseconds": 0.77104,
+    "p50_microseconds": 0.7487,
+    "p95_microseconds": 0.7557400000000001,
     "p95_cap_microseconds": 250.0,
     "allocation_passes": 100,
     "allocations_max": 3,
@@ -41,8 +41,8 @@
     "allocated_bytes_max": 1313,
     "body_shared": true,
     "not_modified": {
-      "p50_microseconds": 0.7404600000000001,
-      "p95_microseconds": 0.7569800000000001,
+      "p50_microseconds": 0.7578400000000001,
+      "p95_microseconds": 0.7817400000000001,
       "allocation_passes": 100,
       "allocations_max": 3,
       "allocations_distribution": {
@@ -58,7 +58,8 @@
       "allocations_distribution": {
         "4": 100
       },
-      "allocated_bytes_max": 1332
+      "allocated_bytes_max": 1332,
+      "body_shared": true
     }
   },
   "c64_plus_4": {
@@ -69,8 +70,8 @@
     "warmup_iterations": 200,
     "measured_samples": 40,
     "batch_iterations": 50,
-    "p50_microseconds": 33.06526,
-    "p95_microseconds": 33.58902,
+    "p50_microseconds": 33.01694,
+    "p95_microseconds": 34.21488,
     "p95_cap_microseconds": 2000.0,
     "allocation_passes": 100,
     "allocated_bytes_max": 85019,

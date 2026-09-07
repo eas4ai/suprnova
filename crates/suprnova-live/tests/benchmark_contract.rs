@@ -144,6 +144,10 @@ fn render_cache_budget_result_holds_the_c64_allocation_and_copy_bounds() {
     assert!(c64["allocations_max"].as_u64().expect("number") <= 4);
     assert_eq!(c64["allocations_cap"], 4);
     assert_eq!(c64["body_shared"], true);
+    assert_eq!(
+        c64["seed_deadline"]["body_shared"], true,
+        "the seeded fixture shares its stored body too, reported on its own"
+    );
     assert_eq!(c64["p95_cap_microseconds"], 250.0);
     assert!(c64["p95_microseconds"].as_f64().is_some());
     assert!(

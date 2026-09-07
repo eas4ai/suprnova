@@ -2,6 +2,16 @@
 //! architecture performance budget v1, measured in an isolated,
 //! single-threaded process with a benchmark-only counting global allocator.
 //! On-demand: never a gate step. See docs/implementation/benchmarking.md.
+//!
+//! Environment variables it honours:
+//!
+//! - `SUPRNOVA_LIVE_BENCH_RESULT` redirects the result file; without it a
+//!   release run writes the checked-in
+//!   `benchmarks/render-cache-budget-v1.json`.
+//! - `SUPRNOVA_LIVE_REQUIRE_S1=1` refuses to measure at all unless the
+//!   environment is `validated_s1`, and names the conditions it refused on.
+//!   Without it an unqualified machine measures and the result says
+//!   `local_exploratory`, which is what a workstation run is.
 #![allow(
     unsafe_code,
     reason = "benchmark-only counting global allocator required by the Complete L0 budget row"
@@ -111,6 +121,14 @@ static GLOBAL: Counting = Counting;
 
 /// An open measurement window. Held for exactly the work being measured;
 /// [`Armed::stop`] closes it and reports the totals.
+///
+/// Closing is [`Drop`]'s job rather than `stop`'s, so the window closes on
+/// every path out of it and not only the one that returns normally. The
+/// measured request carries assertions, so a guard that fails inside the
+/// window unwinds through here; an allocator left armed would then count
+/// the panic's own formatting, and whatever a later pass did between
+/// windows, into a number that is supposed to describe one request. Making
+/// that unrepresentable costs nothing.
 struct Armed;
 
 impl Armed {
@@ -122,13 +140,21 @@ impl Armed {
         Self
     }
 
-    /// Closes the window and returns `(allocations, bytes)`.
+    /// Closes the window and returns `(allocations, bytes)`. Dropping the
+    /// guard is what closes it; the counters are read afterwards, which is
+    /// free because an atomic load never allocates.
     fn stop(self) -> (usize, usize) {
-        ARMED.store(false, Ordering::SeqCst);
+        drop(self);
         (
             ALLOCATIONS.load(Ordering::Relaxed),
             BYTES.load(Ordering::Relaxed),
         )
+    }
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        ARMED.store(false, Ordering::SeqCst);
     }
 }
 
@@ -823,6 +849,30 @@ fn assert_isolated() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Refuses to measure when the runner demanded a qualified S1 environment
+/// and this machine cannot prove one, naming the conditions it refused on.
+///
+/// `SUPRNOVA_LIVE_REQUIRE_S1=1` is how a release-qualification runner says
+/// "an exploratory number is not an acceptable answer here". The refusal
+/// runs before any measurement, so an unqualified machine finds out in
+/// milliseconds rather than after both workloads. Any other value, including
+/// the variable being absent, measures and labels the result honestly.
+///
+/// The benchmark never sets `SUPRNOVA_LIVE_S1_DEDICATED` on its own behalf,
+/// so this can only ever pass because the runner attested it.
+fn assert_required_environment(environment: &EnvironmentEvidence) -> Result<(), Box<dyn Error>> {
+    if std::env::var("SUPRNOVA_LIVE_REQUIRE_S1").as_deref() != Ok("1")
+        || environment.s1_requirements_met
+    {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "SUPRNOVA_LIVE_REQUIRE_S1 is 1 and this run cannot prove the S1 environment: {}",
+        environment.unmet_s1_requirements().join("; ")
+    ))
+    .into())
+}
+
 // -------------------------------------------------------------------------
 // Result record
 // -------------------------------------------------------------------------
@@ -882,6 +932,7 @@ struct SeedDeadlineResult {
     allocations_cap: usize,
     allocations_distribution: BTreeMap<usize, usize>,
     allocated_bytes_max: usize,
+    body_shared: bool,
 }
 
 /// Composite assembly of a 64 KiB shell with four 4 KiB islands.
@@ -955,6 +1006,7 @@ fn run_c64(timed: bool) -> Result<C64Result, Box<dyn Error>> {
     let mut conditional = AllocationLedger::default();
     let mut seed_deadline = AllocationLedger::default();
     let mut body_shared = true;
+    let mut seeded_body_shared = true;
     for _ in 0..ALLOCATION_PASSES {
         let armed = Armed::start();
         let response = fixture.measured_request(None, now_ms);
@@ -972,15 +1024,20 @@ fn run_c64(timed: bool) -> Result<C64Result, Box<dyn Error>> {
         let armed = Armed::start();
         let response = seeded.measured_request(None, now_ms);
         let (allocations, bytes) = armed.stop();
-        body_shared &= seeded.body_is_shared(&response);
+        seeded_body_shared &= seeded.body_is_shared(&response);
         drop(black_box(response));
         seed_deadline.record(allocations, bytes);
     }
-    if !body_shared {
-        return Err(io::Error::other(
-            "a measured C64 hit copied the stored body instead of sharing it",
-        )
-        .into());
+    for (shape, shared) in [
+        ("fresh", body_shared),
+        ("seed-deadline", seeded_body_shared),
+    ] {
+        if !shared {
+            return Err(io::Error::other(format!(
+                "a measured C64 {shape} hit copied the stored body instead of sharing it"
+            ))
+            .into());
+        }
     }
     full.assert_within_cap("the C64 hot hit")?;
     conditional.assert_within_cap("the C64 conditional hit")?;
@@ -1018,7 +1075,7 @@ fn run_c64(timed: bool) -> Result<C64Result, Box<dyn Error>> {
         conditional_timing.p95
     );
     println!(
-        "C64 seed-deadline hit: allocations max={} ({}) bytes={}",
+        "C64 seed-deadline hit: allocations max={} ({}) bytes={} body_shared={seeded_body_shared}",
         seed_deadline.max_allocations,
         seed_deadline.distribution_text(),
         seed_deadline.max_bytes
@@ -1059,6 +1116,7 @@ fn run_c64(timed: bool) -> Result<C64Result, Box<dyn Error>> {
             allocations_cap: ALLOCATIONS_CAP,
             allocations_distribution: seed_deadline.distribution,
             allocated_bytes_max: seed_deadline.max_bytes,
+            body_shared: seeded_body_shared,
         },
     })
 }
@@ -1153,8 +1211,19 @@ fn main() {
 /// Guards, both workloads, and the result file. A debug build runs the
 /// correctness and allocation checks and skips timing, as `snapshot_budget`
 /// does; only a release run writes a result.
+///
+/// The environment is read once, before any measurement, so the refusal
+/// below cannot spend minutes measuring a machine it was going to reject,
+/// and so the record describes the machine at one instant rather than two.
 fn run() -> Result<(), Box<dyn Error>> {
     assert_isolated()?;
+    let mut environment = bench_environment::collect();
+    environment.database = "not_used_by_render_cache_budget_benchmark";
+    environment.provider_versions = BTreeMap::from([
+        ("render_store", "in_process_memory_l0_v1"),
+        ("snapshot_key_ring", "in_process_v1"),
+    ]);
+    assert_required_environment(&environment)?;
     let timed = !cfg!(debug_assertions);
 
     let c64 = run_c64(timed)?;
@@ -1167,12 +1236,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let mut environment = bench_environment::collect();
-    environment.database = "not_used_by_render_cache_budget_benchmark";
-    environment.provider_versions = BTreeMap::from([
-        ("render_store", "in_process_memory_l0_v1"),
-        ("snapshot_key_ring", "in_process_v1"),
-    ]);
     let result = BudgetResult {
         schema_version: 1,
         profile: "release",
