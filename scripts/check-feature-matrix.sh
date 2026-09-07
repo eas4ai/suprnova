@@ -263,20 +263,23 @@ run "Nation X minimal test targets" \
     cargo check -p suprnova --no-default-features --features "$MINIMAL_FEATURES" --tests
 run "filesystem-off doctests" \
     cargo test -p suprnova --no-default-features --features "$MINIMAL_FEATURES" --doc
+# The test binaries were folded one per module on 2026-09-05, so each former
+# top-level file is now a submodule and every listed name carries its module
+# prefix (`casts_encrypted::`, `encryption::`, `remember_me::`).
 run "enumerate minimal encrypted-cast tests" \
-    write_test_list eloquent_casts_encrypted
+    write_test_list eloquent
 run "enumerate minimal encryption tests" \
-    write_test_list encryption
+    write_test_list crypto
 run "enumerate minimal remember-me tests" \
-    write_test_list remember_me
+    write_test_list auth
 
-assert_test_listed eloquent_casts_encrypted as_hashed_writes_bcrypt_and_does_not_decrypt
-assert_test_listed eloquent_casts_encrypted as_hashed_is_idempotent_across_re_saves
-assert_test_not_listed eloquent_casts_encrypted as_encrypted_round_trips_and_storage_is_ciphertext
-assert_test_listed encryption appears_encrypted_rejects_plaintext_and_short_payloads
-assert_test_not_listed encryption round_trip_string
-assert_test_listed remember_me forget_remember_cookie_clears_the_cookie
-assert_test_not_listed remember_me login_remember_issues_cookie_and_persists_token
+assert_test_listed eloquent casts_encrypted::as_hashed_writes_bcrypt_and_does_not_decrypt
+assert_test_listed eloquent casts_encrypted::as_hashed_is_idempotent_across_re_saves
+assert_test_not_listed eloquent casts_encrypted::as_encrypted_round_trips_and_storage_is_ciphertext
+assert_test_listed crypto encryption::appears_encrypted_rejects_plaintext_and_short_payloads
+assert_test_not_listed crypto encryption::round_trip_string
+assert_test_listed auth remember_me::forget_remember_cookie_clears_the_cookie
+assert_test_not_listed auth remember_me::login_remember_issues_cookie_and_persists_token
 
 run "default profile" \
     cargo check -p suprnova
