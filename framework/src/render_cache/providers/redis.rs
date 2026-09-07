@@ -58,8 +58,8 @@ use std::time::Duration;
 use redis::Script;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use suprnova_live::ledger::{InstanceRecordKey, LedgerError, LedgerErrorKind, PromotionRecordKey};
-use suprnova_live::render_cache::RenderCacheError;
 use suprnova_live::render_cache::key::RenderKey;
+use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 use crate::FrameworkError;
 
@@ -423,28 +423,37 @@ fn glob_escape(text: &str) -> String {
 }
 
 /// Collapses a driver failure into the one closed provider kind the
-/// RenderCache contract exposes, logging the underlying cause first.
+/// RenderCache contract exposes, logging its closed-set kind first.
 ///
 /// The cause never reaches the caller: [`RenderCacheError`] carries a kind
 /// and nothing else, exactly so a driver message - which can echo a command,
 /// its arguments, or the endpoint - can never travel back into a response.
+/// It does not reach the log either: `redis::ErrorKind` is a closed enum
+/// whose variants carry no free text, so its `Debug` says which class of
+/// failure this was and repeats no argument of the command that failed.
 /// Mirrors [`provider_error`](super::provider_error), which does the same for
 /// the SQL adapters.
 pub(crate) fn provider_error(error: &redis::RedisError) -> RenderCacheError {
-    super::provider_error(FrameworkError::internal(error.to_string()))
+    tracing::warn!(
+        target: "suprnova::render_cache",
+        kind = ?error.kind(),
+        "render cache tier provider failure",
+    );
+    RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
 }
 
 /// Collapses a driver failure into the one closed provider kind the ledger
-/// contract exposes, logging the underlying cause first.
+/// contract exposes, logging its closed-set kind first.
 ///
 /// The same collapse as [`provider_error`], for the contract on the other
 /// side of the Live record store. [`LedgerError`] carries a kind and nothing
 /// else, which is what keeps an encoded record out of a response even though
-/// a driver message could repeat one.
+/// a driver message could repeat one; logging `redis::ErrorKind` rather than
+/// that message keeps the record out of the log for the same reason.
 pub(crate) fn ledger_error(error: &redis::RedisError) -> LedgerError {
     tracing::warn!(
         target: "suprnova::render_cache",
-        %error,
+        kind = ?error.kind(),
         "live instance record store provider failure",
     );
     LedgerError::new(LedgerErrorKind::ProviderUnavailable)
@@ -457,9 +466,7 @@ pub(crate) fn ledger_error(error: &redis::RedisError) -> LedgerError {
 /// as a provider failure, because there is nothing else the caller's closed
 /// contract can say and answering "absent" would invent an answer.
 pub(crate) fn unreadable_status() -> RenderCacheError {
-    super::provider_error(FrameworkError::internal(
-        "render cache Redis script returned a status this build does not define".to_owned(),
-    ))
+    super::provider_error_kind("unreadable_script_status")
 }
 
 /// [`unreadable_status`] for the ledger side.
@@ -585,6 +592,33 @@ mod tests {
             40,
             "a script is cached by its SHA-1"
         );
+    }
+
+    #[test]
+    fn a_driver_failure_is_logged_as_a_kind_and_never_as_its_message() {
+        // What a failing script or command actually carries back: the
+        // detail string repeats the arguments, which for these adapters are
+        // render keys, hex identities, and encoded records.
+        let error = redis::RedisError::from((
+            redis::ErrorKind::Extension,
+            "script failed",
+            "EVALSHA rk1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+             instance:0123456789abcdef"
+                .to_owned(),
+        ));
+        // The message is the leak this guards against, so prove it is
+        // really in the error before proving it is not in what is logged.
+        let message = error.to_string();
+        assert!(message.contains("rk1."), "{message}");
+        assert!(message.contains("0123456789abcdef"), "{message}");
+
+        // `kind = ?error.kind()` is the field both warn sites log.
+        let logged = format!("{:?}", error.kind());
+        assert_eq!(logged, "Extension");
+        assert!(!logged.contains("rk1."), "{logged}");
+        assert!(!logged.contains("0123456789abcdef"), "{logged}");
+        assert!(!logged.contains("EVALSHA"), "{logged}");
+        assert!(!logged.contains("instance:"), "{logged}");
     }
 
     #[test]

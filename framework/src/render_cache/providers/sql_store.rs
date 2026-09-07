@@ -59,7 +59,10 @@ use suprnova_live::render_cache::store::{
     PublicationFence, PublishOutcome, RenderStore, StoreInspection, StoredEntry,
 };
 
-use super::{as_i64, as_u64, bind, binds, provider_error, row_lock, sql_now_ms, store_now_ms};
+use super::{
+    as_i64, as_u64, bind, binds, provider_db_error, provider_error, row_lock, sql_now_ms,
+    store_now_ms,
+};
 use crate::database::transaction::ExecutorChoice;
 use crate::render_cache::SweepOutcome;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
@@ -144,7 +147,7 @@ impl SqlRenderStore {
                 vec![Value::from(offset), Value::from(limit)],
             ))
             .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| provider_db_error(&error))?
             .rows_affected();
         let more_remain = exec
             .query_one(sea_orm::Statement::from_sql_and_values(
@@ -153,7 +156,7 @@ impl SqlRenderStore {
                 vec![Value::from(offset)],
             ))
             .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| provider_db_error(&error))?
             .is_some();
         Ok(SweepOutcome {
             removed: usize::try_from(removed).unwrap_or(usize::MAX),
@@ -239,7 +242,7 @@ impl SqlRenderStore {
             ],
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
         let held = read_publication(exec, backend, &name)
             .await?
             .ok_or_else(|| {
@@ -287,19 +290,19 @@ async fn read_publication(
             vec![Value::from(name.to_owned())],
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+        .map_err(|error| provider_db_error(&error))?
     else {
         return Ok(None);
     };
     let epoch: i64 = row
         .try_get_by_index(0)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     let token: i64 = row
         .try_get_by_index(1)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     let published_at_ms: i64 = row
         .try_get_by_index(2)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     Ok(Some(HeldPublication {
         fence: PublicationFence {
             epoch: as_u64(epoch),
@@ -332,25 +335,25 @@ impl RenderStore for SqlRenderStore {
                 ],
             ))
             .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| provider_db_error(&error))?
         else {
             return Ok(None);
         };
         let bytes: Vec<u8> = row
             .try_get_by_index(0)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let epoch: i64 = row
             .try_get_by_index(1)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let token: i64 = row
             .try_get_by_index(2)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let digest_hex: String = row
             .try_get_by_index(3)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let published_at_ms: i64 = row
             .try_get_by_index(4)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let Some(generation_digest) = decode_digest(&digest_hex) else {
             // A fence digest that is not 64 hex characters is a row this
             // build cannot reconstruct a fence from, so there is nothing to
@@ -440,7 +443,7 @@ impl RenderStore for SqlRenderStore {
             vec![Value::from(key.to_base64url())],
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
         Ok(())
     }
 
@@ -456,7 +459,7 @@ impl RenderStore for SqlRenderStore {
                 vec![],
             ))
             .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| provider_db_error(&error))?
             .ok_or_else(|| {
                 provider_error(FrameworkError::database(
                     "render cache L1 inspection returned no row".to_owned(),
@@ -464,10 +467,10 @@ impl RenderStore for SqlRenderStore {
             })?;
         let entries: i64 = row
             .try_get_by_index(0)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         let bytes: i64 = row
             .try_get_by_index(1)
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| provider_db_error(&error))?;
         // Occupancy, so every row the table holds counts - including one
         // whose retention has passed and which no sweep has reached yet.
         // That is what an operator asking how large L1 has grown needs to

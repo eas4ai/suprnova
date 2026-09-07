@@ -87,7 +87,10 @@ done
 # output for the same reason as above.
 echo
 echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::live_mysql"
-tiers_mysql_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_mysql 2>&1)"
+if ! tiers_mysql_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_mysql 2>&1)"; then
+    echo "$tiers_mysql_out"
+    exit 1
+fi
 echo "$tiers_mysql_out"
 for tiers_mysql_test in \
     live_mysql_record_creation_and_cas_conflict \
@@ -98,6 +101,12 @@ for tiers_mysql_test in \
         exit 1
     fi
 done
+# The exact number of `tiers::live_mysql` tests. Update it when one is added
+# or removed.
+if ! grep -qE "^test result: ok\. 3 passed" <<<"$tiers_mysql_out"; then
+    echo "check-mysql: the tiers summary line does not report exactly 3 passed" >&2
+    exit 1
+fi
 
 # The SQL record store's guarded upsert - the statement that must refuse a
 # lower fence and accept a higher one - is proved by an in-source unit test,
@@ -105,10 +114,19 @@ done
 # hazard, same output assertion.
 echo
 echo "==> cargo test -p suprnova --lib -- --ignored live_mysql"
-sql_store_mysql_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 live_mysql 2>&1)"
+if ! sql_store_mysql_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 live_mysql 2>&1)"; then
+    echo "$sql_store_mysql_out"
+    exit 1
+fi
 echo "$sql_store_mysql_out"
 if ! grep -qE "^test render_cache::providers::sql_store::tests::live_mysql_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one \.\.\. ok" <<<"$sql_store_mysql_out"; then
     echo "check-mysql: the SQL store guarded-upsert test did not report ok (filter may have matched nothing)" >&2
+    exit 1
+fi
+# The bare `live_mysql` filter selects exactly one in-source test. Update it
+# when another is added.
+if ! grep -qE "^test result: ok\. 1 passed" <<<"$sql_store_mysql_out"; then
+    echo "check-mysql: the --lib summary line does not report exactly 1 passed" >&2
     exit 1
 fi
 

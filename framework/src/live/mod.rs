@@ -56,7 +56,9 @@ pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,
 };
 pub use routes::LiveRouteGuard;
-pub use runtime::{LiveRuntime, verify_ledger_backend, verify_ledger_driver_for_test};
+pub use runtime::{
+    LiveRuntime, production_ledger_limits, verify_ledger_backend, verify_ledger_driver_for_test,
+};
 pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};

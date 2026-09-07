@@ -115,8 +115,9 @@ async fn an_instance_one_node_mounts_is_current_authority_on_the_other() {
 /// operation does yields, so joining them proves that the second node's claim
 /// is classified against the record the first node left, not that a
 /// compare-and-store conflict is recovered. The conflict path itself is
-/// covered by the kernel's own `a_stale_read_is_read_again_and_reclassified`
-/// unit test, which drives a store that steals the first write.
+/// covered by the kernel's own
+/// `a_stale_read_is_read_again_and_reclassified_rather_than_forced` unit
+/// test, which drives a store that steals the first write.
 #[tokio::test]
 async fn a_second_node_claiming_one_base_revision_joins_rather_than_grants() {
     let nodes = deployment();

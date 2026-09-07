@@ -45,7 +45,10 @@ use suprnova_live::render_cache::RenderCacheError;
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
 
-use super::{as_i64, as_u64, bind, is_unique_violation, provider_error, row_lock, sql_now_ms};
+use super::{
+    as_i64, as_u64, bind, is_unique_violation, provider_db_error, provider_error, row_lock,
+    sql_now_ms,
+};
 use crate::database::transaction::ExecutorChoice;
 use crate::{DB, FrameworkError, Transaction};
 
@@ -148,7 +151,7 @@ impl SqlLeaseStore {
                         return Ok(AcquireStep::Collided);
                     }
                     Err(error) => {
-                        return Err(provider_error(FrameworkError::database(error.to_string())));
+                        return Err(provider_db_error(&error));
                     }
                 }
             }
@@ -165,7 +168,7 @@ impl SqlLeaseStore {
                     ],
                 ))
                 .await
-                .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+                .map_err(|error| provider_db_error(&error))?;
                 // A takeover writes exactly one more than the row carried
                 // when this transaction locked it, so the re-read below can
                 // tell "my write landed" from "the guard refused it" without
@@ -230,16 +233,16 @@ async fn read_lease(
             vec![Value::from(name.to_owned())],
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+        .map_err(|error| provider_db_error(&error))?
     else {
         return Ok(None);
     };
     let lease_id: i64 = row
         .try_get_by_index(0)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     let expires_at_ms: i64 = row
         .try_get_by_index(1)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     Ok(Some(LeaseRow {
         lease_id: as_u64(lease_id),
         expires_at_ms: as_u64(expires_at_ms),
@@ -324,7 +327,7 @@ impl LeaseStore for SqlLeaseStore {
                 ],
             ))
             .await
-            .map_err(|error| provider_error(FrameworkError::database(error.to_string())))
+            .map_err(|error| provider_db_error(&error))
         };
         match released {
             Ok(_) => tx.commit().await.map_err(provider_error),
@@ -365,7 +368,7 @@ async fn mint_through(
         guard.clone(),
     ))
     .await
-    .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+    .map_err(|error| provider_db_error(&error))?;
     let Some(row) = exec
         .query_one(sea_orm::Statement::from_sql_and_values(
             backend,
@@ -373,19 +376,24 @@ async fn mint_through(
             guard,
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+        .map_err(|error| provider_db_error(&error))?
     else {
         return Ok(None);
     };
     let token: i64 = row
         .try_get_by_index(0)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     Ok(Some(as_u64(token)))
 }
 
 /// `SELECT` for one key's tenure, locked for the acquisition that is about
 /// to replace it where the dialect can lock it. SQLite has no `FOR UPDATE`
-/// and needs none: it serialises writers.
+/// and needs none: it serialises writers, and it refuses a write from a
+/// transaction whose read snapshot another writer has already overtaken
+/// (`SQLITE_BUSY_SNAPSHOT`) rather than letting that write land. That
+/// refusal is the property the re-read in `acquire_through` depends on
+/// there: a write that commits at all was measured against the tenure this
+/// transaction read.
 fn select_lease_sql(backend: DbBackend) -> Result<String, FrameworkError> {
     Ok(format!(
         "SELECT lease_id, expires_at_ms FROM {LEASES} WHERE render_key = {}{}",

@@ -362,8 +362,7 @@ impl RuntimeProviderCandidates {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let random: Arc<dyn InstanceIdGenerator> = Arc::new(SystemInstanceIdGenerator);
         let key_ring = Arc::new(build_key_ring()?);
-        let ledger_limits =
-            LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())?;
+        let ledger_limits = production_ledger_limits()?;
         // The limits above are the same in every driver: what
         // `LIVE_LEDGER_DRIVER` chooses is where the records live, never what
         // the state machine over them permits. Building the store reaches no
@@ -1940,6 +1939,27 @@ pub async fn verify_ledger_driver_for_test(driver: &LedgerDriver) -> Result<(), 
     verify_ledger_driver(driver).await
 }
 
+/// The instance-ledger limits every production runtime builds, whichever
+/// driver `LIVE_LEDGER_DRIVER` chose: a 30 second claim lease, a seven day
+/// instance lifetime, 64 retained accepted outcomes, and 100,000 live
+/// instances.
+///
+/// One function rather than one literal per assembly point, so a test that
+/// stands a second node's ledger beside a running runtime's gets the
+/// runtime's own numbers rather than a copy of them that can drift.
+///
+/// `#[doc(hidden)]`: the numbers are the runtime's business, not an
+/// application's, and they are not part of the public contract.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] if these numbers ever stop satisfying
+/// [`LedgerLimits`]'s own bounds, which is a Live boot failure.
+#[doc(hidden)]
+pub fn production_ledger_limits() -> Result<LedgerLimits, FrameworkError> {
+    LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())
+}
+
 /// The probe itself, over an explicit driver.
 async fn verify_ledger_driver(driver: &LedgerDriver) -> Result<(), FrameworkError> {
     match driver {
@@ -1987,8 +2007,7 @@ pub(super) fn assemble_for_harness_with_clock(
     clock: Arc<dyn Clock>,
 ) -> Result<LiveRuntime, FrameworkError> {
     let mut candidates = RuntimeProviderCandidates::production(&registry)?;
-    let ledger_limits =
-        LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())?;
+    let ledger_limits = production_ledger_limits()?;
     candidates.clock = Some(Arc::clone(&clock));
     candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
     assemble_runtime(config, registry, candidates)
@@ -2008,8 +2027,7 @@ pub(super) fn assemble_with_clock_override(
     clock: Arc<dyn Clock>,
 ) -> Result<LiveRuntime, FrameworkError> {
     let mut candidates = RuntimeProviderCandidates::from_graph(&runtime.graph);
-    let ledger_limits =
-        LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())?;
+    let ledger_limits = production_ledger_limits()?;
     candidates.clock = Some(Arc::clone(&clock));
     candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
     assemble_runtime(

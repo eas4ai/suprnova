@@ -155,7 +155,10 @@ done
 # and assert on the output for the same reason as above.
 echo
 echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::live_postgres"
-tiers_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_postgres 2>&1)"
+if ! tiers_pg_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_postgres 2>&1)"; then
+    echo "$tiers_pg_out"
+    exit 1
+fi
 echo "$tiers_pg_out"
 for tiers_pg_test in \
     live_postgres_record_creation_and_cas_conflict \
@@ -166,6 +169,12 @@ for tiers_pg_test in \
         exit 1
     fi
 done
+# The exact number of `tiers::live_postgres` tests. Update it when one is
+# added or removed.
+if ! grep -qE "^test result: ok\. 3 passed" <<<"$tiers_pg_out"; then
+    echo "check-postgres: the tiers summary line does not report exactly 3 passed" >&2
+    exit 1
+fi
 
 # The SQL record store's guarded upsert - the statement that must refuse a
 # lower fence and accept a higher one - is proved by an in-source unit test,
@@ -173,10 +182,19 @@ done
 # hazard, same output assertion.
 echo
 echo "==> cargo test -p suprnova --lib -- --ignored live_postgres"
-sql_store_pg_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 live_postgres 2>&1)"
+if ! sql_store_pg_out="$(cargo test -p suprnova --lib -- --ignored --test-threads=1 live_postgres 2>&1)"; then
+    echo "$sql_store_pg_out"
+    exit 1
+fi
 echo "$sql_store_pg_out"
 if ! grep -qE "^test render_cache::providers::sql_store::tests::live_postgres_the_guarded_upsert_refuses_a_lower_fence_and_takes_a_higher_one \.\.\. ok" <<<"$sql_store_pg_out"; then
     echo "check-postgres: the SQL store guarded-upsert test did not report ok (filter may have matched nothing)" >&2
+    exit 1
+fi
+# The bare `live_postgres` filter selects exactly one in-source test. Update
+# it when another is added.
+if ! grep -qE "^test result: ok\. 1 passed" <<<"$sql_store_pg_out"; then
+    echo "check-postgres: the --lib summary line does not report exactly 1 passed" >&2
     exit 1
 fi
 

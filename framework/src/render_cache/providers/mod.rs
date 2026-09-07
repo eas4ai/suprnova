@@ -32,7 +32,7 @@ pub use sql_instances::SqlInstanceRecordStore;
 pub use sql_lease::SqlLeaseStore;
 pub use sql_store::SqlRenderStore;
 
-use sea_orm::DbBackend;
+use sea_orm::{DbBackend, DbErr};
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 use crate::FrameworkError;
@@ -105,7 +105,7 @@ pub async fn store_now_ms(exec: &ExecutorChoice, offset_ms: u64) -> Result<u64, 
             vec![],
         ))
         .await
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?
+        .map_err(|error| provider_db_error(&error))?
         .ok_or_else(|| {
             provider_error(FrameworkError::database(
                 "store time query returned no row".to_owned(),
@@ -113,26 +113,97 @@ pub async fn store_now_ms(exec: &ExecutorChoice, offset_ms: u64) -> Result<u64, 
         })?;
     let now: i64 = row
         .try_get_by_index(0)
-        .map_err(|error| provider_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| provider_db_error(&error))?;
     Ok(u64::try_from(now).unwrap_or(0).saturating_add(offset_ms))
 }
 
 /// Collapses a backend failure into the one closed provider kind the
-/// RenderCache contract exposes, logging the underlying cause first.
+/// RenderCache contract exposes, logging the cause's closed-set kind first.
 ///
 /// The cause never reaches the caller: [`RenderCacheError`] carries a kind
 /// and nothing else, exactly so a driver message - which can echo bound
-/// values - can never travel back into a response. It is logged at `warn`
-/// so "no primary connection registered" stays distinguishable from "the
-/// database is down" in whatever collects these logs. Mirrors
-/// [`ledger`](super::ledger)'s own `provider_error`.
+/// values - can never travel back into a response. It does not reach the
+/// log either. What is logged is the failure's own variant name, which is
+/// enough to keep "no primary connection registered"
+/// (`kind="service_not_found"`) distinguishable from "the database is down"
+/// (`kind="database"`) in whatever collects these logs, and carries no
+/// render key, hex identity, or encoded record with it.
+/// [`ledger`](super::ledger)'s own `provider_error` makes the same collapse
+/// for the generation ledger's contract.
 pub(crate) fn provider_error(error: FrameworkError) -> RenderCacheError {
+    provider_error_kind(framework_error_kind(&error))
+}
+
+/// [`provider_error`] for a SeaORM failure, which is where a bound value
+/// would otherwise travel: [`db_error_kind`] names the variant and drops
+/// the driver's message.
+pub(crate) fn provider_db_error(error: &DbErr) -> RenderCacheError {
+    provider_error_kind(db_error_kind(error))
+}
+
+/// The one `warn` site behind [`provider_error`] and [`provider_db_error`].
+///
+/// `kind` is `&'static str` by signature, and that signature is the whole
+/// guarantee: nothing a backend, a driver, or a caller composed at runtime
+/// can be handed to it.
+pub(crate) fn provider_error_kind(kind: &'static str) -> RenderCacheError {
     tracing::warn!(
         target: "suprnova::render_cache",
-        %error,
+        kind,
         "render cache tier provider failure",
     );
     RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable)
+}
+
+/// The closed-set name of a SeaORM failure, for logging.
+///
+/// `DbErr`'s `Display` repeats the driver's own message, and the statements
+/// these adapters run bind render keys, hex identities, and encoded
+/// records, so that message is exactly the thing that must not be logged.
+/// The variant name says which layer failed and carries none of it.
+/// `DbErr` is `#[non_exhaustive]`, so an unrecognised future variant
+/// answers `"other"` rather than falling back to the message.
+pub(crate) fn db_error_kind(error: &DbErr) -> &'static str {
+    match error {
+        DbErr::ConnectionAcquire(_) => "connection_acquire",
+        DbErr::TryIntoErr { .. } => "try_into",
+        DbErr::Conn(_) => "conn",
+        DbErr::Exec(_) => "exec",
+        DbErr::Query(_) => "query",
+        DbErr::ConvertFromU64(_) => "convert_from_u64",
+        DbErr::UnpackInsertId => "unpack_insert_id",
+        DbErr::UpdateGetPrimaryKey => "update_get_primary_key",
+        DbErr::RecordNotFound(_) => "record_not_found",
+        DbErr::AttrNotSet(_) => "attr_not_set",
+        DbErr::Custom(_) => "custom",
+        DbErr::Type(_) => "type",
+        DbErr::Json(_) => "json",
+        DbErr::Migration(_) => "migration",
+        DbErr::RecordNotInserted => "record_not_inserted",
+        DbErr::RecordNotUpdated => "record_not_updated",
+        DbErr::BackendNotSupported { .. } => "backend_not_supported",
+        DbErr::KeyArityMismatch { .. } => "key_arity_mismatch",
+        DbErr::PrimaryKeyNotSet { .. } => "primary_key_not_set",
+        _ => "other",
+    }
+}
+
+/// The closed-set name of a framework failure, for logging.
+///
+/// The same rule as [`db_error_kind`], one layer up: a
+/// `FrameworkError::Database` message is a driver string, so the variant is
+/// what is logged and the message is dropped. The three variants these
+/// adapters can raise or receive are named individually, because the
+/// distinction between them is the one worth keeping - a service that was
+/// never registered is a deployment mistake, a database error is an
+/// outage - and everything else answers `"other"`.
+pub(crate) fn framework_error_kind(error: &FrameworkError) -> &'static str {
+    match error {
+        FrameworkError::Database(_) => "database",
+        FrameworkError::ServiceNotFound { .. } => "service_not_found",
+        FrameworkError::Internal { .. } => "internal",
+        _ => "other",
+    }
 }
 
 /// Milliseconds, counters, and identities as a `BIGINT` column stores them.
@@ -307,6 +378,78 @@ mod tests {
             "error returned from database: (code: 2067) UNIQUE constraint failed: suprnova_live_promotions.idempotency",
             "suprnova_live_instances"
         ));
+    }
+
+    #[test]
+    fn a_seaorm_failure_is_logged_as_a_variant_name_and_never_as_its_message() {
+        // What a failing statement actually carries back: the driver
+        // repeats the statement and its bound values, which for these
+        // adapters are render keys, hex identities, and encoded records.
+        let error = sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(
+            "error returned from database: INSERT INTO suprnova_live_instances \
+             VALUES ('0123456789abcdef', x'0a5245434f5244')"
+                .to_owned(),
+        ));
+        // The message is the leak this guards against, so prove it is
+        // really in the error before proving it is not in what is logged.
+        let message = error.to_string();
+        assert!(message.contains("0123456789abcdef"), "{message}");
+        assert!(message.contains("0a5245434f5244"), "{message}");
+
+        let logged = db_error_kind(&error);
+        assert_eq!(logged, "query");
+        assert!(!logged.contains("0123456789abcdef"), "{logged}");
+        assert!(!logged.contains("0a5245434f5244"), "{logged}");
+        assert!(!logged.contains("suprnova_live_instances"), "{logged}");
+
+        // Every arm answers a name of its own, and nothing composed at
+        // runtime can reach the log through any of them.
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::Conn(sea_orm::RuntimeErr::Internal(
+                "0123456789abcdef".to_owned()
+            ))),
+            "conn"
+        );
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::Custom("0123456789abcdef".to_owned())),
+            "custom"
+        );
+        assert_eq!(
+            db_error_kind(&sea_orm::DbErr::RecordNotInserted),
+            "record_not_inserted"
+        );
+    }
+
+    #[test]
+    fn a_framework_failure_is_logged_as_a_variant_name_and_never_as_its_message() {
+        // A `Database` message is a driver string one layer down, so the
+        // same rule applies to it.
+        let error = FrameworkError::database(
+            "error returned from database: UPDATE suprnova_render_leases SET \
+             render_key = 'rk1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'"
+                .to_owned(),
+        );
+        let message = error.to_string();
+        assert!(message.contains("rk1."), "{message}");
+
+        let logged = framework_error_kind(&error);
+        assert_eq!(logged, "database");
+        assert!(!logged.contains("rk1."), "{logged}");
+        assert!(!logged.contains("suprnova_render_leases"), "{logged}");
+
+        // The distinction the log exists for: a connection that was never
+        // registered is a deployment mistake, not an outage.
+        assert_eq!(
+            framework_error_kind(&FrameworkError::ServiceNotFound {
+                type_name: "suprnova::database::DbConnection"
+            }),
+            "service_not_found"
+        );
+        assert_eq!(
+            framework_error_kind(&FrameworkError::internal("rk1.secret".to_owned())),
+            "internal"
+        );
+        assert_eq!(framework_error_kind(&FrameworkError::Unauthorized), "other");
     }
 
     #[test]

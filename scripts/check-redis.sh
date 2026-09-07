@@ -90,7 +90,10 @@ export REDIS_TEST_URL="redis://127.0.0.1:${HOST_PORT}/"
 # tests, and refuse a summary line that reports nothing ran.
 echo
 echo "==> cargo test -p suprnova --test render_cache -- --ignored tiers::live_redis"
-redis_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_redis 2>&1)"
+if ! redis_out="$(cargo test -p suprnova --test render_cache -- --ignored --test-threads=1 tiers::live_redis 2>&1)"; then
+    echo "$redis_out"
+    exit 1
+fi
 echo "$redis_out"
 for redis_test in \
     live_redis_publish_fences_and_eviction_is_a_miss \
@@ -102,8 +105,13 @@ for redis_test in \
         exit 1
     fi
 done
-if ! grep -qE "^test result: ok\. [1-9][0-9]* passed" <<<"$redis_out"; then
-    echo "check-redis: no summary line reporting a non-zero passed count" >&2
+# The exact number of `tiers::live_redis` tests, pinned rather than "more
+# than none" so a test that quietly stops being selected - renamed out of
+# the prefix, or its `#[ignore]` dropped - fails here instead of shrinking
+# the run in silence. Update this number when a live_redis test is added or
+# removed.
+if ! grep -qE "^test result: ok\. 16 passed" <<<"$redis_out"; then
+    echo "check-redis: the summary line does not report exactly 16 passed" >&2
     exit 1
 fi
 

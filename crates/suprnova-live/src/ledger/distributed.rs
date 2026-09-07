@@ -769,9 +769,10 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
     ///
     /// Each operation drains the queue before it runs, so calling this is
     /// only necessary when a caller needs a dropped claim retired without
-    /// making another ledger request. A retirement that failed is still
-    /// queued when this returns: it has one more attempt, and then the
-    /// claim's lease is what retires it.
+    /// making another ledger request. A retirement that failed for the
+    /// first time is still queued when this returns and has one more
+    /// attempt; a second failure drops it, and then the claim's lease is
+    /// what retires it.
     pub async fn flush_cleanup(&self) -> Result<(), LedgerError> {
         self.drain_retirements().await
     }

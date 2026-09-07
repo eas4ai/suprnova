@@ -8,7 +8,7 @@
 //! | Column | Meaning |
 //! |---|---|
 //! | `scope` | lowercase hex of the trusted scope fingerprint, 64 characters |
-//! | `instance` / `idempotency` | lowercase hex of the server-assigned instance identity or the bounded retry identity, 32 characters |
+//! | `instance` / `idempotency` | lowercase hex of the server-assigned instance identity or the bounded retry identity, 32 to 64 characters in a `VARCHAR(64)` (both identities accept 16 to 32 bytes) |
 //! | `record` | the encoded record, opaque here: only the kernel's codec reads it |
 //! | `version` | the version a compare-and-store must carry to replace this state (instances only) |
 //! | `expires_at_ms` | store-time deadline after which the record is gone |
@@ -21,9 +21,9 @@
 //!
 //! `expires_at_ms` is the deadline the kernel computed on *its* clock and
 //! handed over as a bound value; every comparison against it is
-//! [`sql_now_ms`](super::sql_now_ms) inlined into the statement that reads
-//! or guards the row. A record past that deadline answers exactly as one
-//! that was never written, which is what the port promises.
+//! [`sql_now_ms`] inlined into the statement that reads or guards the row.
+//! A record past that deadline answers exactly as one that was never
+//! written, which is what the port promises.
 //!
 //! # The caller's transaction, when there is one
 //!
@@ -54,14 +54,17 @@
 //! operation's to reclaim.
 
 use async_trait::async_trait;
-use sea_orm::{DbBackend, Value};
+use sea_orm::{DbBackend, DbErr, Value};
 use suprnova_live::identity::UnixMillis;
 use suprnova_live::ledger::{
     CasOutcome, InstanceRecordKey, InstanceRecordStore, LedgerError, LedgerErrorKind,
     MAX_RECORD_BYTES, PromotionRecordKey, StoredRecord,
 };
 
-use super::{as_i64, as_u64, bind, is_unique_violation, row_lock, sql_now_ms};
+use super::{
+    as_i64, as_u64, bind, db_error_kind, framework_error_kind, is_unique_violation, row_lock,
+    sql_now_ms,
+};
 use crate::database::transaction::ExecutorChoice;
 use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 
@@ -158,7 +161,7 @@ impl SqlInstanceRecordStore {
                 ],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         if held.is_some() {
             return Ok(false);
         }
@@ -173,7 +176,7 @@ impl SqlInstanceRecordStore {
             ],
         ))
         .await
-        .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| ledger_db_error(&error))?;
 
         match exec
             .run(sea_orm::Statement::from_sql_and_values(
@@ -190,7 +193,7 @@ impl SqlInstanceRecordStore {
         {
             Ok(_) => Ok(true),
             Err(error) if is_unique_violation(&error.to_string(), table.name()) => Ok(false),
-            Err(error) => Err(ledger_error(FrameworkError::database(error.to_string()))),
+            Err(error) => Err(ledger_db_error(&error)),
         }
     }
 
@@ -222,7 +225,7 @@ impl SqlInstanceRecordStore {
                 vec![Value::from(self.offset()), Value::from(limit)],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         if rows.is_empty() {
             return Ok(());
         }
@@ -230,10 +233,10 @@ impl SqlInstanceRecordStore {
         for row in &rows {
             let scope: String = row
                 .try_get_by_index(0)
-                .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+                .map_err(|error| ledger_db_error(&error))?;
             let member: String = row
                 .try_get_by_index(1)
-                .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+                .map_err(|error| ledger_db_error(&error))?;
             victims.push(Value::from(scope));
             victims.push(Value::from(member));
         }
@@ -243,7 +246,7 @@ impl SqlInstanceRecordStore {
             victims,
         ))
         .await
-        .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| ledger_db_error(&error))?;
         Ok(())
     }
 
@@ -289,13 +292,13 @@ impl SqlInstanceRecordStore {
                 ],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| ledger_db_error(&error))?
         else {
             return Ok(CasOutcome::Missing);
         };
         let current: i64 = row
             .try_get_by_index(0)
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         if as_u64(current) != expected_version {
             return Ok(CasOutcome::Conflict);
         }
@@ -313,7 +316,7 @@ impl SqlInstanceRecordStore {
             ],
         ))
         .await
-        .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| ledger_db_error(&error))?;
 
         let Some(row) = exec
             .query_one(sea_orm::Statement::from_sql_and_values(
@@ -326,7 +329,7 @@ impl SqlInstanceRecordStore {
                 ],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| ledger_db_error(&error))?
         else {
             // The record elapsed between the locked read and the guarded
             // update, which PostgreSQL can genuinely reach inside one
@@ -338,7 +341,7 @@ impl SqlInstanceRecordStore {
         };
         let stored: i64 = row
             .try_get_by_index(0)
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         let stored = as_u64(stored);
         if stored == expected_version.saturating_add(1) {
             Ok(CasOutcome::Stored { version: stored })
@@ -366,16 +369,16 @@ impl SqlInstanceRecordStore {
                 ],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| ledger_db_error(&error))?
         else {
             return Ok(None);
         };
         let bytes: Vec<u8> = row
             .try_get_by_index(0)
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         let expires_at_ms: i64 = row
             .try_get_by_index(1)
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         // A reservation has no version column: nothing ever replaces one, it
         // is created and it elapses, so every read of one reports the
         // version a creation gives.
@@ -383,7 +386,7 @@ impl SqlInstanceRecordStore {
             RecordTable::Instances => {
                 let version: i64 = row
                     .try_get_by_index(2)
-                    .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+                    .map_err(|error| ledger_db_error(&error))?;
                 as_u64(version)
             }
             RecordTable::Promotions => FIRST_VERSION,
@@ -553,19 +556,39 @@ async fn write_executor() -> Result<ExecutorChoice, LedgerError> {
 }
 
 /// Collapses a backend failure into the one closed provider kind the ledger
-/// contract exposes, logging the underlying cause first.
+/// contract exposes, logging the cause's closed-set kind first.
 ///
 /// The cause never reaches the caller: [`LedgerError`] carries a kind and
 /// nothing else, exactly so a driver message - which can echo bound values,
 /// and whose bound values here include an encoded record - can never travel
-/// back into a response. It is logged at `warn` so "no primary connection
-/// registered" stays distinguishable from "the database is down" in whatever
-/// collects these logs. Mirrors [`provider_error`](super::provider_error),
-/// the same collapse for the render cache's own closed kind.
+/// back into a response. It does not reach the log either. What is logged
+/// is the failure's own variant name, which keeps "no primary connection
+/// registered" (`kind="service_not_found"`) distinguishable from "the
+/// database is down" (`kind="database"`) in whatever collects these logs
+/// without a record travelling with it. Mirrors
+/// [`provider_error`](super::provider_error), the same collapse for the
+/// render cache's own closed kind.
 fn ledger_error(error: FrameworkError) -> LedgerError {
+    ledger_error_kind(framework_error_kind(&error))
+}
+
+/// [`ledger_error`] for a SeaORM failure, which is the case where an
+/// encoded record would otherwise travel into the log:
+/// [`db_error_kind`](super::db_error_kind) names the variant and drops the
+/// driver's message.
+fn ledger_db_error(error: &DbErr) -> LedgerError {
+    ledger_error_kind(db_error_kind(error))
+}
+
+/// The one `warn` site behind [`ledger_error`] and [`ledger_db_error`].
+///
+/// `kind` is `&'static str` by signature, and that signature is the whole
+/// guarantee: nothing a backend, a driver, or a caller composed at runtime
+/// can be handed to it.
+fn ledger_error_kind(kind: &'static str) -> LedgerError {
     tracing::warn!(
         target: "suprnova::render_cache",
-        %error,
+        kind,
         "live instance record store provider failure",
     );
     LedgerError::new(LedgerErrorKind::ProviderUnavailable)
@@ -622,7 +645,7 @@ impl InstanceRecordStore for SqlInstanceRecordStore {
             vec![Value::from(address.scope), Value::from(address.member)],
         ))
         .await
-        .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+        .map_err(|error| ledger_db_error(&error))?;
         Ok(())
     }
 
@@ -659,7 +682,7 @@ impl InstanceRecordStore for SqlInstanceRecordStore {
                 vec![Value::from(self.offset())],
             ))
             .await
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?
+            .map_err(|error| ledger_db_error(&error))?
             .ok_or_else(|| {
                 ledger_error(FrameworkError::database(
                     "live instance count returned no row".to_owned(),
@@ -667,7 +690,7 @@ impl InstanceRecordStore for SqlInstanceRecordStore {
             })?;
         let live: i64 = row
             .try_get_by_index(0)
-            .map_err(|error| ledger_error(FrameworkError::database(error.to_string())))?;
+            .map_err(|error| ledger_db_error(&error))?;
         Ok(usize::try_from(live).unwrap_or(usize::MAX))
     }
 }

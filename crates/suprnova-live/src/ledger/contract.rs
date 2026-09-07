@@ -26,7 +26,16 @@ pub enum LedgerErrorKind {
     InvalidConfiguration,
     /// Promotion expiry was elapsed, overflowed, or exceeded configured lifetime.
     InvalidExpiry,
-    /// The proposed server instance identity already belongs to another promotion.
+    /// The proposed server instance identity already belongs to another
+    /// promotion, or a compare-and-store lost its race twice.
+    ///
+    /// A distributed provider reports it for an identity another promotion
+    /// holds, for a mount whose identity a reservation another node made
+    /// already holds, and for a claim, commit, abandon, or queued retirement
+    /// that read a record another node had already replaced and was
+    /// overtaken again on its one retry. Every form is a classified
+    /// rejection and never a partial write: the caller retries the whole
+    /// operation, with a fresh identity where it proposed one.
     InstanceConflict,
     /// The embedded provider reached its configured live-instance capacity.
     CapacityExceeded,

@@ -54,7 +54,7 @@ use hyper::Method;
 use serde_json::Value;
 use suprnova::StatusCode;
 use suprnova::live::testing::prepare_live_router_for_test;
-use suprnova::live::{LedgerDriver, verify_ledger_driver_for_test};
+use suprnova::live::{LedgerDriver, production_ledger_limits, verify_ledger_driver_for_test};
 use suprnova::render_cache::RenderCache;
 use suprnova::render_cache::ledger::tier_migration_present;
 use suprnova::render_cache::providers::{
@@ -67,8 +67,7 @@ use suprnova_live::clock::{Clock, SystemClock};
 use suprnova_live::identity::{InstanceId, Revision, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{
     CasOutcome, DistributedInstanceLedger, InstanceRecordKey, InstanceRecordStore, LedgerError,
-    LedgerErrorKind, LedgerLimits, LiveInstanceLedger, MAX_RECORD_BYTES, PromotionRecordKey,
-    StoredRecord,
+    LedgerErrorKind, LiveInstanceLedger, MAX_RECORD_BYTES, PromotionRecordKey, StoredRecord,
 };
 use suprnova_live::render_cache::entry::{EntryKind, EntryLimits, decode};
 use suprnova_live::render_cache::singleflight::{
@@ -2803,11 +2802,20 @@ async fn the_database_profile_publishes_to_sql_l1_serves_from_it_and_sweeps_thro
         before,
         "an L1 hit runs no handler"
     );
-    assert!(
-        RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
-            .await
-            .is_some(),
-        "and the entry it served is promoted back into L0"
+    let promoted = RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("and the entry it served is promoted back into L0");
+    assert_eq!(
+        promoted.kind,
+        EntryKind::Complete,
+        "a seed-only route caches whole, with no slot left to fill"
+    );
+    // A hit is only a hit if it answers with what was published. No handler
+    // ran between the two requests, so identical bytes are evidence that the
+    // row round-tripped, not that the route renders the same thing twice.
+    assert_eq!(
+        hit.body, first.body,
+        "the L1 hit serves the bytes the first response published"
     );
 
     // A stitched document's Composite entry round-trips through the same
@@ -2954,14 +2962,17 @@ async fn the_only_instance_identity() -> (ScopeFingerprint, InstanceId) {
 
 /// A ledger handle with nothing in common with the running runtime's but the
 /// backend: its own record store, its own clock, and the limits the runtime
-/// itself builds. This is the "second process" of these tests.
+/// itself builds - read from the runtime's own assembly seam rather than
+/// restated here, so a change to those numbers cannot leave this node
+/// running a state machine the real one does not. This is the "second
+/// process" of these tests.
 fn a_second_nodes_ledger<S: InstanceRecordStore + 'static>(
     store: S,
 ) -> Arc<dyn LiveInstanceLedger> {
     Arc::new(DistributedInstanceLedger::new(
         Arc::new(store),
         Arc::new(SystemClock),
-        LedgerLimits::new(30_000, 604_800_000, 64, 100_000).expect("the runtime's ledger limits"),
+        production_ledger_limits().expect("the runtime's ledger limits"),
     ))
 }
 

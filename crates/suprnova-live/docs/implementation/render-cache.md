@@ -913,10 +913,11 @@ lease can never outrank one minted under a newer one.
 implements `LiveInstanceLedger` by loading a record, applying one of the pure
 transitions in `ledger::state`, and compare-and-storing the result at exactly
 the version it read. A `Conflict` retries once from a fresh read and then
-reports `LedgerErrorKind::Contention`, a classified rejection rather than a
-partial state. `MemoryInstanceLedger` keeps its public name and constructor
-and is now this kernel over an in-memory store, so Tier 0 and both
-distributed tiers run one state machine and answer one conformance suite.
+reports `LedgerErrorKind::InstanceConflict`, a classified rejection rather
+than a partial state. `MemoryInstanceLedger` keeps its public name and
+constructor and is now this kernel over an in-memory store, so Tier 0 and
+both distributed tiers run one state machine and answer one conformance
+suite.
 
 `ledger/record.rs` is the record's only encoding: a `RECORD_VERSION` byte
 followed by the RFC 8785 canonical JSON of a mirror of the in-memory record,
@@ -1015,7 +1016,7 @@ compares against.
   leader's `publish_token` answers `LeaseFenced`, so it publishes nothing;
   the request's own response is still served, exactly as it is for any other
   publication failure.
-- A record store `Conflict` that survives one retry is `Contention`.
+- A record store `Conflict` that survives one retry is `InstanceConflict`.
 - Eviction, expiry, or a restart of Redis makes entries miss and instances
   missing. That is fresh-render recovery, never reconstructed authority: the
   coherence check against the database generation ledger runs on every hit
@@ -1119,6 +1120,26 @@ Each of these is ruled behaviour, not a defect.
   automatic sweep of its own and is reclaimed only through
   `RenderCache::sweep`; the Redis L1 needs none, because every entry it
   stores carries a `PEXPIRE` and Redis reclaims the bytes itself.
+- Above that bound the tiers count records differently. The SQL and Redis
+  stores count only records whose store deadline is still ahead, so an
+  elapsed record nothing has reclaimed yet is not counted at all. Tier 0's
+  memory store reclaims its bounded batch and then answers with its own
+  length, so once more than 64 deadlines are due at the same moment it
+  counts the surplus elapsed records too and reaches configured capacity a
+  little sooner than a distributed tier would. The divergence is invisible
+  below that bound and was not aligned on purpose: an exact live count on
+  the memory store is a full scan on every mount, which is the cost the
+  bounded reclaim exists to avoid.
+- Reclamation inside an ambient host transaction holds its row locks until
+  that transaction ends. The SQL record store joins the host's transaction
+  whenever one is open, so the `DELETE` its creating operation runs over
+  elapsed rows is the host's to commit, and a peer node whose own creating
+  operation would reach those rows waits on the locks for as long as the
+  host transaction lives. It is bounded by the batch size and costs
+  correctness nothing - an elapsed record a rollback puts back is still
+  elapsed and still invisible to every read - but a long host transaction is
+  a peer's latency. Only the database tier can do this to a peer: the Redis
+  record store never joins a host transaction.
 - Precise duplicate-key classification on MySQL needs 8.0.19 or newer. Older
   MySQL and MariaDB report `for key 'PRIMARY'` without the table prefix
   8.0.19 added, and this build refuses to read a message it cannot attribute
