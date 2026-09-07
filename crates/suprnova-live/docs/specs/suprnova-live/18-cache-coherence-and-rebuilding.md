@@ -1,7 +1,7 @@
 # Suprnova Live -- 18 Cache Coherence and Rebuilding
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-07
 
 ## Scope
 
@@ -275,6 +275,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Shipped the Database-coordinated and Externally accelerated
+  tiers over a fenced lease store port. Every cross-node expiry is decided on
+  the store's own clock, read inside the statement or script that guards the
+  state it decides, so a skewed node clock neither extends nor shortens a
+  lease. A key another node leads is a bypass rather than a wait: bounded
+  duplicate computation across nodes is permitted and two accepted
+  publications are not. Generation truth stays in the application database at
+  every tier, so the coherence check on every hit is a database read whatever
+  served the bytes.
 - 2026-08-21 -- The durable application database is generation authority at
   every tier; local memory and networked key/value providers are accelerators,
   not alternate generation truth.

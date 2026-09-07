@@ -118,7 +118,10 @@ includes
 `live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current`
 and its MySQL twin, run and asserted on by name in `scripts/check-postgres.sh`
 and `scripts/check-mysql.sh`; the Postgres one fails with the isolation level
-removed. The seams the `testing` default feature compiles into ordinary
+removed. (The Tier 1 and Tier 2 providers later added a second, `tiers` block
+to each of those two scripts, and a `scripts/check-redis.sh` beside them for
+the Tier 2 adapters; see "Deployment tiers and providers" in
+`render-cache.md`.) The seams the `testing` default feature compiles into ordinary
 builds were captured in `iterations/next/test-seams-in-ordinary-builds.md`
 rather than changed. The English manual's matching prose (the raw-read
 decline, the `Auth::user()` consequence, the PostgreSQL serialization note,
@@ -237,7 +240,10 @@ The gate install is the documented step for tooling that changed in a
 reviewed commit on this branch: Task 11 added the `render_cache_ledger` live
 test blocks to `scripts/check-postgres.sh` and `scripts/check-mysql.sh`, and
 the install record still named the commit from before them, so the runner
-refused to start on tooling drift. Re-recording from this branch's own tip
+refused to start on tooling drift. (The Tier 1 and Tier 2 providers later
+gave both scripts a `tiers` block of the same shape and added
+`scripts/check-redis.sh` to the default tier, which is tooling of the same
+kind and carries the same re-record obligation.) Re-recording from this branch's own tip
 is what the record is for.
 
 Every gate run this checkpoint produced, in order, with the tip it covered:

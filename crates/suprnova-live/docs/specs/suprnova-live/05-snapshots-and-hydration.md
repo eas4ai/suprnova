@@ -1,7 +1,7 @@
 # Suprnova Live -- 05 Snapshots and Hydration
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-07
 
 ## Scope
 
@@ -289,6 +289,14 @@ owner lineage records the newly applied parent revision.
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Shipped tier-provider Live instance ledgers as one kernel over
+  a record store port. The distributed ledger runs the same state machine the
+  Tier 0 memory ledger runs and answers the same conformance suite; records
+  carry revision metadata only, in a versioned canonical frame whose every
+  identity is revalidated on decode. A database record store joins the host's
+  ambient transaction, so a claim inside a rolled-back request leaves no row;
+  a Redis record store cannot join one and claims the successor first. Both
+  couplings remain permitted.
 - 2026-09-01 -- Bound production child admission to three independently checked
   authorities: the current child snapshot, the accepted parent successor
   snapshot and its exact signed lineage, and a purpose-separated v2 parameter

@@ -33,6 +33,9 @@ The engine crate owns the host-neutral contracts, under
 - `http.rs`: conditional evaluation and `Cache-Control`/`Vary` metadata.
 - `singleflight.rs`: the `RebuildCoordinator` trait, `LocalRebuildCoordinator`,
   and bounded rebuild admission.
+- `lease.rs`: the `LeaseStore` port, its in-memory reference implementation,
+  and `FencedLeaseCoordinator`, the kernel that turns a store into
+  cross-node rebuild leadership. See Deployment tiers and providers below.
 
 The framework adapts those contracts to Suprnova, under
 `framework/src/render_cache/`:
@@ -51,7 +54,13 @@ The framework adapts those contracts to Suprnova, under
   `GenerationLedger` implementation, and its migration presence check.
 - `orm.rs`: the write-side hooks that advance generations for supported ORM
   and query-builder writes.
-- `migration.rs`: the RenderCache schema migration.
+- `migration.rs`: `Migration`, the RenderCache schema migration, and
+  `TierMigration`, the four tables the database and Redis providers need on
+  top of it.
+- `providers/`: the six Tier 1 and Tier 2 adapters (`SqlRenderStore`,
+  `SqlLeaseStore`, `SqlInstanceRecordStore`, `RedisRenderStore`,
+  `RedisLeaseStore`, `RedisInstanceRecordStore`), the shared dialect and
+  Redis plumbing, and the one store-clock helper they all read.
 - `registry.rs`: `RenderCachePolicyTable`, `GroupPolicy`, and deterministic
   route/group policy resolution.
 - `live.rs`: `LiveDocumentFacts` and the Live-specific decline rule.
@@ -80,11 +89,15 @@ Two provider contracts carry the whole cache:
   advances nothing.
 
 `RenderCache::install(router, config)` checks that the RenderCache
-migration's tables are present, builds the Live key ring, assembles L0
-(`MemoryRenderStore`, bounded by `config.l0`), L1 (a `FileRenderStore` when
-`config.l1` names a directory, otherwise none), the clock, the rebuild
-coordinator (a `LocalRebuildCoordinator` with a 30 second lease and 128
-waiters unless overridden), and the SQL generation ledger; it then appends
+migration's tables are present, and, for a profile that reaches them, that
+the tier migration's tables are too and that every Redis endpoint the
+configuration would use answers a `PING`. It builds the Live key ring, then
+assembles L0 (`MemoryRenderStore`, bounded by `config.l0`), L1 and the
+rebuild coordinator (whichever providers the configured deployment profile
+names; under the default embedded profile that is a `FileRenderStore` when
+`config.l1` names a directory and otherwise none, with a
+`LocalRebuildCoordinator` at a 30 second lease and 128 waiters unless
+overridden), the clock, and the SQL generation ledger; it then appends
 `RenderCacheMiddleware` to the process-wide global middleware chain and
 marks the process installed. Installation never clears the middleware
 registry, so an application's own logging, session, CSRF, and auth
@@ -391,7 +404,10 @@ Two separate reads make up coherence around one render:
   read paths. Proven against a live PostgreSQL in
   `live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current`
   (and the MySQL twin), which `scripts/check-postgres.sh` and
-  `scripts/check-mysql.sh` run and assert on by name.
+  `scripts/check-mysql.sh` run and assert on by name. Those two scripts each
+  carry a second, later block that runs the Tier 1 adapter regressions by
+  name on the same servers, and `scripts/check-redis.sh` is their Tier 2
+  counterpart; see Deployment tiers and providers below.
 - **The owning transaction.** An ORM write inside a `DB::transaction`
   advances its generations inside that same transaction; a bare autocommit
   write (`model.save()` with no ambient transaction) has already committed
@@ -804,6 +820,371 @@ Each of these is ruled behaviour, not a defect.
   nothing composite is ever served, but the entry stays in L0 until eviction
   pressure, an epoch advance, or a republish removes it.
 
+## Deployment tiers and providers
+
+Tier 0 is one process: an in-process L0, an optional file L1, an in-process
+rebuild coordinator, and an in-process Live instance ledger, over an
+application database that already holds generation truth. Tier 1 and Tier 2
+keep every one of those semantics and move the three cross-node ones into a
+store several processes share. A **profile** names which providers a process
+builds; route declarations, policies, the collector, the key, the codec, the
+middleware flow, and composite stitching are the same at every tier, and no
+application-facing type changes between them.
+
+| Tier | Profile | L1 entries | Rebuild leadership | Live instance records |
+|---|---|---|---|---|
+| 0, Embedded | `embedded` | one file per key, or none | in process | in process |
+| 1, Database-coordinated | `database` | `suprnova_render_entries` | `suprnova_render_leases` | `suprnova_live_instances` and `suprnova_live_promotions` |
+| 2, Externally accelerated | `redis` | one Redis hash per key | one Redis hash per key | one Redis hash per record |
+
+Generation truth does not move. `SqlGenerationLedger` is the
+`GenerationLedger` at all three tiers, so the coherence check that runs on
+every hit is a database read whatever served the bytes. That is what keeps
+an accelerator an accelerator: Redis can lose everything it holds without
+anything stale being proven current, because nothing Redis holds proves
+currency in the first place.
+
+### Profiles and configuration
+
+`RenderCacheConfig` carries a `Profile` (`Embedded`, `Database`, `Redis`), an
+`L1Config` (`Disabled`, `File`, `Database`, `Redis`), and a
+`CoordinatorConfig` (`Local`, `Database`, `Redis`). The profile sets the
+other two; each can then be overridden on its own, so a deployment that wants
+its entries in the database but its rebuild leases in process says exactly
+that rather than choosing the nearest whole profile.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RENDER_CACHE_PROFILE` | `embedded` | `embedded`, `database`, or `redis`; sets the two below |
+| `RENDER_CACHE_L1` | the profile's | `disabled`, `file`, `database`, or `redis` |
+| `RENDER_CACHE_COORDINATOR` | the profile's | `local`, `database`, or `redis` |
+| `RENDER_CACHE_L1_BYTES` | 1 GiB | the whole directory for the file tier, one entry for the database and Redis tiers |
+| `RENDER_CACHE_REDIS_URL` | `REDIS_URL`, then `redis://127.0.0.1:6379` | where both Redis cache tiers connect |
+| `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | the key namespace both Redis cache tiers write under |
+| `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
+| `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
+| `LIVE_LEDGER_DRIVER` | `memory` | `memory`, `database`, or `redis` |
+| `LIVE_REDIS_URL` | `REDIS_URL`, then `redis://127.0.0.1:6379` | where the Redis ledger driver connects |
+| `LIVE_REDIS_PREFIX` | `suprnova_live:` | the key namespace the Redis ledger driver writes under |
+
+`RENDER_CACHE_L1_DIR` keeps exactly the meaning it had: under the embedded
+profile, setting it is still what turns L1 on at all. A variable with a
+closed set of accepted values that is set to something outside it fails the
+boot with a message that names the variable and never repeats the rejected
+value.
+
+The Live instance ledger is configured separately from the cache, because it
+is Live's authority rather than the cache's storage. `LIVE_LEDGER_DRIVER`
+chooses where instance records live, and a deployment can run the cache on
+one tier and the ledger on another.
+
+Both installs fail closed. `RenderCache::install` refuses a configuration
+that reaches a tier table the migration has not created, and pings every
+distinct Redis endpoint the configuration would use, once per endpoint. The
+Live driver is probed by `live::verify_ledger_backend`, which `Server::run`
+calls before any request is served: `LiveRuntime::bind` is synchronous and is
+reached from synchronous public constructors, so the probe cannot live inside
+it.
+
+### The two engine kernels
+
+Neither distributed provider could be written in the framework: the engine's
+lease and ledger types keep their constructors crate-private, which is what
+stops a host from minting authority the engine did not issue. So the engine
+gained two host-neutral kernels over two small store ports. A kernel owns
+every semantic; a port owns only atomicity and time.
+
+`render_cache::lease::FencedLeaseCoordinator<S: LeaseStore>` implements
+`RebuildCoordinator` by composing a `LocalRebuildCoordinator` (in-process
+waiters, unchanged) with a store that decides leadership across processes.
+`LeaseStore` is three operations, `try_acquire`, `mint_token`, and `release`,
+and `LeaseAttempt` is `Acquired { lease_id, expires_at_ms }` or `Held`.
+Admission runs the local coordinator first; `Wait` and `Bypass` pass through,
+and a local `Lead` then asks the store. `Acquired` is a `Lead` carrying the
+distributed lease id. `Held` answers `Bypass`, after handing the local lease
+back so this node's own waiters wake and re-admit rather than parking behind
+a leader that will never publish. `publish_token` mints from the store and
+turns a `None` into `RenderCacheErrorKind::LeaseFenced`, on which the
+middleware discards the render's bytes and publishes nothing. Tokens are
+monotonic per key across tenures, so a token minted under an older lease can
+never outrank one minted under a newer one.
+
+`ledger::distributed::DistributedInstanceLedger<S: InstanceRecordStore>`
+implements `LiveInstanceLedger` by loading a record, applying one of the pure
+transitions in `ledger::state`, and compare-and-storing the result at exactly
+the version it read. A `Conflict` retries once from a fresh read and then
+reports `LedgerErrorKind::Contention`, a classified rejection rather than a
+partial state. `MemoryInstanceLedger` keeps its public name and constructor
+and is now this kernel over an in-memory store, so Tier 0 and both
+distributed tiers run one state machine and answer one conformance suite.
+
+`ledger/record.rs` is the record's only encoding: a `RECORD_VERSION` byte
+followed by the RFC 8785 canonical JSON of a mirror of the in-memory record,
+the whole frame bounded at `MAX_RECORD_BYTES` (32,768). Every identity
+travels as text and comes back through its own validating constructor, so a
+record read from a store another process can write is validated exactly as
+protocol input is: decoding classifies and never panics, whatever the bytes
+are. Records carry revision metadata only, never component state, rendered
+HTML, or action arguments. `LedgerError::new` is public, as
+`RenderCacheError::new` already was, so a host adapter can report
+`ProviderUnavailable` or `CapacityExceeded` without engine help.
+
+### The six adapters and the four tables
+
+The adapters live in `framework/src/render_cache/providers/`. Each carries a
+decision to a backend and back; none of them makes one.
+
+| Adapter | Implements | Storage |
+|---|---|---|
+| `SqlRenderStore` | `RenderStore` | one row in `suprnova_render_entries` |
+| `SqlLeaseStore` | `LeaseStore` | one row in `suprnova_render_leases` |
+| `SqlInstanceRecordStore` | `InstanceRecordStore` | one row in `suprnova_live_instances` or `suprnova_live_promotions` |
+| `RedisRenderStore` | `RenderStore` | a `<prefix>entry:<key>` hash |
+| `RedisLeaseStore` | `LeaseStore` | a `<prefix>lease:<key>` hash plus a `<prefix>token:<key>` counter |
+| `RedisInstanceRecordStore` | `InstanceRecordStore` | `<prefix>instance:` and `<prefix>promotion:` hashes, indexed by a `<prefix>instances` sorted set |
+
+`TierMigration` (`m20260906_000000_create_render_cache_tier_tables`) creates
+the four tables, and a non-unique index on `expires_at_ms` for the three that
+are reclaimed, so a bounded sweep never scans the table; leases are taken
+over by primary key and need none. Render keys are stored as
+`RenderKey::to_base64url()` (`rk1.` plus 43 base64url characters), the lookup
+key itself and never a second hash of it. `scope` is `CHAR(64)`, the hex of a
+fixed 32-byte fingerprint; `instance` and `idempotency` are `VARCHAR(64)`,
+because `InstanceId` and `IdempotencyKey` are 16 to 32 bytes carried as hex.
+
+`L1Provider` is an enum (`File`, `Database`, `Redis`) rather than a trait
+object, for one reason: reclamation is provider-specific and is not part of
+the `RenderStore` contract, so `RenderCache::sweep` has to reach the
+provider's own sweep. Every read and publication goes through the enum's own
+`RenderStore` implementation, which delegates and nothing more.
+
+Publication is fenced inside the store, not around it.
+`SqlRenderStore::publish` reads the stored `(epoch, token)` under a row lock
+where the dialect has one, carries `PublicationFence::supersedes` into the
+upsert's own guard as well (a lock cannot hold a row that does not exist yet,
+and two nodes publishing a brand-new key can both find it absent), and
+re-reads in the same transaction, so the outcome is a stored fact rather than
+a dialect-specific affected-row count. `RedisRenderStore::publish` makes the
+same comparison inside one Lua script that returns an explicit status. Every
+SQL statement binds its values and every script receives `KEYS` and `ARGV`;
+no caller value is ever spliced into SQL or Lua text, and no error message
+carries a key, a byte, a record, or a URL.
+
+### Store time, and the offset seam
+
+Every cross-node expiry decision is made on the backend's own clock, read
+inside the operation that acts on it. `sql_now_ms(backend)` is the one place
+the dialects disagree:
+
+| Backend | Milliseconds since the Unix epoch |
+|---|---|
+| SQLite | `CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)` |
+| PostgreSQL | `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT` |
+| MySQL | `CAST(UNIX_TIMESTAMP(NOW(3)) * 1000 AS SIGNED)` |
+
+It is inlined into the statement that guards the row, and `store_now_ms`
+reads it on the executor carrying that statement rather than on a second
+connection, so an expiry is written and compared on one clock and one
+snapshot. The Redis scripts read `redis.call('TIME')` inside the script that
+guards the key. A node whose clock runs fast can therefore neither extend a
+lease, nor hide a live entry from its peers, nor declare a peer's record
+elapsed. The `now_ms` arguments the `RebuildCoordinator` methods take are
+node time and feed only the in-process coordinator.
+
+Moving store time in a test needs a seam, because no test here sleeps.
+`set_time_offset_for_test(offset_ms)` adds a fixed offset to the store clock
+one adapter reads. It is per adapter instance rather than process-wide on
+purpose, since several stores share one test binary and a process-global
+offset would let one test's expiry move another's, and production always
+passes zero. `RedisRenderStore` has no such seam and needs none: an entry's
+lifetime there is Redis's own `PEXPIRE`, not a stored deadline this crate
+compares against.
+
+### Failure semantics
+
+- A backend that is not there stops the boot, with one actionable sentence
+  naming the migration or the variable to fix. Nothing is ever served against
+  a missing table or an endpoint nothing answers.
+- A backend lost at runtime is a store error. Every adapter maps a driver
+  failure to `RenderCacheErrorKind::ProviderUnavailable` or
+  `LedgerErrorKind::ProviderUnavailable`; the route's `FailurePolicy` then
+  decides (open renders without caching, closed fails the request),
+  coordinator errors take the existing provider-failure path, and ledger
+  errors become Live provider failures.
+- A lease is taken over once store time has passed its expiry. The former
+  leader's `publish_token` answers `LeaseFenced` and its render is discarded.
+- A record store `Conflict` that survives one retry is `Contention`.
+- Eviction, expiry, or a restart of Redis makes entries miss and instances
+  missing. That is fresh-render recovery, never reconstructed authority: the
+  coherence check against the database generation ledger runs on every hit
+  regardless of which L1 served the bytes.
+- Bytes in a row or a hash are the signed codec frame, so a torn, truncated,
+  or tampered value fails its integrity check and is a miss rather than a
+  served page.
+
+The two record stores differ in one contracted way. `SqlInstanceRecordStore`
+joins the host's ambient transaction when one is open, so a claim taken
+inside a request that rolls back leaves no row, which is the coupling a
+database tier is chosen for. `RedisInstanceRecordStore` cannot join one and
+does not pretend to: a Redis-backed ledger claims the successor first and the
+host's effects follow. Specification 05 allows either coupling.
+`SqlLeaseStore` joins nothing either, deliberately: a lease taken inside
+someone else's transaction would become visible to other nodes only at that
+transaction's commit, and a rollback would silently drop a lease a peer had
+already observed as held.
+
+### No cross-node waiting
+
+A key another node holds is a `Bypass`: the request renders and publishes
+nothing. Nothing in this build polls, sleeps, or parks waiting for a peer's
+lease. The rebuild contract permits bounded duplicate computation across
+nodes and forbids two accepted publications, and the store's fence is what
+forbids the second one, so waiting would buy avoided work at the price of a
+request's latency depending on a process it cannot see.
+
+### Telemetry and test seams
+
+Telemetry is unchanged by the tiers: the six counter names and the closed
+attribute sets listed under Operations below are the same at every profile,
+and no counter, attribute, or label names a tier, a provider, or a backend.
+
+The seams the tier tests reach:
+
+- `set_time_offset_for_test` on `SqlRenderStore`, `SqlLeaseStore`,
+  `SqlInstanceRecordStore`, `RedisLeaseStore`, and
+  `RedisInstanceRecordStore`, described above.
+- `RenderCache::clear_l0_for_test`, which empties L0 and leaves L1, the
+  authority epoch, and the coordinator exactly as they were. It is the only
+  way a test can prove that a later request was served from L1 rather than
+  from memory.
+- `render_cache::sweep_l1(l1, now_ms, epoch)`, the body of
+  `RenderCache::sweep` with the runtime lookup lifted out, so a test can
+  drive a provider's own reclamation without binding the process singleton.
+- `live::verify_ledger_driver_for_test(driver)`, the ledger probe over a
+  driver a caller names rather than the bound runtime's, for the same reason.
+- `ledger_conformance::run_all` and `run_two_node` in
+  `suprnova-live-test-support`, the provider conformance suite written
+  against `LiveInstanceLedger` alone, so the same scenarios run over the
+  engine's kernels and over a framework adapter against a real backend.
+- `RedisPrefixGuard` in
+  `framework/tests/support/render_cache_tiers_support/`, which deletes
+  everything under one test's key prefix on drop, so a failed assertion
+  cannot leave keys behind; and in `framework/tests/render_cache/tiers.rs`,
+  `OffsetRecordStore`, the small trait that lets one generic conformance body
+  run over either record store, with `MirroredClockStore` keeping the suite's
+  `ControlledClock` and the store's own clock in step.
+
+Multi-node behaviour is proved at the provider layer, because the RenderCache
+runtime is a process singleton: two adapter handles over one backend stand in
+for two nodes. The middleware is proved end to end once per distributed
+profile on top of that. The Database profile runs in the default suite on a
+single-connection SQLite pool, which is what makes it prove something no
+larger pool could: a coordinator or publish call made inside the render's own
+read transaction would deadlock there rather than merely be slower. The Redis
+profile runs in the `#[ignore]`d `live_redis_*` tests, which
+`scripts/check-redis.sh` runs against a disposable `redis:7-alpine` container
+on a Docker-assigned loopback port; `scripts/check-postgres.sh` and
+`scripts/check-mysql.sh` each gained a tiers block that runs and asserts by
+name on the `live_postgres_*` and `live_mysql_*` twins.
+
+### Limitations
+
+Each of these is ruled behaviour, not a defect.
+
+- An instance record stays countable for 60 seconds after the instance
+  lifetime the node clock measures runs out. The gap is deliberate: it is the
+  same clock-skew allowance the rest of the crate gives, and it is what lets
+  a request arriving just after an instance elapsed be told
+  `RefreshReason::InstanceExpired` rather than `RefreshReason::Missing`. The
+  cost is that an elapsed instance occupies configured capacity for that
+  window. A promotion reservation gets no such window, because its retry
+  identity has to be free the instant it elapses.
+- Capacity is counted and then admitted, and across nodes those are not one
+  atomic step, so N nodes creating instances at once can over-admit by at
+  most N-1 against the configured `max_instances`. Each node's own count is
+  exact: both stores count exactly the records whose store deadline has not
+  passed, which is why an elapsed but still retained record is counted and a
+  record past the retention window is not.
+- Reclamation of records past their store deadline is bounded to 64 per
+  creating operation, on SQL and on Redis alike, the same number the
+  in-memory reference store uses. A burst of more than 64 due deadlines
+  leaves the surplus rows or index members for the operations that follow;
+  nothing reads or counts one waiting to be reclaimed. The database L1 has no
+  automatic sweep of its own and is reclaimed only through
+  `RenderCache::sweep`; the Redis L1 needs none, because every entry it
+  stores carries a `PEXPIRE` and Redis reclaims the bytes itself.
+- Precise duplicate-key classification on MySQL needs 8.0.19 or newer. Older
+  MySQL and MariaDB report `for key 'PRIMARY'` without the table prefix
+  8.0.19 added, and this build refuses to read a message it cannot attribute
+  to the statement's own table, so a genuine collision there degrades to
+  `ProviderUnavailable`. That is the safe direction, since a caller told the
+  store failed retries or reports while a caller told a peer holds the key
+  stops looking, and nothing is granted twice either way.
+- The Redis adapters target a single Redis 7 or newer instance. The scripts
+  touch keys they do not declare in `KEYS` (a reclamation pass deletes the
+  index members its own range read found), which Redis Cluster refuses, and
+  they read the store clock with `TIME` inside a script, which older servers
+  refuse.
+- `RedisRenderStore::inspect` is bounded rather than exhaustive: it reports
+  what a capped `SCAN` found, stopping at 10,000 keys or 1,000 rounds, and
+  says that it stopped. `SCAN` guarantees only that a key present for the
+  whole scan is returned at least once, so the count is approximate in both
+  directions rather than a floor.
+- `max_bytes` on the database and Redis L1 bounds one entry, checked before
+  any statement or command runs. It bounds neither the table nor the
+  keyspace, and neither tier evicts to make room: the storage is shared by
+  every node, so no single process holds an accurate picture of it, and
+  growth is bounded by retention instead. Only the file tier bounds a whole
+  directory, which it can because it owns that directory alone.
+- A lease row and a lease key are never deleted, and neither is the
+  publication token counter. Releasing sets the expiry to zero and leaves the
+  row or hash where it is, because a restarted tenure counter or token
+  counter would let a fenced-out leader's already-minted token outrank the
+  publication that replaced it. The lease keyspace is therefore bounded by
+  the number of distinct render keys ever rebuilt, not by the number
+  currently held.
+- A Redis-backed Live ledger never joins a host transaction and claims the
+  successor before the host's effects. Specification 05 allows either
+  coupling; a deployment that needs a claim to disappear with a rolled-back
+  request chooses the database tier, whose record store joins the ambient
+  transaction and therefore leaves no row when the host rolls back.
+- A bypassing node renders without publishing. There is no cross-node waiting
+  anywhere in this build, so a key another node is rebuilding costs this node
+  one duplicate render. Bounded duplicate computation across nodes is
+  accepted; two accepted publications are not.
+- Losing Redis loses stored bytes and instance records; it never loses
+  authority, and it can never make stale content current. Every hit is
+  checked against the database generation ledger whatever served it.
+- `SqlLeaseStore` always opens a short transaction of its own, and the
+  middleware calls `admit`, `publish_token`, and `release` outside any host
+  transaction. Both facts are load-bearing together, and both are proved by
+  the Database-profile middleware test on its one-connection pool, where
+  either being false would deadlock.
+- `instance` and `idempotency` are `VARCHAR(64)`, sized for the 16- to
+  32-byte identities this build issues carried as hex. A longer identity
+  would need a migration.
+- `LedgerError::new` is public. A host adapter has to be able to report a
+  store failure or a capacity refusal without engine help, and the
+  alternative, a second error type at the port, would have made every kernel
+  translate.
+- The Live ledger's fail-closed probe is a separate step,
+  `live::verify_ledger_backend`, which `Server::run` calls before any request
+  is served. It cannot live inside `LiveRuntime::bind`, which is synchronous
+  and is reached from synchronous public constructors and from tooling, so a
+  host that assembles a Live runtime without going through `Server::run` gets
+  no probe.
+- The store-time offset seam is per adapter instance and is never set in
+  production. It exists because a test here does not sleep, and a
+  process-global offset would let one test's expiry move another's.
+- `cargo test --test render_cache` run plainly reports two known `privacy::*`
+  failures. They predate this work and come from the shared-process runner
+  rather than from the tests; `cargo nextest`, the runner the gate uses,
+  gives each test its own process and is green.
+- Deferred: credible generation hints over Redis pub/sub, captured in
+  `iterations/next/redis-generation-hints.md`; Memcached; Redis Cluster;
+  cross-node waiting; and separately cached nested segments, captured in
+  `iterations/next/nested-cached-segments.md`.
+
 ## Operations
 
 ### File layout and the tally/disk invariant
@@ -874,6 +1255,13 @@ L1 is not touched by an epoch advance and keeps every pre-epoch file until
 | `RENDER_CACHE_FAILURE` | `open` (`closed` is the only other accepted value) |
 | `APP_BUILD_ID` | the application's own `CARGO_PKG_VERSION` |
 
+It also reads the deployment-profile variables (`RENDER_CACHE_PROFILE`,
+`RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`, `RENDER_CACHE_REDIS_URL`,
+`RENDER_CACHE_REDIS_PREFIX`, `RENDER_CACHE_LEASE_MS`, and
+`RENDER_CACHE_MAX_WAITERS`), which are tabled with their defaults under
+Deployment tiers and providers above, beside the Live instance ledger's own
+`LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL`, and `LIVE_REDIS_PREFIX`.
+
 ### Telemetry
 
 Six closed counter names: `suprnova.render_cache.lookups`,
@@ -907,9 +1295,15 @@ registers its own: neither ever prints a stored body or a raw key.
   documents).** A stitched entry's slots are re-rendered per request and
   never cached themselves, and a cached segment cannot contain another
   cached segment; captured in `iterations/next/nested-cached-segments.md`.
-- **Database and Redis tiers (plan C).** The only storage providers are the
-  in-process `MemoryRenderStore` (L0) and the file-backed `FileRenderStore`
-  (L1); there is no shared, cross-process, or cross-node tier.
+- **Memcached, Redis Cluster, and cross-node waiting.** The database and
+  Redis tiers ship (see Deployment tiers and providers above), but the Redis
+  adapters target a single Redis 7 or newer instance, no other network
+  key/value backend has an adapter, and a key another node is rebuilding is
+  a bypass rather than a wait.
+- **Credible generation hints.** Nothing publishes or listens for a signal
+  that a generation advanced, so a validation lease is shortened by nothing
+  but its own policy; captured in
+  `iterations/next/redis-generation-hints.md`.
 - **The budget harness (plan D).** RenderCache has no benchmark harness of
   its own, unlike the checked-in snapshot, action, upload, and asynchronous
   budgets.

@@ -1,7 +1,7 @@
 # Suprnova Live -- 15 Render Representations and Storage
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-07
 
 ## Scope
 
@@ -206,6 +206,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Shipped the database and Redis L1 providers behind the existing
+  store contract. A publication is fenced inside the store itself, in one
+  guarded statement or one script, so two nodes publishing the same new key
+  cannot both find it absent and let the lower fence land second. The entry
+  byte bound applies to one entry rather than to the shared table or
+  keyspace, and neither shared tier evicts to make room: growth there is
+  bounded by retention, and only the file tier bounds a whole directory.
 - 2026-08-21 -- RenderCache is a framework layer above `suprnova::Cache`, with a
   binary/raw storage path rather than JSON string serialization.
 - 2026-08-21 -- A proven hot hit should approach immutable static-response
