@@ -399,9 +399,11 @@ impl Server {
         // missing or whose Redis answers nothing must stop the boot rather
         // than fail every mount. `LiveRuntime::bind` above cannot do this
         // itself - it is synchronous, and both probes are I/O - so it builds
-        // the configured provider and this proves it. See
+        // the configured provider and this proves it. The driver was read
+        // from the environment once, at bind time, and this reads it off the
+        // runtime rather than parsing it again. See
         // `crate::live::verify_ledger_backend`.
-        crate::live::verify_ledger_backend(&crate::live::LedgerDriver::from_env()?).await?;
+        crate::live::verify_ledger_backend().await?;
 
         // Bootstrap localization - binds the default `FluentTranslator`
         // from `lang/` unless the app already bound its own `Translator`.

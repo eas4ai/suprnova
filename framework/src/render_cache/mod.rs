@@ -187,17 +187,19 @@ fn needs_tier_tables(config: &RenderCacheConfig) -> bool {
 /// Distinct, because the L1 tier and the coordinator each carry their own
 /// endpoint and a deployment may point them at different instances; one
 /// `PING` per instance is what proves the boot, and pinging the same one
-/// twice proves nothing further.
+/// twice proves nothing further. Distinct *by URL* alone: `PING` asks whether
+/// an instance answers, which the key namespace written on it cannot change,
+/// so two tiers on one instance under two prefixes are still one endpoint.
 fn redis_endpoints(config: &RenderCacheConfig) -> Vec<providers::RedisProviderConfig> {
     let mut endpoints: Vec<providers::RedisProviderConfig> = Vec::new();
     let mut push = |url: &str, prefix: &str| {
-        let endpoint = providers::RedisProviderConfig {
+        if endpoints.iter().any(|held| held.url == url) {
+            return;
+        }
+        endpoints.push(providers::RedisProviderConfig {
             url: url.to_owned(),
             prefix: prefix.to_owned(),
-        };
-        if !endpoints.contains(&endpoint) {
-            endpoints.push(endpoint);
-        }
+        });
     };
     if let L1Config::Redis { url, prefix, .. } = &config.l1 {
         push(url, prefix);
@@ -254,6 +256,53 @@ async fn build_coordinator(
             },
         )),
     })
+}
+
+/// Removes the entries `l1`'s own provider considers dead, bounded per call.
+///
+/// The body of [`RenderCache::sweep`], with the runtime lookup lifted out, so
+/// that the reclamation each tier actually performs can be exercised against a
+/// provider a caller built rather than only against the process-wide installed
+/// one. `RenderCache::install` binds a singleton every other test in a shared
+/// process can see, which is a heavy price for reaching one `match` arm.
+///
+/// `now_ms` and `epoch` are passed rather than read, and only the file tier
+/// consults either: an entry from an older epoch is already unreachable on the
+/// database tier (every key embeds the epoch it was derived under) and its row
+/// leaves on its own retention like any other, so that arm never consults the
+/// ledger, whatever `epoch` says here.
+///
+/// `#[doc(hidden)]`: the operator-facing entry point is
+/// [`RenderCache::sweep`]; this is `pub` so a conformance test outside this
+/// crate can reach a provider's own reclamation directly.
+///
+/// # Errors
+///
+/// Returns [`RenderCacheError`] when the provider's own removal fails.
+#[doc(hidden)]
+pub async fn sweep_l1(
+    l1: &L1Provider,
+    now_ms: u64,
+    epoch: u64,
+) -> Result<SweepOutcome, RenderCacheError> {
+    match l1 {
+        L1Provider::File(store) => store.sweep(now_ms, epoch).await,
+        // The database tier reads the epoch nowhere, for the reason this
+        // function's own doc gives. Deadness there is one comparison, made by
+        // the database's own clock inside the delete.
+        L1Provider::Database(store) => store.sweep(providers::sql_store::SWEEP_BATCH).await,
+        // The Redis tier has no sweep to run, and reporting one would be a lie
+        // rather than a courtesy. Every entry it stores carries a key lifetime
+        // (`PEXPIRE` to the retention), so Redis reclaims a dead entry's bytes
+        // itself, on its own schedule, without this process asking. Nothing
+        // was removed by this call, and nothing is left for a later one:
+        // `SweepOutcome { removed: 0, more_remain: false }` is the honest
+        // answer, the same one a configuration with no L1 at all gets.
+        L1Provider::Redis(_) => Ok(SweepOutcome {
+            removed: 0,
+            more_remain: false,
+        }),
+    }
 }
 
 /// The RenderCache facade: install, observe, inspect, and epoch control.
@@ -446,7 +495,7 @@ impl RenderCache {
             ));
         }
         for endpoint in redis_endpoints(&config) {
-            providers::redis::ping(&endpoint).await?;
+            providers::redis::ping(&endpoint, providers::redis::RENDER_CACHE_REDIS_URL).await?;
         }
         let l1 = match &config.l1 {
             L1Config::Disabled => None,
@@ -651,6 +700,7 @@ impl RenderCache {
     /// Returns [`RenderCacheError`] when no runtime is installed, the
     /// provider's own removal fails, or - for the file tier, which needs
     /// the current epoch to judge deadness - the ledger epoch read fails.
+    /// The reclamation itself is [`sweep_l1`].
     pub async fn sweep() -> Result<SweepOutcome, RenderCacheError> {
         let runtime = Self::runtime()
             .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
@@ -660,30 +710,13 @@ impl RenderCache {
                 more_remain: false,
             });
         };
-        match l1 {
-            L1Provider::File(store) => {
-                let epoch = runtime.ledger.epoch().await?;
-                store.sweep(runtime.now_ms(), epoch).await
-            }
-            // The database tier reads the epoch nowhere: an entry from an
-            // older epoch is already unreachable (every key embeds the
-            // epoch it was derived under), and its row leaves on its own
-            // retention like any other. Deadness there is one comparison,
-            // made by the database's own clock inside the delete.
-            L1Provider::Database(store) => store.sweep(providers::sql_store::SWEEP_BATCH).await,
-            // The Redis tier has no sweep to run, and reporting one would be
-            // a lie rather than a courtesy. Every entry it stores carries a
-            // key lifetime (`PEXPIRE` to the retention), so Redis reclaims a
-            // dead entry's bytes itself, on its own schedule, without this
-            // process asking. Nothing was removed by this call, and nothing
-            // is left for a later one: `SweepOutcome { removed: 0,
-            // more_remain: false }` is the honest answer, the same one a
-            // configuration with no L1 at all gets above.
-            L1Provider::Redis(_) => Ok(SweepOutcome {
-                removed: 0,
-                more_remain: false,
-            }),
-        }
+        // The epoch is read here, once, rather than inside `sweep_l1`: only
+        // the file tier needs one, and reading it is a ledger round trip.
+        let epoch = match l1 {
+            L1Provider::File(_) => runtime.ledger.epoch().await?,
+            _ => 0,
+        };
+        sweep_l1(l1, runtime.now_ms(), epoch).await
     }
 
     /// Test-only: the key text for a route with default variance and an
@@ -803,8 +836,112 @@ mod tests {
     //! gate for a cache that will never serve anything. This test binary has
     //! no database configured at all, so a probe that still ran would fail
     //! loudly right here.
+    //!
+    //! The three configuration-to-provider helpers are proven here too, and
+    //! deliberately without an install: they are pure or reach nothing, and
+    //! installing to exercise them would bind a process singleton every other
+    //! test in this binary can see.
     use super::*;
     use crate::http::text;
+
+    fn tier_config(l1: L1Config, coordinator: CoordinatorConfig) -> RenderCacheConfig {
+        let mut config = disabled_config();
+        config.enabled = true;
+        config.l1 = l1;
+        config.coordinator = coordinator;
+        config
+    }
+
+    fn redis_l1(url: &str, prefix: &str) -> L1Config {
+        L1Config::Redis {
+            url: url.to_owned(),
+            prefix: prefix.to_owned(),
+            max_bytes: 1024,
+        }
+    }
+
+    fn redis_coordinator(url: &str, prefix: &str) -> CoordinatorConfig {
+        CoordinatorConfig::Redis {
+            url: url.to_owned(),
+            prefix: prefix.to_owned(),
+            lease_ms: 30_000,
+            max_waiters: 128,
+        }
+    }
+
+    const LOCAL: CoordinatorConfig = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
+
+    #[test]
+    fn either_database_provider_alone_needs_the_tier_tables() {
+        // The L1 tier and the coordinator are chosen independently and reach
+        // different tables of the same migration, so neither may be the only
+        // one that makes install probe for it.
+        assert!(needs_tier_tables(&tier_config(
+            L1Config::Database { max_bytes: 1024 },
+            LOCAL
+        )));
+        assert!(needs_tier_tables(&tier_config(
+            L1Config::Disabled,
+            CoordinatorConfig::Database {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            }
+        )));
+        // And a configuration that reaches neither must not make an embedded
+        // application carry the migration.
+        assert!(!needs_tier_tables(&tier_config(L1Config::Disabled, LOCAL)));
+        assert!(!needs_tier_tables(&tier_config(
+            redis_l1("redis://one", "a:"),
+            redis_coordinator("redis://one", "b:")
+        )));
+    }
+
+    #[test]
+    fn one_endpoint_is_pinged_once_however_many_tiers_write_to_it() {
+        // `PING` asks whether an instance answers, which the namespace
+        // written on it cannot change, so the two tiers on one instance are
+        // one endpoint even under two prefixes.
+        let shared = redis_endpoints(&tier_config(
+            redis_l1("redis://one", "entries:"),
+            redis_coordinator("redis://one", "leases:"),
+        ));
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].url, "redis://one");
+
+        // Two instances are two endpoints, and both have to answer.
+        let split = redis_endpoints(&tier_config(
+            redis_l1("redis://one", "entries:"),
+            redis_coordinator("redis://two", "leases:"),
+        ));
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].url, "redis://one");
+        assert_eq!(split[1].url, "redis://two");
+
+        // A configuration with no Redis in it pings nothing at all.
+        assert!(redis_endpoints(&tier_config(L1Config::Disabled, LOCAL)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_coordinator_the_configuration_can_name_is_built_from_it() {
+        // Construction only: a lease store resolves its executor per
+        // operation and a Redis handle reaches nothing, so this proves the
+        // wiring without a database, an endpoint, or an installed runtime.
+        for config in [
+            LOCAL,
+            CoordinatorConfig::Database {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            },
+            redis_coordinator("redis://127.0.0.1:6379", "coordinator:"),
+        ] {
+            build_coordinator(&config)
+                .await
+                .expect("the configured coordinator is built");
+        }
+    }
 
     fn disabled_config() -> RenderCacheConfig {
         RenderCacheConfig {

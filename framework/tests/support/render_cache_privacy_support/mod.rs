@@ -64,8 +64,8 @@ use suprnova::live::{LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
-    FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy, RepresentationClass,
-    VarianceDimension,
+    CoordinatorConfig, FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy,
+    RepresentationClass, VarianceDimension,
 };
 use suprnova::testing::TestContainer;
 use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
@@ -923,6 +923,13 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
     config.l1 = L1Config::Disabled;
+    // Pinned alongside the L1 tier, and for the same reason: an ambient
+    // RENDER_CACHE_PROFILE or RENDER_CACHE_COORDINATOR must not change which
+    // providers this suite installs.
+    config.coordinator = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
 
     install_feature_evaluator().await;
 

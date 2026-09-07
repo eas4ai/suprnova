@@ -39,14 +39,13 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use suprnova::live::{LedgerDriver, verify_ledger_backend};
-use suprnova::render_cache::L1Provider;
-use suprnova::render_cache::config::{CoordinatorConfig, L1Config};
+use suprnova::live::{LedgerDriver, verify_ledger_driver_for_test};
 use suprnova::render_cache::ledger::tier_migration_present;
 use suprnova::render_cache::providers::{
     RedisInstanceRecordStore, RedisLeaseStore, RedisProviderConfig, RedisRenderStore,
     SqlInstanceRecordStore, SqlLeaseStore, SqlRenderStore,
 };
+use suprnova::render_cache::{CoordinatorConfig, L1Config, L1Provider, sweep_l1};
 use suprnova::{DB, FrameworkError};
 use suprnova_live::clock::Clock;
 use suprnova_live::identity::UnixMillis;
@@ -2399,38 +2398,28 @@ async fn the_database_profile_refuses_to_install_without_the_tier_migration() {
     );
 }
 
-/// The whole database profile end to end: it installs against the tier
-/// tables, builds both providers from the configuration, and its L1 is
-/// reachable through the operator-facing sweep.
+/// The `L1Provider::Database` arm of the sweep every operator reaches, over
+/// a provider this test built.
 ///
-/// One test rather than three deliberately. Installing binds a *process*
-/// singleton, and this binary runs its files' tests on shared threads under
-/// plain `cargo test`, so every install here is visible to whatever else is
-/// mid-request; keeping the installing surface to one test keeps that window
-/// as small as the coverage allows. (Under `cargo nextest`, the gate's
-/// runner, each test is its own process and the question does not arise.)
+/// [`sweep_l1`] is the body of `RenderCache::sweep` with the runtime lookup
+/// lifted out, and it is what this calls: installing a runtime to reach one
+/// `match` arm would bind a *process* singleton that every other test in this
+/// binary can see, and `RenderCache::sweep` adds nothing over `sweep_l1` but
+/// that lookup and the file tier's epoch read.
+///
+/// The epoch argument is deliberately a value no ledger would return: the
+/// database arm must not consult it, and passing one proves the arm ignores
+/// what it is given rather than merely that no ledger was queried.
 #[tokio::test]
-async fn the_database_profile_installs_both_providers_and_sweeps_through_the_facade() {
+async fn the_database_l1_provider_sweeps_its_own_rows_through_the_facade_body() {
     let _db = boot().await;
-    install(tier_config(
-        L1Config::Database {
-            max_bytes: 1024 * 1024,
-        },
-        CoordinatorConfig::Database {
-            lease_ms: 30_000,
-            max_waiters: 128,
-        },
-    ))
-    .await
-    .expect("the database profile installs against the tier tables");
+    let provider = L1Provider::Database(SqlRenderStore::new(1024 * 1024));
 
-    // Written through a second handle on the same database, which is what a
-    // second node would be. A retention of zero makes the row due by the
-    // database's own clock the moment it is written, so nothing here waits
-    // on a timer: the sweep's `now` is read after the publication's.
-    let store = SqlRenderStore::new(1024 * 1024);
+    // A retention of zero makes each row due by the database's own clock the
+    // moment it is written, so nothing here waits on a timer: the sweep's
+    // `now` is read after the publication's.
     for pattern in ["/facade-a", "/facade-b"] {
-        store
+        provider
             .publish(
                 &key(pattern),
                 Bytes::from_static(b"due immediately"),
@@ -2443,11 +2432,9 @@ async fn the_database_profile_installs_both_providers_and_sweeps_through_the_fac
     }
     assert_eq!(row_count().await, 2);
 
-    // The facade, not the store: this is the `L1Provider::Database` arm of
-    // `RenderCache::sweep`, which nothing else reaches.
-    let swept = suprnova::render_cache::RenderCache::sweep()
+    let swept = sweep_l1(&provider, 1_000, u64::MAX)
         .await
-        .expect("the installed database tier sweeps");
+        .expect("the database tier sweeps");
     assert_eq!(swept.removed, 2);
     assert!(!swept.more_remain);
     assert_eq!(row_count().await, 0);
@@ -2500,7 +2487,7 @@ async fn a_redis_profile_whose_endpoint_answers_nothing_refuses_to_install() {
 #[tokio::test]
 async fn the_live_database_ledger_driver_needs_the_same_migration() {
     let _db = boot_without_the_tier_tables().await;
-    let refused = verify_ledger_backend(&LedgerDriver::Database)
+    let refused = verify_ledger_driver_for_test(&LedgerDriver::Database)
         .await
         .expect_err("a database ledger without its tables must not boot");
     let message = refused.to_string();
@@ -2514,7 +2501,7 @@ async fn the_live_database_ledger_driver_needs_the_same_migration() {
 #[tokio::test]
 async fn the_live_database_ledger_driver_boots_once_the_migration_is_applied() {
     let _db = boot().await;
-    verify_ledger_backend(&LedgerDriver::Database)
+    verify_ledger_driver_for_test(&LedgerDriver::Database)
         .await
         .expect("the database ledger driver boots against the tier tables");
 }

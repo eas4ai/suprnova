@@ -60,8 +60,9 @@ use suprnova_live::ledger::{
 };
 
 use super::redis::{
-    RedisProvider, RedisProviderConfig, SharedScript, StoreTimeOffset, instance_index_key,
-    instance_key, ledger_error, promotion_key, timed_script, unreadable_ledger_status,
+    LIVE_REDIS_URL, RedisProvider, RedisProviderConfig, SharedScript, StoreTimeOffset,
+    instance_index_key, instance_key, ledger_error, promotion_key, timed_script,
+    unreadable_ledger_status,
 };
 use super::{as_i64, as_u64};
 use crate::FrameworkError;
@@ -258,10 +259,11 @@ impl RedisInstanceRecordStore {
     /// Redis connection URL. The message names the setting and never repeats
     /// its value, which can carry a password.
     pub async fn connect(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
-        Self::open(config)
+        Self::open(config, LIVE_REDIS_URL)
     }
 
-    /// [`Self::connect`] without the `async` marker.
+    /// [`Self::connect`] without the `async` marker, naming the setting whose
+    /// value produced `config`.
     ///
     /// The Live instance ledger is built by `LiveRuntime::bind`, which is
     /// synchronous, so this store has to be constructible without an `await`
@@ -273,11 +275,14 @@ impl RedisInstanceRecordStore {
     ///
     /// Returns [`FrameworkError`] when no asynchronous runtime is running on
     /// this thread or the configured URL is not a usable Redis connection
-    /// URL. The message names the setting and never repeats its value, which
+    /// URL. Every message names `setting` and never repeats its value, which
     /// can carry a password.
-    pub fn open(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
+    pub fn open(
+        config: &RedisProviderConfig,
+        setting: &'static str,
+    ) -> Result<Self, FrameworkError> {
         Ok(Self {
-            provider: RedisProvider::open(config)?,
+            provider: RedisProvider::open(config, setting)?,
             time_offset_ms: StoreTimeOffset::default(),
         })
     }
@@ -502,10 +507,12 @@ mod tests {
 
     #[test]
     fn creation_binds_every_argument_the_script_reads() {
-        // Spelled out on both sides, the way `redis_store`'s publication
-        // test pins `PUBLISH_LUA`: an edit to either that forgets the other
-        // would store a deadline as a reclamation batch, or reclaim against
-        // an offset, with nothing failing until a live Redis saw it.
+        // Pins which argument the *script* reads for what, the way
+        // `redis_store`'s publication test pins `PUBLISH_LUA`. It does not
+        // check the order the call site binds them in - only a live Redis
+        // sees both halves at once, and the `live_redis_*` tests are what
+        // prove they agree. What this catches is an edit to the script that
+        // moves a position without the reader moving with it.
         assert!(
             INSERT_LUA.contains("'record', ARGV[1], 'version', 1, 'expires_at_ms', ARGV[2]"),
             "ARGV[1] is the encoded record and ARGV[2] its deadline: {INSERT_LUA}"
@@ -528,12 +535,15 @@ mod tests {
         );
         assert!(
             !INSERT_LUA.contains("ARGV[5]"),
-            "four arguments, and the call site binds exactly four: {INSERT_LUA}"
+            "the script reads four arguments and no fifth: {INSERT_LUA}"
         );
     }
 
     #[test]
     fn the_replacement_binds_every_argument_the_script_reads() {
+        // Same reading as `creation_binds_every_argument_the_script_reads`
+        // above: which argument the script reads for what, not the order the
+        // call site binds them in.
         assert!(
             COMPARE_AND_STORE_LUA
                 .contains("'record', ARGV[1], 'version', next_version, 'expires_at_ms', ARGV[3]"),
@@ -558,7 +568,7 @@ mod tests {
         );
         assert!(
             !COMPARE_AND_STORE_LUA.contains("ARGV[5]"),
-            "four arguments, and the call site binds exactly four: {COMPARE_AND_STORE_LUA}"
+            "the script reads four arguments and no fifth: {COMPARE_AND_STORE_LUA}"
         );
     }
 

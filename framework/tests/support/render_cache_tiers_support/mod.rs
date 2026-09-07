@@ -324,7 +324,9 @@ pub async fn install(config: RenderCacheConfig) -> Result<(), FrameworkError> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
-    RenderCache::install(Router::new(), config).await.map(|_| ())
+    RenderCache::install(Router::new(), config)
+        .await
+        .map(|_| ())
 }
 
 // --- Tier 2: Redis ---

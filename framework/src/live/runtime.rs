@@ -81,6 +81,11 @@ struct RuntimeGraph {
     random: Arc<dyn InstanceIdGenerator>,
     key_ring: Arc<SnapshotKeyRing>,
     ledger: Arc<dyn LiveInstanceLedger>,
+    /// Which backend `ledger` above was built over, read once from the
+    /// environment at bind time and kept. [`verify_ledger_backend`] probes
+    /// this value rather than re-reading the environment, so the boot check
+    /// can never prove a driver the runtime is not running.
+    ledger_driver: LedgerDriver,
     promotion: Arc<PromotionService>,
     public_mount: Arc<PublicSeedMountService>,
     private_mount: Arc<PrivateMountService>,
@@ -337,6 +342,9 @@ struct RuntimeProviderCandidates {
     random: Option<Arc<dyn InstanceIdGenerator>>,
     key_ring: Option<Arc<SnapshotKeyRing>>,
     ledger: Option<Arc<dyn LiveInstanceLedger>>,
+    /// Travels with `ledger` rather than beside it: an omitted ledger is a
+    /// readiness case, a driver is a fact about the one that was built.
+    ledger_driver: LedgerDriver,
     ports: super::ports::HostPortCandidates,
 }
 
@@ -345,6 +353,7 @@ struct RuntimeProviders {
     random: Arc<dyn InstanceIdGenerator>,
     key_ring: Arc<SnapshotKeyRing>,
     ledger: Arc<dyn LiveInstanceLedger>,
+    ledger_driver: LedgerDriver,
     ports: super::ports::HostPorts,
 }
 
@@ -361,7 +370,12 @@ impl RuntimeProviderCandidates {
         // backend - a SQL store resolves its executor per operation and a
         // Redis store is a handle - so a driver that cannot be reached is
         // refused by `verify_ledger_backend` at boot rather than here.
-        let ledger: Arc<dyn LiveInstanceLedger> = match LedgerDriver::from_env()? {
+        //
+        // Read once, here, and carried on the runtime from this point on:
+        // `verify_ledger_backend` probes what was built rather than what the
+        // environment says a second time.
+        let ledger_driver = LedgerDriver::from_env()?;
+        let ledger: Arc<dyn LiveInstanceLedger> = match &ledger_driver {
             LedgerDriver::Memory => {
                 Arc::new(MemoryInstanceLedger::new(Arc::clone(&clock), ledger_limits))
             }
@@ -371,10 +385,13 @@ impl RuntimeProviderCandidates {
                 ledger_limits,
             )),
             LedgerDriver::Redis { url, prefix } => Arc::new(DistributedInstanceLedger::new(
-                Arc::new(RedisInstanceRecordStore::open(&RedisProviderConfig {
-                    url,
-                    prefix,
-                })?),
+                Arc::new(RedisInstanceRecordStore::open(
+                    &RedisProviderConfig {
+                        url: url.clone(),
+                        prefix: prefix.clone(),
+                    },
+                    crate::render_cache::providers::redis::LIVE_REDIS_URL,
+                )?),
                 Arc::clone(&clock),
                 ledger_limits,
             )),
@@ -384,6 +401,7 @@ impl RuntimeProviderCandidates {
             random: Some(random),
             key_ring: Some(key_ring),
             ledger: Some(ledger),
+            ledger_driver,
             ports: super::ports::HostPortCandidates::production(registry)?,
         })
     }
@@ -394,6 +412,7 @@ impl RuntimeProviderCandidates {
             random: Some(Arc::clone(&graph.random)),
             key_ring: Some(Arc::clone(&graph.key_ring)),
             ledger: Some(Arc::clone(&graph.ledger)),
+            ledger_driver: graph.ledger_driver.clone(),
             ports: graph.ports.candidates(),
         }
     }
@@ -450,6 +469,7 @@ impl RuntimeProviderCandidates {
             ledger: self
                 .ledger
                 .ok_or_else(|| missing_provider("instance ledger"))?,
+            ledger_driver: self.ledger_driver,
             ports: self.ports.finalize(missing_provider)?,
         })
     }
@@ -1719,6 +1739,7 @@ fn assemble_runtime(
         random,
         key_ring,
         ledger,
+        ledger_driver,
         ports,
     } = candidates.finalize()?;
     let input = InputLimits::new(
@@ -1848,6 +1869,7 @@ fn assemble_runtime(
             random,
             key_ring,
             ledger,
+            ledger_driver,
             promotion,
             public_mount,
             private_mount,
@@ -1888,14 +1910,38 @@ fn assemble_runtime(
 /// closed on an unreachable cache driver. It is a separate step rather than
 /// part of `LiveRuntime::bind` because that function is synchronous - it is
 /// reached from synchronous public constructors and from tooling - and both
-/// probes here are I/O.
+/// probes here are I/O. It takes no argument and reads the driver the bound
+/// runtime is actually running, so it can never prove a driver nothing uses.
 ///
 /// # Errors
 ///
-/// Returns [`FrameworkError`] naming `LIVE_LEDGER_DRIVER` when the database
-/// driver's tables are absent, and `LIVE_REDIS_URL` when the Redis driver's
-/// endpoint does not answer. Neither message repeats a configured value.
-pub async fn verify_ledger_backend(driver: &LedgerDriver) -> Result<(), FrameworkError> {
+/// Returns [`FrameworkError`] when the Live runtime cannot be bound, naming
+/// `LIVE_LEDGER_DRIVER` when the database driver's tables are absent, and
+/// naming `LIVE_REDIS_URL` when the Redis driver's endpoint does not answer.
+/// No message repeats a configured value.
+pub async fn verify_ledger_backend() -> Result<(), FrameworkError> {
+    verify_ledger_driver(&LiveRuntime::bind()?.graph.ledger_driver).await
+}
+
+/// Test-only: [`verify_ledger_backend`] against a driver a caller names,
+/// rather than the bound runtime's.
+///
+/// `#[doc(hidden)]`: not part of the public contract. It exists because the
+/// database driver's refusal needs a database, and binding a Live runtime to
+/// carry that driver would bind a *process* singleton every other test in a
+/// shared process can see - the price this crate's other test seams exist to
+/// avoid.
+///
+/// # Errors
+///
+/// Exactly [`verify_ledger_backend`]'s.
+#[doc(hidden)]
+pub async fn verify_ledger_driver_for_test(driver: &LedgerDriver) -> Result<(), FrameworkError> {
+    verify_ledger_driver(driver).await
+}
+
+/// The probe itself, over an explicit driver.
+async fn verify_ledger_driver(driver: &LedgerDriver) -> Result<(), FrameworkError> {
     match driver {
         LedgerDriver::Memory => Ok(()),
         LedgerDriver::Database => {
@@ -1911,25 +1957,18 @@ pub async fn verify_ledger_backend(driver: &LedgerDriver) -> Result<(), Framewor
                 ))
             }
         }
+        // Reported as the provider itself reports it: it was handed the name
+        // of the setting an operator would change, so there is one message
+        // per failure rather than a re-worded copy here.
         LedgerDriver::Redis { url, prefix } => {
-            crate::render_cache::providers::redis::ping(&RedisProviderConfig {
-                url: url.clone(),
-                prefix: prefix.clone(),
-            })
+            crate::render_cache::providers::redis::ping(
+                &RedisProviderConfig {
+                    url: url.clone(),
+                    prefix: prefix.clone(),
+                },
+                crate::render_cache::providers::redis::LIVE_REDIS_URL,
+            )
             .await
-            .map_err(|error| {
-                tracing::warn!(
-                    target: "suprnova::live",
-                    %error,
-                    "live instance ledger Redis did not answer PING at boot",
-                );
-                FrameworkError::internal(
-                    "LIVE_LEDGER_DRIVER=redis, but the configured Redis did not answer PING. \
-                     Fix LIVE_REDIS_URL, start the instance it names, or unset \
-                     LIVE_LEDGER_DRIVER to run the in-process ledger. The endpoint is not \
-                     repeated here: it can carry a password.",
-                )
-            })
         }
     }
 }
@@ -2143,7 +2182,7 @@ mod ledger_backend_tests {
     #[tokio::test]
     async fn a_redis_ledger_that_answers_nothing_stops_the_boot_without_naming_the_endpoint() {
         let driver = closed_port_driver();
-        let refused = verify_ledger_backend(&driver)
+        let refused = verify_ledger_driver(&driver)
             .await
             .expect_err("a ledger backend nothing answers must not boot");
         let message = refused.to_string();
@@ -2157,7 +2196,7 @@ mod ledger_backend_tests {
 
     #[tokio::test]
     async fn the_in_process_ledger_needs_no_backend_and_is_always_reachable() {
-        verify_ledger_backend(&LedgerDriver::Memory)
+        verify_ledger_driver(&LedgerDriver::Memory)
             .await
             .expect("the in-process ledger reaches nothing and so can fail nothing");
     }

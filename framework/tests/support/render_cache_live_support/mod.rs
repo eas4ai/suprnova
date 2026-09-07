@@ -424,6 +424,13 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
     render_cache_config.enabled = true;
     render_cache_config.l1 = suprnova::render_cache::L1Config::Disabled;
+    // Pinned alongside the L1 tier, and for the same reason: an ambient
+    // RENDER_CACHE_PROFILE or RENDER_CACHE_COORDINATOR must not change which
+    // providers this suite installs.
+    render_cache_config.coordinator = suprnova::render_cache::CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
 
     // Registered globally, and before `RenderCache::install`, for the same
     // ordering reason `render_cache_middleware_support::boot` documents:

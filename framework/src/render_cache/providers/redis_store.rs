@@ -50,8 +50,8 @@ use suprnova_live::render_cache::store::{
 
 use super::as_i64;
 use super::redis::{
-    RedisProvider, RedisProviderConfig, SharedScript, entry_key, entry_scan_pattern,
-    provider_error, unreadable_status,
+    RENDER_CACHE_REDIS_URL, RedisProvider, RedisProviderConfig, SharedScript, entry_key,
+    entry_scan_pattern, provider_error, unreadable_status,
 };
 use crate::FrameworkError;
 
@@ -188,7 +188,7 @@ impl RedisRenderStore {
         max_bytes: u64,
     ) -> Result<Self, FrameworkError> {
         Ok(Self {
-            provider: RedisProvider::connect(config).await?,
+            provider: RedisProvider::connect(config, RENDER_CACHE_REDIS_URL).await?,
             max_bytes,
         })
     }

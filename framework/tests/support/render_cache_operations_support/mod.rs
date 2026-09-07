@@ -29,8 +29,8 @@ use suprnova::auth::Authenticatable;
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
-    FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy, RepresentationClass, StorageLayers,
-    VarianceDimension,
+    CoordinatorConfig, FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy,
+    RepresentationClass, StorageLayers, VarianceDimension,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
@@ -279,6 +279,13 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
             max_bytes: 16 * 1024 * 1024,
         },
         None => L1Config::Disabled,
+    };
+    // Pinned alongside the L1 tier, and for the same reason: an ambient
+    // RENDER_CACHE_PROFILE or RENDER_CACHE_COORDINATOR must not change which
+    // providers this suite installs.
+    config.coordinator = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
     };
 
     // Same ordering requirement `render_cache_middleware_support` documents

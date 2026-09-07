@@ -53,8 +53,8 @@ use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
 
 use super::redis::{
-    RedisProvider, RedisProviderConfig, SharedScript, StoreTimeOffset, lease_key, provider_error,
-    timed_script, token_key, unreadable_status,
+    RENDER_CACHE_REDIS_URL, RedisProvider, RedisProviderConfig, SharedScript, StoreTimeOffset,
+    lease_key, provider_error, timed_script, token_key, unreadable_status,
 };
 use super::{as_i64, as_u64};
 use crate::FrameworkError;
@@ -167,7 +167,7 @@ impl RedisLeaseStore {
     /// its value, which can carry a password.
     pub async fn connect(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
         Ok(Self {
-            provider: RedisProvider::connect(config).await?,
+            provider: RedisProvider::connect(config, RENDER_CACHE_REDIS_URL).await?,
             time_offset_ms: StoreTimeOffset::default(),
         })
     }

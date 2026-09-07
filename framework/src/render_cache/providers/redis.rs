@@ -89,6 +89,17 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 /// own ledger driver).
 pub(crate) const REDACTED_URL: &str = "redis://<redacted>";
 
+/// The environment variable that names where the render cache tiers connect.
+///
+/// Named once here rather than spelled at each call site, so a refusal from
+/// the L1 store, the lease store, or install's own `PING` cannot drift into
+/// naming three different things.
+pub(crate) const RENDER_CACHE_REDIS_URL: &str = "RENDER_CACHE_REDIS_URL";
+
+/// The environment variable that names where the Live instance ledger
+/// connects, for the same reason.
+pub(crate) const LIVE_REDIS_URL: &str = "LIVE_REDIS_URL";
+
 /// Where a Redis-backed tier provider connects, and under what namespace.
 ///
 /// One configuration serves all three adapters, so a deployment points every
@@ -140,6 +151,12 @@ impl RedisProvider {
     /// Builds a handle on `config`, failing only when the URL or the driver
     /// configuration is unusable.
     ///
+    /// `setting` is the environment variable an operator would change to fix
+    /// the failure - `RENDER_CACHE_REDIS_URL` for the render cache tiers,
+    /// `LIVE_REDIS_URL` for the Live instance ledger. Every message below
+    /// names it, and none of them repeats the URL, which can carry a
+    /// password.
+    ///
     /// Asynchronous although it awaits nothing: the manager spawns its own
     /// background task as it is built, so this has to run on an executor, and
     /// the signature is what makes that a compile-time requirement rather
@@ -148,11 +165,12 @@ impl RedisProvider {
     /// # Errors
     ///
     /// Returns [`FrameworkError`] when the URL is not a Redis connection URL
-    /// or the manager cannot be created. Neither message repeats the URL:
-    /// it can carry a password, and a configuration failure is reported by
-    /// naming the setting, never its value.
-    pub(crate) async fn connect(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
-        Self::open(config)
+    /// or the manager cannot be created.
+    pub(crate) async fn connect(
+        config: &RedisProviderConfig,
+        setting: &'static str,
+    ) -> Result<Self, FrameworkError> {
+        Self::open(config, setting)
     }
 
     /// [`Self::connect`] without the `async` marker, for the one caller that
@@ -171,25 +189,30 @@ impl RedisProvider {
     ///
     /// Returns [`FrameworkError`] when no asynchronous runtime is running on
     /// this thread, when the URL is not a Redis connection URL, or when the
-    /// manager cannot be created. No message repeats the URL: it can carry a
-    /// password.
-    pub(crate) fn open(config: &RedisProviderConfig) -> Result<Self, FrameworkError> {
+    /// manager cannot be created. Every message names `setting` and none
+    /// repeats the URL: it can carry a password.
+    pub(crate) fn open(
+        config: &RedisProviderConfig,
+        setting: &'static str,
+    ) -> Result<Self, FrameworkError> {
         if tokio::runtime::Handle::try_current().is_err() {
-            return Err(FrameworkError::internal(
-                "a Redis provider was built outside an asynchronous runtime, which its \
-                 connection manager needs; build it from within the server's runtime."
-                    .to_owned(),
-            ));
+            return Err(FrameworkError::internal(format!(
+                "the Redis provider {setting} configures was built outside an asynchronous \
+                 runtime, which its connection manager needs; build it from within the \
+                 server's runtime."
+            )));
         }
         let client = redis::Client::open(config.url.as_str()).map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
                 %error,
-                "render cache Redis provider url is unusable",
+                setting,
+                "redis provider url is unusable",
             );
-            FrameworkError::internal(
-                "render cache Redis provider url is not a usable Redis connection url".to_owned(),
-            )
+            FrameworkError::internal(format!(
+                "{setting} is not a usable Redis connection url. The value is not repeated \
+                 here: it can carry a password."
+            ))
         })?;
         let manager = ConnectionManagerConfig::new()
             .set_connection_timeout(Some(CONNECT_TIMEOUT))
@@ -200,11 +223,12 @@ impl RedisProvider {
             tracing::warn!(
                 target: "suprnova::render_cache",
                 %error,
-                "render cache Redis provider connection manager is unusable",
+                setting,
+                "redis provider connection manager is unusable",
             );
-            FrameworkError::internal(
-                "render cache Redis provider connection manager could not be created".to_owned(),
-            )
+            FrameworkError::internal(format!(
+                "the Redis connection manager {setting} configures could not be created."
+            ))
         })?;
         Ok(Self {
             conn,
@@ -238,26 +262,34 @@ impl fmt::Debug for RedisProvider {
     }
 }
 
-/// Proves the configured Redis is actually there, by asking it.
+/// Proves the Redis `setting` names is actually there, by asking it.
 ///
 /// `RedisProvider::connect` (crate-private, so this is a plain code span
 /// rather than a link) builds a handle and reaches nothing, which is what
 /// makes a runtime outage a provider failure rather than a construction
-/// error. A profile pointed at an endpoint that is not there is a different
-/// thing entirely - a deployment misconfiguration - and it must fail once, at
+/// error. A deployment pointed at an endpoint that is not there is a
+/// different thing entirely - a misconfiguration - and it must fail once, at
 /// boot, rather than on every request. This is the check that makes that
-/// difference: `install` calls it before it builds a Redis-backed provider,
-/// exactly as it probes for the tier migration before building a
+/// difference: both boot paths call it before building a Redis-backed
+/// provider, exactly as they probe for the tier migration before building a
 /// database-backed one.
+///
+/// `setting` is the environment variable an operator would change:
+/// `RENDER_CACHE_REDIS_URL` from the render cache install,
+/// `LIVE_REDIS_URL` from the Live runtime. The caller names it rather than
+/// re-wording the failure afterwards, so there is one message per failure and
+/// only one place that could stop naming a setting.
 ///
 /// # Errors
 ///
 /// Returns [`FrameworkError`] when the URL is unusable, the instance cannot
-/// be reached, or `PING` does not answer. The message names the setting that
-/// has to change and never repeats the URL, which routinely carries a
-/// password.
-pub async fn ping(config: &RedisProviderConfig) -> Result<(), FrameworkError> {
-    let provider = RedisProvider::connect(config).await?;
+/// be reached, or `PING` does not answer. Every message names `setting` and
+/// none repeats the URL, which routinely carries a password.
+pub async fn ping(
+    config: &RedisProviderConfig,
+    setting: &'static str,
+) -> Result<(), FrameworkError> {
+    let provider = RedisProvider::connect(config, setting).await?;
     let mut conn = provider.connection();
     redis::cmd("PING")
         .query_async::<()>(&mut conn)
@@ -266,14 +298,14 @@ pub async fn ping(config: &RedisProviderConfig) -> Result<(), FrameworkError> {
             tracing::warn!(
                 target: "suprnova::render_cache",
                 %error,
-                "render cache Redis provider did not answer PING at install",
+                setting,
+                "redis provider did not answer PING at boot",
             );
-            FrameworkError::internal(
-                "RenderCache::install: the configured Redis did not answer PING. Fix \
-                 RENDER_CACHE_REDIS_URL, start the instance it names, or select a profile that \
-                 needs no Redis. The endpoint is not repeated here: it can carry a password."
-                    .to_owned(),
-            )
+            FrameworkError::internal(format!(
+                "the Redis {setting} names did not answer PING. Fix {setting}, start the \
+                 instance it names, or select a configuration that needs no Redis. The \
+                 endpoint is not repeated here: it can carry a password."
+            ))
         })
 }
 
