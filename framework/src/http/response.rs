@@ -123,11 +123,14 @@ impl HttpResponse {
     /// here re-decides any of them. The body is moved, never copied: a
     /// `Bytes` the engine cloned off a stored entry stays that same buffer.
     ///
-    /// A header value that is not valid UTF-8 is dropped rather than
-    /// lossily transcoded, since this container holds header values as
-    /// `String`. The engine only ever forms values from text it already
-    /// validated, so this is unreachable in practice and fails by omitting
-    /// one header rather than by mangling it.
+    /// Values are read back as UTF-8, never through `HeaderValue::to_str`:
+    /// that accessor refuses every byte at or above `0x80`, so a perfectly
+    /// valid header the wire carries happily - a `Link` with an accented
+    /// title, say - would be silently dropped here, or a content type
+    /// replaced by the octet-stream fallback. Every value the engine forms
+    /// came from a `&str`, so its bytes are valid UTF-8 by construction; a
+    /// value that is not is logged and skipped rather than lossily
+    /// transcoded, since this container holds header values as `String`.
     pub fn from_engine_response(response: http::Response<Bytes>) -> Self {
         let (parts, body) = response.into_parts();
         // `bytes` records the content type as a header of its own, so it is
@@ -136,7 +139,7 @@ impl HttpResponse {
         let content_type = parts
             .headers
             .get(http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
+            .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
         let mut out = Self::bytes(body, content_type).status(parts.status.as_u16());
@@ -144,8 +147,14 @@ impl HttpResponse {
             if name == http::header::CONTENT_TYPE {
                 continue;
             }
-            if let Ok(value) = value.to_str() {
-                out = out.header(name.as_str().to_owned(), value.to_owned());
+            match std::str::from_utf8(value.as_bytes()) {
+                Ok(value) => out = out.header(name.as_str().to_owned(), value.to_owned()),
+                Err(error) => tracing::warn!(
+                    target: "suprnova::render_cache",
+                    header = %name,
+                    kind = %error,
+                    "dropping an engine-formed header whose value is not UTF-8",
+                ),
             }
         }
         out

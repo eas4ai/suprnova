@@ -655,6 +655,16 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .query(QueryPolicy::declared(["page"]))
         .build()
         .expect("cached policy");
+    // Two routes that differ from `/cached/{id}` only in the replayable
+    // header their handler sets; the policy shape is the plain public one.
+    let control_byte_header_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("control byte header policy");
+    let non_ascii_header_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("non ascii header policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -891,6 +901,12 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .get("/shows-auth-user", shows_auth_user_handler)
         .into();
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
+    let router: Router = router
+        .get("/control-byte-header", control_byte_header_handler)
+        .into();
+    let router: Router = router
+        .get("/non-ascii-header", non_ascii_header_handler)
+        .into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1076,6 +1092,16 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach shows auth user policy")
         .try_render_cache("/sets-cookie", GroupPolicy::from(sets_cookie_policy))
         .expect("attach sets-cookie policy")
+        .try_render_cache(
+            "/control-byte-header",
+            GroupPolicy::from(control_byte_header_policy),
+        )
+        .expect("attach control byte header policy")
+        .try_render_cache(
+            "/non-ascii-header",
+            GroupPolicy::from(non_ascii_header_policy),
+        )
+        .expect("attach non ascii header policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -1394,6 +1420,34 @@ async fn cached_handler(request: Request) -> Response {
     counting_route::maybe_write_during_render().await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("cached render {n}")))
+}
+
+/// A `link` value carrying `0x7f` (DEL): a byte `SafeHeaders` used to accept
+/// and `http::HeaderValue` has never accepted. See the middleware test that
+/// owns `/control-byte-header`.
+pub const CONTROL_BYTE_LINK: &str = "<https://example.com/next>; rel=\"next\"; title=\"a\u{7f}b\"";
+
+/// A `link` value that is valid `http::HeaderValue` bytes but not ASCII, so
+/// `HeaderValue::to_str` refuses it while the wire carries it happily. See
+/// the middleware test that owns `/non-ascii-header`.
+pub const NON_ASCII_LINK: &str =
+    "<https://example.com/caf\u{e9}>; rel=\"next\"; title=\"caf\u{e9}\"";
+
+/// Renders with a replayable header whose value the wire cannot carry.
+async fn control_byte_header_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("control byte render {n}")).header("Link", CONTROL_BYTE_LINK))
+}
+
+/// Renders with a replayable header whose value is valid on the wire but is
+/// not ASCII.
+async fn non_ascii_header_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("non ascii render {n}")).header("Link", NON_ASCII_LINK))
 }
 
 async fn stale_handler(request: Request) -> Response {
@@ -2193,16 +2247,21 @@ pub mod race {
 /// name), and body bytes.
 pub struct TestResponse {
     pub status: hyper::StatusCode,
-    headers: std::collections::HashMap<String, String>,
+    /// Raw header bytes, not `HeaderValue::to_str` output: that accessor
+    /// refuses every byte at or above `0x80`, so a header value that is
+    /// valid on the wire but not ASCII would read back as an empty string
+    /// and a test could not tell it from a dropped header. The framework
+    /// stores header values as `String`, so UTF-8 is the right lens.
+    headers: std::collections::HashMap<String, Vec<u8>>,
     pub body: Bytes,
 }
 
 impl TestResponse {
-    /// The first value of a response header, case-insensitively.
+    /// The first value of a response header, case-insensitively, as UTF-8.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
+        self.headers.get(&name.to_ascii_lowercase()).map(|value| {
+            std::str::from_utf8(value).expect("a header value this suite sends is UTF-8")
+        })
     }
 }
 
@@ -2260,7 +2319,7 @@ async fn dispatch(
         .map(|(name, value)| {
             (
                 name.as_str().to_ascii_lowercase(),
-                value.to_str().unwrap_or_default().to_owned(),
+                value.as_bytes().to_owned(),
             )
         })
         .collect();

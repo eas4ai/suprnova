@@ -299,9 +299,30 @@ pub struct RenderCacheRuntime {
     /// it is inert (coherence is only ever consulted after a store hit) and
     /// is swept the same way once its lease's own timer expires.
     pub(crate) leases: Mutex<BTreeMap<RenderKey, ValidationLease>>,
+    /// Hot hits formed by [`hot_response`] on this runtime, for
+    /// [`super::RenderCache::hot_serves_for_test`].
+    ///
+    /// A field rather than a process-global counter, so it needs no reset
+    /// hook of its own: [`super::RenderCache::install`] builds a fresh
+    /// runtime (and a fresh L0 with it), which zeroes this for the next test
+    /// the way a new store zeroes its own contents.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) hot_serves: std::sync::atomic::AtomicU64,
 }
 
 impl RenderCacheRuntime {
+    /// Counts one hot hit served off this runtime.
+    ///
+    /// Compiled to nothing without the `testing` feature, so a production
+    /// build pays neither the atomic nor the field. `Relaxed` is enough: the
+    /// only reader is a test seam called from the same thread that dispatched
+    /// the request it is asking about, after that request completed.
+    fn count_hot_serve(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        self.hot_serves
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Bounded, monotonic-enough wall clock reading in Unix milliseconds.
     /// A clock failure (closed provider) degrades to 0 rather than
     /// panicking or propagating - every caller of this treats age and
@@ -422,7 +443,7 @@ impl FoundEntry {
 
 /// Closed lookup outcome, for telemetry's `outcome` attribute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LookupOutcome {
+pub(crate) enum LookupOutcome {
     L0Hit,
     L1Hit,
     Conditional,
@@ -447,7 +468,7 @@ impl LookupOutcome {
         }
     }
 
-    fn record(self) {
+    pub(crate) fn record(self) {
         Metrics::counter(render_cache_telemetry::LOOKUPS)
             .inc_with(&[(render_cache_telemetry::OUTCOME, self.as_str())]);
         if matches!(
@@ -589,15 +610,21 @@ impl RenderCacheMiddleware {
                     Layer::L1 => LookupOutcome::L1Hit,
                 })
                 .record();
-                if let Some(complete) = found.complete()
+                // The header's presence is tested first, deliberately:
+                // `evaluate_conditional` forms the entity tag to compare
+                // against, and forming one allocates. A request that sent no
+                // `If-None-Match` - the ordinary hit - must not pay for a
+                // comparison whose answer is already known.
+                if let Some(if_none_match) = request.header("if-none-match")
+                    && let Some(complete) = found.complete()
                     && matches!(
-                        evaluate_conditional(request.header("if-none-match"), complete.validator()),
+                        evaluate_conditional(Some(if_none_match), complete.validator()),
                         ConditionalOutcome::NotModified
                     )
                 {
                     LookupOutcome::Conditional.record();
                 }
-                Ok(deliver_hit(request, next, policy, found, now, None).await)
+                Ok(deliver_hit(runtime, request, next, policy, found, now, None).await)
             }
             FreshnessState::StaleServable => {
                 LookupOutcome::Stale.record();
@@ -613,6 +640,7 @@ impl RenderCacheMiddleware {
                 // either way; only the background refresh is skipped.
                 if is_stitched(policy) || variance_depends_on_ambient_context(policy) {
                     return Ok(deliver_hit(
+                        runtime,
                         request,
                         next,
                         policy,
@@ -632,6 +660,7 @@ impl RenderCacheMiddleware {
                 // response; `hit_response` reports both as `None` and both
                 // are treated as `deliver_hit` treats them: a miss.
                 let Some(response) = hit_response(
+                    runtime,
                     &found,
                     request.method(),
                     request.header("if-none-match"),
@@ -697,6 +726,7 @@ impl RenderCacheMiddleware {
                 // valid response, leaves nothing to fall back to; the failed
                 // rebuild's own outcome is what the client sees.
                 let Some(response) = hit_response(
+                    runtime,
                     &found,
                     &method,
                     if_none_match.as_deref(),
@@ -1211,6 +1241,7 @@ fn is_stitched(policy: &RenderCachePolicy) -> bool {
 /// Composite entry under any class but the stitched one - so it is counted
 /// as a miss and the route renders.
 async fn deliver_hit(
+    runtime: &RenderCacheRuntime,
     mut request: Request,
     next: Next,
     policy: &RenderCachePolicy,
@@ -1220,6 +1251,7 @@ async fn deliver_hit(
 ) -> Response {
     if !is_stitched(policy) {
         return match hit_response(
+            runtime,
             &found,
             request.method(),
             request.header("if-none-match"),
@@ -1258,6 +1290,7 @@ async fn deliver_hit(
 /// any other class), and so is a Complete entry whose stored values cannot
 /// be formed into a valid response.
 fn hit_response(
+    runtime: &RenderCacheRuntime,
     found: &FoundEntry,
     method: &hyper::Method,
     if_none_match: Option<&str>,
@@ -1266,7 +1299,14 @@ fn hit_response(
     warning: Option<&'static str>,
 ) -> Option<HttpResponse> {
     match found {
-        FoundEntry::Hot(hot) => Some(hot_response(hot, method, if_none_match, now_ms, warning)),
+        FoundEntry::Hot(hot) => Some(hot_response(
+            runtime,
+            hot,
+            method,
+            if_none_match,
+            now_ms,
+            warning,
+        )),
         FoundEntry::Decoded(hit) => match &hit.entry {
             DecodedEntry::Complete(entry) => complete_response(
                 method,
@@ -1287,12 +1327,14 @@ fn hit_response(
 /// rather than copied, and this adopts that response into the framework's
 /// own container without touching either.
 pub(crate) fn hot_response(
+    runtime: &RenderCacheRuntime,
     hot: &HotEntry,
     method: &hyper::Method,
     if_none_match: Option<&str>,
     now_ms: u64,
     warning: Option<&'static str>,
 ) -> HttpResponse {
+    runtime.count_hot_serve();
     HttpResponse::from_engine_response(serve_hot(
         hot,
         HotRequest {
@@ -1430,11 +1472,12 @@ async fn render_and_publish(
                                 Layer::L1 => LookupOutcome::L1Hit,
                             })
                             .record();
-                            Ok(deliver_hit(request, next, policy, found, now, None).await)
+                            Ok(deliver_hit(runtime, request, next, policy, found, now, None).await)
                         }
                         FreshnessState::StaleServable => {
                             LookupOutcome::Stale.record();
                             Ok(deliver_hit(
+                                runtime,
                                 request,
                                 next,
                                 policy,
@@ -1719,11 +1762,11 @@ async fn lead_render(
     )
 }
 
-/// The fresh-render counterpart of [`conditional_response`]: serves the
+/// The fresh-render counterpart of [`complete_response`]: serves the
 /// handler's own response, untouched, with the cache validators (`ETag`,
 /// `Cache-Control`, `Vary`, `Age`) attached - or a body-free 304 when the
 /// request's `If-None-Match` already matches what was just rendered. Unlike
-/// `conditional_response`, this never reconstructs the body or the
+/// `complete_response`, this never reconstructs the body or the
 /// non-validator headers from `entry`: for the render that produced `entry`,
 /// the handler's own response is the authoritative one. `replace_header` is
 /// used for each validator so a value the handler already set (a
@@ -2308,6 +2351,16 @@ async fn fresh_reread_is_coherent(
 /// non-replayable header, or one exceeding a bound) - in which case the
 /// candidate is declined the same as an ineligible or uncacheable one.
 ///
+/// A replayable header whose *value* is not a valid HTTP header value is
+/// dropped rather than declining the whole candidate, mirroring what
+/// [`HttpResponse::into_hyper`](crate::http::HttpResponse) already does on
+/// the way to the wire: the client never received that header either, so
+/// storing the response without it stores exactly what was sent. Keeping it
+/// would be worse than dropping the entry: `SafeHeaders` would accept the
+/// value, the stored entry could then never be formed into a response, and
+/// every later request would miss, render, republish and warn again on the
+/// same value - which a request can influence.
+///
 /// Only the header: whether the stored representation is the response's own
 /// bytes or a shell with holes cut in it is the caller's decision, and for a
 /// stitched route the publisher's (see `stitch::build_composite_entry`).
@@ -2323,6 +2376,21 @@ fn entry_header(
     let safe_pairs: Vec<(String, String)> = response
         .headers()
         .filter(|(name, _)| REPLAYABLE_HEADERS.contains(&name.to_ascii_lowercase().as_str()))
+        .filter(|(name, value)| {
+            if http::HeaderValue::from_str(value).is_ok() {
+                return true;
+            }
+            // The name is one of the eight in `REPLAYABLE_HEADERS`, so it is
+            // closed and low-cardinality and safe to name; the value is the
+            // request-influenced part and is never logged.
+            tracing::warn!(
+                target: "suprnova::render_cache",
+                header = %name,
+                "dropping a response header from the stored entry: its value is not a \
+                 valid HTTP header value, so the wire drops it too",
+            );
+            false
+        })
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
     let safe_headers = SafeHeaders::from_pairs(safe_pairs).ok()?;
@@ -2410,10 +2478,19 @@ async fn store_entry(
                 // from is a defect in this process, not a stored-entry
                 // problem: publishing it would store bytes the next lookup
                 // is guaranteed to evict.
-                Ok(DecodedEntry::Composite(_)) | Err(_) => {
+                Ok(DecodedEntry::Composite(_)) => {
                     tracing::warn!(
                         target: "suprnova::render_cache",
-                        "a freshly encoded Complete entry did not decode back as one; \
+                        "a freshly encoded Complete entry decoded back as a Composite one; \
+                         nothing was published",
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "suprnova::render_cache",
+                        kind = %error,
+                        "a freshly encoded Complete entry did not decode back at all; \
                          nothing was published",
                     );
                     return;
@@ -2723,6 +2800,7 @@ mod tests {
             clock: Arc::new(suprnova_live::clock::SystemClock),
             limits: EntryLimits::default(),
             leases: Mutex::new(BTreeMap::new()),
+            hot_serves: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

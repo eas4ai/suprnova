@@ -545,6 +545,8 @@ impl RenderCache {
             clock,
             limits: EntryLimits::default(),
             leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            #[cfg(any(test, feature = "testing"))]
+            hot_serves: std::sync::atomic::AtomicU64::new(0),
         });
         *runtime_slot().write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runtime));
         // Appends, never clears: `register_global_middleware` is
@@ -880,10 +882,58 @@ impl RenderCache {
     #[must_use]
     pub fn hot_response_body_ptr_for_test(key_text: &str) -> Option<(usize, usize)> {
         let hot = Self::hot_entry_for_test(key_text)?;
-        let response =
-            middleware::hot_response(&hot, &hyper::Method::GET, None, hot.published_at_ms(), None);
+        let runtime = Self::runtime()?;
+        let response = middleware::hot_response(
+            &runtime,
+            &hot,
+            &hyper::Method::GET,
+            None,
+            hot.published_at_ms(),
+            None,
+        );
         let body = response.body();
         Some((body.as_ptr() as usize, body.len()))
+    }
+
+    /// Test-only: the address and length of the encoded frame L0 stores
+    /// under `key_text`, or `None` when that key holds nothing.
+    ///
+    /// Paired with [`Self::l0_body_ptr_for_test`] this checks ruling R10's
+    /// containment property: a hot entry prepared from the frame that is
+    /// about to be stored holds a body that lies *inside* that frame, so L0
+    /// holds those bytes once. One prepared from the pre-encode candidate
+    /// would hold an independent allocation instead, and the containment
+    /// would not hold. Cloning a `Bytes` keeps its address, so reading the
+    /// stored entry out to measure it does not move anything.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn l0_frame_ptr_for_test(key_text: &str) -> Option<(usize, usize)> {
+        let runtime = Self::runtime()?;
+        let key = suprnova_live::render_cache::key::RenderKey::from_base64url(key_text).ok()?;
+        let stored = runtime.l0.get(&key).await.ok()??;
+        Some((stored.bytes.as_ptr() as usize, stored.bytes.len()))
+    }
+
+    /// Test-only: how many hot hits this runtime has served through
+    /// [`middleware::hot_response`], the one function a
+    /// `FoundEntry::Hot` reaches the wire through.
+    ///
+    /// `renders()` staying flat proves a request was answered from storage;
+    /// it cannot say which branch of `lookup` answered, because the decoding
+    /// path is a hit too. This can. The count lives on the installed runtime,
+    /// so a fresh [`Self::install`] starts it at zero with no reset hook.
+    ///
+    /// [`Self::hot_response_body_ptr_for_test`] forms a response through the
+    /// same function and so counts too; read this before calling that one.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn hot_serves_for_test() -> u64 {
+        Self::runtime().map_or(0, |runtime| {
+            runtime
+                .hot_serves
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
     }
 
     /// The hot entry stored under `key_text`, shared by the three seams

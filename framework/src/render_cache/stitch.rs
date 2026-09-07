@@ -55,7 +55,7 @@ use crate::live::{LiveMountKind, LiveRuntime, StitchSlotDescriptor};
 use crate::middleware::Next;
 use crate::telemetry::metrics::Metrics;
 
-use super::middleware::{FoundEntry, complete_response, hot_response};
+use super::middleware::{FoundEntry, LookupOutcome, complete_response, hot_response};
 use super::telemetry as render_cache_telemetry;
 use super::{RenderCache, RenderCachePolicy, collector, live::LiveDocumentFacts};
 
@@ -100,14 +100,21 @@ pub(crate) async fn serve_prepared(mut request: Request, next: Next) -> Response
         // A hot entry is a Complete one whose header values were formed at
         // publication: it is served through the engine's hot builder,
         // exactly as a non-stitched hit is, once the chain has let it
-        // through.
-        FoundEntry::Hot(hot) => Ok(hot_response(
-            &hot,
-            request.method(),
-            request.header("if-none-match"),
-            hit.now_ms,
-            hit.warning,
-        )),
+        // through. The runtime is read back here rather than carried on the
+        // hit, the same way `assemble_hit` reads it: a runtime replaced
+        // between the lookup and here is one this response can no longer be
+        // attributed to, so the route renders instead.
+        FoundEntry::Hot(hot) => match RenderCache::runtime() {
+            Some(runtime) => Ok(hot_response(
+                &runtime,
+                &hot,
+                request.method(),
+                request.header("if-none-match"),
+                hit.now_ms,
+                hit.warning,
+            )),
+            None => next(request).await,
+        },
         FoundEntry::Decoded(decoded) => match decoded.entry {
             DecodedEntry::Complete(entry) => match complete_response(
                 request.method(),
@@ -121,8 +128,18 @@ pub(crate) async fn serve_prepared(mut request: Request, next: Next) -> Response
                 Some(response) => Ok(response),
                 // A stored entry that cannot be formed into a valid response
                 // is a store defect; the route renders it instead of this
-                // serving something malformed.
-                None => next(request).await,
+                // serving something malformed. It is the same outcome the
+                // non-stitched twin records for the same defect
+                // (`middleware::deliver_hit` counts a `Miss` when
+                // `hit_response` gives it nothing), and `fail_document`
+                // additionally counts it under this module's own
+                // assembly-outcome label, so the one store-defect path a
+                // stitched route can take is not the only one with no
+                // counter behind it.
+                None => {
+                    LookupOutcome::Miss.record();
+                    fail_document(request, next).await
+                }
             },
             DecodedEntry::Composite(entry) => {
                 assemble_hit(

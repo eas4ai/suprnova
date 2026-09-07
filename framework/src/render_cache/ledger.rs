@@ -218,6 +218,56 @@ fn placeholders(backend: DbBackend, count: usize) -> Result<String, FrameworkErr
     }
 }
 
+/// Turns `(identity, generation)` rows into the zero-filled
+/// [`GenerationSet`] [`GenerationLedger::current`] promises, plus the epoch
+/// carried by the one row whose identity is empty.
+///
+/// Both reads in this module fetch the same two columns and fill the same
+/// set from them; they differ only in whether the statement also selects the
+/// authority epoch. `current`'s statement never can, so it always gets
+/// `None` back and ignores it, while `current_with_epoch`'s union always
+/// does. An empty identity can only be that extra row: every real value in
+/// the column is the 64 hex characters `hex::encode` produces from a 32-byte
+/// digest.
+///
+/// Every requested digest gets an entry, present in the table or not: an
+/// unobserved digest is 0 by contract (see [`GenerationLedger::current`]'s
+/// doc), and
+/// [`CoherenceCheck::compare`](suprnova_live::render_cache::CoherenceCheck::compare)
+/// reads a decoded entry's observations back through
+/// `GenerationSet::get_digest`, which returns `None` for a digest this set
+/// never recorded. Only inserting what the query returned would leave an
+/// untouched dependency absent instead of `Some(0)`; the observed side
+/// (built the same way, at write time) would still hold `Some(0)` for it,
+/// the two would compare unequal, and every entry that ever observed an
+/// untouched dependency would be reported moved on every request, forever.
+fn zero_filled_set(
+    dependencies: &[[u8; 32]],
+    rows: Vec<sea_orm::QueryResult>,
+) -> Result<(GenerationSet, Option<u64>), RenderCacheError> {
+    let mut found: HashMap<String, u64> = HashMap::new();
+    let mut epoch: Option<u64> = None;
+    for row in rows {
+        let identity: String = row
+            .try_get_by_index(0)
+            .map_err(|e| provider_error(database_error(e)))?;
+        let generation: i64 = row
+            .try_get_by_index(1)
+            .map_err(|e| provider_error(database_error(e)))?;
+        if identity.is_empty() {
+            epoch = Some(generation as u64);
+        } else {
+            found.insert(identity, generation as u64);
+        }
+    }
+    let mut set = GenerationSet::default();
+    for dependency in dependencies {
+        let generation = found.get(&hex::encode(dependency)).copied().unwrap_or(0);
+        set.insert_digest(*dependency, generation)?;
+    }
+    Ok((set, epoch))
+}
+
 /// The per-backend upsert that creates a dependency's row at generation 1
 /// or advances an existing row by one.
 ///
@@ -586,9 +636,8 @@ impl SqlGenerationLedger {
 #[async_trait]
 impl GenerationLedger for SqlGenerationLedger {
     async fn current(&self, dependencies: &[[u8; 32]]) -> Result<GenerationSet, RenderCacheError> {
-        let mut set = GenerationSet::default();
         if dependencies.is_empty() {
-            return Ok(set);
+            return Ok(GenerationSet::default());
         }
 
         // Pinned to the primary through `primary_executor` (see its doc):
@@ -609,33 +658,10 @@ impl GenerationLedger for SqlGenerationLedger {
             .await
             .map_err(|e| provider_error(database_error(e)))?;
 
-        let mut found: HashMap<String, u64> = HashMap::new();
-        for row in rows {
-            let identity: String = row
-                .try_get_by_index(0)
-                .map_err(|e| provider_error(database_error(e)))?;
-            let generation: i64 = row
-                .try_get_by_index(1)
-                .map_err(|e| provider_error(database_error(e)))?;
-            found.insert(identity, generation as u64);
-        }
-
-        // Every requested digest gets an entry, present in the table or
-        // not: an unobserved digest is 0 by contract (see
-        // `GenerationLedger::current`'s doc), and `CoherenceCheck::compare`
-        // reads a decoded entry's observations back through
-        // `GenerationSet::get_digest`, which returns `None` for a digest
-        // this set never recorded. Only inserting what the query returned
-        // would leave an untouched dependency absent instead of `Some(0)`;
-        // the observed side (built the same way, at write time) would
-        // still hold `Some(0)` for it, the two would compare unequal, and
-        // every entry that ever observed an untouched dependency would be
-        // reported moved on every request, forever.
-        for dependency in dependencies {
-            let generation = found.get(&hex::encode(dependency)).copied().unwrap_or(0);
-            set.insert_digest(*dependency, generation)?;
-        }
-        Ok(set)
+        // This statement selects no epoch row, so the second half is always
+        // `None` here; see `zero_filled_set`.
+        let (found, _) = zero_filled_set(dependencies, rows)?;
+        Ok(found)
     }
 
     async fn advance(&self, identities: &[DependencyIdentity]) -> Result<(), RenderCacheError> {
@@ -682,21 +708,7 @@ impl GenerationLedger for SqlGenerationLedger {
             .await
             .map_err(|e| provider_error(database_error(e)))?;
 
-        let mut found: HashMap<String, u64> = HashMap::new();
-        let mut epoch: Option<u64> = None;
-        for row in rows {
-            let identity: String = row
-                .try_get_by_index(0)
-                .map_err(|e| provider_error(database_error(e)))?;
-            let generation: i64 = row
-                .try_get_by_index(1)
-                .map_err(|e| provider_error(database_error(e)))?;
-            if identity.is_empty() {
-                epoch = Some(generation as u64);
-            } else {
-                found.insert(identity, generation as u64);
-            }
-        }
+        let (set, epoch) = zero_filled_set(dependencies, rows)?;
 
         // A missing epoch row is the same failure `epoch` raises for it, for
         // the same reason: without the singleton there is no authority to
@@ -711,14 +723,6 @@ impl GenerationLedger for SqlGenerationLedger {
                 RenderCacheErrorKind::ProviderUnavailable,
             ));
         };
-
-        // Zero-filled exactly as `current` does, and for the reason spelled
-        // out there: an unobserved digest is `Some(0)`, never absent.
-        let mut set = GenerationSet::default();
-        for dependency in dependencies {
-            let generation = found.get(&hex::encode(dependency)).copied().unwrap_or(0);
-            set.insert_digest(*dependency, generation)?;
-        }
         Ok((set, epoch))
     }
 

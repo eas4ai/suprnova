@@ -22,7 +22,7 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
+    NON_ASCII_LINK, advance_posts, boot_with_render_cache, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
@@ -128,16 +128,38 @@ async fn a_second_request_is_served_from_a_hot_entry_holding_the_stored_body() {
         "the leader's own publication prepares the hot entry the next request serves"
     );
 
+    // `renders()` staying at 1 proves the second request was answered from
+    // storage; it does not prove which branch of `lookup` answered it, since
+    // the decoding path is a hit too. This counter does: it is incremented
+    // inside the one function a `FoundEntry::Hot` is served through.
+    let hot_serves_before = RenderCache::hot_serves_for_test();
     let second = dispatch_get(&harness, "/cached/1", &[]).await;
+    let hot_serves_after = RenderCache::hot_serves_for_test();
     assert_eq!(second.status, StatusCode::OK);
     assert_eq!(second.body, first.body);
     assert_eq!(counting_route::renders(), 1, "a hit runs no handler");
+    assert_eq!(
+        (hot_serves_before, hot_serves_after),
+        (0, 1),
+        "the dispatched hit took the hot branch, not the decoding one"
+    );
 
     let stored = RenderCache::l0_body_ptr_for_test(&key).expect("a hot entry");
     assert_eq!(
         stored.1,
         second.body.len(),
         "the hot entry holds exactly the bytes the client was sent"
+    );
+    // Ruling R10's containment property: the hot body is a slice of the very
+    // frame L0 stores, so L0 holds those bytes once rather than twice. A hot
+    // entry prepared from the pre-encode candidate instead would sit in its
+    // own allocation and fail this.
+    let frame = RenderCache::l0_frame_ptr_for_test(&key)
+        .await
+        .expect("a stored frame");
+    assert!(
+        frame.0 <= stored.0 && stored.0 + stored.1 <= frame.0 + frame.1,
+        "the hot body must lie inside the stored frame: body {stored:?} frame {frame:?}"
     );
     // The body a dispatched request hands back was read off a TCP socket by
     // the client half of the harness, so its address can only ever be a
@@ -151,6 +173,60 @@ async fn a_second_request_is_served_from_a_hot_entry_holding_the_stored_body() {
     assert_eq!(
         served, stored,
         "the served body is the stored Bytes, not a copy"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_header_value_the_wire_cannot_carry_is_dropped_at_publication_not_republished_forever() {
+    let harness = boot_with_render_cache().await;
+    let key = RenderCache::key_for_route_for_test("/control-byte-header", &[], None);
+
+    let first = dispatch_get(&harness, "/control-byte-header", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    assert_eq!(
+        first.header("link"),
+        None,
+        "hyper drops a header value it cannot write, and always has: no client ever          receives this one"
+    );
+    assert!(
+        RenderCache::l0_hot_for_test(&key),
+        "the render still publishes, minus the one header the wire refused"
+    );
+
+    let second = dispatch_get(&harness, "/control-byte-header", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.body, first.body);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the second request is a hit; storing a value the response builder cannot form          would miss, render, republish and warn on every request forever"
+    );
+    assert_eq!(second.header("link"), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_non_ascii_header_value_survives_publication_and_the_hit_byte_for_byte() {
+    let harness = boot_with_render_cache().await;
+    let key = RenderCache::key_for_route_for_test("/non-ascii-header", &[], None);
+
+    let first = dispatch_get(&harness, "/non-ascii-header", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        first.header("link"),
+        Some(NON_ASCII_LINK),
+        "the wire carries every byte at or above 0x80 in a header value"
+    );
+    assert!(RenderCache::l0_hot_for_test(&key), "and it is published");
+
+    let second = dispatch_get(&harness, "/non-ascii-header", &[]).await;
+    assert_eq!(counting_route::renders(), 1, "a hit runs no handler");
+    assert_eq!(
+        second.header("link"),
+        Some(NON_ASCII_LINK),
+        "a hit replays the stored value byte for byte; reading it back through          HeaderValue::to_str would silently drop it"
     );
 }
 

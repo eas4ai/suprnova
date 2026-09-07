@@ -68,13 +68,26 @@ pub const REPLAYABLE_HEADERS: [&str; 8] = [
     "x-content-type-options",
 ];
 
-/// Whether `value` carries none of the header-value control bytes (CR, LF,
-/// or NUL) that would let it smuggle a second header or truncate the wire
-/// representation. Shared by [`SafeHeaders::from_pairs`] and the Composite
-/// nonce-header template check, which apply the same rule to a different
-/// value shape (a stored value versus an assembled piece of one).
+/// Whether `value` is a valid HTTP header value byte for byte: horizontal
+/// tab, the visible ASCII range `0x20` through `0x7e`, and the obsolete text
+/// range `0x80` and above. Everything else is refused, which covers CR, LF,
+/// and NUL - the bytes that would let a value smuggle a second header or
+/// truncate the wire representation - along with every other control byte.
+///
+/// This is exactly `http::HeaderValue`'s own rule, and it has to be: a
+/// stored value is always formable as an `http::HeaderValue`, so the
+/// response builders in [`super::hot`] never fail on their own stored
+/// values. A looser rule here would let a value be stored that no hit can
+/// ever be served from - every request would miss, render, and republish the
+/// same unformable value, forever.
+///
+/// Shared by [`SafeHeaders::from_pairs`] and the Composite nonce-header
+/// template check, which apply the same rule to a different value shape (a
+/// stored value versus an assembled piece of one).
 pub(super) fn header_value_is_safe(value: &str) -> bool {
-    !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b) || b >= 0x80)
 }
 
 impl SafeHeaders {
@@ -598,5 +611,49 @@ mod render_key_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RenderKey, D::Error> {
         let text = String::deserialize(deserializer)?;
         RenderKey::from_base64url(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::header::HeaderValue;
+
+    use super::header_value_is_safe;
+
+    /// The rule this module applies to a stored header value has to be the
+    /// rule the response builders in [`super::super::hot`] can form, or a
+    /// value can be stored that no hit can ever be served from - a miss that
+    /// renders and republishes the same unformable value on every request.
+    ///
+    /// Every byte, against `http`'s own answer. A byte below `0x80` is its
+    /// own one-byte UTF-8 character; `0x80` through `0xff` become the two
+    /// byte encoding of `U+0080` through `U+00ff`, whose bytes are all at or
+    /// above `0x80`, so the high half is covered by the values that can
+    /// actually occur in a `&str`.
+    #[test]
+    fn the_stored_value_rule_is_http_header_value_validity_byte_for_byte() {
+        for byte in 0_u8..=u8::MAX {
+            let text = char::from(byte).to_string();
+            let encoded = text.as_bytes();
+            assert_eq!(
+                header_value_is_safe(&text),
+                HeaderValue::from_bytes(encoded).is_ok(),
+                "the two rules disagree for byte {byte:#04x}, encoded {encoded:02x?}"
+            );
+        }
+    }
+
+    /// The three bytes the old rule named are still refused, stated
+    /// separately so a future widening of the rule above cannot quietly let
+    /// a header-smuggling byte back in.
+    #[test]
+    fn the_header_smuggling_bytes_are_still_refused() {
+        for byte in [b'\r', b'\n', 0] {
+            let text = char::from(byte).to_string();
+            assert!(
+                !header_value_is_safe(&text),
+                "byte {byte:#04x} must never be storable in a header value"
+            );
+        }
     }
 }
