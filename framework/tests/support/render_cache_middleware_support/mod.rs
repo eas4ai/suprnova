@@ -863,6 +863,19 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
         .build()
         .expect("leased policy");
+    // Final review, I2: the one lease-mode route whose lease expires well
+    // inside its own fresh window. Every other lease-mode fixture sets
+    // `max_age_ms` equal to `fresh_ms`, so one clock advance kills the
+    // lease and the entry together and no test can tell which of the two
+    // caused the rebuild. Five fresh minutes against a ten second lease
+    // separates them: eleven seconds is far past the lease and nowhere near
+    // the entry, so an authority read after it can only be the lease
+    // expiring.
+    let short_leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 10_000 })
+        .build()
+        .expect("short leased policy");
     // Fix round 2, item 5: the only route in this harness declaring
     // `StorageLayers::l0_and_l1()` - every other policy above defaults to
     // L0-only, so this is the one that actually exercises L1 together with
@@ -1064,6 +1077,7 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
     let router: Router = router.get("/leaky", leaky_handler).into();
     let router: Router = router.get("/stale-principal/{id}", cached_handler).into();
     let router: Router = router.get("/leased/{id}", cached_handler).into();
+    let router: Router = router.get("/short-leased/{id}", cached_handler).into();
     let router: Router = router.get("/l1-cached/{id}", cached_handler).into();
     let router: Router = router
         .get("/leaky-via-request-state", leaky_handler_via_request_state)
@@ -1288,6 +1302,8 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach stale principal policy")
         .try_render_cache("/leased/{id}", GroupPolicy::from(leased_policy))
         .expect("attach leased policy")
+        .try_render_cache("/short-leased/{id}", GroupPolicy::from(short_leased_policy))
+        .expect("attach short leased policy")
         .try_render_cache("/l1-cached/{id}", GroupPolicy::from(l1_cached_policy))
         .expect("attach l1 cached policy")
         .try_render_cache(

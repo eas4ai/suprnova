@@ -913,6 +913,119 @@ async fn an_epoch_advanced_by_another_node_reaches_a_lease_mode_route_when_its_l
     );
 }
 
+/// A validation lease expires while its entry is still comfortably fresh,
+/// and the reread it forces is what finally sees a dependency write.
+///
+/// Final review, I2. R17's claim has two halves and only one of them was
+/// proven anywhere: that a valid lease answers coherence with no authority
+/// read at all (`bypass.rs`, `statements::count() == 0`). The other half -
+/// that the lease *does* expire, and that the authority is then reread
+/// while the entry is still time-fresh - had no test, because every
+/// lease-mode fixture in this harness set `max_age_ms` equal to `fresh_ms`,
+/// so the same clock advance always killed both and either one could
+/// explain a rebuild. `/short-leased/{id}` sets `fresh_ms` to 300_000
+/// against a `max_age_ms` of 10_000, so the two are eleven seconds and five
+/// minutes apart and every assertion below names exactly one of them.
+///
+/// Each of the four dispatches after the publish is discriminating on its
+/// own:
+///
+/// - inside the lease, the hit costs zero statements;
+/// - eleven seconds later nothing about the entry has changed and it is
+///   still fresh, yet the hit costs exactly the one batched coherence
+///   reread - the lease, and nothing else, is what expired;
+/// - that reread granted a new lease, so a dependency write made under it
+///   is invisible and the next hit costs zero statements again;
+/// - eleven seconds after *that*, the reread reports the moved generation
+///   and the route rebuilds, still 22 seconds into a five minute fresh
+///   window.
+///
+/// Verified against the mutation it exists to catch: with
+/// `ValidationLease::valid_at` edited to return `true` unconditionally, the
+/// post-expiry dispatch's `statements::count()` reads 0 where it requires 1;
+/// with that one assertion removed so the run reaches the end, the final
+/// `renders()` reads 1 where it requires 2. A permanently valid lease never
+/// rereads, so it never sees the write. Both reverted after the run.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_lease_expires_well_inside_its_entrys_fresh_window_and_the_reread_sees_the_write() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the first request renders and publishes"
+    );
+
+    // Grants the lease: no lease exists for this key yet, so this hit
+    // rereads the authority once and, finding the entry coherent, leases
+    // that answer for `max_age_ms`.
+    dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1, "the second request is a hit");
+
+    statements::reset();
+    let leased = dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(leased.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1, "and so is the third");
+    assert_eq!(
+        statements::count(),
+        0,
+        "inside the lease the hit consults no authority at all - the half of R17 the \
+         bypass probe already measures, restated here beside its complement"
+    );
+
+    // Past the lease's `max_age_ms` of 10_000 and nowhere near the entry's
+    // `fresh_ms` of 300_000: eleven seconds into a five minute fresh
+    // window. Nothing has touched the entry or its dependencies, so the
+    // only thing this advance can have changed is the lease.
+    clock(&harness).advance_ms(11_000);
+
+    statements::reset();
+    let after_expiry = dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(after_expiry.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the entry is coherent and still fresh, so this dispatch is a hit like the last"
+    );
+    assert_eq!(
+        statements::count(),
+        1,
+        "but it is no longer a free one: the lease expired, so this hit rereads the \
+         authority once - the generations and the epoch batched together - although the \
+         entry it is serving never left its fresh window"
+    );
+
+    // That reread granted a new lease, valid for another ten seconds. A
+    // dependency this entry observed now moves; nothing in this process is
+    // told about it, and the new lease is exactly what stops the next hit
+    // from finding out.
+    advance_posts(&harness).await;
+
+    statements::reset();
+    let leased_again = dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(leased_again.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "within the new lease the write is invisible and the stored entry is served"
+    );
+    assert_eq!(statements::count(), 0, "and this hit is free again");
+
+    clock(&harness).advance_ms(11_000);
+
+    let rebuilt = dispatch_get(&harness, "/short-leased/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the second lease expires the same way, and this time the reread it forces \
+         reports the moved generation: the route rebuilds 22 seconds into a five minute \
+         fresh window, which only an expired lease can account for"
+    );
+}
+
 /// The same external advance against an authority-coherence route reaches it
 /// at its very next hit: that mode rereads the authority on every hit
 /// anyway, and the reread carries the epoch, so
