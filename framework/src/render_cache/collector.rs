@@ -478,7 +478,13 @@ pub fn is_active() -> bool {
 /// anything: the island re-renders per hit either way. The route that keeps
 /// an identity-bound island *without* stitching is already declined whole,
 /// by [`super::live::document_declines`], so no path stores a body carrying
-/// a slot's unnamed read.
+/// a slot's unnamed read. One path reaches storage without that decline and
+/// is safe anyway: `LiveDocument::mount` records the identity-bound fact
+/// only *after* the mount, so a mount that fails returns before anything is
+/// recorded and leaves the report storable - and the body it leaves behind
+/// carries no island bytes at all, because the mount that would have
+/// produced them is the one that failed
+/// (`render_cache::live::a_failed_identity_bound_mount_publishes_a_shell_with_no_island_bytes`).
 fn mark_incomplete() {
     with_state(|state| match state.attribution {
         Attribution::Slot => state.report.slot_reads += 1,

@@ -84,6 +84,29 @@ pub const UNCACHED_CAPTURE_PATH: &str = "/dogfood/private-capture-uncached";
 /// The document mount key `UNCACHED_CAPTURE_PATH` declares.
 pub const UNCACHED_CAPTURE_DOCUMENT_KEY: &str = "dogfood-capture-uncached";
 
+/// An identity-bound island on a route carrying no authentication
+/// middleware at all, so an anonymous request's mount fails and the
+/// handler still answers `200` with a document that has no island in it.
+///
+/// This is the one residual path of the slot-read exemption in
+/// `collector::mark_incomplete`: `LiveDocument::mount` calls
+/// `render_cache::live::record_mount` *after* the mount, so a mount that
+/// fails propagates with `?` before the fact is recorded, and
+/// `live::document_declines` never sees an identity-bound island to
+/// decline the route for. The response is therefore storable - and safe,
+/// because the mount that failed produced no island markup for the stored
+/// shell to carry. `FAILED_MOUNT_FALLBACK` is what the handler renders
+/// instead, so a test can name what the shell does contain as well as what
+/// it does not.
+pub const FAILED_MOUNT_PATH: &str = "/dogfood/failed-mount";
+
+/// The document mount key `FAILED_MOUNT_PATH` declares.
+pub const FAILED_MOUNT_DOCUMENT_KEY: &str = "dogfood-failed-mount";
+
+/// The only body text `FAILED_MOUNT_PATH`'s handler renders once its mount
+/// has failed. See that constant's own doc.
+pub const FAILED_MOUNT_FALLBACK: &str = "island unavailable";
+
 /// The Content Security Policy nonce `CAPTURE_PATH`'s bootstrap stamps, so
 /// the recorded bootstrap nonce has one exact expected value.
 pub const CAPTURE_NONCE: &str = "c4ptur3n0nce";
@@ -129,6 +152,21 @@ static LAST_REPORT: Mutex<Option<CollectorReport>> = Mutex::new(None);
 #[must_use]
 pub fn last_report() -> Option<CollectorReport> {
     LAST_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// The report `FAILED_MOUNT_PATH`'s handler saw after its mount failed.
+/// Kept apart from [`LAST_REPORT`] so neither route can overwrite the
+/// other's, which two `#[serial_test::serial]` tests reading one shared
+/// slot would otherwise do.
+static LAST_FAILED_MOUNT_REPORT: Mutex<Option<CollectorReport>> = Mutex::new(None);
+
+/// The collector report `FAILED_MOUNT_PATH`'s handler last stored.
+#[must_use]
+pub fn last_failed_mount_report() -> Option<CollectorReport> {
+    LAST_FAILED_MOUNT_REPORT
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
@@ -196,6 +234,9 @@ impl Middleware for RenderCounter {
             SEAM_CONTROL_PATH => {
                 SEAM_CONTROL_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
+            FAILED_MOUNT_PATH => {
+                FAILED_MOUNT_RENDERS.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {
                 PUBLIC_RENDERS.fetch_add(1, Ordering::SeqCst);
             }
@@ -210,6 +251,7 @@ static UNREASONED_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static STRIP_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static SEAM_LEAK_RENDERS: AtomicUsize = AtomicUsize::new(0);
 static SEAM_CONTROL_RENDERS: AtomicUsize = AtomicUsize::new(0);
+static FAILED_MOUNT_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The single RenderCache migration this harness needs; mirrors
 /// `render_cache_middleware_support::MiddlewareMigrator`, which is private
@@ -345,6 +387,15 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .vary(VarianceDimension::Tenant)
         .build()
         .expect("seam policy");
+    // Declared `PublicShared` with `Principal` variance, exactly like
+    // `capture_policy`: nothing about the policy declines this route, so
+    // whether its render is stored is decided by the Live document facts
+    // alone - which is the point of `FAILED_MOUNT_PATH`.
+    let failed_mount_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(200_000_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("failed mount policy");
 
     let raw = LiveMount::<DogfoodCounter>::identity_bound(RAW_PATH, "counter", "dogfood-raw")
         .expect("declare raw identity-bound mount");
@@ -397,6 +448,27 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     let router = router
         .try_live_mount(&uncached)
         .expect("register uncached capture identity-bound mount");
+    // No `AuthMiddleware` here, deliberately, and that is the whole
+    // mechanism: without one nothing records principal evidence on the
+    // request, so `mount_private_component` refuses the identity-bound
+    // mount and the handler takes its failure branch.
+    let failed_mount = LiveMount::<CaptureCounter>::identity_bound(
+        FAILED_MOUNT_PATH,
+        "counter",
+        FAILED_MOUNT_DOCUMENT_KEY,
+    )
+    .expect("declare failed-mount identity-bound mount");
+    let failed_mount_handler = failed_mount.clone();
+    let router: Router = router
+        .get(FAILED_MOUNT_PATH, move |request: Request| {
+            let mount = failed_mount_handler.clone();
+            async move { render_failed_mount_document(request, mount).await }
+        })
+        .middleware(LiveTenantMiddleware::new(Arc::new(Tenantless)))
+        .into();
+    let router = router
+        .try_live_mount(&failed_mount)
+        .expect("register failed-mount identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
     // Gated with their handlers, for the reason `strip_handler` records.
     // The policies below stay attached unconditionally: a policy attached
@@ -422,7 +494,9 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .try_render_cache(SEAM_LEAK_PATH, seam_policy.clone())
         .expect("attach seam leak policy")
         .try_render_cache(SEAM_CONTROL_PATH, seam_policy)
-        .expect("attach seam control policy");
+        .expect("attach seam control policy")
+        .try_render_cache(FAILED_MOUNT_PATH, failed_mount_policy)
+        .expect("attach failed mount policy");
 
     let mut render_cache_config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
@@ -464,7 +538,11 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
     STRIP_RENDERS.store(0, Ordering::SeqCst);
     SEAM_LEAK_RENDERS.store(0, Ordering::SeqCst);
     SEAM_CONTROL_RENDERS.store(0, Ordering::SeqCst);
+    FAILED_MOUNT_RENDERS.store(0, Ordering::SeqCst);
     *LAST_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *LAST_FAILED_MOUNT_REPORT
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     suprnova::middleware::register_global_middleware(RenderCounter);
@@ -551,6 +629,45 @@ async fn render_capture_document(
     }
     .await;
     result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+/// `FAILED_MOUNT_PATH`'s handler: attempts an identity-bound mount that is
+/// expected to fail, then answers `200` with a document built by hand,
+/// carrying [`FAILED_MOUNT_FALLBACK`] and no island markup at all.
+///
+/// A mount that unexpectedly succeeds is reported as a `500` rather than
+/// quietly rendering something else: the route exists only to produce the
+/// failing path, and a test that read `200` from a successful mount would
+/// be asserting about a different path than the one it names.
+///
+/// The report is stored while the collector scope is still open, the same
+/// way `render_capture_document` stores its own, so a test can see that
+/// `record_mount` never ran.
+async fn render_failed_mount_document(
+    request: Request,
+    mount: LiveMount<CaptureCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    let mut document = LiveDocument::from_request(&request)
+        .map_err(|error| HttpResponse::text(format!("from_request {error}")).status(500))?;
+    if document
+        .mount(
+            &mount,
+            CanonicalValue::Object(BTreeMap::new()),
+            MountFlags::empty(),
+        )
+        .await
+        .is_ok()
+    {
+        return Err(
+            HttpResponse::text("the identity-bound mount was expected to fail").status(500),
+        );
+    }
+    *LAST_FAILED_MOUNT_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = collector::current_report();
+    Ok(HttpResponse::html(format!(
+        "<!doctype html><html><body><p>{FAILED_MOUNT_FALLBACK}</p></body></html>"
+    )))
 }
 
 /// R89's shape: reads no identity at all. `UNREASONED_PATH`'s policy
@@ -645,6 +762,11 @@ pub fn seam_leak_renders() -> usize {
 /// Renders reaching `SEAM_CONTROL_PATH`'s handler so far.
 pub fn seam_control_renders() -> usize {
     SEAM_CONTROL_RENDERS.load(Ordering::SeqCst)
+}
+
+/// Renders reaching `FAILED_MOUNT_PATH`'s handler so far.
+pub fn failed_mount_renders() -> usize {
+    FAILED_MOUNT_RENDERS.load(Ordering::SeqCst)
 }
 
 /// One dispatched response: status, an accessor for a header, and the body.

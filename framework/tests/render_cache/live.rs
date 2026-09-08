@@ -7,23 +7,25 @@ use crate::render_cache_live_support;
 use bytes::Bytes;
 use live_dogfood_support::{DOCUMENT_PATH, DogfoodCounter, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
-    CAPTURE_NONCE, CAPTURE_PATH, RAW_PATH, SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH,
-    UNCACHED_CAPTURE_PATH, UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get,
-    last_report, private_renders, public_renders, public_seed_lifetime_ms, seam_control_renders,
-    seam_leak_renders, strip_renders, unreasoned_renders,
+    CAPTURE_NONCE, CAPTURE_PATH, FAILED_MOUNT_FALLBACK, FAILED_MOUNT_PATH, RAW_PATH,
+    SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH, UNCACHED_CAPTURE_PATH, UNREASONED_PATH,
+    boot_with_render_cache_and_live, clock, dispatch_get, failed_mount_renders,
+    last_failed_mount_report, last_report, private_renders, public_renders,
+    public_seed_lifetime_ms, seam_control_renders, seam_leak_renders, strip_renders,
+    unreasoned_renders,
 };
 use sha2::Digest as _;
 use suprnova::StatusCode;
 use suprnova::live::{
     LiveDocumentErrorKind, LiveMount, LiveMountKind, StitchFailurePolicy, StitchSlotDescriptor,
 };
-use suprnova::render_cache::RepresentationClass;
-use suprnova::render_cache::collector::{Collector, current_report};
+use suprnova::render_cache::collector::{self, Collector, current_report};
 use suprnova::render_cache::live::{
     CapturedSlot, LiveDocumentFacts, StitchCapture, document_declines, record_bootstrap_nonce,
     record_document_digest, record_document_intent, record_mount, record_shell_island,
     record_stitch_capture_invalid, record_stitch_slot,
 };
+use suprnova::render_cache::{RenderCache, RepresentationClass};
 use suprnova::view::{
     DocumentCachePolicy, DocumentResponseIntent, TrustedHtml, TrustedMarkupReason,
 };
@@ -824,4 +826,122 @@ async fn the_seam_can_only_decline_never_serve_one_user_another_users_body() {
         l1.body, l2.body,
         "user-9 must never be served the body rendered for user-7"
     );
+}
+
+/// The one residual path of the slot-read exemption Task 8 introduced in
+/// `collector::mark_incomplete`: a slot read the collector cannot name
+/// marks only that slot, not the whole report, and the safety argument
+/// rests on `live::document_declines` refusing any route that keeps an
+/// identity-bound island without stitching.
+///
+/// `LiveDocument::mount` records the identity-bound fact *after* the
+/// mount, so a mount that fails propagates with `?` before
+/// `render_cache::live::record_mount` ever runs. Nothing then tells
+/// `document_declines` there was an identity-bound island at all, and a
+/// report whose only unnameable read happened inside that failed mount is
+/// still storable. This test states exactly what happens on that path and
+/// why it is safe:
+///
+/// - **What is asserted:** the response is *published*, not declined, and
+///   what is published contains no island bytes - no Live root element, no
+///   signed snapshot, nothing the failed mount would have produced.
+/// - **Why that is the safe outcome:** the island bytes are the only thing
+///   a stored shell could carry that was derived from one visitor's
+///   identity, and a mount that failed produced none. There is nothing
+///   identity-derived in the stored representation to serve to anybody
+///   else, so storing it shares nothing that was not already public.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failed_identity_bound_mount_publishes_a_shell_with_no_island_bytes() {
+    let harness = boot_with_render_cache_and_live().await;
+
+    // 1. Anonymous, and the route carries no `AuthMiddleware`, so nothing
+    //    records principal evidence and the identity-bound mount refuses.
+    //    The handler answers 200 all the same - a handler that turned the
+    //    failure into a 500 would be declined by eligibility on status
+    //    alone and would never reach the path under test.
+    let first = dispatch_get(&harness, FAILED_MOUNT_PATH, &[]).await;
+    assert_eq!(
+        first.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
+    assert_eq!(failed_mount_renders(), 1);
+    let body = String::from_utf8(first.body.to_vec()).expect("utf8");
+    assert!(body.contains(FAILED_MOUNT_FALLBACK), "{body}");
+
+    // 2. The mount fact was never recorded, so `document_declines` has
+    //    nothing to decline the route for. This is the residual path
+    //    itself, stated as the report the middleware actually saw.
+    let report = last_failed_mount_report().expect("the handler stored its report");
+    assert!(
+        report.live_document.is_none(),
+        "the `?` on the failed mount returned before `record_mount` ran"
+    );
+    assert!(
+        !document_declines(
+            report.live_document.as_ref(),
+            RepresentationClass::PublicShared
+        ),
+        "with no recorded island there is nothing for the Live decline to fire on"
+    );
+
+    // 3. So the render really is published, and the published bytes carry
+    //    no island content: the second request is a hit (the handler is
+    //    never reached again) whose body is the same island-free shell.
+    let second = dispatch_get(&harness, FAILED_MOUNT_PATH, &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        failed_mount_renders(),
+        1,
+        "the second request is answered from the stored entry"
+    );
+    assert_eq!(second.body, first.body, "byte for byte the stored entry");
+    for marker in [
+        "data-suprnova-live-root",
+        "data-suprnova-live-snapshot",
+        "data-suprnova-live-document-key",
+    ] {
+        assert!(
+            !body.contains(marker),
+            "the stored shell carries no island bytes, so it carries no {marker}: {body}"
+        );
+    }
+    let stored = RenderCache::inspect_route_for_test(FAILED_MOUNT_PATH)
+        .await
+        .expect("the entry is reachable under the route's own lookup key");
+    assert_eq!(stored.class, RepresentationClass::PublicShared);
+    assert_eq!(stored.status, 200);
+    assert_eq!(
+        stored.slots, 0,
+        "a Complete entry with no stitch slots: there was no island to cut one for"
+    );
+
+    // 4. And an unnameable read inside that failed mount would not have
+    //    changed any of it. This is the exemption's own arithmetic, replayed
+    //    in the exact order `LiveDocument::mount` produces it on the failing
+    //    path: the mount runs inside `slot_scope`, its unnameable read is
+    //    counted as a slot read and marks nothing, and `record_mount` never
+    //    runs because the `?` returned first.
+    let replayed = Collector::scope(async {
+        collector::begin_handler();
+        collector::slot_scope(async {
+            collector::observe_unobservable_read();
+        })
+        .await;
+        collector::observe_table_read("posts");
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(replayed.slot_reads, 1);
+    assert!(
+        !replayed.context.overflowed,
+        "a slot read the collector cannot name marks only that slot, not the report"
+    );
+    assert!(
+        replayed.storable().is_some(),
+        "so the shell stays storable - which is safe only because it holds no island bytes"
+    );
+    assert!(replayed.live_document.is_none());
 }
