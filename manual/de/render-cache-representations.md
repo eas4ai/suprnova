@@ -336,7 +336,7 @@ zusammengesetzter Treffer wird durch die gesamte Middleware-Kette der Route
 geleitet, bevor irgendetwas ausgeliefert wird, sodass ein anonymer Besucher
 die Umleitung bekommt und nie ein zusammengesetztes Dokument.
 
-Ein zusammengesetztes Dokument mit mindestens einem Slot wird mit
+Ein `Composite`-Dokument mit mindestens einem Slot wird mit
 `Cache-Control: private, no-store` gesendet - bei dem Render, der die Shell
 veröffentlicht, ebenso wie bei jeder Zusammensetzung danach. Es hält die
 Inseln eines Principals unter Autorität, die für eine Anfrage neu abgeleitet
