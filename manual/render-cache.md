@@ -357,7 +357,10 @@ depends on something no key could safely partition by.
   entry's metadata (never its body) by the key text your application logs
   or telemetry can surface, alongside the current epoch, so you can tell
   whether what you are looking at is still live authority or has already
-  aged out from underneath.
+  aged out from underneath. It looks the key up in the running process's
+  in-process tier only, never in the shared one, so on a `database` or
+  `redis` profile it reports no entry for a key this node has not served
+  itself.
 
 ## RenderCache versus `suprnova::Cache`
 

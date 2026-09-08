@@ -14,8 +14,8 @@ served hit carries, the four freshness states it can be in, how it answers
 `If-None-Match` and `HEAD`, and what `PrivateCached` and
 `PublicShellStitched` actually store. *Why* a representation leaves the
 fresh band - a write, an epoch advance - is the next chapter's subject; here
-it is enough that the bands exist and that one representation does. Every
-example below is a route in this repository's dogfood application
+it is enough that the bands exist and that one representation sits in one of
+them. Every example below is a route in this repository's dogfood application
 (`app/src/live/mod.rs`) and is proved by a named test in
 `app/tests/live_render_cache.rs`.
 
@@ -306,11 +306,16 @@ every hit: a stitched hit is forwarded through the route's whole middleware
 chain before anything is served, so an anonymous visitor gets the redirect,
 never an assembled document.
 
-An assembled document is sent `Cache-Control: private, no-store`. It holds
-one principal's islands under authority re-derived for one request, and a
-`max-age` would let a shared browser profile replay them to whoever sits
-down next. The class refuses `SharedCachePolicy::SMaxAge` at policy build
-time for the same reason.
+An assembled document with at least one slot is sent
+`Cache-Control: private, no-store`. It holds one principal's islands under
+authority re-derived for one request, and a `max-age` would let a shared
+browser profile replay them to whoever sits down next. A zero-slot Composite
+carries no per-principal bytes at all, only a per-request nonce, so it keeps
+the class's private `max-age` like any other private representation;
+`a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit` in
+`framework/tests/render_cache/stitch.rs` asserts that. Either way the class
+refuses `SharedCachePolicy::SMaxAge` at policy build time, so no shared
+proxy is ever offered the bytes.
 
 Two limits to know: the class is meaningful only on a route whose chain ends
 in the Live completion middleware, so use it with `LiveDocument::render` and

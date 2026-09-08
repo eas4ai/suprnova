@@ -217,9 +217,12 @@ Assert instead on something only an assembled document can produce, which
 is what `the_dashboard_is_stitched_per_principal_from_one_shared_shell`
 does: the stored entry is `EntryKind::Composite` with the expected slot
 count (`inspect_route_for_test`), the response carries
-`Cache-Control: private, no-store` - a value nothing but the composite
-responder writes, and only after a whole document has been assembled - and
-two principals' documents differ in their island tags and nowhere else. That
+`Cache-Control: private, no-store` - the value the composite responder pins
+on a slotted assembly, and only after a whole document has been assembled -
+and two principals' documents differ in their island tags and nowhere else.
+Slotted is the operative word: a zero-slot Composite keeps the class's
+private `max-age` instead, so that assertion suits a route with islands in
+it and not one without. That
 test asserts `renders() == before + 1` on a hit, and says in its own note
 why that is the honest reading rather than a failure.
 
@@ -267,10 +270,11 @@ clock.advance_ms(300_001);
 
 `AdjustableTestClock` comes from `suprnova::live::testing`, and `unix_now_ms`
 is the harness's own wall-clock reading, so an adjustable clock starts where
-the system one is rather than at an epoch the rest of the process would
-disagree with. The harness wraps the pair as `setup_app_with_clock` and
-`advance_clock_ms`, the second of which panics rather than silently doing
-nothing when the boot took the system clock.
+the system one is rather than at a time origin the rest of the process would
+disagree with. (That is a clock zero, not the authority epoch this chapter
+otherwise means by the word.) The harness wraps the pair as
+`setup_app_with_clock` and `advance_clock_ms`, the second of which panics
+rather than silently doing nothing when the boot took the system clock.
 `stale_service_is_marked_and_rebuilt_in_the_background` is the test.
 
 **4. Count SQL statements.** A cache that skipped the handler but still
@@ -377,8 +381,10 @@ under `Warning` as above.
 
 **The shared tier is not swept by an epoch change alone.** The file tier's
 sweep removes an entry when its retention has elapsed *or* its fence epoch
-is `<` the current one, so an entry stamped with an epoch the restore moved
-backward past is not reclaimed by that clause; it waits out its retention.
+is `<` the current one. If restoring the backup lowered the ledger's epoch
+below values the deployment had already published entries under, those
+entries carry a fence epoch that is now *higher* than the current one, so
+that clause does not reclaim them; they wait out their retention instead.
 The database tier is swept only by an explicit `RenderCache::sweep()`. The
 Redis tier reclaims itself, but on Redis's own schedule: each entry hash is
 stored under `<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (default prefix
