@@ -23,10 +23,19 @@ test.beforeEach(async ({ request }) => {
       };
     })
     .toEqual({ memberships: 0, paused: 0, physical: 0, uploads: 0 });
-  const reset = await request.post(
-    `${REFERENCE_ORIGIN}/__test/iteration-004/control/upload/reset-creation-window`,
-  );
-  expect(reset.status()).toBe(204);
+  // Polled, not posted once: `active_uploads` is a lease the creating
+  // operation drops when its value drops, while the reset also needs the
+  // stored slot state, the ledger record, and the pause authority to be
+  // quiescent, which are written after the lease is gone. The host answers
+  // 409 until all of them agree; 204 is the observed quiescence.
+  await expect
+    .poll(async () => {
+      const reset = await request.post(
+        `${REFERENCE_ORIGIN}/__test/iteration-004/control/upload/reset-creation-window`,
+      );
+      return reset.status();
+    })
+    .toBe(204);
 });
 
 async function probeCommand(page: import("@playwright/test").Page, name: string): Promise<void> {
