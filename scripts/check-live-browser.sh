@@ -34,6 +34,23 @@ npm run build
 npm run build:check
 npm run compatibility:check -- --allow-unqualified
 
-git diff --exit-code --stat -- dist
+# `git diff --exit-code` compares the worktree to the index, so it stays silent
+# on a drift that was already staged, and it cannot see a bundle filename the
+# build has just invented. Porcelain status reports staged and unstaged entries
+# alike, which closes the first hole. `--ignored=matching` closes the second:
+# `.gitignore` carries a `**/dist/` rule and the shipped bundles are tracked
+# only because they were force-added, so a genuinely new file under `dist/` is
+# ignored rather than untracked and would otherwise be invisible here. It
+# surfaces as a `!!` entry, and an unexplained artifact is exactly the drift
+# this check exists to refuse.
+artifacts=$(git status --porcelain --ignored=matching -- dist)
+if [[ -n ${artifacts} ]]; then
+    printf '%s\n' "${artifacts}" >&2
+    git diff --stat -- dist >&2
+    printf '%s\n' "" >&2
+    printf '%s\n' "tracked browser artifacts drifted from the rebuild above." >&2
+    printf '%s\n' "Commit the rebuilt dist/ or fix the source that changed it." >&2
+    exit 1
+fi
 
 echo "live browser: generated contracts, lint, unit suites, and tracked artifacts hold"
