@@ -54,6 +54,15 @@
       "capabilities": ["bash", "git"]
     },
     {
+      "id": "live-contracts",
+      "name": "Live specification and document contracts",
+      "tiers": ["default", "full", "docs"],
+      "argv": ["scripts/check-live-contracts.sh"],
+      "timeout_seconds": 300,
+      "category": "docs",
+      "capabilities": ["bash", "git", "node"]
+    },
+    {
       "id": "workspace-clippy",
       "name": "workspace clippy",
       "tiers": ["default", "full"],
@@ -151,6 +160,15 @@
       "timeout_seconds": 2400,
       "category": "code",
       "capabilities": ["cargo"]
+    },
+    {
+      "id": "live-browser",
+      "name": "Live browser runtime and tracked artifacts",
+      "tiers": ["default", "full"],
+      "argv": ["scripts/check-live-browser.sh"],
+      "timeout_seconds": 900,
+      "category": "browser",
+      "capabilities": ["bash", "git", "node"]
     },
     {
       "id": "translation-lock",
@@ -259,6 +277,15 @@
       "timeout_seconds": 1200,
       "category": "code",
       "capabilities": ["bash", "cargo", "git", "python3"]
+    },
+    {
+      "id": "live-gate",
+      "name": "Suprnova Live gate",
+      "tiers": ["full"],
+      "argv": ["scripts/check-live-gate.sh"],
+      "timeout_seconds": 3600,
+      "category": "environment",
+      "capabilities": ["bash", "cargo", "git", "node", "docker"]
     }
   ]
 }

@@ -1392,7 +1392,7 @@ def load_registry(repo: Path) -> GateRegistry:
             or any(not isinstance(argument, str) or not argument for argument in argv)
             or type(raw["timeout_seconds"]) is not int
             or raw["timeout_seconds"] <= 0
-            or raw["category"] not in {"docs", "code", "environment"}
+            or raw["category"] not in {"docs", "code", "browser", "environment"}
             or not isinstance(capabilities, list)
             or any(
                 not isinstance(capability, str) or not capability

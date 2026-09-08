@@ -82,6 +82,12 @@ class StepRegistryTests(unittest.TestCase):
                 ["scripts/check-prose-dashes.sh"],
             ),
             (
+                "live-contracts",
+                ["default", "full", "docs"],
+                300,
+                ["scripts/check-live-contracts.sh"],
+            ),
+            (
                 "workspace-clippy",
                 ["default", "full"],
                 1200,
@@ -219,6 +225,12 @@ class StepRegistryTests(unittest.TestCase):
                 ],
             ),
             (
+                "live-browser",
+                ["default", "full"],
+                900,
+                ["scripts/check-live-browser.sh"],
+            ),
+            (
                 "translation-lock",
                 ["docs", "full"],
                 300,
@@ -303,6 +315,12 @@ class StepRegistryTests(unittest.TestCase):
                 ["full"],
                 1200,
                 ["scripts/tests/release-normal-smoke.sh"],
+            ),
+            (
+                "live-gate",
+                ["full"],
+                3600,
+                ["scripts/check-live-gate.sh"],
             ),
         ]
         actual = [
