@@ -1,7 +1,8 @@
-# Registered-event descriptor field casing -- staged for next iteration
+# Registered-event descriptor field casing -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-03
+Promoted: 2026-09-08
 Target domain: `14-events-and-asynchronous-updates.md`
 
 ## What it is

@@ -1,7 +1,8 @@
-# The write side should run in every process that writes -- staged for next iteration
+# The write side should run in every process that writes -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-05
+Promoted: 2026-09-08
 Target domain: `16-cache-variance-privacy-and-stitching.md`
 
 ## What it is

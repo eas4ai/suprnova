@@ -1,7 +1,8 @@
-# Cached segments should be able to contain cached segments -- staged for next iteration
+# Cached segments should be able to contain cached segments -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-06
+Promoted: 2026-09-08
 Target domain: `16-cache-variance-privacy-and-stitching.md`
 
 ## What it is

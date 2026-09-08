@@ -1,7 +1,8 @@
-# Credible generation hints over Redis pub/sub -- staged for next iteration
+# Credible generation hints over Redis pub/sub -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-07
+Promoted: 2026-09-08
 Target domain: `18-cache-coherence-and-rebuilding.md`, with
 `15-render-representations-and-storage.md` as the affected storage domain
 

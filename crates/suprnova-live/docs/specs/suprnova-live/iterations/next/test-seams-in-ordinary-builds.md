@@ -1,7 +1,8 @@
-# Test seams compiled into ordinary builds -- staged for next iteration
+# Test seams compiled into ordinary builds -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-05
+Promoted: 2026-09-08
 Target domain: `conventions.md` (framework-wide build and verification
 convention), with `15-render-representations-and-storage.md` as the first affected
 domain

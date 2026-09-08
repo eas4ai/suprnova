@@ -1,7 +1,8 @@
-# Feature-flag dependency generations -- staged for next iteration
+# Feature-flag dependency generations -- promoted to iteration 006
 
-Status: Staged (not in current contract)
+Status: Promoted (iteration 006, 2026-09-08)
 Captured: 2026-09-04
+Promoted: 2026-09-08
 Target domain: `17-dependency-tracking-and-generations.md`
 
 ## What it is
