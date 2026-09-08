@@ -49,7 +49,8 @@ Choose by what you actually need to share:
 
 ## The environment variables
 
-`RenderCacheConfig::from_env` reads these, in `framework/src/render_cache/config.rs`:
+`RenderCacheConfig::from_env` reads these, in
+`framework/src/render_cache/config.rs`:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -207,8 +208,9 @@ decide per route.
 
 ## One conformance suite, every provider
 
-Every store answers the same suite. `framework/tests/render_cache/store_conformance.rs`
-runs the engine's provider scenarios - written against the `RenderStore`
+Every store answers the same suite.
+`framework/tests/render_cache/store_conformance.rs` runs the engine's
+provider scenarios - written against the `RenderStore`
 trait alone - over the file-backed L1, the SQL L1 on SQLite, PostgreSQL, and
 MySQL, and the Redis L1, and the in-process store answers the same suite in
 the engine crate. PostgreSQL, MySQL, and Redis run through ignored tests

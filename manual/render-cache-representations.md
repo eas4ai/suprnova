@@ -115,11 +115,23 @@ they are defined; the other chapters use them without restating them.
 |---|---|
 | `ETag` | A strong validator over exactly the bytes sent. A client may send it back as `If-None-Match`. |
 | `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. An assembled `Composite` document with at least one island is `private, no-store`. |
-| `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`. A dimension that implies none adds nothing. |
+| `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`, `Encoding` implies `Accept-Encoding`. A dimension that implies none adds nothing. The names are emitted in the descriptor's own order, not the order you declared them. |
 | `Age` | Whole seconds since the representation was published. Its presence is the simplest local proof that a response came out of the store. |
 | `Warning` | `110 - "Response is Stale"`, and only on a response served past its fresh interval. |
 
-Three of those are asserted against the running application:
+The dimension-to-header mapping is `VarianceDimension::vary_header` in
+`crates/suprnova-live/src/render_cache/variance.rs`. Two engine tests prove
+the `Locale` and `Encoding` halves of it and the joined header value:
+`a_descriptor_orders_dimensions_and_bounds_values`
+(`crates/suprnova-live/tests/render_cache_variance.rs`) asserts a descriptor
+carrying both reports `["Accept-Encoding", "Accept-Language"]`, and
+`cache_control_and_vary_agree_with_class_variance_and_seed_deadline`
+(`crates/suprnova-live/tests/render_cache_coherence.rs`) asserts the same
+pair emits `Accept-Encoding, Accept-Language` and that a descriptor with no
+header-implying dimension emits no `Vary` at all. `Media` implying `Accept`
+is documented from the code; no test here pairs it.
+
+Three of the response values are asserted against the running application:
 `the_public_document_is_a_hit_whose_seed_still_promotes` reads
 `private, max-age=300` off `/live/public` and requires an `Age` header on
 the second request;

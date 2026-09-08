@@ -210,8 +210,9 @@ which picks exactly one of them:
   re-evaluate what is now stored and serve that. A waiter never trusts the
   wait: if the leader's cycle failed to publish, or published something the
   waiter's own freshness check finds dead, the waiter renders too, rather
-  than serving what it found. `a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh`
-  in `framework/tests/render_cache/middleware.rs` is that rule.
+  than serving what it found.
+  `a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh` in
+  `framework/tests/render_cache/middleware.rs` is that rule.
 - A request that arrives once `RENDER_CACHE_MAX_WAITERS` (default 128) are
   already waiting **bypasses**: it renders and publishes nothing, rather
   than growing an unbounded queue.
@@ -237,11 +238,21 @@ The four freshness states, the bands `FreshnessPolicy` sets, and the
 `Warning` and `Age` a stale response carries are defined in
 [RenderCache Representations](render-cache-representations.md). What matters
 here is that a generation move puts an entry into those bands early: a
-moved entry is evaluated at an effective age of at least its fresh interval,
-so on a route with a stale-servable window it lands in that band and is
-served once under `Warning` while the rebuild runs behind the request. That
-is exactly what step 4 of the write test above observes, on an entry whose
-five fresh minutes had barely started.
+moved entry is evaluated at an effective age of **at least** its fresh
+interval, whatever its real age. Its real age still decides which band that
+lands it in:
+
+- Real age below `fresh_ms + stale_servable_ms`, on a route that declares a
+  stale-servable window: stale-servable. The stored copy is served once
+  under `Warning` and the rebuild runs behind the request. That is step 4 of
+  the write test above, on an entry whose five fresh minutes had barely
+  started.
+- Real age past that, but not yet at the dead edge: stale-on-error. The
+  request waits for a foreground rebuild and sees the stored copy only if
+  that rebuild fails.
+- On a route with no stale-servable window at all, and on every
+  `PrivateCached` route (whose dead edge *is* its fresh edge), a move is
+  Dead: the request rebuilds in the foreground and waits.
 
 `stale_service_is_marked_and_rebuilt_in_the_background` shows the same
 handoff driven by the clock rather than by a write: past `/live/todos`'s

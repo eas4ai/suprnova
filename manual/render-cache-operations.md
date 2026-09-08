@@ -12,9 +12,10 @@ counters, one bounded disk sweep, and one emergency lever.
 This chapter is the operating surface: the commands, exactly what they print
 and what they can see; the counters and their closed outcome sets; how the
 file tier reclaims disk; how to test a cached route so the test proves
-caching rather than merely responding; what to do when something is wrong;
-and how the cache's own performance is measured and what those numbers are
-honestly worth. The command examples are the ones
+caching rather than merely responding; what to do when something is wrong,
+including the multi-node procedure a database restore needs; and how the
+cache's own performance is measured and what those numbers are honestly
+worth. The command examples are the ones
 `the_operator_commands_inspect_without_a_body_and_advance_the_epoch` drives
 through this repository's own console entry point in
 `app/tests/live_render_cache.rs`.
@@ -38,8 +39,9 @@ prints `no entry (current epoch: {epoch})` when the key names nothing it can
 see, and it fails - it does not report success - on an unparseable key or
 with no runtime installed.
 
-**It reads this process's in-process L0 and nothing else.** `RenderCache::inspect`
-looks the key up in L0 alone; it never consults the L1 tier. On the Database
+**It reads this process's in-process L0 and nothing else.**
+`RenderCache::inspect` looks the key up in L0 alone; it never consults the
+L1 tier. On the Database
 or Redis profile that matters: an entry that is live in
 `suprnova_render_entries` or in Redis, published by another node or by this
 one before a restart, prints `no entry` here unless this process has served
@@ -60,11 +62,20 @@ printed.
 
 **`render-cache:epoch-advance`** is the emergency invalidation. It advances
 the authority epoch and prints `epoch advanced to {epoch}`. Because the
-epoch is baked into every lookup key, every currently stored entry becomes
-unreachable by ordinary lookup at its next request - immediately, with
-nothing to enumerate and nothing to delete. The in-process tier is cleared
-outright at the same instant. The test asserts the printed line and then the
-consequence that matters: after the command, the route renders again.
+epoch is baked into every lookup key, this puts stored entries out of reach
+with nothing to enumerate and nothing to delete. The test asserts the
+printed line and then the consequence that matters: after the command, the
+route renders again.
+
+**On the node that runs it**, the effect is immediate: the command drops
+that process's epoch lease and clears its in-process tier, so its very next
+request derives keys under the new epoch and finds nothing. **On any other
+node**, the ledger has moved but that process still holds its old leased
+epoch and its own L0, and it catches up at its next authority read -
+immediately under `CoherenceMode::Authority`, and up to `max_age_ms` later
+under `CoherenceMode::Lease`. Run the command on each node, or restart the
+others. "Restoring the database" below has the full procedure and the tests
+behind it.
 
 Reach for it when something is wrong with cached content and you cannot wait
 for individual entries to expire, and after a job that changed what cached
@@ -191,6 +202,25 @@ explanations. Every hit assertion in
 it. Wait for a render you did not dispatch (a background rebuild) with the
 counter's own barrier, `wait_until_renders_at_least`, never with a sleep.
 
+**The exception is a `PublicShellStitched` route, and it is not a small
+one.** A stitched hit is deliberately forwarded through the route's whole
+chain - its authorization guard has to run again, and only the Live
+completion middleware at the end of that chain serves the hit. A counting
+middleware registered globally after the install sits outside the route's
+own chain, so it is reached on a stitched hit exactly as on a miss. On such
+a route the counter cannot carry the "no handler ran" claim at all.
+
+Assert instead on something only an assembled document can produce, which is
+what
+`the_dashboard_is_stitched_per_principal_from_one_shared_shell` does: the
+stored entry is `EntryKind::Composite` with the expected slot count
+(`inspect_route_for_test`), the response carries
+`Cache-Control: private, no-store` - a value nothing but the composite
+responder writes, and only after a whole document has been assembled - and
+two principals' documents differ in their island tags and nowhere else. That
+test asserts `renders() == before + 1` on a hit, and says in its own note
+why that is the honest reading rather than a failure.
+
 **2. Read the entry back.** Two facade calls are ordinary public API:
 `RenderCache::store_inspection()` reports L0 occupancy, bytes, and the
 current epoch, and `RenderCache::inspect(key_text)` reports one entry's
@@ -200,10 +230,17 @@ application API:
 
 | Seam | What it gives a test |
 |---|---|
-| `RenderCache::key_for_route_for_test(pattern, params, login)` | the same key text the middleware derives |
-| `RenderCache::inspect_route_for_test(pattern)` | that key's L0 entry: class, kind, status, `body_bytes`, slots |
+| `RenderCache::key_for_route_for_test(pattern, params, login)` | the key text the middleware derives **at epoch 1**, the value the migration seeds |
+| `RenderCache::key_for_route_at_epoch_for_test(pattern, params, login, epoch)` | the same, under an epoch you name |
+| `RenderCache::inspect_route_for_test(pattern)` | that epoch-1 key's L0 entry: class, kind, status, `body_bytes`, slots |
 | `RenderCache::inspect_l1_for_test(pattern, params, login)` | the same, out of the configured L1 tier |
 | `RenderCache::clear_l0_for_test()` | empties L0 and leaves L1, the epoch, and the coordinator alone |
+
+The epoch matters because it is part of the key. `key_for_route_for_test`
+hardcodes epoch 1, so a test that has advanced the epoch - on this node or,
+through the ledger, on another - must name the new one with
+`key_for_route_at_epoch_for_test` or it will look up a key nothing was
+published under.
 
 `the_public_document_is_a_hit_whose_seed_still_promotes` uses
 `store_inspection` and `inspect_route_for_test` to assert the entry exists
@@ -254,8 +291,9 @@ The callback is told nothing about the statement - no SQL text, no bound
 value - because a count is the whole point.
 `framework/tests/render_cache/bypass.rs` is written entirely on this
 pattern: `a_lease_mode_hit_runs_nothing_and_issues_no_statement` holds a
-lease-mode hit to zero statements, `an_authority_mode_hit_issues_exactly_one_statement`
-holds an authority-mode hit to one, and
+lease-mode hit to zero statements,
+`an_authority_mode_hit_issues_exactly_one_statement` holds an
+authority-mode hit to one, and
 `the_epoch_is_read_once_at_first_use` measures two misses against each other
 to show the epoch costs one read per runtime.
 
@@ -271,7 +309,7 @@ counter, which is what makes these tests reproducible rather than flaky.
   storing at all (two requests, look for `Age`). If it is, and the write
   that should have invalidated it came from a queue worker, a scheduled
   task, or a console command, that write advanced nothing: run
-  `render-cache:epoch-advance`.
+  `render-cache:epoch-advance` (per node - see the last bullet).
 - **A page you expected to cache never carries an `Age` header.** It is
   being declined, not failing. Work through the classification list in
   [RenderCache](render-cache.md): a session read, an identity read on a
@@ -293,21 +331,83 @@ counter, which is what makes these tests reproducible rather than flaky.
   fails that check and is a miss; the store removes it, and any leftover
   temporary file, the next time it opens. A torn write is self-healing here
   rather than a permanently poisoned entry.
-- **The database was restored from a backup.** The generation ledger is the
-  authority every hit is proved against, so restoring it changes what
-  "current" means, and two facts decide the outcome. The coherence
-  comparison is an inequality in **either** direction, so any stored entry
-  whose observed generations differ from the restored ledger's is treated as
-  moved and rebuilt rather than served. And the authority epoch is part of
-  every lookup key. So: run `render-cache:epoch-advance` before the node
-  serves - it fails loudly rather than reporting success if the epoch
-  singleton is missing, which is also how you find out the migration did not
-  come back with the data - and then empty the shared L1 tier by hand (the
-  file directory, or `suprnova_render_entries`) rather than waiting for the
-  sweep, whose epoch clause only reclaims entries stamped with an epoch
-  *older* than the current one. L0 needs nothing: the epoch advance clears
-  it outright.
-- **You need everything gone, now.** `render-cache:epoch-advance`.
+- **The database was restored from a backup.** This one has a procedure
+  rather than a sentence; see "Restoring the database" below.
+- **You need everything gone, now.** `render-cache:epoch-advance`. On more
+  than one node, run it on each, or restart the ones you did not run it on:
+  the advance moves the ledger's epoch for the whole deployment, but it
+  clears L0 and drops the leased epoch only in the process that ran it. The
+  restore procedure below spells out why.
+
+## Restoring the database
+
+The generation ledger is the authority every hit is proved against, so
+restoring the database changes what "current" means for every entry already
+stored. Three facts from the code decide what a stored entry does next, and
+none of them is "it is quietly dropped".
+
+**A moved entry is not automatically withheld.** The coherence comparison
+(`CoherenceCheck::compare`) is an inequality in *either* direction, so a
+stored entry whose observed generations differ from the restored ledger's is
+a move whichever way the numbers went. But a move is not a refusal to serve:
+the middleware evaluates a moved entry at an effective age of at least its
+fresh interval (`freshness_state` in
+`framework/src/render_cache/middleware.rs`), and on a route that declares a
+stale-servable window that lands it in the stale-servable band. **The
+visitor is served the pre-restore copy once, under `Warning`, while the
+rebuild runs behind the request.** That is the
+same handoff [RenderCache Generations](render-cache-generations.md)
+describes and step 4 of
+`an_orm_write_invalidates_the_todos_document_through_generations` asserts.
+A `PrivateCached` route never does this - its dead edge is its fresh edge -
+and neither does a route that declared no stale-servable window; both
+rebuild in the foreground.
+
+**An epoch advance is per process.** `RenderCache::advance_epoch` advances
+the ledger's epoch, then drops *this* process's epoch lease and clears
+*this* process's L0. Its sibling nodes keep both: their L0 entries and the
+pre-restore epoch they have leased. Each learns at its next authority read -
+immediately on its very next hit under `CoherenceMode::Authority`, and up to
+`max_age_ms` later under `CoherenceMode::Lease` - which is exactly what the
+three `an_epoch_advanced_by_another_node_*` tests in
+`framework/tests/render_cache/middleware.rs` measure. Until then a sibling
+can serve a pre-restore entry, and on a stale-servable route it can serve it
+under `Warning` as above.
+
+**The shared tier is not swept by an epoch change alone.** The file tier's
+sweep removes an entry when its retention has elapsed *or* its fence epoch
+is `<` the current one, so an entry stamped with an epoch the restore moved
+backward past is not reclaimed by that clause; it waits out its retention.
+The database tier is swept only by an explicit `RenderCache::sweep()`. The
+Redis tier reclaims itself, but on Redis's own schedule: each entry hash is
+stored under `<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (default prefix
+`suprnova_render:`) with a `PEXPIRE` set from the entry's retention, so
+waiting out the longest retention you declared is the passive option.
+
+So the procedure, in order:
+
+1. **Run `render-cache:epoch-advance` once**, before the restored deployment
+   serves. It fails loudly rather than reporting success when the epoch
+   singleton is missing, which is also how you find out the migration did
+   not come back with the data.
+2. **Empty the shared L1 tier.** Delete the file tier's directory contents,
+   `DELETE FROM suprnova_render_entries`, or delete the Redis keys matching
+   `<prefix>entry:*` - whichever tier the profile configures. Do this rather
+   than waiting for a sweep, for the reason above.
+3. **Cover every node's L0.** The advance only cleared the node that ran it.
+   Either restart the other nodes - a fresh process has an empty L0 and no
+   leased epoch, so its first request reads the restored authority - or run
+   `render-cache:epoch-advance` on each of them, which clears each one's L0
+   as it runs. The second option bumps the ledger's epoch once per node,
+   which costs nothing: the epoch only ever moves forward from there, and
+   every node ends up reading the last value. Both are safe; the restart is
+   the simpler one to reason about, and it is the only one that needs no
+   `Lease`-mode arithmetic.
+
+Steps 2 and 3 are what make step 1 complete rather than partial. Skip them
+and, on a route with a stale-servable window, a pre-restore representation
+can still be served once - correctly marked `Warning`, and rebuilt right
+after, but served.
 
 ## Measuring it
 

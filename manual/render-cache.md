@@ -83,7 +83,9 @@ how long a representation is fresh, and then two windows measured from that
 fresh edge: how far past it the stored copy may still be served while a
 background rebuild runs, and how far past it the stored copy may be served
 if a foreground rebuild fails outright. The two windows are not stacked; see
-[RenderCache Representations](render-cache-representations.md). `RepresentationClass` runs from widest to
+[RenderCache Representations](render-cache-representations.md).
+
+`RepresentationClass` runs from widest to
 narrowest sharing: `PublicShared` (one representation for everyone who
 matches the declared variance), `PublicShellStitched` (a Live document whose
 shared shell is stored once and whose islands are re-mounted for whoever is
@@ -132,7 +134,10 @@ actually depends on needs to be declared, with two mechanisms:
   rather than being silently ignored.
 - **Variance dimensions**, added one at a time with `.vary(dimension)`:
   - `VarianceDimension::Locale` partitions by the negotiated locale.
-  - `VarianceDimension::Media` partitions by the negotiated media type.
+  - `VarianceDimension::Media` partitions by the negotiated media type, and
+    adds `Accept` to `Vary`.
+  - `VarianceDimension::Encoding` partitions by the negotiated content
+    encoding, and adds `Accept-Encoding` to `Vary`.
   - `VarianceDimension::Host` partitions by the request's host, where your
     deployment makes more than one host meaningful.
   - `VarianceDimension::Tenant` partitions by the current tenant as opaque
@@ -142,6 +147,14 @@ actually depends on needs to be declared, with two mechanisms:
     opaque key material, bound to a permission version (see "Epoch,
     permissions, and inspection" below); a `PrivateCached` route must
     declare `Principal` or `Tenant` (or both) or it fails to build at all.
+
+`Media` and `Encoding` are declarable and keyed, but this release resolves
+each to a constant: every request is `text/html` and `identity`
+respectively. Declaring them is therefore a forward-compatibility move -
+they widen `Vary` correctly and reserve the key space, so a later
+content-negotiation or compression layer cannot collide with entries
+published before it existed - rather than something that partitions traffic
+today.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion`, and
 a custom `VarianceDimension::Application(name)` exist on the type but have
@@ -328,14 +341,17 @@ depends on something no key could safely partition by.
   changed keeps matching whatever was cached under their prior permission
   set.
 - **`RenderCache::advance_epoch()`**, or the hidden
-  `render-cache:epoch-advance` command - an emergency invalidation. Every
-  currently stored entry becomes unreachable by ordinary lookup at its very
-  next request, immediately, because the epoch is baked into the lookup key
-  itself. The in-process tier is also cleared outright the same instant; a
-  file-backed tier keeps its old files on disk until the periodic or manual
-  sweep reclaims them, which is disk hygiene rather than a correctness
-  concern. Reach for this when something is wrong with cached content and
-  you cannot wait for individual entries to expire.
+  `render-cache:epoch-advance` command - an emergency invalidation. The
+  epoch is baked into the lookup key itself, so advancing it puts stored
+  entries out of reach with nothing to enumerate and nothing to delete. On
+  the process that runs it the effect is immediate: it drops that process's
+  epoch lease and clears its in-process tier the same instant. Another node
+  catches up at its next authority read, and its file-backed tier keeps its
+  old files until the periodic or manual sweep reclaims them, which is disk
+  hygiene rather than a correctness concern. Reach for this when something
+  is wrong with cached content and you cannot wait for individual entries to
+  expire; on more than one node, see
+  [RenderCache Operations](render-cache-operations.md).
 - **The hidden `render-cache:inspect <key>` command** reports one stored
   entry's metadata (never its body) by the key text your application logs
   or telemetry can surface, alongside the current epoch, so you can tell
