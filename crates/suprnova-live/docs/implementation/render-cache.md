@@ -458,6 +458,17 @@ The body is never one of the allocations. `serve_hot` hands back the stored
 `Bytes`, and every pass of the bench compares the served body's pointer and
 length against the stored buffer's, recording the result as `body_shared`.
 
+Part of what buys those counts is that `HotEntry` pins the route's
+`SharedCachePolicy` and `FreshnessPolicy` at preparation, where
+`complete_response` reads them off the live policy on every cold request. A
+route policy in this framework is fixed when the route is installed and
+nothing can change one afterwards, so the pinned pair and the live pair are
+the same values and the hot and cold paths cannot disagree. That is the one
+place where they could, and it is the constraint a future
+runtime-reconfiguration feature has to meet: whoever changes a route's policy
+while the process is running must drop the hot entries prepared under the old
+one, because no test in this repository can catch that drift for them.
+
 ### The measured request
 
 The measured request is engine work to a formed `http::Response<Bytes>`. The
@@ -1779,7 +1790,9 @@ and `suprnova.render_cache.stitch.slots`. `lookups` and `hits` carry the
 `outcome` attribute with the eight `LookupOutcome` values listed under
 "Framework middleware and policy" above (`l0`, `l1`, `conditional`,
 `stale`, `miss`, `bypass`, `moved`, `declined`); `hits` increments only for
-`l0`, `l1`, `conditional`, and `stale`. The two stitch counters carry their
+`l0`, `l1`, `conditional`, and `stale`.
+
+The two stitch counters carry their
 own closed `outcome` sets: `assembled` and `fail_document` for assemblies,
 `rendered`, `omitted`, `fallback`, and `failed` for slots. `publications`
 and `rebuilds` are plain counts with no `outcome` attribute in this build.
