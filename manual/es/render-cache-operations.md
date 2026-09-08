@@ -241,7 +241,7 @@ informa de un `Age` de los segundos enteros transcurridos desde que se
 publicó el shell.
 
 Eso último es la prueba sobre la que se sostiene el test, y es el comprobante
-local de servicio desde el almacén en su forma exacta. La cabecera `Age` por
+local de servicio desde el store en su forma exacta. La cabecera `Age` por
 sí sola es la señal débil de la que este capítulo advertía más arriba, porque
 un render también pone una: a cero. El número no es débil: un render publica
 su respuesta y su entrada en el mismo instante, así que una respuesta
