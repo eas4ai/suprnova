@@ -174,25 +174,39 @@ a ratchet over the seven RenderCache-set sources rather than the whole
 manual, which has 1,591 pre-existing problems across 198 files; auditing
 those is a translation question outside this plan.
 
-That wiring is proved as far as one tier: the repository gate's default tier
-passed on the branch head on 2026-09-08, run
-`20260908T084935.854153Z-3938239-6292fa52` over tree `9ff1510b`, after two
-environmental reruns recorded in the plan's own ledger. `live-contracts` and
-`live-browser` are default-tier steps and ran in it; `live-gate` is a
-full-tier step and did not.
+That wiring is proved in both tiers. The default tier passed first on
+2026-09-08, run `20260908T084935.854153Z-3938239-6292fa52` over tree
+`9ff1510b`, after two environmental reruns recorded in the plan's own
+ledger. The full tier then passed on the branch's last code commit
+`bed07db2`, run `20260908T155719.700654Z-1063083-c83c04f7` over tree `193df128`:
+29 steps, `live-contracts`, `live-browser`, and `live-gate` among them, so
+this crate's own gate ran inside the repository gate as the specification
+asks.
 
 The Plan B final review's parked list was swept item by item against the
 current code: twelve of the fifteen were fixed, two were already closed by
 earlier work on this branch, and one (`StitchSlot::parse` running per slot
 per hit) was ruled not a defect with its reasoning and cost recorded.
 
+A whole-branch review after the last task found one defect the per-task
+reviews could not see: the leader's own render of a slotted stitched route
+was sent the class's private `max-age`, unlike every later assembly of it,
+over bytes that hold that principal's islands. The rule is about what the
+bytes hold, not which path produced them, so the leader is
+`private, no-store` now, decided by the one helper both paths share, and
+the dogfood test that had pinned the old value reads a non-zero `Age` under
+the controlled clock as its proof of a stitched hit instead. The same
+review asked for a test that a validation lease expires while its entry is
+still fresh, which the suite now has, statement count included.
+
 ### What this entry does not claim
 
-The full repository gate tier has not run for this branch. Nothing here
-claims MSRV, the feature matrix, the release smoke, or this crate's own gate
-as passing on it; the default-tier run named above is the only gate evidence
-this entry carries, and the closing task's report is where the rest belongs,
-with its exit codes and durations. Calling iteration 005 complete is a
+Nothing here is S1 or B1 evidence: every benchmark figure is exploratory,
+measured on a workstation. The full-tier run named above covers the last
+commit that changes code or tests; the commit that adds these sentences
+changes documents only, and its own default-tier run and by-hand
+`live-gate` step are recorded in the closing report with their ids, exit
+codes, and durations rather than here. Calling iteration 005 complete is a
 separate decision and is not made by this plan.
 
 ## 2026-09-07 -- RenderCache Tier 1 and Tier 2 providers
@@ -268,7 +282,9 @@ Three rulings changed the specification rather than the code. No Composite
 response answers 304 or honours `If-None-Match`, whether it carries slots or
 not, because every assembly is a distinct representation. A slotted assembly
 is additionally sent `Cache-Control: private, no-store`, while a zero-slot one
-keeps its class's private `max-age`. And `MAX_SEGMENTS` rose to 193, the
+keeps its class's private `max-age`; the leader's own render of a slotted
+route joined that rule in the 2026-09-08 entry above. And `MAX_SEGMENTS`
+rose to 193, the
 number a full shell with 32 slots and 64 nonce holes actually needs. The
 engine reviews each found an item the plan's own code had missed - shared
 header limits, the nonce-piece budget, bounding before allocating - which is
