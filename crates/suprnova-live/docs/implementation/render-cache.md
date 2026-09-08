@@ -1792,6 +1792,16 @@ and `suprnova.render_cache.stitch.slots`. `lookups` and `hits` carry the
 `stale`, `miss`, `bypass`, `moved`, `declined`); `hits` increments only for
 `l0`, `l1`, `conditional`, and `stale`.
 
+Both are tallies of outcome labels rather than counts of requests, which is
+ruled behaviour (R54) and matters when reading them: one lookup records every
+outcome that is true of it, so a conditional hit records the tier that
+answered it *and* `conditional`, and contributes two increments to `lookups`
+and two to `hits`. Both facts are wanted - which tier served, and how many
+hits cost no body - and one label per request could report only one of them.
+Summing either counter over its `outcome` values therefore over-counts
+requests; read one label at a time, and use a single label such as `l0` for a
+request count.
+
 The two stitch counters carry their
 own closed `outcome` sets: `assembled` and `fail_document` for assemblies,
 `rendered`, `omitted`, `fallback`, and `failed` for slots. `publications`

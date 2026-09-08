@@ -2,7 +2,19 @@
 
 /// Counter: RenderCache lookups attempted.
 pub const LOOKUPS: &str = "suprnova.render_cache.lookups";
-/// Counter: RenderCache lookups that returned a stored representation.
+/// Counter: RenderCache lookups that returned a stored representation,
+/// tallied by outcome.
+///
+/// **A tally of outcome labels, not a count of requests** (R54). One lookup
+/// records every outcome that is true of it, and a conditional hit has two:
+/// the tier that answered it (`l0` or `l1`) and `conditional`, which says
+/// the answer was a 304. Both facts are worth having - which tier served,
+/// and how many hits cost no body - and one label per request could only
+/// report one of them. Summing this counter over its `outcome` values
+/// therefore over-counts requests, and so does summing [`LOOKUPS`], which
+/// takes one increment from each of the same records. Read either counter
+/// one label at a time; for a request count, use a single label such as
+/// `l0`.
 pub const HITS: &str = "suprnova.render_cache.hits";
 /// Counter: RenderCache publications accepted.
 pub const PUBLICATIONS: &str = "suprnova.render_cache.publications";
