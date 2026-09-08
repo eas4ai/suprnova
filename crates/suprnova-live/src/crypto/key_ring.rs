@@ -158,6 +158,19 @@ impl PartWriter<'_> {
     /// One part whose `len` bytes arrive through `write`'s sink calls. The
     /// caller is responsible for `len` matching what it writes; a mismatch
     /// is a programming error and a debug assertion catches it.
+    ///
+    /// The debug assertion is a backstop, not the guarantee. In release it
+    /// is gone, and a `len` that overstated or understated what `write`
+    /// produced would prefix the MAC with a length that does not describe
+    /// its part - which is the one thing the length framing exists to make
+    /// impossible. What actually holds the pair together is a test per
+    /// caller. The only caller today is the render key's variance
+    /// descriptor, and
+    /// `the_streamed_canonical_form_matches_its_declared_length_and_the_expected_bytes`
+    /// (`tests/render_cache_variance.rs`) pins `canonical_len` and
+    /// `write_canonical` against bytes written out by hand for every
+    /// dimension shape, rather than against each other. A new dimension
+    /// variant, or a second caller, needs its own such test.
     pub(crate) fn part_streamed(&mut self, len: usize, write: impl FnOnce(&mut dyn FnMut(&[u8]))) {
         self.mac.update(&(len as u64).to_be_bytes());
         let mac = &mut *self.mac;
