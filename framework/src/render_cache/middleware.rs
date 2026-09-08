@@ -60,21 +60,42 @@
 //!   key that is neither `user:` nor `team:`, or a decision that varies on
 //!   something other than the context's identity, is not covered - this
 //!   observes *identity*, not the flag's own name or value.
-//! - **Anonymous identity resolution reads the session, which is
-//!   `Uncacheable`.** `Auth::id()` resolves through request state first and
-//!   falls back to `session()`, which records a session read; `classify`
-//!   narrows any session read straight to `Uncacheable`. So an anonymous
-//!   visitor of a route whose render calls `Auth::id()` never caches, even
-//!   though its key correctly says `Anonymous` and the guard's empty-set
-//!   path (below) would now accept it - the class decision happens first.
-//!   A signed-in visitor resolves through request state and never reaches
-//!   the fallback, so the same route does cache for them. Recording that
-//!   fallback as an identity read rather than a session read would fix it
-//!   and is measurably the only thing standing in the way, but it turns
-//!   every session-authenticated render from `Uncacheable` into
-//!   `PrivateCached`, which is a far larger widening than fix round 7 was
-//!   scoped to make. Parked, deliberately, with the measurement recorded in
-//!   `an_anonymous_render_that_resolves_identity_through_the_session_stays_uncacheable`.
+//! - **The session's principal identifier is an identity read; every other
+//!   session value is a session read.** `Auth::id()` resolves through
+//!   request state first and falls back to the persisted session. That
+//!   fallback goes through `crate::session::middleware`'s private
+//!   `session_identity`, which records a principal read and, when there is
+//!   an id, the principal value - never a session read. Only the two
+//!   authentication identifiers reach it (the default guard's `user_id` and
+//!   a named guard's own id), and a closed enum in that module is what
+//!   enforces it rather than a convention. `session()`, `session_mut`, and a
+//!   cookie read all still record a session read and still narrow straight
+//!   to `Uncacheable`, because no key partitions by an arbitrary session
+//!   value.
+//!
+//!   Three consequences follow, each with a test that holds it down. An
+//!   anonymous visitor of a `PrivateCached` route declaring `Principal`
+//!   caches under the `Anonymous` key: the render resolved no identity, so
+//!   no material is observed, the key says `Anonymous`, and the empty-set
+//!   path below finds them in agreement
+//!   (`render_cache::middleware::an_anonymous_render_resolving_identity_through_the_session_caches_anonymously`).
+//!   A signed-in visitor of such a route is stored once per principal, and
+//!   the entry observes the row the provider resolved them from, so a write
+//!   to that row invalidates their page
+//!   (`a_session_resolved_principal_is_stored_and_partitioned_per_principal`,
+//!   `a_session_resolved_principal_render_observes_the_row_it_was_resolved_from`).
+//!   And a principal read on a route that declares no `Principal` variance
+//!   is declined by the value comparison below, so the reclassification
+//!   opens no path to serving one visitor's page to another
+//!   (`a_session_resolved_principal_is_declined_where_no_principal_variance_is_declared`).
+//!
+//!   What stays a boundary: this classifies the *identity read*, not the
+//!   body. An anonymous render whose bytes derive from an input
+//!   classification cannot see - a request header, `Config::get` - is
+//!   storable as far as this is concerned, and declaring the matching
+//!   variance is the route's own job. That is the same residual the
+//!   header and configuration bullets below describe, and reclassifying
+//!   the identity read neither widened nor narrowed it.
 //! - **Authorization decisions are always treated as per-principal.**
 //!   `Gate::allows` records that a decision was evaluated, never what the
 //!   decision consulted, so `AuthorizationRead` requires the `Principal`

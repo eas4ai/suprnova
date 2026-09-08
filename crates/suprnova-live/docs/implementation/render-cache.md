@@ -284,17 +284,28 @@ Two narrower cases are exceptions, not full coverage:
   custom `Evaluator` outside these two, or a scope key that is neither
   `user:` nor `team:`, is invisible.
 
-Two further limits are documented, deliberate gaps rather than guard
-weaknesses:
+Two further rules are documented - the first a deliberate carve-out, the
+second a deliberate gap, neither a guard weakness:
 
-- **`Auth::id()`'s session fallback stays a session read.** `Auth::id()`
-  resolves through request state first and falls back to `session()` for an
-  anonymous visitor; `session()` always records a session read, and any
-  session read narrows straight to `Uncacheable` inside `classify`. So an
-  anonymous visitor of a route whose render calls `Auth::id()` never caches,
-  even though the key correctly resolves to `Anonymous` for that visitor. A
-  signed-in visitor resolves through request state and never reaches the
-  fallback, so the same route does cache for them.
+- **`Auth::id()`'s session fallback is an identity read, not a session
+  read.** `Auth::id()` resolves through request state first and falls back
+  to the persisted session. That fallback reads only the session's
+  authentication identifiers - the default guard's `user_id` and a named
+  guard's own id, a set the host closes with a private enum - and records a
+  principal read plus, when there is an id, the principal value. Every other
+  session value still goes through `session()` / `session_mut()`, still
+  records a session read, and still narrows straight to `Uncacheable`,
+  because no key partitions by an arbitrary session value.
+
+  So an ordinary cookie-carried login caches: a signed-in visitor of a
+  `PrivateCached` route declaring `Principal` is stored once per principal,
+  and an anonymous visitor of the same route caches under the `Anonymous`
+  key, because the render resolved no identity and the key agrees. A
+  principal read on a route that declares no `Principal` variance is still
+  declined by the key-against-value comparison, so the reclassification
+  opens no path to serving one visitor's page to another. This is a host
+  behaviour: the engine's classifier is unchanged and still narrows on the
+  reasons it is given.
 - **Authorization decisions are always treated as per-principal.**
   `Gate::allows` records only that a decision was evaluated, never what it
   consulted, so an `AuthorizationRead` reason always requires the
@@ -354,8 +365,9 @@ sets a cookie, or a response carrying a hop-by-hop, connection, or tracing
 header (`UNSAFE_RESPONSE_HEADERS`).
 
 The documented limits from "the honest boundary" apply directly to
-classification: a session fallback keeps anonymous identity-touching
-renders `Uncacheable` rather than `PrivateCached`; per-tenant authorization
+classification: an anonymous render whose bytes derive from an input
+classification cannot see stays storable, so declaring the matching
+variance is the route's own job; per-tenant authorization
 requires a route to also declare `Principal`; header, `Config::get`, and an
 Eloquent global scope's own task-local reads are invisible to
 classification entirely; a custom feature-flag evaluator, or a scope key
