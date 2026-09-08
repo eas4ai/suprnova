@@ -9,10 +9,12 @@ route declared - never from what the handler happened to do.
 
 This chapter is about that stored thing. What forms a representation can
 take (`Complete` and `Composite`), what goes into its key, which layers it
-is written to, how it answers `If-None-Match` and `HEAD`, and what
-`PrivateCached` and `PublicShellStitched` actually store. Whether a stored
-representation is still *current* is the next chapter's subject; here it is
-enough that one exists. Every example below is a route in this repository's
+is written to, the `ETag`, `Cache-Control`, `Vary`, `Age`, and `Warning` a
+served hit carries, the four freshness states it can be in, how it answers
+`If-None-Match` and `HEAD`, and what `PrivateCached` and
+`PublicShellStitched` actually store. *Why* a representation leaves the
+fresh band - a write, an epoch advance - is the next chapter's subject; here
+it is enough that the bands exist and that one representation does. Every example below is a route in this repository's
 dogfood application (`app/src/live/mod.rs`) and is proved by a named test in
 `app/tests/live_render_cache.rs`.
 
@@ -103,11 +105,66 @@ Pick the layers per route rather than globally. L1 costs a round trip on a
 miss that L0 alone does not, and an entry that only one node will ever ask
 for is not worth putting where every node can see it.
 
+## The metadata a served hit carries
+
+Five response fields describe a served representation, and this is where
+they are defined; the other chapters use them without restating them.
+
+| Field | What it says |
+|---|---|
+| `ETag` | A strong validator over exactly the bytes sent. A client may send it back as `If-None-Match`. |
+| `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. An assembled `Composite` document with at least one island is `private, no-store`. |
+| `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`. A dimension that implies none adds nothing. |
+| `Age` | Whole seconds since the representation was published. Its presence is the simplest local proof that a response came out of the store. |
+| `Warning` | `110 - "Response is Stale"`, and only on a response served past its fresh interval. |
+
+Three of those are asserted against the running application:
+`the_public_document_is_a_hit_whose_seed_still_promotes` reads
+`private, max-age=300` off `/live/public` and requires an `Age` header on
+the second request;
+`the_private_document_is_cached_per_principal_and_never_crosses` reads
+`private, max-age=60` off `/live/me`;
+`the_dashboard_is_stitched_per_principal_from_one_shared_shell` reads
+`private, no-store` off an assembled dashboard, which is the value nothing
+but the composite responder writes.
+
+## The four freshness states
+
+Every hit resolves to exactly one of four states before anything is served.
+`FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` sets
+them. **The two stale windows are both measured from the end of the fresh
+interval, not stacked one after the other** - this is the detail that trips
+people up:
+
+| State | Age since publication | What the visitor gets |
+|---|---|---|
+| Fresh | below `fresh_ms` | the stored bytes, no `Warning` |
+| Stale-servable | past `fresh_ms` by less than `stale_servable_ms` | the stored bytes immediately, under `Warning`, with a bounded rebuild spawned behind the request |
+| Stale-on-error | past `fresh_ms` by at least `stale_servable_ms`, and by less than `stale_on_error_ms` | a foreground rebuild; the stored bytes under `Warning` only if that rebuild itself fails |
+| Dead | past `fresh_ms` by the larger of the two windows or more | nothing; the request renders |
+
+`/live/todos` declares `FreshnessPolicy::new(300_000, 60_000, 300_000)`, so
+it is fresh for five minutes, stale-servable for the sixth, stale-on-error
+until ten minutes, and dead after that.
+
+Two rules override the bands. A `PrivateCached` representation is **never**
+served stale: past its fresh interval it is Dead, which is why `/live/me`
+declares `FreshnessPolicy::new(60_000, 0, 0)` - a stale band there would
+read as a promise the cache does not keep. And a stored public-seed
+document whose promotion deadline has passed is Dead whatever its intervals
+say, because a seed past its deadline can never be promoted again.
+
+`stale_service_is_marked_and_rebuilt_in_the_background` drives `/live/todos`
+across the first boundary on a controlled clock and asserts the served body,
+`Warning: 110 - "Response is Stale"`, and `Age: 300`. What *causes* a
+representation to leave the fresh band early - a write, an epoch advance -
+is [RenderCache Generations](render-cache-generations.md)'s subject.
+
 ## Conditional requests and HEAD
 
-A served `Complete` hit carries a strong `ETag`. A client that sends it back
-as `If-None-Match` gets a `304` with no body, and a `HEAD` gets the headers
-with no body. Neither reaches your handler:
+A client that sends a served `ETag` back as `If-None-Match` gets a `304`
+with no body, and a `HEAD` gets the headers with no body. Neither reaches
+your handler:
 
 ```
 GET  /live/todos                          -> 200, ETag: "..."
@@ -191,7 +248,12 @@ declare the class:
   variance caches under the `Anonymous` key. The render resolved no
   identity, so no principal material was observed, the key says `Anonymous`,
   and the two agree. A signed-in visitor derives a `Private` key that can
-  never reach that entry.
+  never reach that entry. This applies when such a request actually renders
+  a `200`, which `/live/me` never does - its login redirect answers a `302`,
+  and a `302` is refused by eligibility before any of this is consulted. The
+  framework test that does reach it is
+  `an_anonymous_render_resolving_identity_through_the_session_caches_anonymously`
+  in `framework/tests/render_cache/middleware.rs`.
 - A **named guard's** identifier is principal material in exactly the same
   way as the default guard's. Reading it records a principal read and, when
   there is an id, the value.

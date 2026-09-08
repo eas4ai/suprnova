@@ -24,7 +24,7 @@ each answers one question on its own.
 | [Representations](render-cache-representations.md) | What is actually stored, and under what key? |
 | [Generations](render-cache-generations.md) | When does a stored copy stop being current? |
 | [Deployment](render-cache-deployment.md) | How do several nodes share one cache? |
-| [Operations](render-cache-operations.md) | How do I see it, measure it, and switch it off? |
+| [Operations](render-cache-operations.md) | How do I inspect it, test it, measure it, and switch it off? |
 
 ## Enabling the cache
 
@@ -41,9 +41,11 @@ A handful of other variables tune the defaults: `RENDER_CACHE_L0_ENTRIES`
 (4,096) and `RENDER_CACHE_L0_BYTES` (128 MiB) bound the in-process tier;
 `RENDER_CACHE_L1_BYTES` (1 GiB) bounds the file tier; `RENDER_CACHE_FAILURE`
 (`open` by default, or `closed`) decides whether a store or database problem
-serves the route uncached or refuses the request; `APP_BUILD_ID` (your
-crate's own version by default) namespaces every cached entry to the build
-that produced it, so a deploy never serves an old build's bytes.
+serves the route uncached or refuses the request; `APP_BUILD_ID` namespaces
+every cached entry to the build that produced it. Set it explicitly to
+something that changes every deploy: its default is a compiled-in crate
+version, which does not. See
+[RenderCache Deployment](render-cache-deployment.md).
 
 `RENDER_CACHE_PROFILE` (`embedded` by default, or `database` or `redis`)
 chooses whether the second tier and the rebuild coordinator are in this
@@ -77,9 +79,11 @@ fn add_render_cache(router: Router) -> Result<Router, FrameworkError> {
 ```
 
 `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` sets
-how long a representation is fresh, how much longer it may still be served
-while a background rebuild runs, and how much longer still it may be served
-if that rebuild fails outright. `RepresentationClass` runs from widest to
+how long a representation is fresh, and then two windows measured from that
+fresh edge: how far past it the stored copy may still be served while a
+background rebuild runs, and how far past it the stored copy may be served
+if a foreground rebuild fails outright. The two windows are not stacked; see
+[RenderCache Representations](render-cache-representations.md). `RepresentationClass` runs from widest to
 narrowest sharing: `PublicShared` (one representation for everyone who
 matches the declared variance), `PublicShellStitched` (a Live document whose
 shared shell is stored once and whose islands are re-mounted for whoever is
@@ -148,13 +152,13 @@ them yet.
 ## Reading the response headers
 
 A served hit carries `ETag` (a strong validator your client can send back as
-`If-None-Match` for a `304`), `Cache-Control` (`private` unless the class is
-`PublicShared` and you set a `SharedCachePolicy::SMaxAge`, in which case it
-also carries `public` and `s-maxage`), `Vary` (from whichever declared
-dimensions imply one - `Locale` implies `Accept-Language`, `Media` implies
-`Accept`), and `Age` (whole seconds since the representation was published).
-A stale-servable response additionally carries `Warning: 110 - "Response is
-Stale"`.
+`If-None-Match` for a `304`), `Cache-Control`, `Vary`, and `Age` (whole
+seconds since the representation was published, and the quickest local sign
+that a response came out of the store rather than out of your handler). A
+response served past its fresh interval additionally carries
+`Warning: 110 - "Response is Stale"`. Each of the five is defined, with the
+values the dogfood routes are asserted to send, in
+[RenderCache Representations](render-cache-representations.md).
 
 ## Why a render is never stored
 

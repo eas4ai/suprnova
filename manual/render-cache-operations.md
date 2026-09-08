@@ -1,17 +1,20 @@
 # RenderCache Operations
 
-A cache you cannot see is a cache you cannot trust. RenderCache is built so
-that the two questions an operator actually asks - "is this page being
-served from a stored copy?" and "how do I make it stop?" - have direct
-answers that do not involve reading a body out of a store or guessing at a
-key. There are two console commands, six telemetry counters, one bounded
-disk sweep, and one emergency lever.
+A cache you cannot see is a cache you cannot trust. RenderCache answers two
+operator questions directly and without ever printing a stored page: **what
+is this node holding under this key, and is it still current?** and **how do
+I make everything stop?** It answers a third - "is this route being served
+from a stored copy at all?" - through telemetry and through the `Age` header
+rather than through a command, because that question is about traffic rather
+than about one entry. There are two console commands, six telemetry
+counters, one bounded disk sweep, and one emergency lever.
 
-This chapter is the operating surface: the commands and exactly what they
-print, the counters and their closed outcome sets, how the file tier
-reclaims disk, what to do when something is wrong, and how the cache's own
-performance is measured and what those numbers are honestly worth. The
-command examples are the ones
+This chapter is the operating surface: the commands, exactly what they print
+and what they can see; the counters and their closed outcome sets; how the
+file tier reclaims disk; how to test a cached route so the test proves
+caching rather than merely responding; what to do when something is wrong;
+and how the cache's own performance is measured and what those numbers are
+honestly worth. The command examples are the ones
 `the_operator_commands_inspect_without_a_body_and_advance_the_epoch` drives
 through this repository's own console entry point in
 `app/tests/live_render_cache.rs`.
@@ -31,9 +34,19 @@ cargo run --bin console -- render-cache:epoch-advance
 representation class, its `body_bytes`, its other metadata, and the current
 authority epoch beside it, so you can tell whether the entry you are looking
 at is still live authority or has already aged out from underneath. It
-prints `no entry (current epoch: {epoch})` when the key names nothing
-stored, and it fails - it does not report success - on an unparseable key or
+prints `no entry (current epoch: {epoch})` when the key names nothing it can
+see, and it fails - it does not report success - on an unparseable key or
 with no runtime installed.
+
+**It reads this process's in-process L0 and nothing else.** `RenderCache::inspect`
+looks the key up in L0 alone; it never consults the L1 tier. On the Database
+or Redis profile that matters: an entry that is live in
+`suprnova_render_entries` or in Redis, published by another node or by this
+one before a restart, prints `no entry` here unless this process has served
+it since it started. Read the report as "what this node has in memory",
+never as "what the deployment has stored". The same is true of
+`RenderCache::store_inspection`, which reports L0 occupancy and the current
+epoch.
 
 The key is the text the lookup itself uses: `rk1.` plus 43 base64url
 characters, which is what your application's logging and telemetry can
@@ -148,6 +161,110 @@ removes any leftover temporary file and any file that fails its frame check,
 treating a torn write as self-healing rather than a permanently poisoned
 entry.
 
+## Testing a cached route
+
+A test that asserts a cached route responds correctly passes whether the
+response came out of the store or out of a fresh render. Every claim has to
+be made against something only a stored entry actually being served can
+produce. Four patterns do that, and this repository's own dogfood tests use
+all four: `app/tests/live_render_cache.rs` with the harness in
+`app/tests/live_support/mod.rs`.
+
+**1. Count renders on the handler side of the cache.** Register a counting
+middleware *after* `RenderCache::install`. Registration appends, so it lands
+closer to the handler than `RenderCacheMiddleware`, and a request the cache
+answers returns before calling it:
+
+```rust
+let router = app::live::routes_with_render_cache_with_config(routes::register(), config)
+    .await
+    .expect("install the routes and the RenderCache middleware");
+// After the install, so it only sees requests the cache forwarded.
+render_counter::register();
+```
+
+The difference between two readings of `render_counter::renders()` is then
+the number of renders the cache did not avoid, and nothing else - unlike
+identical bodies or an `Age` header, both of which have honest non-cache
+explanations. Every hit assertion in
+`an_orm_write_invalidates_the_todos_document_through_generations` rests on
+it. Wait for a render you did not dispatch (a background rebuild) with the
+counter's own barrier, `wait_until_renders_at_least`, never with a sleep.
+
+**2. Read the entry back.** Two facade calls are ordinary public API:
+`RenderCache::store_inspection()` reports L0 occupancy, bytes, and the
+current epoch, and `RenderCache::inspect(key_text)` reports one entry's
+body-free metadata. Alongside them the framework exposes hidden test seams -
+`#[doc(hidden)]`, and named `_for_test` so nothing mistakes them for
+application API:
+
+| Seam | What it gives a test |
+|---|---|
+| `RenderCache::key_for_route_for_test(pattern, params, login)` | the same key text the middleware derives |
+| `RenderCache::inspect_route_for_test(pattern)` | that key's L0 entry: class, kind, status, `body_bytes`, slots |
+| `RenderCache::inspect_l1_for_test(pattern, params, login)` | the same, out of the configured L1 tier |
+| `RenderCache::clear_l0_for_test()` | empties L0 and leaves L1, the epoch, and the coordinator alone |
+
+`the_public_document_is_a_hit_whose_seed_still_promotes` uses
+`store_inspection` and `inspect_route_for_test` to assert the entry exists
+and is stored under the declared class;
+`the_database_profile_serves_a_hit_through_the_sql_stores` uses
+`inspect_l1_for_test` and then `clear_l0_for_test`, which is the only way to
+prove a later request came out of L1 rather than out of memory.
+
+**3. Move the clock instead of waiting.** The clock the runtime reads is
+settable on a `RenderCacheConfig` and never by `from_env`, so a test that
+needs a freshness band installs its own:
+
+```rust
+let clock = Arc::new(AdjustableTestClock::new(unix_now_ms()));
+// Bound to its own name first: passing `Arc::clone(&clock)` inline leaves
+// the compiler inferring the trait object as the clone's return type.
+let for_runtime = Arc::clone(&clock);
+let config = RenderCacheConfig::from_env()?.with_clock_for_test(for_runtime);
+// ... install through the application's own configuration seam, then:
+clock.advance_ms(300_001);
+```
+
+`AdjustableTestClock` comes from `suprnova::live::testing`, and `unix_now_ms`
+is the harness's own wall-clock reading, so an adjustable clock starts where
+the system one is rather than at an epoch the rest of the process would
+disagree with. The harness wraps the pair as `setup_app_with_clock` and
+`advance_clock_ms`, the second of which panics rather than silently doing
+nothing when the boot took the system clock.
+`stale_service_is_marked_and_rebuilt_in_the_background` is the test.
+
+**4. Count SQL statements.** A cache that skipped the handler but still
+consulted the database on every hit satisfies every handler-side counter and
+still costs a round trip. `DbConnection::observe_statements_for_test` points
+SeaORM's metric callback at a counter of your own, and it sees statements on
+the pool and on every transaction started from it:
+
+```rust
+// Immediately after connecting, before the connection is cloned or bound
+// into the container: installing needs sole ownership of the pool, and the
+// call reports `false` rather than counting nothing silently.
+let installed = conn.observe_statements_for_test(|| {
+    STATEMENTS.fetch_add(1, Ordering::SeqCst);
+});
+assert!(installed, "the statement observer needs an unshared connection");
+```
+
+The callback is told nothing about the statement - no SQL text, no bound
+value - because a count is the whole point.
+`framework/tests/render_cache/bypass.rs` is written entirely on this
+pattern: `a_lease_mode_hit_runs_nothing_and_issues_no_statement` holds a
+lease-mode hit to zero statements, `an_authority_mode_hit_issues_exactly_one_statement`
+holds an authority-mode hit to one, and
+`the_epoch_is_read_once_at_first_use` measures two misses against each other
+to show the epoch costs one read per runtime.
+
+Two habits worth keeping. Boot the harness through your own application's
+configuration seam rather than through a hand-built router, so the test
+installs the same routes, policies, and middleware ordering the server does.
+And never add a timing wait: every barrier above is a state barrier on a
+counter, which is what makes these tests reproducible rather than flaky.
+
 ## When something is wrong
 
 - **A page is showing content you know is old.** Check whether the route is
@@ -165,12 +282,31 @@ entry.
   backend missing at boot stops the boot instead, with a sentence naming the
   migration or the variable to fix.
 - **Redis was flushed or restarted.** Entries miss and are re-rendered.
-  Nothing stale can be proven current, because the coherence check runs
-  against the database generation ledger whatever served the bytes.
+  Nothing stale can be proven current: currency is proved against the
+  database generation ledger, never against the tier that held the bytes.
 - **A rebuild leader died mid-rebuild.** Its lease is taken over once store
   time passes the expiry, and the former leader's own publication is fenced
   out rather than racing the new one. It publishes nothing; its request's
   response is still served.
+- **An L1 file was torn by a crash or a full disk.** Nothing serves it. Each
+  file carries a digest over its own frame, so a truncated or altered file
+  fails that check and is a miss; the store removes it, and any leftover
+  temporary file, the next time it opens. A torn write is self-healing here
+  rather than a permanently poisoned entry.
+- **The database was restored from a backup.** The generation ledger is the
+  authority every hit is proved against, so restoring it changes what
+  "current" means, and two facts decide the outcome. The coherence
+  comparison is an inequality in **either** direction, so any stored entry
+  whose observed generations differ from the restored ledger's is treated as
+  moved and rebuilt rather than served. And the authority epoch is part of
+  every lookup key. So: run `render-cache:epoch-advance` before the node
+  serves - it fails loudly rather than reporting success if the epoch
+  singleton is missing, which is also how you find out the migration did not
+  come back with the data - and then empty the shared L1 tier by hand (the
+  file directory, or `suprnova_render_entries`) rather than waiting for the
+  sweep, whose epoch clause only reclaims entries stamped with an epoch
+  *older* than the current one. L0 needs nothing: the epoch advance clears
+  it outright.
 - **You need everything gone, now.** `render-cache:epoch-advance`.
 
 ## Measuring it
@@ -246,4 +382,6 @@ epoch-wide.
 
 - [RenderCache](render-cache.md) - the declarations these commands operate on
 - [Observability](observability.md) - where the counters above are exported
+- [Testing](testing.md) - the surrounding test conventions the patterns above
+  sit inside
 - [Deployment](deployment.md) - the production checklist around them

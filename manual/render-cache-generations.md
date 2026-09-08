@@ -11,15 +11,16 @@ data, because an ordinary `model.save()` already is one.
 This chapter is about that machinery from the outside: what a render is
 recorded as depending on, how coarse those dependencies really are, what the
 framework cannot see and therefore cannot invalidate, how the coherence
-check is paid for on a hit, and what a visitor is served in the window
-between "no longer current" and "rebuilt". Every claim below is held down by
+check is paid for on a hit, which request rebuilds when several want the
+same entry at once, and what a visitor is served in the window between "no
+longer current" and "rebuilt". Every claim below is held down by
 a named test or a checked-in measurement; the dogfood examples are routes in
 `app/src/live/mod.rs` proved by `app/tests/live_render_cache.rs`.
 
 ## What a render is recorded as depending on
 
-While the leader's render runs, a request-scoped collector records each
-dependency it can name: a table read, a record read by primary key, a query
+While a render runs, a request-scoped collector records each dependency it
+can name: a table read, a record read by primary key, a query
 class, a relation, a configuration identity, a feature, a locale, a route,
 and one always-present `Broad` identity that every representation observes.
 Reads through the ORM and the query builder record themselves; you write
@@ -61,9 +62,16 @@ whole cycle through the running application:
    schedules exactly one background rebuild. Its five fresh minutes have
    barely started, so the advanced generation of the `todos` table is the
    only thing that can explain either.
-5. That rebuild really runs, and the listing it produces has the new row in
-   it.
-6. And the route settles back to a plain hit against the republished entry.
+5. That rebuild really runs: the test waits on the render counter - a state
+   barrier, not a timed wait - until a render the test itself did not
+   dispatch has happened.
+6. The written row really is in the listing. This is a **separate** step and
+   deliberately not an assertion about the background rebuild's own output:
+   the test drops L0 first and renders again, because the rebuild's
+   publication lands at a moment nothing reachable from the application
+   makes observable, so asserting on whichever request happened to catch it
+   would be a race.
+7. And the route settles back to a plain hit against the republished entry.
 
 No cache key was named anywhere in that sequence. An ORM write inside a
 `DB::transaction` advances its generations inside that same transaction, so
@@ -85,8 +93,9 @@ That is safe - it can only invalidate too much, never too little - and it is
 measured rather than assumed. The invalidation-storm workload in
 `framework/benches/render_cache_workloads.rs` publishes 64 keys over 12
 record identities, drives 1,000 writes, and records the fan-out it observed
-in `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json` (the
-timing fields of that object are left out here):
+in `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json`
+(abridged; the recorded object also carries the burst, sweep, hit, rebuild,
+statement, and latency fields):
 
 ```json
 "invalidation_storm": {
@@ -189,36 +198,68 @@ paths down by name:
 and
 `an_epoch_advanced_by_another_node_serves_a_stale_servable_entry_once_then_rebuilds`.
 
-## Freshness, stale service, and stale on error
+## One rebuild per key: singleflight and waiters
 
-`FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` sets
-three consecutive bands measured from publication:
+When an entry is missing or no longer current, the requests that arrive for
+it do not all render. They are admitted through a **rebuild coordinator**,
+which picks exactly one of them:
 
-- **Fresh.** Served as is.
-- **Stale-servable.** Served immediately with `Warning: 110 - "Response is
-  Stale"` and an honest `Age`, with a bounded background rebuild spawned to
-  replace it.
-- **Stale-on-error.** Rebuilt in the foreground; the stored bytes are served
-  only if that rebuild itself fails.
+- The **leader** is the one request that renders and may publish. It holds a
+  lease on that key for the length of its render.
+- **Waiters** are the requests that arrive for the same key while the leader
+  holds it. They wait in process, and when the leader releases they
+  re-evaluate what is now stored and serve that. A waiter never trusts the
+  wait: if the leader's cycle failed to publish, or published something the
+  waiter's own freshness check finds dead, the waiter renders too, rather
+  than serving what it found. `a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh`
+  in `framework/tests/render_cache/middleware.rs` is that rule.
+- A request that arrives once `RENDER_CACHE_MAX_WAITERS` (default 128) are
+  already waiting **bypasses**: it renders and publishes nothing, rather
+  than growing an unbounded queue.
 
-Past all three the entry is dead and the next request renders.
-`stale_service_is_marked_and_rebuilt_in_the_background` drives
-`/live/todos` (fresh 300,000 ms, stale-servable 60,000 ms) across the first
-boundary on a controlled clock and asserts the served body is the copy on
-hand, that it carries `Warning: 110 - "Response is Stale"` and `Age: 300`,
-that exactly one rebuild was scheduled, and that the rebuild really runs.
+`concurrent_misses_render_once_and_waiters_reuse_the_publication` proves the
+ordinary case end to end - two concurrent misses, one render, identical
+bodies - and
+`one_leader_per_key_and_fence_with_bounded_waiters` in
+`crates/suprnova-live/tests/render_cache_singleflight.rs` proves the cap
+directly against the coordinator: past its waiter limit, admission answers
+`Bypass`.
 
-A `PrivateCached` representation is never served stale: past its fresh
-interval it is dead. That is why `/live/me` declares
-`FreshnessPolicy::new(60_000, 0, 0)` - a stale band on a private entry would
-read as a promise the cache does not keep.
+Two publications for one key can never both be accepted, whatever the
+coordinator decided. A leader mints a publication token under its lease, and
+the store compares that fence before it writes: an older epoch, or an equal
+epoch with a lower token, loses. That is what makes duplicate *rendering*
+safe to accept while duplicate *publishing* is not, and it is why there is
+no cross-node waiting at all - a key another node is rebuilding is a bypass
+here. See [RenderCache Deployment](render-cache-deployment.md).
 
-The stale-on-error fallback covers the request that leads a rebuild **and**
-a request waiting behind a leader whose rebuild failed. Both are answered
-the same way: the stale bytes under `Warning`, rather than the failure.
-`framework/tests/render_cache/races.rs` proves each arm separately, and the
-second one by revert - dropping the fallback from the waiting arm turns its
-final assertions from `200` into `500`.
+## Serving something while it is rebuilt
+
+The four freshness states, the bands `FreshnessPolicy` sets, and the
+`Warning` and `Age` a stale response carries are defined in
+[RenderCache Representations](render-cache-representations.md). What matters
+here is that a generation move puts an entry into those bands early: a
+moved entry is evaluated at an effective age of at least its fresh interval,
+so on a route with a stale-servable window it lands in that band and is
+served once under `Warning` while the rebuild runs behind the request. That
+is exactly what step 4 of the write test above observes, on an entry whose
+five fresh minutes had barely started.
+
+`stale_service_is_marked_and_rebuilt_in_the_background` shows the same
+handoff driven by the clock rather than by a write: past `/live/todos`'s
+300,000 fresh milliseconds and inside its 60,000 stale-servable ones, the
+visitor is handed the copy on hand under `Warning: 110 - "Response is
+Stale"` and `Age: 300`, exactly one rebuild is scheduled, and that rebuild
+really runs.
+
+The stale-on-error fallback covers the request that leads a rebuild **and** a
+waiter behind a leader whose rebuild failed. Both are answered the same way:
+the stale bytes under `Warning`, rather than the failure.
+`framework/tests/render_cache/races.rs` proves each arm separately -
+`a_waiter_behind_a_failed_leader_is_served_the_stale_entry_it_was_waiting_on`
+and `a_waiter_that_re_evaluates_onto_a_stale_on_error_entry_falls_back_to_it` -
+and the second one by revert: dropping the fallback from the waiting arm
+turns its final assertions from `200` into `500`.
 
 Stitched routes are the exception, and it is a deliberate one. A `Composite`
 entry is never served by the stale-on-error fallback and never triggers a

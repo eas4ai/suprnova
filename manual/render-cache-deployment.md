@@ -28,11 +28,13 @@ embedded profile by default and is booted on the Database profile by
 | `redis` | one Redis hash per key | one Redis hash per key, plus a token counter | one Redis hash per record |
 
 The thing that does **not** move between them is generation truth. The
-database-backed generation ledger is the authority at every profile, so the
-coherence check that runs on a hit is a database read whatever served the
-bytes. That is what keeps an accelerator an accelerator: Redis can lose
-everything it holds without anything stale being proven current, because
-nothing Redis holds proves currency in the first place.
+database-backed generation ledger is the authority at every profile:
+whichever tier handed over the bytes, currency is proved against the
+database - by rereading it on the hit under `CoherenceMode::Authority`, or
+by a validation lease granted from an earlier read of it under
+`CoherenceMode::Lease`. That is what keeps an accelerator an accelerator:
+Redis can lose everything it holds without anything stale being proven
+current, because nothing Redis holds proves currency in the first place.
 
 Choose by what you actually need to share:
 
@@ -64,7 +66,7 @@ Choose by what you actually need to share:
 | `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serves the route uncached on a provider failure, `closed` answers `503` |
-| `APP_BUILD_ID` | the application's own `CARGO_PKG_VERSION` | namespaces every entry to the build that produced it |
+| `APP_BUILD_ID` | a compiled-in crate version (see below) | namespaces every entry to the build that produced it |
 
 The profile is a shorthand, not a lock. `RENDER_CACHE_L1` and
 `RENDER_CACHE_COORDINATOR` each override their own half, so a deployment
@@ -75,6 +77,23 @@ A variable with a closed set of accepted values that is set to something
 outside it fails the boot with a message naming the variable. The rejected
 value is never repeated in that message, because an environment value can
 carry a secret.
+
+**Set `APP_BUILD_ID` explicitly, once per deploy.** It is mixed into every
+lookup key, so changing it is what stops a new build from serving entries
+the previous one published. Its default is not what the name suggests:
+`RenderCacheConfig::from_env` falls back to `env!("CARGO_PKG_VERSION")`,
+which expands at compile time inside the `suprnova` crate, so the default is
+the **framework** crate's version. It equals your application's version only
+because both take `version.workspace = true` from the same workspace, and
+either way it moves only when someone bumps a version number. A deploy that
+changes a template, a translation, or a handler without a version bump keeps
+the same build id and can serve entries the previous build published. Set it
+to something that changes every time you ship - a commit id or a release
+identifier:
+
+```bash
+APP_BUILD_ID=$(git rev-parse --short HEAD)
+```
 
 Live's own instance ledger is configured separately, because it is Live's
 authority rather than the cache's storage: `LIVE_LEDGER_DRIVER` (`memory`,
@@ -115,13 +134,40 @@ so nothing pays for a cache that is off.
 `RenderCache::install` is asynchronous, because it probes for the tables and
 pings every distinct Redis endpoint the configuration would use before it
 assembles anything. `Application::try_routes_async` is the hook that hosts
-it:
+it. This is `app/src/live/mod.rs`, and the split into two functions is worth
+copying:
 
 ```rust
+/// [`routes`] followed by the RenderCache middleware. This is the entry
+/// point every server in this application uses.
 pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
-    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()?).await
+    routes_with_render_cache_with_config(router, RenderCacheConfig::from_env()?).await
+}
+
+#[doc(hidden)]
+pub async fn routes_with_render_cache_with_config(
+    router: Router,
+    config: RenderCacheConfig,
+) -> Result<Router, FrameworkError> {
+    RenderCache::install(routes(router)?, config).await
 }
 ```
+
+`routes` is the synchronous inner half: it registers the reserved Live
+routes, the document routes, and every cache policy, and installs no
+middleware. `cmd/main.rs` reaches `routes_with_render_cache` through
+`Application::try_routes_async`, and the browser scenario's server in
+`app/examples/live_dogfood_host.rs` awaits it directly.
+
+The configuration seam underneath it is not decoration. A test that needs a
+different profile or a clock it can move has no other way in, and it matters
+that it installs *the same* routes, policies, and middleware ordering the
+server does, differing only in the configuration it passed. Both dogfood
+boots go through it: `the_database_profile_serves_a_hit_through_the_sql_stores`
+passes a Database-profile configuration, and
+`stale_service_is_marked_and_rebuilt_in_the_background` passes one carrying
+an adjustable clock. See "Testing a cached route" in
+[RenderCache Operations](render-cache-operations.md).
 
 Two ordering rules, both the caller's responsibility:
 
@@ -131,10 +177,13 @@ Two ordering rules, both the caller's responsibility:
    the session, locale, and identity middleware whose request-scoped state
    the cache middleware reads while deriving a lookup key.
 
-Both installs fail closed. A configuration that reaches a table the
-migration has not created stops the boot with one actionable sentence naming
-the migration or the variable to fix, and nothing is ever served against a
-missing table or an endpoint nothing answers.
+The install fails closed, through two probes. It checks that the tables the
+configuration would reach exist, and it pings every distinct Redis endpoint
+the configuration would use, once per endpoint. Either failing stops the
+boot with one actionable sentence naming the migration or the variable to
+fix, so nothing is ever served against a missing table or an endpoint
+nothing answers. (Live's own instance ledger is probed separately, by
+`Server::run`, before any request is served.)
 
 ## Choosing where a route's entries live
 
