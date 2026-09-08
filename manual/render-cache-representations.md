@@ -309,7 +309,7 @@ never an assembled document.
 An assembled document with at least one slot is sent
 `Cache-Control: private, no-store`. It holds one principal's islands under
 authority re-derived for one request, and a `max-age` would let a shared
-browser profile replay them to whoever sits down next. A zero-slot Composite
+browser profile replay them to whoever sits down next. A zero-slot `Composite`
 carries no per-principal bytes at all, only a per-request nonce, so it keeps
 the class's private `max-age` like any other private representation;
 `a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit` in

@@ -220,7 +220,7 @@ count (`inspect_route_for_test`), the response carries
 `Cache-Control: private, no-store` - the value the composite responder pins
 on a slotted assembly, and only after a whole document has been assembled -
 and two principals' documents differ in their island tags and nowhere else.
-Slotted is the operative word: a zero-slot Composite keeps the class's
+Slotted is the operative word: a zero-slot `Composite` keeps the class's
 private `max-age` instead, so that assertion suits a route with islands in
 it and not one without. That
 test asserts `renders() == before + 1` on a hit, and says in its own note
