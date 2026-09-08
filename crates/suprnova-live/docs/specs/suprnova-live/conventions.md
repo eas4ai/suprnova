@@ -19,9 +19,10 @@ tests, benchmarks, and implementation documents are one maintained authority.
 The former `/home/shawn/workspace2/suprnova-live` checkout is immutable
 historical provenance only. Its large `reference/` catalog and optional
 `suprnova-live.zip` Fable handoff export remain non-normative historical
-artifacts and do not become a parallel current contract. Iteration 005
-authorizes coherent changes in an isolated Suprnova integration worktree while
-unrelated Suprnova and Magnetar work remains untouched.
+artifacts and do not become a parallel current contract. The active iteration
+contract named under Completeness and scope authorizes coherent changes in an
+isolated Suprnova worktree while unrelated Suprnova and Magnetar work remains
+untouched.
 
 ## Implementation standards
 
@@ -547,6 +548,8 @@ fixtures.
 
 - 2026-09-08 -- Advanced the active contract to iteration 006, the sweep of
   every staged capture; iteration 005 closed with its definition of done met.
+  The authority statement now names the active contract rather than one
+  iteration, so it does not go stale at the next advance.
 - 2026-09-08 -- Promoted `test-seams-in-ordinary-builds.md` from
   `iterations/next/` into iteration 006: a documented production build shape
   with the framework `testing` feature off, in which no test seam is present

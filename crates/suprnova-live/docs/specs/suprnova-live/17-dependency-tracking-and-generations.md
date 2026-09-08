@@ -150,6 +150,17 @@ UX flow:
 2. Transaction rolls back -> generations remain unchanged and valid cache
    entries are not discarded unnecessarily.
 
+#### Advancement in every writing process
+
+The advancement this capability describes SHALL hold in every process that
+writes through the ORM with RenderCache enabled, whether or not that process
+serves HTTP, so a queue worker, a scheduled task, or a console command advances
+the same generations the serving process advances for the same write. The rule
+that opens the write side in such a process, and its tests, are owned by
+`16-cache-variance-privacy-and-stitching.md` under Private representation keys.
+Until iteration 006 delivers this, a write from a process that does not serve
+HTTP advances no generation at all.
+
 ### Consistent render observation and publication reread
 
 A rebuild shall associate rendered data with generations from a consistent
@@ -236,6 +247,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `write-side-outside-the-serving-process.md` from
+  `iterations/next/` into iteration 006 for its advancement aspect: the
+  advancement rule holds in every writing process, recorded under
+  Transaction-aware write advancement beside the owning rule in
+  `16-cache-variance-privacy-and-stitching.md`.
 - 2026-09-08 -- Promoted `feature-flag-dependency-generations.md` from
   `iterations/next/` into iteration 006: a flag read observes a `Feature`
   generation that a flip or an out-of-band reload advances, and the reload
