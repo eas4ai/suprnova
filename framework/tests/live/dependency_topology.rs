@@ -36,6 +36,31 @@ fn framework_owns_the_only_inward_live_dependency() {
     );
 }
 
+/// Returns `true` when `source` names the internal package `suprnova_live` as
+/// a complete identifier (for example `suprnova_live::render_cache`, `use
+/// suprnova_live;`, or a Cargo dependency line). Returns `false` when
+/// `suprnova_live` only appears as a prefix of a longer identifier, such as
+/// the database table names `suprnova_live_instances` and
+/// `suprnova_live_promotions`, which are schema facts rather than package
+/// references.
+fn names_internal_package(source: &str) -> bool {
+    const NEEDLE: &str = "suprnova_live";
+    let mut search_from = 0;
+    while let Some(offset) = source[search_from..].find(NEEDLE) {
+        let start = search_from + offset;
+        let end = start + NEEDLE.len();
+        let followed_by_identifier_byte = source[end..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_alphanumeric() || next == '_');
+        if !followed_by_identifier_byte {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
 #[test]
 fn application_sources_and_manuals_name_only_the_public_facade() {
     let root = workspace_root();
@@ -43,7 +68,7 @@ fn application_sources_and_manuals_name_only_the_public_facade() {
         let path = root.join(relative);
         if path.is_file() {
             let source = fs::read_to_string(&path).expect("read public source");
-            assert!(!source.contains("suprnova_live"), "{}", path.display());
+            assert!(!names_internal_package(&source), "{}", path.display());
             continue;
         }
         if !path.exists() {
@@ -60,7 +85,7 @@ fn application_sources_and_manuals_name_only_the_public_facade() {
                     matches!(extension.to_str(), Some("rs" | "md" | "toml"))
                 }) {
                     let source = fs::read_to_string(&path).expect("read public source");
-                    assert!(!source.contains("suprnova_live"), "{}", path.display());
+                    assert!(!names_internal_package(&source), "{}", path.display());
                 }
             }
         }
@@ -196,4 +221,17 @@ fn generated_abi_is_symbol_allowlisted() {
         .collect::<Vec<_>>();
     expected.sort_unstable();
     assert_eq!(actual, expected, "generated ABI allowlist drifted");
+}
+
+#[test]
+fn names_internal_package_matches_the_whole_identifier_only() {
+    assert!(names_internal_package("suprnova_live::render_cache"));
+    assert!(names_internal_package("use suprnova_live;"));
+    assert!(names_internal_package("extern crate suprnova_live;"));
+    assert!(names_internal_package("suprnova_live = { path = \"...\" }"));
+    assert!(!names_internal_package("suprnova_live_instances"));
+    assert!(!names_internal_package("suprnova_live_promotions_expires"));
+    assert!(!names_internal_package(
+        "the deployment guide names no internal package here"
+    ));
 }
