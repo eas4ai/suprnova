@@ -85,6 +85,45 @@ pub async fn dispatch_get_recording(
         path,
         &[],
         Some(Arc::clone(frames)),
+        None,
+    )
+    .await
+}
+
+/// Where a timed dispatch collects one entry per request: how long the
+/// server side took, never anything about the request or the response.
+///
+/// Task 7. A dispatch in this suite serves every request over a fresh
+/// loopback TCP connection, so the time a client measures around
+/// [`dispatch_get`](super::dispatch_get) is a connection plus a request,
+/// and a caller that wants to report what the *middleware* cost cannot get
+/// it from the client side at all. This is measured where the work
+/// happens: around `handle_request`, inside the service the test host
+/// runs, which is the same place [`CountingBody`] wraps the body and for
+/// the same reason.
+pub type ServerTimingLog = Arc<Mutex<Vec<std::time::Duration>>>;
+
+/// Dispatches a `GET` request to `path`, recording how long the server side
+/// of it took into `timings`.
+///
+/// The duration ends when the response value exists, which is before hyper
+/// has written a byte of it and before the client has read one, so it
+/// excludes the connection, the response write, and the client's own read.
+/// A caller that wants the whole round trip measures around this call as
+/// well; the two together are what the request cost and what the server
+/// cost.
+pub async fn dispatch_get_timed(
+    harness: &Harness,
+    path: &str,
+    timings: &ServerTimingLog,
+) -> TestResponse {
+    dispatch_recording(
+        harness,
+        hyper::Method::GET,
+        path,
+        &[],
+        None,
+        Some(Arc::clone(timings)),
     )
     .await
 }

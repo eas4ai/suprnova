@@ -53,7 +53,13 @@ use suprnova_live::render_cache::singleflight::{
 use suprnova_live::render_cache::store::PublicationFence;
 
 mod probe;
-mod recording;
+// `pub`, unlike `probe`: Task 7 added two names here
+// (`recording::ServerTimingLog` and `recording::dispatch_get_timed`) that
+// only the workload bench uses, and re-exporting them below would report
+// them as unused imports in every other target that includes this module.
+// The three names the test suite already used keep their re-export, so no
+// test's imports change.
+pub mod recording;
 
 // Task 5b review: two self-contained blocks of this module now live in
 // sibling files, and every name they used to define is re-exported here
@@ -63,6 +69,9 @@ pub use probe::probe_route;
 pub use recording::{CountingBody, FrameLog, dispatch_get_recording};
 
 use probe::probe_handler;
+// Named in `dispatch_recording`'s signature; see the note on `pub mod
+// recording` above for why it is not re-exported.
+use recording::ServerTimingLog;
 
 #[suprnova::model(
     table = "posts",
@@ -929,11 +938,30 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
         .build()
         .expect("leased probe policy");
+    // Task 7: lease coherence, so a hot hit on the C64 route consults no
+    // authority - the shape whose statement count is zero.
+    let c64_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease {
+            max_age_ms: 300_000,
+        })
+        .build()
+        .expect("c64 policy");
+    // Task 7: authority coherence, because the storm's whole subject is
+    // whether a write is observed; `page` is declared so one row can back
+    // several keys.
+    let storm_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .query(QueryPolicy::declared(["page"]))
+        .build()
+        .expect("storm policy");
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
     let router: Router = router.get("/probe/{id}", probe_handler).into();
     let router: Router = router.get("/probe-leased/{id}", probe_handler).into();
+    let router: Router = router.get(C64_ROUTE, c64_handler).into();
+    let router: Router = router.get(STORM_ROUTE, storm_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
     let router: Router = router.get("/private-l1/{id}", private_handler).into();
     let router: Router = router.get("/builder-read", builder_read_handler).into();
@@ -1122,6 +1150,10 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach probe policy")
         .try_render_cache("/probe-leased/{id}", GroupPolicy::from(leased_probe_policy))
         .expect("attach leased probe policy")
+        .try_render_cache(C64_ROUTE, GroupPolicy::from(c64_policy))
+        .expect("attach c64 policy")
+        .try_render_cache(STORM_ROUTE, GroupPolicy::from(storm_policy))
+        .expect("attach storm policy")
         .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
         .expect("attach private policy")
         .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
@@ -1487,6 +1519,131 @@ async fn cached_handler(request: Request) -> Response {
     counting_route::maybe_write_during_render().await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("cached render {n}")))
+}
+
+/// The route pattern [`c64_handler`] answers.
+pub const C64_ROUTE: &str = "/c64/{id}";
+
+/// Exactly how many bytes a `/c64/{id}` body is.
+///
+/// The engine's own budget bench measures a 64 KiB Complete entry
+/// (`crates/suprnova-live/benches/render_cache_budget.rs`); this is the same
+/// body size reached through the whole middleware instead, so the two
+/// numbers are about one shape.
+pub const C64_BODY_BYTES: usize = 65_536;
+
+/// How many rows [`c64_handler`] reads, and so how many record dependency
+/// identities its entry observes.
+///
+/// The reads also share one `posts` *table* identity, which
+/// `Model::find` observes on every call
+/// (`framework/src/eloquent/model.rs:220`), so the published entry observes
+/// this many plus one. A caller that reports a dependency count reports the
+/// count it measured, not this constant.
+pub const C64_DEPENDENCY_ROWS: usize = 12;
+
+/// Task 7: the `C64` route. Twelve ORM reads, and a body of exactly
+/// [`C64_BODY_BYTES`] bytes built out of what they returned.
+///
+/// The body is derived from the rows rather than being constant filler, so
+/// a hit that replayed a stale entry would replay stale row values with it -
+/// which is what makes this route usable as a coherence subject as well as a
+/// size. Registered under lease coherence, so a hot hit on it consults no
+/// authority at all.
+async fn c64_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut seed = String::new();
+    for offset in 0..C64_DEPENDENCY_ROWS {
+        let row = Post::find(id + offset as i64).await?;
+        let views = row.as_ref().map_or(-1, |post| post.views);
+        let title_bytes = row.as_ref().map_or(0, |post| post.title.len());
+        seed.push_str(&format!("{offset}.{views}.{title_bytes};"));
+    }
+    Ok(HttpResponse::html(c64_body(id, &seed)))
+}
+
+/// A body of exactly [`C64_BODY_BYTES`] bytes whose every filler byte comes
+/// from `seed`, which is what the twelve reads returned.
+///
+/// # Panics
+///
+/// Panics when the framing alone would exceed [`C64_BODY_BYTES`], which is a
+/// broken fixture rather than a failure of anything under measurement.
+fn c64_body(id: i64, seed: &str) -> String {
+    const CLOSING: &str = "</p></body></html>";
+    let opening = format!("<!doctype html><html><body><p>c64 {id} {seed} ");
+    assert!(
+        opening.len() + CLOSING.len() <= C64_BODY_BYTES,
+        "the C64 framing must fit inside C64_BODY_BYTES"
+    );
+    let filler: &[u8] = seed.as_bytes();
+    assert!(
+        !filler.is_empty(),
+        "the C64 filler is derived from the reads"
+    );
+    let mut body = String::with_capacity(C64_BODY_BYTES);
+    body.push_str(&opening);
+    let mut index = 0_usize;
+    while body.len() + CLOSING.len() < C64_BODY_BYTES {
+        // Every byte the seed carries is ASCII (digits, `.`, `;`), so one
+        // pushed byte is one byte of body and the length below is exact.
+        body.push(char::from(filler[index % filler.len()]));
+        index += 1;
+    }
+    body.push_str(CLOSING);
+    assert_eq!(
+        body.len(),
+        C64_BODY_BYTES,
+        "a C64 body is exactly C64_BODY_BYTES bytes"
+    );
+    body
+}
+
+/// The route pattern [`storm_handler`] answers.
+pub const STORM_ROUTE: &str = "/storm/{id}";
+
+/// Task 7: the invalidation-storm route. Its body carries the row data it
+/// depends on, so "the body every key serves reflects the generation the
+/// storm ended on" is checkable against the database rather than against
+/// another response.
+///
+/// `/cached/{id}` cannot answer that question: its body is a global render
+/// counter, so a body that reflected no write at all would look exactly
+/// like one that reflected every write.
+async fn storm_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let views = Post::find(id).await?.map_or(-1, |post| post.views);
+    Ok(HttpResponse::html(format!(
+        "<p>storm {id} views {views}</p>"
+    )))
+}
+
+/// The `views` value a `/storm/{id}` body carries, or `None` when `body` is
+/// not one.
+///
+/// Lives beside [`storm_handler`] so the format has exactly one definition:
+/// a caller comparing a served body against the row it came from reads the
+/// value through this rather than re-deriving the handler's `format!`.
+#[must_use]
+pub fn storm_body_views(body: &[u8]) -> Option<i64> {
+    std::str::from_utf8(body)
+        .ok()?
+        .split(" views ")
+        .nth(1)?
+        .split('<')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// A `link` value carrying `0x7f` (DEL): a byte `SafeHeaders` used to accept
@@ -2438,7 +2595,7 @@ async fn dispatch(
     path: &str,
     extra_headers: &[(&str, &str)],
 ) -> TestResponse {
-    dispatch_recording(harness, method, path, extra_headers, None).await
+    dispatch_recording(harness, method, path, extra_headers, None, None).await
 }
 
 async fn dispatch_recording(
@@ -2447,6 +2604,7 @@ async fn dispatch_recording(
     path: &str,
     extra_headers: &[(&str, &str)],
     frames: Option<FrameLog>,
+    server_timings: Option<ServerTimingLog>,
 ) -> TestResponse {
     let mut builder = hyper::Request::builder()
         .method(method)
@@ -2471,8 +2629,22 @@ async fn dispatch_recording(
             let router = Arc::clone(&router);
             let middleware = Arc::clone(&middleware);
             let frames = frames.clone();
+            let server_timings = server_timings.clone();
             async move {
+                // Task 7: the server side of one request, from the moment
+                // hyper hands the parsed request over to the moment the
+                // response value exists - the whole of `handle_request`,
+                // and none of the connection this test host sets up around
+                // it. Recorded only when a caller asked for it, so every
+                // other dispatch does exactly what it did before.
+                let started = std::time::Instant::now();
                 let response = handle_request(router, middleware, request).await;
+                if let Some(timings) = &server_timings {
+                    timings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(started.elapsed());
+                }
                 // Wrapped only when a test asked for a recording, so every
                 // other dispatch in this suite hands hyper exactly the body
                 // the framework produced, with no extra layer in the way.
