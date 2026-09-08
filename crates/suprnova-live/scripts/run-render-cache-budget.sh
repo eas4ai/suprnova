@@ -10,9 +10,18 @@
 # `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`) pins both benches.
 # `SUPRNOVA_LIVE_BENCH_RESULT` and `SUPRNOVA_LIVE_WORKLOADS_RESULT`
 # redirect the two result files away from the checked-in ones.
-# `PG_TEST_URL`, when set, adds a PostgreSQL run to the workload bench's
-# result; that server must be disposable, since the run drops and recreates
-# every table it uses.
+#
+# `PG_TEST_URL` and `REDIS_TEST_URL` each add a run to the workload bench's
+# result: PostgreSQL for the database tier's second dialect, Redis for the
+# accelerator tier. Both servers must be disposable, since the run drops and
+# recreates every table and flushes every key it uses.
+#
+# A full run of this script needs both of them, because the checked-result
+# contract requires all three recorded profiles (SQLite, PostgreSQL, Redis).
+# A partial run - one server, or neither - must redirect both result files
+# under `benchmarks/local/` (gitignored) with `SUPRNOVA_LIVE_BENCH_RESULT`
+# and `SUPRNOVA_LIVE_WORKLOADS_RESULT`; otherwise it overwrites the
+# checked-in results with a shorter file and then fails its own contract.
 
 set -euo pipefail
 

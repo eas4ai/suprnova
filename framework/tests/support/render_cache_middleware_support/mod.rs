@@ -1628,22 +1628,33 @@ async fn storm_handler(request: Request) -> Response {
     )))
 }
 
-/// The `views` value a `/storm/{id}` body carries, or `None` when `body` is
-/// not one.
+/// The `(id, views)` pair a `/storm/{id}` body carries, or `None` when
+/// `body` is not one.
 ///
 /// Lives beside [`storm_handler`] so the format has exactly one definition:
 /// a caller comparing a served body against the row it came from reads the
-/// value through this rather than re-deriving the handler's `format!`.
+/// values through this rather than re-deriving the handler's `format!`.
+/// The `id` is part of the pair because `views` alone cannot tell a body
+/// served for the right row from one served for a different row that
+/// happens to hold the same count.
 #[must_use]
-pub fn storm_body_views(body: &[u8]) -> Option<i64> {
-    std::str::from_utf8(body)
-        .ok()?
+pub fn storm_body_row(body: &[u8]) -> Option<(i64, i64)> {
+    let text = std::str::from_utf8(body).ok()?;
+    let id = text
+        .split("storm ")
+        .nth(1)?
+        .split(' ')
+        .next()?
+        .parse()
+        .ok()?;
+    let views = text
         .split(" views ")
         .nth(1)?
         .split('<')
         .next()?
         .parse()
-        .ok()
+        .ok()?;
+    Some((id, views))
 }
 
 /// A `link` value carrying `0x7f` (DEL): a byte `SafeHeaders` used to accept

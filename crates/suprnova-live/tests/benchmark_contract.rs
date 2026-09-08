@@ -204,7 +204,8 @@ fn render_cache_workloads_result_reports_every_workload_with_its_correctness_con
     assert_eq!(
         profiles,
         vec![("sqlite", "none"), ("postgres", "none"), ("none", "redis")],
-        "the checked-in result carries the database tier on both dialects and the Redis tier,          each labelled with the accelerator it actually used"
+        "the checked-in result carries the database tier on both dialects and the Redis tier, \
+         each labelled with the accelerator it actually used"
     );
 
     let sqlite = &runs[0];

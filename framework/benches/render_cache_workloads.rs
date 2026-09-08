@@ -1,6 +1,6 @@
 //! The four framework RenderCache workloads, measured on demand: the
 //! middleware hot hit, the batched generation reread, an invalidation
-//! storm, and two nodes over one database. Never a gate step. See
+//! storm, and two nodes over one backend. Never a gate step. See
 //! `crates/suprnova-live/scripts/run-render-cache-budget.sh`, which runs
 //! this beside the engine budget bench and then the checked-result
 //! contract.
@@ -105,7 +105,7 @@ use render_cache_middleware_support::recording::{ServerTimingLog, dispatch_get_t
 use render_cache_middleware_support::{
     C64_BODY_BYTES, C64_DEPENDENCY_ROWS, C64_ROUTE, Harness, Post, STORM_ROUTE,
     boot_with_render_cache, boot_with_render_cache_on_live_server_for_test, counting_route,
-    dispatch_get, ledger, statements, storm_body_views,
+    dispatch_get, ledger, statements, storm_body_row,
 };
 
 // -------------------------------------------------------------------------
@@ -698,7 +698,11 @@ async fn advance_storm_row(id: i64) -> Result<(), Box<dyn Error>> {
 /// file says so, and the sweeps below would begin to fail - which is the
 /// signal to change the shape rather than the label.
 async fn measure_write_fanout(harness: &Harness, post_ids: &[i64]) -> Result<bool, Box<dyn Error>> {
-    let untouched = format!("/storm/{}?page=1", post_ids[0]);
+    let untouched = format!(
+        "{}/{}?page=1",
+        STORM_ROUTE.trim_end_matches("/{id}"),
+        post_ids[0]
+    );
     dispatch_get(harness, &untouched, &[]).await;
     let published = counting_route::renders();
     dispatch_get(harness, &untouched, &[]).await;
@@ -828,7 +832,16 @@ async fn run_invalidation_storm(
         rebuilds >= writes as u64,
         "the shape must keep the storm meaningful: at least one rebuild per write on average",
     )?;
-    expect(hits, floor, "keys served hot across the whole storm")?;
+    // Bounded by the same shape as `rebuilds`, and for the same reason: an
+    // aggregate pinned to a constant restates the loop bounds instead of
+    // measuring the cache. The exact discrimination - every key of the
+    // second sweep of every burst served hot, and none of the first - is
+    // the per-sweep `expect` in `storm_sweep`, which fails on the sweep
+    // that broke it rather than on the total.
+    require(
+        hits >= floor && hits <= ceiling,
+        "the storm's hot serves must lie between one per key per burst and one per key per sweep",
+    )?;
 
     // One armed hit, after the storm: an authority-mode hit is the single
     // batched reread and nothing else. Read after the body is collected and
@@ -852,8 +865,11 @@ async fn run_invalidation_storm(
 
     // The storm's last word, checked against the database rather than
     // against another sweep: one more write to every row, then every key
-    // must rebuild, and the `views` in the body it serves must be the
-    // `views` its row now holds.
+    // must rebuild, and the body it serves must name its own row and carry
+    // the `views` that row now holds. The id is checked beside the `views`
+    // because the twelve rows share a route: a body served for the wrong
+    // row would pass a `views`-only comparison whenever the two rows have
+    // drifted to the same count.
     for id in &post_ids {
         advance_storm_row(*id).await?;
     }
@@ -861,16 +877,17 @@ async fn run_invalidation_storm(
     let mut final_bodies_coherent = true;
     for (index, body) in final_bodies.iter().enumerate() {
         let id = post_ids[index % IDENTITIES];
-        let served = storm_body_views(body).ok_or_else(|| {
-            io::Error::other("every storm body must carry the `views` of the row it read")
+        let (served_id, served_views) = storm_body_row(body).ok_or_else(|| {
+            io::Error::other("every storm body must name its row and carry that row's `views`")
         })?;
-        if served != row_views(id).await? {
+        if served_id != id || served_views != row_views(id).await? {
             final_bodies_coherent = false;
         }
     }
     require(
         final_bodies_coherent,
-        "every key must serve the `views` its own row holds after the storm's last write",
+        "every key must serve its own row's id and the `views` that row holds after the storm's \
+         last write",
     )?;
 
     let timing = Timing::of(hit_latencies, timed);
