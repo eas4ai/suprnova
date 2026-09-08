@@ -189,67 +189,149 @@ fn render_cache_workloads_result_reports_every_workload_with_its_correctness_con
 
     let runs = result["runs"]
         .as_array()
-        .expect("the result records one run per database it measured");
-    let sqlite = runs
+        .expect("the result records one run per database and accelerator it measured");
+    let profiles: Vec<(&str, &str)> = runs
         .iter()
-        .find(|run| run["database"] == "sqlite")
-        .expect("every result carries the SQLite run, which needs no server");
+        .map(|run| {
+            (
+                run["database"].as_str().expect("a run names its database"),
+                run["accelerator"]
+                    .as_str()
+                    .expect("a run names its accelerator"),
+            )
+        })
+        .collect();
     assert_eq!(
-        sqlite["accelerator"], "none",
-        "the checked-in run measures the database tier alone"
+        profiles,
+        vec![("sqlite", "none"), ("postgres", "none"), ("none", "redis")],
+        "the checked-in result carries the database tier on both dialects and the Redis tier,          each labelled with the accelerator it actually used"
     );
 
+    let sqlite = &runs[0];
+
     let middleware = &sqlite["c64_middleware"];
+    assert_eq!(
+        middleware["body_bytes"], 65_536,
+        "the measured route serves a 64 KiB body, which is what its name claims"
+    );
+    assert!(
+        middleware["dependencies"].as_u64().expect("number") >= 12,
+        "the measured route observes at least one dependency identity per row it read"
+    );
+    assert_eq!(middleware["transport"], "loopback_http1");
     assert!(middleware["warmup"].as_u64().expect("number") >= 30);
     assert!(middleware["samples"].as_u64().expect("number") >= 30);
-    assert!(middleware["p50_microseconds"].as_f64().is_some());
-    assert!(middleware["p95_microseconds"].as_f64().is_some());
+    for metric in [
+        "p50_microseconds",
+        "p95_microseconds",
+        "round_trip_p50_microseconds",
+        "round_trip_p95_microseconds",
+    ] {
+        assert!(
+            middleware[metric].as_f64().is_some(),
+            "c64_middleware records {metric}"
+        );
+    }
+    assert!(
+        middleware["p95_microseconds"].as_f64().expect("number")
+            <= middleware["round_trip_p95_microseconds"]
+                .as_f64()
+                .expect("number"),
+        "the server side of a request cannot cost more than the whole round trip that carried it"
+    );
     assert_eq!(
         middleware["statements_per_hit"], 0,
         "a lease-mode hot hit reaches the database not at all"
     );
 
     let storm = &sqlite["invalidation_storm"];
-    assert_eq!(storm["keys"], 64);
+    let keys = storm["keys"].as_u64().expect("the storm records its keys");
+    let writes = storm["writes"]
+        .as_u64()
+        .expect("the storm records its writes");
+    let bursts = storm["bursts"]
+        .as_u64()
+        .expect("the storm records how many bursts those writes landed in");
+    let writes_per_burst = storm["writes_per_burst"]
+        .as_u64()
+        .expect("the storm records its burst size");
+    let sweeps = storm["sweeps_per_burst"]
+        .as_u64()
+        .expect("the storm records how many sweeps follow a burst");
+    assert_eq!(keys, 64);
     assert_eq!(storm["identities"], 12);
-    assert_eq!(storm["writes"], 1_000);
-    assert!(storm["hits"].as_u64().expect("number") >= 30);
-    assert!(storm["rebuilds"].as_u64().expect("number") >= 1);
-    assert!(storm["rebuilds_per_write"].as_f64().expect("number") >= 0.0);
+    assert_eq!(writes, 1_000);
+    assert!(bursts >= 1 && writes_per_burst >= 1 && sweeps >= 1);
+    assert!(
+        storm["every_write_invalidates_every_key"].is_boolean(),
+        "the storm measures its own write fan-out rather than assuming one"
+    );
+
+    // Bounds derived from the recorded shape, never a constant: a key
+    // rebuilds at least once per burst and at most once per sweep.
+    let rebuilds = storm["rebuilds"].as_u64().expect("number");
+    let hits = storm["hits"].as_u64().expect("number");
+    assert!(
+        rebuilds >= bursts * keys && rebuilds <= bursts * keys * sweeps,
+        "rebuilds {rebuilds} outside [{}, {}]",
+        bursts * keys,
+        bursts * keys * sweeps
+    );
+    assert!(
+        rebuilds >= writes,
+        "a storm shape worth reporting rebuilds at least once per write on average"
+    );
+    assert!(hits >= 30, "the hit percentile needs samples to come from");
+    let per_write = storm["rebuilds_per_write"].as_f64().expect("number");
+    assert!(per_write >= 1.0, "rebuilds_per_write {per_write} below 1.0");
+    // Through `f64::from(u32)`, which is lossless, so the check needs no
+    // cast and no lint suppression.
+    let derived = f64::from(u32::try_from(rebuilds).expect("rebuilds fit in a u32"))
+        / f64::from(u32::try_from(writes).expect("writes fit in a u32"));
+    assert!(
+        (per_write - derived).abs() < 1e-9,
+        "rebuilds_per_write must be rebuilds over writes"
+    );
     assert_eq!(
         storm["statements_per_hit"], 1,
         "an authority-mode hit is one batched coherence reread and nothing else"
     );
-    assert!(storm["hit_p95_microseconds"].as_f64().is_some());
+    assert!(storm["quiescent_hit_p95_microseconds"].as_f64().is_some());
     assert_eq!(
         storm["final_bodies_coherent"], true,
         "a write storm leaves every key serving the generation it ended on"
     );
 
     // The two conditions below are about the engine rather than about a
-    // backend, so every recorded run answers them, not only the SQLite one.
+    // backend, so every run that measured them answers them.
     for run in runs {
         let database = run["database"].as_str().expect("a run names its database");
 
-        let reread = &run["generation_reread"];
-        assert_eq!(reread["keys"], 12, "{database}");
-        assert!(
-            reread["warmup"].as_u64().expect("number") >= 30,
-            "{database}"
-        );
-        assert!(
-            reread["samples"].as_u64().expect("number") >= 30,
-            "{database}"
-        );
-        assert!(reread["p50_milliseconds"].as_f64().is_some(), "{database}");
-        assert!(reread["p95_milliseconds"].as_f64().is_some(), "{database}");
-        assert_eq!(reread["cap_milliseconds"], 3.0, "{database}");
-        assert_eq!(
-            reread["statements_per_reread"], 1,
-            "{database}: one batched reread, never a generation read plus a separate epoch read"
-        );
+        if !run["generation_reread"].is_null() {
+            let reread = &run["generation_reread"];
+            assert_eq!(reread["keys"], 12, "{database}");
+            assert!(
+                reread["warmup"].as_u64().expect("number") >= 30,
+                "{database}"
+            );
+            assert!(
+                reread["samples"].as_u64().expect("number") >= 30,
+                "{database}"
+            );
+            assert!(reread["p50_milliseconds"].as_f64().is_some(), "{database}");
+            assert!(reread["p95_milliseconds"].as_f64().is_some(), "{database}");
+            assert_eq!(reread["cap_milliseconds"], 3.0, "{database}");
+            assert_eq!(
+                reread["statements_per_reread"], 1,
+                "{database}: one batched reread, never a generation read plus a separate epoch read"
+            );
+        }
 
         let node = &run["multi_node"];
+        assert!(
+            !node.is_null(),
+            "{database}: every run measures the multi-node workload"
+        );
         assert_eq!(node["nodes"], 2, "{database}");
         assert_eq!(node["concurrent_requests"], 64, "{database}");
         assert_eq!(
@@ -266,6 +348,11 @@ fn render_cache_workloads_result_reports_every_workload_with_its_correctness_con
             "{database}"
         );
     }
+
+    assert!(
+        !runs[1]["generation_reread"].is_null(),
+        "the PostgreSQL run measures the reread"
+    );
 }
 
 #[test]

@@ -16,30 +16,38 @@
 //!
 //! # What the timings include, and what they do not
 //!
-//! `c64_middleware` and `invalidation_storm` dispatch through the shared
-//! middleware harness, which serves every request over a fresh loopback
-//! HTTP connection. The microseconds they report are therefore a whole
-//! request - connection, parse, middleware, response - not the middleware
-//! alone; the engine's own `render_cache_budget` bench is where a hot hit
-//! is measured without a socket in the way. Both numbers are still the
-//! ones a caller of this workload wants: they say what a served request
-//! costs, and the statement counts beside them say what it cost the
-//! database.
+//! `c64_middleware` reports two latencies for the same requests.
+//! `p50_microseconds` / `p95_microseconds` are the **server side**: the
+//! whole of `handle_request`, from the moment hyper hands the parsed
+//! request to the router to the moment the response value exists, recorded
+//! inside the test host's own service through
+//! `render_cache_middleware_support::recording::dispatch_get_timed`. They
+//! exclude the connection, the response write, and the client's read.
+//! `round_trip_p50_microseconds` / `round_trip_p95_microseconds` are the
+//! **whole loopback request** measured around that same call: a fresh TCP
+//! connection, an HTTP/1.1 exchange, and the body collected back. The
+//! `transport` field names which transport that second pair paid for. The
+//! engine's own `render_cache_budget` bench is where a hot hit is measured
+//! with neither a socket nor a router in the way.
 //!
-//! # Why one current-thread runtime
+//! `invalidation_storm` reports `quiescent_hit_p95_microseconds`, not a
+//! hit latency during the writes, and the name says so. Every render on the
+//! storm route calls `Model::find`, which observes the `posts` *table*
+//! identity as well as the record it hydrated
+//! (`framework/src/eloquent/model.rs:220`), so a single write to any row
+//! invalidates all sixty-four keys. The workload measures that fact rather
+//! than assuming it (`every_write_invalidates_every_key`), and it follows
+//! that no key can be a hit while a write is in flight. What is measured
+//! instead is the hit that follows a rebuild, once the burst of writes has
+//! landed.
 //!
-//! The harnesses these workloads reuse mount their database on the
-//! *thread-local* test container (`TestContainer::fake`), which a
-//! multi-thread runtime can migrate a future away from between polls -
-//! the same reason every test in `framework/tests/render_cache/` is a
-//! plain `#[tokio::test]`. So the multi-node fan-in's sixty-four requests
-//! are concurrent rather than parallel: they interleave on one thread at
-//! their await points, which is real fan-in over one coordinator and one
-//! database and is what makes the publication count exact rather than a
-//! race. The storm is not concurrent at all: its writes and its sweeps
-//! alternate in explicit bursts, so "one rebuild per key per burst" is a
-//! number the workload asserts rather than a ratio it happened to sample.
-//! Nothing anywhere here waits on a clock to reach a state.
+//! `multi_node` reports `fan_in_p95_microseconds` over hand-driven
+//! coordinator calls - admission, and for the one leader the publication
+//! that follows it - not over served requests. No router, no middleware and
+//! no socket are involved; it is the coordination cost sixty-four
+//! concurrent cold requests for one key would pay, and nothing else.
+//! `takeover_p95_milliseconds` is likewise the coordinator and store work a
+//! takeover costs, with store time moved rather than waited out.
 //!
 //! # Environment variables it honours
 //!
@@ -50,6 +58,10 @@
 //!   again against that PostgreSQL server and records a second entry under
 //!   `runs`. The server must be disposable: the run drops and recreates
 //!   every table it uses.
+//! - `REDIS_TEST_URL`, when set, runs the multi-node workload again over
+//!   the Redis lease store and Redis render store and records a third entry
+//!   under `runs` with `accelerator: "redis"`. Every key it writes is
+//!   under a fresh namespace of its own and is removed afterwards.
 //! - `SUPRNOVA_LIVE_REQUIRE_S1=1` refuses to measure at all unless the
 //!   environment is `validated_s1`, naming the conditions it refused on.
 //!   Without it an unqualified machine measures and the result says
@@ -67,28 +79,33 @@ pub mod render_cache_tiers_support;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde::Serialize;
-use suprnova::render_cache::providers::{SqlLeaseStore, SqlRenderStore};
+use suprnova::render_cache::providers::{
+    RedisLeaseStore, RedisProviderConfig, RedisRenderStore, SqlLeaseStore, SqlRenderStore,
+};
 use suprnova::render_cache::{DependencyIdentity, RenderCache};
 use suprnova::{DB, FrameworkError, Model, attrs};
-use suprnova_live::render_cache::FencedLeaseCoordinator;
 use suprnova_live::render_cache::generation::GenerationLedger;
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, RebuildAdmission, RebuildCoordinator,
 };
 use suprnova_live::render_cache::store::{PublishOutcome, RenderStore};
+use suprnova_live::render_cache::{FencedLeaseCoordinator, LeaseStore};
 use suprnova_live_test_support::bench_environment::{self, EnvironmentEvidence, percentile};
 
+use render_cache_middleware_support::recording::{ServerTimingLog, dispatch_get_timed};
 use render_cache_middleware_support::{
-    Harness, Post, boot_with_render_cache, boot_with_render_cache_on_live_server_for_test,
-    counting_route, dispatch_get, ledger, probe_route, statements,
+    C64_BODY_BYTES, C64_DEPENDENCY_ROWS, C64_ROUTE, Harness, Post, STORM_ROUTE,
+    boot_with_render_cache, boot_with_render_cache_on_live_server_for_test, counting_route,
+    dispatch_get, ledger, statements, storm_body_views,
 };
 
 // -------------------------------------------------------------------------
@@ -101,16 +118,13 @@ const WARMUP: usize = 200;
 /// `samples` in the result describes the measurement completely.
 const SAMPLES: usize = 200;
 
-/// The lease-coherence probe route, and the path the middleware workload
-/// measures. Lease coherence is what makes `statements_per_hit` zero: the
-/// validation lease answers coherence, and the epoch the lookup key is
-/// derived under is leased with it.
-const LEASED_PROBE_PATTERN: &str = "/probe-leased/{id}";
-/// The one path [`LEASED_PROBE_PATTERN`] is measured at.
-const LEASED_PROBE_PATH: &str = "/probe-leased/1";
+/// The one path the `C64` route is measured at.
+const C64_PATH: &str = "/c64/1";
+/// What `transport` records for the round-trip pair.
+const C64_TRANSPORT: &str = "loopback_http1";
 
 /// Dependency identities the reread carries, and the number of `posts`
-/// rows the storm advances.
+/// rows the storm writes to.
 const IDENTITIES: usize = 12;
 /// The ceiling a reread is reported against, in milliseconds.
 const REREAD_CAP_MILLISECONDS: f64 = 3.0;
@@ -119,10 +133,11 @@ const REREAD_CAP_MILLISECONDS: f64 = 3.0;
 const STORM_KEYS: usize = 64;
 /// Writes the storm commits.
 const STORM_WRITES: usize = 1_000;
-/// How many bursts those writes are committed in. Each burst is followed
-/// by two sweeps of every key: the first must rebuild every one of them,
-/// the second must hit every one of them.
+/// How many bursts those writes are committed in.
 const STORM_BURSTS: usize = 20;
+/// Sweeps of every key after each burst: one that must rebuild every key,
+/// one that must hit every key.
+const SWEEPS_PER_BURST: usize = 2;
 
 /// Nodes the multi-node workload runs.
 const NODES: usize = 2;
@@ -134,8 +149,10 @@ const TAKEOVER_ROUNDS: usize = 40;
 const FAN_IN_LEASE_MS: u64 = 30_000;
 /// The lease lifetime a takeover round elapses past, in milliseconds.
 const TAKEOVER_LEASE_MS: u64 = 1_000;
-/// How far past [`TAKEOVER_LEASE_MS`] a takeover round moves store time.
-const TAKEOVER_OFFSET_MS: u64 = 2_000;
+/// How far each takeover round moves store time past the round before it.
+/// Longer than [`TAKEOVER_LEASE_MS`], so one round's move elapses the lease
+/// that round took out and no round can reach a lease of an earlier one.
+const TAKEOVER_OFFSET_STEP_MS: u64 = 2_000;
 /// Waiters one node admits per key while its leader holds it. Above the
 /// per-node request count, so every concurrent request either leads,
 /// bypasses, or waits - never bypasses for want of a waiter slot.
@@ -161,7 +178,7 @@ const fn scaled(full: usize, timed: bool) -> usize {
 // Result record
 // -------------------------------------------------------------------------
 
-/// One run of the workloads across every database measured.
+/// One run of the workloads across every database and accelerator measured.
 #[derive(Serialize)]
 struct WorkloadsResult {
     schema_version: u8,
@@ -171,28 +188,40 @@ struct WorkloadsResult {
     runs: Vec<DatabaseRun>,
 }
 
-/// The workloads one database answered. `c64_middleware` and
-/// `invalidation_storm` need the middleware harness's own SQLite file, so
-/// they are absent rather than zero on a server run.
+/// The workloads one `(database, accelerator)` pair answered.
+///
+/// Every workload is optional and absent rather than zero when that pair
+/// did not run it: `c64_middleware` and `invalidation_storm` need the
+/// middleware harness, which owns its own SQLite file, and the Redis run
+/// exercises no database at all.
 #[derive(Serialize)]
 struct DatabaseRun {
     database: &'static str,
     accelerator: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     c64_middleware: Option<C64Middleware>,
-    generation_reread: GenerationReread,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_reread: Option<GenerationReread>,
     #[serde(skip_serializing_if = "Option::is_none")]
     invalidation_storm: Option<InvalidationStorm>,
-    multi_node: MultiNode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    multi_node: Option<MultiNode>,
 }
 
-/// A hot hit served through the whole middleware, over a loopback request.
+/// A 64 KiB hot hit served through the whole middleware, timed twice: once
+/// where the work happens and once around the loopback request that carried
+/// it. See the module doc for exactly what each pair includes.
 #[derive(Serialize)]
 struct C64Middleware {
+    body_bytes: usize,
+    dependencies: usize,
+    transport: &'static str,
     warmup: usize,
     samples: usize,
     p50_microseconds: f64,
     p95_microseconds: f64,
+    round_trip_p50_microseconds: f64,
+    round_trip_p95_microseconds: f64,
     statements_per_hit: u64,
 }
 
@@ -209,20 +238,28 @@ struct GenerationReread {
 }
 
 /// A write storm against every cached key, and what it cost in rebuilds.
+///
+/// Every constant that determines the ratios is recorded beside them, so a
+/// reader can derive `rebuilds_per_write`'s bounds from the file without
+/// reading this source.
 #[derive(Serialize)]
 struct InvalidationStorm {
     keys: usize,
     identities: usize,
     writes: usize,
+    bursts: usize,
+    writes_per_burst: usize,
+    sweeps_per_burst: usize,
+    every_write_invalidates_every_key: bool,
     hits: u64,
     rebuilds: u64,
     rebuilds_per_write: f64,
     statements_per_hit: u64,
-    hit_p95_microseconds: f64,
+    quiescent_hit_p95_microseconds: f64,
     final_bodies_coherent: bool,
 }
 
-/// Two nodes over one database: the fan-in of cold requests, and what a
+/// Two nodes over one backend: the fan-in of cold requests, and what a
 /// fenced leader's takeover costs.
 #[derive(Serialize)]
 struct MultiNode {
@@ -259,9 +296,15 @@ impl Timing {
         }
     }
 
-    /// The zero record a debug profile reports, where timing never runs.
-    const fn unmeasured() -> Self {
-        Self { p50: 0.0, p95: 0.0 }
+    /// Percentiles when there is something to take them of, and the zero
+    /// record otherwise - which is what a debug profile reports, since it
+    /// runs every workload and times none of them.
+    fn of(samples: Vec<f64>, timed: bool) -> Self {
+        if timed {
+            Self::from_samples(samples)
+        } else {
+            Self { p50: 0.0, p95: 0.0 }
+        }
     }
 }
 
@@ -273,6 +316,30 @@ fn elapsed_microseconds(started: Instant) -> f64 {
 /// Milliseconds since `started`.
 fn elapsed_milliseconds(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
+}
+
+/// Runs `once` `samples` times and returns one sample per run, scaled by
+/// `scale`.
+///
+/// The runs happen whether or not the caller is timing: a debug profile has
+/// to keep every correctness assertion inside `once` firing, and only the
+/// numbers are skipped. `Timing::of` is what then discards them.
+async fn measure<F, Fut>(
+    samples: usize,
+    scale: fn(Instant) -> f64,
+    mut once: F,
+) -> Result<Vec<f64>, Box<dyn Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), Box<dyn Error>>>,
+{
+    let mut collected = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        once().await?;
+        collected.push(scale(started));
+    }
+    Ok(collected)
 }
 
 /// Fails with a message naming the fact, what it was, and what it had to
@@ -338,34 +405,86 @@ fn write_result(result: &WorkloadsResult, path: &Path) -> Result<(), Box<dyn Err
     Ok(())
 }
 
+/// Creates `rows` `posts` rows through the ORM, returning their ids in the
+/// order they were created.
+///
+/// # Errors
+///
+/// Returns whatever the ORM returns; a fresh harness database is empty, so
+/// nothing here can collide.
+async fn create_posts(rows: usize) -> Result<Vec<i64>, Box<dyn Error>> {
+    let mut ids = Vec::with_capacity(rows);
+    for index in 0..rows {
+        let title = format!("row-{index}");
+        ids.push(Post::create(attrs! { title: title }).await?.id);
+    }
+    Ok(ids)
+}
+
+/// The `views` a row holds, read straight from the database with no cache
+/// and no render in the way. The oracle every coherence check compares a
+/// served body against.
+async fn row_views(id: i64) -> Result<i64, Box<dyn Error>> {
+    Ok(Post::find(id).await?.map_or(-1, |post| post.views))
+}
+
 // -------------------------------------------------------------------------
 // Workload 1: the middleware hot hit
 // -------------------------------------------------------------------------
 
-/// The lease-coherence probe route served through the whole middleware.
+/// The `C64` route served through the whole middleware: a 64 KiB body over
+/// twelve ORM reads, under lease coherence.
 ///
-/// The first request renders and publishes; the second is the first hot
-/// hit and is what grants the validation lease, so the measured requests
-/// start from the third. The statement count is taken from one armed
-/// request rather than divided out of the measured batch, so it is a count
-/// of one hit and not an average over many.
+/// The first request renders and publishes; the second is the first hot hit
+/// and is what grants the validation lease, so the measured requests start
+/// from the third.
+///
+/// The statement count is taken from one armed request, and read only after
+/// the client has the whole body *and* after `hot_serves_for_test` has
+/// moved, so neither the response write nor the hot-path bookkeeping can
+/// still be outstanding when it is read. The residual gap is a statement
+/// this request causes that is issued after both of those - a background
+/// task the middleware detached, say - which no counter read at any single
+/// point can see; nothing on the hot path does that today, and the storm's
+/// own armed hit would show a statement that appeared later as a count of
+/// two rather than one.
 async fn run_c64_middleware(
     harness: &Harness,
     timed: bool,
 ) -> Result<C64Middleware, Box<dyn Error>> {
-    let key = RenderCache::key_for_route_for_test(LEASED_PROBE_PATTERN, &[("id", "1")], None);
+    let ids = create_posts(C64_DEPENDENCY_ROWS).await?;
+    require(
+        ids.first() == Some(&1) && ids.last() == Some(&(C64_DEPENDENCY_ROWS as i64)),
+        "the C64 route reads a contiguous run of row ids from 1, which a fresh database gives it",
+    )?;
+    let key = RenderCache::key_for_route_for_test(C64_ROUTE, &[("id", "1")], None);
 
-    dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
+    let first = dispatch_get(harness, C64_PATH, &[]).await;
+    expect(first.status.as_u16(), 200, "the first request's status")?;
+    expect(first.body.len(), C64_BODY_BYTES, "the C64 body's length")?;
     expect(
-        probe_route::handler_calls(),
+        counting_route::renders(),
         1,
-        "the first request through the measured route",
+        "renders the first request through the measured route caused",
     )?;
     require(
         RenderCache::l0_hot_for_test(&key),
         "the first request must publish a hot entry for the measured requests to hit",
     )?;
-    dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
+    let published = RenderCache::inspect(&key)
+        .await?
+        .ok_or_else(|| io::Error::other("the first request must publish an entry to inspect"))?;
+    let dependencies = published.observations;
+    require(
+        dependencies >= C64_DEPENDENCY_ROWS,
+        "the C64 entry must observe at least one dependency identity per row its handler read",
+    )?;
+    expect(
+        published.body_bytes,
+        C64_BODY_BYTES,
+        "the stored body length",
+    )?;
+    dispatch_get(harness, C64_PATH, &[]).await;
 
     // The condition the microseconds below are only meaningful beside: a
     // lease-mode hot hit reaches the database zero times. A change that
@@ -374,59 +493,88 @@ async fn run_c64_middleware(
     // here rather than quietly costing a round trip per request.
     statements::reset();
     let hot_before = RenderCache::hot_serves_for_test();
-    let measured = dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
-    let statements_per_hit = statements::count();
-    expect(measured.status.as_u16(), 200, "a measured hit's status")?;
+    let armed = dispatch_get(harness, C64_PATH, &[]).await;
+    expect(armed.status.as_u16(), 200, "the armed hit's status")?;
+    expect(
+        armed.body.len(),
+        C64_BODY_BYTES,
+        "the armed hit's body length",
+    )?;
     expect(
         RenderCache::hot_serves_for_test(),
         hot_before + 1,
-        "hot serves after one measured request",
+        "hot serves after one armed request",
     )?;
+    let statements_per_hit = statements::count();
     expect(
         statements_per_hit,
         0,
         "statements a lease-mode hot hit issues",
     )?;
 
+    let server_timings: ServerTimingLog = Arc::new(Mutex::new(Vec::new()));
     let warmup = scaled(WARMUP, timed);
     for _ in 0..warmup {
-        dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
+        dispatch_get_timed(harness, C64_PATH, &server_timings).await;
     }
+    server_timings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 
     let samples = scaled(SAMPLES, timed);
-    let timing = if timed {
-        let mut measured = Vec::with_capacity(samples);
-        for _ in 0..samples {
-            let started = Instant::now();
-            let response = dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
-            measured.push(elapsed_microseconds(started));
-            expect(response.status.as_u16(), 200, "a measured hit's status")?;
-        }
-        Timing::from_samples(measured)
-    } else {
-        for _ in 0..samples {
-            dispatch_get(harness, LEASED_PROBE_PATH, &[]).await;
-        }
-        Timing::unmeasured()
-    };
+    // A shared reference, which is `Copy`, so each call of the `FnMut`
+    // below hands its future a copy rather than moving the handle into the
+    // first one.
+    let timings = &server_timings;
+    let round_trip = measure(samples, elapsed_microseconds, || async move {
+        let response = dispatch_get_timed(harness, C64_PATH, timings).await;
+        expect(response.status.as_u16(), 200, "a measured hit's status")?;
+        expect(
+            response.body.len(),
+            C64_BODY_BYTES,
+            "a measured hit's body length",
+        )
+    })
+    .await?;
+    let server: Vec<f64> = server_timings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|elapsed| elapsed.as_secs_f64() * 1_000_000.0)
+        .collect();
+    expect(
+        server.len(),
+        samples,
+        "server-side durations recorded across the measured pass",
+    )?;
 
     // Nothing rendered while the measurement ran, so every sample above is
     // a hit rather than an occasional rebuild averaged in.
     expect(
-        probe_route::handler_calls(),
+        counting_route::renders(),
         1,
-        "handler calls across the whole measured pass",
+        "renders across the whole measured pass",
     )?;
 
+    let server = Timing::of(server, timed);
+    let round_trip = Timing::of(round_trip, timed);
     println!(
-        "c64_middleware: p50={:.3}us p95={:.3}us statements_per_hit={statements_per_hit}",
-        timing.p50, timing.p95
+        "c64_middleware: server p50={:.3}us p95={:.3}us round_trip p50={:.3}us p95={:.3}us \
+         body_bytes={C64_BODY_BYTES} dependencies={dependencies} \
+         statements_per_hit={statements_per_hit}",
+        server.p50, server.p95, round_trip.p50, round_trip.p95
     );
     Ok(C64Middleware {
+        body_bytes: C64_BODY_BYTES,
+        dependencies,
+        transport: C64_TRANSPORT,
         warmup,
         samples,
-        p50_microseconds: timing.p50,
-        p95_microseconds: timing.p95,
+        p50_microseconds: server.p50,
+        p95_microseconds: server.p95,
+        round_trip_p50_microseconds: round_trip.p50,
+        round_trip_p95_microseconds: round_trip.p95,
         statements_per_hit,
     })
 }
@@ -469,20 +617,17 @@ async fn run_generation_reread(timed: bool) -> Result<GenerationReread, Box<dyn 
     )?;
 
     let samples = scaled(SAMPLES, timed);
-    let timing = if timed {
-        let mut measured = Vec::with_capacity(samples);
-        for _ in 0..samples {
-            let started = Instant::now();
-            ledger.current_with_epoch(&digests).await?;
-            measured.push(elapsed_milliseconds(started));
-        }
-        Timing::from_samples(measured)
-    } else {
-        for _ in 0..samples {
-            ledger.current_with_epoch(&digests).await?;
-        }
-        Timing::unmeasured()
-    };
+    // Shared references for the same reason `run_c64_middleware` takes
+    // them: they are `Copy`, so the closure stays callable.
+    let (ledger, digests) = (&ledger, &digests);
+    let timing = Timing::of(
+        measure(samples, elapsed_milliseconds, || async move {
+            ledger.current_with_epoch(digests).await?;
+            Ok(())
+        })
+        .await?,
+        timed,
+    );
 
     if timed && timing.p95 > REREAD_CAP_MILLISECONDS {
         return Err(io::Error::other(format!(
@@ -519,25 +664,15 @@ fn storm_paths(post_ids: &[i64]) -> Vec<String> {
         .map(|index| {
             let id = post_ids[index % IDENTITIES];
             let page = index / IDENTITIES + 1;
-            format!("/cached/{id}?page={page}")
+            format!("{}/{id}?page={page}", STORM_ROUTE.trim_end_matches("/{id}"))
         })
         .collect()
 }
 
-/// Creates the twelve rows the storm advances, returning their ids.
-async fn create_storm_rows() -> Result<Vec<i64>, Box<dyn Error>> {
-    let mut ids = Vec::with_capacity(IDENTITIES);
-    for index in 0..IDENTITIES {
-        let title = format!("storm-{index}");
-        let post = Post::create(attrs! { title: title }).await?;
-        ids.push(post.id);
-    }
-    Ok(ids)
-}
-
 /// Advances one row's record generation, and the table generation with it,
 /// through the ORM inside its own transaction - the shape any application
-/// write takes.
+/// write takes. `views` is the column the storm route renders, so a write
+/// here is one a served body can be checked against.
 async fn advance_storm_row(id: i64) -> Result<(), Box<dyn Error>> {
     DB::transaction(move |_tx| {
         Box::pin(async move {
@@ -551,10 +686,36 @@ async fn advance_storm_row(id: i64) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Measures whether a write to one row invalidates a key that never read
+/// that row.
+///
+/// This is the fact the burst shape below exists for, measured rather than
+/// assumed. `Model::find` calls `observe_table_read` on every invocation
+/// (`framework/src/eloquent/model.rs:220`) as well as
+/// `observe_record_read_json` for the row it hydrated, so every key on this
+/// route observes the shared `posts` table identity, and any write moves
+/// it. If that ever stopped being true this returns `false`, the result
+/// file says so, and the sweeps below would begin to fail - which is the
+/// signal to change the shape rather than the label.
+async fn measure_write_fanout(harness: &Harness, post_ids: &[i64]) -> Result<bool, Box<dyn Error>> {
+    let untouched = format!("/storm/{}?page=1", post_ids[0]);
+    dispatch_get(harness, &untouched, &[]).await;
+    let published = counting_route::renders();
+    dispatch_get(harness, &untouched, &[]).await;
+    expect(
+        counting_route::renders(),
+        published,
+        "renders a second request to an unwritten key causes",
+    )?;
+
+    advance_storm_row(post_ids[1]).await?;
+    let before = counting_route::renders();
+    dispatch_get(harness, &untouched, &[]).await;
+    Ok(counting_route::renders() == before + 1)
+}
+
 /// Requests every key once, returning each response's body and the
-/// microseconds it took. Only the hit sweep's microseconds are reported;
-/// a rebuild sweep's are collected and dropped, since what this workload
-/// reports is the cost of a hit during a storm.
+/// microseconds it took.
 ///
 /// The caller says which of the two sweeps this is, and the sweep proves
 /// it: after a burst of writes every key must rebuild, and immediately
@@ -602,19 +763,24 @@ async fn storm_sweep(
 /// Twenty bursts of fifty writes, each burst followed by a sweep that must
 /// rebuild every key and a sweep that must hit every key.
 ///
-/// The writes and the sweeps are strictly ordered rather than racing,
-/// which is what makes `rebuilds` an exact number instead of a sample: a
-/// storm of one thousand writes across sixty-four keys causes one rebuild
-/// per key per burst - 1,280 - and not the 64,000 an "invalidate, then
-/// rebuild on every request" cache would pay. A change that rebuilt a key
-/// more than once per burst, or that failed to invalidate one at all,
-/// fails inside [`storm_sweep`] rather than showing up as a worse ratio.
+/// The sweeps are quiescent by necessity, not by preference: every write
+/// invalidates every key (see [`measure_write_fanout`]), so no key can be a
+/// hit while a write is in flight, and the hit latency this reports is
+/// named `quiescent_hit_p95_microseconds` for that reason. What the shape
+/// does measure is the one thing spec 18 asks a storm to prove: one
+/// thousand writes across sixty-four keys cost rebuilds in the low
+/// thousands, not the 64,000 an invalidate-and-rebuild-on-every-request
+/// cache would pay. The aggregate is checked against bounds derived from
+/// the shape rather than against a constant; the exact per-sweep contract
+/// lives in [`storm_sweep`], where a key that failed to rebuild or failed
+/// to hit fails immediately.
 async fn run_invalidation_storm(
     harness: &Harness,
     timed: bool,
 ) -> Result<InvalidationStorm, Box<dyn Error>> {
-    let post_ids = create_storm_rows().await?;
+    let post_ids = create_posts(IDENTITIES).await?;
     let paths = storm_paths(&post_ids);
+    let every_write_invalidates_every_key = measure_write_fanout(harness, &post_ids).await?;
 
     let bursts = scaled(STORM_BURSTS, timed);
     let writes = if timed {
@@ -652,78 +818,188 @@ async fn run_invalidation_storm(
 
     let rebuilds = counting_route::renders() - renders_before;
     let hits = RenderCache::hot_serves_for_test() - hot_before;
-    expect(
-        rebuilds,
-        (bursts * STORM_KEYS) as u64,
-        "rebuilds across the whole storm",
+    let floor = (bursts * STORM_KEYS) as u64;
+    let ceiling = floor * SWEEPS_PER_BURST as u64;
+    require(
+        rebuilds >= floor && rebuilds <= ceiling,
+        "the storm's rebuilds must lie between one per key per burst and one per key per sweep",
     )?;
+    require(
+        rebuilds >= writes as u64,
+        "the shape must keep the storm meaningful: at least one rebuild per write on average",
+    )?;
+    expect(hits, floor, "keys served hot across the whole storm")?;
 
     // One armed hit, after the storm: an authority-mode hit is the single
-    // batched reread and nothing else. A change that split the generation
-    // and epoch reads, or that consulted a provider on a hit, moves this.
+    // batched reread and nothing else. Read after the body is collected and
+    // after the hot-serve counter moved, for the reason
+    // `run_c64_middleware` gives.
     statements::reset();
+    let hot_armed = RenderCache::hot_serves_for_test();
     let armed = dispatch_get(harness, &paths[0], &[]).await;
-    let statements_per_hit = statements::count();
     expect(armed.status.as_u16(), 200, "the armed hit's status")?;
+    expect(
+        RenderCache::hot_serves_for_test(),
+        hot_armed + 1,
+        "hot serves after the armed hit",
+    )?;
+    let statements_per_hit = statements::count();
     expect(
         statements_per_hit,
         1,
         "statements an authority-mode hot hit issues",
     )?;
 
-    // The storm's last word: one more write, then every key must rebuild
-    // to the generation that write left, and serve exactly those bytes
-    // back on the request after it.
-    advance_storm_row(post_ids[0]).await?;
+    // The storm's last word, checked against the database rather than
+    // against another sweep: one more write to every row, then every key
+    // must rebuild, and the `views` in the body it serves must be the
+    // `views` its row now holds.
+    for id in &post_ids {
+        advance_storm_row(*id).await?;
+    }
     let (final_bodies, _) = storm_sweep(harness, &paths, false).await?;
-    let (replayed, _) = storm_sweep(harness, &paths, true).await?;
-    let final_bodies_coherent = final_bodies == replayed;
+    let mut final_bodies_coherent = true;
+    for (index, body) in final_bodies.iter().enumerate() {
+        let id = post_ids[index % IDENTITIES];
+        let served = storm_body_views(body).ok_or_else(|| {
+            io::Error::other("every storm body must carry the `views` of the row it read")
+        })?;
+        if served != row_views(id).await? {
+            final_bodies_coherent = false;
+        }
+    }
     require(
         final_bodies_coherent,
-        "every key must serve the generation the storm ended on",
+        "every key must serve the `views` its own row holds after the storm's last write",
     )?;
 
-    let timing = if timed {
-        Timing::from_samples(hit_latencies)
-    } else {
-        Timing::unmeasured()
-    };
+    let timing = Timing::of(hit_latencies, timed);
     let rebuilds_per_write = rebuilds as f64 / writes as f64;
     println!(
         "invalidation_storm: hits={hits} rebuilds={rebuilds} per_write={rebuilds_per_write:.4} \
-         hit_p95={:.3}us statements_per_hit={statements_per_hit}",
+         quiescent_hit_p95={:.3}us statements_per_hit={statements_per_hit} \
+         fanout_is_table_wide={every_write_invalidates_every_key}",
         timing.p95
     );
     Ok(InvalidationStorm {
         keys: STORM_KEYS,
         identities: IDENTITIES,
         writes,
+        bursts,
+        writes_per_burst,
+        sweeps_per_burst: SWEEPS_PER_BURST,
+        every_write_invalidates_every_key,
         hits,
         rebuilds,
         rebuilds_per_write,
         statements_per_hit,
-        hit_p95_microseconds: timing.p95,
+        quiescent_hit_p95_microseconds: timing.p95,
         final_bodies_coherent,
     })
 }
 
 // -------------------------------------------------------------------------
-// Workload 4: two nodes over one database
+// Workload 4: two nodes over one backend
 // -------------------------------------------------------------------------
 
-/// A coordinator handle over the shared database. Two of these are two
-/// nodes, for the reason `framework/tests/render_cache/tiers/mod.rs` gives:
-/// the RenderCache runtime is a process singleton, so a second runtime is
-/// not something one process can have, and two adapter handles over one
-/// backend are what a second node actually is to the backend.
-fn node(lease_ms: u64) -> Arc<FencedLeaseCoordinator<SqlLeaseStore>> {
-    Arc::new(FencedLeaseCoordinator::new(
-        Arc::new(SqlLeaseStore::new()),
+/// A lease store whose view of store time this bench can move forward.
+///
+/// Both adapters carry the same doc-hidden seam, under the same name, as an
+/// inherent method. `framework/tests/render_cache/tiers/mod.rs` defines an
+/// equivalent trait for the same reason; it lives in a test module this
+/// bench does not include, and the method is renamed here so an inherent
+/// call and a trait call can never be confused for one another.
+trait OffsetLeaseStore: LeaseStore {
+    fn set_time_offset(&self, offset_ms: u64);
+}
+
+impl OffsetLeaseStore for SqlLeaseStore {
+    fn set_time_offset(&self, offset_ms: u64) {
+        self.set_time_offset_for_test(offset_ms);
+    }
+}
+
+impl OffsetLeaseStore for RedisLeaseStore {
+    fn set_time_offset(&self, offset_ms: u64) {
+        self.set_time_offset_for_test(offset_ms);
+    }
+}
+
+/// Every handle one `multi_node` run needs.
+///
+/// Built by the caller, because only the caller knows which tier's
+/// constructors to call and which of them are asynchronous. Two coordinator
+/// handles over one backend are two nodes, for the reason
+/// `framework/tests/render_cache/tiers/mod.rs` gives: the RenderCache
+/// runtime is a process singleton, so a second runtime is not something one
+/// process can have, and two adapter handles over one backend are what a
+/// second node actually is to the backend.
+struct Nodes<L: LeaseStore, R: RenderStore> {
+    fan_in: Vec<Arc<FencedLeaseCoordinator<L>>>,
+    fan_in_stores: Vec<Arc<R>>,
+    dying: FencedLeaseCoordinator<L>,
+    dying_store: Arc<L>,
+    taking: FencedLeaseCoordinator<L>,
+    taking_store: Arc<L>,
+    entries: R,
+}
+
+/// A coordinator handle over `store`.
+fn node<L: LeaseStore>(store: Arc<L>, lease_ms: u64) -> FencedLeaseCoordinator<L> {
+    FencedLeaseCoordinator::new(
+        store,
         LocalCoordinatorLimits {
             lease_ms,
             max_waiters: MAX_WAITERS,
         },
-    ))
+    )
+}
+
+/// The database tier's handles.
+fn sql_nodes() -> Nodes<SqlLeaseStore, SqlRenderStore> {
+    let dying_store = Arc::new(SqlLeaseStore::new());
+    let taking_store = Arc::new(SqlLeaseStore::new());
+    Nodes {
+        fan_in: (0..NODES)
+            .map(|_| Arc::new(node(Arc::new(SqlLeaseStore::new()), FAN_IN_LEASE_MS)))
+            .collect(),
+        fan_in_stores: (0..NODES)
+            .map(|_| Arc::new(SqlRenderStore::new(MAX_STORE_BYTES)))
+            .collect(),
+        dying: node(Arc::clone(&dying_store), TAKEOVER_LEASE_MS),
+        dying_store,
+        taking: node(Arc::clone(&taking_store), TAKEOVER_LEASE_MS),
+        taking_store,
+        entries: SqlRenderStore::new(MAX_STORE_BYTES),
+    }
+}
+
+/// The Redis tier's handles, over the namespace `config` names.
+async fn redis_nodes(
+    config: &RedisProviderConfig,
+) -> Result<Nodes<RedisLeaseStore, RedisRenderStore>, Box<dyn Error>> {
+    let dying_store = Arc::new(RedisLeaseStore::connect(config).await?);
+    let taking_store = Arc::new(RedisLeaseStore::connect(config).await?);
+    let mut fan_in = Vec::with_capacity(NODES);
+    let mut fan_in_stores = Vec::with_capacity(NODES);
+    for _ in 0..NODES {
+        fan_in.push(Arc::new(node(
+            Arc::new(RedisLeaseStore::connect(config).await?),
+            FAN_IN_LEASE_MS,
+        )));
+        fan_in_stores.push(Arc::new(
+            RedisRenderStore::connect(config, MAX_STORE_BYTES).await?,
+        ));
+    }
+    Ok(Nodes {
+        fan_in,
+        fan_in_stores,
+        dying: node(Arc::clone(&dying_store), TAKEOVER_LEASE_MS),
+        dying_store,
+        taking: node(Arc::clone(&taking_store), TAKEOVER_LEASE_MS),
+        taking_store,
+        entries: RedisRenderStore::connect(config, MAX_STORE_BYTES).await?,
+    })
 }
 
 /// Sixty-four cold requests for one key, split across two nodes.
@@ -737,19 +1013,23 @@ fn node(lease_ms: u64) -> Arc<FencedLeaseCoordinator<SqlLeaseStore>> {
 /// fails on `publications`.
 ///
 /// Each request's sample is the whole time it took that request to learn
-/// what to serve, not its admission alone: the leader's runs to the end of
-/// its publication, a bypassing node's ends at its admission because it
-/// renders on its own from there, and a waiter's ends when the leader
-/// released it. Collecting admissions first costs a waiter only the
-/// microseconds the other admissions take, so what a waiter's sample is
-/// dominated by is the publication it was actually waiting for.
-async fn fan_in(
-    nodes: &[Arc<FencedLeaseCoordinator<SqlLeaseStore>>],
-    stores: &[Arc<SqlRenderStore>],
+/// what to serve: the leader's runs to the end of its publication, a
+/// bypassing node's ends at its admission because it renders on its own
+/// from there, and a waiter's ends when the leader released it. Collecting
+/// admissions first costs a waiter only the microseconds the other
+/// admissions take, so what a waiter's sample is dominated by is the
+/// publication it was actually waiting for.
+async fn fan_in<L, R>(
+    nodes: &[Arc<FencedLeaseCoordinator<L>>],
+    stores: &[Arc<R>],
     key: RenderKey,
     bytes: Bytes,
     requests: usize,
-) -> Result<(usize, usize, Vec<f64>), Box<dyn Error>> {
+) -> Result<(usize, usize, Vec<f64>), Box<dyn Error>>
+where
+    L: LeaseStore + 'static,
+    R: RenderStore,
+{
     let mut admitting = tokio::task::JoinSet::new();
     for request in 0..requests {
         let coordinator = Arc::clone(&nodes[request % nodes.len()]);
@@ -837,34 +1117,39 @@ async fn fan_in(
 /// the takeover publishes, and the fenced leader mints nothing.
 ///
 /// Store time is moved rather than waited for, so the round costs a few
-/// statements instead of a lease lifetime. The fenced leader's refusal is
-/// the correctness half: a `publish_token` that answered a node's own
-/// clock, or a lease that never fenced, would let the dead leader publish
-/// over the takeover's bytes.
-async fn takeover_round(pattern: &str, entries: &SqlRenderStore) -> Result<f64, Box<dyn Error>> {
+/// statements instead of a lease lifetime, and each round moves it one step
+/// further than the round before it so no round can reach an earlier
+/// round's lease. The fenced leader's refusal is the correctness half: a
+/// `publish_token` that answered a node's own clock, or a lease that never
+/// fenced, would let the dead leader publish over the takeover's bytes.
+async fn takeover_round<L, R>(
+    pattern: &str,
+    nodes: &Nodes<L, R>,
+    before_ms: u64,
+    after_ms: u64,
+) -> Result<f64, Box<dyn Error>>
+where
+    L: OffsetLeaseStore,
+    R: RenderStore,
+{
     let key = render_cache_tiers_support::key(pattern);
-    let dying_store = Arc::new(SqlLeaseStore::new());
-    let taking_store = Arc::new(SqlLeaseStore::new());
-    let limits = LocalCoordinatorLimits {
-        lease_ms: TAKEOVER_LEASE_MS,
-        max_waiters: MAX_WAITERS,
-    };
-    let dying = FencedLeaseCoordinator::new(Arc::clone(&dying_store), limits);
-    let taking = FencedLeaseCoordinator::new(Arc::clone(&taking_store), limits);
+    nodes.dying_store.set_time_offset(before_ms);
+    nodes.taking_store.set_time_offset(before_ms);
 
-    let RebuildAdmission::Lead(dead) = dying.admit(&key, NODE_EPOCH, 0).await? else {
+    let RebuildAdmission::Lead(dead) = nodes.dying.admit(&key, NODE_EPOCH, before_ms).await? else {
         return Err(io::Error::other("the first node must lead an unheld key").into());
     };
-    dying_store.set_time_offset_for_test(TAKEOVER_OFFSET_MS);
-    taking_store.set_time_offset_for_test(TAKEOVER_OFFSET_MS);
+    nodes.dying_store.set_time_offset(after_ms);
+    nodes.taking_store.set_time_offset(after_ms);
 
     let started = Instant::now();
-    let RebuildAdmission::Lead(taken) = taking.admit(&key, NODE_EPOCH, TAKEOVER_OFFSET_MS).await?
+    let RebuildAdmission::Lead(taken) = nodes.taking.admit(&key, NODE_EPOCH, after_ms).await?
     else {
         return Err(io::Error::other("an elapsed lease must be taken over").into());
     };
-    let fence = taking.publish_token(&taken, TAKEOVER_OFFSET_MS).await?;
-    let outcome = entries
+    let fence = nodes.taking.publish_token(&taken, after_ms).await?;
+    let outcome = nodes
+        .entries
         .publish(
             &key,
             render_cache_tiers_support::encoded_entry(pattern),
@@ -875,10 +1160,11 @@ async fn takeover_round(pattern: &str, entries: &SqlRenderStore) -> Result<f64, 
         .await?;
     let milliseconds = elapsed_milliseconds(started);
     expect(outcome, PublishOutcome::Published, "the takeover's publish")?;
-    taking.release(*taken).await?;
+    nodes.taking.release(*taken).await?;
 
-    let refused = dying
-        .publish_token(&dead, TAKEOVER_OFFSET_MS)
+    let refused = nodes
+        .dying
+        .publish_token(&dead, after_ms)
         .await
         .err()
         .map(|error| error.kind());
@@ -887,35 +1173,41 @@ async fn takeover_round(pattern: &str, entries: &SqlRenderStore) -> Result<f64, 
         Some(suprnova_live::render_cache::RenderCacheErrorKind::LeaseFenced),
         "what a fenced leader's publish token is refused with",
     )?;
-    dying.release(*dead).await?;
+    nodes.dying.release(*dead).await?;
     Ok(milliseconds)
 }
 
-/// The fan-in and the takeover, over whatever database is mounted.
-async fn run_multi_node(timed: bool) -> Result<MultiNode, Box<dyn Error>> {
-    let nodes: Vec<_> = (0..NODES).map(|_| node(FAN_IN_LEASE_MS)).collect();
-    let stores: Vec<_> = (0..NODES)
-        .map(|_| Arc::new(SqlRenderStore::new(MAX_STORE_BYTES)))
-        .collect();
-
+/// The fan-in and the takeover, over whatever backend `nodes` addresses.
+///
+/// `namespace` keeps one tier's keys away from another's, so a run that
+/// measures both leaves neither reading the other's entries.
+async fn run_multi_node<L, R>(
+    nodes: &Nodes<L, R>,
+    namespace: &str,
+    timed: bool,
+) -> Result<MultiNode, Box<dyn Error>>
+where
+    L: OffsetLeaseStore + 'static,
+    R: RenderStore,
+{
     // A warm round first, over its own key, so the measured round is not
     // paying for the pool's first statement against these tables.
-    let warm = "/workloads-fan-in-warm";
+    let warm = format!("{namespace}/fan-in-warm");
     fan_in(
-        &nodes,
-        &stores,
-        render_cache_tiers_support::key(warm),
-        render_cache_tiers_support::encoded_entry(warm),
+        &nodes.fan_in,
+        &nodes.fan_in_stores,
+        render_cache_tiers_support::key(&warm),
+        render_cache_tiers_support::encoded_entry(&warm),
         NODES,
     )
     .await?;
 
-    let measured = "/workloads-fan-in";
+    let measured = format!("{namespace}/fan-in");
     let (publications, duplicate_renders, latencies) = fan_in(
-        &nodes,
-        &stores,
-        render_cache_tiers_support::key(measured),
-        render_cache_tiers_support::encoded_entry(measured),
+        &nodes.fan_in,
+        &nodes.fan_in_stores,
+        render_cache_tiers_support::key(&measured),
+        render_cache_tiers_support::encoded_entry(&measured),
         CONCURRENT_REQUESTS,
     )
     .await?;
@@ -926,17 +1218,25 @@ async fn run_multi_node(timed: bool) -> Result<MultiNode, Box<dyn Error>> {
     )?;
     let fan_in_timing = Timing::from_samples(latencies);
 
-    let entries = SqlRenderStore::new(MAX_STORE_BYTES);
     let rounds = scaled(TAKEOVER_ROUNDS, timed);
     let mut takeovers = Vec::with_capacity(rounds);
     for round in 0..rounds {
-        takeovers.push(takeover_round(&format!("/workloads-takeover-{round}"), &entries).await?);
+        let step = round as u64 * TAKEOVER_OFFSET_STEP_MS;
+        takeovers.push(
+            takeover_round(
+                &format!("{namespace}/takeover-{round}"),
+                nodes,
+                step,
+                step + TAKEOVER_OFFSET_STEP_MS,
+            )
+            .await?,
+        );
     }
     let takeover_timing = Timing::from_samples(takeovers);
 
     println!(
-        "multi_node: publications={publications} duplicate_renders={duplicate_renders} \
-         fan_in_p95={:.3}us takeover_p95={:.4}ms",
+        "multi_node[{namespace}]: publications={publications} \
+         duplicate_renders={duplicate_renders} fan_in_p95={:.3}us takeover_p95={:.4}ms",
         fan_in_timing.p95, takeover_timing.p95
     );
     Ok(MultiNode {
@@ -976,7 +1276,7 @@ async fn sqlite_run(timed: bool) -> Result<DatabaseRun, Box<dyn Error>> {
     };
     let multi_node = {
         let database = render_cache_tiers_support::boot().await;
-        let measured = run_multi_node(timed).await?;
+        let measured = run_multi_node(&sql_nodes(), "/workloads-sqlite", timed).await?;
         drop(database);
         measured
     };
@@ -985,9 +1285,9 @@ async fn sqlite_run(timed: bool) -> Result<DatabaseRun, Box<dyn Error>> {
         database: "sqlite",
         accelerator: "none",
         c64_middleware: Some(c64_middleware),
-        generation_reread,
+        generation_reread: Some(generation_reread),
         invalidation_storm: Some(invalidation_storm),
-        multi_node,
+        multi_node: Some(multi_node),
     })
 }
 
@@ -1025,7 +1325,7 @@ async fn postgres_run(url: &str, timed: bool) -> Result<DatabaseRun, Box<dyn Err
                 io::Error::other("PG_TEST_URL is set but the server is not reachable")
             })?;
         let guard = render_cache_tiers_support::reset_and_migrate(conn).await;
-        let measured = run_multi_node(timed).await?;
+        let measured = run_multi_node(&sql_nodes(), "/workloads-postgres", timed).await?;
         drop(guard);
         measured
     };
@@ -1034,9 +1334,31 @@ async fn postgres_run(url: &str, timed: bool) -> Result<DatabaseRun, Box<dyn Err
         database: "postgres",
         accelerator: "none",
         c64_middleware: None,
-        generation_reread,
+        generation_reread: Some(generation_reread),
         invalidation_storm: None,
-        multi_node,
+        multi_node: Some(multi_node),
+    })
+}
+
+/// The multi-node workload over the Redis lease store and Redis render
+/// store.
+///
+/// `database` is `"none"` and means it: nothing in this run reads or writes
+/// a database. Both stores are Redis, under a namespace of this run's own
+/// that the boot helper's guard removes afterwards.
+async fn redis_run(timed: bool) -> Result<DatabaseRun, Box<dyn Error>> {
+    let (config, _connection, cleanup) = render_cache_tiers_support::boot_redis().await;
+    let nodes = redis_nodes(&config).await?;
+    let multi_node = run_multi_node(&nodes, "/workloads-redis", timed).await?;
+    drop(cleanup);
+
+    Ok(DatabaseRun {
+        database: "none",
+        accelerator: "redis",
+        c64_middleware: None,
+        generation_reread: None,
+        invalidation_storm: None,
+        multi_node: Some(multi_node),
     })
 }
 
@@ -1055,6 +1377,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let postgres = std::env::var("PG_TEST_URL")
         .ok()
         .filter(|url| !url.is_empty());
+    let redis = std::env::var("REDIS_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
     environment.database = if postgres.is_some() {
         "sqlite_and_postgres"
     } else {
@@ -1065,6 +1390,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         ("lease_store", "sql_fenced_v1"),
         ("render_store", "sql_l1_v1"),
     ]);
+    if redis.is_some() {
+        environment
+            .provider_versions
+            .insert("accelerator_lease_store", "redis_fenced_v1");
+        environment
+            .provider_versions
+            .insert("accelerator_render_store", "redis_l1_v1");
+    }
     assert_required_environment(&environment)?;
     let timed = !cfg!(debug_assertions);
 
@@ -1074,6 +1407,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut runs = vec![runtime.block_on(sqlite_run(timed))?];
     if let Some(url) = postgres {
         runs.push(runtime.block_on(postgres_run(&url, timed))?);
+    }
+    if redis.is_some() {
+        runs.push(runtime.block_on(redis_run(timed))?);
     }
 
     if !timed {

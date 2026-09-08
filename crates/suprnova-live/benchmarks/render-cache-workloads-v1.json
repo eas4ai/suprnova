@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile": "release",
-  "measured_at_unix_ms": 1788825056584,
+  "measured_at_unix_ms": 1788826873523,
   "environment": {
     "classification": "local_exploratory",
     "operating_system": "linux",
@@ -15,6 +15,8 @@
     "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
     "database": "sqlite_and_postgres",
     "provider_versions": {
+      "accelerator_lease_store": "redis_fenced_v1",
+      "accelerator_render_store": "redis_l1_v1",
       "generation_ledger": "sql_v1",
       "lease_store": "sql_fenced_v1",
       "render_store": "sql_l1_v1"
@@ -29,18 +31,23 @@
       "database": "sqlite",
       "accelerator": "none",
       "c64_middleware": {
+        "body_bytes": 65536,
+        "dependencies": 14,
+        "transport": "loopback_http1",
         "warmup": 200,
         "samples": 200,
-        "p50_microseconds": 49.309,
-        "p95_microseconds": 59.964999999999996,
+        "p50_microseconds": 8.716,
+        "p95_microseconds": 14.440000000000001,
+        "round_trip_p50_microseconds": 68.50399999999999,
+        "round_trip_p95_microseconds": 109.082,
         "statements_per_hit": 0
       },
       "generation_reread": {
         "keys": 12,
         "warmup": 200,
         "samples": 200,
-        "p50_milliseconds": 0.01777,
-        "p95_milliseconds": 0.020278,
+        "p50_milliseconds": 0.019128,
+        "p95_milliseconds": 0.031712,
         "cap_milliseconds": 3.0,
         "statements_per_reread": 1
       },
@@ -48,11 +55,15 @@
         "keys": 64,
         "identities": 12,
         "writes": 1000,
+        "bursts": 20,
+        "writes_per_burst": 50,
+        "sweeps_per_burst": 2,
+        "every_write_invalidates_every_key": true,
         "hits": 1280,
         "rebuilds": 1280,
         "rebuilds_per_write": 1.28,
         "statements_per_hit": 1,
-        "hit_p95_microseconds": 121.67,
+        "quiescent_hit_p95_microseconds": 165.048,
         "final_bodies_coherent": true
       },
       "multi_node": {
@@ -60,8 +71,8 @@
         "concurrent_requests": 64,
         "publications": 1,
         "duplicate_renders": 1,
-        "fan_in_p95_microseconds": 157.47299999999998,
-        "takeover_p95_milliseconds": 0.147937
+        "fan_in_p95_microseconds": 166.501,
+        "takeover_p95_milliseconds": 1.3229170000000001
       }
     },
     {
@@ -71,8 +82,8 @@
         "keys": 12,
         "warmup": 200,
         "samples": 200,
-        "p50_milliseconds": 0.061789000000000004,
-        "p95_milliseconds": 0.088336,
+        "p50_milliseconds": 0.092149,
+        "p95_milliseconds": 0.235958,
         "cap_milliseconds": 3.0,
         "statements_per_reread": 1
       },
@@ -81,8 +92,20 @@
         "concurrent_requests": 64,
         "publications": 1,
         "duplicate_renders": 1,
-        "fan_in_p95_microseconds": 2348.672,
-        "takeover_p95_milliseconds": 1.858167
+        "fan_in_p95_microseconds": 9201.986,
+        "takeover_p95_milliseconds": 6.0536449999999995
+      }
+    },
+    {
+      "database": "none",
+      "accelerator": "redis",
+      "multi_node": {
+        "nodes": 2,
+        "concurrent_requests": 64,
+        "publications": 1,
+        "duplicate_renders": 1,
+        "fan_in_p95_microseconds": 260.519,
+        "takeover_p95_milliseconds": 0.215281
       }
     }
   ]
