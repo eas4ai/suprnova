@@ -186,32 +186,46 @@ async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
 /// published once, and every hit re-mounts its three identity-bound islands
 /// for whoever is asking, behind the route's own login gate.
 ///
-/// Ruling R78 in the form this class needs. `render_counter` cannot carry
-/// the "the handler did not run" claim here, and saying so is the point of
-/// this note: it is a global middleware registered after
-/// `RenderCache::install`, so it sits outside the route's own chain, and a
-/// stitched hit is deliberately forwarded through that whole chain before
-/// anything is served. It therefore counts every request to the dashboard,
-/// hit or miss. `Cache-Control` cannot carry it either, and that is
-/// deliberate: a slotted stitched route is `private, no-store` on the
-/// leader's own rendered document as much as on every assembly after it,
-/// because the directive follows what the bytes hold - one principal's
-/// islands - and not which code path produced them.
+/// Ruling R78 in the form this class needs, and R56 for what carries it.
+/// Two of this route's observables cannot: `render_counter` is a global
+/// middleware registered after `RenderCache::install`, so it sits outside
+/// the route's own chain, and a stitched hit is deliberately forwarded
+/// through that whole chain before anything is served - it therefore counts
+/// every request to the dashboard, hit or miss. `Cache-Control` cannot
+/// either, and that is deliberate: a slotted stitched route is
+/// `private, no-store` on the leader's own rendered document as much as on
+/// every assembly after it, because the directive follows what the bytes
+/// hold - one principal's islands - and not which code path produced them.
 ///
-/// So the counter is asserted for what it actually is, and the cache claim
-/// here rests on what the store holds and what the two documents are made
-/// of: a Composite entry with one slot per identity-bound island, read back
-/// under the same lookup key the middleware derived, and two principals
-/// whose documents differ in their island tags and nowhere else - one
-/// shell, islands re-mounted per principal. "The handler did not run on the
-/// hit" is asserted directly one layer down, in
+/// `Age` can, and it is the proof this test turns on. The application is
+/// booted on the adjustable RenderCache clock, the shell is published, the
+/// clock moves five whole seconds, and the second principal's response
+/// carries `Age: 5`. A render cannot produce that number: its response and
+/// its entry are published at the same instant, so `finish_fresh_render`
+/// writes `Age: 0` by construction, while an assembly computes the age from
+/// the publication instant of the shell it was assembled from. That is the
+/// manual's sentence about `Age` being the simplest local proof that a
+/// response came out of the store, made exact - and the clock is far inside
+/// the route's five fresh minutes, so nothing about freshness changes.
+///
+/// Around it, the store's own side of the claim: a Composite entry with one
+/// slot per identity-bound island, read back under the same lookup key the
+/// middleware derived, and two principals whose documents differ in their
+/// island tags and nowhere else. "The handler did not run on the hit" is
+/// asserted directly one layer down, in
 /// `a_hit_assembles_each_principals_own_island_without_the_handler`
 /// (`framework/tests/render_cache/stitch.rs`), against a render counter
 /// that sits inside the route's own chain where this application's does
-/// not.
+/// not. Between that counter and this `Age`, both halves are proven.
+///
+/// Verified rather than argued: with `RenderCache::clear_l0_for_test()`
+/// inserted after the clock advance, so the second principal's request has
+/// to render instead of assemble, the `Age` assertion fails reading `0`
+/// against the required `5` - the clock had moved five seconds all the
+/// same. Removed after the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
-    let app = setup_app(6).await;
+    let app = setup_app_with_clock(6).await;
     let alice = seed_session(&app).await;
     let bob = seed_session(&app).await;
 
@@ -248,14 +262,17 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
         "one slot for the counter, the uploader, and the feed"
     );
 
-    // 3. A second principal is served under the same rule: the class is
+    // 3. Five whole seconds pass on the RenderCache clock - far inside the
+    //    route's 300_000 fresh milliseconds, so the entry does not move a
+    //    freshness band - and a second principal asks. The class is
     //    `private, no-store` whether the bytes were rendered or assembled,
-    //    so this step pins the directive rather than the code path behind
-    //    it. The counter still moves, which is the fact this test's own note
-    //    is about: a stitched hit is forwarded through the chain the
-    //    counting middleware sits outside of. Step 4 is where the document
-    //    is shown to be the stored shell with this principal's own islands
-    //    in it.
+    //    so that header pins the directive rather than the code path behind
+    //    it; `Age` is what pins the code path, for the reason this test's
+    //    own note gives. The counter still moves: a stitched hit is
+    //    forwarded through the chain the counting middleware sits outside
+    //    of. Step 4 is where the document is shown to be the stored shell
+    //    with this principal's own islands in it.
+    advance_clock_ms(&app, 5_000);
     let before = render_counter::renders();
     let second = get(&app, "/live", Some(&bob)).await;
     assert_eq!(second.status, StatusCode::OK, "{}", second.text());
@@ -269,7 +286,12 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
         Some("private, no-store"),
         "an assembled document holds one principal's islands: nothing may store it"
     );
-    assert_eq!(second.header("age"), Some("0"));
+    assert_eq!(
+        second.header("age"),
+        Some("5"),
+        "the five seconds since the shell was published: a render cannot produce this, \
+         because a render's response is published at the instant it is served"
+    );
 
     // 4. The islands in it belong to the principal who asked, and nothing
     //    else in the document does: two fresh principals differ only in the
