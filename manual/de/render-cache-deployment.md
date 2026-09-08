@@ -95,11 +95,11 @@ was zur Kompilierzeit innerhalb der Crate `suprnova` expandiert, sodass der
 Standardwert die Version der **Framework**-Crate ist. Sie stimmt nur deshalb
 mit der Version Ihrer Anwendung überein, weil beide
 `version.workspace = true` aus demselben Workspace übernehmen, und so oder so
-bewegt sie sich nur, wenn jemand eine Versionsnummer erhöht. Ein Deployment, das ein Template,
-eine Übersetzung oder einen Handler ohne Versionserhöhung ändert, behält
-dieselbe Build-Id und kann Einträge ausliefern, die der vorherige Build
-veröffentlicht hat. Setzen Sie sie auf etwas, das sich bei jeder
-Auslieferung ändert, etwa eine Commit-Id oder eine Release-Kennung:
+bewegt sie sich nur, wenn jemand eine Versionsnummer erhöht. Ein Deployment,
+das ein Template, eine Übersetzung oder einen Handler ohne Versionserhöhung
+ändert, behält dieselbe Build-Id und kann Einträge ausliefern, die der
+vorherige Build veröffentlicht hat. Setzen Sie sie auf etwas, das sich bei
+jeder Auslieferung ändert, etwa eine Commit-Id oder eine Release-Kennung:
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)

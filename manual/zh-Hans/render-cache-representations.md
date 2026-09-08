@@ -79,8 +79,8 @@ let router = router.try_render_cache(
 
 这就是 `app/src/live/mod.rs` 里 `/live/todos` 的声明。它是那个应用中唯一一份
 字节可以被每个节点共享的文档，所以它也是唯一一个声明了 `l0_and_l1()` 的。在
-`embedded` 配置档下，除非 `RENDER_CACHE_L1_DIR` 指定了一个目录，否则 L1 处于
-禁用状态，此时声明这个层级什么也不会改变；在 Database 配置档下，条目会落进
+embedded 配置档下，除非 `RENDER_CACHE_L1_DIR` 指定了一个目录，否则 L1 处于禁用
+状态，此时声明这个层级什么也不会改变；在 Database 配置档下，条目会落进
 `suprnova_render_entries`，第二个进程能在那里找到它。
 
 `the_database_profile_serves_a_hit_through_the_sql_stores` 就是证明。它在

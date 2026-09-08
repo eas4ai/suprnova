@@ -10,7 +10,7 @@ RenderCache 用**配置档**来回答这件事：一个配置档指名一个进�
 本章讲的是你怎么挑一个并把它接好。三个配置档各提供什么、框架配置实际读取哪些
 环境变量、一个共享配置档要能启动、你的应用必须列出哪个迁移、安装该放在你的启动
 流程的什么位置，以及这些层级承诺什么、不承诺什么。本仓库的自用（dogfood）应用
-默认跑 `embedded` 配置档，并由 `app/tests/live_render_cache.rs` 里的
+默认跑 embedded 配置档，并由 `app/tests/live_render_cache.rs` 里的
 `the_database_profile_serves_a_hit_through_the_sql_stores` 在 Database 配置档上
 启动。
 

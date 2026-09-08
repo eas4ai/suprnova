@@ -244,7 +244,7 @@ erzeugen kann, und genau das tut
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell`: Der
 gespeicherte Eintrag ist ein `EntryKind::Composite` mit der erwarteten
 Slot-Zahl (`inspect_route_for_test`), die Antwort trägt
-`Cache-Control: private, no-store` - den Wert, den der `Composite`-Responder
+`Cache-Control: private, no-store` - den Wert, den der Composite-Responder
 auf einer Zusammensetzung mit Slots festlegt, und erst, nachdem ein ganzes
 Dokument zusammengesetzt wurde -, und die Dokumente zweier Principals
 unterscheiden sich in ihren Insel-Tags und nirgends sonst. „Mit Slots“ ist
@@ -546,7 +546,7 @@ Invalidierung ist ein Epochensprung, der nichts kostet und nur diesen Cache
 berührt: Ihre Sitzungen und Ihre Queue liegen nicht im Wirkungsradius. Die
 Telemetrie ist eine geschlossene Menge von sechs Zählern mit geschlossenen
 Attributmengen, und das macht ein Dashboard darüber über Releases hinweg
-stabil statt zu einem Satz driftender Zeichenketten. Der Handel ist, dass es
+stabil statt zu einem Satz driftender Zeichenketten. Der Preis ist, dass es
 keinen Befehl „lösche genau diesen einen Schlüssel“ gibt: Die Hebel sind pro
 Eintrag nur lesend oder epochenweit.
 

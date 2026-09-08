@@ -154,7 +154,7 @@ auf der zweiten Anfrage;
 `private, max-age=60` von `/live/me`;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` liest
 `private, no-store` von einem zusammengesetzten Dashboard, und das ist der
-Wert, den nichts außer dem `Composite`-Responder schreibt.
+Wert, den nichts außer dem Composite-Responder schreibt.
 
 ## Die vier Frischezustände
 

@@ -209,13 +209,13 @@ rodava, em termos que você vai reconhecer:
   comum apoiado em cookie é exatamente aquilo para que serve uma rota
   `PrivateCached` que declara variância `Principal`, e buscar o id do
   visitante não torna a página silenciosamente não cacheável. Todo outro
-  valor da sessão ainda torna. Duas consequências que vale conhecer: uma
-  requisição anônima a uma rota dessas entra em cache sob a chave
-  `Anonymous`, porque a renderização não resolveu identidade nenhuma, não
-  observou material de principal, e a chave diz isso - um visitante
-  autenticado deriva uma chave `Private` que nunca alcança aquela entrada; e
-  o identificador de um guard nomeado é material de principal exatamente da
-  mesma forma que o do guard padrão.
+  valor da sessão ainda torna a página não cacheável. Duas consequências que
+  vale conhecer: uma requisição anônima a uma rota dessas entra em cache sob
+  a chave `Anonymous`, porque a renderização não resolveu identidade
+  nenhuma, não observou material de principal, e a chave diz isso - um
+  visitante autenticado deriva uma chave `Private` que nunca alcança aquela
+  entrada; e o identificador de um guard nomeado é material de principal
+  exatamente da mesma forma que o do guard padrão.
 - **Você leu uma identidade, em uma rota que não declara `Principal`.**
   Ler o usuário autenticado restringe a classe para `PrivateCached`; se a
   variância declarada da rota não incluir `Principal`, não há como

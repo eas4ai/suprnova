@@ -422,12 +422,12 @@ copia de seguridad bajó el epoch del libro mayor por debajo de valores bajo
 los que el despliegue ya había publicado entradas, esas entradas llevan un
 epoch de valla que ahora es *mayor* que el actual, así que esa cláusula no
 las recupera; en su lugar esperan a que se agote su retención. El nivel de
-base de datos solo lo barre un `RenderCache::sweep()` explícito. El nivel de Redis se recupera solo, pero según el calendario del
-propio Redis: cada hash de entrada se almacena bajo
-`<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (prefijo por defecto
-`suprnova_render:`) con un `PEXPIRE` fijado a partir de la retención de la
-entrada, así que esperar a que se agote la retención más larga que hayas
-declarado es la opción pasiva.
+base de datos solo lo barre un `RenderCache::sweep()` explícito. El nivel
+de Redis se recupera solo, pero según el calendario del propio Redis: cada
+hash de entrada se almacena bajo `<RENDER_CACHE_REDIS_PREFIX>entry:<key>`
+(prefijo por defecto `suprnova_render:`) con un `PEXPIRE` fijado a partir
+de la retención de la entrada, así que esperar a que se agote la retención
+más larga que hayas declarado es la opción pasiva.
 
 Así que el procedimiento, en orden:
 

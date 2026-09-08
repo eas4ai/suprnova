@@ -428,7 +428,7 @@ Então o procedimento, em ordem:
    migração não voltou junto com os dados.
 2. **Esvazie a camada L1 compartilhada.** Apague o conteúdo do diretório da
    camada de arquivo, `DELETE FROM suprnova_render_entries`, ou apague as
-   chaves Redis que casam com `<prefixo>entry:*` - o que quer que o perfil
+   chaves Redis que casam com `<prefix>entry:*` - o que quer que o perfil
    configure. Faça isso em vez de esperar por uma varredura, pelo motivo
    acima.
 3. **Cubra a L0 de cada nó, com o tráfego ainda desligado.** O avanço só
