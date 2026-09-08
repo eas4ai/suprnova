@@ -237,19 +237,19 @@
       "id": "feature-pinecone-tests",
       "name": "Pinecone feature tests",
       "tiers": ["full"],
-      "argv": ["cargo", "test", "-p", "suprnova", "--features", "vector-pinecone", "--no-fail-fast"],
+      "argv": ["cargo", "nextest", "run", "-p", "suprnova", "--features", "vector-pinecone", "--no-fail-fast"],
       "timeout_seconds": 1800,
       "category": "code",
-      "capabilities": ["cargo"]
+      "capabilities": ["cargo", "cargo-nextest"]
     },
     {
       "id": "feature-fanout-tests",
       "name": "broadcast fanout feature tests",
       "tiers": ["full"],
-      "argv": ["cargo", "test", "-p", "suprnova", "--features", "broadcasting-fanout", "--no-fail-fast"],
+      "argv": ["cargo", "nextest", "run", "-p", "suprnova", "--features", "broadcasting-fanout", "--no-fail-fast"],
       "timeout_seconds": 1800,
       "category": "code",
-      "capabilities": ["cargo"]
+      "capabilities": ["cargo", "cargo-nextest"]
     },
     {
       "id": "audit",

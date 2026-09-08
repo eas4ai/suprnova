@@ -281,7 +281,8 @@ class StepRegistryTests(unittest.TestCase):
                 1800,
                 [
                     "cargo",
-                    "test",
+                    "nextest",
+                    "run",
                     "-p",
                     "suprnova",
                     "--features",
@@ -295,7 +296,8 @@ class StepRegistryTests(unittest.TestCase):
                 1800,
                 [
                     "cargo",
-                    "test",
+                    "nextest",
+                    "run",
                     "-p",
                     "suprnova",
                     "--features",
