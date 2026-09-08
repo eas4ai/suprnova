@@ -1,0 +1,176 @@
+import importlib.util
+import json
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+_LOCAL_ROOT = Path(__file__).resolve().parents[2]
+_CHECKER_PATH = _LOCAL_ROOT / "scripts" / "check-manual-structure.py"
+
+_CHANGELOG = "# Changelog\n\nNothing to declare.\n"
+
+# A chapter on the span ratchet, and one that is not. Both must be real entries
+# of SPAN_CHECKED_SOURCES / absent from it, so the tests assert the wiring and
+# not a fixture invented for them.
+_LISTED = "render-cache.md"
+_UNLISTED = "cli.md"
+
+
+def _load_checker():
+    spec = importlib.util.spec_from_file_location(
+        "suprnova_manual_structure", _CHECKER_PATH
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise RuntimeError("failed to load manual structure checker module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ManualCodeSpanTests(unittest.TestCase):
+    """The inline code span mirror rule, exercised through the public entry point."""
+
+    def setUp(self):
+        self.checker = _load_checker()
+        self.root = Path(tempfile.mkdtemp(prefix="manual-structure-test-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "gate-steps.json").write_text(
+            json.dumps({"registered_files": []}) + "\n", encoding="utf-8"
+        )
+        (self.root / "CHANGELOG.md").write_text(_CHANGELOG, encoding="utf-8")
+
+    def _check(self, chapters):
+        """Write `{name: (english, mirror)}`, give every locale the mirror, check."""
+
+        manual = self.root / "manual"
+        manual.mkdir(exist_ok=True)
+        for name, (english, _mirror) in chapters.items():
+            (manual / name).write_text(english, encoding="utf-8")
+        for locale in self.checker.LOCALES:
+            directory = manual / locale
+            directory.mkdir(parents=True, exist_ok=True)
+            for name, (_english, mirror) in chapters.items():
+                (directory / name).write_text(mirror, encoding="utf-8")
+            (directory / "changelog.md").write_text(_CHANGELOG, encoding="utf-8")
+        return self.checker.check_manual_structure(self.root)
+
+    def _one(self, english, mirror, *, name=_LISTED):
+        return self._check({name: (english, mirror)})
+
+    def _span_messages(self, problems):
+        return [problem.message for problem in problems if problem.kind == "spans"]
+
+    def test_the_ratchet_lists_only_chapters_proven_clean(self):
+        self.assertIn(_LISTED, self.checker.SPAN_CHECKED_SOURCES)
+        self.assertNotIn(_UNLISTED, self.checker.SPAN_CHECKED_SOURCES)
+
+    def test_clean_mirror_reports_nothing(self):
+        english = (
+            "# Guide\n"
+            "\n"
+            "The `RenderCache` stores a `Representation` per `variance_key`.\n"
+            "\n"
+            "```rust\n"
+            "let cache = RenderCache::new(`ignored inside a fence`);\n"
+            "```\n"
+        )
+        mirror = (
+            "# Guide\n"
+            "\n"
+            "Der `RenderCache` speichert eine `Representation` je\n"
+            "`variance_key`.\n"
+            "\n"
+            "```rust\n"
+            "let cache = RenderCache::new(`auch hier ignoriert`);\n"
+            "```\n"
+        )
+
+        self.assertEqual(self._one(english, mirror), [])
+
+    def test_lost_span_is_reported(self):
+        english = (
+            "# Guide\n"
+            "\n"
+            "The `RenderCache` stores a `Representation` per `variance_key`.\n"
+        )
+        mirror = "# Guide\n\nDer `RenderCache` speichert eine `Representation`.\n"
+
+        problems = self._one(english, mirror)
+        messages = self._span_messages(problems)
+
+        self.assertEqual(len(problems), len(self.checker.LOCALES))
+        self.assertEqual(len(messages), len(self.checker.LOCALES))
+        for message in messages:
+            self.assertIn("`variance_key`", message)
+            self.assertIn("drops", message)
+
+    def test_translated_span_is_reported_in_both_directions(self):
+        english = "# Guide\n\nThe `RenderCache` holds one entry.\n"
+        mirror = "# Guide\n\nDer `RenderZwischenspeicher` haelt einen Eintrag.\n"
+
+        messages = self._span_messages(self._one(english, mirror))
+
+        self.assertEqual(len(messages), 2 * len(self.checker.LOCALES))
+        dropped = [message for message in messages if "drops" in message]
+        added = [message for message in messages if "adds" in message]
+        self.assertEqual(len(dropped), len(self.checker.LOCALES))
+        self.assertEqual(len(added), len(self.checker.LOCALES))
+        for message in dropped:
+            self.assertIn("`RenderCache`", message)
+        for message in added:
+            self.assertIn("`RenderZwischenspeicher`", message)
+
+    def test_backticks_added_around_prose_are_reported(self):
+        english = "# Guide\n\nThe `RenderCache` writes the entry migrations.\n"
+        mirror = "# Guide\n\nDer `RenderCache` schreibt die `entry` Migrationen.\n"
+
+        messages = self._span_messages(self._one(english, mirror))
+
+        self.assertEqual(len(messages), len(self.checker.LOCALES))
+        for message in messages:
+            self.assertIn("`entry`", message)
+            self.assertIn("adds", message)
+
+    def test_mirror_may_repeat_an_english_span(self):
+        english = "# Guide\n\nThe `RenderCache` stores and evicts entries.\n"
+        mirror = (
+            "# Guide\n"
+            "\n"
+            "Der `RenderCache` speichert Eintraege. Der `RenderCache`\n"
+            "entfernt sie wieder.\n"
+        )
+
+        self.assertEqual(self._one(english, mirror), [])
+
+    def test_span_defect_is_reported_only_for_a_listed_chapter(self):
+        english = "# Guide\n\nThe `RenderCache` stores a `Representation`.\n"
+        mirror = "# Guide\n\nDer `RenderCache` speichert etwas.\n"
+
+        problems = self._check(
+            {_LISTED: (english, mirror), _UNLISTED: (english, mirror)}
+        )
+        spans = [problem for problem in problems if problem.kind == "spans"]
+
+        self.assertEqual(len(spans), len(self.checker.LOCALES))
+        self.assertEqual({problem.file for problem in spans}, {_LISTED})
+        for problem in spans:
+            self.assertIn("`Representation`", problem.message)
+
+    def test_an_unlisted_chapter_is_still_checked_for_every_other_shape(self):
+        english = "# Guide\n\n- one\n- two\n"
+        mirror = "# Guide\n\n- eins\n"
+
+        problems = self._check({_UNLISTED: (english, mirror)})
+
+        self.assertEqual(len(problems), len(self.checker.LOCALES))
+        self.assertEqual({problem.kind for problem in problems}, {"lists"})
+
+
+if __name__ == "__main__":
+    unittest.main()

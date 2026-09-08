@@ -7,18 +7,44 @@ import json
 import posixpath
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 LOCALES = ("de", "es", "fr", "ja", "pt-BR", "zh-Hans")
+
+# Sources whose mirrors are held to the inline code span rule below.
+#
+# This list is a ratchet, not an inventory. The span rule compares the code
+# spans of an English chapter against each mirror, and the manual predates it:
+# most chapters carry differences that are a translation audit of their own, not
+# something this gate can act on. So the rule binds only where a chapter has
+# already been shown clean. A chapter joins this list on the day its six mirrors
+# pass, and from then on the docs tier refuses a regression in it. Chapters
+# absent from the list are checked for every other shape - headings, fences,
+# tables, lists, links - exactly as before; only their spans go unexamined.
+#
+# Never add a chapter to buy silence. Run the checker first; if it reports
+# spans for the chapter, the mirrors are wrong and the fix belongs in the
+# translation, not here.
+SPAN_CHECKED_SOURCES = (
+    "render-cache.md",
+    "render-cache-representations.md",
+    "render-cache-generations.md",
+    "render-cache-deployment.md",
+    "render-cache-operations.md",
+    "documentation.md",
+    "live.md",
+)
 _HEADING = re.compile(r"^(?: {0,3}|\s*(?:[-+*]|\d+[.)])\s+)(#{1,6})(?:\s+|$)")
 _LIST_ITEM = re.compile(r"^(\s*)([-+*]|\d+[.)])\s+")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _REFERENCE_LINK = re.compile(r"^\s*\[[^]]+\]:\s*(?:<([^>]+)>|(\S+))")
 _AUTOLINK = re.compile(r"<(https?://[^>]+|mailto:[^>]+)>", re.IGNORECASE)
 _TABLE_DELIMITER_CELL = re.compile(r"^:?-+:?$")
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
 
@@ -42,6 +68,7 @@ class _MarkdownShape:
     tables: tuple[tuple[int, tuple[int, ...]], ...]
     lists: tuple[tuple[int, str], ...]
     links: tuple[str, ...]
+    spans: tuple[str, ...]
     unclosed_fence: bool
 
 
@@ -149,6 +176,46 @@ def _code_span_end(line: str, start: int) -> int | None:
     return None
 
 
+def _code_spans(text: str) -> list[str]:
+    """Return the rendered text of every inline code span, in order.
+
+    A naive ``\\`([^\\`]+)\\`` scan cannot be used here. A span may be opened by a
+    run of two or more backticks so that it can contain a backtick, and a run
+    that never finds a matching closing run is literal text rather than a span.
+    Either case throws a naive scan out of phase and turns the ordinary prose
+    between two real spans into invented spans. ``_code_span_end`` already
+    implements the matching-run rule for the table scanner, so the same
+    tokenizer is reused here.
+
+    Whitespace inside a span is collapsed the way a renderer collapses it, so a
+    mirror that wraps a long span across a different pair of lines still yields
+    the same span text.
+    """
+
+    spans: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character != "`":
+            index += 1
+            continue
+        end = _code_span_end(text, index)
+        if end is None:
+            while index < len(text) and text[index] == "`":
+                index += 1
+            continue
+        marker_length = 1
+        while index + marker_length < len(text) and text[index + marker_length] == "`":
+            marker_length += 1
+        content = text[index + marker_length : end - marker_length]
+        spans.append(_WHITESPACE_RUN.sub(" ", content).strip())
+        index = end
+    return spans
+
+
 def _table_cells(line: str) -> tuple[str, ...] | None:
     stripped = line.strip()
     pipe_positions: list[int] = []
@@ -196,6 +263,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
     fences: list[str] = []
     lists: list[tuple[int, str]] = []
     links: list[str] = []
+    prose: list[str] = []
     table_groups: list[list[int]] = []
     active_table: list[int] = []
     previous_table_cells: tuple[str, ...] | None = None
@@ -222,6 +290,11 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
         if closing_marker is not None:
             previous_table_cells = None
             continue
+
+        # Prose only. Inline code spans are collected from the joined text
+        # below so a mirror that wraps its lines differently is not penalized
+        # for a span whose backticks land on two different lines.
+        prose.append(line)
 
         heading = _HEADING.match(line)
         if heading is not None:
@@ -268,6 +341,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
         tables=tables,
         lists=tuple(lists),
         links=tuple(links),
+        spans=tuple(_code_spans(" ".join(prose))),
         unclosed_fence=closing_marker is not None,
     )
 
@@ -279,6 +353,7 @@ def _compare_shapes(
     locale: str,
     file: str,
     problems: list[Problem],
+    compare_spans: bool,
 ) -> None:
     comparisons = (
         ("headings", english.headings, localized.headings),
@@ -291,6 +366,40 @@ def _compare_shapes(
         if expected != actual:
             problems.append(
                 Problem(locale, file, kind, f"expected {expected!r}, found {actual!r}")
+            )
+    # Inline code spans name identifiers, paths, commands and API surface. A
+    # translator must carry them across untouched, so the comparison is a
+    # multiset and it is deliberately asymmetric: a span the mirror lost is a
+    # defect, and a span the mirror invented is a defect (a translated word
+    # left inside backticks, or backticks put around ordinary prose), but a
+    # mirror repeating an English span more often than the English is fine -
+    # splitting one sentence into two legitimately repeats the identifier.
+    #
+    # Only for sources on the SPAN_CHECKED_SOURCES ratchet; see that list.
+    if compare_spans:
+        english_spans = Counter(english.spans)
+        localized_spans = Counter(localized.spans)
+        for span, missing in sorted((english_spans - localized_spans).items()):
+            problems.append(
+                Problem(
+                    locale,
+                    file,
+                    "spans",
+                    f"mirror drops the inline code span `{span}` "
+                    f"({missing} of {english_spans[span]} occurrence(s) missing)",
+                )
+            )
+        for span, added in sorted((localized_spans - english_spans).items()):
+            if span in english_spans:
+                continue
+            problems.append(
+                Problem(
+                    locale,
+                    file,
+                    "spans",
+                    f"mirror adds the inline code span `{span}` "
+                    f"({added} occurrence(s)); the English source has no such span",
+                )
             )
     if localized.unclosed_fence:
         problems.append(Problem(locale, file, "fences", "unclosed fenced code block"))
@@ -405,6 +514,7 @@ def _validate_manual_structure(root: Path) -> tuple[list[Problem], int]:
                 locale=locale,
                 file=locale_name,
                 problems=problems,
+                compare_spans=source_name in SPAN_CHECKED_SOURCES,
             )
 
     return sorted(problems), len(sources)
