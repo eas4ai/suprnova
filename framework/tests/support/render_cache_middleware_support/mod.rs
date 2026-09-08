@@ -172,6 +172,42 @@ impl suprnova::Middleware for ProviderLoginHeader {
     }
 }
 
+/// The sign-in shape a cookie-carried web login actually has on every
+/// request after the login itself: the identity is in the persisted
+/// session and **nothing** is in request state, so the first `Auth::id()`
+/// inside the render has to read it out of the session.
+///
+/// `ProviderLoginHeader` above cannot serve this purpose and neither can
+/// `LoginHeader`: `Auth::login_id` and `Auth::set_user` both write the
+/// request-scoped auth state, so by the time the handler runs the identity
+/// is already there and the session is never consulted. This middleware
+/// installs a session scope whose `SessionData` already carries the
+/// `user_id` - exactly what `SessionMiddleware` leaves behind when it
+/// hydrates a session cookie - and writes no request state at all.
+///
+/// Runs before `RenderCache::install`, like every other sign-in here, so
+/// the scope is in place when the middleware derives the key. The read
+/// itself still happens inside the render, which is the whole point: it is
+/// the read `session_identity` classifies as an identity read rather than
+/// as a session-value read.
+pub struct SessionOnlyLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for SessionOnlyLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(id) = request.header("x-test-session-login").map(str::to_owned) else {
+            return next(request).await;
+        };
+        let slot = suprnova::session::new_session_slot_for_test();
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .expect("a fresh test session slot holds a session")
+            .user_id = Some(id);
+        suprnova::session::session_scope_for_test(slot, async move { next(request).await }).await
+    }
+}
+
 /// Resolves the Live tenant from an `x-test-tenant` header, for fix round
 /// 4's tenant-partitioning tests. Wired through the real
 /// `suprnova::live::LiveTenantMiddleware`, exactly like a production tenant
@@ -747,6 +783,17 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .vary(VarianceDimension::Principal)
         .build()
         .expect("shows auth user policy");
+    // The same handler as `/shows-auth-user`, on a route that declares no
+    // `Principal` variance at all. Reading the principal on such a route has
+    // to be declined: there is no dimension in the key to partition the
+    // entry by, so publishing it would serve one visitor's page to every
+    // other. This is the negative that keeps the session-resolved identity
+    // read safe to classify as an identity read.
+    let session_principal_undeclared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("session principal undeclared policy");
     let sets_cookie_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
@@ -982,6 +1029,9 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
     let router: Router = router
         .get("/shows-auth-user", shows_auth_user_handler)
         .into();
+    let router: Router = router
+        .get("/session-principal-undeclared", shows_auth_user_handler)
+        .into();
     let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
     let router: Router = router
         .get("/control-byte-header", control_byte_header_handler)
@@ -1185,6 +1235,11 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
             GroupPolicy::from(shows_auth_user_policy),
         )
         .expect("attach shows auth user policy")
+        .try_render_cache(
+            "/session-principal-undeclared",
+            GroupPolicy::from(session_principal_undeclared_policy),
+        )
+        .expect("attach session principal undeclared policy")
         .try_render_cache("/sets-cookie", GroupPolicy::from(sets_cookie_policy))
         .expect("attach sets-cookie policy")
         .try_render_cache(
@@ -1383,6 +1438,9 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
     // Final review, F2: the provider-resolving sign-in, same ordering
     // requirement as `LoginHeader` above.
     suprnova::middleware::register_global_middleware(ProviderLoginHeader);
+    // R24: the session-only sign-in, same ordering requirement as
+    // `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(SessionOnlyLoginHeader);
     // Fix round 4, Leak B: the non-default-guard sign-in, same ordering
     // requirement as `LoginHeader` above.
     suprnova::middleware::register_global_middleware(NamedGuardLoginHeader);

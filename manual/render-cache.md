@@ -153,10 +153,13 @@ it ran, in terms you will recognize:
 - **You read a session value.** Any read of the current session (through
   `session()`, `session_mut`, or a session cookie) forces the render to
   `Uncacheable`, permanently, no matter what variance the route declares.
-  This also fires when an anonymous visitor's identity resolves through the
-  session fallback - a common surprise, since the visitor is genuinely
-  anonymous and the resulting key is correctly `Anonymous`, but the read
-  itself is still a session read.
+  The one thing this does *not* cover is the signed-in visitor's own
+  identity. `Auth::id()` reads it out of the session when nothing earlier in
+  the request resolved it, and that read is classified as an identity read,
+  not a session read - so an ordinary cookie-backed login is exactly what a
+  `PrivateCached` route declaring `Principal` variance is for, and reaching
+  for the visitor's id does not quietly make the page uncacheable. Every
+  other value in the session still does.
 - **You read an identity, on a route that does not declare `Principal`.**
   Reading the signed-in user narrows the class to `PrivateCached`; if the
   route's declared variance does not include `Principal`, there is no way

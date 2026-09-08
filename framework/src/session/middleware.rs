@@ -2040,14 +2040,74 @@ pub fn is_authenticated() -> bool {
     auth_user_id().is_some()
 }
 
+/// Reads an identifier out of the persisted session **as an identity
+/// read**, not as a session-value read.
+///
+/// This is the one deliberate exception to [`session`]'s rule that every
+/// read of the session marks the render `Uncacheable`, and the difference
+/// is a fact about what is read, not about who reads it. `read` is only
+/// ever handed the session's authentication identifiers - `user_id` and a
+/// named guard's own id - and reading the principal's identity is exactly
+/// what [`crate::render_cache::collector::observe_principal_read`] and
+/// [`crate::render_cache::collector::observe_principal_value`] exist to
+/// record: the classifier narrows such a render to
+/// `RepresentationClass::PrivateCached` and the key partitions it by
+/// `VarianceDimension::Principal`, which is a representation one visitor
+/// may safely be served again. Any *other* session value is a dependency
+/// no key partitions by, which is why [`session`] keeps marking those
+/// `Uncacheable` and why nothing else in this module routes through here.
+///
+/// Recording the value, not merely the read, is what keeps the exception
+/// safe. `RenderCacheMiddleware` resolves the same identity through
+/// `Auth::id()` when it derives the key, outside the render's collector
+/// scope; recording the value here lets
+/// `key_used_different_values_than_the_render_saw` compare what the render
+/// read against what the key was built from, and decline when they differ.
+/// A route that reads the principal without declaring `Principal` variance
+/// is declined by that same comparison, so reclassifying this read opens no
+/// path to serving one visitor's page to another.
+///
+/// Before this existed, `auth_user_id`'s fallback went through [`session`],
+/// so any route whose principal was carried by a session cookie - the
+/// ordinary web login - marked its own render `Uncacheable` the first time
+/// anything asked who was asking, with no error and no telemetry. No
+/// session-authenticated `PrivateCached` route in any application could
+/// store.
+fn session_identity(read: impl FnOnce(&SessionData) -> Option<String>) -> Option<String> {
+    crate::render_cache::collector::observe_principal_read();
+    let identity = SESSION_CONTEXT
+        .try_with(|slot| slot.lock().unwrap().as_ref().and_then(read))
+        .ok()
+        .flatten();
+    if let Some(identity) = &identity {
+        crate::render_cache::collector::observe_principal_value(identity);
+    }
+    identity
+}
+
+/// The default guard's identifier as the persisted session holds it, read
+/// as an identity rather than as a session value. See [`session_identity`].
+pub(crate) fn session_user_id() -> Option<String> {
+    session_identity(|session| session.user_id.clone())
+}
+
 /// Helper to get the authenticated user ID
 ///
 /// Consults the request-scoped auth state first (so a `once` /
 /// `set_user` authentication that was never written to the session is
 /// still visible to `Auth::id()`), then falls back to the persisted
 /// session user.
+///
+/// That fallback is an *identity* read, not a session-value read: reading
+/// who is asking is what `VarianceDimension::Principal` keys a cached
+/// representation by, so a render that reaches it stays storable as
+/// `RepresentationClass::PrivateCached` instead of being forced
+/// `Uncacheable` the way every other session read is. The private
+/// `session_identity` in this module carries the full reasoning and the
+/// argument for why the exception is safe; no other value in the session
+/// takes that path.
 pub fn auth_user_id() -> Option<String> {
-    crate::auth::request_state::current_user_id().or_else(|| session().and_then(|s| s.user_id))
+    crate::auth::request_state::current_user_id().or_else(session_user_id)
 }
 
 /// Return one session guard's request or persisted identifier.
@@ -2056,12 +2116,16 @@ pub(crate) fn guard_auth_user_id(guard_name: &str) -> Option<String> {
         .or_else(|| persisted_guard_auth_user_id(guard_name))
 }
 
-/// Return one session guard's persisted identifier, ignoring request-only overrides.
+/// Return one session guard's persisted identifier, ignoring request-only
+/// overrides. Reads the identity through [`session_identity`], for the
+/// reason that function documents: a named guard's own identifier is the
+/// principal's identity too, and a route that reads it is keyed by
+/// `Principal` exactly like one that reads the default guard's.
 pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
-    session().and_then(|session| {
+    session_identity(|session| {
         session.auth_guard_id(guard_name).or_else(|| {
             (guard_name == crate::auth::Auth::default_guard_name())
-                .then_some(session.user_id)
+                .then(|| session.user_id.clone())
                 .flatten()
         })
     })

@@ -2160,23 +2160,28 @@ async fn anonymous_traffic_caches_where_the_key_declares_the_dimension_and_not_o
     );
 }
 
-/// The limitation the empty-set fix does not reach, asserted so it is a
-/// recorded fact rather than a surprise (see the middleware module doc's
-/// honest-boundary section). `Auth::id()` resolves an anonymous request by
-/// falling through to `session()`, which records a *session* read, and
-/// `classify` narrows any session read straight to `Uncacheable` - before
-/// this guard ever runs. So an anonymous visitor of a route whose render
-/// calls `Auth::id()` still never caches, whatever the key says.
+/// The empty-set path fix round 7 built and could not reach, now reachable
+/// and asserted - ruling R24 changed the fact this test used to record.
 ///
-/// Measured, not assumed: removing the `.or_else(|| session()...)` fallback
-/// from `crate::session::middleware::auth_user_id` makes the first repeat
-/// below a hit, with no other change - which is also the proof that the
-/// empty-set fix is what stands behind it once the session read is out of
-/// the way. That change is a much larger widening than fix round 7 was
-/// scoped to make, so it is reported rather than taken.
+/// Fix round 7 documented a limitation here instead of removing it:
+/// `Auth::id()` resolved an anonymous request by falling through to
+/// `session()`, which recorded a *session* read, and `classify` narrowed any
+/// session read straight to `Uncacheable` before the empty-set guard ever
+/// ran. Its own note said that removing the fallback would make the first
+/// repeat below a hit, and called that a wider change than the round was
+/// scoped to make.
+///
+/// R24 made the narrower change the same evidence pointed at: the fallback
+/// stays, but reading the identity out of the session is classified as an
+/// identity read (`crate::session::middleware`'s private `session_identity`),
+/// not as a session-value read. So the empty-set path now decides, and it
+/// says store: the render resolved no identity, the key says `Anonymous`,
+/// and the two agree. Nothing identity-derived is in the body to share, and
+/// a signed-in visitor derives a `Private(..)` key that never reaches this
+/// entry - which the second half below still holds down.
 #[tokio::test]
 #[serial_test::serial]
-async fn an_anonymous_render_that_resolves_identity_through_the_session_stays_uncacheable() {
+async fn an_anonymous_render_resolving_identity_through_the_session_caches_anonymously() {
     let harness = boot_with_render_cache().await;
 
     dispatch_get(&harness, "/private/1", &[]).await;
@@ -2184,9 +2189,21 @@ async fn an_anonymous_render_that_resolves_identity_through_the_session_stays_un
     dispatch_get(&harness, "/private/1", &[]).await;
     assert_eq!(
         counting_route::renders(),
-        after_first_anonymous + 1,
-        "anonymous identity resolution reads the session, and a session read is \
-         Uncacheable - the empty-set path is never reached"
+        after_first_anonymous,
+        "the render observed no identity and the key says Anonymous: the empty-set path \
+         agrees, so the anonymous repeat is a hit"
+    );
+
+    // And the entry it hit is the anonymous one, not anybody's: a signed-in
+    // visitor of the same path derives a key carrying private principal
+    // material and renders for themselves.
+    let after_anonymous = counting_route::renders();
+    let alice_first = dispatch_get(&harness, "/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(alice_first.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        after_anonymous + 1,
+        "a signed-in visitor never hits the anonymous entry"
     );
 
     dispatch_get(&harness, "/private/2", &[("x-test-login", "alice")]).await;
@@ -2516,6 +2533,172 @@ async fn a_private_render_showing_auth_user_is_invalidated_by_an_orm_write_to_th
         after_body.contains(&format!("user {id} named alicia")),
         "the re-render shows the renamed row - got {after_body:?}"
     );
+}
+
+/// Ruling R24 (a): a `PrivateCached` route with `Principal` variance whose
+/// handler resolves the principal *through the session* - the ordinary
+/// cookie-carried web login, where nothing has warmed the request-scoped
+/// auth state - is stored, and stored once per principal.
+///
+/// `SessionOnlyLoginHeader` is what makes this the session path rather than
+/// the request-state path: it leaves the identity in the persisted session
+/// and nothing in request state, so the handler's own `Auth::user()` reaches
+/// `auth_user_id`'s fallback, which is the read this ruling reclassified.
+///
+/// The production change this would catch: routing that fallback back
+/// through `session::session()`. That records a session read, which narrows
+/// every such render to `Uncacheable`, and both repeats below render again -
+/// silently, with no error and no telemetry, which is exactly how the defect
+/// survived until an application tried to cache a private page.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_session_resolved_principal_is_stored_and_partitioned_per_principal() {
+    let harness = boot_with_render_cache().await;
+    let ada = create_user(&harness, "ada").await.to_string();
+    let grace = create_user(&harness, "grace").await.to_string();
+
+    let ada_first = dispatch_get(&harness, "/shows-auth-user", &session_login(&ada)).await;
+    assert_eq!(ada_first.status, StatusCode::OK);
+    let ada_body = String::from_utf8_lossy(&ada_first.body).to_string();
+    assert!(
+        ada_body.contains(&format!("user {ada} named ada")),
+        "precondition: the identity came out of the session - got {ada_body:?}"
+    );
+    let grace_first = dispatch_get(&harness, "/shows-auth-user", &session_login(&grace)).await;
+    let grace_body = String::from_utf8_lossy(&grace_first.body).to_string();
+    assert!(
+        grace_body.contains(&format!("user {grace} named grace")),
+        "{grace_body:?}"
+    );
+    assert_eq!(counting_route::renders(), 2, "one render each");
+
+    dispatch_get(&harness, "/shows-auth-user", &session_login(&ada)).await;
+    dispatch_get(&harness, "/shows-auth-user", &session_login(&grace)).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "both repeats are hits: a session-resolved principal is storable"
+    );
+
+    assert_ne!(
+        ada_first.body, grace_first.body,
+        "and the two entries are different documents, each naming its own principal"
+    );
+    assert!(!ada_body.contains("grace") && !grace_body.contains("ada"));
+}
+
+/// Ruling R24 (b): the entry such a render publishes observes the table the
+/// principal was resolved from, so a write to that principal's own row
+/// invalidates their page.
+///
+/// This is the contract the application-level workaround this ruling removed
+/// would have broken: resolving the principal in a middleware *outside* the
+/// render moves the provider's `users` read out of the collector's sight, and
+/// the entry is then published with no dependency on the row it displays.
+///
+/// The production change this would catch: performing the resolution outside
+/// the render's collector scope (the removed `ResolvePrincipal`), or dropping
+/// the provider's own `observe_table_read`. Either leaves the rename below
+/// invisible until the fresh window runs out.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_session_resolved_principal_render_observes_the_row_it_was_resolved_from() {
+    let harness = boot_with_render_cache().await;
+    let id = create_user(&harness, "alice").await;
+    let login = id.to_string();
+
+    let first = dispatch_get(&harness, "/shows-auth-user", &session_login(&login)).await;
+    assert!(
+        String::from_utf8_lossy(&first.body).contains(&format!("user {id} named alice")),
+        "precondition: the row was resolved and shown"
+    );
+    dispatch_get(&harness, "/shows-auth-user", &session_login(&login)).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the repeat is a hit, so there is a stored entry to invalidate"
+    );
+
+    rename_user(&harness, id, "alicia").await;
+
+    let after = dispatch_get(&harness, "/shows-auth-user", &session_login(&login)).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the write to the resolved row invalidated the entry that displayed it"
+    );
+    assert!(
+        String::from_utf8_lossy(&after.body).contains(&format!("user {id} named alicia")),
+        "and the re-render shows the renamed row"
+    );
+}
+
+/// Ruling R24 (c): the negative that keeps the reclassification safe. The
+/// same handler, on a route that declares no `Principal` variance, is
+/// declined - so reading the principal out of the session opens no path to
+/// serving one visitor's page to another.
+///
+/// The undeclared-principal guard is what refuses it: the render observes a
+/// principal value, the key carries no `Principal` dimension to partition
+/// by, and `key_used_different_values_than_the_render_saw` declines rather
+/// than publish under a key every visitor hits.
+///
+/// The production change this would catch: recording the session-resolved
+/// identity without its `PrincipalObserved` classification reason - the
+/// value alone with no reason attached would leave nothing for that guard to
+/// compare, and the second visitor below would be served the first's page.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_session_resolved_principal_is_declined_where_no_principal_variance_is_declared() {
+    let harness = boot_with_render_cache().await;
+    let ada = create_user(&harness, "ada").await.to_string();
+    let grace = create_user(&harness, "grace").await.to_string();
+
+    let first = dispatch_get(
+        &harness,
+        "/session-principal-undeclared",
+        &session_login(&ada),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(
+        first.header("etag").is_none(),
+        "never stored, so no validator"
+    );
+    let repeat = dispatch_get(
+        &harness,
+        "/session-principal-undeclared",
+        &session_login(&ada),
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a principal read on a route that declares no Principal variance is declined"
+    );
+    assert_ne!(
+        first.body, repeat.body,
+        "each request rendered for itself; nothing was replayed"
+    );
+
+    let other = dispatch_get(
+        &harness,
+        "/session-principal-undeclared",
+        &session_login(&grace),
+    )
+    .await;
+    assert_eq!(counting_route::renders(), 3);
+    let other_body = String::from_utf8_lossy(&other.body).to_string();
+    assert!(
+        other_body.contains(&format!("user {grace} named grace")) && !other_body.contains("ada"),
+        "the second visitor is never served the first's page: {other_body:?}"
+    );
+}
+
+/// The header pair `SessionOnlyLoginHeader` recognizes: an identity in the
+/// persisted session and nothing in request state.
+fn session_login(id: &str) -> [(&str, &str); 1] {
+    [("x-test-session-login", id)]
 }
 
 /// Final review, F3 / ruling R119: `bump_permission_version` advances a
