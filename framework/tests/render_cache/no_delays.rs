@@ -13,9 +13,10 @@
 //!
 //! It is a text scan, deliberately: it has to catch a wait in any of the
 //! several forms Rust spells one in - a thread parked for a `Duration`, a
-//! timer awaited on the runtime, a spin loop - including forms no clippy
-//! lint in this repository knows about, and it has to do so without
-//! compiling anything.
+//! timer awaited on the runtime, a spin loop, a deadline awaited instead of
+//! a duration, a repeating timer, a future given a time budget - including
+//! forms no clippy lint in this repository knows about, and it has to do so
+//! without compiling anything.
 //!
 //! The prose here therefore never spells a forbidden call out in full: the
 //! scan reads this file too (see [`FORBIDDEN`]), and a doc comment naming
@@ -28,18 +29,46 @@ use std::path::Path;
 /// `no_delays.rs` lives in one of the directories below, and exempting it
 /// by name would leave the checker the one file in the tree that may
 /// contain a timing wait).
-const FORBIDDEN: [&str; 5] = [
+/// The needles that take no open paren (`sleep_` + `until`, and the
+/// `thread::` path) match the name wherever it is spelled, including
+/// through an alias or a fully qualified path with the argument list on
+/// the next line.
+const FORBIDDEN: [&str; 8] = [
     concat!("sleep", "("),
+    concat!("sleep_", "until"),
     concat!("yield_now", "("),
     concat!("spin_loop", "("),
     concat!("park_timeout", "("),
+    concat!("interval", "("),
+    concat!("timeout", "("),
     concat!("thread::", "sleep"),
 ];
 
-/// A database-side lock hold inside a SQL string, not a test wait. It runs
-/// on the server, inside a transaction whose lock another connection is
-/// then proven to wait on; nothing in the test process sleeps.
-const ALLOWED_LINES: [&str; 1] = ["PERFORM pg_sleep(0.2);"];
+/// The lines that spell one of the needles and are not a wait, each
+/// admitted whole rather than by shape: an exemption covers exactly the
+/// line it names, so the next use of the same form is a new decision taken
+/// here instead of an already-open door.
+///
+/// The distinction they all turn on is whether time is what the test is
+/// waiting for. A budget that only bounds how long a hang may last is not:
+/// the await it wraps returns the instant its own work finishes, and the
+/// budget exists so a wedged connection fails the run rather than hanging
+/// it.
+const ALLOWED_LINES: [&str; 4] = [
+    // A database-side lock hold inside a SQL string, not a test wait. It
+    // runs on the server, inside a transaction whose lock another
+    // connection is then proven to wait on; nothing in the test process
+    // sleeps.
+    "PERFORM pg_sleep(0.2);",
+    // sea-orm pool configuration in `try_connect_live`: it bounds how long
+    // a connection attempt to an absent live database may hang before the
+    // ignored test decides there is nothing to connect to and skips.
+    "opts.connect_timeout(Duration::from_secs(2))",
+    ".acquire_timeout(Duration::from_secs(2));",
+    // A watchdog around the webhook request itself, not a wait for a
+    // condition: `send_request` resolves the instant the response arrives.
+    "let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))",
+];
 
 #[test]
 fn the_render_cache_tests_and_their_support_contain_no_timing_waits() {
