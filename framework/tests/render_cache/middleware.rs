@@ -22,14 +22,19 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    NON_ASCII_LINK, advance_epoch_on_another_node, advance_posts, boot_with_render_cache,
+    advance_epoch_on_another_node, advance_posts, boot_with_render_cache,
     boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
     reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user, statements,
-    wait_until_background_finished,
 };
+// Used only by tests gated on the `testing` feature below (ruling R47):
+// `NON_ASCII_LINK` by the non-ASCII header test, `wait_until_background_finished`
+// by the two tests that read `RenderCache::background_rebuilds_for_test` or
+// `RenderCache::hot_serves_for_test`.
+#[cfg(feature = "testing")]
+use render_cache_middleware_support::{NON_ASCII_LINK, wait_until_background_finished};
 use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
 use suprnova::{StatusCode, async_trait};
 
@@ -113,6 +118,14 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     assert_eq!(counting_route::renders(), 1);
 }
 
+// Ruling R47: gated on the `testing` feature, like `bypass.rs` and
+// `races.rs` - `RenderCache::l0_hot_for_test`, `hot_serves_for_test`,
+// `l0_body_ptr_for_test`, `l0_frame_ptr_for_test`, and
+// `hot_response_body_ptr_for_test` only exist in the library under that
+// feature, so a feature-matrix build with default features off compiles
+// this test to nothing instead of failing against seams that are not
+// there.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_second_request_is_served_from_a_hot_entry_holding_the_stored_body() {
@@ -178,6 +191,10 @@ async fn a_second_request_is_served_from_a_hot_entry_holding_the_stored_body() {
     );
 }
 
+// Ruling R47: gated on the `testing` feature, like the test above -
+// `RenderCache::l0_hot_for_test` only exists in the library under that
+// feature.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_header_value_the_wire_cannot_carry_is_dropped_at_publication_not_republished_forever() {
@@ -208,6 +225,10 @@ async fn a_header_value_the_wire_cannot_carry_is_dropped_at_publication_not_repu
     assert_eq!(second.header("link"), None);
 }
 
+// Ruling R47: gated on the `testing` feature, like the two tests above -
+// `RenderCache::l0_hot_for_test` only exists in the library under that
+// feature.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_non_ascii_header_value_survives_publication_and_the_hit_byte_for_byte() {
@@ -620,6 +641,10 @@ async fn a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh() {
 /// barrier that lets its rebuild's own render be counted, and without it
 /// this test would pass just as well against a build that spawns nothing at
 /// all.
+///
+/// Ruling R47: gated on the `testing` feature - `RenderCache::background_rebuilds_for_test`
+/// only exists in the library under that feature.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_stale_principal_route_never_spawns_a_background_rebuild() {
@@ -953,6 +978,10 @@ async fn an_epoch_advanced_by_another_node_reaches_an_authority_mode_route_on_it
 /// what the policy chooses to do about it is to answer that one request
 /// from the entry it already holds, exactly as it would for any other
 /// dependency that moved.
+///
+/// Ruling R47: gated on the `testing` feature - `RenderCache::hot_serves_for_test`
+/// only exists in the library under that feature.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn an_epoch_advanced_by_another_node_serves_a_stale_servable_entry_once_then_rebuilds() {

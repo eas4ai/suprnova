@@ -66,7 +66,12 @@ pub mod recording;
 // under the same path, so a test's `use render_cache_middleware_support::{..}`
 // line is unchanged by the split.
 pub use probe::probe_route;
-pub use recording::{CountingBody, FrameLog, dispatch_get_recording};
+pub use recording::{CountingBody, FrameLog};
+// `dispatch_get_recording` is used only by `bypass.rs`, which is gated on
+// the `testing` feature (ruling R72), so the re-export is gated the same
+// way instead of going unused under the minimal profile.
+#[cfg(feature = "testing")]
+pub use recording::dispatch_get_recording;
 
 use probe::probe_handler;
 // Named in `dispatch_recording`'s signature; see the note on `pub mod
@@ -651,7 +656,12 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
                 .min_connections(1)
                 .logging(false)
                 .build();
+            #[cfg(feature = "testing")]
             let mut conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            #[cfg(not(feature = "testing"))]
+            let conn = suprnova::database::DbConnection::connect(&config)
                 .await
                 .expect("connect sqlite");
             // Task 5: the only boot path that owns a pool nothing has
@@ -659,7 +669,12 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
             // needs - see `statements::install`. The two other
             // `BootDatabase` arms are handed a connection somebody else
             // already holds, so they cannot install one and the bypass
-            // suite does not use them.
+            // suite does not use them. Ruling R47: `statements::install`
+            // reaches `DbConnection::observe_statements_for_test`, which
+            // only exists under the `testing` feature, so the install call
+            // (and the `mut` it alone needs) is gated the same way instead
+            // of the seam being compiled into a minimal-profile binary.
+            #[cfg(feature = "testing")]
             assert!(
                 statements::install(&mut conn),
                 "a freshly connected pool must accept the statement observer"
@@ -2474,6 +2489,13 @@ pub mod statements {
     /// it took. Installing needs sole ownership of the pool, so this has
     /// to run before the connection is cloned anywhere - see
     /// [`super::boot`], which calls it immediately after connecting.
+    ///
+    /// Compiled only under the `testing` feature (ruling R47):
+    /// `DbConnection::observe_statements_for_test` only exists in the
+    /// library under that feature, so `boot`'s own call is gated the same
+    /// way instead of failing a minimal-profile build against a seam that
+    /// is not there.
+    #[cfg(feature = "testing")]
     pub(crate) fn install(conn: &mut suprnova::database::DbConnection) -> bool {
         conn.observe_statements_for_test(|| {
             STATEMENTS.fetch_add(1, Ordering::SeqCst);

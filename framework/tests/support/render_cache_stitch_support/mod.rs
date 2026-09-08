@@ -1036,7 +1036,13 @@ pub struct StitchDocument<'a> {
 /// privacy suite held byte-identical copies until task 8, and separating an
 /// island's per-principal markup from the shell bytes around it is exactly
 /// the distinction an assembled stitched document has to get right.
-pub use crate::render_cache_support::{attribute, decoded_snapshot, island_tag};
+pub use crate::render_cache_support::{decoded_snapshot, island_tag};
+// `attribute` is used only by `the_stored_shell_holds_no_island_markup_and_no_signed_snapshot`,
+// which is gated on the `testing` feature (it needs `RenderCache::shell_for_test`),
+// so the re-export is gated the same way instead of going unused under the
+// minimal profile.
+#[cfg(feature = "testing")]
+pub use crate::render_cache_support::attribute;
 
 /// One dispatched response: status, an accessor for a header, and the body.
 pub struct TestResponse {
