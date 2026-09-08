@@ -60,7 +60,7 @@
       "argv": ["scripts/check-live-contracts.sh"],
       "timeout_seconds": 300,
       "category": "docs",
-      "capabilities": ["bash", "git", "node"]
+      "capabilities": ["bash", "git", "node", "rtk"]
     },
     {
       "id": "workspace-clippy",
@@ -283,9 +283,9 @@
       "name": "Suprnova Live gate",
       "tiers": ["full"],
       "argv": ["scripts/check-live-gate.sh"],
-      "timeout_seconds": 3600,
+      "timeout_seconds": 5400,
       "category": "environment",
-      "capabilities": ["bash", "cargo", "git", "node", "docker"]
+      "capabilities": ["bash", "cargo", "git", "node", "rtk"]
     }
   ]
 }

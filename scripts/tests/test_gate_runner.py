@@ -319,7 +319,7 @@ class StepRegistryTests(unittest.TestCase):
             (
                 "live-gate",
                 ["full"],
-                3600,
+                5400,
                 ["scripts/check-live-gate.sh"],
             ),
         ]
