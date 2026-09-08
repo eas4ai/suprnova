@@ -332,8 +332,18 @@ impl RenderCacheConfig {
     /// `RENDER_CACHE_ENABLED` (default `true`), `RENDER_CACHE_L0_ENTRIES`
     /// (default 4096), `RENDER_CACHE_L0_BYTES` (default 128 MiB),
     /// `RENDER_CACHE_FAILURE` (`open` default or `closed`), and
-    /// `APP_BUILD_ID` (default `CARGO_PKG_VERSION` of the application) keep
-    /// the meaning they have always had.
+    /// `APP_BUILD_ID` keep the meaning they have always had.
+    ///
+    /// `APP_BUILD_ID`'s default is `env!("CARGO_PKG_VERSION")`, which
+    /// expands at compile time inside *this* crate, so the fallback is the
+    /// framework crate's own version rather than the host application's. It
+    /// matches the application's only where both inherit one workspace
+    /// version, and either way it moves only when someone bumps a version
+    /// number. A deployment should set `APP_BUILD_ID` explicitly to
+    /// something that changes every release (a commit id, say): it is mixed
+    /// into every lookup key, so a deploy that changes a template or a
+    /// handler without a version bump otherwise keeps the previous build's
+    /// entries reachable.
     ///
     /// `RENDER_CACHE_PROFILE` (`embedded` default, `database`, `redis`)
     /// selects the deployment shape and with it the defaults for the L1
