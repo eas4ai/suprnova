@@ -2040,14 +2040,36 @@ pub fn is_authenticated() -> bool {
     auth_user_id().is_some()
 }
 
+/// The fields [`session_identity`] is allowed to read, as a closed set.
+///
+/// This enum **is** the invariant that function's doc used to assert in
+/// prose. It used to take an arbitrary `impl FnOnce(&SessionData) ->
+/// Option<String>`, so "only the authentication identifiers reach it" was a
+/// convention a third caller could break by passing a content field, which
+/// would silently reclassify a session-value read as an identity read with
+/// no test failing. There is no closure to pass now: a caller names one of
+/// these two variants, and adding a third means editing this enum and the
+/// match below, where the reclassification is exactly what a reviewer is
+/// looking at.
+enum SessionIdentityField<'a> {
+    /// The default guard's `SessionData::user_id`.
+    DefaultGuardUser,
+    /// A named guard's own identifier, falling back to `user_id` when the
+    /// name *is* the default guard's - the shape
+    /// [`persisted_guard_auth_user_id`] has always read.
+    Guard(&'a str),
+}
+
 /// Reads an identifier out of the persisted session **as an identity
 /// read**, not as a session-value read.
 ///
 /// This is the one deliberate exception to [`session`]'s rule that every
 /// read of the session marks the render `Uncacheable`, and the difference
-/// is a fact about what is read, not about who reads it. `read` is only
-/// ever handed the session's authentication identifiers - `user_id` and a
-/// named guard's own id - and reading the principal's identity is exactly
+/// is a fact about what is read, not about who reads it. `field` can only
+/// name one of the session's authentication identifiers - see
+/// [`SessionIdentityField`], which is what makes that a type-level fact
+/// rather than a promise in this paragraph - and reading the principal's
+/// identity is exactly
 /// what [`crate::render_cache::collector::observe_principal_read`] and
 /// [`crate::render_cache::collector::observe_principal_value`] exist to
 /// record: the classifier narrows such a render to
@@ -2073,10 +2095,23 @@ pub fn is_authenticated() -> bool {
 /// anything asked who was asking, with no error and no telemetry. No
 /// session-authenticated `PrivateCached` route in any application could
 /// store.
-fn session_identity(read: impl FnOnce(&SessionData) -> Option<String>) -> Option<String> {
+fn session_identity(field: SessionIdentityField<'_>) -> Option<String> {
     crate::render_cache::collector::observe_principal_read();
     let identity = SESSION_CONTEXT
-        .try_with(|slot| slot.lock().unwrap().as_ref().and_then(read))
+        .try_with(|slot| {
+            let slot = slot.lock().unwrap();
+            let session = slot.as_ref()?;
+            match field {
+                SessionIdentityField::DefaultGuardUser => session.user_id.clone(),
+                SessionIdentityField::Guard(guard_name) => {
+                    session.auth_guard_id(guard_name).or_else(|| {
+                        (guard_name == crate::auth::Auth::default_guard_name())
+                            .then(|| session.user_id.clone())
+                            .flatten()
+                    })
+                }
+            }
+        })
         .ok()
         .flatten();
     if let Some(identity) = &identity {
@@ -2088,7 +2123,7 @@ fn session_identity(read: impl FnOnce(&SessionData) -> Option<String>) -> Option
 /// The default guard's identifier as the persisted session holds it, read
 /// as an identity rather than as a session value. See [`session_identity`].
 pub(crate) fn session_user_id() -> Option<String> {
-    session_identity(|session| session.user_id.clone())
+    session_identity(SessionIdentityField::DefaultGuardUser)
 }
 
 /// Helper to get the authenticated user ID
@@ -2122,13 +2157,7 @@ pub(crate) fn guard_auth_user_id(guard_name: &str) -> Option<String> {
 /// principal's identity too, and a route that reads it is keyed by
 /// `Principal` exactly like one that reads the default guard's.
 pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
-    session_identity(|session| {
-        session.auth_guard_id(guard_name).or_else(|| {
-            (guard_name == crate::auth::Auth::default_guard_name())
-                .then(|| session.user_id.clone())
-                .flatten()
-        })
-    })
+    session_identity(SessionIdentityField::Guard(guard_name))
 }
 
 /// Persist one session guard's identifier and mirror the default guard.
