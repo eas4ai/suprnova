@@ -59,6 +59,11 @@
     - [Server-Sent 事件](sse.md)
     - [WebSocket](websockets.md)
     - [Live](live.md)
+    - [RenderCache](render-cache.md)
+    - [RenderCache 表示](render-cache-representations.md)
+    - [RenderCache 世代](render-cache-generations.md)
+    - [RenderCache 部署](render-cache-deployment.md)
+    - [RenderCache 运维](render-cache-operations.md)
     - [幂等性](idempotency.md)
     - [超时](timeout.md)
     - [功能标志](feature-flags.md)
@@ -123,6 +128,6 @@
     - [环境变量](env-vars.md)
     - [词汇表](glossary.md)
 
-*[API 文档（rustdoc）](https://docs.rs/suprnova) - 即将发布。*
 ---
 
+*[API 文档（rustdoc）](https://docs.rs/suprnova) - 即将发布。*

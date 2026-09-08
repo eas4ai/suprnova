@@ -9,6 +9,18 @@ RenderCache 会存储一份已证明安全的 GET 或 HEAD 路由响应副本，
 本章覆盖启用缓存、接入路由与分组、声明差异化维度、读取它添加的响应头、渲染被
 拒绝的原因、运维控制，以及它与 `suprnova::Cache` 的区别。
 
+## 这几章
+
+这是五章中的第一章。第一次请按顺序读完；此后，每一章都能自己回答一个问题。
+
+| 章节 | 回答什么 |
+|---|---|
+| RenderCache（本章） | 我怎么把它打开，并把一个路由接入进来？ |
+| [表示](render-cache-representations.md) | 实际被存储的到底是什么，又在什么键下？ |
+| [世代](render-cache-generations.md) | 一份已存储的副本什么时候不再是最新的？ |
+| [部署](render-cache-deployment.md) | 多个节点如何共享同一个缓存？ |
+| [运维](render-cache-operations.md) | 我怎么检视、测试、度量它，以及把它关掉？ |
+
 ## 启用缓存
 
 有两个环境变量在起步阶段很重要：
@@ -22,8 +34,14 @@ RenderCache 会存储一份已证明安全的 GET 或 HEAD 路由响应副本，
 `RENDER_CACHE_L0_BYTES`（128 MiB）约束进程内层级；`RENDER_CACHE_L1_BYTES`
 （1 GiB）约束文件层级；`RENDER_CACHE_FAILURE`（默认为 `open`，或者 `closed`）
 决定存储或数据库出问题时，是让路由以不缓存的方式提供服务，还是直接拒绝该请求；
-`APP_BUILD_ID`（默认是你的 crate 自身的版本）把每一个缓存条目都限定在生成它的
-那次构建的命名空间下，因此一次部署永远不会返回旧构建的字节。
+`APP_BUILD_ID` 把每一个缓存条目都限定在生成它的那次构建的命名空间下。请把它
+显式设为每次部署都会变化的东西：它的默认值是一个编译进来的 crate 版本，而那个
+版本并不会变。参见 [RenderCache 部署](render-cache-deployment.md)。
+
+`RENDER_CACHE_PROFILE`（默认为 `embedded`，或者 `database`、`redis`）决定第二
+层级和重建协调器是在本进程内，还是与其他每一个节点共享。一个共享的配置档还需要
+一个由你的应用列出的迁移。这两件事，连同完整的变量表，都是
+[部署](render-cache-deployment.md)那一章的主题。
 
 ## 接入一个路由或一个分组
 
@@ -49,11 +67,16 @@ fn add_render_cache(router: Router) -> Result<Router, FrameworkError> {
 ```
 
 `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` 设定一个
-表示保持新鲜的时长、在后台重建运行期间它还可以继续被服务多久，以及如果那次重建
-彻底失败，它还可以再被服务多久。`RepresentationClass` 按共享范围从最宽到最窄
-排列：`PublicShared`（为每一个匹配已声明差异化维度的访客提供同一份表示）、
-`PublicShellStitched`（为未来的组合式外壳表示保留，目前尚不可用）、
-`PrivateCached`（为每一个已登录访客或租户各提供一份表示），以及 `Uncacheable`。
+表示保持新鲜的时长，以及从那条新鲜边界起算的两个窗口：在一次后台重建运行期间，
+已存储的副本还可以越过它多远继续被服务；以及如果一次前台重建彻底失败，已存储的
+副本还可以越过它多远被服务。这两个窗口不是叠加的；参见
+[RenderCache 表示](render-cache-representations.md)。
+
+`RepresentationClass` 按共享范围从最宽到最窄排列：`PublicShared`（为每一个匹配
+已声明差异化维度的访客提供同一份表示）、`PublicShellStitched`（一份 Live 文档，
+它共享的外壳只被存储一次，而它的岛屿会为每一个发起询问的人重新挂载；参见
+[表示](render-cache-representations.md)）、`PrivateCached`（为每一个已登录访客
+或租户各提供一份表示），以及 `Uncacheable`。
 
 一个路由模式必须先被注册，然后才能接入；并且你必须在调用 `RenderCache::install`
 （见下文）**之前**完成路由与分组的全部接入 - 安装这一步只会读取到那个时间点为止
@@ -90,7 +113,10 @@ Application::new()
   而不是被悄悄忽略。
 - **差异化维度**，通过 `.vary(dimension)` 逐个添加：
   - `VarianceDimension::Locale` 按协商出的语言环境分区。
-  - `VarianceDimension::Media` 按协商出的媒体类型分区。
+  - `VarianceDimension::Media` 按协商出的媒体类型分区，并把 `Accept` 加入
+    `Vary`。
+  - `VarianceDimension::Encoding` 按协商出的内容编码分区，并把
+    `Accept-Encoding` 加入 `Vary`。
   - `VarianceDimension::Host` 按请求的主机分区，适用于你的部署让不止一个主机
     具有意义的情况。
   - `VarianceDimension::Tenant` 把当前租户作为不透明的键材料来分区；任何处理
@@ -98,6 +124,11 @@ Application::new()
   - `VarianceDimension::Principal` 把已登录访客作为不透明的键材料来分区，并
     绑定到一个权限版本（见下文“纪元、权限与检查”）；一个 `PrivateCached` 路由
     必须声明 `Principal` 或 `Tenant`（或两者都声明），否则根本无法构建成功。
+
+`Media` 和 `Encoding` 都可以声明，也都会进入键，但本版本把它们各自解析成一个
+常量：每一个请求分别都是 `text/html` 和 `identity`。因此声明它们是一步面向未来
+的兼容动作 - 它们会正确地扩宽 `Vary` 并预留键空间，好让日后的内容协商层或压缩层
+不会与在它出现之前发布的条目相撞 - 而不是今天就在划分流量的东西。
 
 `VarianceDimension::FeatureVersion`、`VarianceDimension::ConfigVersion`，以及
 自定义的 `VarianceDimension::Application(name)` 都存在于这个类型上，但在本
@@ -107,12 +138,12 @@ Application::new()
 ## 读取响应头
 
 一次被服务的命中携带 `ETag`（一个强验证器，你的客户端可以把它作为
-`If-None-Match` 送回来换取一个 `304`）、`Cache-Control`（默认是 `private`，
-除非类别是 `PublicShared` 且你设置了 `SharedCachePolicy::SMaxAge`，此时它还
-携带 `public` 和 `s-maxage`）、`Vary`（来自任何隐含它的已声明维度 - `Locale`
-隐含 `Accept-Language`，`Media` 隐含 `Accept`），以及 `Age`（自该表示发布以来
-经过的整秒数）。一个陈旧但仍可服务的响应还会额外携带
-`Warning: 110 - "Response is Stale"`。
+`If-None-Match` 送回来换取一个 `304`）、`Cache-Control`、`Vary`，以及 `Age`
+（自该表示发布以来经过的整秒数，也是判断一个响应出自存储而不是出自你的处理程序
+最快的本地迹象）。一个越过其新鲜区间之后才被服务的响应还会额外携带
+`Warning: 110 - "Response is Stale"`。这五者中的每一个，连同自用（dogfood）路由
+被断言会发出的取值，都定义在
+[RenderCache 表示](render-cache-representations.md)。
 
 ## 为什么一次渲染永远不会被存储
 
@@ -130,10 +161,16 @@ Application::new()
 
 - **你读取了一个会话值。** 对当前会话的任何读取（通过 `session()`、
   `session_mut`，或者一个会话 Cookie）都会把这次渲染永久性地强制变为
-  `Uncacheable`，不论该路由声明了什么差异化维度。当一个匿名访客的身份是通过
-  会话回退来解析的时候，这条规则同样会触发 - 这是一个常见的意外，因为该访客
-  确实是匿名的，得到的键也正确地是 `Anonymous`，但这次读取本身仍然是一次会话
-  读取。
+  `Uncacheable`，不论该路由声明了什么差异化维度。它*不*覆盖的唯一一样东西，是
+  已登录访客自己的身份。当请求中更早的环节都没有解析出身份时，`Auth::id()` 会
+  从会话里把它读出来，而那次读取被归类为一次身份读取，而不是一次会话读取 - 所以
+  一次普通的、由 Cookie 支撑的登录，正是一个声明了 `Principal` 差异化维度的
+  `PrivateCached` 路由所要服务的场景，去取访客的 id 并不会悄悄让页面变得不可
+  缓存。会话中其他每一个值仍然会。有两个后果值得知道：一个发往这样一个路由的
+  匿名请求会缓存在 `Anonymous` 键下，因为这次渲染没有解析出任何身份，没有观察到
+  任何主体材料，而键也如实这么说 - 一个已登录访客派生出的是一个 `Private` 键，
+  它永远触及不到那个条目；以及，一个具名 guard 自己的标识符，与默认 guard 的
+  标识符在完全相同的意义上属于主体材料。
 - **你在一个没有声明 `Principal` 的路由上读取了身份。** 读取已登录用户会把
   类别收窄为 `PrivateCached`；如果该路由声明的差异化维度中不包含 `Principal`，
   就没有办法按访客对条目分别建键，因此它会被拒绝存储，而不是被共享。
@@ -257,15 +294,22 @@ flash 消息）- 没有任何差异化维度声明能让一次会话读取变得
   个世代能挺过一次重启，并且这次调用会在角色变更运行在某个
   事务中时，加入那个事务。不进行这次调用的话，一个权限刚刚
   发生变化的用户，仍然会命中在其先前权限集合下缓存的内容。
-- **`RenderCache::advance_epoch()`**，或者隐藏命令 `render-cache:epoch-advance` -
-  一次紧急失效操作。每一个当前已存储的条目，会在它的下一次请求上立即变得
-  无法通过普通查找触及，因为纪元本身就被烘焙进了查找键。进程内层级也会在同一
-  时刻被彻底清空；一个文件支持的层级会把旧文件留在磁盘上，直到周期性或手动的
-  清扫回收它们为止，这属于磁盘卫生问题，而不是正确性问题。当缓存内容出了问题、
-  而你等不及各个条目自行过期时，就用这个。
+- **`RenderCache::advance_epoch()`**，或者隐藏命令
+  `render-cache:epoch-advance` - 一次紧急失效操作。纪元本身就被烘焙进了查找
+  键，所以推进它会让已存储的条目变得无法触及，既没有什么要枚举的，也没有什么
+  要删除的。在运行这条命令的那个进程上，效果是立即的：它会丢弃该进程的纪元
+  租约，并在同一时刻清空它的进程内层级。另一个节点会在它的下一次权威读取时
+  跟上，而它那个文件支持的层级会把旧文件一直留着，直到一次清扫回收它们为止 -
+  每第 256 次发布触发的那次自动清扫，或者一次显式的 `RenderCache::sweep()` -
+  这属于磁盘卫生问题，而不是正确性问题。当缓存内容出了问题、而你等不及各个
+  条目自行过期时，就用这个；在不止一个节点上的做法，参见
+  [RenderCache 运维](render-cache-operations.md)。
 - **隐藏命令 `render-cache:inspect <key>`** 通过你的应用日志或遥测能够呈现的
   那段键文本，报告某一个已存储条目的元数据（绝不是它的正文），并连同当前纪元
-  一并给出，让你能判断自己正在查看的究竟还是有效权威，还是早已在背后过期。
+  一并给出，让你能判断自己正在查看的究竟还是有效权威，还是早已在背后过期。它
+  只在运行中进程的进程内层级里查这个键，绝不去共享层级里查，所以在一个
+  `database` 或 `redis` 配置档下，对于一个本节点自己没有服务过的键，它会报告
+  没有条目。
 
 ## RenderCache 与 `suprnova::Cache` 的区别
 
@@ -281,3 +325,26 @@ HTTP 响应，键是从路由及其已声明的差异化维度自动派生出来
 一开始就不会被存储，因此也没有什么可重新计算的。当你有一个想要计算一次并复用
 的具体值时，用 `suprnova::Cache`；当你有一整个路由、其响应渲染代价高昂且可以
 安全共享时，用 RenderCache。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 框架本身没有对等物。响应缓存是一个你自己加进来的包，它用中间件把路由
+包起来，按一个你自己拼出来的键存下已渲染的响应，此后的一切都归你：哪些路由可以
+安全缓存、是什么让两个访客不同，以及一个已存储的页面什么时候不再为真。框架并不
+知道某个页面被缓存过，所以它没法告诉你什么时候缓存它是个错误。
+
+RenderCache 之所以是框架的一部分，正是因为这个。它看得见渲染的发生，所以它能
+记录处理程序读了什么，把这些与路由声明的内容作对照，并拒绝存储一个它无法为其
+安全性交代清楚的响应 - 而且是静默地拒绝，不改变访客被提供的东西。把一个路由
+接入进来是一份声明，框架此后会照着它来要求你，而不是一个你对自己许下的承诺。
+代价是有些你很想缓存的路由会被拒绝，你得去查明原因；好处是那些确实被存储下来
+的，是由渲染它们的那个进程当场证明过可以安全存储的。
+
+## 下一步
+
+- [RenderCache 表示](render-cache-representations.md) - 实际被存储的是什么、
+  在什么键下，以及在哪些层级里
+- [RenderCache 世代](render-cache-generations.md) - 一份已存储的副本如何不再
+  是最新的
+- [缓存](cache.md) - 本章拿来作对比的那个显式键值存储
+- [Live](live.md) - 一份缝合式表示是从哪些文档里裁下来的

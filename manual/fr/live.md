@@ -456,9 +456,9 @@ périmé répond `409` avec un corps vide ; un principal absent répond `401`.
   l'application expose son chemin de connexion et le visiteur reprend depuis
   un document frais.
 
-Live fonctionne intégralement sans RenderCache ; la mise en cache des
-documents Live est une fonctionnalité distincte avec son propre chapitre
-lorsqu'elle arrivera.
+Live fonctionne intégralement sans RenderCache. La mise en cache des
+documents Live est le rôle de RenderCache ; voir
+[RenderCache](render-cache.md).
 
 ## Référence de la CLI
 

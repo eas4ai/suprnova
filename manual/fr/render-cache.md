@@ -14,6 +14,19 @@ groupes, la déclaration de la variance, la lecture des en-têtes de réponse
 qu'il ajoute, les raisons pour lesquelles un rendu est refusé, le contrôle
 opérationnel, et en quoi il diffère de `suprnova::Cache`.
 
+## Les chapitres
+
+C'est le premier de cinq. Lisez-les dans l'ordre la première fois ; ensuite,
+chacun répond seul à une question.
+
+| Chapitre | Répond à |
+|---|---|
+| RenderCache (celui-ci) | Comment l'activer et activer une route ? |
+| [Représentations](render-cache-representations.md) | Qu'est-ce qui est réellement stocké, et sous quelle clé ? |
+| [Générations](render-cache-generations.md) | Quand une copie stockée cesse-t-elle d'être à jour ? |
+| [Déploiement](render-cache-deployment.md) | Comment plusieurs nœuds partagent-ils un seul cache ? |
+| [Exploitation](render-cache-operations.md) | Comment l'inspecter, le tester, le mesurer et le désactiver ? |
+
 ## Activer le cache
 
 Deux variables d'environnement comptent pour démarrer :
@@ -32,10 +45,18 @@ Une poignée d'autres variables ajustent les valeurs par défaut :
 bornent le palier intra-processus ; `RENDER_CACHE_L1_BYTES` (1 Gio) borne le
 palier fichier ; `RENDER_CACHE_FAILURE` (`open` par défaut, ou `closed`)
 décide si un problème de magasin ou de base de données sert la route sans
-cache ou refuse la requête ; `APP_BUILD_ID` (la propre version de votre
-crate par défaut) cantonne chaque entrée mise en cache au build qui l'a
-produite, si bien qu'un déploiement ne sert jamais les octets d'un ancien
-build.
+cache ou refuse la requête ; `APP_BUILD_ID` cantonne chaque entrée mise en
+cache au build qui l'a produite. Réglez-la explicitement sur quelque chose
+qui change à chaque déploiement : sa valeur par défaut est une version de
+crate figée à la compilation, qui elle ne change pas. Voir
+[Déploiement de RenderCache](render-cache-deployment.md).
+
+`RENDER_CACHE_PROFILE` (`embedded` par défaut, ou `database` ou `redis`)
+choisit si le second palier et le coordinateur de reconstruction vivent dans
+ce processus ou sont partagés avec tous les autres nœuds. Un profil partagé
+a aussi besoin d'une migration que votre application liste. Les deux sont le
+sujet du chapitre [Déploiement](render-cache-deployment.md), avec le tableau
+complet des variables.
 
 ## Activer une route ou un groupe
 
@@ -63,15 +84,22 @@ fn add_render_cache(router: Router) -> Result<Router, FrameworkError> {
 ```
 
 `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)`
-définit combien de temps une représentation est fraîche, combien de temps
-supplémentaire elle peut encore être servie pendant qu'une reconstruction
-en arrière-plan s'exécute, et combien de temps de plus encore elle peut
-être servie si cette reconstruction échoue purement et simplement.
+définit combien de temps une représentation est fraîche, puis deux fenêtres
+mesurées depuis ce bord de fraîcheur : jusqu'où au-delà la copie stockée
+peut encore être servie pendant qu'une reconstruction en arrière-plan
+s'exécute, et jusqu'où au-delà la copie stockée peut être servie si une
+reconstruction au premier plan échoue purement et simplement. Les deux
+fenêtres ne s'empilent pas ; voir
+[Représentations de RenderCache](render-cache-representations.md).
+
 `RepresentationClass` va du partage le plus large au plus étroit :
 `PublicShared` (une représentation pour tous ceux qui correspondent à la
-variance déclarée), `PublicShellStitched` (réservé à une future
-représentation à coque composée, pas encore utilisable), `PrivateCached`
-(une représentation par visiteur connecté ou par tenant), et `Uncacheable`.
+variance déclarée), `PublicShellStitched` (un document Live dont la coque
+partagée est stockée une seule fois et dont les îlots sont montés à nouveau
+pour quiconque les demande ; voir
+[Représentations](render-cache-representations.md)),
+`PrivateCached` (une représentation par visiteur connecté ou par tenant), et
+`Uncacheable`.
 
 Un pattern de route doit déjà être enregistré avant que vous ne l'activiez,
 et vous devez terminer d'activer les routes et les groupes **avant**
@@ -116,7 +144,10 @@ avec deux mécanismes :
   cache pour cette requête au lieu d'être silencieusement ignoré.
 - **Dimensions de variance**, ajoutées une par une avec `.vary(dimension)` :
   - `VarianceDimension::Locale` partitionne par la locale négociée.
-  - `VarianceDimension::Media` partitionne par le type de média négocié.
+  - `VarianceDimension::Media` partitionne par le type de média négocié, et
+    ajoute `Accept` à `Vary`.
+  - `VarianceDimension::Encoding` partitionne par l'encodage de contenu
+    négocié, et ajoute `Accept-Encoding` à `Vary`.
   - `VarianceDimension::Host` partitionne par l'hôte de la requête, là où
     votre déploiement rend plus d'un hôte significatif.
   - `VarianceDimension::Tenant` partitionne par le tenant courant utilisé
@@ -128,6 +159,15 @@ avec deux mécanismes :
     `PrivateCached` doit déclarer `Principal` ou `Tenant` (ou les deux),
     sinon elle échoue purement et simplement à la construction.
 
+`Media` et `Encoding` sont déclarables et entrent dans la clé, mais cette
+version les résout chacune à une constante : chaque requête est `text/html`
+et `identity` respectivement. Les déclarer est donc un geste de
+compatibilité ascendante - elles élargissent `Vary` correctement et
+réservent l'espace de clés, si bien qu'une future couche de négociation de
+contenu ou de compression ne peut pas entrer en collision avec des entrées
+publiées avant son existence - plutôt que quelque chose qui partitionne le
+trafic aujourd'hui.
+
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion`, et
 un `VarianceDimension::Application(name)` personnalisé existent sur le
 type mais n'ont pas de résolveur dans cette version : une route qui en
@@ -136,15 +176,15 @@ d'échouer à la construction. Ne les déclarez pas encore.
 
 ## Lire les en-têtes de réponse
 
-Une réponse servie depuis le cache porte `ETag` (un validateur fort que
-votre client peut renvoyer sous forme de `If-None-Match` pour obtenir un
-`304`), `Cache-Control` (`private` sauf si la classe est `PublicShared` et
-que vous avez réglé un `SharedCachePolicy::SMaxAge`, auquel cas elle porte
-aussi `public` et `s-maxage`), `Vary` (à partir de toute dimension déclarée
-qui en implique un - `Locale` implique `Accept-Language`, `Media` implique
-`Accept`), et `Age` (secondes entières depuis la publication de la
-représentation). Une réponse périmée mais encore servable porte en plus
-`Warning: 110 - "Response is Stale"`.
+Un hit servi porte `ETag` (un validateur fort que votre client peut
+renvoyer sous forme de `If-None-Match` pour obtenir un `304`),
+`Cache-Control`, `Vary`, et `Age` (secondes entières depuis la publication
+de la représentation, et le signe local le plus rapide qu'une réponse est
+sortie du magasin plutôt que de votre handler). Une réponse servie au-delà
+de son intervalle de fraîcheur porte en plus
+`Warning: 110 - "Response is Stale"`. Chacun des cinq est défini, avec les
+valeurs que les tests exigent des routes dogfood, dans
+[Représentations de RenderCache](render-cache-representations.md).
 
 ## Pourquoi un rendu n'est jamais stocké
 
@@ -166,11 +206,21 @@ pendant son exécution, en des termes que vous reconnaîtrez :
 - **Vous avez lu une valeur de session.** Toute lecture de la session
   courante (via `session()`, `session_mut`, ou un cookie de session) force
   le rendu à `Uncacheable`, de façon permanente, quelle que soit la
-  variance déclarée par la route. Cela se déclenche aussi quand l'identité
-  d'un visiteur anonyme se résout via le repli sur la session - une
-  surprise fréquente, puisque le visiteur est réellement anonyme et que la
-  clé résultante est correctement `Anonymous`, mais la lecture elle-même
-  reste une lecture de session.
+  variance déclarée par la route. La seule chose que cela ne couvre *pas*
+  est l'identité propre du visiteur connecté. `Auth::id()` la lit dans la
+  session quand rien de plus tôt dans la requête ne l'a résolue, et cette
+  lecture est classée comme une lecture d'identité, non comme une lecture
+  de session - une connexion ordinaire adossée à un cookie est donc
+  exactement ce à quoi sert une route `PrivateCached` qui déclare la
+  variance `Principal`, et aller chercher l'id du visiteur ne rend pas
+  discrètement la page impossible à mettre en cache. Toute autre valeur de
+  la session le fait toujours. Deux conséquences méritent d'être connues :
+  une requête anonyme vers une telle route se met en cache sous la clé
+  `Anonymous`, parce que le rendu n'a résolu aucune identité, n'a observé
+  aucun matériau de principal, et que la clé le dit - un visiteur connecté
+  dérive une clé `Private` qui n'atteint jamais cette entrée ; et
+  l'identifiant propre d'un guard nommé est un matériau de principal
+  exactement de la même façon que celui du guard par défaut.
 - **Vous avez lu une identité, sur une route qui ne déclare pas
   `Principal`.** Lire l'utilisateur connecté restreint la classe à
   `PrivateCached` ; si la variance déclarée par la route n'inclut pas
@@ -323,23 +373,29 @@ quelque chose qu'aucune clé ne pourrait partitionner en toute sécurité.
   permissions viennent de changer continue de correspondre à ce qui était
   mis en cache sous son précédent jeu de permissions.
 - **`RenderCache::advance_epoch()`**, ou la commande masquée
-  `render-cache:epoch-advance` - une invalidation d'urgence. Chaque entrée
-  actuellement stockée devient inatteignable par une recherche ordinaire
-  dès sa toute prochaine requête, immédiatement, parce que l'epoch est
-  intégré directement à la clé de recherche elle-même. Le palier
-  intra-processus est aussi entièrement vidé au même instant ; un palier
-  adossé à des fichiers conserve ses anciens fichiers sur le disque
-  jusqu'à ce que le balayage périodique ou manuel les récupère, ce qui
-  relève de l'hygiène disque plutôt que d'un problème de correction.
-  Recourez à ceci quand quelque chose ne va pas avec le contenu mis en
-  cache et que vous ne pouvez pas attendre l'expiration individuelle des
-  entrées.
+  `render-cache:epoch-advance` - une invalidation d'urgence. L'epoch est
+  intégré à la clé de recherche elle-même, donc le faire avancer met les
+  entrées stockées hors d'atteinte sans rien à énumérer ni rien à
+  supprimer. Sur le processus qui l'exécute, l'effet est immédiat : il
+  abandonne le bail d'epoch de ce processus et vide son palier
+  intra-processus au même instant. Un autre nœud se met à jour à sa
+  prochaine lecture d'autorité, et son palier adossé à des fichiers
+  conserve ses anciens fichiers jusqu'à ce qu'un balayage les récupère -
+  celui qui se déclenche automatiquement à chaque 256e publication, ou un
+  `RenderCache::sweep()` explicite - ce qui relève de l'hygiène disque
+  plutôt que d'un problème de correction. Recourez à ceci quand quelque
+  chose ne va pas avec le contenu mis en cache et que vous ne pouvez pas
+  attendre l'expiration individuelle des entrées ; sur plus d'un nœud,
+  voir [Exploitation de RenderCache](render-cache-operations.md).
 - **La commande masquée `render-cache:inspect <key>`** rapporte les
   métadonnées d'une entrée stockée (jamais son corps) via le texte de clé
   que les logs ou la télémétrie de votre application peuvent faire
   apparaître, ainsi que l'epoch courant, afin que vous puissiez déterminer
   si ce que vous regardez fait encore autorité en direct ou a déjà expiré
-  entre-temps.
+  entre-temps. Elle cherche la clé dans le seul palier intra-processus du
+  processus en cours d'exécution, jamais dans le palier partagé, si bien que
+  sur un profil `database` ou `redis` elle ne rapporte aucune entrée pour
+  une clé que ce nœud n'a pas servie lui-même.
 
 ## RenderCache face à `suprnova::Cache`
 
@@ -362,3 +418,35 @@ rendu qui a lu du SQL brut n'est jamais stocké du tout, donc il n'y a rien
 valeur précise que vous voulez calculer une fois et réutiliser ;
 tournez-vous vers RenderCache quand vous avez une route entière dont la
 réponse est coûteuse à rendre et sûre à partager.
+
+### Pourquoi Suprnova diverge
+
+Laravel n'a aucun équivalent dans le framework lui-même. La mise en cache
+des réponses est un paquet que vous ajoutez, il enveloppe la route dans un
+middleware qui stocke la réponse rendue sous une clé que vous composez, et
+tout le reste vous revient : quelles routes sont sûres à mettre en cache,
+ce qui rend deux visiteurs différents, et quand une page stockée cesse
+d'être vraie. Le framework ne sait pas qu'une page a été mise en cache, il
+ne peut donc pas vous dire que la mettre en cache était une erreur.
+
+RenderCache fait partie du framework exactement pour cette raison. Il voit
+le rendu se produire, il peut donc enregistrer ce que le handler a lu, le
+comparer à ce que la route a déclaré, et refuser de stocker une réponse
+dont il ne peut pas justifier la sûreté - silencieusement, sans changer ce
+qui est servi au visiteur. Activer une route est une déclaration à laquelle
+le framework vous tient ensuite, plutôt qu'une promesse que vous vous faites
+à vous-même. Le coût est que certaines routes que vous aimeriez mettre en
+cache sont refusées et que vous devez découvrir pourquoi ; le bénéfice est
+que celles qui sont stockées ont été prouvées sûres à stocker, une fois, par
+le processus qui les a rendues.
+
+## Suivant
+
+- [Représentations de RenderCache](render-cache-representations.md) - ce qui
+  est réellement stocké, sous quelle clé, et dans quels paliers
+- [Générations de RenderCache](render-cache-generations.md) - comment une
+  copie stockée cesse d'être à jour
+- [Cache](cache.md) - le magasin clé-valeur explicite auquel ce chapitre
+  s'oppose
+- [Live](live.md) - les documents dont une représentation cousue est
+  découpée

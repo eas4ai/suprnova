@@ -394,8 +394,8 @@ App::singleton(runtime.clone());
 - 已关闭的异步传输被退役，运行时以新的传输代际重新连接；过期的代际会被拒绝。
 - 过期或轮换的会话使绑定身份的工作失效；应用展示其登录路径，访客从新文档继续。
 
-Live 在没有 RenderCache 的情况下完整运行；缓存 Live 文档是一项独立功能，落地时
-将有自己的章节。
+Live 在没有 RenderCache 的情况下完整运行。缓存 Live 文档是 RenderCache 的职责；
+参见 [RenderCache](render-cache.md)。
 
 ## CLI 参考
 

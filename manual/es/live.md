@@ -452,8 +452,8 @@ obsoleto responde `409` con cuerpo vacío; un principal ausente responde `401`.
   aplicación muestra su ruta de inicio de sesión y el visitante continúa desde
   un documento nuevo.
 
-Live funciona completo sin RenderCache; cachear documentos Live es una
-funcionalidad aparte con su propio capítulo cuando llegue.
+Live funciona completo sin RenderCache. Cachear documentos Live es tarea
+de RenderCache; consulta [RenderCache](render-cache.md).
 
 ## Referencia de la CLI
 

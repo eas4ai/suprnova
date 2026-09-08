@@ -434,8 +434,8 @@ App::singleton(runtime.clone());
   します。アプリケーションはサインインの経路を示し、訪問者は新しいドキュメントから
   続行します。
 
-Live は RenderCache なしで完全に動作します。Live ドキュメントのキャッシュは別の
-機能で、提供時に独自の章を持ちます。
+Live は RenderCache なしで完全に動作します。Live ドキュメントのキャッシュは
+RenderCache の仕事です。[RenderCache](render-cache.md) を参照してください。
 
 ## CLI リファレンス
 

@@ -460,8 +460,8 @@ Principal antwortet mit `401`.
   ungültig; die Anwendung zeigt ihren Anmeldepfad, und der Besucher macht mit
   einem frischen Dokument weiter.
 
-Live läuft vollständig ohne RenderCache; das Caching von Live-Dokumenten ist
-eine eigene Funktion mit eigenem Kapitel, sobald sie erscheint.
+Live läuft vollständig ohne RenderCache. Das Caching von Live-Dokumenten ist
+Aufgabe von RenderCache; siehe [RenderCache](render-cache.md).
 
 ## CLI-Referenz
 

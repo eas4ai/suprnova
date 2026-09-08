@@ -59,6 +59,11 @@
     - [Server-Sent イベント](sse.md)
     - [WebSocket](websockets.md)
     - [Live](live.md)
+    - [RenderCache](render-cache.md)
+    - [RenderCache の表現](render-cache-representations.md)
+    - [RenderCache の世代](render-cache-generations.md)
+    - [RenderCache のデプロイメント](render-cache-deployment.md)
+    - [RenderCache の運用](render-cache-operations.md)
     - [べき等性](idempotency.md)
     - [タイムアウト](timeout.md)
     - [フィーチャー フラグ](feature-flags.md)
@@ -123,6 +128,6 @@
     - [環境変数](env-vars.md)
     - [用語集](glossary.md)
 
-*[API ドキュメンテーション (rustdoc)](https://docs.rs/suprnova) - 公開後に利用可能。*
 ---
 
+*[API ドキュメンテーション (rustdoc)](https://docs.rs/suprnova) - 公開後に利用可能。*

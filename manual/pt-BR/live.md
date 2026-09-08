@@ -452,8 +452,8 @@ obsoleto responde `409` com corpo vazio; um principal ausente responde `401`.
   a aplicação expõe seu caminho de login e o visitante continua a partir de um
   documento novo.
 
-Live funciona por completo sem RenderCache; o cache de documentos Live é uma
-funcionalidade separada, com capítulo próprio quando chegar.
+Live funciona por completo sem RenderCache. Colocar documentos Live em cache
+é tarefa do RenderCache; veja [RenderCache](render-cache.md).
 
 ## Referência da CLI
 

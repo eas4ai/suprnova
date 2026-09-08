@@ -14,6 +14,19 @@ variância, ler os cabeçalhos de resposta que ele adiciona, os motivos pelos
 quais uma renderização é recusada, o controle operacional e em que ele
 difere de `suprnova::Cache`.
 
+## Os capítulos
+
+Este é o primeiro de cinco. Leia-os em ordem na primeira vez; depois disso,
+cada um responde sozinho a uma pergunta.
+
+| Capítulo | Responde |
+|---|---|
+| RenderCache (este) | Como eu ligo isso e incluo uma rota? |
+| [Representações](render-cache-representations.md) | O que é de fato armazenado, e sob qual chave? |
+| [Gerações](render-cache-generations.md) | Quando uma cópia armazenada deixa de estar atual? |
+| [Implantação](render-cache-deployment.md) | Como vários nós compartilham um único cache? |
+| [Operações](render-cache-operations.md) | Como eu inspeciono, testo, meço e desligo isso? |
+
 ## Habilitando o cache
 
 Duas variáveis de ambiente importam para começar:
@@ -31,9 +44,17 @@ Um punhado de outras variáveis ajusta os padrões: `RENDER_CACHE_L0_ENTRIES`
 `RENDER_CACHE_L1_BYTES` (1 GiB) limita a camada de arquivo;
 `RENDER_CACHE_FAILURE` (`open` por padrão, ou `closed`) decide se um
 problema de armazenamento ou de banco de dados serve a rota sem cache ou
-recusa a requisição; `APP_BUILD_ID` (a versão do seu próprio crate, por
-padrão) isola cada entrada em cache no namespace do build que a produziu,
-de modo que um deploy nunca sirva os bytes de um build antigo.
+recusa a requisição; `APP_BUILD_ID` isola cada entrada em cache no namespace
+do build que a produziu. Defina-a explicitamente como algo que muda a cada
+deploy: seu padrão é uma versão de crate compilada junto, que não muda. Veja
+[Implantação do RenderCache](render-cache-deployment.md).
+
+`RENDER_CACHE_PROFILE` (`embedded` por padrão, ou `database` ou `redis`)
+escolhe se a segunda camada e o coordenador de reconstrução ficam neste
+processo ou são compartilhados com todos os outros nós. Um perfil
+compartilhado também exige uma migração que sua aplicação liste. Ambos são
+assunto do capítulo [Implantação](render-cache-deployment.md), junto com a
+tabela completa de variáveis.
 
 ## Incluindo uma rota ou um grupo
 
@@ -60,15 +81,22 @@ fn add_render_cache(router: Router) -> Result<Router, FrameworkError> {
 ```
 
 `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)`
-define por quanto tempo uma representação é válida, por quanto tempo a mais
-ela ainda pode ser servida enquanto uma reconstrução em segundo plano é
-executada, e por quanto tempo a mais ainda pode ser servida se essa
-reconstrução falhar completamente. `RepresentationClass` vai da mais ampla
-à mais restrita em compartilhamento: `PublicShared` (uma representação para
-todos que correspondem à variância declarada), `PublicShellStitched`
-(reservada para uma futura representação de shell composto, ainda não
-utilizável), `PrivateCached` (uma representação por visitante autenticado ou
-tenant), e `Uncacheable`.
+define por quanto tempo uma representação é válida e, em seguida, duas
+janelas medidas a partir dessa borda de validade: quão além dela a cópia
+armazenada ainda pode ser servida enquanto uma reconstrução em segundo
+plano é executada, e quão além dela a cópia armazenada pode ser servida se
+uma reconstrução em primeiro plano falhar completamente. As duas janelas não
+são empilhadas; veja
+[Representações do RenderCache](render-cache-representations.md).
+
+`RepresentationClass` vai da mais ampla à mais restrita em compartilhamento:
+`PublicShared` (uma representação para todos que correspondem à variância
+declarada), `PublicShellStitched` (um documento Live cujo shell
+compartilhado é armazenado uma única vez e cujas ilhas são remontadas para
+quem estiver pedindo; veja
+[Representações](render-cache-representations.md)),
+`PrivateCached` (uma representação por visitante autenticado ou tenant), e
+`Uncacheable`.
 
 Um padrão de rota precisa já estar registrado antes de você incluí-lo, e
 você precisa terminar de incluir rotas e grupos **antes** de chamar
@@ -113,7 +141,10 @@ dois mecanismos:
 - **Dimensões de variância**, adicionadas uma de cada vez com
   `.vary(dimension)`:
   - `VarianceDimension::Locale` particiona pela localidade negociada.
-  - `VarianceDimension::Media` particiona pelo tipo de mídia negociado.
+  - `VarianceDimension::Media` particiona pelo tipo de mídia negociado e
+    adiciona `Accept` ao `Vary`.
+  - `VarianceDimension::Encoding` particiona pela codificação de conteúdo
+    negociada e adiciona `Accept-Encoding` ao `Vary`.
   - `VarianceDimension::Host` particiona pelo host da requisição, quando
     sua implantação torna mais de um host significativo.
   - `VarianceDimension::Tenant` particiona pelo tenant atual como material
@@ -125,6 +156,14 @@ dois mecanismos:
     precisa declarar `Principal` ou `Tenant` (ou ambos), ou ela simplesmente
     falha ao ser construída.
 
+`Media` e `Encoding` são declaráveis e entram na chave, mas esta versão
+resolve cada uma delas para uma constante: toda requisição é `text/html` e
+`identity`, respectivamente. Declará-las é, portanto, um movimento de
+compatibilidade futura - elas ampliam o `Vary` corretamente e reservam o
+espaço de chaves, de modo que uma camada posterior de negociação de conteúdo
+ou de compressão não possa colidir com entradas publicadas antes de ela
+existir - em vez de algo que particione o tráfego hoje.
+
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion` e
 uma `VarianceDimension::Application(name)` personalizada existem no tipo,
 mas não têm resolvedor nesta versão: uma rota que declara uma delas contorna
@@ -134,14 +173,14 @@ construída. Não as declare ainda.
 ## Lendo os cabeçalhos de resposta
 
 Um hit servido carrega `ETag` (um validador forte que seu cliente pode
-enviar de volta como `If-None-Match` para obter um `304`), `Cache-Control`
-(`private`, a menos que a classe seja `PublicShared` e você defina uma
-`SharedCachePolicy::SMaxAge`, caso em que também carrega `public` e
-`s-maxage`), `Vary` (a partir de quaisquer dimensões declaradas que
-impliquem um - `Locale` implica `Accept-Language`, `Media` implica
-`Accept`), e `Age` (segundos inteiros desde que a representação foi
-publicada). Uma resposta obsoleta mas servível carrega adicionalmente
-`Warning: 110 - "Response is Stale"`.
+enviar de volta como `If-None-Match` para obter um `304`), `Cache-Control`,
+`Vary` e `Age` (segundos inteiros desde que a representação foi publicada, e
+o sinal local mais rápido de que uma resposta saiu do armazenamento em vez
+de sair do seu handler). Uma resposta servida além do seu intervalo de
+validade carrega adicionalmente `Warning: 110 - "Response is Stale"`. Cada
+um dos cinco é definido, com os valores que os testes exigem que as rotas de
+dogfood enviem, em
+[Representações do RenderCache](render-cache-representations.md).
 
 ## Por que uma renderização nunca é armazenada
 
@@ -163,11 +202,20 @@ rodava, em termos que você vai reconhecer:
 - **Você leu um valor de sessão.** Qualquer leitura da sessão atual (por
   meio de `session()`, `session_mut`, ou de um cookie de sessão) força a
   renderização para `Uncacheable`, permanentemente, não importa qual
-  variância a rota declare. Isso também acontece quando a identidade de um
-  visitante anônimo é resolvida por meio do fallback de sessão - uma
-  surpresa comum, já que o visitante é genuinamente anônimo e a chave
-  resultante é corretamente `Anonymous`, mas a leitura em si ainda é uma
-  leitura de sessão.
+  variância a rota declare. A única coisa que isso *não* cobre é a
+  identidade do próprio visitante autenticado. `Auth::id()` a lê da sessão
+  quando nada antes na requisição a resolveu, e essa leitura é classificada
+  como leitura de identidade, não como leitura de sessão - então um login
+  comum apoiado em cookie é exatamente aquilo para que serve uma rota
+  `PrivateCached` que declara variância `Principal`, e buscar o id do
+  visitante não torna a página silenciosamente não cacheável. Todo outro
+  valor da sessão ainda torna. Duas consequências que vale conhecer: uma
+  requisição anônima a uma rota dessas entra em cache sob a chave
+  `Anonymous`, porque a renderização não resolveu identidade nenhuma, não
+  observou material de principal, e a chave diz isso - um visitante
+  autenticado deriva uma chave `Private` que nunca alcança aquela entrada; e
+  o identificador de um guard nomeado é material de principal exatamente da
+  mesma forma que o do guard padrão.
 - **Você leu uma identidade, em uma rota que não declara `Principal`.**
   Ler o usuário autenticado restringe a classe para `PrivateCached`; se a
   variância declarada da rota não incluir `Principal`, não há como
@@ -315,20 +363,26 @@ segurança.
   mudar continua correspondendo ao que estava armazenado em cache sob seu
   conjunto de permissões anterior.
 - **`RenderCache::advance_epoch()`**, ou o comando oculto
-  `render-cache:epoch-advance` - uma invalidação de emergência. Toda
-  entrada atualmente armazenada se torna inacessível por busca comum já na
-  sua próxima requisição, imediatamente, porque o epoch está embutido na
-  própria chave de busca. A camada em processo também é limpa por completo
-  no mesmo instante; uma camada apoiada em arquivo mantém seus arquivos
-  antigos em disco até que a varredura periódica ou manual os recupere, o
-  que é uma questão de higiene de disco, e não de corretude. Recorra a
-  isso quando algo estiver errado com o conteúdo em cache e você não puder
-  esperar que entradas individuais expirem.
+  `render-cache:epoch-advance` - uma invalidação de emergência. O epoch está
+  embutido na própria chave de busca, então avançá-lo põe as entradas
+  armazenadas fora de alcance sem nada a enumerar e nada a excluir. No
+  processo que o executa o efeito é imediato: ele descarta o lease de epoch
+  daquele processo e limpa sua camada em processo no mesmo instante. Outro
+  nó se atualiza na sua próxima leitura da autoridade, e sua camada apoiada
+  em arquivo mantém os arquivos antigos até que uma varredura os recupere -
+  a automática a cada 256ª publicação, ou um `RenderCache::sweep()`
+  explícito - o que é uma questão de higiene de disco, e não de corretude.
+  Recorra a isso quando algo estiver errado com o conteúdo em cache e você
+  não puder esperar que entradas individuais expirem; em mais de um nó,
+  veja [Operações do RenderCache](render-cache-operations.md).
 - **O comando oculto `render-cache:inspect <key>`** relata os metadados de
   uma entrada armazenada (nunca seu corpo) pelo texto da chave que os logs
   ou a telemetria da sua aplicação podem expor, junto com o epoch atual,
   para que você possa saber se o que está vendo ainda é autoridade viva ou
-  se já expirou sem que você percebesse.
+  se já expirou sem que você percebesse. Ele procura a chave apenas na
+  camada em processo do processo em execução, nunca na compartilhada, então
+  em um perfil `database` ou `redis` ele não relata entrada alguma para uma
+  chave que este nó não tenha servido ele mesmo.
 
 ## RenderCache versus `suprnova::Cache`
 
@@ -351,3 +405,35 @@ nada para recalcular. Recorra a
 `suprnova::Cache` quando você tiver um valor específico que quer computar
 uma vez e reutilizar; recorra ao RenderCache quando você tiver uma rota
 inteira cuja resposta é cara de renderizar e segura de compartilhar.
+
+### Por que Suprnova diverge
+
+O Laravel não tem equivalente no próprio framework. Cache de resposta é um
+pacote que você adiciona, ele envolve a rota em um middleware que armazena a
+resposta renderizada sob uma chave que você compõe, e tudo depois disso é
+com você: quais rotas são seguras para cachear, o que torna dois visitantes
+diferentes, e quando uma página armazenada deixa de ser verdadeira. O
+framework não sabe que uma página foi cacheada, então não consegue te dizer
+quando cachear uma delas foi um erro.
+
+O RenderCache faz parte do framework exatamente por esse motivo. Ele vê a
+renderização acontecer, então consegue registrar o que o handler leu,
+comparar isso com o que a rota declarou, e recusar-se a armazenar uma
+resposta cuja segurança não consegue justificar - silenciosamente, sem mudar
+o que é servido ao visitante. Incluir uma rota é uma declaração pela qual o
+framework passa a te cobrar, e não uma promessa que você faz a si mesmo. O
+custo é que algumas rotas que você gostaria de cachear são recusadas e você
+tem que descobrir por quê; o benefício é que as que são armazenadas foram
+comprovadamente seguras de armazenar, uma vez, pelo processo que as
+renderizou.
+
+## Próximos passos
+
+- [Representações do RenderCache](render-cache-representations.md) - o que é
+  de fato armazenado, sob qual chave e em quais camadas
+- [Gerações do RenderCache](render-cache-generations.md) - como uma cópia
+  armazenada deixa de estar atual
+- [Cache](cache.md) - o armazenamento chave-valor explícito com o qual este
+  capítulo contrasta
+- [Live](live.md) - os documentos dos quais uma representação costurada é
+  recortada

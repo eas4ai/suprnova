@@ -59,6 +59,11 @@
     - [Eventos enviados pelo servidor](sse.md)
     - [WebSockets](websockets.md)
     - [Live](live.md)
+    - [RenderCache](render-cache.md)
+    - [Representações do RenderCache](render-cache-representations.md)
+    - [Gerações do RenderCache](render-cache-generations.md)
+    - [Implantação do RenderCache](render-cache-deployment.md)
+    - [Operações do RenderCache](render-cache-operations.md)
     - [Idempotência](idempotency.md)
     - [Tempo limite](timeout.md)
     - [Sinalizadores de recursos](feature-flags.md)
@@ -123,6 +128,6 @@
     - [Variáveis de ambiente](env-vars.md)
     - [Glossário](glossary.md)
 
-*[Documentação da API (rustdoc)](https://docs.rs/suprnova) - quando publicada.*
 ---
 
+*[Documentação da API (rustdoc)](https://docs.rs/suprnova) - quando publicada.*
