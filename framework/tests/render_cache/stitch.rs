@@ -440,6 +440,16 @@ async fn a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit() {
     )
     .await;
     assert_eq!(published.status, StatusCode::OK, "{}", published.text());
+    // Pins `lead_render`'s half of the override, which nothing else does:
+    // `no-store` must never reach a Composite with no per-principal bytes in
+    // it, on the publishing render any more than on the hits below.
+    assert!(
+        published
+            .header("cache-control")
+            .expect("cache-control")
+            .starts_with("private, max-age="),
+        "the render that published a zero-slot Composite keeps the class's private freshness"
+    );
     let before = handler_renders(SEED_ONLY_NONCE_PATH);
     let first = dispatch(
         &harness,
