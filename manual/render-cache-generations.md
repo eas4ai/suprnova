@@ -13,18 +13,17 @@ recorded as depending on, how coarse those dependencies really are, what the
 framework cannot see and therefore cannot invalidate, how the coherence
 check is paid for on a hit, which request rebuilds when several want the
 same entry at once, and what a visitor is served in the window between "no
-longer current" and "rebuilt". Every claim below is held down by
-a named test or a checked-in measurement; the dogfood examples are routes in
+longer current" and "rebuilt". Every claim below is held down by a named
+test or a checked-in measurement; the dogfood examples are routes in
 `app/src/live/mod.rs` proved by `app/tests/live_render_cache.rs`.
 
 ## What a render is recorded as depending on
 
 While a render runs, a request-scoped collector records each dependency it
-can name: a table read, a record read by primary key, a query
-class, a relation, a configuration identity, a feature, a locale, a route,
-and one always-present `Broad` identity that every representation observes.
-Reads through the ORM and the query builder record themselves; you write
-nothing.
+can name: a table read, a record read by primary key, a query class, a
+relation, a configuration identity, a feature, a locale, a route, and one
+always-present `Broad` identity that every representation observes. Reads
+through the ORM and the query builder record themselves; you write nothing.
 
 `/live/todos` is the whole pattern in one handler:
 
@@ -219,8 +218,7 @@ which picks exactly one of them:
 
 `concurrent_misses_render_once_and_waiters_reuse_the_publication` proves the
 ordinary case end to end - two concurrent misses, one render, identical
-bodies - and
-`one_leader_per_key_and_fence_with_bounded_waiters` in
+bodies - and `one_leader_per_key_and_fence_with_bounded_waiters` in
 `crates/suprnova-live/tests/render_cache_singleflight.rs` proves the cap
 directly against the coordinator: past its waiter limit, admission answers
 `Bypass`.

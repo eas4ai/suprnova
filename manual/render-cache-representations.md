@@ -14,8 +14,9 @@ served hit carries, the four freshness states it can be in, how it answers
 `If-None-Match` and `HEAD`, and what `PrivateCached` and
 `PublicShellStitched` actually store. *Why* a representation leaves the
 fresh band - a write, an epoch advance - is the next chapter's subject; here
-it is enough that the bands exist and that one representation does. Every example below is a route in this repository's
-dogfood application (`app/src/live/mod.rs`) and is proved by a named test in
+it is enough that the bands exist and that one representation does. Every
+example below is a route in this repository's dogfood application
+(`app/src/live/mod.rs`) and is proved by a named test in
 `app/tests/live_render_cache.rs`.
 
 ## Two entry forms
