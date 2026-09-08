@@ -174,6 +174,13 @@ a ratchet over the seven RenderCache-set sources rather than the whole
 manual, which has 1,591 pre-existing problems across 198 files; auditing
 those is a translation question outside this plan.
 
+That wiring is proved as far as one tier: the repository gate's default tier
+passed on the branch head on 2026-09-08, run
+`20260908T084935.854153Z-3938239-6292fa52` over tree `9ff1510b`, after two
+environmental reruns recorded in the plan's own ledger. `live-contracts` and
+`live-browser` are default-tier steps and ran in it; `live-gate` is a
+full-tier step and did not.
+
 The Plan B final review's parked list was swept item by item against the
 current code: twelve of the fifteen were fixed, two were already closed by
 earlier work on this branch, and one (`StitchSlot::parse` running per slot
@@ -181,11 +188,12 @@ per hit) was ruled not a defect with its reasoning and cost recorded.
 
 ### What this entry does not claim
 
-The default and full repository gate tiers for this branch are the closing
-task's, and their run identifiers, exit codes, and durations belong in its
-report rather than here: a ledger line naming them would change the tree they
-covered. Calling iteration 005 complete is a separate decision and is not
-made by this plan.
+The full repository gate tier has not run for this branch. Nothing here
+claims MSRV, the feature matrix, the release smoke, or this crate's own gate
+as passing on it; the default-tier run named above is the only gate evidence
+this entry carries, and the closing task's report is where the rest belongs,
+with its exit codes and durations. Calling iteration 005 complete is a
+separate decision and is not made by this plan.
 
 ## 2026-09-07 -- RenderCache Tier 1 and Tier 2 providers
 
