@@ -69,7 +69,10 @@ route renders again.
 
 **On the node that runs it**, the effect is immediate: the command drops
 that process's epoch lease and clears its in-process tier, so its very next
-request derives keys under the new epoch and finds nothing. **On any other
+request derives keys under the new epoch and finds nothing. (That last
+clause holds while the epoch only moves forward, which is the ordinary case;
+after a database restore the advanced value may be one the deployment has
+used before, so see "Restoring the database" below.) **On any other
 node**, the ledger has moved but that process still holds its old leased
 epoch and its own L0, and it catches up at its next authority read -
 immediately under `CoherenceMode::Authority`, and up to `max_age_ms` later
@@ -210,11 +213,10 @@ middleware registered globally after the install sits outside the route's
 own chain, so it is reached on a stitched hit exactly as on a miss. On such
 a route the counter cannot carry the "no handler ran" claim at all.
 
-Assert instead on something only an assembled document can produce, which is
-what
-`the_dashboard_is_stitched_per_principal_from_one_shared_shell` does: the
-stored entry is `EntryKind::Composite` with the expected slot count
-(`inspect_route_for_test`), the response carries
+Assert instead on something only an assembled document can produce, which
+is what `the_dashboard_is_stitched_per_principal_from_one_shared_shell`
+does: the stored entry is `EntryKind::Composite` with the expected slot
+count (`inspect_route_for_test`), the response carries
 `Cache-Control: private, no-store` - a value nothing but the composite
 responder writes, and only after a whole document has been assembled - and
 two principals' documents differ in their island tags and nowhere else. That
@@ -355,11 +357,10 @@ fresh interval (`freshness_state` in
 `framework/src/render_cache/middleware.rs`), and on a route that declares a
 stale-servable window that lands it in the stale-servable band. **The
 visitor is served the pre-restore copy once, under `Warning`, while the
-rebuild runs behind the request.** That is the
-same handoff [RenderCache Generations](render-cache-generations.md)
-describes and step 4 of
-`an_orm_write_invalidates_the_todos_document_through_generations` asserts.
-A `PrivateCached` route never does this - its dead edge is its fresh edge -
+rebuild runs behind the request.** That is the same handoff
+[RenderCache Generations](render-cache-generations.md) describes, and step 4
+of `an_orm_write_invalidates_the_todos_document_through_generations` asserts
+it. A `PrivateCached` route never does this - its dead edge is its fresh edge -
 and neither does a route that declared no stale-servable window; both
 rebuild in the foreground.
 
@@ -394,13 +395,16 @@ So the procedure, in order:
    `DELETE FROM suprnova_render_entries`, or delete the Redis keys matching
    `<prefix>entry:*` - whichever tier the profile configures. Do this rather
    than waiting for a sweep, for the reason above.
-3. **Cover every node's L0.** The advance only cleared the node that ran it.
-   Either restart the other nodes - a fresh process has an empty L0 and no
-   leased epoch, so its first request reads the restored authority - or run
-   `render-cache:epoch-advance` on each of them, which clears each one's L0
-   as it runs. The second option bumps the ledger's epoch once per node,
-   which costs nothing: the epoch only ever moves forward from there, and
-   every node ends up reading the last value. Both are safe; the restart is
+3. **Cover every node's L0, with traffic still off.** The advance only
+   cleared the node that ran it, so until this step is done an uncovered
+   sibling can still serve a pre-restore entry once - which is why traffic
+   stays off until here, not until step 2. Either restart the other nodes -
+   a fresh process has an empty L0 and no leased epoch, so its first request
+   reads the restored authority - or run `render-cache:epoch-advance` on
+   each of them, which clears each one's L0 as it runs. The second option
+   bumps the ledger's epoch once per node, which costs nothing: the epoch
+   only ever moves forward from there, and every node ends up reading the
+   last value. Both are safe; the restart is
    the simpler one to reason about, and it is the only one that needs no
    `Lease`-mode arithmetic.
 

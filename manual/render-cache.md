@@ -85,11 +85,11 @@ background rebuild runs, and how far past it the stored copy may be served
 if a foreground rebuild fails outright. The two windows are not stacked; see
 [RenderCache Representations](render-cache-representations.md).
 
-`RepresentationClass` runs from widest to
-narrowest sharing: `PublicShared` (one representation for everyone who
-matches the declared variance), `PublicShellStitched` (a Live document whose
-shared shell is stored once and whose islands are re-mounted for whoever is
-asking; see [Representations](render-cache-representations.md)),
+`RepresentationClass` runs from widest to narrowest sharing: `PublicShared`
+(one representation for everyone who matches the declared variance),
+`PublicShellStitched` (a Live document whose shared shell is stored once and
+whose islands are re-mounted for whoever is asking; see
+[Representations](render-cache-representations.md)),
 `PrivateCached` (one representation per signed-in visitor or tenant), and
 `Uncacheable`.
 
@@ -347,8 +347,9 @@ depends on something no key could safely partition by.
   the process that runs it the effect is immediate: it drops that process's
   epoch lease and clears its in-process tier the same instant. Another node
   catches up at its next authority read, and its file-backed tier keeps its
-  old files until the periodic or manual sweep reclaims them, which is disk
-  hygiene rather than a correctness concern. Reach for this when something
+  old files until a sweep reclaims them - the automatic one every 256th
+  publication, or an explicit `RenderCache::sweep()` - which is disk hygiene
+  rather than a correctness concern. Reach for this when something
   is wrong with cached content and you cannot wait for individual entries to
   expire; on more than one node, see
   [RenderCache Operations](render-cache-operations.md).

@@ -115,7 +115,7 @@ they are defined; the other chapters use them without restating them.
 |---|---|
 | `ETag` | A strong validator over exactly the bytes sent. A client may send it back as `If-None-Match`. |
 | `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. An assembled `Composite` document with at least one island is `private, no-store`. |
-| `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`, `Encoding` implies `Accept-Encoding`. A dimension that implies none adds nothing. The names are emitted in the descriptor's own order, not the order you declared them. |
+| `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`, `Encoding` implies `Accept-Encoding`. A dimension that implies none adds nothing. The names are emitted sorted by header name, not in the order you declared the dimensions. |
 | `Age` | Whole seconds since the representation was published. Its presence is the simplest local proof that a response came out of the store. |
 | `Warning` | `110 - "Response is Stale"`, and only on a response served past its fresh interval. |
 
