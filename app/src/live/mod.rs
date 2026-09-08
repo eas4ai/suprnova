@@ -241,7 +241,10 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     // is not a convention that could drift. Freshness is a minute with no
     // stale service: a private entry has no stale band in any case (its
     // dead edge is its fresh edge), and declaring one would only read as a
-    // promise the cache does not keep.
+    // promise the cache does not keep. The principal is resolved inside the
+    // render, as an identity read, so the entry observes the `users` table
+    // the provider resolved it from and a change to that person's own row
+    // invalidates their page rather than waiting out the minute.
     let router = router.try_render_cache(
         ME_PATH,
         RenderCachePolicy::builder(RepresentationClass::PrivateCached)

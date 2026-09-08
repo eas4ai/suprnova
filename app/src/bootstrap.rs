@@ -31,11 +31,10 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
-    App, Auth, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError,
-    IncludeMiddleware, Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData,
-    LocaleMiddleware, LocaleShare, Middleware, Next, Prop, Request, Response, S3Config,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider, async_trait, bind,
-    global_middleware, singleton,
+    App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
+    Prop, S3Config, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
+    bind, global_middleware, singleton,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -342,12 +341,6 @@ pub fn register_http_stack() {
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // Directly after the session, and well before the RenderCache
-    // middleware every route hook appends behind this stack. See
-    // `ResolvePrincipal`'s own documentation for why the order is the
-    // whole point.
-    global_middleware!(ResolvePrincipal);
-
     global_middleware!(
         LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
     );
@@ -425,43 +418,5 @@ impl InertiaSharedData for AppSharedData {
             })),
         );
         Ok(shared)
-    }
-}
-
-/// Resolves the signed-in principal once per request, before anything that
-/// keys or caches by it.
-///
-/// `Auth::id()` falls back to reading the session whenever nothing has yet
-/// resolved a user for this request, and a session read forces the render
-/// it happens inside to `Uncacheable` whatever variance the route declared
-/// (see the RenderCache manual's classification rules). So a route that
-/// means to store one representation per signed-in visitor cannot, as long
-/// as the first thing to ask who is asking is the route's own gate running
-/// inside the render.
-///
-/// Resolving here moves that session read outside every render: the
-/// request-scoped authentication cache is already warm when the cache
-/// middleware and the route's gate run, both read the principal from it,
-/// and what the collector sees is an identity read - which is exactly what
-/// `RepresentationClass::PrivateCached` with `VarianceDimension::Principal`
-/// is the declaration for. `/live/me` is the route in this application that
-/// depends on it.
-///
-/// It costs one user lookup per signed-in request and none for an anonymous
-/// one, since `Auth::user` resolves nothing without an identifier to
-/// resolve. A gated route pays nothing extra either: it would have resolved
-/// the same user itself, and the resolution is cached for the rest of the
-/// request.
-struct ResolvePrincipal;
-
-#[async_trait]
-impl Middleware for ResolvePrincipal {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        // A failed or absent resolution is deliberately not answered here.
-        // This middleware grants nothing and refuses nothing; the gates
-        // downstream decide what an unresolved principal means, and they
-        // run whether or not this warmed the cache.
-        let _ = Auth::user().await;
-        next(request).await
     }
 }

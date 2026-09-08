@@ -429,6 +429,20 @@ async fn an_orm_write_invalidates_the_todos_document_through_generations() {
         counted + 1,
         "the render lists the todo the write added: {rebuilt_text}"
     );
+
+    // 7. And the cache is current again: what that render published serves
+    //    the next request without reaching the handler, and without the
+    //    stale marking, so the route came all the way back to a plain hit.
+    let before = render_counter::renders();
+    let settled = get(&app, "/live/todos", None).await;
+    assert_eq!(settled.status, StatusCode::OK);
+    assert_eq!(
+        render_counter::renders(),
+        before,
+        "the republished entry serves the next request in turn"
+    );
+    assert_eq!(settled.body, rebuilt.body);
+    assert!(settled.header("warning").is_none());
 }
 
 /// The number `live/todos.html` printed, so a test asserts on what the
@@ -507,11 +521,59 @@ async fn the_private_document_is_cached_per_principal_and_never_crosses() {
     assert!(curie_first.text().contains("Marie Curie"));
 
     // 5. An anonymous visitor is redirected before the handler runs, so no
-    //    signed-in document is ever a candidate to serve them.
+    //    signed-in document is ever a candidate to serve them - and nothing
+    //    is stored under the anonymous key either. The second anonymous
+    //    request proves that the way this suite proves everything else: the
+    //    counting middleware sits between the cache middleware and the
+    //    route's own chain, so a request the cache answered would never
+    //    reach it, and both of these do. A `302` is refused by eligibility
+    //    before any of the private machinery is consulted, which is why the
+    //    refusal costs a render each time rather than becoming an entry.
+    let before = render_counter::renders();
     let anonymous = get(&app, "/live/me", None).await;
     assert_eq!(anonymous.status, StatusCode::FOUND);
     assert_eq!(anonymous.header("location"), Some("/login"));
     assert!(anonymous.body.is_empty());
+    let again = get(&app, "/live/me", None).await;
+    assert_eq!(again.status, StatusCode::FOUND);
+    assert_eq!(again.header("location"), Some("/login"));
+    assert_eq!(
+        render_counter::renders(),
+        before + 2,
+        "the redirect is never stored: each anonymous request is forwarded again"
+    );
+
+    // 6. And the anonymous traffic poisoned nothing: Ada's page is hers
+    //    again, and serving it needs no second render.
+    //
+    //    Ada's first entry is deliberately not the one asserted on here.
+    //    Seeding Marie Curie in step 4 inserted a `users` row, and the
+    //    handler resolves its principal through the provider that reads that
+    //    table, so every stored `/live/me` entry observed the write and
+    //    went out of date - a `PrivateCached` entry has no stale band, so the
+    //    next request for each rebuilds in the foreground. That is the
+    //    dependency contract doing its job, not the anonymous requests doing
+    //    damage, and the pair below separates the two: one render to
+    //    republish, then a hit whose body still names nobody but Ada.
+    let before = render_counter::renders();
+    let republished = get(&app, "/live/me", Some(&ada)).await;
+    assert_eq!(republished.status, StatusCode::OK, "{}", republished.text());
+    assert_eq!(render_counter::renders(), before + 1);
+    let before = render_counter::renders();
+    let ada_after = get(&app, "/live/me", Some(&ada)).await;
+    assert_eq!(
+        render_counter::renders(),
+        before,
+        "Ada is served her own stored document again, with no render"
+    );
+    assert_eq!(ada_after.body, republished.body);
+    assert!(
+        ada_after.text().contains("Ada Lovelace")
+            && !ada_after.text().contains("Grace Hopper")
+            && !ada_after.text().contains("Marie Curie"),
+        "{}",
+        ada_after.text()
+    );
 }
 
 /// Both requests a client makes when it already has a copy are answered out
@@ -676,6 +738,14 @@ async fn the_operator_commands_inspect_without_a_body_and_advance_the_epoch() {
     //    reads out of application logging.
     let key = RenderCache::key_for_route_for_test("/live/todos", &[], None);
     assert!(key.starts_with("rk1."), "{key}");
+    console(&["render-cache:inspect", &key])
+        .await
+        .expect("render-cache:inspect is reachable through the console entry point");
+    // The text that command printed. `inspect_report_for_test` is the
+    // framework's own seam for exactly this: it builds the string
+    // `run_inspect_command` hands to `println!`, so the assertions below are
+    // about what the operator was shown, without capturing process stdout -
+    // which this test cannot do without reaching for `unsafe`.
     let report = inspect_report_for_test(&key)
         .await
         .expect("render-cache:inspect");
@@ -709,6 +779,9 @@ async fn the_operator_commands_inspect_without_a_body_and_advance_the_epoch() {
         advanced.starts_with("epoch advanced to "),
         "the report names the epoch it advanced to: {advanced}"
     );
+    console(&["render-cache:epoch-advance"])
+        .await
+        .expect("render-cache:epoch-advance is reachable through the console entry point");
     let before = render_counter::renders();
     let after = get(&app, "/live/todos", None).await;
     assert_eq!(after.status, StatusCode::OK, "{}", after.text());
@@ -717,4 +790,21 @@ async fn the_operator_commands_inspect_without_a_body_and_advance_the_epoch() {
         before + 1,
         "every pre-advance entry is unreachable, so the route renders again"
     );
+}
+
+/// Runs one console command exactly as `app/src/bin/console.rs` does: the
+/// framework's public `dispatch_argv_with_init` over an argv whose first
+/// element is the binary name, resolving through the same registry the
+/// operator's `console <name>` reaches.
+///
+/// The initializer is empty rather than `app::bootstrap::register`, which
+/// the binary passes: the test harness has already installed this process's
+/// database, container bindings, and RenderCache runtime, and running the
+/// real bootstrap on top of them would connect a second database and
+/// replace what the requests above were served from.
+async fn console(argv: &[&str]) -> Result<(), suprnova::FrameworkError> {
+    let argv: Vec<String> = std::iter::once("console".to_owned())
+        .chain(argv.iter().map(|part| (*part).to_owned()))
+        .collect();
+    suprnova::console::dispatch_argv_with_init(argv, || async {}).await
 }

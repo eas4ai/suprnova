@@ -244,6 +244,17 @@ async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
     http_stack_once();
     let mut render_cache_clock = None;
     let mut config = RenderCacheConfig::from_env().expect("render cache configuration");
+    // Pinned on every boot, whatever the variant: an ambient
+    // `RENDER_CACHE_PROFILE`, `RENDER_CACHE_L1`, `RENDER_CACHE_L1_DIR`, or
+    // `RENDER_CACHE_COORDINATOR` must not change which providers this suite
+    // installs - `/live/todos` declares `l0_and_l1`, so an inherited file or
+    // Redis tier would silently move where these tests read from.
+    // `CacheBoot::DatabaseProfile` overrides both again below, deliberately.
+    config.l1 = L1Config::Disabled;
+    config.coordinator = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
     match cache {
         CacheBoot::FromEnv => {}
         CacheBoot::TestClock => {
