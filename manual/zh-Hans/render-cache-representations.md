@@ -100,7 +100,7 @@ Database 配置档的提供者上启动应用，用中间件派生出的那个�
 | 字段 | 它说明什么 |
 |---|---|
 | `ETag` | 一个正好覆盖所发送字节的强验证器。客户端可以把它作为 `If-None-Match` 送回来。 |
-| `Cache-Control` | 默认对每一个类别都是 `private`。一个设置了 `SharedCachePolicy::SMaxAge` 的 `PublicShared` 路由还会拿到 `public` 和 `s-maxage`，这是共享代理唯一一次被邀请保留这些字节的方式。一份至少含有一个岛屿的、已组装的 `Composite` 文档则是 `private, no-store`。 |
+| `Cache-Control` | 默认对每一个类别都是 `private`。一个设置了 `SharedCachePolicy::SMaxAge` 的 `PublicShared` 路由还会拿到 `public` 和 `s-maxage`，这是共享代理唯一一次被邀请保留这些字节的方式。一份至少含有一个岛屿的 `Composite` 文档则是 `private, no-store`，无论它是在一次命中上被组装出来的，还是由发布那个外壳的那次渲染产生的。 |
 | `Vary` | 由那些隐含某个请求头的已声明差异化维度推导而来：`Locale` 隐含 `Accept-Language`，`Media` 隐含 `Accept`，`Encoding` 隐含 `Accept-Encoding`。一个不隐含任何请求头的维度什么也不会添加。这些名字是按头名称排序发出的，而不是按你声明维度的顺序。 |
 | `Age` | 自该表示发布以来经过的整秒数。它的出现是“一个响应出自存储”最简单的本地证据。 |
 | `Warning` | `110 - "Response is Stale"`，并且只出现在越过其新鲜区间之后才被服务的响应上。 |
@@ -121,8 +121,9 @@ Database 配置档的提供者上启动应用，用中间件派生出的那个�
 读到 `private, max-age=300`，并要求第二个请求带有一个 `Age` 头；
 `the_private_document_is_cached_per_principal_and_never_crosses` 从 `/live/me`
 上读到 `private, max-age=60`；
-`the_dashboard_is_stitched_per_principal_from_one_shared_shell` 从一份组装出的
-仪表盘上读到 `private, no-store`，而这个取值除了复合响应器之外没有别的东西会写。
+`the_dashboard_is_stitched_per_principal_from_one_shared_shell` 从仪表盘上读到
+`private, no-store`：发布它外壳的那次渲染上是这个值，之后那次组装出来的命中上也
+是，因为这个取值跟着字节里装的是什么走，而不是跟着哪条代码路径产生了它们走。
 
 ## 四种新鲜度状态
 
@@ -271,10 +272,12 @@ router.try_render_cache(
 东西被服务之前，都会被转发穿过这个路由的整条中间件链，所以一个匿名访客拿到的是
 重定向，而绝不是一份组装好的文档。
 
-一份至少带有一个槽位的、已组装的文档会被发以
-`Cache-Control: private, no-store`。它在为某一次请求重新派生出的权限之下装着
+一份至少带有一个槽位的缝合文档会被发以
+`Cache-Control: private, no-store`：发布外壳的那次渲染上是这样，之后每一次组装上
+也是。它在为某一次请求重新派生出的权限之下装着
 某一个主体的岛屿，而一个 `max-age` 会让一个共享的浏览器配置把它们重放给下一个
-坐下来的人。一个零槽位的 `Composite` 根本不携带任何按主体划分的字节，只带一个
+坐下来的人；哪条路径产生了这些字节，并不改变字节里装的是什么。一个零槽位的
+`Composite` 根本不携带任何按主体划分的字节，只带一个
 按请求生成的 nonce，所以它像别的私有表示一样，保留这个类别的私有 `max-age`；
 `framework/tests/render_cache/stitch.rs` 里的
 `a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit` 断言了

@@ -239,16 +239,18 @@ zusammengesetzten Treffer genauso erreicht wie bei einem Fehltreffer. Auf
 einer solchen Route kann der Zähler die Behauptung „es lief kein Handler“
 überhaupt nicht tragen.
 
-Sichern Sie stattdessen etwas zu, das nur ein zusammengesetztes Dokument
-erzeugen kann, und genau das tut
+Sichern Sie stattdessen zu, was der Store hält und woraus das ausgelieferte
+Dokument besteht, und genau das tut
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell`: Der
 gespeicherte Eintrag ist ein `EntryKind::Composite` mit der erwarteten
-Slot-Zahl (`inspect_route_for_test`), die Antwort trägt
-`Cache-Control: private, no-store` - den Wert, den der Composite-Responder
-auf einer Zusammensetzung mit Slots festlegt, und erst, nachdem ein ganzes
-Dokument zusammengesetzt wurde -, und die Dokumente zweier Principals
-unterscheiden sich in ihren Insel-Tags und nirgends sonst. „Mit Slots“ ist
-das entscheidende Wort: Ein `Composite` ohne Slots behält stattdessen das
+Slot-Zahl (`inspect_route_for_test`), und die Dokumente zweier Principals
+unterscheiden sich in ihren Insel-Tags und nirgends sonst. Die Antwort trägt
+außerdem `Cache-Control: private, no-store`, aber lesen Sie das als das, was
+es ist: die Direktive der ganzen Klasse, festgelegt bei dem Render, der die
+Shell veröffentlicht, ebenso wie bei jeder Zusammensetzung danach, denn sie
+richtet sich danach, was die Bytes enthalten, und nicht danach, welcher Pfad
+sie erzeugt hat. „Mit Slots“ ist
+dabei das entscheidende Wort: Ein `Composite` ohne Slots behält stattdessen das
 private `max-age` der Klasse, sodass jene Zusicherung zu einer Route mit
 Inseln darin passt und nicht zu einer ohne. Jener Test sichert bei einem
 Treffer `renders() == before + 1` zu und sagt in seiner eigenen Notiz, warum

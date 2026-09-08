@@ -236,16 +236,17 @@ dehors de la chaîne propre à la route, il est donc atteint sur un hit cousu
 exactement comme sur un miss. Sur une telle route, le compteur ne peut pas
 du tout porter l'affirmation « aucun handler ne s'est exécuté ».
 
-Assertez plutôt sur quelque chose que seul un document assemblé peut
-produire, ce que fait
+Assertez plutôt sur ce que le magasin détient et sur ce dont est fait le
+document servi, ce que fait
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` : l'entrée
 stockée est un `EntryKind::Composite` avec le nombre d'emplacements attendu
-(`inspect_route_for_test`), la réponse porte
-`Cache-Control: private, no-store` - la valeur que le répondeur composite
-épingle sur un assemblage doté d'emplacements, et seulement après qu'un
-document entier a été assemblé - et les documents de deux principaux
-diffèrent par leurs balises d'îlot et nulle part ailleurs. « Doté
-d'emplacements » est le mot qui compte : un `Composite` à zéro emplacement
+(`inspect_route_for_test`), et les documents de deux principaux
+diffèrent par leurs balises d'îlot et nulle part ailleurs. La réponse porte
+aussi `Cache-Control: private, no-store`, mais lisez cela pour ce que c'est :
+la directive de toute la classe, épinglée sur le rendu qui publie la coque
+autant que sur chaque assemblage qui suit, car elle suit ce que contiennent
+les octets et non le chemin qui les a produits. « Doté
+d'emplacements » est ici le mot qui compte : un `Composite` à zéro emplacement
 garde à la place le `max-age` privé de la classe, si bien que cette
 assertion convient à une route qui contient des îlots et non à une route
 qui n'en contient pas. Ce test asserte `renders() == before + 1` sur un

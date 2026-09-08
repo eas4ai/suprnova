@@ -230,15 +230,16 @@ própria da rota, então ele é alcançado em um hit costurado exatamente como e
 um miss. Em uma rota dessas o contador não consegue sustentar a afirmação de
 "nenhum handler rodou", de forma alguma.
 
-Afirme, em vez disso, sobre algo que apenas um documento montado consegue
-produzir, que é o que
+Afirme, em vez disso, sobre o que o armazenamento guarda e sobre do que o
+documento servido é feito, que é o que
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` faz: a
 entrada armazenada é um `EntryKind::Composite` com a contagem de slots
-esperada (`inspect_route_for_test`), a resposta carrega
-`Cache-Control: private, no-store` - o valor que o respondedor composto fixa
-em uma montagem com slots, e apenas depois que um documento inteiro foi
-montado - e os documentos de dois principais diferem nas suas tags de ilha e
-em nenhum outro lugar. A palavra operativa é "com slots": um `Composite` de
+esperada (`inspect_route_for_test`) e os documentos de dois principais
+diferem nas suas tags de ilha e em nenhum outro lugar. A resposta também
+carrega `Cache-Control: private, no-store`, mas leia isso pelo que é: a
+diretiva da classe inteira, fixada tanto na renderização que publica o shell
+quanto em cada montagem posterior, porque ela segue o que os bytes guardam e
+não o caminho que os produziu. A palavra operativa ali é "com slots": um `Composite` de
 zero slots mantém, em vez disso, o `max-age` privado da classe, então aquela
 afirmação serve a uma rota com ilhas nela e não a uma sem elas. Aquele teste
 afirma `renders() == before + 1` em um hit, e diz na sua própria nota por que

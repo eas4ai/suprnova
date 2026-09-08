@@ -122,7 +122,7 @@ enunciarlos.
 | Campo | Qué dice |
 |---|---|
 | `ETag` | Un validador fuerte sobre exactamente los bytes enviados. Un cliente puede devolverlo como `If-None-Match`. |
-| `Cache-Control` | `private` para toda clase por defecto. Una ruta `PublicShared` que establece `SharedCachePolicy::SMaxAge` obtiene además `public` y `s-maxage`, que es la única manera de invitar alguna vez a un proxy compartido a conservar los bytes. Un documento `Composite` ensamblado con al menos una isla es `private, no-store`. |
+| `Cache-Control` | `private` para toda clase por defecto. Una ruta `PublicShared` que establece `SharedCachePolicy::SMaxAge` obtiene además `public` y `s-maxage`, que es la única manera de invitar alguna vez a un proxy compartido a conservar los bytes. Un documento `Composite` con al menos una isla es `private, no-store`, tanto si se ensambló en un acierto como si lo produjo el render que publicó el shell. |
 | `Vary` | Derivada de las dimensiones de varianza declaradas que impliquen una cabecera de petición: `Locale` implica `Accept-Language`, `Media` implica `Accept`, `Encoding` implica `Accept-Encoding`. Una dimensión que no implique ninguna no añade nada. Los nombres se emiten ordenados por nombre de cabecera, no en el orden en que declaraste las dimensiones. |
 | `Age` | Segundos enteros desde que se publicó la representación. Su presencia es la prueba local más simple de que una respuesta salió del store. |
 | `Warning` | `110 - "Response is Stale"`, y solo en una respuesta servida más allá de su intervalo de frescura. |
@@ -149,8 +149,9 @@ segunda petición;
 `the_private_document_is_cached_per_principal_and_never_crosses` lee
 `private, max-age=60` en `/live/me`;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` lee
-`private, no-store` en un panel ensamblado, que es el valor que nada salvo
-el respondedor de compuestos escribe.
+`private, no-store` en el panel, tanto en el render que publica su shell como
+en el acierto ensamblado posterior, porque ese valor sigue lo que contienen
+los bytes y no la ruta de código que los produjo.
 
 ## Los cuatro estados de frescura
 
@@ -328,11 +329,13 @@ un acierto cosido se reenvía por toda la cadena de middleware de la ruta
 antes de servir nada, así que un visitante anónimo recibe la redirección,
 nunca un documento ensamblado.
 
-A un documento ensamblado con al menos un slot se le envía
-`Cache-Control: private, no-store`. Contiene las islas de un principal bajo
+A un documento cosido con al menos un slot se le envía
+`Cache-Control: private, no-store`, tanto en el render que publica el shell
+como en cada ensamblaje posterior. Contiene las islas de un principal bajo
 autoridad vuelta a derivar para una petición, y un `max-age` dejaría que un
 perfil de navegador compartido se las reprodujera a quien se sentara
-después. Un `Composite` sin slots no lleva byte alguno específico de un
+después; qué ruta produjo los bytes no cambia lo que hay en ellos. Un
+`Composite` sin slots no lleva byte alguno específico de un
 principal, solo un nonce por petición, así que conserva el `max-age` privado
 de la clase igual que cualquier otra representación privada;
 `a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit`, en

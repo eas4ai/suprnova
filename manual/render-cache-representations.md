@@ -114,7 +114,7 @@ they are defined; the other chapters use them without restating them.
 | Field | What it says |
 |---|---|
 | `ETag` | A strong validator over exactly the bytes sent. A client may send it back as `If-None-Match`. |
-| `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. An assembled `Composite` document with at least one island is `private, no-store`. |
+| `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. A `Composite` document with at least one island is `private, no-store`, whether it was assembled on a hit or rendered by the leader that published the shell. |
 | `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`, `Encoding` implies `Accept-Encoding`. A dimension that implies none adds nothing. The names are emitted sorted by header name, not in the order you declared the dimensions. |
 | `Age` | Whole seconds since the representation was published. Its presence is the simplest local proof that a response came out of the store. |
 | `Warning` | `110 - "Response is Stale"`, and only on a response served past its fresh interval. |
@@ -138,8 +138,9 @@ the second request;
 `the_private_document_is_cached_per_principal_and_never_crosses` reads
 `private, max-age=60` off `/live/me`;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` reads
-`private, no-store` off an assembled dashboard, which is the value nothing
-but the composite responder writes.
+`private, no-store` off the dashboard on the render that publishes its shell
+as well as on the assembled hit after it, because that value follows what the
+bytes hold and not which path produced them.
 
 ## The four freshness states
 
@@ -306,10 +307,12 @@ every hit: a stitched hit is forwarded through the route's whole middleware
 chain before anything is served, so an anonymous visitor gets the redirect,
 never an assembled document.
 
-An assembled document with at least one slot is sent
-`Cache-Control: private, no-store`. It holds one principal's islands under
+A stitched document with at least one slot is sent
+`Cache-Control: private, no-store`, on the render that publishes the shell as
+much as on every assembly after it. It holds one principal's islands under
 authority re-derived for one request, and a `max-age` would let a shared
-browser profile replay them to whoever sits down next. A zero-slot `Composite`
+browser profile replay them to whoever sits down next; which path produced the
+bytes does not change what is in them. A zero-slot `Composite`
 carries no per-principal bytes at all, only a per-request nonce, so it keeps
 the class's private `max-age` like any other private representation;
 `a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit` in

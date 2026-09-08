@@ -127,7 +127,7 @@ darzulegen.
 | Feld | Was es aussagt |
 |---|---|
 | `ETag` | Ein starker Validator über genau die gesendeten Bytes. Ein Client darf ihn als `If-None-Match` zurücksenden. |
-| `Cache-Control` | Standardmäßig `private` für jede Klasse. Eine `PublicShared`-Route, die `SharedCachePolicy::SMaxAge` setzt, erhält zusätzlich `public` und `s-maxage`, und nur so wird ein geteilter Proxy je eingeladen, die Bytes zu behalten. Ein zusammengesetztes `Composite`-Dokument mit mindestens einer Insel ist `private, no-store`. |
+| `Cache-Control` | Standardmäßig `private` für jede Klasse. Eine `PublicShared`-Route, die `SharedCachePolicy::SMaxAge` setzt, erhält zusätzlich `public` und `s-maxage`, und nur so wird ein geteilter Proxy je eingeladen, die Bytes zu behalten. Ein `Composite`-Dokument mit mindestens einer Insel ist `private, no-store`, gleichgültig ob es bei einem Treffer zusammengesetzt oder von dem Render erzeugt wurde, der die Shell veröffentlicht hat. |
 | `Vary` | Abgeleitet aus den deklarierten Varianzdimensionen, die einen Anfrage-Header implizieren: `Locale` impliziert `Accept-Language`, `Media` impliziert `Accept`, `Encoding` impliziert `Accept-Encoding`. Eine Dimension, die keinen impliziert, fügt nichts hinzu. Die Namen werden nach Header-Namen sortiert ausgegeben, nicht in der Reihenfolge, in der Sie die Dimensionen deklariert haben. |
 | `Age` | Ganze Sekunden seit der Veröffentlichung der Repräsentation. Sein Vorhandensein ist der einfachste lokale Nachweis dafür, dass eine Antwort aus dem Store kam. |
 | `Warning` | `110 - "Response is Stale"`, und nur auf einer Antwort, die über ihr Frische-Intervall hinaus ausgeliefert wird. |
@@ -153,8 +153,10 @@ auf der zweiten Anfrage;
 `the_private_document_is_cached_per_principal_and_never_crosses` liest
 `private, max-age=60` von `/live/me`;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` liest
-`private, no-store` von einem zusammengesetzten Dashboard, und das ist der
-Wert, den nichts außer dem Composite-Responder schreibt.
+`private, no-store` vom Dashboard, und zwar bei dem Render, der dessen Shell
+veröffentlicht, ebenso wie bei dem zusammengesetzten Treffer danach, denn
+dieser Wert richtet sich danach, was die Bytes enthalten, und nicht danach,
+welcher Pfad sie erzeugt hat.
 
 ## Die vier Frischezustände
 
@@ -335,10 +337,12 @@ geleitet, bevor irgendetwas ausgeliefert wird, sodass ein anonymer Besucher
 die Umleitung bekommt und nie ein zusammengesetztes Dokument.
 
 Ein zusammengesetztes Dokument mit mindestens einem Slot wird mit
-`Cache-Control: private, no-store` gesendet. Es hält die Inseln eines
-Principals unter Autorität, die für eine Anfrage neu abgeleitet wurde, und
-ein `max-age` ließe ein geteiltes Browserprofil sie demjenigen wiedergeben,
-der sich als Nächstes davorsetzt. Ein `Composite` ohne Slots trägt
+`Cache-Control: private, no-store` gesendet - bei dem Render, der die Shell
+veröffentlicht, ebenso wie bei jeder Zusammensetzung danach. Es hält die
+Inseln eines Principals unter Autorität, die für eine Anfrage neu abgeleitet
+wurde, und ein `max-age` ließe ein geteiltes Browserprofil sie demjenigen
+wiedergeben, der sich als Nächstes davorsetzt; welcher Pfad die Bytes erzeugt
+hat, ändert nichts daran, was in ihnen steht. Ein `Composite` ohne Slots trägt
 überhaupt keine Bytes pro Principal, nur eine Nonce pro Anfrage, und behält
 deshalb das private `max-age` der Klasse wie jede andere private
 Repräsentation;

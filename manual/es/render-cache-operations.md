@@ -231,15 +231,16 @@ en un acierto cosido exactamente igual que en un fallo. En una ruta así el
 contador no puede sostener en absoluto la afirmación de «no se ejecutó
 ningún handler».
 
-Asevera en su lugar sobre algo que solo pueda producir un documento
-ensamblado, que es lo que hace
+Asevera en su lugar sobre lo que guarda el store y sobre de qué está hecho
+el documento servido, que es lo que hace
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell`: la entrada
 almacenada es `EntryKind::Composite` con el número de slots esperado
-(`inspect_route_for_test`), la respuesta lleva
-`Cache-Control: private, no-store` (el valor que el respondedor de
-compuestos fija en un ensamblaje con slots, y solo después de haber
-ensamblado un documento entero) y los documentos de dos principales
-difieren en sus etiquetas de isla y en ningún otro sitio. «Con slots» es la
+(`inspect_route_for_test`) y los documentos de dos principales
+difieren en sus etiquetas de isla y en ningún otro sitio. La respuesta lleva
+además `Cache-Control: private, no-store`, pero léelo por lo que es: la
+directiva de toda la clase, fijada tanto en el render que publica el shell
+como en cada ensamblaje posterior, porque sigue lo que contienen los bytes y
+no la ruta que los produjo. «Con slots» es ahí la
 expresión clave: un `Composite` sin slots conserva en su lugar el `max-age`
 privado de la clase, así que esa aseveración le va bien a una ruta con
 islas y no a una sin ellas. Esa prueba asevera `renders() == before + 1` en

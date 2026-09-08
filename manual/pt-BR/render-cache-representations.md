@@ -121,7 +121,7 @@ eles são definidos; os outros capítulos os usam sem repeti-los.
 | Campo | O que ele diz |
 |---|---|
 | `ETag` | Um validador forte sobre exatamente os bytes enviados. Um cliente pode devolvê-lo como `If-None-Match`. |
-| `Cache-Control` | `private` para toda classe, por padrão. Uma rota `PublicShared` que define `SharedCachePolicy::SMaxAge` também recebe `public` e `s-maxage`, que é a única forma de um proxy compartilhado ser algum dia convidado a guardar os bytes. Um documento `Composite` montado com pelo menos uma ilha é `private, no-store`. |
+| `Cache-Control` | `private` para toda classe, por padrão. Uma rota `PublicShared` que define `SharedCachePolicy::SMaxAge` também recebe `public` e `s-maxage`, que é a única forma de um proxy compartilhado ser algum dia convidado a guardar os bytes. Um documento `Composite` com pelo menos uma ilha é `private, no-store`, tanto se foi montado em um hit quanto se foi produzido pela renderização que publicou o shell. |
 | `Vary` | Derivado das dimensões de variância declaradas que implicam um cabeçalho de requisição: `Locale` implica `Accept-Language`, `Media` implica `Accept`, `Encoding` implica `Accept-Encoding`. Uma dimensão que não implica nenhum não adiciona nada. Os nomes são emitidos ordenados por nome de cabeçalho, e não na ordem em que você declarou as dimensões. |
 | `Age` | Segundos inteiros desde que a representação foi publicada. Sua presença é a prova local mais simples de que uma resposta saiu do armazenamento. |
 | `Warning` | `110 - "Response is Stale"`, e apenas em uma resposta servida além do seu intervalo de validade. |
@@ -146,8 +146,9 @@ segunda requisição;
 `the_private_document_is_cached_per_principal_and_never_crosses` lê
 `private, max-age=60` de `/live/me`;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` lê
-`private, no-store` de um painel montado, que é o valor que nada além do
-respondedor composto escreve.
+`private, no-store` do painel tanto na renderização que publica o seu shell
+quanto no hit montado que vem depois, porque esse valor segue o que os bytes
+guardam e não o caminho de código que os produziu.
 
 ## Os quatro estados de validade
 
@@ -326,10 +327,12 @@ encaminhado por toda a cadeia de middleware da rota antes de qualquer coisa
 ser servida, então um visitante anônimo recebe o redirecionamento, nunca um
 documento montado.
 
-Um documento montado com pelo menos um slot é enviado com
-`Cache-Control: private, no-store`. Ele guarda as ilhas de um principal sob
+Um documento costurado com pelo menos um slot é enviado com
+`Cache-Control: private, no-store`, tanto na renderização que publica o shell
+quanto em cada montagem posterior. Ele guarda as ilhas de um principal sob
 autoridade rederivada para uma requisição, e um `max-age` deixaria um perfil
-de navegador compartilhado reproduzi-las para quem sentasse ali em seguida.
+de navegador compartilhado reproduzi-las para quem sentasse ali em seguida;
+qual caminho produziu os bytes não muda o que há dentro deles.
 Um `Composite` de zero slots não carrega byte algum por principal, apenas um
 nonce por requisição, então ele mantém o `max-age` privado da classe como
 qualquer outra representação privada;

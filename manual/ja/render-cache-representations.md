@@ -114,7 +114,7 @@ let router = router.try_render_cache(
 | フィールド | 何を述べるか |
 |---|---|
 | `ETag` | 送られたバイト列そのものに対する強いバリデータ。クライアントはこれを `If-None-Match` として送り返せます。 |
-| `Cache-Control` | 既定ではどのクラスでも `private` です。`SharedCachePolicy::SMaxAge` を設定した `PublicShared` ルートは `public` と `s-maxage` も得ます。共有プロキシがそのバイト列を保持するよう招かれる方法は、これだけです。アイランドを少なくとも 1 つ持つ、組み立て済みの `Composite` ドキュメントは `private, no-store` です。 |
+| `Cache-Control` | 既定ではどのクラスでも `private` です。`SharedCachePolicy::SMaxAge` を設定した `PublicShared` ルートは `public` と `s-maxage` も得ます。共有プロキシがそのバイト列を保持するよう招かれる方法は、これだけです。アイランドを少なくとも 1 つ持つ `Composite` ドキュメントは、ヒットで組み立てられたものでも、シェルを公開したレンダリングが生み出したものでも `private, no-store` です。 |
 | `Vary` | 宣言されたバリエーションディメンションのうち、リクエストヘッダーを含意するものから導出されます。`Locale` は `Accept-Language` を、`Media` は `Accept` を、`Encoding` は `Accept-Encoding` を含意します。何も含意しないディメンションは、何も加えません。名前は、ディメンションを宣言した順ではなく、ヘッダー名でソートして出力されます。 |
 | `Age` | その表現が公開されてから経過した整数秒。これが存在すること自体が、レスポンスがストアから出てきたことのいちばん簡単なローカルの証拠です。 |
 | `Warning` | `110 - "Response is Stale"`。新鮮な区間を過ぎて配信されたレスポンスにだけ付きます。 |
@@ -138,9 +138,10 @@ let router = router.try_render_cache(
 `private, max-age=300` を読み取り、2 回目のリクエストに `Age` ヘッダーがあること
 を要求します。`the_private_document_is_cached_per_principal_and_never_crosses`
 は `/live/me` から `private, max-age=60` を読み取ります。
-`the_dashboard_is_stitched_per_principal_from_one_shared_shell` は、組み立て済み
-のダッシュボードから `private, no-store` を読み取ります。これは、コンポジット
-レスポンダー以外の何も書かない値です。
+`the_dashboard_is_stitched_per_principal_from_one_shared_shell` は、ダッシュボード
+から `private, no-store` を読み取ります。シェルを公開するレンダリングでも、その
+あとの組み立て済みヒットでも同じです。この値は、どの経路がバイト列を生み出したか
+ではなく、バイト列が何を保持しているかに従うからです。
 
 ## 4 つの鮮度状態
 
@@ -312,11 +313,13 @@ router.try_render_cache(
 転送されるため、匿名の訪問者は組み立て済みドキュメントではなく、リダイレクトを
 受け取ります。
 
-スロットを少なくとも 1 つ持つ組み立て済みのドキュメントには、
-`Cache-Control: private, no-store` が付いて送られます。それは 1 人のプリンシパル
-のアイランドを、1 つのリクエストのために導出し直された権限のもとで保持して
-おり、`max-age` があれば、共有のブラウザープロファイルが次に座った相手にそれを
-再生できてしまうからです。スロットが 0 個の `Composite` は、プリンシパルごとの
+スロットを少なくとも 1 つ持つステッチされたドキュメントには、
+`Cache-Control: private, no-store` が付いて送られます。シェルを公開する
+レンダリングでも、そのあとのすべての組み立てでも同じです。それは 1 人の
+プリンシパルのアイランドを、1 つのリクエストのために導出し直された権限のもとで
+保持しており、`max-age` があれば、共有のブラウザープロファイルが次に座った相手に
+それを再生できてしまうからです。どの経路がバイト列を生み出したかは、その中身を
+変えません。スロットが 0 個の `Composite` は、プリンシパルごとの
 バイト列をまったく運ばず、リクエストごとのノンスだけを運ぶので、ほかの私的な
 表現と同じように、このクラスの私的な `max-age` を保ちます。
 `framework/tests/render_cache/stitch.rs` の

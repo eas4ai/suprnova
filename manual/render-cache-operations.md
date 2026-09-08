@@ -213,14 +213,16 @@ middleware registered globally after the install sits outside the route's
 own chain, so it is reached on a stitched hit exactly as on a miss. On such
 a route the counter cannot carry the "no handler ran" claim at all.
 
-Assert instead on something only an assembled document can produce, which
-is what `the_dashboard_is_stitched_per_principal_from_one_shared_shell`
+Assert instead on what the store holds and what the served document is made
+of, which is what `the_dashboard_is_stitched_per_principal_from_one_shared_shell`
 does: the stored entry is `EntryKind::Composite` with the expected slot
-count (`inspect_route_for_test`), the response carries
-`Cache-Control: private, no-store` - the value the composite responder pins
-on a slotted assembly, and only after a whole document has been assembled -
-and two principals' documents differ in their island tags and nowhere else.
-Slotted is the operative word: a zero-slot `Composite` keeps the class's
+count (`inspect_route_for_test`), and two principals' documents differ in
+their island tags and nowhere else. The response carries
+`Cache-Control: private, no-store` as well, but read that for what it is: the
+whole class's directive, pinned on the render that publishes the shell as much
+as on every assembly after it, because it follows what the bytes hold and not
+which path produced them.
+Slotted is the operative word there: a zero-slot `Composite` keeps the class's
 private `max-age` instead, so that assertion suits a route with islands in
 it and not one without. That
 test asserts `renders() == before + 1` on a hit, and says in its own note

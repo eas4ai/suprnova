@@ -124,7 +124,7 @@ qu'ils sont définis ; les autres chapitres les utilisent sans les redéfinir.
 | Champ | Ce qu'il dit |
 |---|---|
 | `ETag` | Un validateur fort sur exactement les octets envoyés. Un client peut le renvoyer sous forme de `If-None-Match`. |
-| `Cache-Control` | `private` pour chaque classe par défaut. Une route `PublicShared` qui règle `SharedCachePolicy::SMaxAge` obtient aussi `public` et `s-maxage`, ce qui est la seule façon d'inviter un proxy partagé à garder les octets. Un document `Composite` assemblé avec au moins un îlot reçoit `private, no-store`. |
+| `Cache-Control` | `private` pour chaque classe par défaut. Une route `PublicShared` qui règle `SharedCachePolicy::SMaxAge` obtient aussi `public` et `s-maxage`, ce qui est la seule façon d'inviter un proxy partagé à garder les octets. Un document `Composite` comportant au moins un îlot reçoit `private, no-store`, qu'il ait été assemblé sur un hit ou produit par le rendu qui a publié la coque. |
 | `Vary` | Dérivé des dimensions de variance déclarées qui impliquent un en-tête de requête : `Locale` implique `Accept-Language`, `Media` implique `Accept`, `Encoding` implique `Accept-Encoding`. Une dimension qui n'en implique aucun n'ajoute rien. Les noms sont émis triés par nom d'en-tête, pas dans l'ordre où vous avez déclaré les dimensions. |
 | `Age` | Secondes entières depuis la publication de la représentation. Sa présence est la preuve locale la plus simple qu'une réponse est sortie du magasin. |
 | `Warning` | `110 - "Response is Stale"`, et seulement sur une réponse servie au-delà de son intervalle de fraîcheur. |
@@ -151,8 +151,9 @@ seconde requête ;
 `the_private_document_is_cached_per_principal_and_never_crosses` lit
 `private, max-age=60` sur `/live/me` ;
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` lit
-`private, no-store` sur un tableau de bord assemblé, valeur que rien d'autre
-que le répondeur composite n'écrit.
+`private, no-store` sur le tableau de bord, aussi bien sur le rendu qui
+publie sa coque que sur le hit assemblé qui suit, car cette valeur suit ce
+que contiennent les octets et non le chemin de code qui les a produits.
 
 ## Les quatre états de fraîcheur
 
@@ -331,10 +332,12 @@ un hit cousu est transmis à travers toute la chaîne de middleware de la
 route avant que quoi que ce soit ne soit servi, si bien qu'un visiteur
 anonyme obtient la redirection, jamais un document assemblé.
 
-Un document assemblé comportant au moins un emplacement est envoyé avec
-`Cache-Control: private, no-store`. Il détient les îlots d'un principal sous
+Un document cousu comportant au moins un emplacement est envoyé avec
+`Cache-Control: private, no-store`, sur le rendu qui publie la coque autant
+que sur chaque assemblage qui suit. Il détient les îlots d'un principal sous
 une autorité redérivée pour une seule requête, et un `max-age` laisserait un
-profil de navigateur partagé les rejouer pour celui qui s'assied ensuite. Un
+profil de navigateur partagé les rejouer pour celui qui s'assied ensuite ; le
+chemin qui a produit les octets ne change rien à ce qu'ils contiennent. Un
 `Composite` à zéro emplacement ne porte aucun octet propre à un principal,
 seulement un nonce propre à la requête, si bien qu'il garde le `max-age`
 privé de la classe comme toute autre représentation privée ;
