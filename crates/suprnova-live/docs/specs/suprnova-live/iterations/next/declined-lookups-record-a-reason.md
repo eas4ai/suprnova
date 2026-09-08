@@ -10,9 +10,9 @@ RenderCache's lookup telemetry closes its `outcome` attribute over eight
 values, one of which is `declined`. Every decline is counted under that one
 value and nothing else, so a decline is indistinguishable from any other
 decline once it reaches an operator. Three fail-closed limits now produce
-declines that no request-visible signal explains: a render that resolves an
-anonymous identity through the session fallback, a route keyed only by
-`Tenant` whose gate check is treated as per-principal, and an Inertia
+declines that no request-visible signal explains: a render that reads any
+session value other than the two authentication identifiers, a route keyed
+only by `Tenant` whose gate check is treated as per-principal, and an Inertia
 document that reads the negotiated locale on a route which declares no
 `Locale` variance. Each is correct behaviour. Each is also silent: the route
 serves normally, nothing fails, and the cache simply never fills, which is

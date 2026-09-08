@@ -81,12 +81,20 @@ require_heading docs/implementation/framework-integration.md "Providers and conf
 
 require_heading docs/implementation/render-cache.md "Contracts and providers"
 require_heading docs/implementation/render-cache.md "Framework middleware and policy"
+require_heading docs/implementation/render-cache.md "Hot path and budget harness"
 require_heading docs/implementation/render-cache.md "Privacy classification"
 require_heading docs/implementation/render-cache.md "Generations and coherence"
 require_heading docs/implementation/render-cache.md "Live documents"
 require_heading docs/implementation/render-cache.md "Composite stitching"
 require_heading docs/implementation/render-cache.md "Deployment tiers and providers"
+require_heading docs/implementation/render-cache.md "Recovery"
 require_heading docs/implementation/render-cache.md "Operations"
+require_text docs/implementation/render-cache.md \
+    "Complete L0 allocation bound" 'at most four heap allocations'
+require_text docs/implementation/render-cache.md \
+    "shared-body guarantee" 'no full-body copy'
+require_text docs/implementation/render-cache.md \
+    "honest benchmark classification" 'local_exploratory'
 require_heading docs/implementation/component-authoring.md "Application-facing authoring"
 require_heading docs/implementation/component-authoring.md "Generated metadata and registration"
 require_heading docs/implementation/component-authoring.md "Internal standalone machinery"

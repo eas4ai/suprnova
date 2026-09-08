@@ -142,13 +142,16 @@ Operations below.
    HEAD, or the route has no effective policy.
 2. Derive the lookup key from the route identity, path params, the
    declared query names, the declared variance (host, locale, media,
-   encoding, tenant, principal), the application build id, and the current
-   authority epoch. A query parameter present on the request but not
+   encoding, tenant, principal), the application build id, and the authority
+   epoch this node currently holds (leased, not read per request; see Hot
+   path and budget harness below). A query parameter present on the request
+   but not
    declared by the policy bypasses the cache for that request rather than
    silently excluding it from the key.
-3. Look up L0, then L1; a decode failure evicts the defective entry from the
-   layer it was found in and is treated as a miss there. An L1 hit that
-   decodes is promoted into L0.
+3. Look up L0's hot slot, then L0's stored bytes, then L1; a decode failure
+   evicts the defective entry from the layer it was found in and is treated
+   as a miss there. An L1 hit that decodes is promoted into L0, hot when it
+   is a Complete entry whose header values can be formed.
 4. A hit is checked for coherence (see Generations and coherence) and
    resolved to a freshness state, then served: a fresh hit answers 304 when
    the request's `If-None-Match` matches, otherwise the full body for GET or
@@ -330,6 +333,238 @@ A route handler that branches its output on a header or a config value,
 without also declaring the matching variance, is outside what this
 middleware can protect on its own.
 
+## Hot path and budget harness
+
+A Complete L0 hit runs no handler, no ORM query, no template, and no
+serializer, copies no body bytes, and issues no SQL statement on a lease-mode
+route. It is the one RenderCache path with a measured allocation bound, and
+`crates/suprnova-live/src/render_cache/hot.rs` is where that bound lives.
+Everything in this section is measured by the two benches described at the
+end of it, never reasoned.
+
+### Hot entries and the L0 hot slot
+
+`HotEntry::prepare` decodes a Complete frame once, at publication, and keeps
+every value a later hit would otherwise recompute: the status, the
+validator's `ETag` (as a header value and as text, for the conditional
+comparison), the content type, `Cache-Control`, `Vary`, and each replayable
+stored header, already formed as `HeaderName`/`HeaderValue` pairs. The
+route's shared-cache and freshness policies are pinned into the entry at that
+moment. This framework fixes a route's policy when the route is installed, so
+the pin is correct by construction; a host that changed a policy at runtime
+would have to drop the hot entries prepared under the old one, and nothing
+here detects that for it. `HotEntry`'s `Debug` is written by hand, because
+`CompleteEntry`'s own prints the body: lengths and counts stand in for
+content.
+
+`MemoryRenderStore::publish_hot` stores that `Arc<HotEntry>` beside the
+encoded bytes under the same fence, byte bound, and LRU rules a plain
+publication uses. `hot_get` returns it synchronously, allocates nothing, and
+touches the LRU order only when it actually hands one back, since a key that
+is present without a hot slot has to fall through to `RenderStore::get`,
+which does the touching itself. The store's byte bound still counts encoded
+bytes only, so once hot slots are in use it bounds stored frames rather than
+the store's total memory. The store cannot check that a hot entry matches the
+bytes beside it without decoding them, which is the work the hot slot exists
+to avoid, so that obligation stays with the publisher; a debug build asserts
+the half of it that is free to check, that the prepared entry names the key
+it is published under.
+
+Both publication sites honour the obligation the same way: the lead
+publication and the L1-to-L0 promotion each prepare from `decode(&encoded)`
+rather than from the candidate already in hand, so the served body is a slice
+of the stored frame and a promoted entry is indistinguishable from a freshly
+published one. A Composite entry, or a Complete one whose stored header
+values cannot be formed into HTTP headers, is promoted as plain bytes and
+decoded again on its next hit.
+
+`serve_hot` forms the response from the precomputed values; `respond` forms
+it for bytes that are not a hot entry. Both end in the same private builder,
+so a hot hit and a cold response cannot drift apart in status, header order,
+or body treatment, and that builder is now the only one in the system: the
+framework's own header loops in `conditional_response`, `respond_hit`, and
+`stitch::respond` are gone, and `HttpResponse::from_engine_response` converts
+the engine's `http::Response<Bytes>` into the framework response type.
+`respond` always evaluates `If-None-Match`; a caller that must never answer
+304, such as a slotted Composite assembly whose bytes are request-specific,
+passes `if_none_match: None`.
+
+Two reads a hit used to pay for are gone as well. `RenderKey::derive` streams
+its canonical description straight into the MAC through `PartWriter` and
+`mac_with`, producing a byte-identical digest without allocating, and the
+authority epoch is leased in the runtime's `EpochCache` rather than read from
+the ledger per request; Generations and coherence below describes the three
+paths an epoch advance takes to reach a request.
+
+### The allocation ledger
+
+Specification `00-overview.md`'s Complete L0 row allows one `C64` measured
+request at most four heap allocations and no full-body copy after
+shared-byte retrieval. The engine bench measures both with a benchmark-only
+counting global allocator, in a process it first proves is single-threaded:
+
+| Measured request | Allocations | Allocated bytes |
+|---|---|---|
+| `C64` fresh GET hit | 3 | 1,313 |
+| `C64` conditional 304 hit | 3 | 1,313 |
+| `C64` seed-deadline GET hit | 4 | 1,332 |
+
+Each figure is the maximum over 100 armed single requests, and all 100
+recorded that same count in every row; the counts are identical in debug and
+release. Two of the three are `HeaderMap::with_capacity` (its index table and
+its entry table), one is the `Age` value, and the fourth appears only for a
+body that embeds a public seed deadline, whose `Cache-Control` shrinks with
+the clock and therefore cannot be precomputed.
+
+Those last two values are formatted into a fixed stack buffer through a small
+`core::fmt::Write` cursor and lifted with `HeaderValue::from_bytes`, which
+copies an exactly sized slice. That detail is load-bearing rather than
+stylistic: `HeaderValue::from(u64)` allocates twice, because it sizes a
+`BytesMut` for the widest possible number and then freezes a buffer whose
+length is far below its capacity, which is the case `bytes` completes by
+boxing a shared handle. With the integer conversion in place the
+seed-deadline request costs five allocations and fails the budget. Both stack
+formatters fall back to the allocating path if a value ever fails to fit, so
+an unforeseen shape loses an allocation rather than the header.
+
+The body is never one of the allocations. `serve_hot` hands back the stored
+`Bytes`, and every pass of the bench compares the served body's pointer and
+length against the stored buffer's, recording the result as `body_shared`.
+
+### The measured request
+
+The measured request is engine work to a formed `http::Response<Bytes>`. The
+framework's conversion of that value into its own `HttpResponse` is outside
+it and is reported separately, as a server-side and a round-trip number, by
+the workload bench below. Reading the budget row end to end instead would
+require the framework's response type to carry a header map, which is a
+framework HTTP change outside iteration 005.
+
+### The engine bench
+
+`crates/suprnova-live/benches/render_cache_budget.rs` (`harness = false`)
+measures the two engine workloads. It is the only file in this crate that
+uses the `unsafe` keyword: the package lint is `unsafe_code = "deny"` so that
+this one target can carry a `#![allow(unsafe_code, reason = ..)]` for its
+counting global allocator, while `src/lib.rs` keeps `#![forbid(unsafe_code)]`
+and no library, test, or example code can opt in.
+
+- `C64` is a 64 KiB Complete representation with 12 observed dependencies,
+  one replayable stored header, and a 300,000/60,000/300,000 millisecond
+  freshness policy. It is measured as a fresh GET hit, as a conditional
+  request whose `If-None-Match` matches, and as a seeded variant whose
+  promotion deadline is 45 seconds away.
+- `C64+4` is the same public shell with four 4 KiB identity-bound stitch
+  slots and a bootstrap nonce hole, assembled to 81,942 bytes.
+
+Correctness guards run in every profile and before any measurement: status,
+body length, `ETag` against the validator, the literal `Cache-Control` each
+fixture must serve, `Age` of `0` at the publication instant, the absence of
+`Vary` for an entry that declares no variance, the pointer and length of the
+served body, a 304 with an empty body for the matching tag and a 200 for an
+unrelated one, and, for the assembly, the exact assembled length, the nonce
+landing in exactly one hole, each island marker appearing once in slot order,
+and the templated content-security-policy header carrying the nonce. A
+benchmark that got fast by getting wrong fails instead of reporting.
+
+Before any pass the bench reads `/proc/self/status` and refuses to run unless
+`Threads:` is `1`, so the counting allocator can never see another thread's
+work; it refuses outright on a non-Linux target, since the S1 reference
+environment is Linux. There is no async runtime in the measured path at all.
+
+The allocation pass runs 100 armed single requests per shape. The timing pass
+is release-only: 200 warmup iterations, then 40 samples of 50 iterations
+each, so one clock read covers work far larger than the clock's own cost.
+Percentiles use the nearest-rank rule the other budget tools use.
+
+| Workload | Cap | Checked result |
+|---|---|---|
+| `C64` p95 | 250 microseconds | 0.7557 |
+| `C64` allocations | 4 | 4 (seeded shape; 3 otherwise) |
+| `C64+4` p95 | 2,000 microseconds | 34.215 |
+| `C64+4` copy ratio | 2.0 | 1.0378 |
+
+The copy ratio is allocated bytes per byte of source content; 85,019 bytes
+allocated over 81,920 bytes of shell and slots.
+
+### The framework workload bench
+
+`framework/benches/render_cache_workloads.rs` (`harness = false`) measures
+what needs a database, a router, or two nodes. It contains no `unsafe`. Each
+workload asserts the correctness condition its numbers are only meaningful
+beside, and every latency workload runs 200 requests before it measures 200.
+
+- **`c64_middleware`** drives the `C64` route through the real middleware in
+  a test host. `p50_microseconds`/`p95_microseconds` are the server side:
+  the whole of `handle_request`, from the parsed request reaching the router
+  to the response value existing, excluding the connection, the response
+  write, and the client's read. `round_trip_p50_microseconds`/
+  `round_trip_p95_microseconds` are the whole loopback exchange around that
+  same call, over a fresh TCP connection with the body collected back;
+  `transport` names what that second pair paid for. Checked: 8.716 and
+  14.440 microseconds server side, 68.504 and 109.082 microseconds round
+  trip, over a 65,536-byte body with 14 dependencies, and
+  `statements_per_hit` of 0.
+- **`generation_reread`** rereads 12 dependency keys and the epoch. Checked:
+  0.019 and 0.032 milliseconds on SQLite and 0.092 and 0.236 milliseconds on
+  PostgreSQL, against a 3-millisecond cap, with `statements_per_reread` of 1
+  - one batched `UNION ALL`, never a generation read plus an epoch read.
+- **`invalidation_storm`** commits 1,000 writes in 20 bursts of 50 against
+  64 cached keys over 12 dependency identities, sweeping twice per burst.
+  Every render on the storm route calls `Model::find`, which observes the
+  table identity as well as the row it hydrated, so one write to any row
+  invalidates all 64 keys; the workload measures that rather than assuming
+  it and records it as `every_write_invalidates_every_key`. It follows that
+  no key can be a hit while a write is in flight, so the reported
+  `quiescent_hit_p95_microseconds` (165.048) is the hit that follows a
+  rebuild once a burst has landed, and the name says so. Checked: 1,280
+  hits, 1,280 rebuilds, 1.28 rebuilds per write, one statement per hit, and
+  every final body coherent with the generation the storm ended on.
+- **`multi_node`** fans 64 concurrent cold requests for one key across two
+  handles over one backend. Checked, on all three tiers: exactly one
+  publication, one bypass on the node that did not lead, and the rest
+  waiting on it. Fan-in p95 is 166.501 microseconds on SQLite, 9,201.986 on
+  PostgreSQL, and 260.519 on Redis; takeover p95 is 1.3229, 6.0536, and
+  0.2153 milliseconds. Those are hand-driven coordinator calls - admission,
+  and for the one leader the publication after it - not served requests: no
+  router, middleware, or socket is involved. A takeover moves store time
+  rather than waiting it out.
+
+### Running it, and what the results claim
+
+```sh
+rtk env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
+```
+
+The runner pins both benches to `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`)
+with `taskset`, runs the engine bench, then the framework bench, then
+`tests/benchmark_contract.rs`, which validates the checked-in results and the
+wiring. `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` runs the engine bench alone.
+`PG_TEST_URL` and `REDIS_TEST_URL` each add a run to the workload result, and
+a complete run needs both, because the contract requires all three recorded
+profiles. Both servers must be disposable: the run drops and recreates every
+table and flushes every key it uses.
+
+The two result files are `benchmarks/render-cache-budget-v1.json` and
+`benchmarks/render-cache-workloads-v1.json`.
+`SUPRNOVA_LIVE_BENCH_RESULT` and `SUPRNOVA_LIVE_WORKLOADS_RESULT` redirect
+them. A partial run must redirect both, under the gitignored
+`benchmarks/local/`; without that it overwrites the checked-in results with a
+shorter file and then fails its own contract.
+
+Both benches classify their environment the same way every other budget tool
+in this crate does. The checked-in results are `local_exploratory`: a
+workstation, `powersave` governor, no dedicated-vCPU attestation. Nothing
+promotes that to S1 evidence, and `SUPRNOVA_LIVE_REQUIRE_S1=1` makes a
+non-qualifying environment a refusal to measure rather than a labelled
+result. See [benchmarking](benchmarking.md) for the S1 and B1 contracts.
+
+Neither bench is a gate step, and
+`the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step` in
+`tests/benchmark_contract.rs` asserts it against both the Live gate script
+and the repository gate's step list. Budgets are on-demand tools that report
+numbers a person reads.
+
 ## Privacy classification
 
 `RepresentationClass` has four variants, ordered from widest to narrowest
@@ -438,12 +673,27 @@ evaluated: `CoherenceMode::Authority` rereads the ledger on every hit;
 `CoherenceMode::Lease { max_age_ms }` trusts a locally granted, still-valid
 `ValidationLease` instead, rereading (and granting a fresh lease on a
 coherent result) only once the lease has expired. A lease's own hint can
-only shorten its expiry, never extend it. Lease mode does not need its own
-epoch comparison: `RenderKey::derive` bakes the current epoch into the
-lookup key itself, so an epoch bump changes the key for every route,
-lease-mode routes included, making a previously published entry unreachable
-by ordinary lookup on the very next request rather than something a hit
-path would ever need to detect as "moved."
+only shorten its expiry, never extend it. The epoch is leased with the
+generations. `RenderKey::derive` bakes it into the lookup key, so a request
+derives its key under whatever epoch its own node currently believes in, and
+the runtime's `EpochCache` holds that value between requests: the authority
+is read for it once on a runtime's first use, and after that only by a read
+that was going to happen anyway (`authority_coherence`,
+`fresh_reread_is_coherent`, and a waiter's re-admission each store the epoch
+the authority just reported). Without that lease a hit could not cost less
+than one statement, which both the Complete L0 budget and specification 18's
+leases forbid.
+
+An epoch advance therefore reaches a request by one of three paths, none of
+them a per-request read. Advanced on this node,
+`RenderCache::advance_epoch` drops the lease beside its L0 clear, so the very
+next request reads the authority once, derives its key under the new epoch,
+and misses - immediately, lease mode included. Advanced on another node, a
+lease-mode route finds out at its first reread after the lease expires, at
+most `max_age_ms` later, and `CoherenceCheck::compare` reports `Moved`
+against the entry's own epoch. Advanced on another node, an authority-mode
+route makes that same comparison at its very next hit. Staleness is bounded
+by exactly the bound specification 18 already applies to a lease-mode route.
 
 `evaluate_freshness` resolves one of four states from a policy's
 `FreshnessPolicy` (`fresh_ms`, `stale_servable_ms`, `stale_on_error_ms`):
@@ -1233,6 +1483,151 @@ Each of these is ruled behaviour, not a defect.
   cross-node waiting; and separately cached nested segments, captured in
   `iterations/next/nested-cached-segments.md`.
 
+## Recovery
+
+Every recovery path here is a fresh render, never a reconstructed authority.
+A stored entry is bytes plus the generations it observed; whether those bytes
+may still be served is decided against the database generation ledger on the
+hit that wants them, whatever tier held them. That is why losing a cache tier
+costs work and never correctness, and it is the property each case below
+depends on. The operator-facing procedures live in the repository manual's
+`render-cache-operations.md` chapter; this section records what the code does
+and where.
+
+### A provider lost at runtime
+
+Every adapter maps a driver failure to
+`RenderCacheErrorKind::ProviderUnavailable` or
+`LedgerErrorKind::ProviderUnavailable`. The route's `FailurePolicy` then
+decides: `Open` (the default) passes the request through uncached, `Closed`
+answers a bare `503`. A provider missing at boot is different in kind: the
+install probe stops the boot with one actionable sentence naming the
+migration or the variable to fix, so nothing is ever served against a missing
+table or an endpoint nothing answers.
+
+A provider failure records no `LookupOutcome` at all. It is visible as
+`suprnova.render_cache.lookups` falling for the affected routes rather than
+as a labelled value, which matters when reading a dashboard during an
+incident: an unreachable backend does not show up as `bypass` or `declined`.
+
+### Redis eviction, flush, or restart
+
+Entries miss and instance records go missing; the next request renders and
+republishes. Nothing stale can be proven current by this, because currency is
+proved against the database ledger and not against the tier that held the
+bytes. A Redis entry's lifetime is Redis's own `PEXPIRE`, set from the
+entry's retention, rather than a stored deadline this crate compares against,
+so the Redis render store needs no store-clock seam and has none.
+
+### A database restored from a backup
+
+Restoring the ledger changes what "current" means for every entry already
+stored, and the code's behaviour is not "quietly drop them":
+
+- `CoherenceCheck::compare` is an inequality in either direction, so a stored
+  entry whose observed generations differ from the restored ledger's is
+  `Moved` whichever way the numbers went.
+- `freshness_state` evaluates a non-coherent entry against an effective age
+  that is never below `fresh_ms`, so a moved entry that is still time-fresh
+  is treated exactly as one that has just gone stale. On a route with a
+  stale-servable window that means the pre-restore copy is served once under
+  `Warning` while the rebuild runs behind the request. A `PrivateCached`
+  route, whose dead edge is its fresh edge, and any route that declared no
+  stale-servable window rebuild in the foreground instead.
+- `RenderCache::advance_epoch` advances the ledger's epoch, then drops the
+  leased epoch and clears L0 *in the calling process only*. Sibling nodes
+  keep both until their next authority read: immediately on the next hit
+  under `CoherenceMode::Authority`, and at most `max_age_ms` later under
+  `CoherenceMode::Lease`.
+- An epoch change alone does not reclaim a shared tier. The file tier's
+  `sweep` retires an entry whose retention has elapsed or whose fence epoch
+  is below the current one; a restore that lowered the epoch leaves entries
+  whose fence epoch is *above* it, so that clause does not fire and they wait
+  out their retention. The database tier is swept only by an explicit
+  `RenderCache::sweep()`. The Redis tier reclaims itself on `PEXPIRE`.
+
+The safe procedure that follows from those four facts - advance the epoch
+before the restored deployment serves, empty the shared tier rather than
+waiting for a sweep, and cover every node's L0 before traffic returns - is
+written out step by step in the manual's operations chapter. Detecting or
+surviving a ledger rewind without operator action is not implemented and is
+not claimed.
+
+### A torn or tampered stored entry
+
+A stored entry is the signed codec frame in every tier, so a truncated,
+torn, or altered value fails its integrity check and is a miss rather than a
+served page. On the file tier `FileRenderStore::open` additionally scans the
+directory once at startup and removes any leftover `.tmp` file (a crash
+between creation and rename) and any `.snrc` file that fails its frame check,
+so a torn write is self-healing rather than a permanently poisoned entry. A
+decode failure found during a lookup evicts the defective entry from the
+layer it was found in and is treated as a miss there.
+
+Instance records are not signed - they are a version byte plus canonical
+JSON - and their guarantee is different in shape and equal in strength: every
+identity in a record is re-parsed through its own validating constructor on
+decode, so bytes another process can write are validated exactly as protocol
+input is, and a frame that does not decode is classified rather than trusted.
+
+### Lease expiry, fencing, and takeover
+
+Every cross-node expiry is decided on the store's own clock, read inside the
+operation that acts on it, so a node whose clock runs fast can neither extend
+a lease nor declare a peer's lease elapsed. A lease is taken over once store
+time has passed its expiry; the former leader's `publish_token` then answers
+`LeaseFenced`, so it publishes nothing, while its own request's response is
+still served, exactly as for any other publication failure. Releasing a lease
+sets its expiry to `0` rather than deleting the row, so the per-key
+publication token counter outlives the lease and a later fence can still be
+ordered against every earlier one.
+
+There is no cross-node waiting anywhere in this build: a key another node
+leads is a `Bypass`, and nothing polls, sleeps, or parks for a peer. Bounded
+duplicate computation across nodes is permitted; two accepted publications
+are not, and the store's fence is what forbids the second.
+
+### Emergency invalidation and bounded cleanup
+
+`render-cache:epoch-advance` is the emergency lever, and it is bounded rather
+than instantaneous: `RenderKey::derive` bakes the epoch into the lookup key,
+so a new epoch makes every previously published entry unreachable by ordinary
+lookup, and dropping the calling process's epoch lease is what keeps that
+node's own bound at one request instead of `max_age_ms`. It is also the
+remedy after a write from a queue worker, a scheduled task, or a console
+command, none of which run the install that opens the write-side
+instrumentation, and therefore none of which advance a generation.
+
+Cleanup is bounded by construction, and it differs by tier. The file tier
+removes at most 64 entries per call, oldest publication first, and returns a
+`SweepOutcome` whose `more_remain` lets a larger backlog drain across later
+calls; it sweeps itself every 256th publication as well as on an operator's
+explicit `RenderCache::sweep()`. The database tier has the same 64-row bound
+but no automatic trigger: `RenderCache::sweep()` is what runs it, and a row
+past its expiry is refused by `get` whether or not a sweep has reached it.
+The Redis tier has no sweep at all; each entry carries a `PEXPIRE` from its
+retention. On every tier an entry's retention comes from the same class-aware
+dead edge `evaluate_freshness` uses, so reclamation and a live freshness
+check can never disagree about whether an entry is truly dead.
+
+### What an operator sees
+
+The six counter names and their closed attribute sets do not change with the
+profile or the failure, so a recovery is read from the shape of the ordinary
+counters:
+
+| Situation | What the counters do |
+|---|---|
+| Provider lost at runtime | `lookups` falls for the affected routes; no outcome value is recorded for the failure itself |
+| Redis flushed or restarted | `miss`, then `publications`, until the working set is republished |
+| Database restored | `stale` on routes with a stale-servable window and `miss` elsewhere, then `publications` |
+| Leader fenced by a takeover | `publications` counts one: the fenced leader's publish answers `Fenced` and is never counted |
+| Another node leading a key | `bypass` |
+
+`render-cache:inspect <key>` reports one entry's class, byte count, and
+metadata without its body or its key material, and reads L0 only; it is a
+statement about what this process holds, not about the shared tier.
+
 ## Operations
 
 ### File layout and the tally/disk invariant
@@ -1301,7 +1696,17 @@ L1 is not touched by an epoch advance and keeps every pre-epoch file until
 | `RENDER_CACHE_L1_DIR` | unset (L1 disabled) |
 | `RENDER_CACHE_L1_BYTES` | 1 GiB |
 | `RENDER_CACHE_FAILURE` | `open` (`closed` is the only other accepted value) |
-| `APP_BUILD_ID` | the application's own `CARGO_PKG_VERSION` |
+| `APP_BUILD_ID` | the framework crate's own `CARGO_PKG_VERSION` |
+
+`APP_BUILD_ID`'s default expands at compile time inside the framework crate,
+so it is that crate's version rather than the host application's; the two
+agree only where both inherit one workspace version, and either way the value
+moves only when someone bumps a version number. It is mixed into every lookup
+key, so a deployment should set it explicitly to something that changes every
+release: without that, a deploy which changes a template or a handler but no
+version number leaves the previous build's entries reachable.
+`RenderCache::install` refuses a value that does not satisfy `BuildId`'s
+grammar rather than falling back to one shared namespace.
 
 It also reads the deployment-profile variables (`RENDER_CACHE_PROFILE`,
 `RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`, `RENDER_CACHE_REDIS_URL`,
@@ -1359,14 +1764,6 @@ registers its own: neither ever prints a stored body or a raw key.
   that a generation advanced, so a validation lease is shortened by nothing
   but its own policy; captured in
   `iterations/next/redis-generation-hints.md`.
-- **The budget harness (plan D).** RenderCache has no benchmark harness of
-  its own, unlike the checked-in snapshot, action, upload, and asynchronous
-  budgets.
-- **Session identity read versus session content read.** `Auth::id()`'s
-  fallback to `session()` for an anonymous visitor records a session read,
-  which always narrows to `Uncacheable`, even though the fallback only ever
-  resolves identity; distinguishing that from a render that reads actual
-  session content is parked as a next-iteration capture.
 - **Feature-flag dependency generations.** Nothing advances a
   `DependencyIdentity::Feature` generation on a flag change or an
   evaluator reload, so a published entry that depended on a flag's answer

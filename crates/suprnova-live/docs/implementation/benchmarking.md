@@ -80,6 +80,113 @@ presented as release-grade toolchain performance.
 `tests/expansion_budget_rules.mjs` holds the rule contract and runs on demand
 with `node tests/expansion_budget_rules.mjs`.
 
+## RenderCache budget benchmark
+
+The engine benchmark measures the two RenderCache workloads that need no
+database, no router, and no socket: `C64`, a 64 KiB Complete representation
+with 12 dependencies served as a Complete L0 hit, and `C64+4`, the same
+public shell assembled with four 4 KiB stitch slots. The timed region is
+engine work to a formed `http::Response<Bytes>`; the framework's conversion
+into its own response type, the router, the middleware chain, and the socket
+are all outside it, and the workload benchmark below is where those are
+measured instead.
+
+It is the only file in this crate that uses the `unsafe` keyword. The package
+lint is `unsafe_code = "deny"` so that `benches/render_cache_budget.rs` can
+carry one `#![allow(unsafe_code, reason = ..)]` for the counting global
+allocator the allocation rows need; `src/lib.rs` keeps
+`#![forbid(unsafe_code)]`, so no library, test, or example code can opt in.
+
+Run both RenderCache benchmarks from the workspace root:
+
+```sh
+rtk env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
+```
+
+The runner pins both benchmarks to `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`)
+with `taskset` and finishes by running `tests/benchmark_contract.rs` over the
+results. `SUPRNOVA_LIVE_SKIP_WORKLOADS=1` runs the engine benchmark alone;
+`SUPRNOVA_LIVE_BENCH_RESULT` and `SUPRNOVA_LIVE_WORKLOADS_RESULT` redirect
+the two result files, and a partial run must redirect both under the
+gitignored `benchmarks/local/` or it overwrites the checked-in results with a
+shorter file and then fails its own contract.
+
+Before it measures anything the benchmark reads `/proc/self/status` and
+refuses to run unless the process has exactly one thread, so the allocator
+can never count another thread's work; there is no async runtime in the
+measured path. Correctness guards run in every profile ahead of the
+measurement - status, body length, entity tag, the literal `Cache-Control`
+each fixture must serve, the served body's pointer and length, the 304 and
+200 conditional answers, and, for the assembly, the exact assembled length,
+one nonce in one hole, and each island marker once in slot order - so a run
+that got fast by getting wrong fails instead of reporting.
+
+The allocation pass runs 100 armed single requests per shape. The timing pass
+is release-only and records 200 warmup iterations, then 40 samples of 50
+iterations each, so one clock read covers work far larger than the clock's
+own cost. Results go to `benchmarks/render-cache-budget-v1.json`.
+
+| Row | Cap | Checked local result |
+|---|---|---|
+| `C64` p95 | 250 microseconds | 0.7557 |
+| `C64` allocations | 4 | 3 fresh, 3 conditional, 4 seed-deadline |
+| `C64+4` p95 | 2,000 microseconds | 34.215 |
+| `C64+4` copy ratio | 2.0 | 1.0378 |
+
+Every allocation figure is the maximum over its 100 passes, and all 100
+recorded the same count. The checked result also records `body_shared`,
+which the benchmark sets by comparing the served body's pointer and length
+against the stored buffer's on every pass.
+
+## RenderCache workload benchmark
+
+The framework benchmark measures the four RenderCache workloads that need a
+database, a router, or two nodes, and it contains no `unsafe`. Each workload
+asserts the correctness condition its numbers are only meaningful beside, so
+these are not timings alone: a lease-mode hot hit issues no statement, a
+coherence reread is one batched statement, a write storm rebuilds each key
+once per burst and leaves every key serving the generation the storm ended
+on, and sixty-four concurrent cold requests across two nodes publish exactly
+once.
+
+`SUPRNOVA_LIVE_SKIP_WORKLOADS` must not be set for it to run, and a complete
+run needs both `PG_TEST_URL` and `REDIS_TEST_URL`, because the checked-result
+contract requires all three recorded profiles (SQLite, PostgreSQL, Redis).
+Both servers must be disposable: the run drops and recreates every table and
+flushes every key it uses. Every latency workload runs 200 requests before it
+measures 200. Results go to `benchmarks/render-cache-workloads-v1.json`.
+
+- `c64_middleware` drives the `C64` route through the real middleware in a
+  test host. Its `p50`/`p95` pair is the server side, from the parsed request
+  reaching the router to the response value existing, and excludes the
+  connection, the response write, and the client's read; its round-trip pair
+  is the whole loopback exchange around the same call. Checked: 8.716 and
+  14.440 microseconds server side, 68.504 and 109.082 microseconds round
+  trip, with zero statements per hit.
+- `generation_reread` rereads 12 dependency keys and the epoch as one
+  statement, against a 3 millisecond cap. Checked: 0.019 and 0.032
+  milliseconds on SQLite, 0.092 and 0.236 milliseconds on PostgreSQL.
+- `invalidation_storm` commits 1,000 writes in 20 bursts of 50 against 64
+  cached keys. It records that a point read observes its table as well as its
+  row, so every write invalidates every key, and reports the hit that follows
+  a rebuild rather than a hit during the writes, which cannot exist. Checked:
+  1,280 hits, 1,280 rebuilds, 1.28 rebuilds per write, one statement per hit,
+  and a 165.048 microsecond quiescent hit p95.
+- `multi_node` fans 64 concurrent cold requests for one key across two
+  handles over one backend, through hand-driven coordinator calls rather than
+  served requests. Checked on every tier: one publication, one bypass on the
+  node that did not lead. Fan-in p95 is 166.501 microseconds on SQLite,
+  9,201.986 on PostgreSQL, and 260.519 on Redis; takeover p95 is 1.3229,
+  6.0536, and 0.2153 milliseconds.
+
+Both RenderCache results are classified the same way every other budget tool
+in this crate classifies its own. The checked-in files are
+`local_exploratory` - a workstation, `powersave` governor, no dedicated-vCPU
+attestation - and `SUPRNOVA_LIVE_REQUIRE_S1=1` turns a non-qualifying
+environment into a refusal to measure rather than a labelled result. Nothing
+here is S1 evidence or a public performance claim; see "Validated S1
+evidence" below for what would be.
+
 ## Browser runtime benchmark
 
 Artifact sizes are not a budget: `npm run build` prints the exact raw and

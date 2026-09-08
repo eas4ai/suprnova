@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-07
 
 ## Scope
 
@@ -468,6 +468,24 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Decision ID: render-cache-budget-harness-placement. The
+  RenderCache budget harness shipped as two benchmarks rather than one.
+  `crates/suprnova-live/benches/render_cache_budget.rs` keeps the counting
+  global allocator and measures the two workloads that need no database,
+  router, or socket; the package lint for `unsafe_code` becomes `deny` so
+  that this one target MAY allow it with a written reason, while the library
+  root keeps `forbid` and no library, test, or example code may opt in.
+  Workloads that need a database, a router, or two nodes live in a
+  host-level benchmark, `framework/benches/render_cache_workloads.rs`, which
+  contains no `unsafe` and covers the middleware hit, the batched generation
+  reread, an invalidation storm, and two nodes over one backend. Every
+  workload SHALL assert the correctness condition its numbers are only
+  meaningful beside, so a run that got fast by getting wrong fails instead of
+  reporting. Both benchmarks remain on-demand tools outside every gate tier,
+  and `crates/suprnova-live/scripts/run-render-cache-budget.sh` runs them and
+  then the checked-result contract. Rejected putting the allocator in the
+  host-level benchmark, which would have widened the `unsafe` allowance
+  beyond the one target this specification names.
 - 2026-09-01 -- Decision ID: budgets-are-on-demand-tools. Every benchmark and
   artifact budget left `scripts/gate.sh`; the gate verifies correctness and
   security only, budget tools run on demand and report numbers, and no artifact

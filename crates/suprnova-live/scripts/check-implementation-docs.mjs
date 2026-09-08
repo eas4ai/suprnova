@@ -55,6 +55,21 @@ const requiredHeadings = new Map([
       "Suprnova integration boundary",
     ],
   ],
+  [
+    "docs/implementation/render-cache.md",
+    [
+      "Contracts and providers",
+      "Framework middleware and policy",
+      "Hot path and budget harness",
+      "Privacy classification",
+      "Generations and coherence",
+      "Live documents",
+      "Composite stitching",
+      "Deployment tiers and providers",
+      "Recovery",
+      "Operations",
+    ],
+  ],
 ]);
 const semanticRequirements = new Map([
   [

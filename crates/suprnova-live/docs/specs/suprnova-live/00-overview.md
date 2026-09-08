@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-07
 
 ## Purpose
 
@@ -519,6 +519,20 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Fixed the measured-request scope of the Complete L0 hit row.
+  The row's caps SHALL be read against engine work up to a formed
+  `http::Response<Bytes>`; a host's conversion of that value into its own
+  response type is outside the measured request and MAY be reported as a
+  separate number by a host-level benchmark. The harness the row names
+  shipped: `crates/suprnova-live/benches/render_cache_budget.rs` measures
+  `C64` and `C64+4` with its benchmark-only counting global allocator in a
+  process it proves single-threaded, and the checked result records three
+  heap allocations for a fresh hit, three for a conditional one, four for a
+  seed-deadline hit against the cap of four, a shared body, and a `C64+4`
+  copy ratio of 1.04. Rejected reading the row end to end, which would
+  require the host response type to carry a header map - a host HTTP change
+  outside this iteration - and rejected relaxing the cap to accommodate an
+  allocation the engine could avoid.
 - 2026-09-01 -- Benchmark and artifact budgets became on-demand tools outside
   `scripts/gate.sh`; the gate verifies correctness and security only, and no
   artifact carries an absolute ceiling or drift rule. Dedicated S1 and B1

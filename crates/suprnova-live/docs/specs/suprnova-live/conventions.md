@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-09-01
+Last revised: 2026-09-07
 
 ## Authority and application
 
@@ -300,6 +300,8 @@ suprnova/
     benches/
       render_cache_budget.rs
   framework/src/live/
+  framework/benches/
+    render_cache_workloads.rs
   suprnova-macros/src/live/
   suprnova-cli/src/commands/live/
   suprnova-cli/src/templates/files/live/
@@ -512,6 +514,19 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Scoped the no-`unsafe` rule so the Complete L0 allocation
+  budget can be measured. The engine crate root SHALL keep
+  `#![forbid(unsafe_code)]`; the package lint becomes `deny` so that exactly
+  one benchmark target, `benches/render_cache_budget.rs`, MAY allow `unsafe`
+  with a written reason for the counting global allocator that budget needs.
+  That benchmark holds the only `unsafe` in the subtree, and a later proposal
+  requiring `unsafe` still needs its own approved safety case. The module
+  layout gains `framework/benches/render_cache_workloads.rs`, the host-level
+  RenderCache benchmark, which contains no `unsafe`. Rejected leaving the
+  package lint at `forbid` and measuring allocations from outside the
+  process, which cannot see them, and rejected a separate crate for the
+  allocator, which would add a workspace member to hold one forwarding
+  allocator used by one benchmark.
 - 2026-09-01 -- Benchmark and artifact budgets are on-demand tools, not gate
   phases; `scripts/gate.sh` verifies correctness and security only. Dedicated
   S1 and B1 qualification is release-checklist work outside Iteration 005, and

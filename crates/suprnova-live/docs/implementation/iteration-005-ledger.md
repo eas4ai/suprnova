@@ -10,6 +10,247 @@ This ledger records implementation checkpoints for the integrated Suprnova Live
 authority. It is evidence about the current implementation state, not a
 replacement for the normative Iteration 005 contract.
 
+## 2026-09-07 -- RenderCache budget harness, manual breadth, and qualification
+
+The fourth and last RenderCache plan closed iteration 005's remaining
+definition-of-done items for the cache: the allocation clause of the Complete
+L0 budget, the budget harness, the missing halves of the integrated test
+harness, dogfood breadth, the manual chapter set, and the repository gate's
+knowledge of the Live subtree. It ran as fourteen planned tasks plus one
+inserted mid-plan, on `feat/render-cache-qualification` from `59960c3c`, each
+written, reviewed, fixed, and re-reviewed before the next started. This entry
+covers the work through the records task; the closing qualification run is
+the plan's last task and is reported separately, for the reason at the end.
+
+### What the hot path became
+
+`RenderKey::derive` now streams its canonical description into the MAC
+instead of building a byte string first, producing a byte-identical digest
+with no allocation. A new engine module, `render_cache::hot`, decodes a
+Complete frame once at publication and keeps every header value a hit can
+precompute; `MemoryRenderStore` gained a hot slot beside each entry's bytes,
+and one response builder now forms every cached response - fresh, 304, HEAD,
+stale under `Warning`, and stitched - so the framework's three separate
+header loops are gone. The measured result is a Complete L0 hit at three heap
+allocations (four when the body embeds a public seed deadline whose
+`Cache-Control` shrinks with the clock), against a budget of four, with the
+body shared rather than copied.
+
+Two defects surfaced while measuring rather than while reasoning. The `Age`
+header cost two allocations instead of one, because `HeaderValue::from(u64)`
+sizes a buffer for the widest possible number and then freezes a much shorter
+one, which is exactly the case `bytes` completes by boxing a shared handle;
+forming the digits on the stack and lifting an exactly sized slice fixes it,
+and without that fix the seeded shape costs five and fails the budget. The
+second was larger: the bypass probe's statement counter measured one SQL
+statement on a lease-mode hot hit, because the middleware read the authority
+epoch on every request in order to bake it into the lookup key. Ruling R17
+judged that a defect rather than a number to record - specification 18 says a
+lease exists to avoid querying authority on every hot hit - and an inserted
+task leased the epoch with the generations in an `EpochCache` per runtime.
+Measured after it: a lease-mode hit issues no statement, an authority-mode
+hit exactly one (generations and epoch in one `UNION ALL`), the first miss of
+a process one extra, and later misses none.
+
+### The harness, and what it is allowed to claim
+
+Two benchmarks, both on-demand tools and neither a gate step, which
+`tests/benchmark_contract.rs` asserts against the Live gate script and the
+repository gate's step list. The engine benchmark,
+`crates/suprnova-live/benches/render_cache_budget.rs`, measures `C64` and
+`C64+4` with a benchmark-only counting global allocator in a process it first
+proves single-threaded; ruling R1 made the package's
+`unsafe_code` lint `deny` so that one target can allow it with a written
+reason, while `src/lib.rs` keeps `forbid` and no library, test, or example
+code can opt in. `framework/benches/render_cache_workloads.rs` measures what
+needs a database, a router, or two nodes, contains no `unsafe`, and asserts
+each workload's correctness condition beside its numbers. Both results are
+checked in as `local_exploratory`; nothing in this plan converts a missing S1
+measurement into a pass. The runner,
+`crates/suprnova-live/scripts/run-render-cache-budget.sh`, runs both and then
+the contract test.
+
+Ruling R2 fixed what the Complete L0 row measures: engine work to a formed
+`http::Response<Bytes>`, with the framework's conversion into its own
+response type outside it and reported separately by the workload bench as a
+server-side and a round-trip pair. Reading the row end to end would need the
+framework response type to carry a header map, a framework HTTP change
+outside this iteration.
+
+### What the tests proved that prose could not
+
+One `RenderStore` conformance suite now runs against the memory, file, SQL
+(SQLite, PostgreSQL, MySQL), and Redis providers, selected by
+`RENDER_CACHE_PROFILE`. A bypass probe with statement, render, template, and
+serializer counters plus a server-side body-address check proves a hit runs
+none of them and copies no body bytes. Three race seams (`BEFORE_VIEW`,
+`AFTER_VIEW_CLOSE`, `DURING_REREAD`) pin the boundaries a rebuild has to
+respect, and a static check keeps timing-based waits out of the new tests.
+
+The invalidation storm recorded a fact the design had assumed away: a point
+read through the ORM observes the table identity as well as the row, so any
+write to that table invalidates every cached entry that read from it. Ruling
+R21 judged that by design rather than a defect - over-invalidation is safe,
+and iteration 005 already says reads and writes collapse to broader safe
+generations - and the workload now measures and records it
+(`every_write_invalidates_every_key`) instead of assuming row granularity.
+Ruling R18 closed a real gap the same review found: a waiter behind a failed
+leader now falls back to a stale-on-error entry exactly as the request that
+leads the rebuild does.
+
+### What the dogfood application found
+
+Two new routes exercise the cache from an application's side: `/live/todos`,
+a `PublicShared` document backed by ORM reads with an L0 and L1 policy, and
+`/live/me`, a `PrivateCached` document varying on `Principal`. Six
+application tests cover ORM-write invalidation through generations,
+per-principal partitioning that never crosses, conditional and HEAD requests
+answered from the stored entry, marked stale service with a background
+rebuild, a hit served through the SQL stores under the Database profile, and
+the two operator commands.
+
+Writing them exposed a framework defect no framework test had: resolving the
+signed-in visitor through the persisted session recorded a session read,
+which narrows straight to `Uncacheable`, so a `PrivateCached` route could not
+cache at all without an application-side middleware standing in front of the
+cache. Ruling R24 made the session's authentication identifiers - the default
+guard's user id and a named guard's own id, a set now closed by a private
+enum - an identity read that records principal material, while every other
+session value still forces `Uncacheable`. The application's workaround
+middleware was deleted, and framework tests now prove storage and
+partitioning per principal, that a user-row write rebuilds the entry, and
+that the same read on a route which declares no `Principal` variance is
+declined. Ruling R25 accepted two consequences as designed: an anonymous
+request to such a route caches under the `Anonymous` key, since no principal
+material is observed and a signed-in visitor derives a `Private` key that
+never reaches that entry; and a named guard's identifier is principal
+material in the same way.
+
+### Records, manual, and gate wiring
+
+The manual gained four RenderCache chapters beside a revised keystone -
+representations, generations, deployment, and operations - each mirrored into
+`de`, `es`, `fr`, `ja`, `pt-BR`, and `zh-Hans` as a real translation with
+identical structure and stamped in the translation lock. Ruling R27 settled
+the chapter allocation: the representations chapter owns the header and
+freshness definitions, the keystone keeps its summary, and the generations
+chapter cross-links rather than redefining. Ruling R28 corrected a claim
+found while writing them: `APP_BUILD_ID`'s default expands inside the
+framework crate, so it is that crate's version and not the host
+application's, and it never moves per deploy; the framework rustdoc and this
+crate's own environment table now say so, and both the manual and this
+document recommend setting the variable explicitly per release.
+
+The repository gate gained three steps rather than a second copy of the Live
+gate's knowledge: `live-contracts` (default, full, and docs tiers) runs the
+spec checker, the implementation-document checker, this crate's documentation
+and gate contracts, and `git diff --check`; `live-browser` (default and full)
+runs the browser package's install, generated-contract, format, lint, type,
+unit, build, and artifact-parity checks; `live-gate` (full) runs this crate's
+own gate from the repository root and passes `SUPRNOVA_LIVE_RELEASE` through
+when the caller sets it. Ruling R33 set the Live gate step's timeout to
+5,400 seconds against a warm hand-run of 31 minutes 42 seconds, and ruling
+R34 replaced a docker capability declaration with `rtk` on the steps whose
+scripts call it. Ruling R37 shipped the manual's new inline-code-span rule as
+a ratchet over the seven RenderCache-set sources rather than the whole
+manual, which has 1,591 pre-existing problems across 198 files; auditing
+those is a translation question outside this plan.
+
+The Plan B final review's parked list was swept item by item against the
+current code: twelve of the fifteen were fixed, two were already closed by
+earlier work on this branch, and one (`StitchSlot::parse` running per slot
+per hit) was ruled not a defect with its reasoning and cost recorded.
+
+### What this entry does not claim
+
+The default and full repository gate tiers for this branch are the closing
+task's, and their run identifiers, exit codes, and durations belong in its
+report rather than here: a ledger line naming them would change the tree they
+covered. Calling iteration 005 complete is a separate decision and is not
+made by this plan.
+
+## 2026-09-07 -- RenderCache Tier 1 and Tier 2 providers
+
+Twenty-five commits from `d55ca241` to `59960c3c`, merged into `main` and
+pushed the same day. The distributed logic stayed in the engine as two
+host-neutral kernels over small store ports rather than in the framework:
+`FencedLeaseCoordinator<S: LeaseStore>` for cross-node rebuild leadership,
+which composes the local coordinator for in-process waiters, and
+`DistributedInstanceLedger<S: InstanceRecordStore>` for Live instance
+authority. `MemoryInstanceLedger` became that same kernel over an in-memory
+store, so Tier 0 and both distributed tiers run one state machine and answer
+one conformance suite, and the existing Tier 0 ledger tests passed unchanged.
+
+The framework supplies six adapters - a render store, a lease store, and an
+instance record store each for SQL and for Redis - plus a tier migration
+creating four tables with an expiry index on the three that are reclaimed.
+Every cross-node expiry is decided on the store's own clock, read inside the
+statement or script that guards the state it decides, with a per-adapter
+offset seam so a test moves that clock without waiting for it.
+`RENDER_CACHE_PROFILE` selects `embedded`, `database`, or `redis`; the Live
+instance ledger carries its own `LIVE_LEDGER_DRIVER`; and both installs fail
+closed at boot on a missing tier migration or an endpoint nothing answers.
+
+Rulings that shaped the adapters: the SQL lease store uses its own short
+transaction and never the ambient one, because a lease taken inside someone
+else's transaction becomes visible to peers only at commit and vanishes on a
+rollback a peer has already observed; the SQL record store does join the
+ambient transaction, which is the coupling a database tier is chosen for;
+releasing a lease sets its expiry to zero rather than deleting the row, so
+the per-key publication token counter outlives it; a record-store conflict
+that survives one retry is an instance conflict rather than a new error kind;
+and identity columns are `VARCHAR(64)`, since a 32-byte identity does not fit
+a `CHAR(32)`.
+
+Multi-node behaviour is proved at the provider layer with two handles over
+one backend, plus one end-to-end middleware proof per distributed profile.
+`scripts/check-redis.sh` runs the Redis regressions against a disposable
+`redis:7-alpine` container in the default tier, and the PostgreSQL and MySQL
+scripts each gained a tiers block. The final review returned no blocker; the
+closing wave that followed it fixed every remaining item rather than parking
+any, including a pre-existing queue test that slept for a delayed redelivery
+and now synchronises on the delivery itself, and the full-tier
+`feature-matrix` step, which had been red since before the Composite
+stitching plan. One gate run failed on a pre-existing reference-host race
+(an interrupted upload closed with unread body bytes, so the kernel sent a
+reset); draining the interrupted body inside the test host fixed it, and the
+gate was green at `59960c3c`. Credible generation hints over Redis pub/sub
+were captured for a future contract rather than built.
+
+## 2026-09-06 -- RenderCache Composite stitching
+
+Twenty-four commits from `94489224` to `d55ca241`, merged into `main` the
+same evening. A route declares `RepresentationClass::PublicShellStitched`;
+the request-scoped collector attributes every read to a gate, a content, or a
+slot scope, and only stitched routes classify from content reads alone.
+`LiveDocument::mount` captures each identity-bound island's slot metadata and
+emitted markup as the document is built, and the publisher cuts a Composite
+entry only when that capture is usable: every captured slot located in the
+rendered document exactly once, and the document digest matching what was
+captured. Anything else declines publication and stores nothing. A document
+with no identity-bound islands but a bootstrap nonce is stored as a legal
+zero-slot Composite.
+
+On a hit the global middleware attaches a prepared hit and calls the route
+chain, so the route's own guard and tenant middleware still decide the
+request, and the Live completion middleware then re-mounts every slot under
+authority derived for that request alone. The bounds are 32 slots, 64 nonce
+holes, 193 graph segments, and 4,096 bytes each for slot parameters and
+fallbacks.
+
+Three rulings changed the specification rather than the code. No Composite
+response answers 304 or honours `If-None-Match`, whether it carries slots or
+not, because every assembly is a distinct representation. A slotted assembly
+is additionally sent `Cache-Control: private, no-store`, while a zero-slot one
+keeps its class's private `max-age`. And `MAX_SEGMENTS` rose to 193, the
+number a full shell with 32 slots and 64 nonce holes actually needs. The
+engine reviews each found an item the plan's own code had missed - shared
+header limits, the nonce-piece budget, bounding before allocating - which is
+why every task on this plan and the two after it carried its own independent
+review before the next task started. The dogfood application's dashboard
+route is opted in and proved through the running application. Separately
+cached nested segments were captured for a future contract rather than built.
+
 ## 2026-09-04 -- RenderCache Tier 0 foundation
 
 Suprnova now carries a render cache for Complete representations. The plan ran
