@@ -441,8 +441,8 @@ body; a missing principal answers `401`.
   application exposes its sign-in path and the visitor continues from a fresh
   document.
 
-Live runs complete without RenderCache; caching Live documents is a separate
-feature with its own chapter when it lands.
+Live runs complete without RenderCache. Caching Live documents is
+RenderCache's job; see [RenderCache](render-cache.md).
 
 ## CLI reference
 

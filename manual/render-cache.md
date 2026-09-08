@@ -13,6 +13,19 @@ declaring variance, reading the response headers it adds, the reasons a
 render is declined, operational control, and how it differs from
 `suprnova::Cache`.
 
+## The chapters
+
+This is the first of five. Read them in order the first time; after that,
+each answers one question on its own.
+
+| Chapter | Answers |
+|---|---|
+| RenderCache (this one) | How do I turn it on and opt a route in? |
+| [Representations](render-cache-representations.md) | What is actually stored, and under what key? |
+| [Generations](render-cache-generations.md) | When does a stored copy stop being current? |
+| [Deployment](render-cache-deployment.md) | How do several nodes share one cache? |
+| [Operations](render-cache-operations.md) | How do I see it, measure it, and switch it off? |
+
 ## Enabling the cache
 
 Two environment variables matter to start:
@@ -31,6 +44,13 @@ A handful of other variables tune the defaults: `RENDER_CACHE_L0_ENTRIES`
 serves the route uncached or refuses the request; `APP_BUILD_ID` (your
 crate's own version by default) namespaces every cached entry to the build
 that produced it, so a deploy never serves an old build's bytes.
+
+`RENDER_CACHE_PROFILE` (`embedded` by default, or `database` or `redis`)
+chooses whether the second tier and the rebuild coordinator are in this
+process or shared with every other node. A shared profile also needs a
+migration your application lists. Both are the
+[Deployment](render-cache-deployment.md) chapter's subject, together with
+the full variable table.
 
 ## Opting a route or a group in
 
@@ -61,9 +81,11 @@ how long a representation is fresh, how much longer it may still be served
 while a background rebuild runs, and how much longer still it may be served
 if that rebuild fails outright. `RepresentationClass` runs from widest to
 narrowest sharing: `PublicShared` (one representation for everyone who
-matches the declared variance), `PublicShellStitched` (reserved for a future
-composed-shell representation, not usable yet), `PrivateCached` (one
-representation per signed-in visitor or tenant), and `Uncacheable`.
+matches the declared variance), `PublicShellStitched` (a Live document whose
+shared shell is stored once and whose islands are re-mounted for whoever is
+asking; see [Representations](render-cache-representations.md)),
+`PrivateCached` (one representation per signed-in visitor or tenant), and
+`Uncacheable`.
 
 A route pattern must already be registered before you opt it in, and you
 must finish opting routes and groups in **before** calling
@@ -159,7 +181,12 @@ it ran, in terms you will recognize:
   not a session read - so an ordinary cookie-backed login is exactly what a
   `PrivateCached` route declaring `Principal` variance is for, and reaching
   for the visitor's id does not quietly make the page uncacheable. Every
-  other value in the session still does.
+  other value in the session still does. Two consequences worth knowing: an
+  anonymous request to such a route caches under the `Anonymous` key,
+  because the render resolved no identity, observed no principal material,
+  and the key says so - a signed-in visitor derives a `Private` key that
+  never reaches that entry; and a named guard's own identifier is principal
+  material in exactly the same way as the default guard's.
 - **You read an identity, on a route that does not declare `Principal`.**
   Reading the signed-in user narrows the class to `PrivateCached`; if the
   route's declared variance does not include `Principal`, there is no way
@@ -330,3 +357,32 @@ nothing to recompute. Reach
 for `suprnova::Cache` when you have a specific value you want to compute
 once and reuse; reach for RenderCache when you have a whole route whose
 response is expensive to render and safe to share.
+
+### Why Suprnova diverges
+
+Laravel has no equivalent in the framework itself. Response caching is a
+package you add, it wraps the route in middleware that stores the rendered
+response under a key you compose, and everything after that is yours: which
+routes are safe to cache, what makes two visitors different, and when a
+stored page stops being true. The framework does not know a page was cached,
+so it cannot tell you when caching one was a mistake.
+
+RenderCache is part of the framework for exactly that reason. It sees the
+render happen, so it can record what the handler read, compare that against
+what the route declared, and refuse to store a response whose safety it
+cannot account for - silently, without changing what the visitor is served.
+Opting a route in is a declaration the framework then holds you to, rather
+than a promise you make to yourself. The cost is that some routes you would
+like to cache are declined and you have to find out why; the benefit is that
+the ones that are stored were proven safe to store, once, by the process
+that rendered them.
+
+## Next
+
+- [RenderCache Representations](render-cache-representations.md) - what is
+  actually stored, under what key, and in which layers
+- [RenderCache Generations](render-cache-generations.md) - how a stored copy
+  stops being current
+- [Cache](cache.md) - the explicit key-value store this chapter contrasts
+  with
+- [Live](live.md) - the documents a stitched representation is cut from
