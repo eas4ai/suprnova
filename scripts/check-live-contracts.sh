@@ -10,15 +10,19 @@
 # script that no longer satisfies its own contract could sit on the branch
 # through every default-tier run.
 #
-# These four checks are pure text: they read the tracked specification and
-# implementation documents and the Live gate script. They cost seconds, they
-# need no toolchain beyond Node and Git, and they fail on exactly the kind of
-# drift a documentation-shaped change introduces. Running them in the default
-# tier keeps the Live subtree's documents honest between full runs.
+# These five checks are pure text: four read the tracked specification and
+# implementation documents and the Live gate script, and the fifth asks Git
+# whether the working tree introduces whitespace errors. They cost seconds,
+# they need no toolchain beyond Node and Git, and they fail on exactly the
+# kind of drift a documentation-shaped change introduces. Running them in the
+# default tier keeps the Live subtree's documents honest between full runs.
 #
-# The two shell contracts resolve the Live root from their own location, so
-# they are safe to invoke from the workspace root; the two Node checkers take
-# the workspace-relative path the Live conventions document specifies.
+# The two shell contracts (`documentation_contract.sh`, `gate_contract.sh`)
+# resolve the Live root from their own location, so they are safe to invoke
+# from the workspace root; the two Node checkers (`check-specs.mjs`,
+# `check-implementation-docs.mjs`) take the workspace-relative path the Live
+# conventions document specifies; and `git diff --check` reads the whole
+# working tree from wherever it is run.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
