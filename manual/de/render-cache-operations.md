@@ -239,22 +239,36 @@ zusammengesetzten Treffer genauso erreicht wie bei einem Fehltreffer. Auf
 einer solchen Route kann der Zähler die Behauptung „es lief kein Handler“
 überhaupt nicht tragen.
 
-Sichern Sie stattdessen zu, was der Store hält und woraus das ausgelieferte
-Dokument besteht, und genau das tut
+Sichern Sie stattdessen zu, was der Store hält, woraus das ausgelieferte
+Dokument besteht und wie alt es ist - und genau das tut
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell`: Der
 gespeicherte Eintrag ist ein `EntryKind::Composite` mit der erwarteten
-Slot-Zahl (`inspect_route_for_test`), und die Dokumente zweier Principals
-unterscheiden sich in ihren Insel-Tags und nirgends sonst. Die Antwort trägt
-außerdem `Cache-Control: private, no-store`, aber lesen Sie das als das, was
-es ist: die Direktive der ganzen Klasse, festgelegt bei dem Render, der die
-Shell veröffentlicht, ebenso wie bei jeder Zusammensetzung danach, denn sie
-richtet sich danach, was die Bytes enthalten, und nicht danach, welcher Pfad
-sie erzeugt hat. „Mit Slots“ ist
-dabei das entscheidende Wort: Ein `Composite` ohne Slots behält stattdessen das
-private `max-age` der Klasse, sodass jene Zusicherung zu einer Route mit
-Inseln darin passt und nicht zu einer ohne. Jener Test sichert bei einem
-Treffer `renders() == before + 1` zu und sagt in seiner eigenen Notiz, warum
-das die ehrliche Lesart ist und kein Fehlschlag.
+Slot-Zahl (`inspect_route_for_test`), die Dokumente zweier Principals
+unterscheiden sich in ihren Insel-Tags und nirgends sonst, und die Antwort an
+den zweiten Principal meldet ein `Age` von so vielen ganzen Sekunden, wie
+seit der Veröffentlichung der Shell vergangen sind.
+
+Das Letzte ist der Beweis, auf dem dieser Test steht, und es ist der lokale
+Beleg für Auslieferung aus dem Store in seiner genauen Form. Der
+`Age`-Header für sich ist das schwache Signal, vor dem dieses Kapitel weiter
+oben gewarnt hat, denn ein Render setzt ebenfalls einen - auf null. Die Zahl
+ist nicht schwach: Ein Render veröffentlicht seine Antwort und seinen Eintrag
+im selben Augenblick, sodass eine gerenderte Antwort null meldet, wie weit
+die Uhr auch gelaufen ist, während eine Zusammensetzung das Alter der Shell
+meldet, aus der sie zusammengesetzt wurde. Der Test stellt dafür eine
+verstellbare Uhr, weit innerhalb des Frischefensters der Route, sodass das
+Abgelesene exakt ist und nicht zufällig.
+
+Die Antwort trägt außerdem `Cache-Control: private, no-store`, aber lesen Sie
+das als das, was es ist: die Direktive, die eine Route dieser Klasse mit
+Slots trägt, festgelegt bei dem Render, der die Shell veröffentlicht, ebenso
+wie bei jeder Zusammensetzung danach, denn sie richtet sich danach, was die
+Bytes enthalten, und nicht danach, welcher Pfad sie erzeugt hat. „Mit Slots“
+ist dabei das entscheidende Wort: Ein `Composite` ohne Slots behält
+stattdessen das private `max-age` der Klasse, sodass die Direktive etwas über
+eine Route mit Inseln darin sagt und nichts über eine ohne. Jener Test
+sichert bei einem Treffer `renders() == before + 1` zu und sagt in seiner
+eigenen Notiz, warum das die ehrliche Lesart ist und kein Fehlschlag.
 
 **2. Den Eintrag zurücklesen.** Zwei Facade-Aufrufe sind gewöhnliche
 öffentliche API: `RenderCache::store_inspection()` meldet die L0-Belegung,

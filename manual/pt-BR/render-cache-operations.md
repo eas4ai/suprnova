@@ -230,20 +230,34 @@ própria da rota, então ele é alcançado em um hit costurado exatamente como e
 um miss. Em uma rota dessas o contador não consegue sustentar a afirmação de
 "nenhum handler rodou", de forma alguma.
 
-Afirme, em vez disso, sobre o que o armazenamento guarda e sobre do que o
-documento servido é feito, que é o que
+Afirme, em vez disso, sobre o que o armazenamento guarda, sobre do que o
+documento servido é feito e sobre que idade ele tem, que é o que
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` faz: a
 entrada armazenada é um `EntryKind::Composite` com a contagem de slots
-esperada (`inspect_route_for_test`) e os documentos de dois principais
-diferem nas suas tags de ilha e em nenhum outro lugar. A resposta também
-carrega `Cache-Control: private, no-store`, mas leia isso pelo que é: a
-diretiva da classe inteira, fixada tanto na renderização que publica o shell
-quanto em cada montagem posterior, porque ela segue o que os bytes guardam e
-não o caminho que os produziu. A palavra operativa ali é "com slots": um `Composite` de
-zero slots mantém, em vez disso, o `max-age` privado da classe, então aquela
-afirmação serve a uma rota com ilhas nela e não a uma sem elas. Aquele teste
-afirma `renders() == before + 1` em um hit, e diz na sua própria nota por que
-essa é a leitura honesta em vez de uma falha.
+esperada (`inspect_route_for_test`), os documentos de dois principais diferem
+nas suas tags de ilha e em nenhum outro lugar, e a resposta ao segundo
+principal informa um `Age` dos segundos inteiros passados desde que o shell
+foi publicado.
+
+Esse último é a prova em que o teste se apoia, e é o comprovante local de
+serviço a partir do armazenamento na sua forma exata. O cabeçalho `Age`
+sozinho é o sinal fraco contra o qual este capítulo avisou acima, porque uma
+renderização também põe um: em zero. O número não é fraco: uma renderização
+publica a sua resposta e a sua entrada no mesmo instante, então uma resposta
+renderizada informa zero por mais que o relógio tenha andado, enquanto uma
+montagem informa a idade do shell a partir do qual foi montada. O teste move
+um relógio ajustável, bem dentro da janela de validade da rota, para que o
+que ele lê seja exato e não incidental.
+
+A resposta também carrega `Cache-Control: private, no-store`, mas leia isso
+pelo que é: a diretiva que uma rota com slots desta classe carrega, fixada
+tanto na renderização que publica o shell quanto em cada montagem posterior,
+porque ela segue o que os bytes guardam e não o caminho que os produziu. A
+palavra operativa é "com slots": um `Composite` de zero slots mantém, em vez
+disso, o `max-age` privado da classe, então a diretiva diz algo de uma rota
+com ilhas nela e nada de uma sem elas. Aquele teste afirma
+`renders() == before + 1` em um hit, e diz na sua própria nota por que essa é
+a leitura honesta em vez de uma falha.
 
 **2. Leia a entrada de volta.** Duas chamadas de facade são API pública
 comum: `RenderCache::store_inspection()` relata a ocupação da L0, os bytes e

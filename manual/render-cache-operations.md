@@ -213,20 +213,32 @@ middleware registered globally after the install sits outside the route's
 own chain, so it is reached on a stitched hit exactly as on a miss. On such
 a route the counter cannot carry the "no handler ran" claim at all.
 
-Assert instead on what the store holds and what the served document is made
-of, which is what `the_dashboard_is_stitched_per_principal_from_one_shared_shell`
-does: the stored entry is `EntryKind::Composite` with the expected slot
-count (`inspect_route_for_test`), and two principals' documents differ in
-their island tags and nowhere else. The response carries
-`Cache-Control: private, no-store` as well, but read that for what it is: the
-whole class's directive, pinned on the render that publishes the shell as much
-as on every assembly after it, because it follows what the bytes hold and not
-which path produced them.
-Slotted is the operative word there: a zero-slot `Composite` keeps the class's
-private `max-age` instead, so that assertion suits a route with islands in
-it and not one without. That
-test asserts `renders() == before + 1` on a hit, and says in its own note
-why that is the honest reading rather than a failure.
+Assert instead on what the store holds, what the served document is made of,
+and how old it is - which is what
+`the_dashboard_is_stitched_per_principal_from_one_shared_shell` does: the
+stored entry is `EntryKind::Composite` with the expected slot count
+(`inspect_route_for_test`), two principals' documents differ in their island
+tags and nowhere else, and the second principal's response reports an `Age`
+of the whole seconds that have passed since the shell was published.
+
+That last one is the proof the test turns on, and it is the local proof of
+store service in its exact form. The `Age` header on its own is the weak
+signal this chapter warned about above, because a render sets one too - at
+zero. The number is not weak: a render publishes its response and its entry
+at the same instant, so a rendered response reports zero however far the
+clock has moved, while an assembly reports the age of the shell it was
+assembled from. The test drives an adjustable clock, well inside the route's
+fresh window, so what it reads is exact rather than incidental.
+
+The response also carries `Cache-Control: private, no-store`, but read that
+for what it is: the directive a slotted route in this class carries, pinned
+on the render that publishes the shell as much as on every assembly after
+it, because it follows what the bytes hold and not which path produced them.
+Slotted is the operative word: a zero-slot `Composite` keeps the class's
+private `max-age` instead, so the directive says something about a route
+with islands in it and nothing about one without. That test asserts
+`renders() == before + 1` on a hit, and says in its own note why that is the
+honest reading rather than a failure.
 
 **2. Read the entry back.** Two facade calls are ordinary public API:
 `RenderCache::store_inspection()` reports L0 occupancy, bytes, and the

@@ -236,22 +236,35 @@ dehors de la chaîne propre à la route, il est donc atteint sur un hit cousu
 exactement comme sur un miss. Sur une telle route, le compteur ne peut pas
 du tout porter l'affirmation « aucun handler ne s'est exécuté ».
 
-Assertez plutôt sur ce que le magasin détient et sur ce dont est fait le
-document servi, ce que fait
+Assertez plutôt sur ce que le magasin détient, sur ce dont est fait le
+document servi et sur son âge, ce que fait
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` : l'entrée
 stockée est un `EntryKind::Composite` avec le nombre d'emplacements attendu
-(`inspect_route_for_test`), et les documents de deux principaux
-diffèrent par leurs balises d'îlot et nulle part ailleurs. La réponse porte
-aussi `Cache-Control: private, no-store`, mais lisez cela pour ce que c'est :
-la directive de toute la classe, épinglée sur le rendu qui publie la coque
-autant que sur chaque assemblage qui suit, car elle suit ce que contiennent
-les octets et non le chemin qui les a produits. « Doté
-d'emplacements » est ici le mot qui compte : un `Composite` à zéro emplacement
-garde à la place le `max-age` privé de la classe, si bien que cette
-assertion convient à une route qui contient des îlots et non à une route
-qui n'en contient pas. Ce test asserte `renders() == before + 1` sur un
-hit, et dit dans sa propre note pourquoi c'est la lecture honnête plutôt
-qu'un échec.
+(`inspect_route_for_test`), les documents de deux principaux diffèrent par
+leurs balises d'îlot et nulle part ailleurs, et la réponse au second
+principal rapporte un `Age` du nombre de secondes entières écoulées depuis la
+publication de la coque.
+
+C'est ce dernier point qui porte le test, et c'est la preuve locale d'un
+service depuis le magasin sous sa forme exacte. L'en-tête `Age` à lui seul
+est le signal faible contre lequel ce chapitre mettait en garde plus haut,
+car un rendu en pose un aussi : à zéro. Le nombre, lui, n'est pas faible : un
+rendu publie sa réponse et son entrée au même instant, si bien qu'une réponse
+rendue rapporte zéro quelle que soit l'avance de l'horloge, tandis qu'un
+assemblage rapporte l'âge de la coque dont il a été assemblé. Le test pilote
+une horloge réglable, bien à l'intérieur de la fenêtre de fraîcheur de la
+route, pour que ce qu'il lit soit exact et non fortuit.
+
+La réponse porte aussi `Cache-Control: private, no-store`, mais lisez cela
+pour ce que c'est : la directive que porte une route dotée d'emplacements
+dans cette classe, épinglée sur le rendu qui publie la coque autant que sur
+chaque assemblage qui suit, car elle suit ce que contiennent les octets et
+non le chemin qui les a produits. « Doté d'emplacements » est le mot qui
+compte : un `Composite` à zéro emplacement garde à la place le `max-age`
+privé de la classe, si bien que la directive dit quelque chose d'une route
+qui contient des îlots et rien d'une route qui n'en contient pas. Ce test
+asserte `renders() == before + 1` sur un hit, et dit dans sa propre note
+pourquoi c'est la lecture honnête plutôt qu'un échec.
 
 **2. Relisez l'entrée.** Deux appels de façade sont de l'API publique
 ordinaire : `RenderCache::store_inspection()` rapporte l'occupation de L0,

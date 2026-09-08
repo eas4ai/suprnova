@@ -231,21 +231,34 @@ en un acierto cosido exactamente igual que en un fallo. En una ruta así el
 contador no puede sostener en absoluto la afirmación de «no se ejecutó
 ningún handler».
 
-Asevera en su lugar sobre lo que guarda el store y sobre de qué está hecho
-el documento servido, que es lo que hace
+Asevera en su lugar sobre lo que guarda el store, sobre de qué está hecho el
+documento servido y sobre qué antigüedad tiene, que es lo que hace
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell`: la entrada
 almacenada es `EntryKind::Composite` con el número de slots esperado
-(`inspect_route_for_test`) y los documentos de dos principales
-difieren en sus etiquetas de isla y en ningún otro sitio. La respuesta lleva
-además `Cache-Control: private, no-store`, pero léelo por lo que es: la
-directiva de toda la clase, fijada tanto en el render que publica el shell
-como en cada ensamblaje posterior, porque sigue lo que contienen los bytes y
-no la ruta que los produjo. «Con slots» es ahí la
-expresión clave: un `Composite` sin slots conserva en su lugar el `max-age`
-privado de la clase, así que esa aseveración le va bien a una ruta con
-islas y no a una sin ellas. Esa prueba asevera `renders() == before + 1` en
-un acierto, y dice en su propia nota por qué esa es la lectura honesta y no
-un fallo.
+(`inspect_route_for_test`), los documentos de dos principales difieren en sus
+etiquetas de isla y en ningún otro sitio, y la respuesta al segundo principal
+informa de un `Age` de los segundos enteros transcurridos desde que se
+publicó el shell.
+
+Eso último es la prueba sobre la que se sostiene el test, y es el comprobante
+local de servicio desde el almacén en su forma exacta. La cabecera `Age` por
+sí sola es la señal débil de la que este capítulo advertía más arriba, porque
+un render también pone una: a cero. El número no es débil: un render publica
+su respuesta y su entrada en el mismo instante, así que una respuesta
+renderizada informa de cero por lejos que haya avanzado el reloj, mientras
+que un ensamblaje informa de la antigüedad del shell del que se ensambló. El
+test mueve un reloj ajustable, bien dentro de la ventana de frescura de la
+ruta, para que lo que lee sea exacto y no incidental.
+
+La respuesta lleva además `Cache-Control: private, no-store`, pero léelo por
+lo que es: la directiva que lleva una ruta con slots de esta clase, fijada
+tanto en el render que publica el shell como en cada ensamblaje posterior,
+porque sigue lo que contienen los bytes y no la ruta que los produjo. «Con
+slots» es la expresión clave: un `Composite` sin slots conserva en su lugar
+el `max-age` privado de la clase, así que la directiva dice algo de una ruta
+con islas y nada de una sin ellas. Esa prueba asevera
+`renders() == before + 1` en un acierto, y dice en su propia nota por qué esa
+es la lectura honesta y no un fallo.
 
 **2. Vuelve a leer la entrada.** Dos llamadas de la fachada son API pública
 corriente: `RenderCache::store_inspection()` informa de la ocupación de L0,
