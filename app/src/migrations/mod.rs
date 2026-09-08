@@ -94,6 +94,13 @@ impl MigratorTrait for Migrator {
             // three `suprnova_render_*` tables alongside this project's own
             // schema.
             Box::new(suprnova::render_cache::migration::Migration),
+            // RenderCache tiers - the four `suprnova_render_*` tables the
+            // database L1 store and the database rebuild coordinator read.
+            // `RenderCache::install` refuses to boot the Database profile
+            // without them, so listing the migration here is what makes
+            // `RENDER_CACHE_PROFILE=database` a configuration choice this
+            // application can actually make.
+            Box::new(suprnova::render_cache::migration::TierMigration),
         ]
     }
 }

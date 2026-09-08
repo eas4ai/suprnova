@@ -20,7 +20,8 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use suprnova::http::cookie::Cookie;
 use suprnova::live::LiveRuntime;
-use suprnova::live::testing::prepare_live_router_for_test;
+use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_for_test};
+use suprnova::render_cache::{CoordinatorConfig, L1Config, Profile, RenderCacheConfig};
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
@@ -53,6 +54,10 @@ pub struct TestApp {
     pub session_store: Arc<DatabaseSessionDriver>,
     pub finalizer: Arc<AppUploadFinalizer>,
     pub runtime: LiveRuntime,
+    /// The clock the RenderCache runtime reads, when this boot installed an
+    /// adjustable one. `None` for every boot that took the system clock;
+    /// [`advance_clock_ms`] says so rather than silently doing nothing.
+    render_cache_clock: Option<Arc<AdjustableTestClock>>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -88,8 +93,13 @@ pub mod render_counter {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use suprnova::{Middleware, Next, Request, Response, async_trait};
+    use tokio::sync::Notify;
 
     static RENDERS: AtomicU64 = AtomicU64::new(0);
+    /// Paired with `RENDERS` so a test can wait for a render it did not
+    /// itself dispatch - a background rebuild - without a timing wait. See
+    /// [`wait_until_renders_at_least`].
+    static ADVANCED: Notify = Notify::const_new();
 
     struct RenderCounter;
 
@@ -97,6 +107,7 @@ pub mod render_counter {
     impl Middleware for RenderCounter {
         async fn handle(&self, request: Request, next: Next) -> Response {
             RENDERS.fetch_add(1, Ordering::SeqCst);
+            ADVANCED.notify_waiters();
             next(request).await
         }
     }
@@ -110,9 +121,93 @@ pub mod render_counter {
     pub fn renders() -> u64 {
         RENDERS.load(Ordering::SeqCst)
     }
+
+    /// Waits until [`renders`] has reached `target`.
+    ///
+    /// The one reading a test cannot take synchronously: a stale-servable
+    /// hit spawns its rebuild in a detached task, so the dispatch that
+    /// triggered it returns before that rebuild has reached any handler.
+    /// The capture-then-check order is what makes this race-free - a
+    /// notification that fires between the check and the wait is held by
+    /// the `Notified` future captured first, so it is never lost - and it
+    /// is a state barrier rather than a timed one: nothing here sleeps,
+    /// yields, or spins.
+    pub async fn wait_until_renders_at_least(target: u64) {
+        loop {
+            let advanced = ADVANCED.notified();
+            if renders() >= target {
+                return;
+            }
+            advanced.await;
+        }
+    }
+}
+
+/// How one [`TestApp`] configures its RenderCache. Every variant starts
+/// from `RenderCacheConfig::from_env`, the reader a server uses, and
+/// changes only what the boot it names has to change.
+pub enum CacheBoot {
+    /// Exactly what `suprnova serve` installs.
+    FromEnv,
+    /// `from_env` with an adjustable clock in place of the system one, so a
+    /// test can drive a freshness band. `RenderCacheConfig::with_clock_for_test`
+    /// is the only way in, and `from_env` never calls it.
+    TestClock,
+    /// `from_env` with the two providers `RENDER_CACHE_PROFILE=database`
+    /// selects: a database L1 store and a database rebuild coordinator.
+    ///
+    /// Set on the configuration rather than through the environment
+    /// variable. The variable is read by `std::env::set_var`, which is
+    /// `unsafe` under this edition and is not something a test in this
+    /// application may reach for; the mapping from that variable to these
+    /// two providers is proven by the framework's own configuration tests
+    /// over `RenderCacheConfig::from_source`, and what this boot exists to
+    /// prove is the half those cannot: that this application, booted on
+    /// those providers, serves a hit out of the SQL store.
+    DatabaseProfile,
 }
 
 pub async fn setup_app(accepts: usize) -> TestApp {
+    boot(accepts, CacheBoot::FromEnv).await
+}
+
+/// Boots with an adjustable RenderCache clock; see [`advance_clock_ms`].
+pub async fn setup_app_with_clock(accepts: usize) -> TestApp {
+    boot(accepts, CacheBoot::TestClock).await
+}
+
+/// Boots on the Database profile's providers; see [`CacheBoot::DatabaseProfile`].
+pub async fn setup_app_on_the_database_profile(accepts: usize) -> TestApp {
+    boot(accepts, CacheBoot::DatabaseProfile).await
+}
+
+/// Moves this application's RenderCache clock forward by `delta_ms`.
+///
+/// # Panics
+///
+/// Panics when the application was not booted through
+/// [`setup_app_with_clock`]: a silent no-op would leave a freshness test
+/// asserting about a band it never entered.
+pub fn advance_clock_ms(app: &TestApp, delta_ms: u64) {
+    app.render_cache_clock
+        .as_ref()
+        .expect("this application was booted with setup_app_with_clock")
+        .advance_ms(delta_ms);
+}
+
+/// Wall-clock milliseconds, so an adjustable clock starts where the system
+/// one is rather than at an epoch the rest of the process would disagree
+/// with.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after the Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("Unix milliseconds fit in u64")
+}
+
+async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
     let lock = TEST_LOCK.lock().await;
     suprnova::Crypt::init(EncryptionKey::generate());
 
@@ -124,6 +219,13 @@ pub async fn setup_app(accepts: usize) -> TestApp {
         .expect("run migrations against sqlite::memory:");
     App::singleton(suprnova::DbConnection::from_raw(conn));
     bind!(dyn UserProvider, DatabaseUserProvider);
+
+    // The `#[injectable]` services a real boot registers, so a route
+    // handler that resolves one - `POST /todos/random` resolves
+    // `CreateRandomTodoAction` - behaves here as it does on a server.
+    // `singleton_if_absent` underneath, so it never clobbers a binding this
+    // harness installs itself.
+    suprnova::container::provider::bootstrap().expect("register injectable services");
 
     // The same Live bindings `bootstrap::register` installs.
     App::singleton(app::live::registry().expect("Live component registry"));
@@ -140,7 +242,32 @@ pub async fn setup_app(accepts: usize) -> TestApp {
     // middleware this registers have to already be there for the cache
     // middleware to land after them, exactly as a deployment orders them.
     http_stack_once();
-    let router = app::live::routes_with_render_cache(app::routes::register())
+    let mut render_cache_clock = None;
+    let mut config = RenderCacheConfig::from_env().expect("render cache configuration");
+    match cache {
+        CacheBoot::FromEnv => {}
+        CacheBoot::TestClock => {
+            let clock = Arc::new(AdjustableTestClock::new(unix_now_ms()));
+            // Bound before the call so the argument is an
+            // `Arc<AdjustableTestClock>` the compiler unsizes at the
+            // parameter, rather than an `Arc::clone` whose return type it
+            // would try to infer as the trait object directly.
+            let for_runtime = Arc::clone(&clock);
+            config = config.with_clock_for_test(for_runtime);
+            render_cache_clock = Some(clock);
+        }
+        CacheBoot::DatabaseProfile => {
+            config.profile = Profile::Database;
+            config.l1 = L1Config::Database {
+                max_bytes: 16 * 1024 * 1024,
+            };
+            config.coordinator = CoordinatorConfig::Database {
+                lease_ms: 30_000,
+                max_waiters: 128,
+            };
+        }
+    }
+    let router = app::live::routes_with_render_cache_with_config(app::routes::register(), config)
         .await
         .expect("install Live routes and the RenderCache middleware");
     // After the install, so it runs closer to the handler than
@@ -184,6 +311,7 @@ pub async fn setup_app(accepts: usize) -> TestApp {
         session_store,
         finalizer,
         runtime,
+        render_cache_clock,
         _lock: lock,
     }
 }
@@ -196,11 +324,18 @@ pub struct SeededSession {
 }
 
 pub async fn seed_session(app: &TestApp) -> SeededSession {
+    seed_session_named(app, "Live Dogfood User").await
+}
+
+/// [`seed_session`] with the user's display name chosen by the caller, so a
+/// test can tell two signed-in principals apart by what their own page says
+/// rather than by a header the cache also controls.
+pub async fn seed_session_named(app: &TestApp, name: &str) -> SeededSession {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let user = User::create(attrs! {
-        name: "Live Dogfood User",
+        name: name,
         email: format!("live-{seq}@example.suprnova.app"),
         password: "hashed-by-test",
     })

@@ -18,6 +18,7 @@ use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware, RegistryErro
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::render_cache::{
     FreshnessPolicy, RenderCache, RenderCacheConfig, RenderCachePolicy, RepresentationClass,
+    StorageLayers, VarianceDimension,
 };
 use suprnova::{
     AuthMiddleware, BackendErrorPolicy, FrameworkError, RateLimitMiddleware, RateLimiterDriver,
@@ -33,6 +34,10 @@ use providers::tenant::SingleTenant;
 pub const DASHBOARD_PATH: &str = "/live";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
+/// The public todo listing, rendered from the ORM.
+pub const TODOS_PATH: &str = "/live/todos";
+/// The signed-in visitor's own account document.
+pub const ME_PATH: &str = "/live/me";
 /// The application-owned upload reacquisition route, outside `/__live/`.
 pub const REACQUIRE_PATH: &str = "/account/uploads/{handle}/reacquire";
 
@@ -171,6 +176,19 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .into();
     let router = router.try_live_mount(&public.counter)?;
 
+    // The todo listing and the account page mount no island; they are
+    // ordinary document routes of this Live surface, registered here so
+    // every route the RenderCache policies below name is declared in one
+    // place. `/live/todos` is open to anyone; `/live/me` carries the same
+    // login redirect the dashboard does, so an anonymous visitor is sent to
+    // the login page rather than shown somebody's account.
+    let router: Router = router.get(TODOS_PATH, pages::todos).into();
+    let router: Router = router
+        .get(ME_PATH, pages::me)
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+
     // The public document is the one route here whose representation is the
     // same for every visitor: its template reads no translation, no feature
     // flag, and no session, and its single island is a public seed rather
@@ -187,6 +205,48 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         PUBLIC_PATH,
         RenderCachePolicy::builder(RepresentationClass::PublicShared)
             .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
+            .build()?,
+    )?;
+
+    // The todo listing is the same declaration as the public document and
+    // for the same reason - one representation for every visitor, no
+    // session, no translation, no feature flag - with one difference that
+    // is the point of having it: its content comes from the `todos` table,
+    // so the entry stops being current the moment a model write to that
+    // table advances the table's generation, not when its five minutes run
+    // out. Five minutes fresh, a minute of stale service (during which the
+    // stored copy is served immediately and refreshed behind the request),
+    // and five minutes of stale-on-error.
+    //
+    // `l0_and_l1` rather than the builder's in-process default: this is
+    // the one document here that every node of a deployment can share
+    // byte for byte, so a shared L1 tier is worth populating. Under the
+    // embedded profile, where L1 is disabled, declaring it changes
+    // nothing.
+    let router = router.try_render_cache(
+        TODOS_PATH,
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
+            .layers(StorageLayers::l0_and_l1())
+            .build()?,
+    )?;
+
+    // The account page is the one route here whose stored bytes belong to
+    // one person. `PrivateCached` says so, and `vary(Principal)` is what
+    // makes it safe rather than merely declared: the lookup key carries
+    // opaque per-principal material, so two signed-in visitors never share
+    // an entry and an anonymous visitor - who is redirected before the
+    // handler runs - never derives one at all. The class is also refused at
+    // build time without `Principal` or `Tenant` variance, so this pairing
+    // is not a convention that could drift. Freshness is a minute with no
+    // stale service: a private entry has no stale band in any case (its
+    // dead edge is its fresh edge), and declaring one would only read as a
+    // promise the cache does not keep.
+    let router = router.try_render_cache(
+        ME_PATH,
+        RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0)?)
+            .vary(VarianceDimension::Principal)
             .build()?,
     )?;
 
@@ -234,5 +294,24 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
 /// middleware establish the request-scoped state the cache middleware reads
 /// while building a lookup key.
 pub async fn routes_with_render_cache(router: Router) -> Result<Router, FrameworkError> {
-    RenderCache::install(routes(router)?, RenderCacheConfig::from_env()?).await
+    routes_with_render_cache_with_config(router, RenderCacheConfig::from_env()?).await
+}
+
+/// [`routes_with_render_cache`] over a caller-supplied configuration.
+///
+/// `#[doc(hidden)]`: a test seam, not part of this application's surface.
+/// Every server here reaches the cache through [`routes_with_render_cache`],
+/// which reads the environment; a test that needs to drive a freshness band
+/// has no other way in, because the clock the runtime reads is settable only
+/// on a `RenderCacheConfig` and `from_env` never sets it. Splitting the
+/// configuration out rather than duplicating the install keeps the two on
+/// one code path: a test installs the same routes, the same policies, and
+/// the same middleware ordering the server does, and differs from it in
+/// exactly the configuration it passed.
+#[doc(hidden)]
+pub async fn routes_with_render_cache_with_config(
+    router: Router,
+    config: RenderCacheConfig,
+) -> Result<Router, FrameworkError> {
+    RenderCache::install(routes(router)?, config).await
 }

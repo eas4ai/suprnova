@@ -1,13 +1,22 @@
-//! The Live document routes: an authenticated dashboard with three islands
-//! and a public page with one public seed.
+//! The Live document routes: an authenticated dashboard with three islands,
+//! a public page with one public seed, an ORM-backed public todo listing,
+//! and the signed-in visitor's own account page.
+//!
+//! The last two mount no island. They are still document routes of this
+//! application's Live surface, and they exist to exercise the two
+//! RenderCache shapes the island documents cannot: a shared representation
+//! whose content comes from the ORM (so an ordinary model write is what
+//! invalidates it), and a representation stored once per principal.
 
 use std::collections::BTreeMap;
 
 use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, MountFlags};
-use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
-use suprnova::{FrameworkError, HttpResponse, Request, Response, StatusCode};
+use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, ViewTemplate};
+use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, StatusCode};
 
 use super::{DashboardMounts, PublicMounts};
+use crate::models::todos::Todo;
+use crate::models::users::User;
 
 mod filters {
     pub use suprnova::view::filters::trusted_html;
@@ -27,6 +36,17 @@ struct PublicView<'a> {
     counter: &'a TrustedHtml,
 }
 
+#[suprnova::view(path = "live/todos.html")]
+struct TodosView {
+    count: usize,
+    titles: Vec<String>,
+}
+
+#[suprnova::view(path = "live/me.html")]
+struct MeView {
+    name: String,
+}
+
 fn parameters() -> CanonicalValue {
     CanonicalValue::Object(BTreeMap::new())
 }
@@ -38,6 +58,19 @@ fn view(name: &str) -> Result<ViewName, FrameworkError> {
 fn intent() -> Result<DocumentResponseIntent, FrameworkError> {
     DocumentResponseIntent::html(StatusCode::OK)
         .map_err(|_| FrameworkError::internal("Live document response intent"))
+}
+
+/// Renders one checked template into an HTML response.
+///
+/// The two island-free pages take this path rather than
+/// `LiveDocument::render`: with no mount to describe there is no document
+/// metadata to validate, and no Live bootstrap worth emitting for a page
+/// that has nothing to bootstrap.
+fn html(view: &impl ViewTemplate) -> Result<HttpResponse, FrameworkError> {
+    let mut body = String::new();
+    view.render_view(&mut body)
+        .map_err(|_| FrameworkError::internal("Live page template"))?;
+    Ok(HttpResponse::html(body))
 }
 
 fn failed(error: FrameworkError) -> HttpResponse {
@@ -97,6 +130,47 @@ pub async fn public(request: Request, mounts: &PublicMounts) -> Response {
                 AssetSet::empty(),
             )
             .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// `GET /live/todos`: every todo in the database, listed through the ORM.
+///
+/// The read is an ordinary `Todo::all()`, so the RenderCache collector
+/// records the `todos` table as a dependency of the render and any model
+/// write to that table advances its generation. Nothing here reads the
+/// session, the signed-in visitor, or the locale, which is what lets the
+/// route stay a shared representation.
+pub async fn todos(_request: Request) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let titles: Vec<String> = Todo::all()
+            .await?
+            .into_vec()
+            .into_iter()
+            .map(|todo| todo.title)
+            .collect();
+        html(&TodosView {
+            count: titles.len(),
+            titles,
+        })
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// `GET /live/me`: the signed-in visitor's own account page.
+///
+/// The route's own `AuthMiddleware::redirect_to("/login")` is what turns an
+/// anonymous visit into a redirect, exactly as on the dashboard, so this
+/// handler only ever runs for a resolved principal; the `ok_or_else` below
+/// is a contract check, not a gate.
+pub async fn me(_request: Request) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let user = Auth::user_as::<User>()
+            .await?
+            .ok_or_else(|| FrameworkError::internal("Live account document without a principal"))?;
+        html(&MeView { name: user.name })
     }
     .await;
     result.map_err(failed)
