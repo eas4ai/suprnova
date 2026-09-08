@@ -1527,11 +1527,20 @@ impl LiveRuntime {
             .ok_or_else(|| FrameworkError::internal("Live request preparation was rejected"))
     }
 
+    /// Validates a request against a mount selection, producing the trusted
+    /// context a mount runs under.
+    ///
+    /// Takes no separate "current route" and "current slot": the route and
+    /// slot the candidate is checked against are
+    /// [`MountSelection::route`] and [`MountSelection::slot`], read off the
+    /// selection inside
+    /// [`validate_request_context_with_scope`](Self::validate_request_context_with_scope).
+    /// This used to take both as arguments and ignore them, which read like
+    /// a check against an independent fact and was not one - every caller
+    /// derived them from the very selection it passed alongside.
     pub(crate) fn validate_request_context(
         &self,
         request: &Request,
-        _current_route: RouteIdentity,
-        _current_slot: IslandSlot,
         selection: MountSelection,
     ) -> Result<TrustedLiveRequestContext, FrameworkError> {
         self.validate_request_context_with_scope(request, selection, None, None)

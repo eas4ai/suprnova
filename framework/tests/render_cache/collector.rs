@@ -403,6 +403,122 @@ async fn folding_the_gate_into_content_reproduces_the_undivided_report() {
     assert!(report.gate.observed.is_empty());
 }
 
+/// Task 8: the shared bound counts distinct identities, not read events.
+/// A gate that reads exactly what the handler goes on to read folds into
+/// one observation per identity, so it must cost the budget one slot per
+/// identity and not two - otherwise a report whose folded set sits well
+/// inside the window is declared unstorable and the route silently stops
+/// being cached.
+#[tokio::test]
+async fn an_identity_read_in_both_buckets_costs_the_bound_one_slot_not_two() {
+    let mut report = Collector::scope(async {
+        // No `begin_handler` yet, so these land in the gate bucket.
+        for index in 0..MAX_OBSERVATIONS - 1 {
+            collector::observe(DependencyIdentity::record(
+                "t",
+                index.to_string().as_bytes(),
+            ));
+        }
+        collector::begin_handler();
+        for index in 0..MAX_OBSERVATIONS - 1 {
+            collector::observe(DependencyIdentity::record(
+                "t",
+                index.to_string().as_bytes(),
+            ));
+        }
+        current_report().expect("report")
+    })
+    .await;
+    assert!(
+        !report.context.overflowed,
+        "the same identities read in both buckets are one observation each, not two"
+    );
+    report.fold_gate_into_content();
+    assert_eq!(
+        report.storable().map(<[_]>::len),
+        Some(MAX_OBSERVATIONS - 1),
+        "the folded set is exactly the distinct identities the two buckets saw"
+    );
+}
+
+/// The other half of the bound: counting distinct identities must not
+/// become counting nothing. One identity past the cap still overflows, and
+/// it does so whichever bucket the last one landed in.
+#[tokio::test]
+async fn a_distinct_identity_past_the_bound_still_overflows_across_buckets() {
+    let report = Collector::scope(async {
+        for index in 0..MAX_OBSERVATIONS - 1 {
+            collector::observe(DependencyIdentity::record(
+                "gate",
+                index.to_string().as_bytes(),
+            ));
+        }
+        collector::begin_handler();
+        collector::observe(DependencyIdentity::record("content", b"0"));
+        current_report().expect("report")
+    })
+    .await;
+    assert!(
+        report.context.overflowed,
+        "the cap counts distinct identities, and this request read one too many"
+    );
+    assert!(report.storable().is_none());
+}
+
+/// Task 8: a read the collector cannot name, made inside a slot, is a slot
+/// read - counted where slot reads are counted and recorded nowhere. It
+/// must not spoil the shell's report: a slot's reads are re-run on every
+/// hit and are in no bucket, so they say nothing about what the stored
+/// shell depends on, and a route that keeps an identity-bound island
+/// without stitching is already declined whole.
+#[tokio::test]
+async fn an_unnameable_read_inside_a_slot_is_counted_there_and_spoils_no_report() {
+    let long_name = "t".repeat(200);
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        collector::observe_table_read("posts");
+        collector::slot_scope(async {
+            collector::observe_unobservable_read();
+            collector::observe_table_read(&long_name);
+        })
+        .await;
+        current_report().expect("report")
+    })
+    .await;
+    assert!(
+        !report.context.overflowed,
+        "a slot's unnameable read is not the shell's problem"
+    );
+    assert_eq!(
+        report.storable().map(<[_]>::len),
+        Some(1),
+        "the shell still stores on exactly what the handler read"
+    );
+    assert_eq!(
+        report.slot_reads, 2,
+        "both unnameable reads are counted where every slot read is counted"
+    );
+
+    // The control: the same two reads outside a slot still spoil the report,
+    // so the exemption is the slot bucket and not the reads themselves.
+    let spoiled = Collector::scope(async {
+        collector::begin_handler();
+        collector::observe_unobservable_read();
+        current_report().expect("report")
+    })
+    .await;
+    assert!(spoiled.context.overflowed);
+    assert!(spoiled.storable().is_none());
+    let spoiled = Collector::scope(async {
+        collector::begin_handler();
+        collector::observe_table_read(&long_name);
+        current_report().expect("report")
+    })
+    .await;
+    assert!(spoiled.context.overflowed);
+    assert!(spoiled.storable().is_none());
+}
+
 #[tokio::test]
 async fn overflow_inside_any_bucket_marks_the_whole_report() {
     let report = Collector::scope(async {

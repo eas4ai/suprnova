@@ -20,7 +20,14 @@
 //! - [`Tag`] / [`PostTagPivot`] - the many-to-many side of `Post::tags`.
 //! - [`Author`] / [`Book`] - a `#[model(touches = ["author"])]` pair: a
 //!   `Book` write must bust `Author`'s cached representation too.
+//!
+//! It also holds the island-markup readers ([`island_tag`], [`attribute`],
+//! [`decoded_snapshot`]) at the bottom of the file: the privacy and stitch
+//! support modules held byte-identical copies of those until task 8 and now
+//! re-export these, so "which bytes are the island and which are the shell
+//! around it" has one definition for both suites.
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 // A wildcard `sea_orm_migration::prelude::*` import here would bring
 // `sea_query::ExprTrait` into this module's scope, which collides with
@@ -203,4 +210,51 @@ pub async fn boot() {
     .await
     .expect("create books table");
     Box::leak(Box::new(db));
+}
+
+// ── Reading an emitted island ──────────────────────────────────────────
+//
+// The island-markup readers the privacy and stitch suites share. They lived
+// in both support modules as byte-identical copies until task 8; one
+// definition is what keeps "the island bytes" and "the shell bytes around
+// them" meaning the same thing in both suites, which is the distinction
+// every stitched assertion in either file turns on. Both modules re-export
+// these, so a test still imports them from its own support module.
+
+/// The opening tag of the island whose document key is `key`.
+#[must_use]
+pub fn island_tag<'h>(html: &'h str, key: &str) -> &'h str {
+    let needle = format!("data-suprnova-live-document-key=\"{key}\"");
+    let position = html
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no island with document key {key}"));
+    let start = html[..position].rfind('<').expect("island tag start");
+    let end = html[position..].find('>').expect("island tag end") + position + 1;
+    &html[start..end]
+}
+
+/// The value of `name` in one opening tag.
+#[must_use]
+pub fn attribute<'h>(tag: &'h str, name: &str) -> &'h str {
+    let prefix = format!("{name}=\"");
+    let start = tag
+        .find(&prefix)
+        .map(|index| index + prefix.len())
+        .unwrap_or_else(|| panic!("missing attribute {name} in {tag}"));
+    let tail = &tag[start..];
+    let end = tail.find('"').expect("unterminated attribute");
+    &tail[..end]
+}
+
+/// The signed snapshot one island tag carries, decoded from its base64url
+/// `data-suprnova-live-snapshot` attribute. The envelope is
+/// `{"body": {...}, "signature": ...}`, so the scope an island was mounted
+/// under reads as `["body"]["scope"]`.
+#[must_use]
+pub fn decoded_snapshot(tag: &str) -> serde_json::Value {
+    let encoded = attribute(tag, "data-suprnova-live-snapshot");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode emitted Live snapshot");
+    serde_json::from_slice(&bytes).expect("parse emitted Live snapshot")
 }

@@ -1,5 +1,10 @@
-//! Complete entries are bounded, versioned, integrity-protected, and
-//! inspectable without the body.
+//! The stored-entry codec at its boundary: Complete and Composite entries
+//! are bounded, versioned, integrity-protected, and inspectable without the
+//! body. Every test here goes through the public `encode` / `encode_composite`
+//! / `decode` / `inspect` surface, so what it pins is what a store provider
+//! and an operator tool can actually observe. The in-crate unit tests beside
+//! the codec (`src/render_cache/entry.rs`) own what only the module can
+//! reach, such as re-signing a patched frame.
 
 use std::collections::BTreeMap;
 
@@ -7,8 +12,8 @@ use bytes::Bytes;
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{ContentDigest, KeyId, RouteIdentity, UnixMillis};
 use suprnova_live::render_cache::composite::{
-    CompositeEntry, HeaderPiece, HeaderTemplate, Segment, SegmentGraph, ShellIsland,
-    SlotFailurePolicy, StitchSlot, surrounding_digest,
+    CompositeEntry, CompositeHeader, HeaderPiece, HeaderTemplate, MAX_STITCH_SLOTS, Segment,
+    SegmentGraph, ShellIsland, SlotFailurePolicy, StitchSlot, surrounding_digest,
 };
 use suprnova_live::render_cache::entry::{
     CompleteEntry, DecodedEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, Validator,
@@ -108,9 +113,15 @@ fn base_header_json(keys: &SnapshotKeyRing) -> serde_json::Value {
 }
 
 /// A minimal Composite entry: a shell with one nonce hole and one stitch
-/// slot, plus one shell island and one nonce-bearing header template - the
-/// same shape as `composite::tests::graph_and_shell`, reused here at the
-/// codec boundary rather than duplicated.
+/// slot, plus one shell island and one nonce-bearing header template.
+///
+/// Built here rather than shared with `composite::tests::graph_and_shell`,
+/// which is a `#[cfg(test)]` fixture private to the crate and so out of an
+/// integration test's reach. It is deliberately a smaller shape than that
+/// one - one slot, one literal on each side - because what this file tests
+/// is the codec boundary, not the graph rules: the graph rules have their
+/// own tests beside `SegmentGraph::validate`, and a second slot here would
+/// only lengthen the bit-flip sweep below.
 fn composite_entry(keys: &SnapshotKeyRing) -> CompositeEntry {
     let head = b"<!doctype html><html><body>".to_vec();
     let tail = b"</body></html>".to_vec();
@@ -236,11 +247,9 @@ fn every_corruption_is_a_miss_and_never_a_partial_entry() {
         corrupt[index] ^= 0x55;
         let error = decode(&Bytes::from(corrupt), &keys, &EntryLimits::default())
             .expect_err("corrupt fails closed");
-        assert!(
-            matches!(
-                error.kind(),
-                RenderCacheErrorKind::EntryInvalid | RenderCacheErrorKind::EntryUnsupported
-            ),
+        assert_eq!(
+            error.kind(),
+            RenderCacheErrorKind::EntryInvalid,
             "byte {index}"
         );
     }
@@ -464,11 +473,9 @@ fn every_single_bit_flip_of_a_composite_entry_fails_to_decode() {
             corrupted[byte] ^= 1 << bit;
             let error = decode(&Bytes::from(corrupted), &keys, &EntryLimits::default())
                 .expect_err("corrupt fails closed");
-            assert!(
-                matches!(
-                    error.kind(),
-                    RenderCacheErrorKind::EntryInvalid | RenderCacheErrorKind::EntryUnsupported
-                ),
+            assert_eq!(
+                error.kind(),
+                RenderCacheErrorKind::EntryInvalid,
                 "byte {byte} bit {bit}"
             );
         }
@@ -478,7 +485,13 @@ fn every_single_bit_flip_of_a_composite_entry_fails_to_decode() {
 #[test]
 fn a_composite_entry_signed_by_another_ring_is_rejected() {
     let encoded = encode_composite(&composite_entry(&keys()), &keys()).expect("encodes");
-    assert!(decode(&encoded, &keys_from(9), &EntryLimits::default()).is_err());
+    assert_eq!(
+        decode(&encoded, &keys_from(9), &EntryLimits::default())
+            .map(|_| ())
+            .map_err(|error| error.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid),
+        "a foreign ring is a miss, not an unsupported format"
+    );
 }
 
 #[test]
@@ -520,5 +533,138 @@ fn a_composite_header_whose_class_is_not_stitched_is_rejected() {
             .map(|_| ())
             .map_err(|e| e.kind()),
         Err(RenderCacheErrorKind::EntryInvalid)
+    );
+}
+
+/// `DecodedEntry` answers for either arm without the caller matching on it:
+/// `kind()` names the arm, `header()` returns the shared header that arm
+/// carries, and `into_complete()` hands out a body only for the arm that
+/// has one. These are the accessors a caller that does not need the body
+/// uses, and nothing else in this file exercised them.
+#[test]
+fn a_decoded_entry_reports_its_kind_and_shared_header_for_both_arms() {
+    let keys = keys();
+
+    let complete = entry(&keys);
+    let decoded = decode(
+        &encode(&complete, &keys).expect("encodes"),
+        &keys,
+        &EntryLimits::default(),
+    )
+    .expect("decodes");
+    assert_eq!(decoded.kind(), EntryKind::Complete);
+    assert_eq!(decoded.header(), complete.header());
+    assert_eq!(
+        decoded.into_complete().map(|entry| entry.body().clone()),
+        Some(complete.body().clone()),
+        "the Complete arm hands out the body it decoded"
+    );
+
+    let composite = composite_entry(&keys);
+    let decoded = decode(
+        &encode_composite(&composite, &keys).expect("encodes"),
+        &keys,
+        &EntryLimits::default(),
+    )
+    .expect("decodes");
+    assert_eq!(decoded.kind(), EntryKind::Composite);
+    assert_eq!(
+        decoded.header(),
+        composite.header(),
+        "both arms carry the same header shape, and `header()` reaches it either way"
+    );
+    assert!(
+        decoded.into_complete().is_none(),
+        "a Composite entry is never handed out as a directly sendable Complete entry"
+    );
+}
+
+/// A stored Composite header reaches `inspect` with neither its integrity
+/// tag checked nor `SegmentGraph::validate` run over it, so its slot vector
+/// is bounded only by the canonical entry count. `inspect` must not report
+/// a slot count above the stitch bound: that count belongs to an entry
+/// `decode` refuses and assembly could never serve, and an operator reading
+/// it would be reading a number out of unauthenticated bytes.
+///
+/// The bytes here are correctly signed, so the refusal is the slot bound
+/// and not the tag.
+#[test]
+fn inspection_refuses_a_composite_graph_with_more_slots_than_the_stitch_bound() {
+    let keys = keys();
+    let entry = composite_entry(&keys);
+    let mut header = serde_json::to_value(CompositeHeader {
+        entry: entry.header().clone(),
+        graph: entry.graph().clone(),
+    })
+    .expect("header json");
+    let slot = header["graph"]["slots"][0].clone();
+    let slots = header["graph"]["slots"]
+        .as_array_mut()
+        .expect("the graph carries a slot array");
+    while slots.len() <= MAX_STITCH_SLOTS {
+        slots.push(slot.clone());
+    }
+    let encoded =
+        encode_raw_header_for_test_with_kind(&header, entry.shell(), &keys, EntryKind::Composite);
+    assert_eq!(
+        inspect(&encoded, &EntryLimits::default())
+            .map(|inspection| inspection.slots)
+            .map_err(|error| error.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid),
+        "inspect must refuse a slot count the stitch bound refuses, never report it"
+    );
+    assert_eq!(
+        decode(&encoded, &keys, &EntryLimits::default())
+            .map(|_| ())
+            .map_err(|error| error.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid),
+        "the two readers give the same verdict on the same bytes"
+    );
+
+    // The positive control: the same header at exactly the bound inspects,
+    // so the check above is a ceiling and not a refusal of every graph.
+    let mut header = serde_json::to_value(CompositeHeader {
+        entry: entry.header().clone(),
+        graph: entry.graph().clone(),
+    })
+    .expect("header json");
+    let slot = header["graph"]["slots"][0].clone();
+    let slots = header["graph"]["slots"]
+        .as_array_mut()
+        .expect("the graph carries a slot array");
+    while slots.len() < MAX_STITCH_SLOTS {
+        slots.push(slot.clone());
+    }
+    let encoded =
+        encode_raw_header_for_test_with_kind(&header, entry.shell(), &keys, EntryKind::Composite);
+    assert_eq!(
+        inspect(&encoded, &EntryLimits::default())
+            .expect("a graph at the bound inspects")
+            .slots,
+        MAX_STITCH_SLOTS
+    );
+}
+
+/// The body length `inspect` reports is four unauthenticated bytes read out
+/// of the frame. It is bounded by the same ceiling `decode` applies, so an
+/// operator never sees a length belonging to an entry no read can serve.
+#[test]
+fn inspection_refuses_a_body_length_above_the_ceiling_it_was_given() {
+    let keys = keys();
+    let encoded = encode(&entry(&keys), &keys).expect("encodes");
+    let tiny = EntryLimits {
+        max_body_bytes: 8,
+        ..EntryLimits::default()
+    };
+    assert_eq!(
+        inspect(&encoded, &tiny)
+            .map(|inspection| inspection.body_bytes)
+            .map_err(|error| error.kind()),
+        Err(RenderCacheErrorKind::EntryInvalid),
+        "inspect applies the body ceiling decode applies"
+    );
+    assert!(
+        inspect(&encoded, &EntryLimits::default()).is_ok(),
+        "the same bytes inspect under the default ceiling"
     );
 }

@@ -109,45 +109,21 @@
 //! shape that let four earlier rounds of this task's review each find a
 //! different unguarded seam.
 //!
-//! # Deliberately out of scope for this task
+//! # Seed promotion deadlines
 //!
-//! - **Seed promotion deadlines.** `EntryHeader::seed_deadline_ms` is
-//!   always `None` here. Reading a Live document's embedded public seed
-//!   deadline is the Live-integration task this iteration's plan lists
-//!   separately from the middleware; wiring it in here would reach past
-//!   this task's subject.
-//! - **Background rebuild's ambient context (fix round 2, item 4).** A
-//!   stale-servable background rebuild runs on a `tokio::spawn`ed task, and
-//!   task-locals do not cross a spawn. `Lang`'s negotiated locale and
-//!   `Auth`'s request-scoped identity are both task-local
-//!   (`tokio::task_local!`-backed), so a background render for a route that
-//!   declares `Locale` or `Principal` variance would compute a *different*
-//!   variance than the one the key it is about to publish under was already
-//!   derived from: a locale-varying route's background rebuild would render
-//!   the default locale's content and publish it under another locale's
-//!   key, and a principal-varying route's background rebuild would render
-//!   anonymously and publish under a specific principal's key - a real
-//!   content-identity mismatch, not merely a wasted render. (An earlier
-//!   draft of this note called this "a possible wasted or misdirected
-//!   rebuild, not a correctness or security defect," reasoning that
-//!   `key_used_different_values_than_the_render_saw`'s narrowing would decline the store;
-//!   round 1 of this task's review established that narrowing never
-//!   repartitions an already-derived key, so that justification does not
-//!   hold, and the gap is broader than the cookie-carried case it was
-//!   framed around - the fix below is the actual guard.)
-//!
-//!   The fix: `RenderCacheMiddleware::serve` does not spawn a background
-//!   rebuild at all for a route whose policy declares `Locale` or
-//!   `Principal` variance (see `variance_depends_on_ambient_context`); such
-//!   a route still serves its stale-servable entry immediately - the
-//!   "never blocks" guarantee is unaffected - it just does not also try to
-//!   refresh it in the background. The entry only refreshes once it goes
-//!   Dead and the next request renders it in the foreground, where the
-//!   ambient context is the real request's own. `Tenant` variance needs no
-//!   such guard: `Request::live_tenant()` reads a field set on the `Request`
-//!   value itself, not a task-local, so it survives the moved `Request`
-//!   the spawn carries. A request id is also lost across the spawn - log
-//!   correlation only, not a cache-key concern, so it is not guarded here.
+//! A Live document that mounted a public-seed island records the earliest
+//! promotion deadline it embedded, and that deadline is stored with the
+//! entry: the collector records it
+//! ([`super::collector::observe_live_document_mount`], through
+//! [`super::live::record_mount`]), `lead_render` reads it off the report
+//! and hands it to `entry_header`, and every freshness decision afterwards
+//! reads it back out of [`EntryHeader::seed_deadline_ms`]. An entry whose
+//! seed deadline has passed is Dead however fresh its clock says it is, so
+//! a cached document can never outlive the seed inside it.
+//! `render_cache::live::a_public_seed_document_is_a_hit_until_its_seed_deadline`
+//! is the end-to-end guard: the entry is a hit right up to the deadline and
+//! renders again the moment it is past, which is only possible if the value
+//! reached the stored header.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -381,6 +357,19 @@ pub struct RenderCacheRuntime {
     /// the way a new store zeroes its own contents.
     #[cfg(any(test, feature = "testing"))]
     pub(crate) hot_serves: std::sync::atomic::AtomicU64,
+    /// Background rebuilds this runtime *decided* to spawn, for
+    /// [`super::RenderCache::background_rebuilds_for_test`].
+    ///
+    /// Counted in [`RenderCacheMiddleware::spawn_background_rebuild`],
+    /// immediately before the `tokio::spawn` and therefore still on the
+    /// request's own path, so it is already final when the dispatch that
+    /// took the decision returns. That is what a test asserting a route
+    /// *never* spawns one needs: waiting on the spawned task's own effects
+    /// can only ever show that it has not finished yet, while this shows
+    /// that it was never started. Zeroed by a fresh
+    /// [`super::RenderCache::install`], like `hot_serves` beside it.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) background_rebuilds: std::sync::atomic::AtomicU64,
 }
 
 impl RenderCacheRuntime {
@@ -393,6 +382,15 @@ impl RenderCacheRuntime {
     fn count_hot_serve(&self) {
         #[cfg(any(test, feature = "testing"))]
         self.hot_serves
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts one background rebuild this runtime decided to spawn. Same
+    /// shape and same reasoning as [`Self::count_hot_serve`]; see the
+    /// `background_rebuilds` field for what makes the count useful.
+    fn count_background_rebuild(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        self.background_rebuilds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -789,52 +787,26 @@ impl RenderCacheMiddleware {
                 }
                 LookupOutcome::Miss.record();
                 // Captured before `request` moves into the rebuild attempt,
-                // so a fallback to the stale entry (below) does not need the
-                // request back - matching `lead_render`'s own capture.
+                // so a fallback to the stale entry does not need the request
+                // back - matching `lead_render`'s own capture.
                 let method = request.method().clone();
                 let if_none_match = request.header("if-none-match").map(str::to_owned);
                 let outcome = render_and_publish(runtime, request, next, policy, job, 0).await;
-                // Stale-on-error exists for a foreground rebuild that fails,
-                // not only for a provider failure before the handler ran: a
-                // handler that itself returns an error or a 5xx status is an
-                // ordinary `Response` to `render_and_publish`, so that case
-                // must be detected here too rather than passed through. See
-                // fix round 2, item 3.
-                let rebuild_failed = match &outcome {
-                    Ok(response) => {
-                        let status = match response {
-                            Ok(http) | Err(http) => http.status_code(),
-                        };
-                        status >= 500
-                    }
-                    Err(ProviderFailure(..)) => true,
-                };
-                // A stitched route has no stale-on-error fallback: serving
-                // the stored shell here would answer the request with a
-                // representation the route's own chain never got to gate on
-                // this time round, which is precisely what this class
-                // exists to prevent. The failed rebuild's own outcome is
-                // what the client sees.
-                if !rebuild_failed || is_stitched(policy) {
-                    return outcome;
-                }
-                // A Composite entry on a route that did not declare
-                // stitching, or a stored entry that cannot be formed into a
-                // valid response, leaves nothing to fall back to; the failed
-                // rebuild's own outcome is what the client sees.
-                let Some(response) = hit_response(
+                match stale_on_error_fallback(
                     runtime,
+                    policy,
                     &found,
+                    &outcome,
                     &method,
                     if_none_match.as_deref(),
-                    policy,
                     now,
-                    warning_header(FreshnessState::StaleOnError),
-                ) else {
-                    return outcome;
-                };
-                LookupOutcome::Stale.record();
-                Ok(Ok(response))
+                ) {
+                    Some(response) => {
+                        LookupOutcome::Stale.record();
+                        Ok(Ok(response))
+                    }
+                    None => outcome,
+                }
             }
             FreshnessState::Dead => {
                 // The rebuild below runs under `job`. Exercised by
@@ -865,6 +837,7 @@ impl RenderCacheMiddleware {
         job: RenderJob,
     ) {
         Metrics::counter(render_cache_telemetry::REBUILDS).inc();
+        runtime.count_background_rebuild();
         tokio::spawn(async move {
             let _ = render_and_publish(&runtime, request, next, &policy, job, 0).await;
         });
@@ -887,13 +860,34 @@ fn declared_query_ok(request: &Request, policy: &RenderCachePolicy) -> bool {
 /// Whether `policy`'s declared variance depends on state that is task-local
 /// rather than carried on the `Request` value itself - `Locale`
 /// (`Lang::locale()`) or `Principal` (`Auth::id()`), both
-/// `tokio::task_local!`-backed. A `tokio::spawn`ed task does not inherit
-/// task-locals, so a background rebuild for one of these routes would
-/// compute a different variance than the key it is about to publish under.
-/// See the module doc's "Background rebuild's ambient context" note (fix
-/// round 2, item 4). `Tenant` is deliberately excluded: `Request::live_tenant`
-/// reads a field on the moved `Request`, not a task-local, so it is safe
-/// across the spawn.
+/// `tokio::task_local!`-backed.
+///
+/// A `tokio::spawn`ed task does not inherit task-locals, so a background
+/// rebuild for one of these routes would compute a *different* variance
+/// than the key it is about to publish under: a locale-varying route's
+/// background rebuild would render the default locale's content and publish
+/// it under another locale's key, and a principal-varying route's would
+/// render anonymously and publish under a specific principal's key. That is
+/// a content-identity mismatch, not a wasted render. An earlier note called
+/// it harmless on the grounds that
+/// `key_used_different_values_than_the_render_saw` would decline the store;
+/// round 1 of this task's review established that narrowing never
+/// repartitions an already-derived key, so that justification does not
+/// hold and this predicate is the actual guard (fix round 2, item 4).
+///
+/// `RenderCacheMiddleware::serve` therefore spawns no background rebuild at
+/// all for such a route. It still serves its stale-servable entry
+/// immediately - the "never blocks" guarantee is unaffected - it just does
+/// not also refresh it in the background; the entry refreshes once it goes
+/// Dead and the next request renders it in the foreground, where the
+/// ambient context is the real request's own.
+/// `render_cache::middleware::a_stale_principal_route_never_spawns_a_background_rebuild`
+/// is the guard.
+///
+/// `Tenant` is deliberately excluded: `Request::live_tenant` reads a field
+/// on the moved `Request`, not a task-local, so it is safe across the spawn.
+/// A request id is also lost across the spawn - log correlation only, not a
+/// cache-key concern, so it is not guarded here.
 fn variance_depends_on_ambient_context(policy: &RenderCachePolicy) -> bool {
     policy.vary().contains(&VarianceDimension::Locale)
         || policy.vary().contains(&VarianceDimension::Principal)
@@ -1635,6 +1629,71 @@ impl RenderJob {
     }
 }
 
+/// The stale response a failed rebuild falls back to, under `Warning`, or
+/// `None` when the rebuild did not fail or this route and this entry have
+/// nothing to fall back to. Serving it is what a `stale_on_error_ms` window
+/// buys.
+///
+/// The one place that judgement lives, shared by the two paths a request can
+/// reach a `StaleOnError` entry with a rebuild to make: the primary hit path
+/// in [`RenderCacheMiddleware::serve`], and a waiter in
+/// [`render_and_publish`] whose re-evaluation after the wait lands on such
+/// an entry. Ruling R18: the waiter path used to rebuild with no fallback at
+/// all, so a client that queued behind a leader and then re-evaluated onto a
+/// stale-on-error entry received its own rebuild's failure while a request
+/// that had arrived on that entry was served the stale bytes. One helper is
+/// what keeps the two answers the same.
+///
+/// Stale-on-error exists for a foreground rebuild that fails, not only for a
+/// provider failure before the handler ran: a handler that itself returns an
+/// error or a 5xx status is an ordinary `Response` to
+/// [`render_and_publish`], so that case is detected here too rather than
+/// passed through (fix round 2, item 3).
+///
+/// Two exclusions:
+///
+/// - A **stitched** route has no stale-on-error fallback. Serving the stored
+///   shell here would answer the request with a representation the route's
+///   own chain never got to gate on this time round, which is precisely what
+///   that class exists to prevent.
+/// - A **Composite** entry on a route that did not declare stitching, and a
+///   stored entry that cannot be formed into a valid response, leave nothing
+///   to fall back to. [`hit_response`] reports both as `None`.
+///
+/// In both cases the caller returns the failed rebuild's own outcome, which
+/// is what the client sees.
+fn stale_on_error_fallback(
+    runtime: &RenderCacheRuntime,
+    policy: &RenderCachePolicy,
+    found: &FoundEntry,
+    outcome: &Result<Response, ProviderFailure>,
+    method: &hyper::Method,
+    if_none_match: Option<&str>,
+    now: u64,
+) -> Option<HttpResponse> {
+    let rebuild_failed = match outcome {
+        Ok(response) => {
+            let status = match response {
+                Ok(http) | Err(http) => http.status_code(),
+            };
+            status >= 500
+        }
+        Err(ProviderFailure(..)) => true,
+    };
+    if !rebuild_failed || is_stitched(policy) {
+        return None;
+    }
+    hit_response(
+        runtime,
+        found,
+        method,
+        if_none_match,
+        policy,
+        now,
+        warning_header(FreshnessState::StaleOnError),
+    )
+}
+
 async fn render_and_publish(
     runtime: &Arc<RenderCacheRuntime>,
     request: Request,
@@ -1701,12 +1760,15 @@ async fn render_and_publish(
                             )
                             .await)
                         }
-                        // `StaleOnError`'s stale-only-on-provider-failure
-                        // behavior is the primary hit path's own concern
-                        // (and a separately known gap - out of scope for
-                        // this fix); a waiter treats it the same as `Dead`:
-                        // neither is safe to serve as a plain hit, so both
-                        // fall through to a fresh admission attempt.
+                        // Neither state is safe to serve as a plain hit,
+                        // so both rebuild. They part company afterwards:
+                        // ruling R18, a `StaleOnError` entry falls back to
+                        // its own stale bytes when that rebuild fails,
+                        // through the same helper the primary hit path uses,
+                        // so a waiter behind a failed leader is answered the
+                        // way a request that had arrived a moment earlier
+                        // would have been. A `Dead` entry has no window left
+                        // to fall back into.
                         FreshnessState::StaleOnError | FreshnessState::Dead => {
                             LookupOutcome::Miss.record();
                             // Fix round 3, item 5: bounds a sustained herd
@@ -1744,7 +1806,18 @@ async fn render_and_publish(
                             if job.restamp(runtime).is_err() {
                                 return Ok(next(request).await);
                             }
-                            Box::pin(render_and_publish(
+                            // Captured before `request` moves into the
+                            // rebuild, for the reason the primary arm's own
+                            // capture gives - and only for the one state
+                            // that can fall back, so a `Dead` re-admission
+                            // pays neither the clone nor the header copy.
+                            let fallback = (state == FreshnessState::StaleOnError).then(|| {
+                                (
+                                    request.method().clone(),
+                                    request.header("if-none-match").map(str::to_owned),
+                                )
+                            });
+                            let outcome = Box::pin(render_and_publish(
                                 runtime,
                                 request,
                                 next,
@@ -1752,7 +1825,25 @@ async fn render_and_publish(
                                 job,
                                 depth + 1,
                             ))
-                            .await
+                            .await;
+                            let Some((method, if_none_match)) = fallback else {
+                                return outcome;
+                            };
+                            match stale_on_error_fallback(
+                                runtime,
+                                policy,
+                                &found,
+                                &outcome,
+                                &method,
+                                if_none_match.as_deref(),
+                                now,
+                            ) {
+                                Some(response) => {
+                                    LookupOutcome::Stale.record();
+                                    Ok(Ok(response))
+                                }
+                                None => outcome,
+                            }
                         }
                     }
                 }
@@ -3114,6 +3205,8 @@ mod tests {
             leases: Mutex::new(BTreeMap::new()),
             epoch_cache: EpochCache::empty(),
             hot_serves: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "testing"))]
+            background_rebuilds: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

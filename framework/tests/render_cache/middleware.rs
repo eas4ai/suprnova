@@ -245,7 +245,15 @@ async fn a_moved_generation_misses_and_a_write_during_the_render_discards_the_ca
     counting_route::write_during_next_render(&harness);
     let raced = dispatch_get(&harness, "/cached/2", &[]).await;
     assert_eq!(raced.status, StatusCode::OK);
-    assert_eq!(counting_route::renders(), 3);
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "three renders and no more: `/cached/1` cold, `/cached/1` again \
+         after the write moved its generation, and `/cached/2` once. \
+         The raced request still renders exactly once and answers from \
+         that render: the write it observed discards the *candidate*, \
+         never the response"
+    );
     // `inspect_route_for_test` derives its key from the pattern alone with
     // empty params (see its own doc) - correct for a fixed path like
     // `/sets-cookie` below, but `/cached/{id}` has a dynamic segment a real
@@ -430,7 +438,13 @@ async fn a_stitched_shell_whose_handler_never_began_is_never_published() {
 
     let began = dispatch_get(&harness, "/stitched-handler", &[]).await;
     assert_eq!(began.status, StatusCode::OK);
-    assert_eq!(counting_route::renders(), 3);
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "the third render is this first request to `/stitched-handler`; \
+         the first two were the gate-only route, which stored nothing \
+         and so rendered on both of its requests"
+    );
     let handler_key = RenderCache::key_for_route_for_test("/stitched-handler", &[], None);
     assert!(
         RenderCache::inspect(&handler_key)
@@ -586,6 +600,26 @@ async fn a_singleflight_waiter_never_serves_a_superseded_entry_as_fresh() {
     );
 }
 
+/// Fix round 2, item 4: a route whose variance depends on ambient
+/// (task-local) context does not get a background rebuild. That rebuild
+/// runs with no task-local identity at all (`Auth::id()` returns `None`
+/// inside the spawned task regardless of who made the original request), so
+/// it renders anonymously and would publish that anonymous render under
+/// this specific principal's already-derived key.
+/// `key_omits_observed_privacy` does not catch this shape, since it only
+/// flags an *observed* identity the key does not declare, not a *declared*
+/// dimension the render failed to observe.
+///
+/// Task 8: the negative is read off the spawn decision itself, not off the
+/// spawned task's effects. `RenderCache::background_rebuilds_for_test`
+/// counts the decision on the request's own path, immediately before the
+/// `tokio::spawn`, so it is already final when the dispatch returns - where
+/// `renders()` staying at 1 could only ever mean "the rebuild has not
+/// finished yet". `/stale/{id}`, dispatched here in the same state, is the
+/// positive control: it does spawn, `wait_until_background_finished` is the
+/// barrier that lets its rebuild's own render be counted, and without it
+/// this test would pass just as well against a build that spawns nothing at
+/// all.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_stale_principal_route_never_spawns_a_background_rebuild() {
@@ -596,11 +630,22 @@ async fn a_stale_principal_route_never_spawns_a_background_rebuild() {
         &[("x-test-login", "user-7")],
     )
     .await;
-    assert_eq!(counting_route::renders(), 1);
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "one cold publish each: the route under test and its control"
+    );
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        0,
+        "precondition: a cold publish spawns nothing"
+    );
 
     // past_fresh = 70_000 - 60_000 = 10_000, inside the StaleServable band
-    // [0, stale_servable_ms (60_000)).
+    // [0, stale_servable_ms (60_000)) for both routes.
     clock(&harness).advance_ms(70_000);
+
     let stale = dispatch_get(
         &harness,
         "/stale-principal/1",
@@ -608,28 +653,41 @@ async fn a_stale_principal_route_never_spawns_a_background_rebuild() {
     )
     .await;
     assert_eq!(stale.header("warning"), Some("110 - \"Response is Stale\""));
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        0,
+        "a Principal-varying route must not spawn a background rebuild, and the decision \
+         not to is taken on this request's own path, so this is already final"
+    );
 
-    // Fix round 2, item 4, proven to discriminate: before the fix, this
-    // route's declared `Principal` variance did not stop a background
-    // rebuild from spawning. That rebuild runs with no task-local identity
-    // at all (`Auth::id()` returns `None` inside the spawned task
-    // regardless of who made the original request), so it renders
-    // anonymously and would publish that anonymous render under this
-    // specific principal's already-derived key -
-    // `key_omits_observed_privacy` does not catch this shape, since it
-    // only flags an *observed* identity the key does not declare, not a
-    // *declared* dimension the render failed to observe. Reverting the
-    // `serve` fix and re-running this test, `renders()` reliably reached 2
-    // immediately after the stale dispatch above - the same "the
-    // background rebuild only awaits a local SQLite read, so it reliably
-    // finishes first" timing `stale_service_is_policy_driven_bounded_and_never_private`
-    // above already relies on. With the fix, no task is ever spawned for a
-    // `Principal`-varying route, so this is not a race: nothing could
-    // increment `renders()` a second time no matter how long this waited.
+    let control = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(
+        control.header("warning"),
+        Some("110 - \"Response is Stale\""),
+        "the control is stale in exactly the same way"
+    );
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        1,
+        "and a route without ambient variance does spawn one, so the count above is a \
+         measurement and not a counter nobody moves"
+    );
+
+    // The control's rebuild is a detached `tokio::spawn`; the dispatch above
+    // returned before it published. Waiting on the coordinator's release
+    // counter - two foreground publishes plus the control's rebuild - is the
+    // barrier, and nothing here waits on time.
+    wait_until_background_finished(&harness, 3).await;
     assert_eq!(
         counting_route::renders(),
+        3,
+        "exactly one background render ran: the control's. A rebuild spawned for the \
+         Principal-varying route would make this 4"
+    );
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
         1,
-        "a Principal-varying route must not spawn a background rebuild"
+        "and no second spawn appeared while the first one ran"
     );
 }
 

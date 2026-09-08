@@ -221,13 +221,10 @@ pub(crate) async fn handle(request: Request) -> Response {
     {
         return error_response(EndpointErrorKind::ContextInconsistent);
     }
-    let current_route = selection.route().clone();
-    let current_slot = selection.slot().clone();
-    let context =
-        match runtime.validate_request_context(&request, current_route, current_slot, selection) {
-            Ok(context) => context,
-            Err(_) => return error_response(EndpointErrorKind::ContextInconsistent),
-        };
+    let context = match runtime.validate_request_context(&request, selection) {
+        Ok(context) => context,
+        Err(_) => return error_response(EndpointErrorKind::ContextInconsistent),
+    };
     let endpoint_request = match LiveEndpointRequest::try_new(
         request.method().clone(),
         media,

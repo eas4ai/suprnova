@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
-use super::composite::{CompositeEntry, CompositeHeader};
+use super::composite::{CompositeEntry, CompositeHeader, MAX_STITCH_SLOTS};
 use super::generation::GenerationSet;
 use super::key::RenderKey;
 use super::policy::{RepresentationClass, UNSAFE_RESPONSE_HEADERS};
@@ -320,7 +320,7 @@ fn validate_header_bounds(
 
 /// Frames already-canonicalized header bytes and a body into the wire
 /// layout (magic, version, kind, lengths, header, body, digest, integrity
-/// tag) and signs it. Shared by [`encode_with_kind`], [`encode_composite`],
+/// tag) and signs it. Shared by [`encode`], [`encode_composite`],
 /// and the test-only raw header encoder below, since all three produce the
 /// same wire shape from different header sources.
 fn frame(
@@ -350,23 +350,16 @@ fn frame(
     Ok(Bytes::from(out))
 }
 
-fn encode_with_kind(
-    entry: &CompleteEntry,
-    keys: &SnapshotKeyRing,
-    kind: EntryKind,
-) -> Result<Bytes, RenderCacheError> {
+/// Encodes a Complete entry: its canonical header framed around exactly the
+/// body bytes it was constructed with.
+pub fn encode(entry: &CompleteEntry, keys: &SnapshotKeyRing) -> Result<Bytes, RenderCacheError> {
     let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
     let header_json = serde_json::to_vec(entry.header()).map_err(|_| invalid())?;
     let limits = header_limits(EntryLimits::default().max_header_bytes)?;
     let header_bytes = crate::canonical::parse_canonical_value(&header_json, &limits)
         .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
         .map_err(|_| invalid())?;
-    frame(&header_bytes, entry.body(), kind, keys)
-}
-
-/// Encodes a Complete entry.
-pub fn encode(entry: &CompleteEntry, keys: &SnapshotKeyRing) -> Result<Bytes, RenderCacheError> {
-    encode_with_kind(entry, keys, EntryKind::Complete)
+    frame(&header_bytes, entry.body(), EntryKind::Complete, keys)
 }
 
 /// Encodes a Composite entry: its canonical header (the shared entry header
@@ -555,11 +548,14 @@ pub fn decode(
 
 /// Reads metadata without decoding or exposing the body. This is the
 /// lighter read: it verifies structural bounds and the integrity of the
-/// framing (magic, version, kind, lengths) but, unlike `decode`, it neither
-/// takes a key ring nor applies the business-rule bounds `decode` enforces
-/// on the header content (the safe-header allowlist, the variance bounds,
-/// or the stored digest). The asymmetry is deliberate, since `inspect`
-/// exists for body-free triage without those inputs.
+/// framing (magic, version, kind, lengths, and the stitch-slot ceiling on a
+/// Composite graph) but, unlike `decode`, it neither takes a key ring nor
+/// applies the business-rule bounds `decode` enforces on the header content
+/// (the safe-header allowlist, the variance bounds, or the stored digest).
+/// The asymmetry is deliberate, since `inspect` exists for body-free triage
+/// without those inputs. What it never does is report an unbounded number
+/// read out of unauthenticated bytes: every field of [`EntryInspection`] is
+/// either bounded by the framing it was read through or refused.
 pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, RenderCacheError> {
     let invalid = || RenderCacheError::new(RenderCacheErrorKind::EntryInvalid);
     if bytes.len() < 11 || &bytes[..4] != MAGIC {
@@ -579,12 +575,30 @@ pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, R
     validate_header_bounds(header_bytes, &canonical_limits)?;
     let header: EntryHeader = serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
     let body_bytes = read_u32(bytes, 11 + header_len)?;
+    // The same bound `decode` puts on this field, for the same reason: the
+    // length is four unauthenticated bytes, and a length above the ceiling
+    // belongs to an entry no read can ever serve.
+    if body_bytes > limits.max_body_bytes {
+        return Err(invalid());
+    }
     let slots = match kind {
         EntryKind::Complete => 0,
         EntryKind::Composite => {
             let composite: CompositeHeader =
                 serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
-            composite.graph.slots.len()
+            // The graph arrives straight from `serde_json` here, with
+            // neither an integrity check nor `SegmentGraph::validate` in the
+            // way, so its slot vector is bounded only by the canonical
+            // entry count (512) and not by the stitch bound. Reporting that
+            // number would state as fact a slot count `decode` refuses and
+            // no assembly could ever serve, so a graph over the bound is
+            // refused here too: `inspect` and `decode` give the same verdict
+            // on this bound, and `slots` is never a number above it.
+            let slots = composite.graph.slots.len();
+            if slots > MAX_STITCH_SLOTS {
+                return Err(invalid());
+            }
+            slots
         }
     };
     Ok(EntryInspection {
@@ -616,9 +630,112 @@ mod render_key_serde {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use http::header::HeaderValue;
 
-    use super::header_value_is_safe;
+    use super::{
+        CompleteEntry, EntryHeader, EntryLimits, RenderCacheErrorKind, RepresentationClass,
+        SafeHeaders, decode, encode, header_value_is_safe, inspect, integrity,
+    };
+    use crate::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+    use crate::identity::{KeyId, UnixMillis};
+    use crate::render_cache::generation::GenerationSet;
+    use crate::render_cache::key::RenderKey;
+    use crate::render_cache::variance::VarianceDescriptor;
+
+    fn keys() -> SnapshotKeyRing {
+        let active = KeyRecord::new(
+            KeyId::parse("entry-codec-test").expect("key id"),
+            RootKey::new(vec![7; 32]).expect("root key"),
+            UnixMillis::new(0),
+            UnixMillis::new(u64::MAX / 2),
+            UnixMillis::new(u64::MAX),
+        )
+        .expect("key record");
+        SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
+    }
+
+    fn complete_entry(keys: &SnapshotKeyRing) -> CompleteEntry {
+        CompleteEntry::new(
+            EntryHeader {
+                key: RenderKey::for_test(keys, "/kind-byte"),
+                class: RepresentationClass::PublicShared,
+                variance: VarianceDescriptor::new(),
+                published_at_ms: 1_000,
+                fresh_ms: 60_000,
+                stale_servable_ms: 0,
+                stale_on_error_ms: 0,
+                observed: GenerationSet::default(),
+                epoch: 1,
+                seed_deadline_ms: None,
+                status: 200,
+                headers: SafeHeaders::from_pairs([("content-type", "text/html; charset=utf-8")])
+                    .expect("safe headers"),
+                content_encoding: None,
+            },
+            Bytes::from_static(b"<!doctype html><html><body>hi</body></html>"),
+        )
+    }
+
+    /// The format defines exactly two kind bytes. Any other byte is refused
+    /// by both readers, and refused *as the kind byte*: the integrity tag is
+    /// recomputed over the patched frame, so these bytes are correctly
+    /// signed and the kind check is the only thing left that can reject
+    /// them.
+    ///
+    /// Recomputing the tag is what makes this a test. `decode` verifies the
+    /// tag before it ever reads byte six, so a test that merely patched the
+    /// byte would pass against a `decode` with no kind check at all. Only
+    /// `inspect`, which takes no key ring, reads the byte unconditionally.
+    #[test]
+    fn a_kind_byte_the_format_does_not_define_is_refused_by_both_readers() {
+        let keys = keys();
+        let encoded = encode(&complete_entry(&keys), &keys).expect("encode");
+        assert_eq!(encoded[6], 1, "a Complete entry frames kind byte 1");
+        for kind_byte in [0_u8, 3, 4, 127, 255] {
+            let mut patched = encoded.to_vec();
+            patched[6] = kind_byte;
+            let signed_len = patched.len() - 32;
+            let mac = integrity(&keys, &patched[..signed_len]);
+            patched[signed_len..].copy_from_slice(&mac);
+            let patched = Bytes::from(patched);
+            assert_eq!(
+                decode(&patched, &keys, &EntryLimits::default())
+                    .map(|_| ())
+                    .map_err(|error| error.kind()),
+                Err(RenderCacheErrorKind::EntryInvalid),
+                "decode accepted kind byte {kind_byte}"
+            );
+            assert_eq!(
+                inspect(&patched, &EntryLimits::default())
+                    .map(|_| ())
+                    .map_err(|error| error.kind()),
+                Err(RenderCacheErrorKind::EntryInvalid),
+                "inspect accepted kind byte {kind_byte}"
+            );
+        }
+    }
+
+    /// The positive control the check above needs: the kind byte the format
+    /// does define is still accepted by both readers, so "refuses
+    /// everything" cannot pass for "refuses what it must". Kind byte 2 is
+    /// covered end to end by the Composite round trip in
+    /// `tests/render_cache_entry.rs`.
+    #[test]
+    fn the_defined_kind_byte_is_still_accepted() {
+        let keys = keys();
+        let encoded = encode(&complete_entry(&keys), &keys).expect("encode");
+        assert!(
+            decode(&encoded, &keys, &EntryLimits::default()).is_ok(),
+            "an unpatched Complete entry decodes"
+        );
+        assert_eq!(
+            inspect(&encoded, &EntryLimits::default())
+                .expect("an unpatched Complete entry inspects")
+                .kind,
+            super::EntryKind::Complete
+        );
+    }
 
     /// The rule this module applies to a stored header value has to be the
     /// rule the response builders in [`super::super::hot`] can form, or a

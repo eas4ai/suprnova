@@ -28,6 +28,7 @@
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
     boot_with_render_cache, clock, counting_route, dispatch_get, race,
+    wait_until_background_finished,
 };
 use suprnova::StatusCode;
 use suprnova::render_cache::RenderCache;
@@ -420,5 +421,210 @@ async fn a_write_during_the_reread_publishes_a_stale_entry_that_the_next_lookup_
     assert_eq!(
         served.body, rebuilt.body,
         "and it serves the body that saw the write"
+    );
+}
+
+/// Ruling R18: a singleflight waiter on a `StaleOnError` entry is answered
+/// the same way a request that had arrived a moment earlier would have
+/// been. Both rebuild; both, when that rebuild fails, serve the stale bytes
+/// under `Warning` rather than handing the failure to the client.
+///
+/// This is the client-visible half of the ruling, and it holds because both
+/// requests entered through `serve`'s own `StaleOnError` arm, so the
+/// fallback that wraps that arm wraps the waiting one too. It passes before
+/// and after the fix and is a guard, not its proof; the arm the fix
+/// actually changed - a waiter that re-evaluates *onto* a stale-on-error
+/// entry it did not arrive on - is reached by
+/// [`a_waiter_that_re_evaluates_onto_a_stale_on_error_entry_falls_back_to_it`]
+/// below.
+///
+/// Both renders are armed to fail through `fail_next_render`, which is
+/// one-shot and, in `stale_handler`, consumed *after* `on_render_start`
+/// returns - so a held render consumes its arming only once released. Each
+/// render is therefore held first and armed second: the leader while it is
+/// held, then the waiter's own rebuild while *it* is held. Every wait here
+/// is a state barrier - the render-started count, the coordinator's waiter
+/// count, and its release count - and none of it waits on time.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waiter_behind_a_failed_leader_is_served_the_stale_entry_it_was_waiting_on() {
+    let harness = boot_with_render_cache().await;
+    let original = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(original.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        original.header("warning").is_none(),
+        "precondition: a fresh publish is not stale"
+    );
+
+    // `/stale/{id}` is fresh 60_000, stale-servable 60_000, stale-on-error
+    // 120_000. age 130_000 gives past_fresh = 70_000, inside
+    // [stale_servable_ms, stale_on_error_ms): the StaleOnError band, which
+    // is the one band where a request rebuilds in the foreground and still
+    // has somewhere to fall back to.
+    clock(&harness).advance_ms(130_000);
+
+    counting_route::hold_next_render(&harness);
+    let leader = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/stale/1", &[]).await })
+    };
+    // The `original` dispatch already rendered once, so the leader's held
+    // render is the second; see `wait_until_rendering_count`'s own doc for
+    // why the count has to be explicit.
+    counting_route::wait_until_rendering_count(&harness, 2).await;
+
+    let waiter = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/stale/1", &[]).await })
+    };
+    counting_route::wait_until_waiting(&harness, 1).await;
+
+    // The leader is held and the waiter is parked behind it. Arm the
+    // leader's failure and the hold that will catch the waiter's own
+    // rebuild, then let the leader go: it fails, publishes nothing, and
+    // releases the lease the waiter is waiting on.
+    counting_route::fail_next_render(&harness);
+    counting_route::hold_next_render(&harness);
+    counting_route::release_render(&harness);
+
+    // The waiter re-admitted itself and its own rebuild is now held, before
+    // it has decided anything. Arm its failure and let it go.
+    counting_route::wait_until_rendering_count(&harness, 3).await;
+    counting_route::fail_next_render(&harness);
+    counting_route::release_render(&harness);
+
+    let (leader_response, waiter_response) =
+        (leader.await.expect("leader"), waiter.await.expect("waiter"));
+
+    assert_eq!(
+        leader_response.status,
+        StatusCode::OK,
+        "the leader's own failed rebuild falls back to the stale entry"
+    );
+    assert_eq!(
+        waiter_response.status,
+        StatusCode::OK,
+        "and so does the waiter's: a client that queued behind a failing leader must not \
+         receive the failure the client ahead of it was shielded from"
+    );
+    assert_eq!(
+        waiter_response.header("warning"),
+        Some("110 - \"Response is Stale\""),
+        "and it is answered honestly, under the same Warning the leader got"
+    );
+    assert_eq!(
+        leader_response.header("warning"),
+        Some("110 - \"Response is Stale\"")
+    );
+    assert_eq!(
+        waiter_response.body, original.body,
+        "the bytes served are the stale entry's own, not a fresh render's"
+    );
+    assert_eq!(leader_response.body, original.body);
+
+    // Three leads have now run and released: the original publish, the
+    // leader's failed rebuild, and the waiter's own. Waiting on the release
+    // count is what makes the assertions below read a settled store rather
+    // than one with a publish decision still in flight.
+    wait_until_background_finished(&harness, 3).await;
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "both rebuild attempts really ran: neither request was served the stale entry \
+         without first trying to replace it"
+    );
+    let key = RenderCache::key_for_route_for_test("/stale/{id}", &[("id", "1")], None);
+    assert!(
+        RenderCache::inspect(&key).await.expect("inspect").is_some(),
+        "and the stale entry both fell back to is still the stored one: a failed rebuild \
+         publishes nothing"
+    );
+}
+
+/// Ruling R18, the arm the fix actually changed: a singleflight waiter that
+/// arrived on *no* entry, and whose re-evaluation after the wait lands on a
+/// `StaleOnError` one, falls back to that entry when its own rebuild fails.
+///
+/// Reaching the waiter's own `StaleOnError` arm takes a shape the plain
+/// stale route cannot produce, because a request that is already
+/// stale-on-error at its first lookup enters through `serve`'s arm and is
+/// wrapped there. `/stale-error-only/{id}` declares no stale-servable
+/// window at all, so an entry whose observations are behind the ledger -
+/// floored to `past_fresh == 0` by `freshness_state` - lands in the
+/// stale-on-error band rather than the servable one. The leader here
+/// publishes exactly such an entry (`AFTER_REREAD` lands a write between
+/// its coherent reread and its store), so the waiter, which found nothing
+/// on its own first lookup, re-evaluates onto a stale-on-error entry it
+/// never arrived on.
+///
+/// Before the fix the waiter called `render_and_publish` there with no
+/// fallback, and its 500 reached the client; the stale bytes it was sitting
+/// on were never offered. Proven by revert: dropping the `StaleOnError`
+/// branch from the waiter arm leaves the last assertions below reading
+/// `500` where they require `200` and the stale `Warning`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waiter_that_re_evaluates_onto_a_stale_on_error_entry_falls_back_to_it() {
+    let harness = boot_with_render_cache().await;
+
+    // Cold: neither request finds an entry, so both reach admission through
+    // the miss path rather than through `serve`'s stale-on-error arm.
+    counting_route::hold_next_render(&harness);
+    let leader = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/stale-error-only/1", &[]).await })
+    };
+    counting_route::wait_until_rendering_count(&harness, 1).await;
+
+    let waiter = {
+        let h = harness.clone();
+        tokio::spawn(async move { dispatch_get(&h, "/stale-error-only/1", &[]).await })
+    };
+    counting_route::wait_until_waiting(&harness, 1).await;
+
+    // The leader publishes an entry that is already behind the ledger, and
+    // the hold is re-armed so the waiter's own rebuild can be caught before
+    // it decides anything.
+    race::write_posts_after_reread(&harness);
+    counting_route::hold_next_render(&harness);
+    counting_route::release_render(&harness);
+
+    counting_route::wait_until_rendering_count(&harness, 2).await;
+    counting_route::fail_next_render(&harness);
+    counting_route::release_render(&harness);
+
+    let (leader_response, waiter_response) =
+        (leader.await.expect("leader"), waiter.await.expect("waiter"));
+
+    assert_eq!(
+        leader_response.status,
+        StatusCode::OK,
+        "the leader's own render succeeded and published"
+    );
+    assert!(
+        leader_response.header("warning").is_none(),
+        "precondition: the leader served its own fresh render, not a stale entry"
+    );
+    assert_eq!(
+        waiter_response.status,
+        StatusCode::OK,
+        "the waiter's rebuild failed, and a stale-on-error window is exactly what a failed \
+         rebuild is supposed to fall back into - whichever path reached it"
+    );
+    assert_eq!(
+        waiter_response.header("warning"),
+        Some("110 - \"Response is Stale\""),
+        "and it says so"
+    );
+    assert_eq!(
+        waiter_response.body, leader_response.body,
+        "the bytes served are the entry the leader published, which is what the waiter was \
+         waiting on all along"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "one render each: the leader's publish and the waiter's failed rebuild"
     );
 }

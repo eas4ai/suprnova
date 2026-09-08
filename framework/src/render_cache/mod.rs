@@ -548,6 +548,8 @@ impl RenderCache {
             epoch_cache: middleware::EpochCache::empty(),
             #[cfg(any(test, feature = "testing"))]
             hot_serves: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "testing"))]
+            background_rebuilds: std::sync::atomic::AtomicU64::new(0),
         });
         *runtime_slot().write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runtime));
         // Appends, never clears: `register_global_middleware` is
@@ -985,6 +987,27 @@ impl RenderCache {
         Self::runtime().map_or(0, |runtime| {
             runtime
                 .hot_serves
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    /// How many background rebuilds this process has decided to spawn since
+    /// the runtime was installed.
+    ///
+    /// The decision is taken on the request's own path, immediately before
+    /// the `tokio::spawn`, so this value is already final when the dispatch
+    /// that took it returns. A test asserting that a route *never* spawns a
+    /// background rebuild reads this and needs no barrier at all: waiting on
+    /// the spawned task's own effects could only ever show that it has not
+    /// finished yet. The count lives on the installed runtime, so a fresh
+    /// [`Self::install`] starts it at zero.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn background_rebuilds_for_test() -> u64 {
+        Self::runtime().map_or(0, |runtime| {
+            runtime
+                .background_rebuilds
                 .load(std::sync::atomic::Ordering::Relaxed)
         })
     }

@@ -324,12 +324,7 @@ async fn render_slot(
         return Err(());
     }
     let context = live
-        .validate_request_context(
-            request,
-            slot.route.clone(),
-            slot.slot.clone(),
-            registration.selection.clone(),
-        )
+        .validate_request_context(request, registration.selection.clone())
         .map_err(|_| ())?;
     let output = collector::slot_scope(
         live.mount_private_component(

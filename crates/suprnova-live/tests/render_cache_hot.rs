@@ -726,10 +726,17 @@ fn a_cache_control_override_replaces_the_computed_value() {
 fn prepare_fails_closed_on_an_unrepresentable_header() {
     let keys = keys();
     let policy = freshness();
-    // The entry's own rule bars CR, LF, and NUL from a stored value, which
-    // still leaves values no HTTP header may carry, such as this one.
-    let headers = SafeHeaders::from_pairs([("content-language", "en\u{1}")])
-        .expect("the entry's own rule allows this value");
+    // `SafeHeaders::from_pairs` now applies `http::HeaderValue`'s own rule
+    // byte for byte (`entry::tests::the_stored_value_rule_is_http_header_value_validity_byte_for_byte`),
+    // so no value it accepts can fail to form on the wire, and this fixture
+    // cannot be built through it any more. The derived `Deserialize`
+    // rebuilds the private map straight from JSON and applies no rule at
+    // all, which is exactly the shape these two builders must still refuse:
+    // they are handed a `CompleteEntry` by a caller, and the type alone is
+    // not proof that its values were ever checked.
+    let headers: SafeHeaders =
+        serde_json::from_value(serde_json::json!({ "content-language": "en\u{1}" }))
+            .expect("the derived Deserialize applies no rule, which is the point");
     let entry = entry_with(
         &keys,
         "/hot",

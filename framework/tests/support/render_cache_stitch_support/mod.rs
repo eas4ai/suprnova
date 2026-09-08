@@ -32,14 +32,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use serde_json::Value;
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
 use suprnova::live::{
     LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry, LiveTenantMiddleware,
@@ -1034,48 +1031,12 @@ pub struct StitchDocument<'a> {
     pub island: &'a TrustedHtml,
 }
 
-/// The opening tag of the island whose document key is `key`.
-///
-/// The same helper the application's own `live_support` uses, copied here
-/// rather than shared: it is what separates an island's per-principal
-/// markup from the shell bytes around it, which is exactly the distinction
-/// an assembled stitched document has to get right.
-#[must_use]
-pub fn island_tag<'h>(html: &'h str, key: &str) -> &'h str {
-    let needle = format!("data-suprnova-live-document-key=\"{key}\"");
-    let position = html
-        .find(&needle)
-        .unwrap_or_else(|| panic!("no island with document key {key}"));
-    let start = html[..position].rfind('<').expect("island tag start");
-    let end = html[position..].find('>').expect("island tag end") + position + 1;
-    &html[start..end]
-}
-
-/// The value of `name` in one opening tag.
-#[must_use]
-pub fn attribute<'h>(tag: &'h str, name: &str) -> &'h str {
-    let prefix = format!("{name}=\"");
-    let start = tag
-        .find(&prefix)
-        .map(|index| index + prefix.len())
-        .unwrap_or_else(|| panic!("missing attribute {name} in {tag}"));
-    let tail = &tag[start..];
-    let end = tail.find('"').expect("unterminated attribute");
-    &tail[..end]
-}
-
-/// The signed snapshot one island tag carries, decoded from its base64url
-/// `data-suprnova-live-snapshot` attribute. The envelope is
-/// `{"body": {...}, "signature": ...}`, so the scope an island was mounted
-/// under reads as `["body"]["scope"]`.
-#[must_use]
-pub fn decoded_snapshot(tag: &str) -> Value {
-    let encoded = attribute(tag, "data-suprnova-live-snapshot");
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .expect("decode emitted Live snapshot");
-    serde_json::from_slice(&bytes).expect("parse emitted Live snapshot")
-}
+/// The island-markup readers, defined once in
+/// [`crate::render_cache_support`] and re-exported here: this suite and the
+/// privacy suite held byte-identical copies until task 8, and separating an
+/// island's per-principal markup from the shell bytes around it is exactly
+/// the distinction an assembled stitched document has to get right.
+pub use crate::render_cache_support::{attribute, decoded_snapshot, island_tag};
 
 /// One dispatched response: status, an accessor for a header, and the body.
 pub struct TestResponse {

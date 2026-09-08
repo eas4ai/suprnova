@@ -59,7 +59,9 @@
 //!   tables they read, so they call [`observe_unobservable_read`] and the
 //!   render is never stored (final review, F2). The query-builder facade
 //!   (`DB::table(..).get()`, `first()`, `count()`) knows its table and
-//!   records it through [`observe_table_read`] instead.
+//!   records it through [`observe_table_read`] instead. Inside a slot the
+//!   same read is counted as a slot read and marks nothing, for the reason
+//!   `mark_incomplete` gives (a private function; see its own comment).
 //! - **[`observe_secret_context_read`] has no automatic producer.**
 //!   `Config::get::<T>()` returns whole typed structs, so a secret read is
 //!   indistinguishable from any other configuration read at that seam;
@@ -334,6 +336,17 @@ struct State {
     /// so a table read by both the gate and the handler is recorded once
     /// in each bucket and once after they are folded together.
     seen_gate: std::collections::BTreeSet<DependencyIdentity>,
+    /// How many *distinct* identities the two buckets hold between them:
+    /// `|seen_gate union seen|`, maintained incrementally rather than
+    /// recomputed, since `observe` runs on every framework read.
+    ///
+    /// This, and not `seen_gate.len() + seen.len()`, is what
+    /// [`MAX_COLLECTED`] bounds. An identity the gate and the handler both
+    /// read occupies a slot in each set but folds into one observation, so
+    /// counting the two sums would spend two units of the budget on one
+    /// observation and overflow a report whose folded set is well inside
+    /// the window.
+    distinct: usize,
 }
 
 /// A scope's collector.
@@ -454,8 +467,23 @@ pub fn is_active() -> bool {
 /// reached, or a dependency could not be encoded into an identity at all.
 /// Either way the report must not be treated as a complete accounting of
 /// what the representation depended on.
+///
+/// Except inside a slot, where it counts a slot read like every other read
+/// there and marks nothing. A slot's reads are recorded in no bucket and
+/// re-run on every hit, so a read the collector cannot name inside one says
+/// nothing about what the stored shell depends on - and the shell is the
+/// only thing the report decides the fate of. Marking the report from here
+/// would mean one island reaching for raw SQL silently stopped a whole
+/// route from ever being stored, which is not a conservatism that buys
+/// anything: the island re-renders per hit either way. The route that keeps
+/// an identity-bound island *without* stitching is already declined whole,
+/// by [`super::live::document_declines`], so no path stores a body carrying
+/// a slot's unnamed read.
 fn mark_incomplete() {
-    with_state(|state| state.report.context.overflowed = true);
+    with_state(|state| match state.attribution {
+        Attribution::Slot => state.report.slot_reads += 1,
+        Attribution::Gate | Attribution::Content => state.report.context.overflowed = true,
+    });
 }
 
 /// Records a typed dependency into the bucket the current attribution
@@ -465,7 +493,9 @@ fn mark_incomplete() {
 /// are folded into one observation window on every non-stitched route. A
 /// per-bucket bound would let a report sit under the cap in each bucket
 /// separately, overflow only once the two were folded, and be stored on a
-/// dependency set that had already dropped identities.
+/// dependency set that had already dropped identities. It is shared as a
+/// count of *distinct* identities, since that is what the fold produces:
+/// see the private `State::distinct` field's own comment.
 pub fn observe(identity: DependencyIdentity) {
     with_state(|state| match state.attribution {
         Attribution::Slot => state.report.slot_reads += 1,
@@ -473,10 +503,15 @@ pub fn observe(identity: DependencyIdentity) {
             if state.seen_gate.contains(&identity) {
                 return;
             }
-            if state.seen_gate.len() + state.seen.len() >= MAX_COLLECTED {
+            // New to this bucket, but the budget is spent per distinct
+            // identity: one the content bucket already holds folds into the
+            // same observation and costs nothing more. See `State::distinct`.
+            let new_to_report = !state.seen.contains(&identity);
+            if new_to_report && state.distinct >= MAX_COLLECTED {
                 state.report.context.overflowed = true;
                 return;
             }
+            state.distinct += usize::from(new_to_report);
             state.seen_gate.insert(identity.clone());
             state.report.gate.observed.push(identity);
         }
@@ -484,10 +519,12 @@ pub fn observe(identity: DependencyIdentity) {
             if state.seen.contains(&identity) {
                 return;
             }
-            if state.seen_gate.len() + state.seen.len() >= MAX_COLLECTED {
+            let new_to_report = !state.seen_gate.contains(&identity);
+            if new_to_report && state.distinct >= MAX_COLLECTED {
                 state.report.context.overflowed = true;
                 return;
             }
+            state.distinct += usize::from(new_to_report);
             state.seen.insert(identity.clone());
             state.report.observed.push(identity);
         }
@@ -503,7 +540,9 @@ pub fn observe(identity: DependencyIdentity) {
 /// render that read something the collector cannot account for is not one
 /// whose stored dependency set could ever be trusted to invalidate it (final
 /// review, F2; the 005 contract's "insufficiently observable reads bypass
-/// caching"). A no-op outside a scope, like every other observer here.
+/// caching"). A no-op outside a scope, like every other observer here, and
+/// inside a slot a counted slot read that marks nothing - see the private
+/// `mark_incomplete`'s own comment.
 pub fn observe_unobservable_read() {
     if !is_active() {
         return;

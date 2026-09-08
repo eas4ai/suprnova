@@ -487,6 +487,14 @@ async fn a_no_store_document_intent_is_sticky_once_recorded() {
     .await;
 }
 
+/// Also the end-to-end guard that `EntryHeader::seed_deadline_ms` is
+/// actually carried by a stored entry, and not left `None`: the deadline is
+/// recorded by the collector, read off the report by `lead_render`, and
+/// handed to `entry_header`; every freshness decision afterwards reads it
+/// back out of the stored header. The entry below is a hit right up to the
+/// deadline and renders again the moment it is past, which no other field
+/// of the header could produce - a time-fresh entry with no seed deadline
+/// stored would still be a hit on the third dispatch.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_public_seed_document_is_a_hit_until_its_seed_deadline() {

@@ -701,6 +701,18 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
         .expect("stale policy");
+    // Task 8, ruling R18: the same route shape with *no* stale-servable
+    // window, only a stale-on-error one. That is the only shape in which a
+    // singleflight waiter can reach `StaleOnError` from its own
+    // re-evaluation rather than from the arm that admitted it: an entry the
+    // leader published with observations already behind the ledger is
+    // floored at `fresh_ms`, which lands at `past_fresh == 0` - inside the
+    // empty stale-servable band, and therefore in the stale-on-error one.
+    // See `races::a_waiter_that_re_evaluates_onto_a_stale_on_error_entry_...`.
+    let stale_error_only_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 120_000).expect("freshness"))
+        .build()
+        .expect("stale error only policy");
     let private_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .vary(VarianceDimension::Principal)
@@ -958,6 +970,7 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/stale/{id}", stale_handler).into();
+    let router: Router = router.get("/stale-error-only/{id}", stale_handler).into();
     let router: Router = router.get("/probe/{id}", probe_handler).into();
     let router: Router = router.get("/probe-leased/{id}", probe_handler).into();
     let router: Router = router.get(C64_ROUTE, c64_handler).into();
@@ -1146,6 +1159,11 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .expect("attach cached policy")
         .try_render_cache("/stale/{id}", GroupPolicy::from(stale_policy))
         .expect("attach stale policy")
+        .try_render_cache(
+            "/stale-error-only/{id}",
+            GroupPolicy::from(stale_error_only_policy),
+        )
+        .expect("attach stale error only policy")
         .try_render_cache("/probe/{id}", GroupPolicy::from(probe_policy))
         .expect("attach probe policy")
         .try_render_cache("/probe-leased/{id}", GroupPolicy::from(leased_probe_policy))

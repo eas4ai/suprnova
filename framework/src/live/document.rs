@@ -473,12 +473,7 @@ impl<'a> LiveDocument<'a> {
         );
         let context = self
             .runtime
-            .validate_request_context(
-                self.request,
-                declaration.route.clone(),
-                declaration.slot.clone(),
-                selection,
-            )
+            .validate_request_context(self.request, selection)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::ContextRejected))?;
         let key = declaration.document_key.clone();
         // Recorded here, at the mount that just succeeded, not later at

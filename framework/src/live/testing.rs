@@ -902,8 +902,6 @@ pub fn complete_live_route_policy_for_test(request: &mut Request, policy: LiveTe
 /// Opaque registered mount used to exercise the production context validator.
 pub struct LiveContextHarness {
     runtime: LiveRuntime,
-    current_route: suprnova_live::identity::RouteIdentity,
-    current_slot: suprnova_live::identity::IslandSlot,
     selection: suprnova_live::host::MountSelection,
 }
 
@@ -993,23 +991,13 @@ impl LiveContextHarness {
         ))?;
         runtime.finalize_mount_catalog()?;
 
-        Ok(Self {
-            runtime,
-            current_route,
-            current_slot,
-            selection,
-        })
+        Ok(Self { runtime, selection })
     }
 
     /// Returns success only when the production validator accepts every fact.
     pub fn validate(&self, request: &Request) -> Result<(), crate::FrameworkError> {
         self.runtime
-            .validate_request_context(
-                request,
-                self.current_route.clone(),
-                self.current_slot.clone(),
-                self.selection.clone(),
-            )
+            .validate_request_context(request, self.selection.clone())
             .map(|_| ())
     }
 }
