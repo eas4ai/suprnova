@@ -14,6 +14,9 @@ EXPECTED_INDEX_MODES = {
     "scripts/check-downstream-dependencies.py": "100755",
     "scripts/check-downstream-dependencies.sh": "100755",
     "scripts/check-feature-matrix.sh": "100755",
+    "scripts/check-live-browser.sh": "100755",
+    "scripts/check-live-contracts.sh": "100755",
+    "scripts/check-live-gate.sh": "100755",
     "scripts/check-magnetar-live.sh": "100755",
     "scripts/check-manual-structure.py": "100755",
     "scripts/check-manual-translations.sh": "100755",
@@ -35,6 +38,7 @@ EXPECTED_INDEX_MODES = {
     "scripts/tests/test_gate_runner.py": "100644",
     "scripts/tests/test_gate_scoping.py": "100644",
     "scripts/tests/test_gate_stamp.py": "100644",
+    "scripts/tests/test_manual_structure.py": "100644",
     "scripts/tests/test_repository_tracking.py": "100644",
 }
 
