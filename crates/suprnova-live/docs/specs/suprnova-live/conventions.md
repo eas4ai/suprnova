@@ -27,7 +27,7 @@ unrelated Suprnova and Magnetar work remains untouched.
 
 ### Completeness and scope
 
-- The active implementation contract is [`iterations/005.md`](iterations/005.md).
+- The active implementation contract is [`iterations/006.md`](iterations/006.md).
   Closed contracts remain historical evidence; preliminary sequencing in an
   older contract does not override the active confirmed boundary.
 - Implement the active iteration contract completely. Do not substitute an
@@ -545,6 +545,8 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Advanced the active contract to iteration 006, the sweep of
+  every staged capture; iteration 005 closed with its definition of done met.
 - 2026-09-08 -- Promoted `test-seams-in-ordinary-builds.md` from
   `iterations/next/` into iteration 006: a documented production build shape
   with the framework `testing` feature off, in which no test seam is present
