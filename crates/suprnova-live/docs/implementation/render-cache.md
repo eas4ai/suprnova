@@ -145,9 +145,8 @@ Operations below.
    encoding, tenant, principal), the application build id, and the authority
    epoch this node currently holds (leased, not read per request; see Hot
    path and budget harness below). A query parameter present on the request
-   but not
-   declared by the policy bypasses the cache for that request rather than
-   silently excluding it from the key.
+   but not declared by the policy bypasses the cache for that request rather
+   than silently excluding it from the key.
 3. Look up L0's hot slot, then L0's stored bytes, then L1; a decode failure
    evicts the defective entry from the layer it was found in and is treated
    as a miss there. An L1 hit that decodes is promoted into L0, hot when it
@@ -396,6 +395,34 @@ authority epoch is leased in the runtime's `EpochCache` rather than read from
 the ledger per request; Generations and coherence below describes the three
 paths an epoch advance takes to reach a request.
 
+### Stored header values
+
+A stored header value is exactly what `http::HeaderValue` accepts, byte for
+byte: horizontal tab, `0x20` through `0x7e`, and `0x80` and above. Everything
+else is refused, which covers CR, LF, and NUL - the bytes that would let a
+value smuggle a second header or truncate the wire representation - along with
+every other control byte. `header_value_is_safe` in `entry.rs` is the one
+implementation, shared by `SafeHeaders::from_pairs` and the Composite
+nonce-header template check, and
+`the_stored_value_rule_is_http_header_value_validity_byte_for_byte` proves it
+against `HeaderValue::from_bytes` for all 256 byte values.
+
+The rule has to be exactly that one, and the reason is the response builder
+above. A looser rule would let a value be stored that no hit can ever be
+served from: every request would miss, render, republish, and fail to form the
+same value again, forever, on input a request can influence. Making the two
+agree is what leaves `respond`'s header-formation error unreachable for stored
+entries.
+
+The framework meets the rule from its own side rather than by declining. A
+replayable pair whose value `HeaderValue::from_str` rejects is dropped in
+`entry_header` before `SafeHeaders::from_pairs` sees it, with a warning that
+names the allowlisted header and never its value; the response is cached
+without that header, which is exactly what `HttpResponse::into_hyper` already
+did to it on the way to the wire, so the client never received it either.
+Declining the whole candidate instead would turn one bad header into a route
+that never caches.
+
 ### The allocation ledger
 
 Specification `00-overview.md`'s Complete L0 row allows one `C64` measured
@@ -492,7 +519,13 @@ allocated over 81,920 bytes of shell and slots.
 `framework/benches/render_cache_workloads.rs` (`harness = false`) measures
 what needs a database, a router, or two nodes. It contains no `unsafe`. Each
 workload asserts the correctness condition its numbers are only meaningful
-beside, and every latency workload runs 200 requests before it measures 200.
+beside. Two of them are latency workloads with their own warmup:
+`c64_middleware` and `generation_reread` each run 200 requests before they
+measure 200, and both record those two counts in the result. The other two
+time work they were already doing - the storm's percentile is over the 1,280
+hits its sweeps take, and the multi-node pair is over one round of 64
+concurrent requests and over 40 takeover rounds - so neither carries a
+warmup or sample count of its own.
 
 - **`c64_middleware`** drives the `C64` route through the real middleware in
   a test host. `p50_microseconds`/`p95_microseconds` are the server side:
@@ -517,18 +550,20 @@ beside, and every latency workload runs 200 requests before it measures 200.
   it and records it as `every_write_invalidates_every_key`. It follows that
   no key can be a hit while a write is in flight, so the reported
   `quiescent_hit_p95_microseconds` (165.048) is the hit that follows a
-  rebuild once a burst has landed, and the name says so. Checked: 1,280
-  hits, 1,280 rebuilds, 1.28 rebuilds per write, one statement per hit, and
-  every final body coherent with the generation the storm ended on.
+  rebuild once a burst has landed, and the name says so; its distribution is
+  the 1,280 hits the sweeps take. Checked: 1,280 hits, 1,280 rebuilds, 1.28
+  rebuilds per write, one statement per hit, and every final body coherent
+  with the generation the storm ended on.
 - **`multi_node`** fans 64 concurrent cold requests for one key across two
   handles over one backend. Checked, on all three tiers: exactly one
   publication, one bypass on the node that did not lead, and the rest
-  waiting on it. Fan-in p95 is 166.501 microseconds on SQLite, 9,201.986 on
-  PostgreSQL, and 260.519 on Redis; takeover p95 is 1.3229, 6.0536, and
-  0.2153 milliseconds. Those are hand-driven coordinator calls - admission,
-  and for the one leader the publication after it - not served requests: no
-  router, middleware, or socket is involved. A takeover moves store time
-  rather than waiting it out.
+  waiting on it. Fan-in p95 is over those 64 requests and takeover p95 over
+  40 rounds, each on its own key: 166.501 microseconds on SQLite, 9,201.986
+  on PostgreSQL, and 260.519 on Redis for the fan-in; 1.3229, 6.0536, and
+  0.2153 milliseconds for the takeover. Those are hand-driven coordinator
+  calls - admission, and for the one leader the publication after it - not
+  served requests: no router, middleware, or socket is involved. A takeover
+  moves store time rather than waiting it out.
 
 ### Running it, and what the results claim
 

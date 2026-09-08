@@ -153,8 +153,11 @@ once.
 run needs both `PG_TEST_URL` and `REDIS_TEST_URL`, because the checked-result
 contract requires all three recorded profiles (SQLite, PostgreSQL, Redis).
 Both servers must be disposable: the run drops and recreates every table and
-flushes every key it uses. Every latency workload runs 200 requests before it
-measures 200. Results go to `benchmarks/render-cache-workloads-v1.json`.
+flushes every key it uses. Two of the four are latency workloads with their
+own warmup: `c64_middleware` and `generation_reread` each run 200 requests
+before they measure 200, and record both counts in the result. The other two
+time work they were already doing and carry no warmup or sample count of
+their own. Results go to `benchmarks/render-cache-workloads-v1.json`.
 
 - `c64_middleware` drives the `C64` route through the real middleware in a
   test host. Its `p50`/`p95` pair is the server side, from the parsed request
@@ -169,15 +172,17 @@ measures 200. Results go to `benchmarks/render-cache-workloads-v1.json`.
 - `invalidation_storm` commits 1,000 writes in 20 bursts of 50 against 64
   cached keys. It records that a point read observes its table as well as its
   row, so every write invalidates every key, and reports the hit that follows
-  a rebuild rather than a hit during the writes, which cannot exist. Checked:
-  1,280 hits, 1,280 rebuilds, 1.28 rebuilds per write, one statement per hit,
-  and a 165.048 microsecond quiescent hit p95.
+  a rebuild rather than a hit during the writes, which cannot exist. Its
+  percentile is over the 1,280 hits its sweeps take. Checked: 1,280 hits,
+  1,280 rebuilds, 1.28 rebuilds per write, one statement per hit, and a
+  165.048 microsecond quiescent hit p95.
 - `multi_node` fans 64 concurrent cold requests for one key across two
   handles over one backend, through hand-driven coordinator calls rather than
-  served requests. Checked on every tier: one publication, one bypass on the
-  node that did not lead. Fan-in p95 is 166.501 microseconds on SQLite,
-  9,201.986 on PostgreSQL, and 260.519 on Redis; takeover p95 is 1.3229,
-  6.0536, and 0.2153 milliseconds.
+  served requests. Its fan-in percentile is over those 64 requests and its
+  takeover percentile over 40 rounds, each on its own key. Checked on every
+  tier: one publication, one bypass on the node that did not lead. Fan-in p95
+  is 166.501 microseconds on SQLite, 9,201.986 on PostgreSQL, and 260.519 on
+  Redis; takeover p95 is 1.3229, 6.0536, and 0.2153 milliseconds.
 
 Both RenderCache results are classified the same way every other budget tool
 in this crate classifies its own. The checked-in files are

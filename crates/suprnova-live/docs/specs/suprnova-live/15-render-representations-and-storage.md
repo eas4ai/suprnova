@@ -67,6 +67,12 @@ Acceptance criteria:
   as the final assembled HTTP validator.
 - Hop-by-hop, per-connection, transient tracing, and unsafe per-request headers
   are never replayed from storage.
+- A stored header value SHALL be a valid HTTP header value, and the rule the
+  entry codec applies SHALL be exactly the one the cache-hit response path
+  can form, so that no entry can be stored whose response can never be built
+  from it. A host whose concrete response carries a replayable header the
+  rule refuses MAY store the response without that header, since the wire
+  representation did not carry it either; it SHALL NOT store the value.
 - Complete body bytes correspond exactly to their final validator and metadata;
   Composite final bytes, `Content-Length`, CSP data, and validators are computed
   only after successful assembly.
@@ -206,6 +212,19 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-07 -- Fixed the stored header value rule at exactly HTTP header
+  value validity, byte for byte, rather than at the three control bytes an
+  earlier reading named (carriage return, line feed, and NUL). The entry codec
+  and the cache-hit response builder now apply one shared rule, proven equal
+  to `http::HeaderValue` for every byte value, so a stored entry is formable
+  into a response by construction and the builder's header-formation error is
+  unreachable for stored values. Rejected the looser rule that preceded it: it
+  let a value be stored that no hit could be served from, so every request to
+  that route missed, rendered, republished, and failed again on the same
+  value, on input a request can influence. A host meets the rule by dropping
+  such a replayable header from the stored representation, matching what its
+  own wire encoding already did to it, rather than by refusing to cache the
+  response at all.
 - 2026-09-07 -- Shipped the database and Redis L1 providers behind the existing
   store contract. A publication is fenced inside the store itself, in one
   guarded statement or one script, so two nodes publishing the same new key

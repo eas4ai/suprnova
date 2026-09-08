@@ -474,7 +474,7 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   global allocator and measures the two workloads that need no database,
   router, or socket; the package lint for `unsafe_code` becomes `deny` so
   that this one target MAY allow it with a written reason, while the library
-  root keeps `forbid` and no library, test, or example code may opt in.
+  root keeps `forbid` and no library, test, or example code can opt in.
   Workloads that need a database, a router, or two nodes live in a
   host-level benchmark, `framework/benches/render_cache_workloads.rs`, which
   contains no `unsafe` and covers the middleware hit, the batched generation

@@ -30,11 +30,22 @@ with no allocation. A new engine module, `render_cache::hot`, decodes a
 Complete frame once at publication and keeps every header value a hit can
 precompute; `MemoryRenderStore` gained a hot slot beside each entry's bytes,
 and one response builder now forms every cached response - fresh, 304, HEAD,
-stale under `Warning`, and stitched - so the framework's three separate
-header loops are gone. The measured result is a Complete L0 hit at three heap
+stale under `Warning`, and stitched - so the framework's three separate header
+loops are gone. The measured result is a Complete L0 hit at three heap
 allocations (four when the body embeds a public seed deadline whose
 `Cache-Control` shrinks with the clock), against a budget of four, with the
 body shared rather than copied.
+
+Ruling R13 settled what that one builder may be handed. The engine's
+stored-header rule became byte-for-byte `http::HeaderValue` validity, pinned
+against `HeaderValue::from_bytes` for all 256 byte values, so the builder can
+never fail on a value the store accepted; and the framework's `entry_header`
+drops a replayable pair whose value `HeaderValue::from_str` rejects, warning
+with the header name only, rather than declining the whole candidate - which
+is what the wire already did to that header on the way out. Both landed at
+`95c90056`. Without the pair, one unformable header makes every request to
+that route miss, render, and republish the same value forever, on input a
+request can influence.
 
 Two defects surfaced while measuring rather than while reasoning. The `Age`
 header cost two allocations instead of one, because `HeaderValue::from(u64)`
@@ -48,9 +59,16 @@ epoch on every request in order to bake it into the lookup key. Ruling R17
 judged that a defect rather than a number to record - specification 18 says a
 lease exists to avoid querying authority on every hot hit - and an inserted
 task leased the epoch with the generations in an `EpochCache` per runtime.
-Measured after it: a lease-mode hit issues no statement, an authority-mode
-hit exactly one (generations and epoch in one `UNION ALL`), the first miss of
-a process one extra, and later misses none.
+Measured after it, in absolute counts: a lease-mode hit issues 0 statements,
+an authority-mode hit exactly 1 (generations and epoch in one `UNION ALL`),
+the first miss of a process 4, and every later miss 3 - one extra on the
+first because that is where the epoch lease is filled, and none extra after
+it. `a_lease_mode_hit_runs_nothing_and_issues_no_statement` and
+`an_authority_mode_hit_issues_exactly_one_statement` pin the first two;
+`the_epoch_is_read_once_at_first_use`, in
+`framework/tests/render_cache/bypass.rs`, pins the `+1` as a relative
+assertion between two misses, so the two miss counts are measurements rather
+than asserted constants.
 
 ### The harness, and what it is allowed to claim
 
