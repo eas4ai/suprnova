@@ -1015,13 +1015,19 @@ class, and both follow from the bytes being new:
   validator is still strong over exactly the bytes sent and still honest
   about which representation this is; it simply never matches a later
   request, which is the truth. `HEAD` still sends the headers with no body.
-- **A slotted assembly is `private, no-store`.** The bytes hold islands
-  mounted for one principal under authority re-derived for one request; a
-  `max-age` would let a shared browser profile replay them to whoever sits
-  down next and skip reauthorization for the whole window. A zero-slot
-  Composite has no per-principal bytes in it, only a per-request nonce, so
-  it keeps the class's private `max-age` like any other private
-  representation.
+- **A slotted stitched representation is `private, no-store`.** The bytes
+  hold islands mounted for one principal under authority re-derived for one
+  request; a `max-age` would let a shared browser profile replay them to
+  whoever sits down next and skip reauthorization for the whole window. The
+  rule follows what the bytes hold, not which code path produced them, so
+  one function decides it - `stitch::cache_control_override_for` - and both
+  writers ask it: `stitch::respond` for every assembled hit, and
+  `middleware::finish_fresh_render` for the leader's own rendered document,
+  which holds that leader's islands and is published as the shell everyone
+  else is assembled from. A zero-slot Composite has no per-principal bytes
+  in it, only a per-request nonce, so it keeps the class's private
+  `max-age` like any other private representation, on the leader's render
+  and on every hit alike.
 
 The class refuses `SharedCachePolicy::SMaxAge` at policy build time, so no
 shared proxy is ever told to keep bytes the server never cached.
@@ -1049,11 +1055,17 @@ The application dogfoods the class on its own dashboard: `app/src/live/mod.rs`
 declares `PublicShellStitched` for `/live`, whose three islands are
 identity-bound and whose shell reads nothing private, and
 `app/tests/live_render_cache.rs` proves through the running application that
-one shared shell is stored as a Composite entry with three slots, that a
-second principal is served from it without the handler running, that each
-principal's island carries its own scope, that the response is
-`private, no-store`, that a conditional GET is answered 200, and that an
-anonymous visitor gets the route's own login redirect.
+one shared shell is stored as a Composite entry with three slots, that two
+principals' documents differ in their island tags and nowhere else, that
+each principal's island carries its own scope, that every response on the
+route is `private, no-store` - the leader's own render included, since its
+bytes hold that leader's islands - that a conditional GET is answered 200,
+and that an anonymous visitor gets the route's own login redirect. "The
+handler did not run on the hit" is asserted one layer down, in
+`a_hit_assembles_each_principals_own_island_without_the_handler`
+(`framework/tests/render_cache/stitch.rs`), whose harness counts renders
+from inside the route's own chain; the application's counting middleware
+sits outside it and is reached on a stitched hit exactly as on a miss.
 
 ### Limitations
 
@@ -1085,9 +1097,10 @@ Each of these is ruled behaviour, not a defect.
   the entry is validated. A `content-security-policy` value close to 4,096
   bytes therefore declines even when the document carries a single short
   nonce.
-- An assembled document with at least one private island is sent
-  `Cache-Control: private, no-store`; a zero-island Composite keeps the
-  class's private `max-age`.
+- A stitched document with at least one private island is sent
+  `Cache-Control: private, no-store`, whether it was assembled on a hit or
+  rendered by the leader that published the shell; a zero-island Composite
+  keeps the class's private `max-age` in both cases.
 - Composite responses never answer 304, so `If-None-Match` is ignored and the
   emitted `ETag` serves `HEAD` and same-response validation only.
 - A stitched hit whose route chain refuses it (authorization, tenant) has

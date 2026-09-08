@@ -192,12 +192,23 @@ async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
 /// `RenderCache::install`, so it sits outside the route's own chain, and a
 /// stitched hit is deliberately forwarded through that whole chain before
 /// anything is served. It therefore counts every request to the dashboard,
-/// hit or miss. What only an assembled hit can produce is
-/// `Cache-Control: private, no-store`: the composite responder is the only
-/// writer of that value, it runs only after a whole document has been
-/// assembled, and that path never calls the handler. So the counter is
-/// asserted for what it actually is, and the stored Composite entry, the
-/// per-principal islands, and the no-store response carry the cache claim.
+/// hit or miss. `Cache-Control` cannot carry it either, and that is
+/// deliberate: a slotted stitched route is `private, no-store` on the
+/// leader's own rendered document as much as on every assembly after it,
+/// because the directive follows what the bytes hold - one principal's
+/// islands - and not which code path produced them.
+///
+/// So the counter is asserted for what it actually is, and the cache claim
+/// here rests on what the store holds and what the two documents are made
+/// of: a Composite entry with one slot per identity-bound island, read back
+/// under the same lookup key the middleware derived, and two principals
+/// whose documents differ in their island tags and nowhere else - one
+/// shell, islands re-mounted per principal. "The handler did not run on the
+/// hit" is asserted directly one layer down, in
+/// `a_hit_assembles_each_principals_own_island_without_the_handler`
+/// (`framework/tests/render_cache/stitch.rs`), against a render counter
+/// that sits inside the route's own chain where this application's does
+/// not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     let app = setup_app(6).await;
@@ -215,8 +226,9 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     );
     assert_eq!(
         first.header("cache-control"),
-        Some("private, max-age=300"),
-        "the render that published the shell is not itself an assembly"
+        Some("private, no-store"),
+        "these bytes hold Alice's three islands, so nothing may store them; \
+         which code path produced them is irrelevant to that"
     );
 
     // 2. What was stored is a segment graph, not a finished answer: one
@@ -236,13 +248,14 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
         "one slot for the counter, the uploader, and the feed"
     );
 
-    // 3. A second principal is answered from that shell without the
-    //    handler running. `private, no-store` is written by nothing but the
-    //    composite responder, and the composite responder is reached only
-    //    after a document has been fully assembled from re-mounted islands.
-    //    The counter still moves, which is the fact this test's own note is
-    //    about: a stitched hit is forwarded through the chain the counting
-    //    middleware sits outside of.
+    // 3. A second principal is served under the same rule: the class is
+    //    `private, no-store` whether the bytes were rendered or assembled,
+    //    so this step pins the directive rather than the code path behind
+    //    it. The counter still moves, which is the fact this test's own note
+    //    is about: a stitched hit is forwarded through the chain the
+    //    counting middleware sits outside of. Step 4 is where the document
+    //    is shown to be the stored shell with this principal's own islands
+    //    in it.
     let before = render_counter::renders();
     let second = get(&app, "/live", Some(&bob)).await;
     assert_eq!(second.status, StatusCode::OK, "{}", second.text());

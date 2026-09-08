@@ -23,8 +23,10 @@
 //! An assembled document is never a repeat of an earlier one - it carries a
 //! nonce and island identities minted for this request alone - so a
 //! Composite hit never answers 304, and a Composite entry with any slot in
-//! it is sent `private, no-store` so no shared browser profile can replay
-//! one principal's islands to the next visitor (see [`respond`]).
+//! it is sent `private, no-store` - on the leader's own render of it as much
+//! as on every later assembly - so no shared browser profile can replay one
+//! principal's islands to the next visitor (see
+//! [`cache_control_override_for`]).
 //!
 //! A route under this class must not rewrite the response body in route
 //! middleware after the Live document rendered it. Such middleware runs again
@@ -397,11 +399,40 @@ async fn fail_document(request: Request, next: Next) -> Response {
 /// per-request reauthorization for the whole window. A zero-slot Composite
 /// has no per-principal bytes in it - only a per-request nonce - so it
 /// keeps the class's private `max-age` from
-/// [`cache_control_value`] as any other private representation would.
+/// [`cache_control_value`] as any other private representation would. The
+/// decision itself is [`cache_control_override_for`], which the leader's
+/// own render asks as well, so the directive does not depend on which code
+/// path produced the bytes.
 ///
 /// Everything else is the shared contract: `Vary` from the declared
 /// variance, `Age` from the publication instant, and `Warning` when the
 /// entry was served stale.
+/// The `Cache-Control` a stitched route's response is pinned to, or `None`
+/// when the class's computed value stands.
+///
+/// A Composite entry with at least one slot is `private, no-store`. The
+/// bytes it describes hold islands mounted for one principal under
+/// authority re-derived for one request; a `max-age` on them would let a
+/// shared browser profile replay one principal's islands to whoever sits
+/// down next, and would skip the per-request reauthorization for the whole
+/// window. A zero-slot Composite has no per-principal bytes in it - only a
+/// per-request nonce - so it keeps the class's private `max-age` like any
+/// other private representation.
+///
+/// The rule is about what the bytes contain, not about which code path
+/// produced them, so both writers of a stitched route's response ask this
+/// one function: [`respond`] for every later assembly, and
+/// `middleware::finish_fresh_render` for the leader's own rendered
+/// document, whose islands are that leader's and are no more storable than
+/// an assembly of the same shell.
+pub(crate) fn cache_control_override_for(entry: &CompositeEntry) -> Option<&'static str> {
+    if entry.graph().slots.is_empty() {
+        None
+    } else {
+        Some("private, no-store")
+    }
+}
+
 fn respond(
     request: &Request,
     policy: &RenderCachePolicy,
@@ -417,12 +448,9 @@ fn respond(
     // per-request nonce - so it keeps the class's private `max-age` the
     // engine computes for any other private representation; a slotted one
     // is pinned to `private, no-store`, for the reason this function's doc
-    // gives.
-    let cache_control_override = if entry.graph().slots.is_empty() {
-        None
-    } else {
-        Some("private, no-store")
-    };
+    // gives. The leader's own render of the same entry asks the same
+    // function, so the two answers cannot drift.
+    let cache_control_override = cache_control_override_for(entry);
     let formed = respond_with_engine(
         ResponseParts {
             status: header.status,

@@ -319,7 +319,12 @@ async fn a_hit_assembles_each_principals_own_island_without_the_handler() {
     // The bytes hold one principal's island, mounted under authority derived
     // for one request, so nothing may store them: a `max-age` here would let
     // a shared browser profile hand user-a's island to whoever sits down
-    // next, and skip reauthorization for the whole window.
+    // next, and skip reauthorization for the whole window. `a1` is the
+    // leader's own rendered document rather than an assembly, and it holds
+    // user-a's island just the same, so it is held to the same value: the
+    // rule is about what the bytes contain, not about which code path
+    // produced them.
+    assert_eq!(a1.header("cache-control"), Some("private, no-store"));
     assert_eq!(a2.header("cache-control"), Some("private, no-store"));
     assert_eq!(b1.header("cache-control"), Some("private, no-store"));
 }

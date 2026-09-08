@@ -2102,6 +2102,16 @@ async fn lead_render(
         DecodedEntry::Complete(entry) => *entry.validator(),
         DecodedEntry::Composite(_) => Validator::strong_for(response.body()),
     };
+    // The leader's own rendered document of a slotted stitched route holds
+    // that leader's islands, mounted under authority derived for this one
+    // request, exactly as every later assembly of the same shell does. The
+    // directive follows what the bytes contain, not which code path produced
+    // them, so both ask the one helper that decides it. A Complete entry,
+    // and a Composite with no slots at all, keep the class's computed value.
+    let cache_control_override = match &entry {
+        DecodedEntry::Complete(_) => None,
+        DecodedEntry::Composite(composite) => stitch::cache_control_override_for(composite),
+    };
     // The client that triggered this render gets its own response back -
     // only the cache validators this middleware adds are attached, rather
     // than a response reconstructed from the stored entry. Reconstructing
@@ -2117,6 +2127,7 @@ async fn lead_render(
         policy,
         entry.header(),
         &validator,
+        cache_control_override,
     )
 }
 
@@ -2142,12 +2153,24 @@ async fn lead_render(
 /// islands re-rendered for *that* request, under a nonce minted for it, and
 /// so legitimately carries a different validator - the two describe
 /// different bytes, and each is strong for the bytes it was sent with.
+///
+/// `cache_control_override` is the one directive the class's computed value
+/// must not be allowed to state, and it exists for the same reason the
+/// validator is passed in: a Composite publication's bytes are the leader's
+/// own fully rendered document, islands included. A slotted stitched route's
+/// document holds one principal's islands under authority re-derived for one
+/// request, so nothing may store it - which is what
+/// [`stitch::cache_control_override_for`](super::stitch::cache_control_override_for)
+/// decides, for this render and for every later assembly of the same entry
+/// alike. `None` leaves the class's own value in place, which is what every
+/// Complete publication and every zero-slot Composite gets.
 fn finish_fresh_render(
     response: HttpResponse,
     if_none_match: Option<&str>,
     policy: &RenderCachePolicy,
     header: &EntryHeader,
     validator: &Validator,
+    cache_control_override: Option<&'static str>,
 ) -> Response {
     let not_modified = matches!(
         evaluate_conditional(if_none_match, validator),
@@ -2167,11 +2190,16 @@ fn finish_fresh_render(
         .map(|deadline| deadline.saturating_sub(header.published_at_ms));
     out = out.replace_header(
         "Cache-Control",
-        cache_control_value(
-            header.class,
-            policy.shared(),
-            &policy.freshness(),
-            seed_remaining,
+        cache_control_override.map_or_else(
+            || {
+                cache_control_value(
+                    header.class,
+                    policy.shared(),
+                    &policy.freshness(),
+                    seed_remaining,
+                )
+            },
+            ToOwned::to_owned,
         ),
     );
     if let Some(vary) = vary_value(&header.variance) {
