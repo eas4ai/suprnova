@@ -1,7 +1,7 @@
 # Suprnova Live -- 18 Cache Coherence and Rebuilding
 
 Status: Normative design specification
-Last revised: 2026-09-07
+Last revised: 2026-09-08
 
 ## Scope
 
@@ -107,6 +107,19 @@ UX flow:
 2. An accelerator misses the hint -> later authoritative validation still
    discovers the change.
 
+#### Generation-ledger epoch rewind detection
+
+A restore that rewinds the ledger's authority epoch below the value live nodes
+or L1 entries already carry SHALL be detected, and no entry stamped above the
+ledger's current authority SHALL be served as current. Such an entry SHALL be
+treated as unproven and rebuilt, proven by a test that performs a rewind and
+observes the refusal and the rebuild. The restore procedure in the operations
+chapter SHALL state the automatic behavior and SHALL keep manual steps only
+where they are still needed. Until iteration 006 delivers this, a rewind is
+undetected: the epoch advance is a plain increment that does not by itself lift
+the epoch back above the stamped high-water mark, and the documented remedy is
+for the operator to advance the epoch and empty L1 by hand.
+
 ### Local validation leases and invalidation hints
 
 L0 caches may use short bounded validation leases to avoid querying authority on
@@ -131,6 +144,31 @@ UX flow:
    reads.
 2. Write hint or lease expiry occurs -> next request revalidates before claiming
    freshness.
+
+#### Credible generation hints over Redis pub/sub
+
+A credible generation hint MAY shorten a validation lease a node already holds,
+and SHALL NOT extend a lease, create one, or stand in for the generation ledger
+as authority. A test SHALL prove that a hint naming an observed digest makes
+the next lookup re-validate earlier, and that no hint causes an entry to be
+served that the coherence check would have refused. A hit SHALL still read the
+database generation ledger, and a deployment receiving forged, duplicated,
+reordered, or stale hints SHALL serve exactly what the same deployment serves
+with hints disabled. Losing the hint channel entirely, or running with hints
+turned off, SHALL leave behavior identical to a deployment built without them:
+the same entries served, the same rebuilds admitted, and only the moment of
+re-validation different. Publication and subscription SHALL be bounded, so that
+one hint message carries a bounded number of digests, a subscriber that falls
+behind is dropped rather than queued without limit, and neither the publisher
+nor the subscriber blocks a request that is not waiting on it. The Embedded and
+Database-coordinated tiers SHALL be unaffected, no new external daemon SHALL
+become required at any tier, and any telemetry added SHALL keep the closed
+low-cardinality label rule and SHALL never name a route, a key, or a dependency
+identity. The bounds this leaves open, the digest count per message, the
+subscriber drop rule, the interaction with an entry rebuilding under a fenced
+lease, and whether a hint's own authenticity is checked at all, SHALL be
+settled and recorded in this specification before the first code commit, so
+this domain binds outcomes rather than a mechanism.
 
 ### Singleflight and fenced publication
 
@@ -275,6 +313,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `redis-generation-hints.md` from `iterations/next/`
+  into iteration 006: a hint MAY only shorten a lease a node already holds
+  and is never authority, with its remaining bounds recorded here before
+  code, added under Local validation leases and invalidation hints.
+- 2026-09-08 -- Promoted `generation-ledger-rewind-detection.md` from
+  `iterations/next/` into iteration 006: an epoch rewind after a restore is
+  detected and no entry stamped above current authority is served, recorded
+  under Durable generation ledger.
 - 2026-09-07 -- Shipped the Database-coordinated and Externally accelerated
   tiers over a fenced lease store port. Every cross-node expiry is decided on
   the store's own clock, read inside the statement or script that guards the

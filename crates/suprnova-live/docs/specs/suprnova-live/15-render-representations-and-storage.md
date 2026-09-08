@@ -1,7 +1,7 @@
 # Suprnova Live -- 15 Render Representations and Storage
 
 Status: Normative design specification
-Last revised: 2026-09-07
+Last revised: 2026-09-08
 
 ## Scope
 
@@ -42,6 +42,21 @@ UX flow:
    exposes its effective policy.
 2. A concrete response violates eligibility -> it is served normally but not
    stored under an unsafe representation class.
+
+#### Test seams and the production build shape
+
+A documented production build shape SHALL exist in which the framework's
+`testing` feature is off, and every RenderCache test seam SHALL be absent from
+a binary built that way, proven by a build assertion or a test rather than by
+reading the source. The default build and every `_for_test` consumer SHALL keep
+working unchanged, so day-to-day verification of this domain is not narrowed by
+the new shape. The framework-wide rule that owns the build shape lives in
+`conventions.md`; this domain owns the RenderCache seams it covers, which are
+the middleware race points, the collector's classification-stripping seam, the
+policy table, the `_for_test` operators on `RenderCache`, the key-input seam,
+the clock and coordinator configuration seams, and the console report builders.
+Until iteration 006 delivers this, `testing` is a default feature and an
+ordinary application build compiles those seams into the production binary.
 
 ### Complete and Composite representation models
 
@@ -113,6 +128,18 @@ UX flow:
 2. Required dimension is ambiguous or unsafe -> lookup bypasses rather than
    risking a false hit.
 
+#### Application build identity at install
+
+The build identity that participates in RenderCache keying SHALL be the
+application's own build id, supplied to `RenderCache::install` or derived in
+the application crate, so that the default changes with the application rather
+than with the framework crate. Two installs carrying different application
+build ids SHALL NOT share a stored entry. The rustdoc and the deployment
+chapter SHALL name the source of the value. Until iteration 006 delivers this,
+the default build id is the framework crate's own package version, which equals
+the application's version only under workspace versioning and does not change
+from one deploy to the next.
+
 ### Provider-backed L0 and L1 storage
 
 RenderCache shall use a binary/raw storage path suitable for immutable bytes and
@@ -140,6 +167,14 @@ UX flow:
    bytes or assembles the stored Composite without invoking public route work.
 2. L0 misses and L1 hits -> the valid typed entry promotes under policy and
    serves/assembles; total miss enters the rebuild contract.
+
+#### Generation hints on the externally accelerated tier
+
+The externally accelerated tier MAY carry credible generation hints beside the
+entry bytes and instance records it already stores, and such a hint SHALL never
+be entry bytes, an instance record, or generation truth; the coherence rule
+that bounds what a hint can do is owned by
+`18-cache-coherence-and-rebuilding.md`.
 
 ### HTTP caching and conditional requests
 
@@ -212,6 +247,19 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `application-build-id-at-install.md` from
+  `iterations/next/` into iteration 006: the build identity that participates
+  in keying becomes the application's own build id, recorded under Canonical
+  lookup identity.
+- 2026-09-08 -- Promoted `test-seams-in-ordinary-builds.md` from
+  `iterations/next/` into iteration 006: a production build shape with the
+  framework `testing` feature off, in which no RenderCache test seam is
+  present, recorded under RenderCache policy and eligibility beside the
+  framework-wide rule in `conventions.md`.
+- 2026-09-08 -- Promoted `redis-generation-hints.md` from `iterations/next/`
+  into iteration 006 for its storage aspect: the externally accelerated tier
+  MAY carry hints, which are never bytes, records, or generation truth,
+  recorded under Provider-backed L0 and L1 storage.
 - 2026-09-07 -- Fixed the stored header value rule at exactly HTTP header
   value validity, byte for byte, rather than at the three control bytes an
   earlier reading named (carriage return, line feed, and NUL). The entry codec

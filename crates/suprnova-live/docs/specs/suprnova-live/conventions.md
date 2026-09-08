@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-09-07
+Last revised: 2026-09-08
 
 ## Authority and application
 
@@ -264,6 +264,37 @@ unrelated Suprnova and Magnetar work remains untouched.
   prove it, plus a higher-level test when the failure crossed a subsystem
   boundary.
 
+### Production build shape
+
+- A documented production build shape SHALL exist in which the framework's
+  `testing` feature is off, and the framework, the CLI scaffold's generated
+  application, and the dogfood application SHALL build and boot in it.
+- Every test seam SHALL be absent from a binary built that way, checked by a
+  build assertion or a test rather than by reading the source.
+- The default build and every `_for_test` consumer SHALL stay unchanged, so
+  day-to-day verification is not narrowed by the new shape, and the feature
+  matrix step SHALL cover the testing-off build of the framework crate.
+- Until iteration 006 delivers this shape, `testing` is a default feature and
+  an ordinary application build compiles those seams into the production
+  binary. The same feature also gates encryption-key installation, the
+  forced-encrypt-failure switch, request query overrides, and the session test
+  scopes, so turning it off is framework-wide work rather than a change local
+  to one domain.
+
+### Documentation and translation parity
+
+- Inline-code-span parity SHALL hold across the whole manual: the six mirrors
+  SHALL agree with the English chapter for every chapter rather than for a
+  listed subset of them.
+- The parity rule's tokenizer SHALL treat a quoted backtick as quoted text, so
+  that only real drift is reported, and every real drift SHALL be fixed by
+  translation rather than by narrowing the rule.
+- The ratchet list of span-checked sources SHALL be retired once every source
+  is covered, and the translation lock SHALL be restamped for every chapter
+  that changed.
+- Until iteration 006 delivers this, span parity is enforced over the seven
+  listed RenderCache and documentation chapters only.
+
 ## Naming and organization
 
 ### Integrated development layout
@@ -514,6 +545,14 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `test-seams-in-ordinary-builds.md` from
+  `iterations/next/` into iteration 006: a documented production build shape
+  with the framework `testing` feature off, in which no test seam is present
+  in the binary, recorded as the Production build shape rule.
+- 2026-09-08 -- Promoted `whole-manual-inline-span-parity.md` from
+  `iterations/next/` into iteration 006: inline-code-span parity across every
+  manual chapter, with the tokenizer corrected and the ratchet list retired,
+  recorded as the Documentation and translation parity rule.
 - 2026-09-07 -- Scoped the no-`unsafe` rule so the Complete L0 allocation
   budget can be measured. The engine crate root SHALL keep
   `#![forbid(unsafe_code)]`; the package lint becomes `deny` so that exactly

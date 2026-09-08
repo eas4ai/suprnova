@@ -1,7 +1,7 @@
 # Suprnova Live -- 17 Dependency Tracking and Generations
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-08
 
 ## Scope
 
@@ -73,6 +73,20 @@ UX flow:
 2. Authoritative change advances that generation -> later coherence validation
    detects mismatch and rebuilds rather than relying on TTL guessing.
 
+#### Feature-flag dependency generations
+
+A feature-flag read SHALL observe a `Feature` generation identified by the
+flag's name, the same way a table or record read is observed, so that a flag
+flip or an out-of-band change invalidates a published entry that depended on
+the flag through the ordinary coherence path rather than leaving it to age out.
+A snapshot refresh reflecting an out-of-band change SHALL advance that
+generation and SHALL notify the cached evaluator in front of it, so no reader
+keeps serving stale identity-scope bits past the change. No `Feature`
+dependency SHALL be recorded for a flag with no scoped rule at all, preserving
+the property that a flag which does not depend on the reader costs nothing.
+Until iteration 006 delivers this, nothing produces a `Feature` identity, and a
+published entry keeps its old answer until its own freshness schedule expires.
+
 ### ORM query and model dependencies
 
 Suprnova ORM integration shall derive safe dependencies from actual reads.
@@ -93,6 +107,19 @@ UX flow:
 1. Route reads a known record -> collector records the narrow safe dependency.
 2. Route executes an opaque query -> collector records a broader generation so
    correctness wins over hit rate.
+
+#### Primary-key point reads observe the record
+
+A primary-key point read that returns a row SHALL observe that record's
+generation rather than the whole table's. A point read that returns no row, and
+every read whose row set is not fixed by a primary key, SHALL keep the table
+observation, because only a table authority survives a row that does not exist
+yet. A write to another row of the same table SHALL leave a point-read entry
+current, while a write to the observed row, or its deletion, SHALL invalidate
+it. The invalidation-storm workload SHALL record the point-read ratio, and the
+generations chapter of the manual SHALL state the rule. Until iteration 006
+delivers this, a point read observes its table unconditionally, so any write to
+that table invalidates every entry that read a row from it.
 
 ### Transaction-aware write advancement
 
@@ -209,6 +236,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `feature-flag-dependency-generations.md` from
+  `iterations/next/` into iteration 006: a flag read observes a `Feature`
+  generation that a flip or an out-of-band reload advances, and the reload
+  notifies the cached evaluator, recorded under Dependency identities and
+  generations.
+- 2026-09-08 -- Promoted `table-granular-point-read-observation.md` from
+  `iterations/next/` into iteration 006: a primary-key point read observes
+  the record it returned rather than the whole table, recorded under ORM
+  query and model dependencies.
 - 2026-08-21 -- Query fingerprints assist dependency identity but are not cache
   validity proof; data generations are authoritative.
 - 2026-08-21 -- Automatic collection is the default inside opted-in rendering;

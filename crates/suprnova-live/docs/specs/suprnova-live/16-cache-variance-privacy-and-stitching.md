@@ -1,7 +1,7 @@
 # Suprnova Live -- 16 Cache Variance, Privacy, and Stitching
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-08
 
 ## Scope
 
@@ -40,6 +40,35 @@ UX flow:
 2. Undeclared request data affects output -> policy downgrades/bypasses and
    diagnostics identify the unsafe dependency.
 
+#### Global-scope evaluation observes the tenant it reads
+
+Global-scope evaluation that reads a tenant SHALL record a tenant observation
+into the active collector, with the tenant as comparable material rather than a
+bare reason. A route whose model carries a tenant-scoped global scope and which
+declares no `Tenant` variance SHALL be declined rather than published, and the
+privacy leak suite SHALL prove it with a positive control showing that the same
+route declaring `Tenant` caches and partitions. A scope that reads no
+per-request state SHALL record nothing and SHALL keep caching exactly as it
+does now; a scope that reads per-request state the recording cannot resolve to
+a known variance dimension SHALL narrow to `Uncacheable` rather than be assumed
+harmless. Until iteration 006 delivers this, a global scope that reads the
+current tenant out of a thread-local, a task-local, or an atomic is invisible
+to the collector, and the only remedy is for the application author to declare
+`Tenant` variance by hand on every affected route.
+
+#### Media and Encoding negotiation
+
+A route declaring `Media` or `Encoding` variance SHALL partition its stored
+representations by the negotiated media type or content coding, drawn from a
+closed set the route declares. The key, the `Vary` header, and the stored
+representation SHALL agree on that value, and a negotiation result outside the
+declared set SHALL fall back to the declared default rather than create a
+variant. Tests SHALL prove that two negotiations yield two representations and
+that a variant is never served to a request that did not negotiate it. Until
+iteration 006 delivers this, the middleware resolves both dimensions to
+constants before keying, so declaring either partitions nothing; that statement
+of present behavior stands as the behavior iteration 006 replaces.
+
 ### Automatic privacy classification
 
 RenderCache shall begin from the route's permitted class and automatically
@@ -64,6 +93,22 @@ UX flow:
 2. Safety cannot be established -> response is served uncached rather than
    exposing one application user's content to another.
 
+#### Authorization decisions record the identity they consulted
+
+An authorization decision SHALL record the identity axis, and the concrete
+identity, that the decision actually consulted, rather than only that a
+decision ran. A decision that consults only a tenant-scoped fact SHALL classify
+and key-compare as `Tenant` material; a decision that consults a per-user fact
+SHALL keep requiring `Principal`; a decision that consults both axes, or one
+the recording cannot resolve cleanly, SHALL keep the conservative behavior of
+requiring `Principal` rather than guess. Role and permission reads that reach
+the database SHALL observe their known tables precisely before a route that
+evaluates one is stored, and the privacy leak suite SHALL gain a case proving
+that a per-tenant-only gate does not leak one tenant's authorized page to a
+different tenant sharing the same key. Until iteration 006 delivers this, every
+authorization read classifies unconditionally as `Principal` material, which is
+safe and needlessly narrow.
+
 ### Private representation keys
 
 Private caching shall use stable revocable purpose identifiers with bounded
@@ -87,6 +132,24 @@ UX flow:
    principal/context's coherent representation.
 2. Identity or permission changes -> old private output is not returned and the
    request renders current authorized state.
+
+#### Generation advances travel with the write, not with the process
+
+The RenderCache write side SHALL open in every process configured with
+RenderCache enabled, whether or not that process serves HTTP, so that a write
+made by a queue worker, a scheduled task, or a console command advances the
+same generations the same write advances in the serving process. A persisted
+permission generation advanced from such a process SHALL take effect, so that a
+permission or membership change invalidates previously permitted private output
+wherever the change was made. A process with RenderCache disabled by
+configuration SHALL open nothing and SHALL write nothing to the ledger. Each of
+these properties SHALL be proven by a test that performs the write outside the
+served application and observes the next lookup rebuild, and the
+honest-boundary statement and the manual statement that describe the present
+limit SHALL be removed rather than left as stale warnings. Until iteration 006
+delivers this, the write side is opened only by the call that also registers
+the middleware, so a write from a process that does not serve HTTP advances no
+generation at all.
 
 ### Server stitching
 
@@ -144,6 +207,40 @@ UX flow:
 2. Assembly detects an invalid boundary -> it does not publish the malformed
    composite and follows render error policy.
 
+#### Nested cached segments
+
+A cached segment MAY contain cached segments. An inner cached segment SHALL
+have an identity and a stored version that no including document owns, so one
+stored copy is included from several documents and invalidated once rather than
+once per including route. Ownership SHALL be acyclic and depth-bounded by a
+named constant, and a graph that would exceed the depth bound, or include
+itself directly or transitively, SHALL be declined at publication rather than
+at assembly. The exact assembled length of a nested graph SHALL be computable
+from typed facts before any byte is copied, so the body bound is enforced
+before allocation exactly as it is for a flat graph. An inner segment SHALL NOT
+be served under a representation class wider, or a freshness window longer,
+than the document including it, and a policy that would relax its parent SHALL
+be refused where it is declared. Every inner segment SHALL be reauthorized per
+request in the same way an island slot is, or SHALL be provably identity-free,
+so a nested inclusion never skips a check the same content would have had at
+the top level. A failure inside an inner segment SHALL resolve through a
+declared policy over the same closed set of outcomes a slot has today,
+`fail_document`, `omit`, or `fallback`, and a failure that reaches the
+outermost document SHALL leave the route serving its own uncached render. The
+framework SHALL offer one typed way to declare an inner cached segment and its
+policy, and a declaration naming a segment the running build no longer has
+SHALL fail that segment rather than substitute another. Telemetry SHALL
+distinguish an inner segment's outcomes from an island slot's under closed
+low-cardinality labels, and the conformance corpus SHALL carry a nested case
+whose unknown depth or unknown segment kind is rejected rather than ignored.
+The mechanism that produces these outcomes, whether a second entry kind, a
+recursive segment variant, or an entry the assembler resolves through the
+store, SHALL be decided and recorded in this specification before the first
+code commit, so this domain binds outcomes rather than a mechanism. Until
+iteration 006 delivers this, server stitching caches exactly one level: every
+slot is re-rendered on every hit, and a slot's island cannot itself be a shell
+with slots of its own.
+
 ### Privacy and variance verification
 
 Testing and diagnostics shall make cache-leak scenarios first-class. The
@@ -165,6 +262,22 @@ UX flow:
 2. Unsafe policy is detected -> checking/test fails before deployment with the
    observed source and recommended safe class.
 
+#### Declined lookups record a reason
+
+The `declined` lookup outcome SHALL carry a `reason` attribute whose values are
+a closed enumeration fixed at compile time, with no request-derived text in it.
+Every branch that declines a store or a serve SHALL map to exactly one reason,
+and adding a decline branch without a reason SHALL fail to compile rather than
+fall back to an unattributed default. The session-value decline, the
+per-principal-gate decline, and the undeclared-locale decline SHALL each be
+distinguishable from one another and from an ordinary ineligible response. The
+reason set SHALL stay bounded under the closed low-cardinality label rule,
+SHALL be documented beside `outcome` in the operations chapter and its mirrors,
+and SHALL be asserted by the operations suite rather than only described in
+prose. Until iteration 006 delivers this, every decline is counted under one
+value, so a route that serves normally while its cache never fills gives an
+operator no signal naming the contract that refused.
+
 ## Acceptance criteria
 
 - Every cached byte-affecting dimension is normalized and represented safely.
@@ -176,6 +289,32 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Promoted `authorization-reads-record-consulted-identity.md`
+  from `iterations/next/` into iteration 006: an authorization decision
+  records the identity axis and the concrete identity it consulted, recorded
+  under Automatic privacy classification.
+- 2026-09-08 -- Promoted `global-scope-tenant-observation.md` from
+  `iterations/next/` into iteration 006: global-scope evaluation that reads a
+  tenant records it as comparable material, recorded under Explicit variance
+  model.
+- 2026-09-08 -- Promoted `declined-lookups-record-a-reason.md` from
+  `iterations/next/` into iteration 006: the `declined` lookup outcome carries
+  a closed compile-time `reason`, recorded under Privacy and variance
+  verification.
+- 2026-09-08 -- Promoted `nested-cached-segments.md` from `iterations/next/`
+  into iteration 006: a cached segment MAY contain cached segments under
+  bounded, composing, reauthorized rules whose mechanism is recorded here
+  before code, added under Segment boundaries and composition safety.
+- 2026-09-08 -- Promoted `write-side-outside-the-serving-process.md` from
+  `iterations/next/` into iteration 006: the write side opens in every
+  RenderCache-enabled process so generation advances travel with the write,
+  recorded under Private representation keys beside the permission-generation
+  rule it repairs.
+- 2026-09-08 -- Promoted `media-and-encoding-negotiation.md` from
+  `iterations/next/` into iteration 006: `Media` and `Encoding` partition by
+  the negotiated value over a closed declared set, recorded under Explicit
+  variance model with the present constants named as the behavior it
+  replaces.
 - 2026-08-21 -- Adopted public, stitched, private, and uncacheable classes with
   automatic safety downgrades.
 - 2026-08-21 -- Private personalization is composed on the server; rejected a
