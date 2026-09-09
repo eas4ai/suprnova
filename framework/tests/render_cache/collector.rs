@@ -1011,3 +1011,92 @@ async fn folding_the_gate_bucket_joins_its_consult_and_adds_its_read_counts() {
     );
     assert_eq!(report.context.principal_reads, 1);
 }
+
+/// A model behind a scope that reads per-request state through no
+/// instrumented accessor at all: the invisible tenant filter the
+/// `PerRequest` default exists to catch.
+#[model(table = "scoped_widgets", timestamps = false, fillable = ["name"])]
+pub struct ScopedWidget {
+    pub id: i64,
+    pub name: String,
+}
+
+static HIDDEN_STATE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(7);
+
+struct HiddenScope;
+
+impl suprnova::eloquent::scopes::GlobalScope<ScopedWidget> for HiddenScope {
+    fn apply(&self, query: suprnova::Builder<ScopedWidget>) -> suprnova::Builder<ScopedWidget> {
+        let hidden = HIDDEN_STATE.load(std::sync::atomic::Ordering::SeqCst);
+        query.filter("name", hidden.to_string())
+    }
+}
+
+/// Iteration 006, definition-of-done item 2, the case that has no other
+/// signal. A scope that takes the `PerRequest` default and then reads its
+/// state through nothing the collector can see is named in the report's
+/// undeclared list, which narrows the render to `Uncacheable`.
+///
+/// Verified failing by returning `ScopeDependency::Constant` from
+/// `HiddenScope::dependency`: nothing was recorded and the report stayed
+/// storable, which is exactly the silent leak.
+#[tokio::test]
+#[serial]
+async fn an_undeclared_scope_reading_its_own_state_narrows_to_uncacheable_and_is_named() {
+    use suprnova::eloquent::scopes::ScopeRegistry;
+    use suprnova_live::render_cache::{ObservedContext, RepresentationClass, classify};
+
+    ScopeRegistry::clear();
+    ScopeRegistry::register::<ScopedWidget, _>(HiddenScope);
+
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        // Building the query is enough: `Model::query()` runs the registry,
+        // and the registry is what records. No database is involved.
+        let _query = ScopedWidget::query();
+        current_report().expect("active")
+    })
+    .await;
+    ScopeRegistry::clear();
+
+    assert!(
+        report
+            .undeclared
+            .iter()
+            .any(|name| name == "global_scope:HiddenScope"),
+        "the scope names itself in the diagnostics, got {:?}",
+        report.undeclared
+    );
+
+    let observed = ObservedContext {
+        undeclared_reads: report.undeclared.clone(),
+        ..ObservedContext::default()
+    };
+    assert_eq!(
+        classify(RepresentationClass::PublicShared, &observed).class,
+        RepresentationClass::Uncacheable,
+        "an undeclared read is what narrows the render to Uncacheable"
+    );
+}
+
+/// `current_tenant()` outside `LiveTenantMiddleware` answers `None` and
+/// records the bare read: a render that asked for the tenant and found none
+/// still depends on that answer, and a route declaring no `Tenant`
+/// dimension must decline rather than publish it for everyone.
+#[tokio::test]
+async fn current_tenant_outside_the_middleware_records_a_tenant_read_with_no_value() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        assert_eq!(suprnova::live::current_tenant(), None);
+        current_report().expect("active")
+    })
+    .await;
+    assert!(
+        report.context.tenant_read,
+        "the read itself is always recorded"
+    );
+    assert!(
+        report.context.tenant_material.is_empty(),
+        "and there is no value to record"
+    );
+}

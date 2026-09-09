@@ -44,15 +44,16 @@
 use crate::render_cache_privacy_support;
 
 use render_cache_privacy_support::{
-    AUTHZ_DRIVEN_ROUTE, Harness, IMPERSONATED_ROUTE, LOCALE_LATE_MIDDLEWARE_ROUTE,
-    LOCALE_NESTED_SCOPE_ROUTE, LOCALE_SWITCHES_ROUTE, LOCALE_VARIES_ROUTE, NAMED_GUARD_ONLY_ROUTE,
-    NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE, PRINCIPAL_DECLARED_AUTHZ_ROUTE,
-    PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE, RBAC_GATED_ROUTE, READS_AUTH_ID_ROUTE,
-    READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE,
-    READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE,
-    REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY, STITCHED_ROUTE,
-    TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_ONLY_GATE_ROUTE,
-    TENANT_ONLY_GATE_UNDECLARED_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
+    AUTHZ_DRIVEN_ROUTE, CONSTANT_SCOPED_ROUTE, Harness, IMPERSONATED_ROUTE,
+    LOCALE_LATE_MIDDLEWARE_ROUTE, LOCALE_NESTED_SCOPE_ROUTE, LOCALE_SWITCHES_ROUTE,
+    LOCALE_VARIES_ROUTE, NAMED_GUARD_ONLY_ROUTE, NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE,
+    PRINCIPAL_DECLARED_AUTHZ_ROUTE, PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE,
+    RBAC_GATED_ROUTE, READS_AUTH_ID_ROUTE, READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE,
+    READS_GLOBAL_FLAG_ROUTE, READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE,
+    READS_USER_SCOPED_FLAG_ROUTE, REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY,
+    STITCHED_ROUTE, TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_ONLY_GATE_ROUTE,
+    TENANT_ONLY_GATE_UNDECLARED_ROUTE, TENANT_SCOPED_ROUTE, TENANT_SCOPED_UNDECLARED_ROUTE,
+    TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
     boot_with_cache_installed_before_the_auth_middleware, boot_with_render_cache, counting_route,
     dispatch_get, ensure_role_gate, ensure_tenant_only_gate, island_tag, route_is_under_a_policy,
     session_cookie, stitched_scope,
@@ -1897,4 +1898,118 @@ fn rbac_statements_name_every_table_they_read() {
             "{sql:?} must insert into its declared table {table}"
         );
     }
+}
+
+/// Iteration 006, definition-of-done item 2, the negative direction. A
+/// model behind a tenant-reading global scope on a route that declares no
+/// `Tenant` dimension is never stored: the scope's `current_tenant()` read
+/// narrows the class and the key has nothing to partition by.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tenant_scoped_model_on_a_route_without_tenant_variance_is_declined() {
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, TENANT_SCOPED_UNDECLARED_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+
+    let acme = dispatch_get(
+        &harness,
+        "/privacy/tenant-scoped-undeclared/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(
+        acme.text().contains("acme-only") && !acme.text().contains("globex-only"),
+        "sanity: the scope really filters - got {}",
+        acme.text()
+    );
+    let after_first = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/privacy/tenant-scoped-undeclared/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "an undeclared tenant-scoped route is never stored"
+    );
+}
+
+/// The positive control: the same handler and the same scope on a route
+/// that declares `Tenant` caches, and each tenant gets its own partition.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_same_route_declaring_tenant_caches_and_partitions() {
+    let harness = boot_with_render_cache().await;
+
+    let acme = dispatch_get(
+        &harness,
+        "/privacy/tenant-scoped/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(acme.text().contains("acme-only"));
+    let after_acme = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/privacy/tenant-scoped/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_acme,
+        "declaring Tenant is what makes a tenant-scoped route cacheable"
+    );
+
+    let globex = dispatch_get(
+        &harness,
+        "/privacy/tenant-scoped/1",
+        &[("x-test-tenant", "globex")],
+    )
+    .await;
+    assert!(
+        globex.text().contains("globex-only") && !globex.text().contains("acme-only"),
+        "globex must never be served acme's rows - got {}",
+        globex.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_acme + 1,
+        "and the second tenant is a genuine miss"
+    );
+    assert_eq!(TENANT_SCOPED_ROUTE, "/privacy/tenant-scoped/{id}");
+}
+
+/// A scope that declares `Constant` records nothing beyond the query's own
+/// table read, so a route with no declared variance behind it still caches.
+///
+/// Verified discriminating by deleting `PublishedScope::dependency`: the
+/// scope fell back to the `PerRequest` default, its evaluation recorded no
+/// resolvable read, and the route stopped caching.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_constant_scope_records_nothing_and_caches_as_before() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/privacy/constant-scoped/1", &[]).await;
+    assert!(
+        first.text().contains("published-notice") && !first.text().contains("draft-notice"),
+        "sanity: the constant scope really filters - got {}",
+        first.text()
+    );
+    let after_first = counting_route::renders();
+
+    dispatch_get(&harness, "/privacy/constant-scoped/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "a scope whose filter is the same for every request costs no cache hits"
+    );
+    assert_eq!(CONSTANT_SCOPED_ROUTE, "/privacy/constant-scoped/{id}");
 }

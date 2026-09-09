@@ -102,6 +102,36 @@ where
     /// `Model::query()` invocation. Return the (possibly modified)
     /// builder. The framework chains scopes in registration order.
     fn apply(&self, query: Builder<M>) -> Builder<M>;
+
+    /// What this scope's filter depends on.
+    ///
+    /// Defaults to [`ScopeDependency::PerRequest`]: an undeclared scope is
+    /// treated as reading per-request state, because an invisible tenant
+    /// filter is the failure this rule exists to catch and a constant scope
+    /// loses only its cache hits until it declares itself.
+    fn dependency(&self) -> ScopeDependency {
+        ScopeDependency::PerRequest
+    }
+}
+
+/// What a global scope's filter depends on.
+///
+/// A scope is invisible to RenderCache as a scope: only the accessors its
+/// `apply` calls are observed. This declaration is how a scope says which
+/// of the two it is, so the registry can tell "read nothing because there
+/// was nothing to read" from "read per-request state through a seam
+/// nothing can see".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScopeDependency {
+    /// The filter is the same for every request (`published = true`).
+    /// Evaluation records nothing beyond the query's own table reads.
+    Constant,
+    /// The filter reads per-request state. The read must go through an
+    /// instrumented accessor (`suprnova::live::current_tenant()`,
+    /// `Auth::id()`, `Lang::locale()`); an evaluation that records no
+    /// resolvable read narrows the render to `Uncacheable` and names the
+    /// scope in diagnostics.
+    PerRequest,
 }
 
 /// Type-erased apply closure. The concrete `Arc<S>` is captured at
@@ -113,11 +143,40 @@ where
 /// looks it up under the same key.
 type ErasedApply = Arc<dyn Fn(Box<dyn Any + Send>) -> Box<dyn Any + Send> + Send + Sync>;
 
+/// One registered scope: its type, its erased `apply`, what it declared it
+/// depends on, and the compile-time name diagnostics use for it.
+#[derive(Clone)]
+struct ScopeEntry {
+    scope_type_id: TypeId,
+    apply: ErasedApply,
+    dependency: ScopeDependency,
+    diagnostic_name: String,
+}
+
 struct PerModelScopes {
-    /// `(TypeId of S, erased apply)` pairs in registration order so
-    /// scopes layer onto the WHERE clause in the order the user
-    /// declared them.
-    entries: Vec<(TypeId, ErasedApply)>,
+    /// Registered scopes in registration order, so they layer onto the
+    /// WHERE clause in the order the user declared them.
+    entries: Vec<ScopeEntry>,
+}
+
+/// The last path segment of a type's name, generic arguments kept:
+/// `TenantScope`, or `TenantScope<Article>` for a generic scope.
+///
+/// Compile-time material and never request data, which is what lets the
+/// name go through `observe_undeclared` at all - that function bounds a
+/// name to 64 characters and a report to 32 of them, and the closed
+/// diagnostics rule forbids anything derived from a request.
+fn short_type_name<S: 'static>() -> String {
+    let full = std::any::type_name::<S>();
+    let (path, generics) = match full.split_once('<') {
+        Some((path, rest)) => (path, Some(rest)),
+        None => (full, None),
+    };
+    let leaf = path.rsplit("::").next().unwrap_or(path);
+    match generics {
+        Some(rest) => format!("{leaf}<{rest}"),
+        None => leaf.to_owned(),
+    }
 }
 
 static REGISTRY: OnceLock<RwLock<HashMap<TypeId, PerModelScopes>>> = OnceLock::new();
@@ -162,6 +221,8 @@ impl ScopeRegistry {
             Send + Into<sea_orm::Value>,
         S: GlobalScope<M> + 'static,
     {
+        let dependency = scope.dependency();
+        let diagnostic_name = format!("global_scope:{}", short_type_name::<S>());
         let scope = Arc::new(scope);
         let scope_type_id = TypeId::of::<S>();
         let model_type_id = TypeId::of::<M>();
@@ -185,7 +246,12 @@ impl ScopeRegistry {
                         entries: Vec::new(),
                     })
                     .entries
-                    .push((scope_type_id, apply));
+                    .push(ScopeEntry {
+                        scope_type_id,
+                        apply,
+                        dependency,
+                        diagnostic_name,
+                    });
             }
             Err(_) => {
                 tracing::error!(
@@ -251,7 +317,7 @@ impl ScopeRegistry {
         // poison. Returning the unscoped builder preserves the
         // documented "no scope registered = query unchanged"
         // semantic; an error log lets ops see the underlying poison.
-        let entries: Vec<(TypeId, ErasedApply)> = match registry().read() {
+        let entries: Vec<ScopeEntry> = match registry().read() {
             Ok(reg) => match reg.get(&TypeId::of::<M>()) {
                 Some(p) => p.entries.clone(),
                 None => return builder,
@@ -268,11 +334,30 @@ impl ScopeRegistry {
 
         let excluded = builder.excluded_scopes.clone();
         let mut current: Box<dyn Any + Send> = Box::new(builder);
-        for (scope_ty, apply) in entries {
-            if excluded.contains(&scope_ty) {
+        // Read once: a collector either is active for this whole call or is
+        // not, and `is_active` is the cheap check every read hook makes
+        // before doing any work at all.
+        let collecting = crate::render_cache::collector::is_active();
+        for entry in entries {
+            if excluded.contains(&entry.scope_type_id) {
                 continue;
             }
-            current = apply(current);
+            let before = if collecting {
+                crate::render_cache::collector::resolvable_reads()
+            } else {
+                0
+            };
+            current = (entry.apply)(current);
+            if collecting
+                && entry.dependency == ScopeDependency::PerRequest
+                && crate::render_cache::collector::resolvable_reads() == before
+            {
+                // A scope that said it reads per-request state and then read
+                // nothing the collector can name: the filter is real, the
+                // dependency is invisible, and the only safe answer is to
+                // refuse to store the render and say which scope did it.
+                crate::render_cache::collector::observe_undeclared(&entry.diagnostic_name);
+            }
         }
         *current
             .downcast::<Builder<M>>()

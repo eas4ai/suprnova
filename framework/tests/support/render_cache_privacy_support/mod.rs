@@ -47,7 +47,6 @@
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -56,6 +55,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
+use suprnova::eloquent::scopes::{GlobalScope, ScopeDependency, ScopeRegistry};
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
 use suprnova::live::{LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry};
 use suprnova::render_cache::config::RenderCacheConfig;
@@ -67,9 +67,9 @@ use suprnova::render_cache::{
 use suprnova::testing::TestContainer;
 use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    App, Auth, AuthMiddleware, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
-    MiddlewareRegistry, Next, Request, Response, Router, SessionConfig, SessionMiddleware,
-    StatusCode, handle_request,
+    App, Auth, AuthMiddleware, Builder, ConnectionTrait, Crypt, EncryptionKey, FrameworkError,
+    HttpResponse, MiddlewareRegistry, Model, Next, Request, Response, Router, SessionConfig,
+    SessionMiddleware, StatusCode, handle_request,
 };
 // `Lang`, `Locale`, and `scope_locale` exist only with the `localization`
 // feature, which the minimal profile checked by
@@ -286,6 +286,51 @@ pub mod counting_route {
     }
 }
 
+// ── Global scopes ──────────────────────────────────────────────────────
+
+/// A model whose rows belong to a tenant, behind a global scope that reads
+/// the current tenant. The shape the manual has always warned about.
+#[suprnova::model(table = "articles", timestamps = false, fillable = ["tenant_id", "title"])]
+pub struct Article {
+    pub id: i64,
+    pub tenant_id: String,
+    pub title: String,
+}
+
+/// A model behind a scope whose filter is the same for every request.
+#[suprnova::model(table = "notices", timestamps = false, fillable = ["published", "title"])]
+pub struct Notice {
+    pub id: i64,
+    pub published: i64,
+    pub title: String,
+}
+
+/// Filters `articles` by the tenant `LiveTenantMiddleware` resolved, read
+/// through the framework's own instrumented accessor. Declared
+/// `PerRequest`, which is also the default.
+pub struct TenantScope;
+
+impl GlobalScope<Article> for TenantScope {
+    fn apply(&self, query: Builder<Article>) -> Builder<Article> {
+        let tenant = suprnova::live::current_tenant().unwrap_or_default();
+        query.filter("tenant_id", tenant)
+    }
+}
+
+/// Filters `notices` by a literal. Declares `Constant`, so its evaluation
+/// is expected to record nothing and the route keeps caching.
+pub struct PublishedScope;
+
+impl GlobalScope<Notice> for PublishedScope {
+    fn apply(&self, query: Builder<Notice>) -> Builder<Notice> {
+        query.filter("published", 1_i64)
+    }
+
+    fn dependency(&self) -> ScopeDependency {
+        ScopeDependency::Constant
+    }
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────
 
 /// Touches nothing observable: no identity, no tenant, no locale, no
@@ -474,10 +519,10 @@ async fn reads_locale_handler(_request: Request) -> Response {
 /// dependency can be seen.
 async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
     let n = counting_route::record();
-    // The literal is repeated rather than referenced through
-    // [`USER_SCOPED_FLAG`] because `is_enabled!` matches a string literal,
-    // not an expression. A divergence between the two would show up
-    // immediately as the flag's sanity assertion in the test (alice gets
+    // The literal is repeated rather than referenced through a named
+    // constant because `is_enabled!` matches a string literal, not an
+    // expression. A divergence between the two would show up immediately
+    // as the flag's sanity assertion in the test (alice gets
     // `enabled=true`) failing.
     let enabled = suprnova::is_enabled!("privacy-user-scoped-flag", false);
     Ok(HttpResponse::html(format!(
@@ -495,7 +540,7 @@ async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
 async fn reads_global_flag_handler(_request: Request) -> Response {
     let n = counting_route::record();
     // See [`reads_user_scoped_flag_handler`] for why the literal is
-    // repeated here rather than referenced through [`GLOBAL_FLAG`].
+    // repeated here rather than referenced through a named constant.
     let enabled = suprnova::is_enabled!("privacy-global-flag", false);
     Ok(HttpResponse::html(format!(
         "global-flag render {n} enabled={enabled}"
@@ -523,7 +568,7 @@ async fn reads_request_auth_user_id_handler(request: Request) -> Response {
 async fn reads_another_users_override_flag_handler(_request: Request) -> Response {
     let n = counting_route::record();
     // See [`reads_user_scoped_flag_handler`] for why the literal is
-    // repeated here rather than referenced through [`OVERRIDE_FLAG`].
+    // repeated here rather than referenced through a named constant.
     let enabled = suprnova::is_enabled!("privacy-override-flag", false);
     Ok(HttpResponse::html(format!(
         "override-flag render {n} enabled={enabled}"
@@ -584,63 +629,28 @@ async fn rbac_gated_handler(_request: Request) -> Response {
     )))
 }
 
-/// A flag whose only rule is at one specific user: `alice` gets `true`,
-/// everyone else falls through to no rule at all and takes the default.
-const USER_SCOPED_FLAG: &str = "privacy-user-scoped-flag";
-
-/// A flag with one global rule and no identity rule at all: its answer does
-/// not depend on the reader, so reading it must narrow nothing.
-const GLOBAL_FLAG: &str = "privacy-global-flag";
-
-/// A flag with a global rule *and* an override belonging to `bob`. The
-/// case that distinguishes "record by flag scope" from "record by the
-/// scope key that happened to match this reader", and (for a reader with
-/// no id) "record a bare read" from "record nothing".
-const OVERRIDE_FLAG: &str = "privacy-override-flag";
-
-/// The evaluator stack, installed process-globally exactly once, the way
-/// `features::bootstrap_database_cached` does in a real application.
-///
-/// A [`CachedEvaluator`](suprnova::features::CachedEvaluator) in front of a
-/// [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator) deliberately,
-/// so one installed stack exercises both halves of the feature-flag attack:
+/// Installs this suite's evaluator stack (as one half of a shared `Chain`)
+/// process-globally, the way `features::bootstrap_database_cached` does in
+/// a real application: a [`CachedEvaluator`](suprnova::features::CachedEvaluator)
+/// in front of a [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator),
+/// so one installed stack exercises both halves of the feature-flag attack -
 /// the miss path reaches the database evaluator's own identity record, and
 /// the second read of the same flag by the same context is a cache hit that
 /// never reaches it and must replay what the miss consulted.
-static FEATURE_EVALUATOR: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
+///
+/// Delegates to `render_cache_feature_evaluator_support`: featureflag's
+/// global default is a genuine process-wide `OnceLock` with no reset, and
+/// `render_cache_middleware_support` needs its own evaluator visible
+/// through that same one slot. See that module's doc for why a shared
+/// installer exists at all and why chaining the two is safe for this
+/// suite's own three flags (`privacy-user-scoped-flag` - a rule at one
+/// specific user, `alice`; `privacy-global-flag` - one global rule and no
+/// identity rule; `privacy-override-flag` - a global rule *and* an
+/// override belonging to `bob`, which is the case that distinguishes
+/// "record by flag scope" from "record by the scope key that happened to
+/// match this reader").
 async fn install_feature_evaluator() {
-    FEATURE_EVALUATOR
-        .get_or_init(|| async {
-            let database = suprnova::features::DatabaseEvaluator::new_in_memory()
-                .await
-                .expect("in-memory feature evaluator");
-            database
-                .set_flag(USER_SCOPED_FLAG, "user:alice", true)
-                .await
-                .expect("seed the user-scoped flag");
-            database
-                .set_flag(GLOBAL_FLAG, "", true)
-                .await
-                .expect("seed the globally scoped flag");
-            database
-                .set_flag(OVERRIDE_FLAG, "", false)
-                .await
-                .expect("seed the global rule of the override flag");
-            database
-                .set_flag(OVERRIDE_FLAG, "user:bob", true)
-                .await
-                .expect("seed bob's override");
-            let cached = suprnova::features::CachedEvaluator::new(
-                Arc::new(database),
-                // Far longer than any test in this file runs, so a second
-                // read of one flag by one context is always a hit and never
-                // an expiry.
-                Duration::from_secs(3_600),
-            );
-            suprnova::features::install_evaluator(Arc::new(cached));
-        })
-        .await;
+    crate::render_cache_feature_evaluator_support::install().await;
 }
 
 /// [`STITCHED_ROUTE`]'s handler: a Live document whose shell touches no
@@ -684,6 +694,39 @@ async fn stitched_handler(
     result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
 }
 
+/// Lists articles through `Model::query()`, so the registered tenant scope
+/// applies and its `current_tenant()` read happens inside the render.
+async fn tenant_scoped_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let titles = Article::query()
+        .get()
+        .await
+        .map_err(|error| HttpResponse::text(format!("query failed: {error}")).status(500))?
+        .into_iter()
+        .map(|article| article.title)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(HttpResponse::html(format!(
+        "tenant-scoped render {n} titles={titles}"
+    )))
+}
+
+/// The same shape behind a `Constant` scope.
+async fn constant_scoped_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let titles = Notice::query()
+        .get()
+        .await
+        .map_err(|error| HttpResponse::text(format!("query failed: {error}")).status(500))?
+        .into_iter()
+        .map(|notice| notice.title)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(HttpResponse::html(format!(
+        "constant-scoped render {n} titles={titles}"
+    )))
+}
+
 // ── Harness ────────────────────────────────────────────────────────────
 
 /// Everything one test needs: the router and middleware registry to
@@ -720,6 +763,8 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     suprnova::middleware::clear_global_middleware_for_test();
 
     let guard = TestContainer::fake();
+    ScopeRegistry::register::<Article, _>(TenantScope);
+    ScopeRegistry::register::<Notice, _>(PublishedScope);
     // The Live registry the stitched route's island is mounted from. Only
     // the component and its view are borrowed from the dogfood support: the
     // routes, policies, middleware, and dispatch loop this suite attacks are
@@ -753,6 +798,27 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
     PrivacyMigrator::up(conn.inner(), None)
         .await
         .expect("apply render cache migration");
+    for statement in [
+        "CREATE TABLE articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            tenant_id TEXT NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+        "CREATE TABLE notices (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            published INTEGER NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+        "INSERT INTO articles (tenant_id, title) VALUES ('acme', 'acme-only')",
+        "INSERT INTO articles (tenant_id, title) VALUES ('globex', 'globex-only')",
+        "INSERT INTO notices (published, title) VALUES (1, 'published-notice')",
+        "INSERT INTO notices (published, title) VALUES (0, 'draft-notice')",
+    ] {
+        conn.inner()
+            .execute_unprepared(statement)
+            .await
+            .unwrap_or_else(|error| panic!("scope fixture {statement:?} failed: {error}"));
+    }
     TestContainer::singleton(conn.clone());
 
     let clock = Arc::new(FixedTestClock::new(1_000_000));
@@ -880,6 +946,15 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         )
         .into();
     let router: Router = router.get(RBAC_GATED_ROUTE, rbac_gated_handler).into();
+    let router: Router = router
+        .get(TENANT_SCOPED_UNDECLARED_ROUTE, tenant_scoped_handler)
+        .into();
+    let router: Router = router
+        .get(TENANT_SCOPED_ROUTE, tenant_scoped_handler)
+        .into();
+    let router: Router = router
+        .get(CONSTANT_SCOPED_ROUTE, constant_scoped_handler)
+        .into();
     let stitched_mount = LiveMount::<DogfoodCounter>::identity_bound(
         STITCHED_ROUTE,
         "counter",
@@ -932,7 +1007,10 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             GroupPolicy::from(tenant_declared.clone()),
         )
         .expect("attach tenant-declared reads-identity policy")
-        .try_render_cache(TENANT_VARIES_ROUTE, GroupPolicy::from(tenant_declared))
+        .try_render_cache(
+            TENANT_VARIES_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
         .expect("attach tenant-varies policy")
         .try_render_cache(
             NAMED_GUARD_ONLY_ROUTE,
@@ -995,7 +1073,10 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             GroupPolicy::from(no_variance.clone()),
         )
         .expect("attach override-flag policy")
-        .try_render_cache(READS_GLOBAL_FLAG_ROUTE, GroupPolicy::from(no_variance))
+        .try_render_cache(
+            READS_GLOBAL_FLAG_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
         .expect("attach global-flag policy")
         .try_render_cache(
             PRINCIPAL_DECLARED_AUTHZ_ROUTE,
@@ -1010,7 +1091,22 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .try_render_cache(RBAC_GATED_ROUTE, GroupPolicy::from(principal_declared))
         .expect("attach rbac-gated policy")
         .try_render_cache(STITCHED_ROUTE, GroupPolicy::from(stitched_declared))
-        .expect("attach stitched policy");
+        .expect("attach stitched policy")
+        .try_render_cache(
+            TENANT_SCOPED_UNDECLARED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach tenant-scoped-undeclared policy")
+        .try_render_cache(
+            TENANT_SCOPED_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-scoped policy")
+        .try_render_cache(
+            CONSTANT_SCOPED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach constant-scoped policy");
 
     let mut config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
@@ -1186,6 +1282,12 @@ pub const RBAC_GATED_ROUTE: &str = "/privacy/rbac-gated/{id}";
 pub const STITCHED_ROUTE: &str = "/privacy/stitched";
 /// The document mount key the island on [`STITCHED_ROUTE`] carries.
 pub const STITCHED_DOCUMENT_KEY: &str = "privacy-stitched-counter";
+/// Declares nothing; its model carries a tenant-reading global scope.
+pub const TENANT_SCOPED_UNDECLARED_ROUTE: &str = "/privacy/tenant-scoped-undeclared/{id}";
+/// The same handler on a route that declares `Tenant`.
+pub const TENANT_SCOPED_ROUTE: &str = "/privacy/tenant-scoped/{id}";
+/// Declares nothing; its model carries a `Constant` global scope.
+pub const CONSTANT_SCOPED_ROUTE: &str = "/privacy/constant-scoped/{id}";
 
 // ── Reading an emitted island ──────────────────────────────────────────
 
