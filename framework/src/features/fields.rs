@@ -140,6 +140,11 @@ pub(crate) struct IdentityScopes {
     /// The flag has at least one rule keyed by the context's team, so a
     /// read of it depends on the render-cache `Tenant` dimension.
     pub(crate) tenant: bool,
+    /// The snapshot holds at least one rule for this flag, at any scope key
+    /// including the global default, so the read depends on stored state
+    /// and gets a `Feature` generation. Independent of the two axes: a
+    /// globally scoped flag is `known` with neither axis set.
+    pub(crate) known: bool,
 }
 
 impl IdentityScopes {
@@ -147,6 +152,7 @@ impl IdentityScopes {
     const NONE: Self = Self {
         principal: false,
         tenant: false,
+        known: false,
     };
 
     /// The union of two records, used when a nested capture closes back
@@ -155,12 +161,13 @@ impl IdentityScopes {
         Self {
             principal: self.principal || other.principal,
             tenant: self.tenant || other.tenant,
+            known: self.known || other.known,
         }
     }
 }
 
 thread_local! {
-    /// Which identity axes [`observe_identity`] has been asked to record
+    /// Which identity axes [`observe_feature_read`] has been asked to record
     /// since the innermost [`capturing_identity_reads`] started.
     ///
     /// This exists for [`CachedEvaluator`](crate::features::CachedEvaluator)
@@ -239,15 +246,27 @@ thread_local! {
 /// this framework ships remains outside what this can see, the same honest
 /// boundary as headers, `Config::get`, and any other undeclared read - see
 /// `crate::render_cache::middleware`'s own module doc.
-pub(crate) fn observe_identity(scopes: IdentityScopes, context: &featureflag::context::Context) {
-    if scopes == IdentityScopes::NONE {
+///
+/// Also records what a flag read depends on beyond identity: when the
+/// snapshot holds the flag at all (`scopes.known`), a
+/// `DependencyIdentity::Feature(name)` so a change to any of its rules
+/// invalidates the entry through the coherence path, the same way a table
+/// write does.
+pub(crate) fn observe_feature_read(
+    feature: &str,
+    scopes: IdentityScopes,
+    context: &featureflag::context::Context,
+) {
+    // Captured first, and from `scopes` rather than from what happened
+    // next, so a replayed cache hit records the same flag dependency and
+    // the same axes as the miss did.
+    CAPTURED_IDENTITY_READS.with(|captured| captured.set(captured.get().merged(scopes)));
+    if scopes.known {
+        crate::render_cache::collector::observe_feature_read(feature);
+    }
+    if !scopes.principal && !scopes.tenant {
         return;
     }
-    // Recorded before the lookups below, and from `scopes` rather than from
-    // what the context happened to carry, so a replayed cache hit records
-    // the same axes as the miss even when this particular visitor has no id
-    // on one of them.
-    CAPTURED_IDENTITY_READS.with(|captured| captured.set(captured.get().merged(scopes)));
     if scopes.principal {
         match context
             .iter()
@@ -274,7 +293,7 @@ pub(crate) fn observe_identity(scopes: IdentityScopes, context: &featureflag::co
 }
 
 /// Runs `evaluate` and reports which identity axes it recorded through
-/// [`observe_identity`].
+/// [`observe_feature_read`].
 ///
 /// Nesting-safe: the axes the inner evaluation recorded are merged back into
 /// whatever capture contains this one, so a `CachedEvaluator` wrapping
@@ -334,18 +353,22 @@ mod tests {
         featureflag::evaluator::with_default(std::sync::Arc::new(NoopEvaluator), || {
             let context = featureflag::context::Context::root();
             let (inner_axes, outer_axes) = capturing_identity_reads(|| {
-                observe_identity(
+                observe_feature_read(
+                    "nested-capture-fixture",
                     IdentityScopes {
                         principal: true,
                         tenant: false,
+                        known: false,
                     },
                     &context,
                 );
                 let (_, inner) = capturing_identity_reads(|| {
-                    observe_identity(
+                    observe_feature_read(
+                        "nested-capture-fixture",
                         IdentityScopes {
                             principal: false,
                             tenant: true,
+                            known: false,
                         },
                         &context,
                     );
@@ -356,7 +379,8 @@ mod tests {
                 inner_axes,
                 IdentityScopes {
                     principal: false,
-                    tenant: true
+                    tenant: true,
+                    known: false
                 },
                 "the inner capture reports only what it recorded"
             );
@@ -364,7 +388,8 @@ mod tests {
                 outer_axes,
                 IdentityScopes {
                     principal: true,
-                    tenant: true
+                    tenant: true,
+                    known: false
                 },
                 "the capture around it sees its own axis and the inner one's"
             );

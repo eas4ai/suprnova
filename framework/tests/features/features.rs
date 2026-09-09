@@ -446,3 +446,96 @@ async fn cached_chain_handles_scoped_override_then_delete() {
          If this returns Some(true), the cache still holds the override entry.",
     );
 }
+
+/// `reload` reports exactly the features whose stored rules differ from the
+/// snapshot it replaced: added, removed, and flipped, and nothing for an
+/// unchanged row.
+#[tokio::test]
+async fn reload_reports_added_removed_and_flipped_features_and_nothing_else() {
+    use std::sync::{Arc, Mutex};
+
+    use suprnova::features::{CompositeFeatureSync, DatabaseEvaluator, FeatureSync};
+
+    /// Records every `on_snapshot_reloaded` call it receives.
+    struct Recording(Arc<Mutex<Vec<Vec<String>>>>);
+
+    #[async_trait::async_trait]
+    impl FeatureSync for Recording {
+        async fn on_flag_changed(&self, _feature: &str, _scope_key: &str) {}
+        async fn on_snapshot_reloaded(&self, changed: &[String]) {
+            self.0
+                .lock()
+                .expect("recording lock")
+                .push(changed.to_vec());
+        }
+    }
+
+    let evaluator = Arc::new(
+        DatabaseEvaluator::new_in_memory()
+            .await
+            .expect("in-memory evaluator"),
+    );
+    evaluator
+        .set_flag("kept", "", true)
+        .await
+        .expect("seed kept");
+    evaluator
+        .set_flag("flipped", "", false)
+        .await
+        .expect("seed flipped");
+    evaluator
+        .set_flag("removed", "", true)
+        .await
+        .expect("seed removed");
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let composite = Arc::new(CompositeFeatureSync::new(
+        Vec::new(),
+        vec![Arc::new(Recording(log.clone())) as Arc<dyn FeatureSync>],
+    ));
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::App::bind::<dyn FeatureSync>(composite);
+
+    evaluator
+        .execute_unprepared_for_test("UPDATE features SET enabled = 1 WHERE name = 'flipped'")
+        .await
+        .expect("flip out of band");
+    evaluator
+        .execute_unprepared_for_test("DELETE FROM features WHERE name = 'removed'")
+        .await
+        .expect("remove out of band");
+    evaluator
+        .execute_unprepared_for_test(
+            "INSERT INTO features (name, scope_key, enabled, created_at, updated_at) \
+             VALUES ('added', '', 1, '2026-09-08T00:00:00Z', '2026-09-08T00:00:00Z')",
+        )
+        .await
+        .expect("add out of band");
+
+    evaluator.reload().await.expect("reload");
+
+    let recorded = log.lock().expect("recording lock").clone();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one notification per reload that changed something"
+    );
+    let mut names = recorded[0].clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "added".to_owned(),
+            "flipped".to_owned(),
+            "removed".to_owned()
+        ],
+        "an unchanged flag is never reported"
+    );
+
+    log.lock().expect("recording lock").clear();
+    evaluator.reload().await.expect("reload again");
+    assert!(
+        log.lock().expect("recording lock").is_empty(),
+        "a reload that changed nothing notifies nobody"
+    );
+}

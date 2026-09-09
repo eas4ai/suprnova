@@ -122,7 +122,10 @@ struct RenderCacheOrmMigrator;
 #[async_trait::async_trait]
 impl MigratorTrait for RenderCacheOrmMigrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(suprnova::render_cache::migration::Migration)]
+        vec![
+            Box::new(suprnova::render_cache::migration::Migration),
+            Box::new(suprnova::features::migrations::CreateFeaturesTable),
+        ]
     }
 }
 

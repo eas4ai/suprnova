@@ -1621,3 +1621,223 @@ async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_tabl
     let conn = Arc::new(db.conn().clone());
     payments_webhook_mirror_scenario(conn).await;
 }
+
+/// The evaluator chain a real application boots, over the database
+/// `render_cache_support::boot` just created: a `CachedEvaluator` in front
+/// of a `DatabaseEvaluator`, with the composite bound as `dyn FeatureSync`
+/// so `set_flag` and `reload` fan out exactly as they do in production.
+async fn bootstrap_flags() -> suprnova::features::BootstrappedFeatures {
+    suprnova::features::bootstrap_database_cached(Duration::from_secs(3_600))
+        .await
+        .expect("bootstrap the feature evaluator chain")
+}
+
+/// What one `is_enabled` call records, in a collector scope attributed the
+/// way the Live completion middleware attributes a handler's own reads.
+async fn feature_report(
+    evaluator: &Arc<suprnova::features::CachedEvaluator>,
+    feature: &str,
+) -> suprnova::render_cache::collector::CollectorReport {
+    use suprnova::features::Evaluator as _;
+
+    suprnova::render_cache::collector::Collector::scope(async {
+        suprnova::render_cache::collector::begin_handler();
+        let context = suprnova::features::Context::root();
+        evaluator.is_enabled(feature, &context);
+        suprnova::render_cache::collector::current_report().expect("a collector is active")
+    })
+    .await
+}
+
+/// The generations a render that read `feature` would have closed its
+/// observation window on, and the epoch it closed at.
+async fn observed_feature_window(
+    evaluator: &Arc<suprnova::features::CachedEvaluator>,
+    feature: &str,
+) -> (suprnova_live::render_cache::generation::GenerationSet, u64) {
+    use suprnova_live::render_cache::generation::ObservationWindow;
+
+    let ledger = SqlGenerationLedger::new();
+    let epoch = ledger.epoch().await.expect("epoch");
+    let report = feature_report(evaluator, feature).await;
+    let mut window = ObservationWindow::open(epoch);
+    for identity in report.storable().expect("the report is storable") {
+        window.observe(identity.clone()).expect("observe");
+    }
+    let observed = window.close(&ledger).await.expect("close");
+    (observed, epoch)
+}
+
+/// True when the entry that closed on `observed` would now be refused.
+async fn entry_is_invalidated(
+    observed: &suprnova_live::render_cache::generation::GenerationSet,
+    epoch: u64,
+) -> bool {
+    use suprnova_live::render_cache::CoherenceCheck;
+
+    let ledger = SqlGenerationLedger::new();
+    let (current, now) = ledger
+        .current_with_epoch(&observed.digests())
+        .await
+        .expect("reread");
+    !matches!(
+        CoherenceCheck::compare(observed, &current, now, epoch),
+        CoherenceCheck::Coherent
+    )
+}
+
+/// Iteration 006, definition-of-done item 3. Flipping a flag through
+/// `set_flag` advances the `Feature` generation the render observed, so the
+/// entry that read it fails its next coherence check.
+///
+/// Verified failing by removing the `after_feature_write` call from
+/// `set_flag`: the reread stayed coherent and the entry would have been
+/// served with the old answer until its freshness window ran out.
+#[tokio::test]
+async fn a_flag_flip_through_set_flag_invalidates_the_entry() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-flag", "", false)
+        .await
+        .expect("seed the flag");
+    features.cached.invalidate_all();
+
+    let (observed, epoch) = observed_feature_window(&features.cached, "orm-suite-flag").await;
+    assert!(
+        observed
+            .get(&DependencyIdentity::feature("orm-suite-flag"))
+            .is_some(),
+        "the render observed the flag's own generation"
+    );
+    assert!(
+        !entry_is_invalidated(&observed, epoch).await,
+        "nothing has changed yet"
+    );
+
+    features
+        .database
+        .set_flag("orm-suite-flag", "", true)
+        .await
+        .expect("flip the flag");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "a flag flip must reach the entry that read the flag"
+    );
+}
+
+/// The same rule for a change made outside `set_flag` entirely: a row
+/// written through `DB::table` and picked up by `reload`.
+#[tokio::test]
+async fn an_out_of_band_flag_change_reflected_by_reload_invalidates_the_entry() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-out-of-band", "", false)
+        .await
+        .expect("seed the flag");
+    features.cached.invalidate_all();
+
+    let (observed, epoch) =
+        observed_feature_window(&features.cached, "orm-suite-out-of-band").await;
+
+    DB::table("features")
+        .filter("name", "orm-suite-out-of-band")
+        .update(attrs! { enabled: true })
+        .await
+        .expect("write the row out of band");
+    features.database.reload().await.expect("reload");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "a reload that finds a changed flag advances that flag's generation"
+    );
+}
+
+/// `reload` also tells the cache what changed, so the cached answer moves
+/// without waiting for the TTL.
+///
+/// Verified failing by deleting `CachedEvaluator::on_snapshot_reloaded`:
+/// the cached answer stayed `false` for the whole hour-long TTL.
+#[tokio::test]
+async fn reload_invalidates_the_cached_evaluator() {
+    use suprnova::features::Evaluator as _;
+
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-cached", "", false)
+        .await
+        .expect("seed the flag");
+
+    let context = suprnova::features::Context::root();
+    assert_eq!(
+        features.cached.is_enabled("orm-suite-cached", &context),
+        Some(false),
+        "the cache now holds the pre-change answer"
+    );
+
+    DB::table("features")
+        .filter("name", "orm-suite-cached")
+        .update(attrs! { enabled: true })
+        .await
+        .expect("write the row out of band");
+    features.database.reload().await.expect("reload");
+
+    assert_eq!(
+        features.cached.is_enabled("orm-suite-cached", &context),
+        Some(true),
+        "the reload told the cache which flag changed"
+    );
+}
+
+/// A flag the snapshot does not hold at any scope key records no `Feature`
+/// dependency: the render depended on the caller's compiled default, not on
+/// stored state, and a generation for it would be a row nothing writes.
+#[tokio::test]
+async fn a_flag_the_snapshot_does_not_hold_records_no_feature_dependency() {
+    boot().await;
+    let features = bootstrap_flags().await;
+
+    let report = feature_report(&features.cached, "orm-suite-absent").await;
+    assert!(
+        !report.observed.iter().any(|identity| matches!(
+            identity,
+            DependencyIdentity::Feature(name) if name == "orm-suite-absent"
+        )),
+        "an absent flag records nothing, got {:?}",
+        report.observed
+    );
+}
+
+/// A flag with only a global rule records its generation and neither
+/// identity axis: its answer does not depend on the reader, so it stays
+/// cacheable for everyone while still being invalidated by a flip.
+#[tokio::test]
+async fn a_global_only_flag_records_a_feature_dependency_and_no_identity_axis() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-global", "", true)
+        .await
+        .expect("seed the flag");
+    features.cached.invalidate_all();
+
+    let report = feature_report(&features.cached, "orm-suite-global").await;
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::feature("orm-suite-global")),
+        "the flag's own generation is observed"
+    );
+    assert!(
+        !report.context.principal_read,
+        "a global rule depends on no principal"
+    );
+    assert!(!report.context.tenant_read, "and on no tenant");
+}

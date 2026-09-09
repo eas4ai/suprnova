@@ -112,6 +112,16 @@ pub trait FeatureSync: Send + Sync + 'static {
     /// Implementors that refresh wholesale can ignore both arguments;
     /// implementors that support targeted invalidation use them.
     async fn on_flag_changed(&self, feature: &str, scope_key: &str);
+
+    /// Called after a data source refreshed its whole snapshot and found
+    /// these features changed.
+    ///
+    /// Only caches need to act, so the default is a no-op and
+    /// [`crate::features::DatabaseEvaluator`] keeps it: a reload that
+    /// notified data sources would reload them, and that reload would
+    /// notify again. `_changed` is unused in the default body for exactly
+    /// that reason.
+    async fn on_snapshot_reloaded(&self, _changed: &[String]) {}
 }
 
 /// Composes [`FeatureSync`] implementors with strict ordering: every
@@ -156,6 +166,14 @@ impl FeatureSync for CompositeFeatureSync {
             sync.on_flag_changed(feature, scope_key).await;
         }
     }
+
+    async fn on_snapshot_reloaded(&self, changed: &[String]) {
+        // Caches only. The data sources are where this notification came
+        // from; handing it back to them is how a reload becomes a loop.
+        for sync in &self.caches {
+            sync.on_snapshot_reloaded(changed).await;
+        }
+    }
 }
 
 /// Resolve `Arc<dyn FeatureSync>` from the App container and dispatch
@@ -168,6 +186,20 @@ impl FeatureSync for CompositeFeatureSync {
 pub async fn notify(feature: &str, scope_key: &str) {
     if let Some(sync) = crate::container::App::make::<dyn FeatureSync>() {
         sync.on_flag_changed(feature, scope_key).await;
+    }
+}
+
+/// Resolve `Arc<dyn FeatureSync>` from the App container and dispatch
+/// [`FeatureSync::on_snapshot_reloaded`]. A no-op when no sync is bound,
+/// and a no-op for an empty change set, which is what almost every reload
+/// produces.
+pub async fn notify_reloaded(changed: &std::collections::BTreeSet<String>) {
+    if changed.is_empty() {
+        return;
+    }
+    if let Some(sync) = crate::container::App::make::<dyn FeatureSync>() {
+        let names: Vec<String> = changed.iter().cloned().collect();
+        sync.on_snapshot_reloaded(&names).await;
     }
 }
 

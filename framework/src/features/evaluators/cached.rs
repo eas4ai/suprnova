@@ -46,7 +46,7 @@
 //! already bounded by the TTL.
 
 use crate::features::fields::{
-    IdentityScopes, TeamField, UserIdField, capturing_identity_reads, observe_identity,
+    IdentityScopes, TeamField, UserIdField, capturing_identity_reads, observe_feature_read,
 };
 use crate::features::sync::FeatureSync;
 use async_trait::async_trait;
@@ -174,6 +174,15 @@ impl FeatureSync for CachedEvaluator {
     async fn on_flag_changed(&self, feature: &str, _scope_key: &str) {
         self.invalidate(feature);
     }
+
+    /// Drops every cached entry for each changed feature. This is the half
+    /// a reload needs that `on_flag_changed` cannot give it: a reload knows
+    /// a set of names and no scope key at all.
+    async fn on_snapshot_reloaded(&self, changed: &[String]) {
+        for feature in changed {
+            self.invalidate(feature);
+        }
+    }
 }
 
 impl Evaluator for CachedEvaluator {
@@ -193,16 +202,17 @@ impl Evaluator for CachedEvaluator {
             && found.inserted_at.elapsed() < self.ttl
         {
             let entry = *found;
-            // Released before the replay below: nothing in `observe_identity`
-            // touches this map today, and holding a shard guard across a
-            // call into another module is how that stops being true.
+            // Released before the replay below: nothing in
+            // `observe_feature_read` touches this map today, and holding a
+            // shard guard across a call into another module is how that
+            // stops being true.
             drop(found);
             // Fix round 6, Leak 4, narrowed by fix round 7: a cached answer
             // for a scoped flag is exactly as identity-dependent as a fresh
             // one, and this hit never reaches `self.inner`, so it replays
             // the axes the miss's own evaluation consulted. See
-            // `crate::features::fields::observe_identity`'s own doc.
-            observe_identity(entry.identity, context);
+            // `crate::features::fields::observe_feature_read`'s own doc.
+            observe_feature_read(feature, entry.identity, context);
             return entry.value;
         }
 
@@ -324,9 +334,9 @@ mod tests {
     }
 
     impl Evaluator for ScopedEvaluator {
-        fn is_enabled(&self, _feature: &str, context: &Context) -> Option<bool> {
+        fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            crate::features::fields::observe_identity(self.scopes, context);
+            crate::features::fields::observe_feature_read(feature, self.scopes, context);
             Some(true)
         }
 
@@ -388,6 +398,7 @@ mod tests {
         let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
             principal: true,
             tenant: true,
+            known: false,
         }));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 
@@ -426,14 +437,15 @@ mod tests {
     /// proves it): the flag can only be set because the hit replayed it.
     ///
     /// This is the seam the round's brief asked to check: the replay and the
-    /// miss both go through `fields::observe_identity`, the one function that
-    /// decides value-or-bare-read, so they cannot disagree about an absent
-    /// field.
+    /// miss both go through `fields::observe_feature_read`, the one function
+    /// that decides value-or-bare-read, so they cannot disagree about an
+    /// absent field.
     #[tokio::test]
     async fn a_cache_hit_replays_a_bare_read_when_the_context_carries_no_field() {
         let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
             principal: true,
             tenant: true,
+            known: false,
         }));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 

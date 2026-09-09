@@ -200,6 +200,20 @@ pub async fn after_table_write(table: &str) -> Result<(), FrameworkError> {
     after_bulk_write(table).await
 }
 
+/// After a feature flag's stored rules changed - `set_flag`, or a name a
+/// `reload` found changed: the flag's own generation.
+///
+/// `pub(crate)`: the only callers are the framework's own feature
+/// evaluators, whose reads are the only ones that observe a `Feature`
+/// identity, and a generation advanced for a flag nothing observes is a
+/// ledger row written for nobody.
+pub(crate) async fn after_feature_write(feature: &str) -> Result<(), FrameworkError> {
+    advance(vec![DependencyIdentity::try_feature(feature).map_err(
+        |_| FrameworkError::internal("feature name out of bounds"),
+    )?])
+    .await
+}
+
 /// After a raw statement whose tables are not known (`DB::statement`):
 /// the broad authority every representation observes.
 pub async fn after_unknown_write() -> Result<(), FrameworkError> {

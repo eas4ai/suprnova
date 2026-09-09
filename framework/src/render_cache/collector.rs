@@ -666,6 +666,25 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
     }
 }
 
+/// A read of one feature flag whose rules the snapshot holds, at any scope
+/// key including the global default.
+///
+/// Records a [`DependencyIdentity::Feature`], so a change to any of the
+/// flag's rules invalidates the entry through the coherence path the same
+/// way a table write does. A flag the snapshot holds at no scope key
+/// records nothing: that render depended on the caller's compiled default,
+/// not on stored state, and a generation for it would be a row nothing ever
+/// writes. See [`observe_table_read`] for the bound-failure behaviour.
+pub fn observe_feature_read(feature: &str) {
+    if !is_active() {
+        return;
+    }
+    match DependencyIdentity::try_feature(feature) {
+        Ok(identity) => observe(identity),
+        Err(_) => mark_incomplete(),
+    }
+}
+
 /// The principal was resolved or checked.
 pub fn observe_principal_read() {
     with_context(|context| {

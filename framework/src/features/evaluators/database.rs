@@ -156,27 +156,43 @@ impl Snapshot {
         self.flags.insert((name, scope_key), enabled);
     }
 
-    /// Note that `name` has a rule at whichever identity scope `scope_key`
-    /// names, if any. An application-defined scope key that is neither
-    /// `user:` nor `team:` records nothing: this framework has no way to
-    /// tell which dimension it partitions, so it is outside what the
-    /// render-cache guard can see (the same honest boundary as a custom
-    /// evaluator - see `crate::render_cache::middleware`'s module doc).
+    /// Note that the snapshot holds `name`, and at whichever identity scope
+    /// `scope_key` names, if any. An application-defined scope key that is
+    /// neither `user:` nor `team:` still marks the flag known - a change to
+    /// it must still invalidate a render that read the flag - but records
+    /// no axis: this framework has no way to tell which dimension it
+    /// partitions, so it is outside what the render-cache guard can see.
     fn record_scope(&mut self, name: &str, scope_key: &str) {
-        let principal = scope_key.starts_with(USER_SCOPE_PREFIX);
-        let tenant = scope_key.starts_with(TEAM_SCOPE_PREFIX);
-        if !principal && !tenant {
-            return;
-        }
         let entry = self.identity.entry(name.to_owned()).or_default();
-        entry.principal |= principal;
-        entry.tenant |= tenant;
+        entry.known = true;
+        entry.principal |= scope_key.starts_with(USER_SCOPE_PREFIX);
+        entry.tenant |= scope_key.starts_with(TEAM_SCOPE_PREFIX);
     }
 
     /// Which identity axes a read of `feature` depends on.
     fn identity_scopes(&self, feature: &str) -> IdentityScopes {
         self.identity.get(feature).copied().unwrap_or_default()
     }
+}
+
+/// Every feature name whose set of `(scope_key, enabled)` rows differs
+/// between two flag maps: added, removed, or flipped.
+fn changed_features(
+    before: &HashMap<(String, String), bool>,
+    after: &HashMap<(String, String), bool>,
+) -> std::collections::BTreeSet<String> {
+    let mut changed = std::collections::BTreeSet::new();
+    for (key, enabled) in after {
+        if before.get(key) != Some(enabled) {
+            changed.insert(key.0.clone());
+        }
+    }
+    for key in before.keys() {
+        if !after.contains_key(key) {
+            changed.insert(key.0.clone());
+        }
+    }
+    changed
 }
 
 impl DatabaseEvaluator {
@@ -269,22 +285,33 @@ impl DatabaseEvaluator {
             next.insert((row.name, row.scope_key), row.enabled);
         }
 
-        let mut store = lock::write(&self.snapshot, "feature-flag snapshot")?;
-        // Re-read under the write lock - `set_flag` bumps the counter
-        // *while holding the same write lock*, so a value-unchanged
-        // re-read here proves no concurrent single-key update slipped
-        // in during the SELECT. Counter advanced ⇒ abandon and keep
-        // the post-`set_flag` snapshot.
-        let counter_after = self.write_counter.load(Ordering::SeqCst);
-        if counter_after == counter_before {
-            *store = Snapshot::from_flags(next);
-        } else {
-            tracing::debug!(
-                from = counter_before,
-                to = counter_after,
-                "features: reload abandoned full-map replace; concurrent set_flag landed during SELECT",
-            );
+        let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let mut store = lock::write(&self.snapshot, "feature-flag snapshot")?;
+            // Re-read under the write lock - `set_flag` bumps the counter
+            // *while holding the same write lock*, so a value-unchanged
+            // re-read here proves no concurrent single-key update slipped
+            // in during the SELECT. Counter advanced ⇒ abandon and keep
+            // the post-`set_flag` snapshot.
+            let counter_after = self.write_counter.load(Ordering::SeqCst);
+            if counter_after == counter_before {
+                changed = changed_features(&store.flags, &next);
+                *store = Snapshot::from_flags(next);
+            } else {
+                tracing::debug!(
+                    from = counter_before,
+                    to = counter_after,
+                    "features: reload abandoned full-map replace; concurrent set_flag landed during SELECT",
+                );
+            }
         }
+        // Only for a swap that actually happened, and only for what it
+        // actually changed: a reload that abandoned its replace changed
+        // nothing, and one that found the same rows advances nothing.
+        for name in &changed {
+            crate::render_cache::orm::after_feature_write(name).await?;
+        }
+        crate::features::sync::notify_reloaded(&changed).await;
         Ok(())
     }
 
@@ -360,6 +387,13 @@ impl DatabaseEvaluator {
             self.write_counter.fetch_add(1, Ordering::SeqCst);
         }
 
+        // After the snapshot swap and before the fan-out, and the order is
+        // load-bearing: a render that read the old value *after* the
+        // advance would publish under the new generation and never be
+        // invalidated. Advancing once the new value is visible to readers
+        // closes that window.
+        crate::render_cache::orm::after_feature_write(name).await?;
+
         // Fan out to other `FeatureSync` implementors (caches,
         // listeners) so any state ahead of the DB sees the change
         // before this call returns. The composite executes data
@@ -396,6 +430,28 @@ impl DatabaseEvaluator {
         keys.push(String::new());
         keys
     }
+
+    /// Runs one statement against this evaluator's own connection, so a
+    /// test can change the `features` table the way another process would
+    /// and then prove `reload` notices.
+    ///
+    /// Test seam: `new_in_memory` deliberately owns a connection the App
+    /// container never sees, so there is no other handle to reach it with.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error the statement failed with.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn execute_unprepared_for_test(&self, sql: &str) -> Result<(), FrameworkError> {
+        use sea_orm::ConnectionTrait as _;
+
+        self.conn
+            .execute_unprepared(sql)
+            .await
+            .map(|_| ())
+            .map_err(|e| FrameworkError::database(format!("features test statement: {e}")))
+    }
 }
 
 impl Evaluator for DatabaseEvaluator {
@@ -429,8 +485,12 @@ impl Evaluator for DatabaseEvaluator {
         // application does. Read from the same guard the lookup below uses,
         // so the scope record and the flag map can never disagree about
         // what this snapshot holds. See
-        // `crate::features::fields::observe_identity`'s own doc.
-        crate::features::fields::observe_identity(store.identity_scopes(feature), context);
+        // `crate::features::fields::observe_feature_read`'s own doc.
+        crate::features::fields::observe_feature_read(
+            feature,
+            store.identity_scopes(feature),
+            context,
+        );
 
         for key in self.scope_keys_for(context) {
             if let Some(enabled) = store.flags.get(&(feature.to_string(), key)) {
