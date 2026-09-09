@@ -125,7 +125,7 @@ pub async fn start_checkout(
         success_return_url: "https://app.example/billing/success".into(),
         cancel_return_url: "https://app.example/billing/cancel".into(),
         amount_hint: None,
-        idempotency_key: Some(format!("checkout_{user_id}")),
+        idempotency_key: None, // Paddle 拒绝客户端提供的键。
         metadata: None,
     }).await?;
 
@@ -133,13 +133,13 @@ pub async fn start_checkout(
 }
 ```
 
-返回的 `SessionPayload::PaddleInline` 携带着前端需要的一切：
+返回的 `SessionPayload::PaddleInline` 包含前端所需的信息。交易已经包含客户 ID。`customer_token` 为 `None`：`ctm_` 标识符不是 Paddle 客户认证令牌。
 
 ```json
 {
   "flow": "paddle_inline",
   "transaction_id": "txn_01h...",
-  "customer_token": "ctm_01h...",
+  "customer_token": null,
   "client_token": "test_..."
 }
 ```
@@ -149,6 +149,24 @@ Svelte / React / Vue 里 paddle.js 的挂载代码，请参见[支付 - 前端�
 ### Paddle 是根据价格类型分发的，不是根据 `SessionMode`
 
 一个真正的 Paddle 特有陷阱：`StartSessionRequest` 上的 `SessionMode::OneOff` / `SessionMode::Subscription` 字段，**被 Paddle 适配器忽略**。Paddle 的 API 只有一个 `transaction_create` 端点，这个提供商会检查提供的价格 ID，来推断这个流程 - 一个循环价格会启动一个订阅，一个一次性价格会启动一次单独的扣款。用 Stripe 时，是这个字段驱动流程；用 Paddle 时，是*价格*驱动流程。在把适配器指向它们之前，请用正确的价格类型来设置您的 Paddle 商品目录。
+
+### 关联与恢复
+
+`metadata` 按照适配器现有的字符串映射策略，作为交易的 `custom_data` 转发：字符串原样传递，其他非 null 值转换为 JSON 字符串，null 值被省略。请提供包含结账尝试和领域标识符的对象。固定版本的 SDK 接受字符串映射，因此嵌套 JSON 值不会保留原始类型。
+
+Paddle 会将结账交易的自定义数据复制到其订阅和续费交易。因此，后续支付中的尝试标识符并不能证明它是原始结账支付。
+
+`session_status(transaction_id)` 从 Paddle 读取交易：
+
+| Paddle 状态 | `CheckoutSessionState` |
+|---|---|
+| `draft`, `ready`, `billed`, `past_due` | `Open` |
+| `paid`, `completed` | `Complete { paid: true, payment_ref, amount_total }` |
+| `canceled` | `Expired` |
+
+`payment_ref` 是交易 ID；金额来自 `details.totals.total`，以最小货币单位表示。无效总额或提供商错误会返回错误。`paid` 确认已收款，但可能早于订阅创建；在声明订阅设置完成前，请等待订阅 webhook 或获取订阅。
+
+Paddle 会在网络 I/O 之前拒绝提供的 `idempotency_key`。创建成功后，请立即保存交易 ID。如果创建响应丢失，请在创建另一笔交易前核对提供商状态。元数据用于关联，不会让重复创建具有幂等性。结账创建和交易获取的请求期限为 30 秒。创建超时意味着提供商结果未知，并不能证明不存在交易。
 
 ## 订阅是通过 webhook 到达的
 
@@ -179,8 +197,8 @@ Svelte / React / Vue 里 paddle.js 的挂载代码，请参见[支付 - 前端�
 
 在客户完成这个小部件和这个 webhook 到达之间，存在一个短暂的窗口，在这段时间里，`payments_subscriptions` 里还没有这个新订阅的行。两种模式能覆盖它：
 
-- **用重定向 URL 来获得即时的用户体验。** 一旦 Paddle 确认了这次交易，`success_return_url` 就会在客户端触发，所以您可以展示“订阅已激活”，而不需要等待服务端的 webhook。
-- **轮询后渲染。** 重定向之后，延迟一小段时间刷新页面，这样 Inertia 控制器就能读到这个此时已经水合完的镜像。
+- **结账后显示待处理状态。** 在 Paddle.js 中配置返回导航；适配器不会将 `success_return_url` 或 `cancel_return_url` 转发到交易 API。浏览器回调不能证明已付款或订阅已激活。
+- **轮询服务器状态。** 使用 `session_status` 验证收款，并在显示订阅访问权限前读取已更新的订阅镜像。
 
 ## 能力矩阵
 
@@ -188,7 +206,8 @@ Svelte / React / Vue 里 paddle.js 的挂载代码，请参见[支付 - 前端�
 
 | Trait 方法 | 行为 |
 |---|---|
-| `Checkout::start_session` | 能用。根据价格类型分发一次性还是订阅，不是根据 `SessionMode`。 |
+| `Checkout::start_session` | 根据价格类型分发；转发元数据；拒绝提供的幂等键。 |
+| `Checkout::session_status` | 获取交易并报告收款状态。 |
 | `Subscription::subscribe` | 总是 `NotSupported`。订阅是从结账完成 + webhook 里诞生的。 |
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | 能用。接到带着默认 `EffectiveFrom::NextBillingPeriod` 的 `subscription_cancel` 上。 |
 | `Subscription::update(new_price_refs: Some(...))` | 在 v1 里是 `NotSupported`。Paddle 把价格集合替换保留给它自己的迁移流程。 |
@@ -243,8 +262,10 @@ Paddle 用 HMAC 给每一个 webhook 签名。这个 `Paddle-Signature` 请求�
 |---|---|---|
 | `transaction.completed`, `transaction.paid` | `PaymentSucceeded` | 对 `payments_transactions` 做 upsert |
 | `transaction.payment_failed` | `PaymentFailed` | 对 `payments_transactions` 做 upsert（失败） |
-| `transaction.billed` | `InvoicePaid` | 对 `payments_transactions` 做 upsert，并关联上 `provider_subscription_id` |
-| `adjustment.created`, `adjustment.updated` | `PaymentRefunded` | 对 `payments_transactions` 做 upsert（已退款） |
+| `transaction.billed` | `None` | 仅开具发票；不会将镜像更新为已付款 |
+| 已批准的退款调整 | `PaymentRefunded` | 将引用的交易更新为已退款 |
+| 已批准的拒付或拒付警告调整 | `PaymentDisputed` | 将引用的交易更新为争议状态 |
+| 待处理／被拒绝的退款、贷记或撤销调整 | `None` | 仅保留原始提供商事件 |
 | `subscription.created` | `SubscriptionCreated` | `Subscription::get` → 对 `payments_subscriptions` + 明细项做 upsert |
 | `subscription.updated`, `.activated`, `.paused`, `.resumed`, `.trialing` | `SubscriptionUpdated` | 和上面一样 |
 | `subscription.canceled` | `SubscriptionCanceled` | 一样；设置 `canceled_at`，翻转状态 |
@@ -252,7 +273,9 @@ Paddle 用 HMAC 给每一个 webhook 签名。这个 `Paddle-Signature` 请求�
 | `customer.updated` | `CustomerUpdated` | 一样 |
 | 其他任何情况 | `None`（未映射） | 只有审计行 - 没有镜像变更 |
 
-Paddle 把这个实体对象直接放在 `data` 下面（不像 Stripe 那样放在 `data.object` 下面）。金额是以**最小单位的字符串**形式到达的（`"1234"` = 主单位里的 12.34），不是小数 - 为了向前兼容，这个适配器会解析字符串和数字这两种形态。货币是以小写的 `currency_code` 形式到达的，而这份快照会把它转成大写。
+Paddle 把这个实体对象直接放在 `data` 下面（不像 Stripe 那样放在 `data.object` 下面）。金额是以**最小单位的字符串**形式到达的（`"1234"` = 主单位里的 12.34），不是小数 - 为了向前兼容，这个适配器会解析字符串和数字这两种形态。快照会将 `currency_code` 转为大写。支付时间取自最近一次已扣款的支付尝试；如果没有扣款时间戳，`paid_at` 保持缺省。`billed_at` 是发票开具时间，绝不会用作支付时间。
+
+仅根据事件名判断的 `paddle_event_to_neutral` 辅助函数对调整返回 `None`，因为审批状态和操作需要载荷才能判定。请使用 `WebhookHandler::parse_event` 对其分类。原始撤销事件仍可用于应用核对；它们不意味着新的支付或退款。
 
 ### 含税金额
 
@@ -276,7 +299,7 @@ let cus = provider.create_customer(CreateCustomerRequest {
     user_id: "user_42".into(),       // 您应用的用户 id
     email: "alice@example.com".into(),
     name: Some("Alice".into()),
-    metadata: None,                  // 在 v1 里不会转发给 Paddle
+    metadata: None,                  // 可选的 custom_data 字符串映射
 }).await?;
 // cus.provider_customer_id == "ctm_01h..."
 ```

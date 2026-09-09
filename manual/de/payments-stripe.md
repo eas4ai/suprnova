@@ -130,9 +130,15 @@ das Managed-Payments-Flag. Setzen Sie Stripes Template-Literal
 ersetzt beim Redirect die echte `cs_…`-ID, und Ihre Rückkehrseite
 gibt sie an `session_status` weiter.
 
-`Checkout::session_status` bildet
-`GET /v1/checkout/sessions/{id}` auf den neutralen
-`CheckoutSessionState` ab:
+Checkout-Metadaten werden an die Session und an den daraus entstehenden
+PaymentIntent (`payment_intent_data.metadata`) oder das Abonnement
+(`subscription_data.metadata`) angehängt. Elements hängt sie direkt an den
+PaymentIntent an. Wie bei Kundenmetadaten bleiben Strings unverändert,
+andere Werte werden zu JSON-Strings, und Nullwerte werden ausgelassen.
+Übergeben Sie ein Objekt mit stabilen Korrelationskennungen.
+
+`Checkout::session_status` ruft `cs_`-IDs über
+`GET /v1/checkout/sessions/{id}` ab und bildet sie auf `CheckoutSessionState` ab:
 
 | Stripe `status` / `payment_status` | `CheckoutSessionState` |
 |---|---|
@@ -140,6 +146,13 @@ gibt sie an `session_status` weiter.
 | `expired` | `Expired` |
 | `complete` + `paid` oder `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid` (verzögertes Settlement) | `Complete { paid: false, … }` |
+
+Bei einer Elements-ID mit Präfix `pi_` ruft die Methode
+`GET /v1/payment_intents/{id}` ab. Nur `succeeded` wird zu
+`Complete { paid: true, ... }`; `canceled` wird zu `Expired`. Zustände für
+Verarbeitung, Autorisierung und erforderliche Kundenaktionen bleiben `Open`.
+Ungültige IDs und Provider-Fehler liefern Fehler. Eine Kartenautorisierung,
+die noch erfasst werden muss, zählt nicht als eingezogene Zahlung.
 
 `payment_ref` trägt die PaymentIntent-ID der Session (`pi_…`), damit
 Rückkehrseiten und Abgleichsläufe die Session mit
@@ -318,7 +331,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // vollständige Rückerstattung
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() leitet das nicht weiter - siehe "Idempotenz"
+            idempotency_key: None,  // optional; wird als Idempotency-Key weitergeleitet
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -599,35 +612,18 @@ sie auch so.
 
 ### Outbound: Abdeckung pro Methode
 
-Stripe unterstützt Anfrage-Idempotenz über den HTTP-Anfrage-Header
-`Idempotency-Key` - derselbe Schlüssel mit demselben Body liefert
-für ein 24-Stunden-Replay-Fenster dasselbe Antwortobjekt; ein
-abweichender Body liefert einen Fehler. Der Suprnova-Stripe-Adapter
-leitet das Feld `idempotency_key` des DTOs heute **nicht**
-einheitlich an diesen Header weiter. Das tatsächliche Verhalten zum
-Zeitpunkt dieses Schreibens:
+Der Adapter leitet einen angegebenen `idempotency_key` im HTTP-Header
+`Idempotency-Key` von Stripe weiter: für Checkout (gehostet und Elements),
+Belastung, Erstattung, Abonnementerstellung und Abonnementänderung.
+Leere oder ungültige Header-Werte scheitern, bevor eine Anfrage gesendet
+wird. Ein fehlender Schlüssel bleibt fehlend.
 
-| Methode | DTO-Feld | Was der Adapter tut |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | In den POST-Body als `idempotency_key=...` weitergeleitet (nicht in den HTTP-Header). Stripes API liest **keine** Idempotenzschlüssel im Body-Formular, sodass das am besten als bislang wirkungslos gilt, bis der Adapter auf den Request-Header-Pfad umzieht. |
-| `Payment::refund` | `RefundRequest::idempotency_key` | Wird stillschweigend verworfen - das Feld wird nicht weitergeleitet. |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | Wird stillschweigend verworfen. |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | Wird stillschweigend verworfen. |
-
-Wenn Sie sich heute für Belastungs-/Rückerstattungs-Wiederholungen
-gegen Stripe auf At-most-once-Semantik verlassen, sichern Sie die
-Wiederholung an Ihrer eigenen Aufrufstelle ab (ein deterministischer
-Domain-Schlüssel, in Ihrer DB persistiert, mit einem Unique-Index,
-der den zweiten Insert verhindert), bis der Adapter den Header
-verdrahtet. Die DTO-Felder werden von der API akzeptiert, aber
-derzeit nicht bis in die tatsächlich gesendete Anfrage
-durchgereicht - setzen Sie sie in Tests und Produktionscode auf
-`None`, damit die Lücke explizit ist, und gehen Sie nicht davon aus,
-dass Stripe Ihre Wiederholungen dedupliziert.
-
-Das ist eine bekannte Lücke im v1-Adapter und ein Kandidat für einen
-Fix im nächsten Release; die Form der Oberfläche bleibt gleich,
-sobald die Verdrahtung steht.
+Speichern Sie einen stabilen Schlüssel pro Operation und verwenden Sie ihn
+bei Wiederholungen mit identischen Parametern erneut. Eine andere Operation
+braucht einen anderen Schlüssel. Die Aufbewahrungsdauer für Wiederholungen
+beim Provider ist begrenzt. Behalten Sie daher Ihren eigenen Operationsdatensatz
+und gleichen Sie einen unklaren Ausgang ab, bevor Sie außerhalb dieses
+Zeitfensters erneut versuchen.
 
 ### Inbound: Webhook-Deduplizierung
 

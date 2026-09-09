@@ -244,7 +244,7 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
 Todo proveedor implementa `Checkout`. Llama a `start_session` para
 obtener un `SessionPayload` etiquetado por flujo que tu frontend
 renderiza. `session_status` (por defecto: `NotSupported`; anulado por
-los proveedores cuyas sesiones se pueden interrogar, p. ej. Stripe)
+los proveedores cuyas sesiones se pueden interrogar, Stripe y Paddle)
 informa el estado autoritativo, del lado del proveedor, de una sesión
 que iniciaste antes.
 
@@ -268,7 +268,8 @@ Campos de `StartSessionRequest`:
 | `success_return_url` | `String` | Adónde enviar al usuario después del pago |
 | `cancel_return_url` | `String` | Adónde enviar al usuario si abandona |
 | `amount_hint` | `Option<Money>` | Anulación o pista para importes puntuales |
-| `idempotency_key` | `Option<String>` | Para reintentos seguros |
+| `idempotency_key` | `Option<String>` | Stripe la reenvía; Paddle la rechaza si está presente |
+| `metadata` | `Option<Value>` | Datos de correlación adjuntos al checkout del proveedor y a su pago o suscripción |
 
 `session_status` es la primitiva de verificación del lado del servidor
 para los flujos de redirección. Cuando el cliente vuelve a caer en tu
@@ -819,8 +820,9 @@ de despacho del frontend.
 
 ## Claves de idempotencia
 
-Todo DTO que muta tiene un `idempotency_key: Option<String>` opcional.
-Fija uno en las llamadas de red que se puedan reintentar:
+Los DTO de checkout, cargo, reembolso y cambios de suscripción exponen
+un `idempotency_key: Option<String>` opcional. Fija uno en las llamadas
+compatibles de Stripe:
 
 ```rust,ignore
 provider.start_session(StartSessionRequest {
@@ -836,11 +838,14 @@ provider.subscribe(SubscribeRequest {
 }).await?;
 ```
 
-Stripe honra las claves de idempotencia mediante el encabezado HTTP
-`Idempotency-Key`. Paddle tiene un mecanismo equivalente. Si una
-solicitud falla a mitad de camino y reintentas con la misma clave, el
-proveedor devuelve la respuesta original en lugar de crear un cargo o
-una suscripción duplicados.
+Stripe reenvía las claves admitidas en el encabezado HTTP `Idempotency-Key`.
+Reintenta la misma operación con la misma clave y los mismos parámetros.
+Paddle no acepta claves de idempotencia suministradas por el cliente; sus
+métodos de checkout y actualización de suscripciones devuelven
+`NotSupported` cuando hay una clave. Guarda el ID de transacción cuando
+la creación tenga éxito. Si el resultado de una creación en Paddle es
+incierto, reconcilia el estado del proveedor antes de crear otra transacción.
+Los metadatos de correlación no deduplican solicitudes.
 
 ## El patrón discriminador
 

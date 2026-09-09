@@ -129,8 +129,15 @@ literal de template `{CHECKOUT_SESSION_ID}` da Stripe na sua
 redirecionamento, e sua página de retorno o passa para
 `session_status`.
 
-`Checkout::session_status` mapeia `GET /v1/checkout/sessions/{id}`
-para o `CheckoutSessionState` neutro:
+Os metadados do checkout são anexados à Session e ao PaymentIntent
+(`payment_intent_data.metadata`) ou à assinatura (`subscription_data.metadata`)
+resultante. Elements os anexa diretamente ao PaymentIntent. Assim como
+nos metadados de cliente, strings são repassadas, outros valores viram
+strings JSON e valores nulos são omitidos. Forneça um objeto com
+identificadores estáveis de correlação.
+
+`Checkout::session_status` busca IDs `cs_` em
+`GET /v1/checkout/sessions/{id}` e os mapeia para `CheckoutSessionState`:
 
 | `status` / `payment_status` da Stripe | `CheckoutSessionState` |
 |---|---|
@@ -138,6 +145,13 @@ para o `CheckoutSessionState` neutro:
 | `expired` | `Expired` |
 | `complete` + `paid` ou `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid` (liquidação atrasada) | `Complete { paid: false, … }` |
+
+Para um ID Elements `pi_`, ele busca `GET /v1/payment_intents/{id}`.
+Apenas `succeeded` mapeia para `Complete { paid: true, ... }`; `canceled`
+mapeia para `Expired`. Estados de processamento, autorização e ação do
+cliente permanecem `Open`. IDs inválidos e erros do provedor retornam
+erros. Uma autorização de cartão que ainda exige captura não conta como
+pagamento recebido.
 
 `payment_ref` carrega o id do PaymentIntent da sessão (`pi_…`) para
 que páginas de retorno e varreduras possam correlacionar a sessão com
@@ -308,7 +322,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // reembolso total
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() não repassa isto - veja "Idempotência"
+            idempotency_key: None,  // chave opcional repassada em Idempotency-Key
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -582,32 +596,17 @@ Leia-as como tal.
 
 ### Saída: cobertura por método
 
-A Stripe suporta idempotência de requisição via o header HTTP
-`Idempotency-Key` - a mesma chave com o mesmo corpo retorna o mesmo
-objeto de resposta por uma janela de replay de 24 horas; um corpo
-divergente retorna um erro. O adaptador Stripe do Suprnova **não**
-repassa uniformemente o campo `idempotency_key` do DTO para esse
-header hoje. O comportamento real no momento desta escrita:
+O adaptador repassa uma `idempotency_key` fornecida no header HTTP
+`Idempotency-Key` da Stripe para checkout (hospedado e Elements), cobrança,
+reembolso, criação e atualização de assinatura. Valores de header vazios
+ou inválidos falham antes do envio da requisição. Uma chave ausente
+continua ausente.
 
-| Método | Campo do DTO | O que o adaptador faz |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | Repassado no corpo do POST como `idempotency_key=...` (não no header HTTP). A API da Stripe **não** lê chaves de idempotência no corpo do formulário, então é melhor tratar isso como não efetivo até o adaptador migrar para o caminho do header de requisição. |
-| `Payment::refund` | `RefundRequest::idempotency_key` | Silenciosamente descartado - o campo não é repassado. |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | Silenciosamente descartado. |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | Silenciosamente descartado. |
-
-Se você depende de semântica no-máximo-uma-vez para retries de
-cobrança/reembolso contra a Stripe hoje, condicione o retry no seu
-próprio call site (uma chave de domínio determinística persistida no
-seu banco, com um índice único impedindo a segunda inserção) até o
-adaptador conectar o header. Os campos do DTO são aceitos pela API
-mas atualmente não são honrados até a rede - defina-os como `None`
-em testes e em código de produção para que a lacuna fique explícita,
-e não assuma que a Stripe está deduplicando seus retries.
-
-Esta é uma lacuna conhecida no adaptador v1 e uma candidata a
-correção no próximo release; a forma da superfície permanece a
-mesma quando a fiação chegar.
+Persista uma chave estável por operação e reutilize-a com parâmetros
+idênticos ao tentar novamente. Uma operação diferente exige outra chave.
+A retenção de respostas pelo provedor é finita; mantenha seu próprio
+registro da operação e reconcilie um resultado incerto antes de tentar
+novamente fora dessa janela.
 
 ### Entrada: deduplicação de webhook
 

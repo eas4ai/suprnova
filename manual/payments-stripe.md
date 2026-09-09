@@ -301,7 +301,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // full refund
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() does not forward this - see "Idempotency"
+            idempotency_key: None,  // optional key forwarded in Idempotency-Key
         }).await?;
     }
     Err(e) => return Err(e.into()),

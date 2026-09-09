@@ -125,7 +125,7 @@ pub async fn start_checkout(
         success_return_url: "https://app.example/billing/success".into(),
         cancel_return_url: "https://app.example/billing/cancel".into(),
         amount_hint: None,
-        idempotency_key: Some(format!("checkout_{user_id}")),
+        idempotency_key: None, // Paddleはクライアント指定のキーを拒否する。
         metadata: None,
     }).await?;
 
@@ -133,13 +133,13 @@ pub async fn start_checkout(
 }
 ```
 
-返ってくる `SessionPayload::PaddleInline` は、フロントエンドが必要とするすべてを運びます：
+返ってくる `SessionPayload::PaddleInline` は、フロントエンドに必要な情報を含みます。トランザクションにはすでに顧客IDが含まれています。`customer_token` は `None` です。`ctm_` 識別子はPaddleの顧客認証トークンではありません。
 
 ```json
 {
   "flow": "paddle_inline",
   "transaction_id": "txn_01h...",
-  "customer_token": "ctm_01h...",
+  "customer_token": null,
   "client_token": "test_..."
 }
 ```
@@ -149,6 +149,24 @@ Svelte / React / Vueでのpaddle.jsマウントコードについては、[支�
 ### Paddleは `SessionMode` ではなく価格の種類で振り分ける
 
 本物のPaddle固有の落とし穴です：`StartSessionRequest` の `SessionMode::OneOff` / `SessionMode::Subscription` フィールドは、**Paddleアダプターによって無視されます**。PaddleのAPIには単一の `transaction_create` エンドポイントしかなく、プロバイダーは、フローを推測するために渡された価格IDを調べます - 定期価格はサブスクリプションを開始し、一度限りの価格は単発のチャージを開始します。Stripeでは、そのフィールドがフローを駆動しますが、Paddleでは*価格*がそれを行います。アダプターをそれらに向ける前に、正しい価格の種類でPaddleのカタログをセットアップしておいてください。
+
+### 相関と復旧
+
+`metadata` は、アダプターの既存の文字列マップ方針に従い、トランザクションの `custom_data` として転送されます。文字列はそのまま渡され、その他のnull以外の値はJSON文字列に変換され、null値は省略されます。チェックアウト試行とドメインの識別子を含むオブジェクトを指定してください。固定バージョンのSDKは文字列マップを受け付けるため、ネストしたJSON値は元の型を保持しません。
+
+Paddleは、チェックアウトトランザクションのカスタムデータをサブスクリプションと更新時のトランザクションにコピーします。そのため、後の支払いに試行識別子が含まれていても、元のチェックアウトの支払いである証拠にはなりません。
+
+`session_status(transaction_id)` はPaddleからトランザクションを読み取ります：
+
+| Paddleのステータス | `CheckoutSessionState` |
+|---|---|
+| `draft`, `ready`, `billed`, `past_due` | `Open` |
+| `paid`, `completed` | `Complete { paid: true, payment_ref, amount_total }` |
+| `canceled` | `Expired` |
+
+`payment_ref` はトランザクションIDです。金額は `details.totals.total` の最小通貨単位の値です。不正な合計額やプロバイダーのエラーはエラーを返します。`paid` は回収を確認しますが、サブスクリプション作成より先に成立する場合があります。サブスクリプションの設定完了を伝える前に、サブスクリプションのwebhookを待つか、サブスクリプションを取得してください。
+
+Paddleは、指定された `idempotency_key` をネットワークI/Oの前に拒否します。作成に成功したら、直ちにトランザクションIDを保存してください。作成レスポンスが失われた場合は、別のトランザクションを作成する前にプロバイダーの状態を照合してください。メタデータは相関用であり、繰り返しの作成をべき等にはしません。チェックアウト作成とトランザクション取得には30秒のリクエスト期限があります。作成がタイムアウトした場合、プロバイダー側の結果は不明です。トランザクションが存在しない証拠にはなりません。
 
 ## サブスクリプションはwebhook経由で届く
 
@@ -179,8 +197,8 @@ Paddleがサブスクリプションのライフサイクルを所有してい�
 
 顧客がウィジェットを完了させてからwebhookが到着するまでの間に短いウィンドウがあり、その間、`payments_subscriptions` には新しいサブスクリプションの行がありません。2つのパターンがこれをカバーします：
 
-- **即時のUXにはリダイレクトURLを使う。** `success_return_url` は、Paddleがトランザクションを確認した瞬間にクライアントサイドで発火するため、サーバーサイドのwebhookを待たずに「サブスクリプションが有効」と表示できます。
-- **ポーリングしてレンダリングする。** リダイレクトの後、短い遅延を置いてページを再読み込みし、Inertiaコントローラーが、更新済みになったミラーを読み取れるようにします。
+- **チェックアウト後は保留状態を表示する。** 復帰時の画面遷移はPaddle.jsで設定してください。アダプターは `success_return_url` と `cancel_return_url` をトランザクションAPIに転送しません。ブラウザのコールバックは、支払いや有効なサブスクリプションの証拠ではありません。
+- **サーバーの状態をポーリングする。** `session_status` で回収を検証し、サブスクリプションへのアクセスを表示する前に、更新済みのサブスクリプションミラーを読み取ってください。
 
 ## 能力マトリクス
 
@@ -188,7 +206,8 @@ Paddleがサブスクリプションのライフサイクルを所有してい�
 
 | トレイトメソッド | 振る舞い |
 |---|---|
-| `Checkout::start_session` | 動作する。`SessionMode` ではなく価格の種類で、一度限りかサブスクリプションかを振り分ける。 |
+| `Checkout::start_session` | 価格の種類で振り分け、メタデータを転送し、指定されたべき等キーを拒否する。 |
+| `Checkout::session_status` | トランザクションを取得し、回収状態を報告する。 |
 | `Subscription::subscribe` | 常に `NotSupported`。サブスクリプションは、チェックアウトの完了 + webhookから生まれる。 |
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | 動作する。デフォルトの `EffectiveFrom::NextBillingPeriod` を伴う `subscription_cancel` に配線される。 |
 | `Subscription::update(new_price_refs: Some(...))` | v1では `NotSupported`。Paddleは、価格セットの置き換えを自身の移行フローのために予約している。 |
@@ -243,8 +262,10 @@ Paddleは、すべてのwebhookをHMACで署名します。`Paddle-Signature` �
 |---|---|---|
 | `transaction.completed`、`transaction.paid` | `PaymentSucceeded` | `payments_transactions` をupsert |
 | `transaction.payment_failed` | `PaymentFailed` | `payments_transactions` をupsert（失敗） |
-| `transaction.billed` | `InvoicePaid` | `provider_subscription_id` を紐付けた `payments_transactions` をupsert |
-| `adjustment.created`、`adjustment.updated` | `PaymentRefunded` | `payments_transactions` をupsert（返金） |
+| `transaction.billed` | `None` | 請求書の発行のみ。支払済みとしてミラーを更新しない |
+| 承認済みの返金調整 | `PaymentRefunded` | 参照先のトランザクションを返金済みに更新 |
+| 承認済みのチャージバックまたはチャージバック警告の調整 | `PaymentDisputed` | 参照先のトランザクションを紛争中に更新 |
+| 保留中／拒否された返金、クレジット、取り消しの調整 | `None` | 生のプロバイダーイベントのみ |
 | `subscription.created` | `SubscriptionCreated` | `Subscription::get` → `payments_subscriptions` + 明細項目をupsert |
 | `subscription.updated`、`.activated`、`.paused`、`.resumed`、`.trialing` | `SubscriptionUpdated` | 上と同じ |
 | `subscription.canceled` | `SubscriptionCanceled` | 同じ。`canceled_at` を設定し、statusを切り替える |
@@ -252,7 +273,9 @@ Paddleは、すべてのwebhookをHMACで署名します。`Paddle-Signature` �
 | `customer.updated` | `CustomerUpdated` | 同じ |
 | その他すべて | `None`（マッピングされない） | 監査行のみ - ミラーへの変更なし |
 
-Paddleは、エンティティオブジェクトを（Stripeのような `data.object` ではなく）`data` の直下に置きます。金額は10進数ではなく、**最小単位の文字列**として届きます（`"1234"` = 主要単位で12.34）- アダプターは、前方互換性のために、文字列と数値の両方の形をパースします。通貨は `currency_code` として小文字で届き、スナップショットはそれを大文字化します。
+Paddleは、エンティティオブジェクトを（Stripeのような `data.object` ではなく）`data` の直下に置きます。金額は10進数ではなく、**最小単位の文字列**として届きます（`"1234"` = 主要単位で12.34）- アダプターは、前方互換性のために、文字列と数値の両方の形をパースします。スナップショットは `currency_code` を大文字化します。支払時刻は、最新の確定済み支払い試行から取得します。確定タイムスタンプがない場合、`paid_at` は未設定のままです。`billed_at` は請求書の発行時刻であり、支払時刻には使用しません。
+
+イベント名のみを見る `paddle_event_to_neutral` ヘルパーは、調整に対して `None` を返します。承認状態とアクションの判定にはペイロードが必要なためです。分類には `WebhookHandler::parse_event` を使ってください。生の取り消しイベントはアプリケーションの照合に利用できますが、新たな支払いや返金を意味しません。
 
 ### 税込みの金額
 
@@ -276,7 +299,7 @@ let cus = provider.create_customer(CreateCustomerRequest {
     user_id: "user_42".into(),       // あなたのアプリのユーザーid
     email: "alice@example.com".into(),
     name: Some("Alice".into()),
-    metadata: None,                  // v1ではPaddleに転送されない
+    metadata: None,                  // オプションのcustom_data文字列マップ
 }).await?;
 // cus.provider_customer_id == "ctm_01h..."
 ```

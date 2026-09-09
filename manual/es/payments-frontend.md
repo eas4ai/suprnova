@@ -68,7 +68,7 @@ lo llama.
   type SessionPayload =
     | { flow: "stripe_elements"; client_secret: string; publishable_key: string; provider_session_id: string }
     | { flow: "stripe_checkout_redirect"; url: string; provider_session_id: string }
-    | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string }
+    | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string | null }
     | { flow: "mobile_money_prompt"; provider_transaction_id: string; message: string; operator: MobileMoneyOperator }
     | { flow: "redirect"; url: string; provider_session_id: string };
 
@@ -129,7 +129,6 @@ lo llama.
     Paddle.Initialize({ token: s.client_token });
     Paddle.Checkout.open({
       transactionId: s.transaction_id,
-      customerToken: s.customer_token,
     });
   }
 
@@ -185,7 +184,7 @@ type MobileMoneyOperator =
 type SessionPayload =
   | { flow: "stripe_elements"; client_secret: string; publishable_key: string; provider_session_id: string }
   | { flow: "stripe_checkout_redirect"; url: string; provider_session_id: string }
-  | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string }
+  | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string | null }
   | { flow: "mobile_money_prompt"; provider_transaction_id: string; message: string; operator: MobileMoneyOperator }
   | { flow: "redirect"; url: string; provider_session_id: string };
 
@@ -247,7 +246,6 @@ export default function Checkout() {
     Paddle.Initialize({ token: s.client_token });
     Paddle.Checkout.open({
       transactionId: s.transaction_id,
-      customerToken: s.customer_token,
     });
   }
 
@@ -307,7 +305,7 @@ type MobileMoneyOperator =
 type SessionPayload =
   | { flow: "stripe_elements"; client_secret: string; publishable_key: string; provider_session_id: string }
   | { flow: "stripe_checkout_redirect"; url: string; provider_session_id: string }
-  | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string }
+  | { flow: "paddle_inline"; transaction_id: string; client_token: string; customer_token?: string | null }
   | { flow: "mobile_money_prompt"; provider_transaction_id: string; message: string; operator: MobileMoneyOperator }
   | { flow: "redirect"; url: string; provider_session_id: string };
 
@@ -369,7 +367,6 @@ function mountPaddleInline(
   Paddle.Initialize({ token: s.client_token });
   Paddle.Checkout.open({
     transactionId: s.transaction_id,
-    customerToken: s.customer_token,
   });
 }
 

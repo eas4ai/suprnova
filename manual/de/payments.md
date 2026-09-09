@@ -247,7 +247,7 @@ Jeder Provider implementiert `Checkout`. Rufen Sie `start_session`
 auf, um eine Flow-getaggte `SessionPayload` zu erhalten, die Ihr
 Frontend rendert. `session_status` (Standard: `NotSupported`;
 überschrieben von Providern, deren Sessions abgefragt werden können,
-z. B. Stripe) meldet den maßgeblichen Zustand einer zuvor gestarteten
+Stripe und Paddle) meldet den maßgeblichen Zustand einer zuvor gestarteten
 Session auf Provider-Seite.
 
 ```rust,ignore
@@ -270,7 +270,8 @@ Felder von `StartSessionRequest`:
 | `success_return_url` | `String` | Wohin der Nutzer nach der Zahlung geschickt wird |
 | `cancel_return_url` | `String` | Wohin der Nutzer geschickt wird, wenn er abbricht |
 | `amount_hint` | `Option<Money>` | Override oder Hinweis für Einmalbeträge |
-| `idempotency_key` | `Option<String>` | Für sichere Wiederholungen |
+| `idempotency_key` | `Option<String>` | Von Stripe weitergeleitet; von Paddle abgelehnt, wenn vorhanden |
+| `metadata` | `Option<Value>` | Korrelationsdaten am Provider-Checkout und dessen Zahlung oder Abonnement |
 
 `session_status` ist die serverseitige Verifizierungs-Primitive für
 Redirect-Flows. Wenn der Kunde auf Ihrer Rückkehrseite landet,
@@ -829,9 +830,9 @@ Dispatch-Code im Frontend.
 
 ## Idempotenzschlüssel
 
-Jedes mutierende DTO hat ein optionales
-`idempotency_key: Option<String>`. Setzen Sie einen bei
-wiederholbaren Netzwerkaufrufen:
+DTOs für Checkout, Belastung, Erstattung und Abonnementänderungen bieten
+ein optionales `idempotency_key: Option<String>`. Setzen Sie es bei
+unterstützten Stripe-Aufrufen:
 
 ```rust,ignore
 provider.start_session(StartSessionRequest {
@@ -847,12 +848,15 @@ provider.subscribe(SubscribeRequest {
 }).await?;
 ```
 
-Stripe honoriert Idempotenzschlüssel über den HTTP-Header
-`Idempotency-Key`. Paddle hat einen gleichwertigen Mechanismus. Wenn
-eine Anfrage mitten im Flug fehlschlägt und Sie mit demselben
-Schlüssel erneut versuchen, liefert der Provider die ursprüngliche
-Antwort, statt eine doppelte Belastung oder ein doppeltes Abonnement
-anzulegen.
+Stripe leitet unterstützte Anfrage-Schlüssel im HTTP-Header
+`Idempotency-Key` weiter. Wiederholen Sie dieselbe Operation mit demselben
+Schlüssel und denselben Parametern. Paddle akzeptiert keine vom Client
+vorgegebenen Idempotenzschlüssel; seine Methoden für Checkout und
+Abonnementänderungen liefern `NotSupported`, wenn ein Schlüssel vorhanden
+ist. Speichern Sie die Transaktions-ID nach erfolgreicher Erstellung.
+Ist der Ausgang einer Paddle-Erstellung unklar, gleichen Sie den Zustand
+beim Provider ab, bevor Sie erneut erstellen. Korrelationsmetadaten
+verhindern keine doppelten Anfragen.
 
 ## Das Diskriminator-Muster
 
