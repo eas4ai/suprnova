@@ -187,7 +187,7 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
 
 ### `Checkout` - 汎用、クライアントウィジェットを開く
 
-すべてのプロバイダーが `Checkout` を実装します。`start_session` を呼び出すと、あなたのフロントエンドがレンダリングする、flowタグ付きの `SessionPayload` が得られます。`session_status`（デフォルト：`NotSupported`。セッションを問い合わせ可能なプロバイダー、たとえばStripeでは上書きされます）は、以前に開始したセッションの、プロバイダー側の正式な状態を報告します。
+すべてのプロバイダーが `Checkout` を実装します。`start_session` を呼び出すと、あなたのフロントエンドがレンダリングする、flowタグ付きの `SessionPayload` が得られます。`session_status`（デフォルト：`NotSupported`。セッションを問い合わせ可能なプロバイダー、StripeとPaddleでは上書きされます）は、以前に開始したセッションの、プロバイダー側の正式な状態を報告します。
 
 ```rust,ignore
 #[async_trait]
@@ -209,7 +209,8 @@ pub trait Checkout: Send + Sync {
 | `success_return_url` | `String` | 支払い後にユーザーを送る先 |
 | `cancel_return_url` | `String` | ユーザーが中断した場合に送る先 |
 | `amount_hint` | `Option<Money>` | 一度限りの金額に対する上書きまたはヒント |
-| `idempotency_key` | `Option<String>` | 安全なリトライのため |
+| `idempotency_key` | `Option<String>` | Stripeは転送し、Paddleは指定された場合に拒否する |
+| `metadata` | `Option<Value>` | プロバイダーのチェックアウトと、その支払いまたはサブスクリプションに付加する相関データ |
 
 `session_status` は、リダイレクトフローのためのサーバーサイド検証プリミティブです。カスタマーがあなたの復帰ページに戻ってきたとき、そのブラウザが運んできたクエリパラメータを信頼しては**いけません** - `start_session` の時点で記録した `provider_session_id` を渡し、結果で分岐してください：
 
@@ -632,7 +633,7 @@ pub enum ChargeResult {
 
 ## べき等キー
 
-すべてのミューテーションを行うDTOは、オプションの `idempotency_key: Option<String>` を持ちます。リトライ可能なネットワーク呼び出しにはこれを設定してください：
+チェックアウト、チャージ、返金、サブスクリプションの変更用DTOは、オプションの `idempotency_key: Option<String>` を公開します。対応するStripe呼び出しで設定してください：
 
 ```rust,ignore
 provider.start_session(StartSessionRequest {
@@ -648,7 +649,7 @@ provider.subscribe(SubscribeRequest {
 }).await?;
 ```
 
-Stripeは、`Idempotency-Key` HTTPヘッダーを介してべき等キーを尊重します - 同じ本文を伴う同じキーは、24時間のリプレイウィンドウの間、同じレスポンスオブジェクトを返します。本文が一致しない場合はエラーが返ります。Paddleにも同等の仕組みがあります。リクエストが途中で失敗し、同じキーでリトライした場合、プロバイダーは、重複した請求やサブスクリプションを作る代わりに、元のレスポンスを返します。
+Stripeは、対応するリクエストのキーを `Idempotency-Key` HTTPヘッダーで転送します。同じ操作のリトライには、同じキーとパラメーターを使ってください。Paddleはクライアント指定のべき等キーを受け付けません。チェックアウトとサブスクリプション更新メソッドは、キーが指定されると `NotSupported` を返します。作成に成功したらトランザクションIDを保存してください。Paddleの作成結果が不明な場合は、再作成する前にプロバイダーの状態を照合してください。相関用メタデータはリクエストを重複排除しません。
 
 ## 判別パターン
 

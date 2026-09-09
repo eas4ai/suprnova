@@ -70,7 +70,9 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 
 ホスト型の一度限りの経路は、`allow_promotion_codes=true`（カスタマーはStripeのページ上でプロモーションコードを入力できます - 下記の `Promotions` トレイトと組み合わせてください）と、プロバイダーがそのように設定されている場合はManaged Paymentsフラグを送ります。あなたの `success_return_url` に、Stripeの `{CHECKOUT_SESSION_ID}` テンプレートリテラルを入れてください - リダイレクト時に、Stripeが本物の `cs_…` idに置き換え、あなたの復帰ページはそれを `session_status` に渡します。
 
-`Checkout::session_status` は `GET /v1/checkout/sessions/{id}` を、ニュートラルな `CheckoutSessionState` にマッピングします：
+チェックアウトのメタデータは、Sessionと、そこから作成されるPaymentIntent（`payment_intent_data.metadata`）またはSubscription（`subscription_data.metadata`）に付加されます。ElementsではPaymentIntentに直接付加されます。顧客メタデータと同様に、文字列はそのまま渡され、文字列以外の値はJSON文字列に変換され、null値は省略されます。安定した相関識別子を含むオブジェクトを指定してください。
+
+`Checkout::session_status` は `GET /v1/checkout/sessions/{id}` で `cs_` IDを取得し、`CheckoutSessionState` にマッピングします：
 
 | Stripeの `status` / `payment_status` | `CheckoutSessionState` |
 |---|---|
@@ -78,6 +80,8 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 | `expired` | `Expired` |
 | `complete` + `paid` または `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid`（確定処理が遅延） | `Complete { paid: false, … }` |
+
+Elementsの `pi_` IDには、`GET /v1/payment_intents/{id}` を使います。`succeeded` のみが `Complete { paid: true, ... }` に、`canceled` が `Expired` にマッピングされます。処理中、承認、顧客の操作待ちの状態は `Open` のままです。不正なIDやプロバイダーのエラーはエラーを返します。まだ確定が必要なカード承認は、回収済みの支払いにはなりません。
 
 `payment_ref` は、セッションのPaymentIntent id（`pi_…`）を運ぶため、復帰ページと突き合わせ処理は、そのセッションを `Payment` の操作と `payments_transactions` ミラーに突き合わせられます。`amount_total` は、プロバイダー側の割引とManaged Paymentsの税がすでに織り込まれた、確定済みの合計です。
 
@@ -197,7 +201,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // 全額返金
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund()はこれを転送しない - 「べき等性」を参照
+            idempotency_key: None,  // 任意。指定するとIdempotency-Keyヘッダーで転送される
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -391,18 +395,9 @@ Stripe API呼び出しに対する送信側のべき等性と、webhook配信に
 
 ### 送信側：メソッドごとの対応
 
-Stripeは、`Idempotency-Key` HTTPリクエストヘッダーを介して、リクエストのべき等性をサポートします - 同じ本文を伴う同じキーは、24時間のリプレイウィンドウの間、同じレスポンスオブジェクトを返します。本文が一致しない場合はエラーが返ります。SuprnovaのStripeアダプターは、今日のところ、DTOの `idempotency_key` フィールドをそのヘッダーへ一様に通していません。この文章を書いている時点での実際の振る舞いは：
+アダプターは、指定された `idempotency_key` をStripeの `Idempotency-Key` HTTPヘッダーで転送します。対象はチェックアウト（ホスト型とElements）、チャージ、返金、サブスクリプション作成と更新です。空白または不正なヘッダー値は送信前に失敗します。キーを省略した場合は、ヘッダーも省略されます。
 
-| メソッド | DTOのフィールド | アダプターが行うこと |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | （HTTPヘッダーではなく）POST本文に `idempotency_key=...` として転送される。StripeのAPIは本文形式のべき等キーを読ま**ない**ため、これは、アダプターがリクエストヘッダーの経路に移行するまでは、効果がないものとして扱うのが最善である。 |
-| `Payment::refund` | `RefundRequest::idempotency_key` | サイレントに捨てられる - このフィールドは転送されない。 |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | サイレントに捨てられる。 |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | サイレントに捨てられる。 |
-
-今日、Stripeに対する請求 / 返金のリトライについて、最大1回の実行という保証に依存する場合は、アダプターがそのヘッダーを配線するまで、あなた自身の呼び出し箇所でそのリトライをゲートしてください（あなたのDBに永続化された決定的なドメインキーと、2度目の挿入を防ぐユニークインデックス）。DTOのフィールドはAPI上では受け付けられますが、現在のところワイヤまで完全には尊重されていません - そのギャップを明示するために、テストと本番のコードではそれらを `None` に設定し、Stripeがあなたのリトライを重複排除してくれると仮定しないでください。
-
-これはv1のアダプターにおける既知のギャップであり、次のリリースの修正候補です。配線が到着しても、サーフェスの形は同じままです。
+操作ごとに安定したキーを保存し、リトライ時は同じパラメーターで再利用してください。別の操作には別のキーが必要です。プロバイダーのリプレイ保持期間は有限なので、独自の操作記録を保持し、期間外にリトライする前に不確かな結果を照合してください。
 
 ### 受信側：webhookの重複排除
 

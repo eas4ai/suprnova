@@ -17,16 +17,17 @@ use crate::PaddleProvider;
 /// Paddle-friendly `HashMap<String, String>` shape that
 /// `CustomerCreate::custom_data` / `CustomerUpdate::custom_data` accept.
 ///
-/// Paddle's `custom_data` field is documented as a flat key/value map of
-/// strings; top-level scalars are stringified and nested objects/arrays are
-/// JSON-encoded so the original structure round-trips, matching how Paddle
-/// renders complex `custom_data` in its dashboard.
+/// The pinned SDK builder accepts string values even though Paddle supports
+/// structured JSON. Non-string values are JSON-encoded strings, consistently
+/// across customer and checkout requests.
 ///
 /// `None`, `Some(Null)`, and an empty object all produce `None` so the
 /// builder method is simply not called and `custom_data` stays out of the
 /// outgoing payload (the field is serialised with `#[skip_serializing_none]`
 /// in the SDK builder).
-fn metadata_to_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
+pub(crate) fn metadata_to_string_map(
+    value: Option<&serde_json::Value>,
+) -> Option<HashMap<String, String>> {
     let obj = value?.as_object()?;
     if obj.is_empty() {
         return None;

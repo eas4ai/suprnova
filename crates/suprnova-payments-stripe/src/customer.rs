@@ -54,7 +54,9 @@ struct UpdateCustomerParams<'a> {
 /// `None` and `Some(serde_json::Value::Null)` both produce `None` so the
 /// `#[serde(skip_serializing_if = "Option::is_none")]` attribute keeps the
 /// outgoing form body empty when no metadata was supplied.
-fn metadata_to_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
+pub(crate) fn metadata_to_string_map(
+    value: Option<&serde_json::Value>,
+) -> Option<HashMap<String, String>> {
     let obj = value?.as_object()?;
     if obj.is_empty() {
         return None;

@@ -128,8 +128,16 @@ el literal de plantilla `{CHECKOUT_SESSION_ID}` de Stripe en tu
 `success_return_url` - Stripe sustituye el id real `cs_…` en la
 redirección, y tu página de retorno lo alimenta a `session_status`.
 
-`Checkout::session_status` mapea `GET /v1/checkout/sessions/{id}` al
-`CheckoutSessionState` neutral:
+Los metadatos de checkout se adjuntan a la Session y al PaymentIntent
+resultante (`payment_intent_data.metadata`) o a la suscripción
+(`subscription_data.metadata`). Elements los adjunta directamente al
+PaymentIntent. Como con los metadatos de clientes, las cadenas pasan sin
+cambios, los demás valores se convierten en cadenas JSON y los valores
+nulos se omiten. Proporciona un objeto con identificadores de correlación
+estables.
+
+`Checkout::session_status` obtiene los IDs `cs_` mediante
+`GET /v1/checkout/sessions/{id}` y los mapea a `CheckoutSessionState`:
 
 | `status` / `payment_status` de Stripe | `CheckoutSessionState` |
 |---|---|
@@ -137,6 +145,13 @@ redirección, y tu página de retorno lo alimenta a `session_status`.
 | `expired` | `Expired` |
 | `complete` + `paid` o `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid` (liquidación retrasada) | `Complete { paid: false, … }` |
+
+Para un ID `pi_` de Elements, obtiene `GET /v1/payment_intents/{id}`.
+Solo `succeeded` se mapea a `Complete { paid: true, ... }`; `canceled` se
+mapea a `Expired`, y los estados de procesamiento, autorización y acción
+del cliente siguen como `Open`. Los IDs inválidos y los errores del
+proveedor devuelven errores. Una autorización de tarjeta que todavía
+requiere captura no cuenta como un pago cobrado.
 
 `payment_ref` lleva el id de PaymentIntent de la sesión (`pi_…`) para
 que las páginas de retorno y los barridos puedan correlacionar la
@@ -310,7 +325,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // reembolso total
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() no reenvía esto - ver "Idempotencia"
+            idempotency_key: None,  // opcional; se reenvía como Idempotency-Key
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -585,34 +600,17 @@ separadas. Léelas como tales.
 
 ### Salida: cobertura por método
 
-Stripe soporta la idempotencia de solicitudes mediante el encabezado
-HTTP de solicitud `Idempotency-Key` - la misma clave con el mismo
-cuerpo devuelve el mismo objeto de respuesta durante una ventana de
-deduplicación de 24 horas; un cuerpo que no coincida devuelve un error.
-El adaptador de Stripe para Suprnova **no** traslada de forma uniforme
-el campo `idempotency_key` del DTO a ese encabezado, hoy por hoy. El
-comportamiento real al momento de escribir esto:
+El adaptador reenvía un `idempotency_key` suministrado en el encabezado
+HTTP `Idempotency-Key` de Stripe para checkout (alojado y Elements),
+cargos, reembolsos, creación y actualización de suscripciones. Los valores
+de encabezado vacíos o inválidos fallan antes de enviar la solicitud.
+Si no hay clave, no se añade ninguna.
 
-| Método | Campo del DTO | Qué hace el adaptador |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | Se reenvía dentro del cuerpo POST como `idempotency_key=...` (no el encabezado HTTP). La API de Stripe **no** lee claves de idempotencia en el cuerpo, así que lo mejor es tratar esto como no efectivo hasta que el adaptador migre a la vía del encabezado de solicitud. |
-| `Payment::refund` | `RefundRequest::idempotency_key` | Se descarta en silencio - el campo no se reenvía. |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | Se descarta en silencio. |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | Se descarta en silencio. |
-
-Si hoy dependes de semántica de a lo sumo una vez para los reintentos
-de cargo/reembolso contra Stripe, controla el reintento en tu propio
-punto de llamada (una clave de dominio determinística persistida en tu
-BD, con un índice único que impida la segunda inserción) hasta que el
-adaptador conecte el encabezado. Los campos del DTO se aceptan en la
-API pero hoy no se respetan hasta llegar a la petición HTTP real -
-fíjalos en `None` en pruebas y en código de producción para que la
-brecha sea explícita, y no asumas que Stripe está deduplicando tus
-reintentos.
-
-Esta es una brecha conocida en el adaptador v1 y una candidata a
-arreglo para la próxima versión; la forma de la superficie se mantiene
-igual una vez que la conexión llegue.
+Guarda una clave estable por operación y reutilízala con parámetros
+idénticos al reintentar. Una operación distinta necesita una clave distinta.
+La retención de respuestas para reintentos del proveedor es finita, así
+que conserva tu propio registro de operaciones y reconcilia un resultado
+incierto antes de reintentar fuera de esa ventana.
 
 ### Entrada: deduplicación de webhooks
 

@@ -96,8 +96,9 @@ pub enum SessionPayload {
     PaddleInline {
         /// Paddle transaction identifier consumed by the Drop-in SDK.
         transaction_id: String,
-        /// Optional customer token; supplied when an existing Paddle
-        /// customer record can be reused.
+        /// Optional Paddle customer authentication token, never a `ctm_` ID.
+        /// The reference adapter returns `None`; its transaction already
+        /// identifies the customer.
         customer_token: Option<String>,
         /// Paddle client (frontend-safe) token.
         client_token: String,

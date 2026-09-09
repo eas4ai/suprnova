@@ -70,7 +70,9 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 
 这个托管的一次性路径会发送 `allow_promotion_codes=true`（客户可以在 Stripe 的页面上输入促销代码 - 和下面的 `Promotions` trait 搭配使用），并且，当这个提供商配置了它时，还会发送 Managed Payments 标志。把 Stripe 的 `{CHECKOUT_SESSION_ID}` 模板字面量放进您的 `success_return_url` 里 - Stripe 会在重定向时把真实的 `cs_…` id 替换进去，然后您的返回页面会把它喂给 `session_status`。
 
-`Checkout::session_status` 把 `GET /v1/checkout/sessions/{id}` 映射到中立的 `CheckoutSessionState` 上：
+结账元数据会附加到 Session，以及生成的 PaymentIntent（`payment_intent_data.metadata`）或 Subscription（`subscription_data.metadata`）。Elements 会将其直接附加到 PaymentIntent。与客户元数据一样，字符串原样传递，非字符串值转换为 JSON 字符串，null 值被省略。请提供包含稳定关联标识符的对象。
+
+`Checkout::session_status` 通过 `GET /v1/checkout/sessions/{id}` 获取 `cs_` ID，并将其映射到 `CheckoutSessionState`：
 
 | Stripe 的 `status` / `payment_status` | `CheckoutSessionState` |
 |---|---|
@@ -78,6 +80,8 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 | `expired` | `Expired` |
 | `complete` + `paid` 或者 `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid`（延迟结算） | `Complete { paid: false, … }` |
+
+对于 Elements 的 `pi_` ID，它会获取 `GET /v1/payment_intents/{id}`。只有 `succeeded` 映射为 `Complete { paid: true, ... }`；`canceled` 映射为 `Expired`，处理中、授权和等待客户操作的状态仍为 `Open`。无效 ID 和提供商错误会返回错误。仍需扣款的卡授权不算已收款。
 
 `payment_ref` 带着这个会话的 PaymentIntent id（`pi_…`），这样返回页面和扫描任务，就能把这个会话和 `Payment` 操作以及 `payments_transactions` 镜像关联起来。`amount_total` 是已经把提供商侧折扣和 Managed Payments 税费都折算进去的结算总额。
 
@@ -197,7 +201,7 @@ match voided {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // 全额退款
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() 不会转发这个字段 - 见下文的“幂等性”一节
+            idempotency_key: None,  // 可选；提供时通过 Idempotency-Key 请求头转发
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -391,18 +395,9 @@ Stripe API 调用上的出站幂等性，和 webhook 投递上的入站幂等性
 
 ### 出站：逐方法覆盖情况
 
-Stripe 通过 `Idempotency-Key` 这个 HTTP 请求头来支持请求幂等性 - 同一个密钥配上同一个请求体，在一个 24 小时的重放窗口内，会返回同一个响应对象；请求体不匹配则会返回一个错误。Suprnova 的 Stripe 适配器目前**并没有**统一地把这个 DTO 的 `idempotency_key` 字段，穿到那个请求头上。写这段话的时候，实际的行为是这样的：
+适配器会通过 Stripe 的 `Idempotency-Key` HTTP 请求头转发提供的 `idempotency_key`，适用于结账（托管和 Elements）、扣款、退款、订阅创建和订阅更新。空白或无效的请求头值会在发送请求前失败。未提供键时，请求头也不会添加。
 
-| 方法 | DTO 字段 | 适配器做了什么 |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | 被转发进 POST 请求体，作为 `idempotency_key=...`（不是 HTTP 请求头）。Stripe 的 API **不会**读取表单形式的幂等键，所以最好把它当作无效的，直到这个适配器迁移到请求头路径为止。 |
-| `Payment::refund` | `RefundRequest::idempotency_key` | 默默地被丢弃 - 这个字段没有被转发。 |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | 默默地被丢弃。 |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | 默默地被丢弃。 |
-
-如果您现在依赖针对 Stripe 的扣款/退款重试的至多一次语义，就在您自己的调用点上把关这次重试（一个持久化在您数据库里的确定性领域键，配上一个防止第二次插入的唯一索引），直到这个适配器把这个请求头接通为止。这些 DTO 字段在 API 上是被接受的，但目前并没有被一路兑现到网络上 - 在测试和生产代码里把它们设成 `None`，让这个缺口保持显式，不要假设 Stripe 会替您给这些重试去重。
-
-这是 v1 适配器里一个已知的缺口，也是下一个版本的候选修复项；一旦这条线路接通，这个表面的形态不会变。
+为每个操作持久化一个稳定的键，并在重试时使用相同参数复用它。不同操作需要不同的键。提供商的重放保留期有限，因此请保留自己的操作记录，并在超出该窗口后重试之前核对不确定的结果。
 
 ### 入站：webhook 去重
 

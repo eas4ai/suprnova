@@ -164,7 +164,7 @@ pub async fn start_checkout(
         success_return_url: "https://app.example/billing/success".into(),
         cancel_return_url: "https://app.example/billing/cancel".into(),
         amount_hint: None,
-        idempotency_key: Some(format!("checkout_{user_id}")),
+        idempotency_key: None, // Paddle rechaza claves suministradas por el cliente.
         metadata: None,
     }).await?;
 
@@ -173,13 +173,15 @@ pub async fn start_checkout(
 ```
 
 El `SessionPayload::PaddleInline` devuelto lleva todo lo que necesita
-el frontend:
+el frontend. La transacción ya contiene el ID del cliente. `customer_token`
+es `None`: un identificador `ctm_` no es un token de autenticación de
+cliente de Paddle.
 
 ```json
 {
   "flow": "paddle_inline",
   "transaction_id": "txn_01h...",
-  "customer_token": "ctm_01h...",
+  "customer_token": null,
   "client_token": "test_..."
 }
 ```
@@ -199,6 +201,44 @@ inicia un cargo único. Con Stripe el campo impulsa el flujo; con
 Paddle es el *precio* el que lo hace. Configura tu catálogo de Paddle
 con los tipos de precio correctos antes de apuntar el adaptador hacia
 ellos.
+
+### Correlación y recuperación
+
+`metadata` se reenvía como `custom_data` de la transacción siguiendo la
+política existente de mapas de cadenas del adaptador: las cadenas pasan sin
+cambios, los demás valores no nulos se convierten en cadenas JSON y los
+valores nulos se omiten. Proporciona un objeto con identificadores del intento
+de checkout y de tu dominio. El SDK fijado acepta mapas de cadenas, por lo
+que los valores JSON anidados no conservan su tipo original.
+
+Paddle copia los datos personalizados de una transacción de checkout a su
+suscripción y a las transacciones de renovación. Por tanto, un identificador
+de intento en un pago posterior no demuestra que sea el pago original
+del checkout.
+
+`session_status(transaction_id)` lee la transacción desde Paddle:
+
+| Estado de Paddle | `CheckoutSessionState` |
+|---|---|
+| `draft`, `ready`, `billed`, `past_due` | `Open` |
+| `paid`, `completed` | `Complete { paid: true, payment_ref, amount_total }` |
+| `canceled` | `Expired` |
+
+`payment_ref` es el ID de transacción; el importe proviene de
+`details.totals.total` en unidades menores. Los totales inválidos o los
+fallos del proveedor devuelven un error. `paid` confirma el cobro, pero
+puede preceder a la creación de la suscripción; espera al webhook de
+suscripción u obtén la suscripción antes de afirmar que su configuración
+está completa.
+
+Paddle rechaza un `idempotency_key` suministrado antes de cualquier E/S de
+red. Guarda el ID de transacción en cuanto la creación tenga éxito. Si se
+pierde la respuesta de creación, reconcilia el estado del proveedor antes
+de crear otra transacción. Los metadatos sirven para correlacionar y no
+hacen idempotentes las creaciones repetidas. La creación de checkout y la
+consulta de transacciones tienen un plazo de 30 segundos por solicitud.
+Un timeout de creación deja incierto el resultado en el proveedor; no
+demuestra que no exista una transacción.
 
 ## Las suscripciones llegan vía webhook
 
@@ -239,13 +279,12 @@ Hay una breve ventana entre que el cliente completa el widget y que
 llega el webhook, en la que `payments_subscriptions` no tiene ninguna
 fila para la nueva suscripción. Dos patrones la cubren:
 
-- **Usa la URL de redirección para una UX inmediata.**
-  `success_return_url` se dispara del lado del cliente en cuanto
-  Paddle confirma la transacción, así que puedes mostrar "Suscripción
-  activa" sin esperar al webhook del lado del servidor.
-- **Sondear y renderizar.** Después de la redirección, refresca la
-  página tras una breve demora para que el controlador de Inertia
-  pueda leer la copia local ya hidratada.
+- **Muestra un estado pendiente tras el checkout.** Configura la navegación
+  de retorno en Paddle.js; el adaptador no reenvía `success_return_url` ni
+  `cancel_return_url` a la API de transacciones. Un callback del navegador
+  no demuestra el pago ni una suscripción activa.
+- **Sondea el estado del servidor.** Usa `session_status` para verificar el
+  cobro y lee la copia local hidratada de la suscripción antes de mostrar acceso.
 
 ## Matriz de capacidades
 
@@ -256,7 +295,8 @@ fallan; el resto funciona, con las advertencias señaladas.
 
 | Método del trait | Comportamiento |
 |---|---|
-| `Checkout::start_session` | Funciona. Decide entre pago puntual y suscripción según el tipo de precio, no según `SessionMode`. |
+| `Checkout::start_session` | Decide según el tipo de precio; reenvía metadatos; rechaza una clave de idempotencia suministrada. |
+| `Checkout::session_status` | Obtiene la transacción e informa del estado del cobro. |
 | `Subscription::subscribe` | Siempre `NotSupported`. Las suscripciones nacen de la finalización del checkout + webhook. |
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Funciona. Se conecta a `subscription_cancel` con el valor por defecto `EffectiveFrom::NextBillingPeriod`. |
 | `Subscription::update(new_price_refs: Some(...))` | `NotSupported` en v1. Paddle reserva el reemplazo del conjunto de precios para sus propios flujos de migración. |
@@ -344,8 +384,10 @@ local. Mapeo rápido:
 |---|---|---|
 | `transaction.completed`, `transaction.paid` | `PaymentSucceeded` | Upsert de `payments_transactions` |
 | `transaction.payment_failed` | `PaymentFailed` | Upsert de `payments_transactions` (fallido) |
-| `transaction.billed` | `InvoicePaid` | Upsert de `payments_transactions` con `provider_subscription_id` enlazado |
-| `adjustment.created`, `adjustment.updated` | `PaymentRefunded` | Upsert de `payments_transactions` (reembolsado) |
+| `transaction.billed` | `None` | Solo emisión de factura; sin actualización de la copia local como pagada |
+| Ajuste de reembolso aprobado | `PaymentRefunded` | Actualiza la transacción referenciada como reembolsada |
+| Ajuste aprobado de contracargo o advertencia de contracargo | `PaymentDisputed` | Actualiza la transacción referenciada como disputada |
+| Ajuste pendiente/rechazado de reembolso, crédito o reversión | `None` | Solo evento sin procesar del proveedor |
 | `subscription.created` | `SubscriptionCreated` | `Subscription::get` → upsert de `payments_subscriptions` + partidas |
 | `subscription.updated`, `.activated`, `.paused`, `.resumed`, `.trialing` | `SubscriptionUpdated` | Igual que arriba |
 | `subscription.canceled` | `SubscriptionCanceled` | Igual; fija `canceled_at`, cambia el estado |
@@ -357,9 +399,17 @@ Paddle pone el objeto de entidad directamente bajo `data` (no bajo
 `data.object` como Stripe). Los importes llegan como **cadenas de
 unidades menores** (`"1234"` = 12.34 en la unidad mayor), no como
 decimales - el adaptador analiza tanto la forma de cadena como la
-numérica, por compatibilidad futura. La moneda llega como
-`currency_code`, en minúsculas, y la instantánea la pone en
-mayúsculas.
+numérica, por compatibilidad futura. La instantánea pone `currency_code`
+en mayúsculas. La hora del pago proviene del último intento de pago
+capturado; si ninguno tiene una marca de tiempo de captura, `paid_at`
+queda ausente. `billed_at` es la hora de emisión de factura y nunca se
+usa como hora de pago.
+
+El helper `paddle_event_to_neutral`, basado solo en el nombre del evento,
+devuelve `None` para los ajustes porque el estado de aprobación y la acción
+requieren el payload. Usa `WebhookHandler::parse_event` para clasificarlos.
+Los eventos de reversión sin procesar siguen disponibles para la
+reconciliación de la aplicación; no implican un nuevo pago ni reembolso.
 
 ### Importes con impuesto incluido
 
@@ -389,7 +439,7 @@ let cus = provider.create_customer(CreateCustomerRequest {
     user_id: "user_42".into(),       // el id de usuario de tu app
     email: "alice@example.com".into(),
     name: Some("Alice".into()),
-    metadata: None,                  // no se reenvía a Paddle en v1
+    metadata: None,                  // mapa de cadenas custom_data opcional
 }).await?;
 // cus.provider_customer_id == "ctm_01h..."
 ```

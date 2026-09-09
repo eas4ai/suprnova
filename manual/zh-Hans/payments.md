@@ -187,7 +187,7 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
 
 ### `Checkout` - 通用，打开客户端小部件
 
-每一个提供商都实现了 `Checkout`。调用 `start_session` 来获得一个带 flow 标记的 `SessionPayload`，供您的前端渲染。`session_status`（默认：`NotSupported`；由那些会话可以被查询的提供商重写，例如 Stripe）报告的是您之前发起的一个会话，在提供商那一侧的权威状态。
+每一个提供商都实现了 `Checkout`。调用 `start_session` 来获得一个带 flow 标记的 `SessionPayload`，供您的前端渲染。`session_status`（默认：`NotSupported`；由那些会话可以被查询的提供商重写，Stripe 和 Paddle）报告的是您之前发起的一个会话，在提供商那一侧的权威状态。
 
 ```rust,ignore
 #[async_trait]
@@ -209,7 +209,8 @@ pub trait Checkout: Send + Sync {
 | `success_return_url` | `String` | 支付完成后把用户带去哪里 |
 | `cancel_return_url` | `String` | 用户放弃时把他们带去哪里 |
 | `amount_hint` | `Option<Money>` | 为一次性金额提供的覆盖值或提示 |
-| `idempotency_key` | `Option<String>` | 用于安全重试 |
+| `idempotency_key` | `Option<String>` | Stripe 会转发；Paddle 在提供此字段时会拒绝 |
+| `metadata` | `Option<Value>` | 附加到提供商结账及其支付或订阅的关联数据 |
 
 `session_status` 是重定向流程的服务端验证原语。当客户回到您的返回页面时，不要相信他们浏览器带回来的查询参数 - 传入您在 `start_session` 时记录下的 `provider_session_id`，然后基于结果分支处理：
 
@@ -632,7 +633,7 @@ pub enum ChargeResult {
 
 ## 幂等键
 
-每一个会产生变更的 DTO，都有一个可选的 `idempotency_key: Option<String>`。在可重试的网络调用上设置一个：
+结账、扣款、退款和订阅变更的 DTO 提供可选的 `idempotency_key: Option<String>`。请在受支持的 Stripe 调用中设置它：
 
 ```rust,ignore
 provider.start_session(StartSessionRequest {
@@ -648,7 +649,7 @@ provider.subscribe(SubscribeRequest {
 }).await?;
 ```
 
-Stripe 通过 `Idempotency-Key` 这个 HTTP 请求头来遵守幂等键。Paddle 也有一套等效的机制。如果一个请求在半路上失败了，而您用同一个键重试，提供商会返回原始的响应，而不是创建一次重复的扣款或者订阅。
+Stripe 通过 `Idempotency-Key` HTTP 请求头转发受支持请求的键。重试同一操作时，请使用相同的键和参数。Paddle 不接受客户端提供的幂等键；其结账和订阅更新方法在提供键时会返回 `NotSupported`。创建成功后，请持久化交易 ID。如果 Paddle 创建结果不确定，请先核对提供商状态，再发起另一次创建。关联元数据不会对请求去重。
 
 ## 判别模式
 
