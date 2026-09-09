@@ -122,13 +122,39 @@ fn a_generated_application_is_live_ready() {
     );
 
     let manifest = read(project.join("Cargo.toml"));
-    let framework_lines = manifest
+    // Two framework lines, and only two: the production dependency and the
+    // dev-dependency that turns `testing` back on for test builds alone.
+    // This used to assert exactly one, which was a proxy for "the facade is
+    // the only way in". The production build shape needs both lines, so the
+    // assertion checks what each one is for instead of counting them.
+    let framework_lines: Vec<&str> = manifest
         .lines()
-        .filter(|line| line.trim_start().starts_with("suprnova"))
-        .count();
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("suprnova"))
+        .collect();
     assert_eq!(
-        framework_lines, 1,
-        "exactly one framework dependency: {manifest}"
+        framework_lines.len(),
+        2,
+        "the production dependency and the testing dev-dependency: {manifest}"
+    );
+    let production = framework_lines[0];
+    assert!(
+        production.contains("default-features = false"),
+        "the binaries build with default features off, so no test seam \
+         reaches them: {production}"
+    );
+    assert!(
+        !production.contains("\"testing\""),
+        "`testing` is never a production feature: {production}"
+    );
+    let development = framework_lines[1];
+    assert!(
+        development.contains("\"testing\""),
+        "`cargo test` still gets the test seams: {development}"
+    );
+    assert!(
+        manifest.contains("[dev-dependencies]"),
+        "the second framework line is a dev-dependency: {manifest}"
     );
     for forbidden in [
         "suprnova-live",
