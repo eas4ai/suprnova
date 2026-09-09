@@ -1626,10 +1626,48 @@ async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_tabl
 /// `render_cache_support::boot` just created: a `CachedEvaluator` in front
 /// of a `DatabaseEvaluator`, with the composite bound as `dyn FeatureSync`
 /// so `set_flag` and `reload` fan out exactly as they do in production.
+///
+/// `bootstrap_database_cached` wires that composite via `App::bind`, which
+/// (unlike `DB::get`/`DB::connection`) writes straight into the process-
+/// global App container with no task-local or thread-local check at all -
+/// "last write wins" across the whole process, not just this test. Every
+/// `#[tokio::test]` in this file that calls this function does so on its
+/// own OS thread with its own `TestDatabase`, but they all fight over that
+/// one global `dyn FeatureSync` slot: whichever test bootstraps last wins
+/// it, and any *other* test's `set_flag`/`reload` call then fans its
+/// `notify`/`notify_reloaded` out to the *winner's* `DatabaseEvaluator`
+/// instead of its own. That stray call still runs on the calling test's own
+/// thread (so its ambient `DB::transaction` writes land in the calling
+/// test's own database), but it also reconciles the *winner's* in-memory
+/// snapshot early - so when the winner later runs its own `reload()`
+/// expecting to observe a change, the snapshot already matches and
+/// `changed_features` reports nothing, and the generation this function's
+/// caller expected advanced never does.
+///
+/// Fixed here, not in `bootstrap_database_cached`: `App::make` (which
+/// `notify`/`notify_reloaded` call) checks a task-local override, then a
+/// thread-local `TestContainer` override, before ever falling through to
+/// that global slot. Re-binding the exact same composite through
+/// `TestContainer::bind` gives *this* test's own thread a binding that
+/// resolution finds before it ever reaches the racy global one, so this
+/// test's own `notify` calls always reach its own evaluators regardless of
+/// which test most recently won the global slot - each test gets its own
+/// evaluator scope again, matching what a single test running alone would
+/// see.
 async fn bootstrap_flags() -> suprnova::features::BootstrappedFeatures {
-    suprnova::features::bootstrap_database_cached(Duration::from_secs(3_600))
+    use suprnova::features::{CompositeFeatureSync, FeatureSync};
+    use suprnova::testing::TestContainer;
+
+    let features = suprnova::features::bootstrap_database_cached(Duration::from_secs(3_600))
         .await
-        .expect("bootstrap the feature evaluator chain")
+        .expect("bootstrap the feature evaluator chain");
+
+    TestContainer::bind::<dyn FeatureSync>(Arc::new(CompositeFeatureSync::new(
+        vec![features.database.clone() as Arc<dyn FeatureSync>],
+        vec![features.cached.clone() as Arc<dyn FeatureSync>],
+    )));
+
+    features
 }
 
 /// What one `is_enabled` call records, in a collector scope attributed the
