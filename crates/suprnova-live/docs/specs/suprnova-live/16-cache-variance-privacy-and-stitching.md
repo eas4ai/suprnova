@@ -289,6 +289,22 @@ operator no signal naming the contract that refused.
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Delivered the promoted authorization and RBAC requirements.
+  Each authorization evaluation runs inside a consult window; principal
+  material recorded inside it, or nothing the recording can resolve, SHALL
+  require the `Principal` dimension, and tenant material alone SHALL require
+  `Tenant` through the distinct `AuthorizationTenantRead` classification
+  reason. The framework's RBAC reads name the five tables they read -
+  `roles`, `permissions`, `role_permissions`, `model_roles`, and
+  `model_permissions` - through crate-private observing statement helpers,
+  so an RBAC-gated route is observed precisely instead of declining;
+  application raw SQL keeps its documented boundary unchanged. A global
+  scope declares whether its filter is constant or per-request, and a
+  per-request evaluation that records no resolvable read SHALL narrow the
+  render to `Uncacheable` and name the scope. The write side opens in every
+  process whose configuration enables RenderCache and whose database holds
+  the migration, probed at most once and never inside a caller's
+  transaction.
 - 2026-09-08 -- Promoted `authorization-reads-record-consulted-identity.md`
   from `iterations/next/` into iteration 006: an authorization decision
   records the identity axis and the concrete identity it consulted, recorded

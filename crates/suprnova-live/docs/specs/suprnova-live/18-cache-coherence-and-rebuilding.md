@@ -313,6 +313,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Delivered the promoted rewind-detection requirement. An
+  observation stamped above the authority epoch is a rewind, reported before
+  any dependency comparison, and an entry so stamped SHALL NOT be served at
+  any age under any freshness policy - not even once under `Warning` on a
+  stale-servable route. The detecting node lifts the ledger epoch to one
+  past the stamp, and only while the epoch is still at or below it, then
+  drops its epoch lease and clears its own L0, so every other node converges
+  through the paths an operator's epoch advance already uses. The lift is a
+  required ledger operation with no default body: a ledger that cannot lift
+  SHALL NOT claim rewind safety.
 - 2026-09-08 -- Promoted `redis-generation-hints.md` from `iterations/next/`
   into iteration 006: a hint MAY only shorten a lease a node already holds
   and is never authority, with its remaining bounds recorded here before

@@ -247,6 +247,19 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-08 -- Delivered the promoted point-read and feature-flag
+  requirements. A primary-key point read that returns a row observes that
+  record and the new per-table `UnkeyedWrite` identity, never the table; one
+  that returns no row observes the table, because an insert is what changes
+  its answer. Every write that cannot name the rows it changed - a bulk
+  update or delete, a table-builder write, or a raw statement on a named
+  table, SHALL advance both `Table` and `UnkeyedWrite`, so a row-level write
+  elsewhere leaves a point-read entry current while an unkeyed one reaches
+  it. "A flag with no scoped rule" means a flag the snapshot holds at no
+  scope key, the global default included: such a read records nothing,
+  while a flag the snapshot holds at any scope key observes a `Feature`
+  generation that `set_flag` and a `reload` diff advance after the snapshot
+  swap, never before it.
 - 2026-09-08 -- Promoted `write-side-outside-the-serving-process.md` from
   `iterations/next/` into iteration 006 for its advancement aspect: the
   advancement rule holds in every writing process, recorded under
