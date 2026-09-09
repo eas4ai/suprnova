@@ -18,11 +18,38 @@
 use crate::config::{Config, Environment};
 use crate::error::FrameworkError;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set by [`load_env`] once the environment has been loaded from a
 /// single-threaded context.
 static ENV_LOADED_PRE_RUNTIME: AtomicBool = AtomicBool::new(false);
+
+/// The application's own package version, recorded once by
+/// [`crate::main`] from the application crate's compilation.
+static DEFAULT_BUILD_ID: OnceLock<&'static str> = OnceLock::new();
+
+/// Records `version` as the RenderCache default build identity.
+///
+/// [`crate::main`]'s expansion calls this with the application crate's own
+/// `CARGO_PKG_VERSION`, so `RenderCacheConfig::from_env`'s default tracks
+/// the application's compilation rather than this framework crate's. The
+/// first call wins: later calls (a second `#[suprnova::main]` invocation
+/// cannot occur in one binary, but a direct caller could try) are ignored,
+/// the same one-shot shape [`load_env`] uses for the environment.
+pub fn set_default_build_id(version: &'static str) {
+    let _ = DEFAULT_BUILD_ID.set(version);
+}
+
+/// The application version [`crate::main`] recorded, if it ran.
+///
+/// `None` when the process never expanded `#[suprnova::main]` - a binary
+/// built with `#[tokio::main]` directly, or a test process that never
+/// booted through it.
+#[must_use]
+pub fn default_build_id() -> Option<&'static str> {
+    DEFAULT_BUILD_ID.get().copied()
+}
 
 /// Load `.env` and register the framework's typed config.
 ///

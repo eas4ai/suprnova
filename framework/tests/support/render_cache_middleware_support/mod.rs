@@ -525,7 +525,7 @@ pub enum BootL1 {
 /// transaction began and never blocks a writer, and a writer never blocks
 /// a reader. That is exactly the isolation the render's read view needs.
 pub async fn boot_with_render_cache() -> Arc<Harness> {
-    boot(true, BootDatabase::FreshSqlite, BootL1::Disabled).await
+    boot(true, BootDatabase::FreshSqlite, BootL1::Disabled, None).await
 }
 
 /// Test-only for the fix round 1, item 2 regression test: boots exactly
@@ -537,7 +537,7 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
 /// already registered its own middleware" without also fighting this
 /// harness's own test-isolation clear.
 pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
-    boot(false, BootDatabase::FreshSqlite, BootL1::Disabled).await
+    boot(false, BootDatabase::FreshSqlite, BootL1::Disabled, None).await
 }
 
 /// Test-only for fix round 2, item 5: boots exactly like
@@ -550,7 +550,25 @@ pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> A
 /// this is the first and only place L1 actually runs together with the
 /// middleware.
 pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
-    boot(true, BootDatabase::FreshSqlite, BootL1::Fresh).await
+    boot(true, BootDatabase::FreshSqlite, BootL1::Fresh, None).await
+}
+
+/// Boots exactly like [`boot_with_render_cache_and_l1_for_test`], except
+/// the installed configuration's build id is overridden with `build_id`
+/// (via [`suprnova::render_cache::config::RenderCacheConfig::with_build_id`])
+/// rather than whatever [`RenderCacheConfig::from_env`] would have chosen.
+/// Exists for the build-id middleware test: pairing this with
+/// [`reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test`]
+/// gives two installs over the *same* database and L1 directory that agree
+/// on everything except the build id.
+pub async fn boot_with_render_cache_and_l1_and_build_id_for_test(build_id: &str) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Fresh,
+        Some(build_id.to_owned()),
+    )
+    .await
 }
 
 /// Boots exactly like [`boot_with_render_cache`], on a live server
@@ -563,7 +581,7 @@ pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
 pub async fn boot_with_render_cache_on_live_server_for_test(
     conn: suprnova::database::DbConnection,
 ) -> Arc<Harness> {
-    boot(true, BootDatabase::LiveServer(conn), BootL1::Disabled).await
+    boot(true, BootDatabase::LiveServer(conn), BootL1::Disabled, None).await
 }
 
 /// A simulated process restart (final review, F3 / ruling R119): a fresh
@@ -583,6 +601,28 @@ pub async fn reboot_with_render_cache_on_the_same_database_and_l1_for_test(
         true,
         BootDatabase::Existing(previous.conn.clone()),
         BootL1::Existing(l1_dir),
+        None,
+    )
+    .await
+}
+
+/// Exactly like [`reboot_with_render_cache_on_the_same_database_and_l1_for_test`],
+/// except the second install's build id is overridden with `build_id`
+/// instead of inheriting whatever [`RenderCacheConfig::from_env`] would
+/// have chosen for both installs alike.
+pub async fn reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test(
+    previous: &Harness,
+    build_id: &str,
+) -> Arc<Harness> {
+    let l1_dir = previous
+        .l1_dir
+        .clone()
+        .expect("the previous boot must have been made with L1 enabled");
+    boot(
+        true,
+        BootDatabase::Existing(previous.conn.clone()),
+        BootL1::Existing(l1_dir),
+        Some(build_id.to_owned()),
     )
     .await
 }
@@ -628,7 +668,12 @@ async fn create_owned_tables(conn: &suprnova::database::DbConnection) {
         .expect("create users table");
 }
 
-async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1) -> Arc<Harness> {
+async fn boot(
+    clear_global_middleware: bool,
+    database: BootDatabase,
+    l1: BootL1,
+    build_id: Option<String>,
+) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     App::init();
@@ -1424,6 +1469,9 @@ async fn boot(clear_global_middleware: bool, database: BootDatabase, l1: BootL1)
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;
     config.enabled = true;
+    if let Some(build_id) = build_id {
+        config = config.with_build_id(build_id);
+    }
     let (l1_tempdir, l1_dir) = match l1 {
         BootL1::Disabled => {
             config.l1 = suprnova::render_cache::L1Config::Disabled;

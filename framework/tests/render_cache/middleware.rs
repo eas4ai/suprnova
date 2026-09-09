@@ -23,11 +23,12 @@
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
     advance_epoch_on_another_node, advance_posts, authority_epoch, boot_with_render_cache,
-    boot_with_render_cache_and_l1_for_test,
+    boot_with_render_cache_and_l1_and_build_id_for_test, boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
-    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user,
+    reboot_with_render_cache_on_the_same_database_and_l1_for_test,
+    reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test, rename_user,
     rewind_epoch_on_another_node, statements,
 };
 // Used only by tests gated on the `testing` feature below (ruling R47):
@@ -2936,6 +2937,65 @@ async fn a_pre_bump_private_entry_stays_a_miss_after_a_restart_that_keeps_l1_and
         1,
         "the pre-bump entry is still a miss after the restart: its observed permission \
          generation is behind the one the bump persisted"
+    );
+}
+
+/// Iteration 006 Plan F, definition-of-done item 9: the build identity that
+/// keys every RenderCache lookup comes from the application, so two
+/// installs that disagree on it must never share an entry - the same
+/// restart shape the pre-bump test above uses (a fresh runtime slot over
+/// the **same** database and the **same** L1 directory), except only the
+/// build id differs between the two installs, not the permission
+/// generation.
+///
+/// Proven by revert: pass the same build id to both boots (or drop
+/// `RenderCacheConfig::from_source`'s `APP_BUILD_ID`/recorded-default
+/// distinction back to a hardcoded constant) and the render count
+/// assertion below fails at `left: 0, right: 1` - the restarted process
+/// serves the first build's L1 file without rendering, exactly the
+/// `l1_participates_with_promotion_and_dual_publish` "L1 hit runs no
+/// handler" shape, which is wrong once the application itself has changed.
+#[tokio::test]
+#[serial_test::serial]
+async fn two_installs_with_different_application_build_ids_never_share_an_entry() {
+    let first_boot = boot_with_render_cache_and_l1_and_build_id_for_test("1.0.0").await;
+
+    dispatch_get(&first_boot, "/l1-cached/1", &[]).await;
+    assert_eq!(counting_route::renders(), 1);
+    assert!(
+        RenderCache::inspect_l1_for_test("/l1-cached/{id}", &[("id", "1")], None)
+            .await
+            .is_some(),
+        "precondition: the first build's entry reached L1"
+    );
+
+    let restarted = reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test(
+        &first_boot,
+        "1.0.1",
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        0,
+        "the restarted process has rendered nothing yet"
+    );
+
+    // Same route, same params, same on-disk L1 directory - only the
+    // installed build id differs. A shared entry would serve the first
+    // build's file with no render at all; the count below is the proof
+    // either way.
+    dispatch_get(&restarted, "/l1-cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "two different application build ids must never share an entry: the second \
+         install's request is a miss against the first build's file, not a hit"
+    );
+    assert!(
+        RenderCache::inspect_l1_for_test("/l1-cached/{id}", &[("id", "1")], None)
+            .await
+            .is_some(),
+        "the second build's own render published its own, separately keyed entry"
     );
 }
 

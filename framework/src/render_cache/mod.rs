@@ -368,6 +368,14 @@ impl RenderCache {
     /// [`crate::middleware::register_global_middleware`], and returns the
     /// router unchanged.
     ///
+    /// `config.build_id` is mixed into every lookup key this runtime
+    /// derives. [`RenderCacheConfig::from_env`] resolves it from three
+    /// sources in order - an explicit `APP_BUILD_ID`, the application's own
+    /// package version recorded by [`crate::main`], or this framework
+    /// crate's version as a last resort - so two installs that disagree on
+    /// any of those three never share an entry; see
+    /// [`RenderCacheConfig::with_build_id`] for a programmatic override.
+    ///
     /// # Call this after registering locale, session, and auth middleware
     ///
     /// `register_global_middleware` appends to whatever is already

@@ -10,8 +10,9 @@
 //! ahead of the runtime, where the mutation is actually sound.
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{ItemFn, parse_macro_input};
+use syn::ItemFn;
 
 /// Which Tokio runtime the generated `main` builds.
 enum Flavor {
@@ -93,8 +94,23 @@ impl syn::parse::Parse for MainArgs {
 }
 
 pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as MainArgs);
-    let input_fn = parse_macro_input!(input as ItemFn);
+    main_impl_inner(attr.into(), input.into()).into()
+}
+
+/// `proc_macro2`-flavoured entry point. The outer `main_impl` is a thin
+/// shim that converts the host `proc_macro::TokenStream`. Splitting the
+/// work here lets the unit tests below feed in token streams directly and
+/// assert on the rendered output - the host `proc_macro::TokenStream`
+/// cannot be constructed outside a real macro-expansion context.
+fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
+    let args: MainArgs = match syn::parse2(attr) {
+        Ok(args) => args,
+        Err(e) => return e.to_compile_error(),
+    };
+    let input_fn: ItemFn = match syn::parse2(input) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error(),
+    };
 
     // The macro's whole purpose is to own runtime construction, so an
     // already-synchronous fn means the author expected something this
@@ -104,8 +120,7 @@ pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
             input_fn.sig.fn_token,
             "#[suprnova::main] expects an `async fn` - it builds the Tokio runtime for you",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let attrs = &input_fn.attrs;
@@ -128,12 +143,19 @@ pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
         None => quote! {},
     };
 
-    // `load_env` runs before the builder line on purpose, and the
-    // ordering is the entire point of this macro - see the module doc.
+    // `load_env` runs before the builder line on purpose, and the ordering
+    // is the entire point of this macro - see the module doc.
+    // `set_default_build_id` runs immediately after: `env!` expands where
+    // these tokens are compiled, which is the *application* crate, not
+    // this macro crate, so it records the application's own
+    // `CARGO_PKG_VERSION` rather than the framework's - what
+    // `RenderCacheConfig::from_env`'s default build id is supposed to
+    // track.
     let expanded = quote! {
         #(#attrs)*
         #vis fn #name() #output {
             ::suprnova::boot::load_env_or_exit();
+            ::suprnova::boot::set_default_build_id(::core::env!("CARGO_PKG_VERSION"));
 
             let __suprnova_runtime = #builder
                 #worker_threads
@@ -148,7 +170,7 @@ pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     // Silence the unused-field warning when no conflict was reported.
     let _ = args.flavor_span;
 
-    expanded.into()
+    expanded
 }
 
 #[cfg(test)]
@@ -228,6 +250,39 @@ mod tests {
         assert!(
             err.to_string().contains("worker_threads"),
             "error must name the offending key; got: {err}"
+        );
+    }
+
+    /// Iteration 006 Plan F: the default RenderCache build id must track
+    /// the application, not this framework crate, so the expansion has to
+    /// hand the application's own `CARGO_PKG_VERSION` to
+    /// `suprnova::boot::set_default_build_id` - and it has to do so
+    /// *after* `load_env_or_exit`, the same ordering the module doc gives
+    /// for why this macro exists at all.
+    #[test]
+    fn the_expansion_records_the_application_build_id_after_loading_the_environment() {
+        let attr: TokenStream2 = "".parse().unwrap();
+        let input: TokenStream2 = r#"async fn main() { body() }"#.parse().unwrap();
+        let expanded = main_impl_inner(attr, input).to_string();
+
+        let load_env_at = expanded
+            .find("load_env_or_exit")
+            .unwrap_or_else(|| panic!("expansion must call load_env_or_exit; got:\n{expanded}"));
+        let set_build_id_at = expanded.find("set_default_build_id").unwrap_or_else(|| {
+            panic!("expansion must call set_default_build_id; got:\n{expanded}")
+        });
+        assert!(
+            load_env_at < set_build_id_at,
+            "set_default_build_id must run after load_env_or_exit; got:\n{expanded}"
+        );
+        assert!(
+            expanded.contains("CARGO_PKG_VERSION"),
+            "the build id must come from CARGO_PKG_VERSION; got:\n{expanded}"
+        );
+        assert!(
+            expanded.contains("env !") || expanded.contains("env!"),
+            "the build id must come from env! so it expands in the application crate, \
+             not a literal; got:\n{expanded}"
         );
     }
 }

@@ -235,6 +235,13 @@ pub struct RenderCacheConfig {
     /// Provider failure behavior.
     pub failure: FailurePolicy,
     /// Application and view build identity namespace.
+    ///
+    /// [`Self::from_env`] resolves this through three sources, in order:
+    /// an explicit `APP_BUILD_ID`; the application's own package version,
+    /// recorded by [`crate::main`] from the application crate's
+    /// compilation; the framework crate's own version, only when the
+    /// process never expanded [`crate::main`]. [`Self::with_build_id`]
+    /// overrides whatever [`Self::from_env`] chose.
     pub build_id: String,
     /// Test-only clock override; `None` means `install` uses the system
     /// clock. `#[doc(hidden)]`: not part of the public contract, set only
@@ -329,6 +336,21 @@ impl RenderCacheConfig {
         self
     }
 
+    /// Overrides the build identity mixed into every lookup key.
+    ///
+    /// Use this when the application derives a per-deploy value (a commit
+    /// hash, say) in code rather than through the `APP_BUILD_ID`
+    /// environment variable - a programmatic install that never reads
+    /// [`Self::from_env`] still has a way to set this. Takes precedence
+    /// over whatever [`Self::from_env`] chose, the same way an explicit
+    /// `APP_BUILD_ID` takes precedence over the recorded application
+    /// version.
+    #[must_use]
+    pub fn with_build_id(mut self, build_id: impl Into<String>) -> Self {
+        self.build_id = build_id.into();
+        self
+    }
+
     /// Reads the process environment.
     ///
     /// `RENDER_CACHE_ENABLED` (default `true`), `RENDER_CACHE_L0_ENTRIES`
@@ -336,16 +358,21 @@ impl RenderCacheConfig {
     /// `RENDER_CACHE_FAILURE` (`open` default or `closed`), and
     /// `APP_BUILD_ID` keep the meaning they have always had.
     ///
-    /// `APP_BUILD_ID`'s default is `env!("CARGO_PKG_VERSION")`, which
-    /// expands at compile time inside *this* crate, so the fallback is the
-    /// framework crate's own version rather than the host application's. It
-    /// matches the application's only where both inherit one workspace
-    /// version, and either way it moves only when someone bumps a version
-    /// number. A deployment should set `APP_BUILD_ID` explicitly to
-    /// something that changes every release (a commit id, say): it is mixed
-    /// into every lookup key, so a deploy that changes a template or a
-    /// handler without a version bump otherwise keeps the previous build's
-    /// entries reachable.
+    /// `APP_BUILD_ID`'s default, absent the environment variable, is the
+    /// application's own package version: [`crate::main`]'s expansion
+    /// records `CARGO_PKG_VERSION` from the *application* crate's own
+    /// compilation (see [`crate::boot::default_build_id`]), and that
+    /// recorded value wins here. Only a binary that never expands
+    /// [`crate::main`] falls back further, to this framework crate's own
+    /// version - named as such because it is otherwise easy to mistake for
+    /// the application's. Either way the value moves only when someone
+    /// bumps a version number. A deployment should set `APP_BUILD_ID`
+    /// explicitly to something that changes every release (a commit id,
+    /// say): it is mixed into every lookup key, so a deploy that changes a
+    /// template or a handler without a version bump otherwise keeps the
+    /// previous build's entries reachable. [`Self::with_build_id`] sets
+    /// this programmatically instead, for an install that never reads the
+    /// environment.
     ///
     /// `RENDER_CACHE_PROFILE` (`embedded` default, `database`, `redis`)
     /// selects the deployment shape and with it the defaults for the L1
@@ -522,7 +549,9 @@ impl RenderCacheConfig {
             } else {
                 FailurePolicy::Open
             },
-            build_id: read("APP_BUILD_ID").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()),
+            build_id: read("APP_BUILD_ID")
+                .or_else(|| crate::boot::default_build_id().map(str::to_owned))
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()),
             clock_override: None,
             coordinator_override: None,
         })
@@ -792,5 +821,53 @@ mod tests {
         assert!(printed.contains("redis://<redacted>"), "{printed}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(!printed.contains("10.0.0.1"), "{printed}");
+    }
+
+    /// The build id's three-source fallback chain, and the one-shot
+    /// semantics of [`crate::boot::set_default_build_id`] behind it, both
+    /// in one test.
+    ///
+    /// [`crate::boot::default_build_id`] is a process-wide `OnceLock` with
+    /// no reset (the same one-shot shape [`crate::boot::load_env`] uses
+    /// for the environment): once any caller records a value, it is the
+    /// answer for the rest of this test binary's life. Nothing else in
+    /// this crate's unit tests calls `set_default_build_id`, so this is
+    /// the only test that may - a second one would race this one for
+    /// which value "wins", and the "nothing recorded yet" assertion below
+    /// would become order-dependent.
+    #[test]
+    fn build_id_prefers_app_build_id_then_the_recorded_default_then_the_framework_version() {
+        assert_eq!(
+            crate::boot::default_build_id(),
+            None,
+            "nothing in this binary has recorded a default build id yet"
+        );
+
+        // Tier 3: neither an explicit APP_BUILD_ID nor a recorded
+        // application version - the framework crate's own version, exactly
+        // as it always was.
+        assert_eq!(parsed(&[]).build_id, env!("CARGO_PKG_VERSION"));
+
+        // Tier 2: #[suprnova::main]'s hand-off, once it has run.
+        crate::boot::set_default_build_id("1.2.3-recorded");
+        assert_eq!(crate::boot::default_build_id(), Some("1.2.3-recorded"));
+        assert_eq!(parsed(&[]).build_id, "1.2.3-recorded");
+
+        // Tier 1: an explicit APP_BUILD_ID always wins over the recorded
+        // default.
+        assert_eq!(
+            parsed(&[("APP_BUILD_ID", "explicit-build")]).build_id,
+            "explicit-build"
+        );
+
+        // First call wins: a later call is ignored, and the recorded
+        // default from the first call above still applies.
+        crate::boot::set_default_build_id("9.9.9-ignored");
+        assert_eq!(
+            crate::boot::default_build_id(),
+            Some("1.2.3-recorded"),
+            "set_default_build_id's first call wins; later calls are ignored"
+        );
+        assert_eq!(parsed(&[]).build_id, "1.2.3-recorded");
     }
 }
