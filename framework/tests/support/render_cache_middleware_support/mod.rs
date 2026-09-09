@@ -1565,6 +1565,29 @@ pub async fn advance_epoch_on_another_node(_harness: &Harness) {
         .expect("advance the authority epoch as another node would");
 }
 
+/// Rewinds the shared epoch singleton to `to`, the way restoring a backup
+/// taken before the current deploy does. Goes through the ordinary write
+/// path rather than a ledger method, because no ledger method lowers an
+/// epoch and none should: this is what an operator's restore leaves behind,
+/// not an operation the framework offers.
+pub async fn rewind_epoch_on_another_node(_harness: &Harness, to: u64) {
+    let bound = i64::try_from(to).expect("an epoch fits in an i64");
+    let rows = suprnova::DB::affecting_statement(
+        "UPDATE suprnova_render_epochs SET epoch = ? WHERE singleton = 1",
+        vec![sea_orm::Value::from(bound)],
+    )
+    .await
+    .expect("rewind the epoch singleton");
+    assert_eq!(rows, 1, "the epoch singleton must exist");
+}
+
+/// The shared authority epoch, read the way a sibling node reads it.
+pub async fn authority_epoch() -> u64 {
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    ledger().epoch().await.expect("read the authority epoch")
+}
+
 /// Advances the `posts` table's generation directly, through the ORM path,
 /// independent of any render.
 pub async fn advance_posts(_harness: &Harness) {

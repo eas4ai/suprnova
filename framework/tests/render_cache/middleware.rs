@@ -22,12 +22,13 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    advance_epoch_on_another_node, advance_posts, boot_with_render_cache,
+    advance_epoch_on_another_node, advance_posts, authority_epoch, boot_with_render_cache,
     boot_with_render_cache_and_l1_for_test,
     boot_with_render_cache_preserving_global_middleware_for_test, clock, counting_route,
     create_user, dispatch_get, dispatch_head, ensure_per_tenant_authz_gate,
     ensure_round3_authz_gate, ensure_round4_per_user_authz_gate,
-    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user, statements,
+    reboot_with_render_cache_on_the_same_database_and_l1_for_test, rename_user,
+    rewind_epoch_on_another_node, statements,
 };
 // Used only by tests gated on the `testing` feature below (ruling R47):
 // `NON_ASCII_LINK` by the non-ASCII header test, `wait_until_background_finished`
@@ -2935,5 +2936,139 @@ async fn a_pre_bump_private_entry_stays_a_miss_after_a_restart_that_keeps_l1_and
         1,
         "the pre-bump entry is still a miss after the restart: its observed permission \
          generation is behind the one the bump persisted"
+    );
+}
+
+/// Iteration 006, definition-of-done item 6. An entry stamped above the
+/// restored authority is refused outright - not served once under
+/// `Warning`, even on a stale-servable route - the node lifts the ledger's
+/// epoch above the stamp, and the route rebuilds.
+///
+/// Verified failing by reverting `CoherenceCheck::compare` to a plain
+/// inequality: the entry came back `Moved`, `freshness_state` put it in the
+/// stale-servable band, and the response carried `Warning` while serving a
+/// representation from a database state the restored authority never held.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    let published = counting_route::renders();
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "the entry is published and served before the restore"
+    );
+    let stamped = authority_epoch().await;
+
+    rewind_epoch_on_another_node(&harness, stamped.saturating_sub(2)).await;
+
+    let after_restore = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(after_restore.status, StatusCode::OK);
+    assert_eq!(
+        after_restore.header("warning"),
+        None,
+        "a representation the restored authority never issued is never served, \
+         not even once under Warning on a stale-servable route"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        published + 1,
+        "the route rebuilds in the foreground instead"
+    );
+    assert_eq!(
+        authority_epoch().await,
+        stamped + 1,
+        "the detecting node lifts the ledger's epoch above the highest stamp it saw"
+    );
+
+    let settled = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(settled.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        published + 1,
+        "and the rebuilt entry, stamped under the lifted epoch, is served again"
+    );
+}
+
+/// A lease-mode route trusts its lease, so it meets the rewind at its next
+/// authority read and not before - the same bound spec 18 already puts on
+/// every other epoch change.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_lease_mode_route_meets_the_rewind_at_its_next_authority_read() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    let published = counting_route::renders();
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "the second request rereads the authority and grants the lease"
+    );
+    let stamped = authority_epoch().await;
+
+    rewind_epoch_on_another_node(&harness, stamped.saturating_sub(2)).await;
+
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "within the lease the node consults no authority and serves"
+    );
+
+    // Past `max_age_ms` (60_000) for the lease granted above.
+    clock(&harness).advance_ms(61_000);
+
+    dispatch_get(&harness, "/leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        published + 1,
+        "the first authority read after the lease expires meets the rewind and rebuilds"
+    );
+    assert_eq!(
+        authority_epoch().await,
+        stamped + 1,
+        "and lifts the epoch above the stamp it met"
+    );
+}
+
+/// The other detection path: the leased epoch itself, met by a refresh
+/// rather than by an entry. Requesting a *different* key is what proves it,
+/// because no entry for that key exists to be compared.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rewind_seen_through_the_epoch_lease_alone_lifts_and_clears_l0() {
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    let published = counting_route::renders();
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        published,
+        "key 1 is published and served"
+    );
+    let stamped = authority_epoch().await;
+
+    rewind_epoch_on_another_node(&harness, stamped.saturating_sub(2)).await;
+
+    // A key with no entry: the authority read this miss makes is the
+    // refresh path, and the lease it replaces is the only thing above the
+    // restored authority.
+    dispatch_get(&harness, "/cached/2", &[]).await;
+    assert_eq!(
+        authority_epoch().await,
+        stamped + 1,
+        "the refresh path detects the rewind as well as the entry path"
+    );
+
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    assert!(
+        counting_route::renders() > published + 1,
+        "key 1's L0 entry was cleared, so it renders again rather than being served"
     );
 }

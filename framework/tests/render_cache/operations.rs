@@ -648,3 +648,36 @@ async fn a_closed_write_side_is_not_probed_again() {
         "a fixed decision is never probed again"
     );
 }
+
+/// The seven closed telemetry names, each naming its own counter. The
+/// rewind counter joins the other six here rather than in its own test,
+/// because what matters is that the set stays closed and distinct.
+#[test]
+fn the_render_cache_telemetry_names_are_closed_and_distinct() {
+    use suprnova::render_cache::telemetry;
+
+    let names = [
+        telemetry::LOOKUPS,
+        telemetry::HITS,
+        telemetry::PUBLICATIONS,
+        telemetry::REBUILDS,
+        telemetry::STITCH_ASSEMBLIES,
+        telemetry::STITCH_SLOTS,
+        telemetry::EPOCH_REWINDS,
+    ];
+    let mut sorted = names.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), names.len(), "no two counters share a name");
+    for name in names {
+        assert!(
+            name.starts_with("suprnova.render_cache."),
+            "{name} is namespaced"
+        );
+    }
+    assert_eq!(
+        telemetry::EPOCH_REWINDS,
+        "suprnova.render_cache.epoch_rewinds",
+        "the operations chapter's telemetry table quotes this name"
+    );
+}

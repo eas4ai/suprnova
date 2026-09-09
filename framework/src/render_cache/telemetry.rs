@@ -34,6 +34,21 @@ pub const STITCH_ASSEMBLIES: &str = "suprnova.render_cache.stitch.assemblies";
 /// slot could not be resolved and the whole document falls back to the
 /// handler).
 pub const STITCH_SLOTS: &str = "suprnova.render_cache.stitch.slots";
+/// Counter: authority epoch rewinds detected and lifted past.
+///
+/// Incremented once per detection, by the node that detected it: a stamp
+/// above the authority - an entry's, or this node's own leased epoch -
+/// which the node then lifts the ledger's epoch above. Carries no
+/// attribute, like [`PUBLICATIONS`] and [`REBUILDS`]: there is one outcome,
+/// and the two epoch numbers involved go to the warning log, never to a
+/// metric label, which is what keeps the label set closed and
+/// low-cardinality. One authority read that meets both a rewound lease and
+/// a rewound entry counts once.
+///
+/// A non-zero value after a database restore is the expected signal that
+/// the restore was noticed. A non-zero value at any other time means an
+/// authority moved backwards for a reason nobody intended.
+pub const EPOCH_REWINDS: &str = "suprnova.render_cache.epoch_rewinds";
 /// Attribute `outcome` values, emitted only on `LOOKUPS` and `HITS` (see
 /// `middleware.rs`'s `LookupOutcome::as_str`): `l0`, `l1`, `conditional`,
 /// `stale`, `miss`, `bypass`, `moved`, `declined`. `PUBLICATIONS` and

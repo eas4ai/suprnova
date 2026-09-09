@@ -309,9 +309,18 @@ impl EpochCache {
         *self.slot()
     }
 
-    /// Records the epoch an authority read just reported.
-    pub(super) fn refresh(&self, epoch: u64) {
-        *self.slot() = Some(epoch);
+    /// Records the epoch an authority read just reported, and reports the
+    /// leased epoch it replaced when that epoch was *greater* - which can
+    /// only mean the authority moved backwards under this node, because
+    /// nothing else lowers it.
+    ///
+    /// Returning it rather than acting on it keeps this type what it is: a
+    /// slot with a lock around it. The caller has the runtime the lift and
+    /// the L0 clear need.
+    pub(super) fn refresh(&self, epoch: u64) -> Option<u64> {
+        let mut slot = self.slot();
+        let previous = slot.replace(epoch);
+        previous.filter(|leased| *leased > epoch)
     }
 
     /// Drops the lease, so the next request that needs the epoch reads the
@@ -432,6 +441,55 @@ impl RenderCacheRuntime {
             .map(suprnova_live::identity::UnixMillis::get)
             .unwrap_or_default()
     }
+
+    /// A stamp above the authority was met: lift the ledger's epoch above
+    /// it, replace this node's lease with the lifted value, and clear this
+    /// node's L0 - the same L0 clear [`super::RenderCache::advance_epoch`]
+    /// does, so the rest of the deployment converges through the paths an
+    /// operator's epoch advance already uses, within one lease window on
+    /// lease-mode routes.
+    ///
+    /// The lease is *set to `lifted_to`*, not dropped to empty the way
+    /// `advance_epoch` drops it. `advance_epoch` has no fresher value to
+    /// offer - it is an operator call with no render of its own - so
+    /// dropping is the only option, and the very next request pays one
+    /// authority read to refill it. This call is different: it always runs
+    /// from inside a request that is about to rebuild
+    /// ([`freshness_state`]'s `Rewound` arm forces `Dead`, which always
+    /// rebuilds), and that rebuild's own [`RenderJob::restamp`] reads this
+    /// cache to decide what epoch to publish under. Dropping it here would
+    /// make `restamp` a no-op (its own documented behaviour for an empty
+    /// cache: proceed under the epoch already captured), so the rebuild
+    /// would render under the stale, rewound stamp, its own fresh reread
+    /// would then find *that* moved against the just-lifted authority, and
+    /// the candidate would be discarded unpublished - one request lifts the
+    /// epoch, the next one rebuilds for real. Setting the lease to the
+    /// value this call just proved current lets the same request's
+    /// `restamp` re-derive the right key immediately, so one rewound
+    /// request costs exactly one rebuild.
+    ///
+    /// A lift failure is logged by the ledger's own provider-error path and
+    /// swallowed here: the request proceeds as a miss, and the next
+    /// authority read detects the rewind again. Failing the request instead
+    /// would turn a recoverable restore into an outage.
+    pub(crate) async fn on_epoch_rewind(&self, stamped: u64) {
+        let Ok(lifted_to) = self.epoch_ledger.lift_epoch_above(stamped).await else {
+            return;
+        };
+        // The lift can only ever raise the epoch, so this can never itself
+        // report a further rewind; nothing here needs to act on the
+        // `Option` it returns.
+        let _ = self.epoch_cache.refresh(lifted_to);
+        self.l0.clear();
+        Metrics::counter(render_cache_telemetry::EPOCH_REWINDS).inc();
+        tracing::warn!(
+            target: "suprnova::render_cache",
+            stamped,
+            lifted_to,
+            "render cache authority epoch rewound; entries stamped above it are refused, \
+             the epoch was lifted past the highest stamp seen, and this node's L0 was cleared",
+        );
+    }
 }
 
 /// The permission version bound into `Principal` material, frozen at 0.
@@ -455,6 +513,9 @@ const FROZEN_PERMISSION_VERSION: u64 = 0;
 enum Coherence {
     Coherent,
     Moved,
+    /// The entry names an epoch above the authority's own: a rewind. Never
+    /// served, at any age, under any policy.
+    Rewound,
 }
 
 /// Which layer answered a lookup, for telemetry and promotion.
@@ -655,7 +716,9 @@ impl RenderCacheMiddleware {
             Some(epoch) => epoch,
             None => match runtime.ledger.epoch().await {
                 Ok(epoch) => {
-                    runtime.epoch_cache.refresh(epoch);
+                    if let Some(leased) = runtime.epoch_cache.refresh(epoch) {
+                        runtime.on_epoch_rewind(leased).await;
+                    }
                     epoch
                 }
                 Err(_) => return Err(ProviderFailure(request, next)),
@@ -1306,16 +1369,29 @@ async fn authority_coherence(
         .map_err(|_| ())?;
     // The one authority read a hit may make also renews the epoch lease, so
     // no request ever reads the epoch on its own (task 5b). Done before the
-    // comparison, not after: this is the value the comparison judges by.
-    runtime.epoch_cache.refresh(epoch);
+    // comparison, not after: this is the value the comparison judges by. A
+    // lease above what the authority now reports is itself a rewind, and is
+    // detected here even when the entry's own stamp is not.
+    let lease_rewound = runtime.epoch_cache.refresh(epoch);
+    if let Some(leased) = lease_rewound {
+        runtime.on_epoch_rewind(leased).await;
+    }
     Ok(
         match CoherenceCheck::compare(&header.observed, &current, epoch, header.epoch) {
             CoherenceCheck::Coherent => Coherence::Coherent,
             CoherenceCheck::Moved(_) => Coherence::Moved,
-            // Shim until Task 10 adds `Coherence::Rewound` and the lift: a
-            // rewound stamp is at minimum a move, which is what this code
-            // already does with an epoch mismatch in either direction.
-            CoherenceCheck::Rewound { .. } => Coherence::Moved,
+            CoherenceCheck::Rewound { stamped, .. } => {
+                // At most one recovery per authority read in the common
+                // case: the lease and the entry are two views of the same
+                // rewind, and the lift the lease already performed covers
+                // every entry this node published under it. An entry another
+                // node published above this node's lease is the exception,
+                // so a stamp above the rewound lease still lifts.
+                if lease_rewound.is_none_or(|leased| stamped > leased) {
+                    runtime.on_epoch_rewind(stamped).await;
+                }
+                Coherence::Rewound
+            }
         },
     )
 }
@@ -1335,6 +1411,13 @@ fn freshness_state(
     now_ms: u64,
     seed_deadline_ms: Option<u64>,
 ) -> FreshnessState {
+    // Before every window: a representation from a database state the
+    // restored authority never held is not served, not even once under
+    // `Warning` on a stale-servable route. Every other coherence result is
+    // a question of age; this one is not.
+    if coherence == Coherence::Rewound {
+        return FreshnessState::Dead;
+    }
     if coherence == Coherence::Coherent {
         return evaluate_freshness(
             &policy.freshness(),
@@ -1830,7 +1913,11 @@ async fn render_and_publish(
                             // which is the only way to change either.
                             if runtime.epoch_cache.get().is_none() {
                                 match runtime.ledger.epoch().await {
-                                    Ok(epoch) => runtime.epoch_cache.refresh(epoch),
+                                    Ok(epoch) => {
+                                        if let Some(leased) = runtime.epoch_cache.refresh(epoch) {
+                                            runtime.on_epoch_rewind(leased).await;
+                                        }
+                                    }
                                     Err(_) => return Err(ProviderFailure(request, next)),
                                 }
                             }
@@ -2733,7 +2820,10 @@ async fn fresh_reread_is_coherent(
     // before the race seam below: a hook armed there that itself advances
     // the epoch drops the lease, and re-filling it afterwards with the
     // pre-hook value would undo that.
-    runtime.epoch_cache.refresh(fresh_epoch);
+    let lease_rewound = runtime.epoch_cache.refresh(fresh_epoch);
+    if let Some(leased) = lease_rewound {
+        runtime.on_epoch_rewind(leased).await;
+    }
     // Test-only race seam (R72/R83): fires inside the reread, after the
     // values it will judge against have been read and before it judges
     // them, so a write armed here is on the far side of that read - the
@@ -2752,10 +2842,14 @@ async fn fresh_reread_is_coherent(
             race_points::fire(&race_points::AFTER_REREAD).await;
             Ok(())
         }
-        // Shim until Task 10: a candidate judged against a rewound
-        // authority is discarded, exactly as a moved one is.
-        CoherenceCheck::Rewound { .. } => Err(()),
         CoherenceCheck::Moved(_) => Err(()),
+        CoherenceCheck::Rewound { stamped, .. } => {
+            // At most one recovery per reread; see `authority_coherence`.
+            if lease_rewound.is_none_or(|leased| stamped > leased) {
+                runtime.on_epoch_rewind(stamped).await;
+            }
+            Err(())
+        }
     }
 }
 
