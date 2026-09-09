@@ -1,7 +1,7 @@
 # Suprnova Live -- 15 Render Representations and Storage
 
 Status: Normative design specification
-Last revised: 2026-09-08
+Last revised: 2026-09-09
 
 ## Scope
 
@@ -53,10 +53,13 @@ working unchanged, so day-to-day verification of this domain is not narrowed by
 the new shape. The framework-wide rule that owns the build shape lives in
 `conventions.md`; this domain owns the RenderCache seams it covers, which are
 the middleware race points, the collector's classification-stripping seam, the
-policy table, the `_for_test` operators on `RenderCache`, the key-input seam,
-the clock and coordinator configuration seams, and the console report builders.
-Until iteration 006 delivers this, `testing` is a default feature and an
-ordinary application build compiles those seams into the production binary.
+policy table, the `_for_test` operators on `RenderCache` (`shell_for_test`,
+`l0_frame_ptr_for_test`, and `uninstall_for_test` among them), the key-input
+seam, the clock and coordinator configuration seams, the console report
+builders, and the lookup recorder that backs the declined-reason
+documentation test. Until iteration 006 delivers this, `testing` is a default
+feature and an ordinary application build compiles those seams into the
+production binary.
 
 ### Complete and Composite representation models
 
@@ -247,6 +250,32 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Delivered the application build id: `#[suprnova::main]`'s
+  expansion calls `suprnova::boot::set_default_build_id` with the
+  application crate's own `CARGO_PKG_VERSION` immediately after loading
+  the environment, and `RenderCacheConfig::from_env` resolves `build_id`
+  through three sources in order: an explicit `APP_BUILD_ID`, the
+  recorded application version, then this framework crate's own version
+  only for a binary that never expanded `#[suprnova::main]`. The public,
+  ungated `RenderCacheConfig::with_build_id` builder overrides whatever
+  `from_env` chose, for a programmatic install that never reads the
+  environment. A middleware test proves two installs with different
+  application build ids never share an entry, recorded under Application
+  build identity at install.
+- 2026-09-09 -- Delivered the production build shape: `app/Cargo.toml` and
+  both CLI templates set `default-features = false` plus the nine
+  non-`testing` defaults on the production dependency and add
+  `features = ["testing"]` as a `[dev-dependencies]` override, so the
+  shape holds by construction rather than by discipline.
+  `framework/tests/fixtures/testing-off-probe/` is a separate-workspace
+  probe crate that fails to compile against every named seam without
+  `testing` and compiles with it, `scripts/check-feature-matrix.sh` gained
+  a production-shape profile, and `scripts/check-production-build.sh`
+  builds the dogfood binary in that shape, runs its migrations, and
+  serves one request; the monorepo gate gained the matching
+  `production-build` step. The render-cache seam inventory above gains
+  the lookup recorder and names `uninstall_for_test` explicitly, recorded
+  under Test seams and the production build shape.
 - 2026-09-08 -- Promoted `application-build-id-at-install.md` from
   `iterations/next/` into iteration 006: the build identity that participates
   in keying becomes the application's own build id, recorded under Canonical

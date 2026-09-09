@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-09-08
+Last revised: 2026-09-09
 
 ## Authority and application
 
@@ -546,6 +546,19 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Delivered the production build shape rule: `app/Cargo.toml`
+  and the CLI scaffold's Rust and API templates split the framework
+  dependency into a production entry (`default-features = false` plus the
+  nine non-`testing` defaults) and a `[dev-dependencies]` entry
+  (`features = ["testing"]`), so the shape holds by construction rather
+  than by discipline. `framework/tests/fixtures/testing-off-probe/` is a
+  separate-workspace probe crate that proves every named test seam is
+  absent from that shape by failing to compile without `testing` and
+  compiling with it, `scripts/check-feature-matrix.sh` gained a matching
+  production-shape profile, and `scripts/check-production-build.sh`
+  builds the dogfood binary in that shape, runs its migrations, and
+  answers one request; the monorepo gate gained the matching
+  `production-build` step, recorded as the Production build shape rule.
 - 2026-09-08 -- Advanced the active contract to iteration 006, the sweep of
   every staged capture; iteration 005 closed with its definition of done met.
   The authority statement now names the active contract rather than one

@@ -1,7 +1,7 @@
 # Suprnova Live -- 16 Cache Variance, Privacy, and Stitching
 
 Status: Normative design specification
-Last revised: 2026-09-08
+Last revised: 2026-09-09
 
 ## Scope
 
@@ -289,6 +289,24 @@ operator no signal naming the contract that refused.
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Delivered the declined-lookup reason set: `LookupDeclineReason`
+  (32 variants, `framework/src/render_cache/decline.rs`) types the `reason`
+  attribute `LookupOutcome::record` emits beside `outcome="declined"`,
+  computed at the branch that declines rather than reconstructed
+  afterward; adding a decline branch without a reason, or a reason
+  without a label, fails to compile. Every render-path invariant this
+  wired through now fails safely rather than panicking: the four decline
+  sites that used to assert or panic on a violated invariant now
+  `debug_assert!` and decline in release, and `run_render` gained an
+  error channel, `RenderRequestLost`, for the one failure `lead_render`
+  cannot degrade to an uncached render because the request itself is
+  already gone, including a transaction that fails at COMMIT after its
+  closure already took the request; `lead_render` answers it with a
+  controlled 500 and releases the lease so the route is not left fenced.
+  `framework/src/render_cache/telemetry.rs` exposes
+  `decline_reason_labels_for_test` so the operations-chapter
+  documentation test can enumerate the closed set, recorded under Privacy
+  and variance verification.
 - 2026-09-08 -- Delivered the promoted authorization and RBAC requirements.
   Each authorization evaluation runs inside a consult window; principal
   material recorded inside it, or nothing the recording can resolve, SHALL
