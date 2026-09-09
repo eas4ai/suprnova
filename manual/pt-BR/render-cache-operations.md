@@ -383,10 +383,17 @@ torna esses testes reproduzíveis em vez de instáveis.
 ## Quando algo está errado
 
 - **Uma página está exibindo conteúdo que você sabe ser antigo.** Verifique
-  se a rota está armazenando (duas requisições, procure o `Age`). Se estiver,
-  e a escrita que deveria tê-la invalidado veio de um worker de fila, de uma
-  tarefa agendada ou de um comando de console, essa escrita não avançou nada:
-  execute `render-cache:epoch-advance` (por nó - veja o último item).
+  se a rota está armazenando (duas requisições, procure o `Age`). Todo
+  processo cuja configuração habilita o RenderCache e cujo banco de dados
+  contém a migração do RenderCache avança gerações para suas próprias
+  escritas, então um worker de fila, uma tarefa agendada ou um comando de
+  console invalida as mesmas gerações que o processo que serve invalidaria;
+  confirme que o processo que escreveu realmente tem o RenderCache
+  habilitado e migrado, já que um que não tem não avança nada. Sob
+  `CoherenceMode::Lease`, uma entrada obsoleta mas ainda armazenada se
+  atualiza sozinha dentro de `max_age_ms`, em vez de imediatamente. Para
+  tudo o mais, execute `render-cache:epoch-advance` (por nó - veja o
+  último item).
 - **Uma página que você esperava que entrasse em cache nunca carrega um
   cabeçalho `Age`.** Ela está sendo recusada, não falhando. Leia primeiro o
   rótulo `reason` do lookup `declined` - ele nomeia o contrato exato que

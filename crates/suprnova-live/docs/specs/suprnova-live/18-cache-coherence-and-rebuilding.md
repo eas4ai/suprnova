@@ -115,10 +115,7 @@ ledger's current authority SHALL be served as current. Such an entry SHALL be
 treated as unproven and rebuilt, proven by a test that performs a rewind and
 observes the refusal and the rebuild. The restore procedure in the operations
 chapter SHALL state the automatic behavior and SHALL keep manual steps only
-where they are still needed. Until iteration 006 delivers this, a rewind is
-undetected: the epoch advance is a plain increment that does not by itself lift
-the epoch back above the stamped high-water mark, and the documented remedy is
-for the operator to advance the epoch and empty L1 by hand.
+where they are still needed.
 
 ### Local validation leases and invalidation hints
 

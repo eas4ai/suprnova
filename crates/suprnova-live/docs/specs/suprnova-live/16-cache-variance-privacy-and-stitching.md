@@ -51,10 +51,7 @@ route declaring `Tenant` caches and partitions. A scope that reads no
 per-request state SHALL record nothing and SHALL keep caching exactly as it
 does now; a scope that reads per-request state the recording cannot resolve to
 a known variance dimension SHALL narrow to `Uncacheable` rather than be assumed
-harmless. Until iteration 006 delivers this, a global scope that reads the
-current tenant out of a thread-local, a task-local, or an atomic is invisible
-to the collector, and the only remedy is for the application author to declare
-`Tenant` variance by hand on every affected route.
+harmless.
 
 #### Media and Encoding negotiation
 
@@ -105,9 +102,7 @@ requiring `Principal` rather than guess. Role and permission reads that reach
 the database SHALL observe their known tables precisely before a route that
 evaluates one is stored, and the privacy leak suite SHALL gain a case proving
 that a per-tenant-only gate does not leak one tenant's authorized page to a
-different tenant sharing the same key. Until iteration 006 delivers this, every
-authorization read classifies unconditionally as `Principal` material, which is
-safe and needlessly narrow.
+different tenant sharing the same key.
 
 ### Private representation keys
 
@@ -146,10 +141,7 @@ configuration SHALL open nothing and SHALL write nothing to the ledger. Each of
 these properties SHALL be proven by a test that performs the write outside the
 served application and observes the next lookup rebuild, and the
 honest-boundary statement and the manual statement that describe the present
-limit SHALL be removed rather than left as stale warnings. Until iteration 006
-delivers this, the write side is opened only by the call that also registers
-the middleware, so a write from a process that does not serve HTTP advances no
-generation at all.
+limit SHALL be removed rather than left as stale warnings.
 
 ### Server stitching
 
@@ -274,9 +266,7 @@ distinguishable from one another and from an ordinary ineligible response. The
 reason set SHALL stay bounded under the closed low-cardinality label rule,
 SHALL be documented beside `outcome` in the operations chapter and its mirrors,
 and SHALL be asserted by the operations suite rather than only described in
-prose. Until iteration 006 delivers this, every decline is counted under one
-value, so a route that serves normally while its cache never fills gives an
-operator no signal naming the contract that refused.
+prose.
 
 ## Acceptance criteria
 

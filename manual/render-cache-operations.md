@@ -359,10 +359,16 @@ counter, which is what makes these tests reproducible rather than flaky.
 ## When something is wrong
 
 - **A page is showing content you know is old.** Check whether the route is
-  storing at all (two requests, look for `Age`). If it is, and the write
-  that should have invalidated it came from a queue worker, a scheduled
-  task, or a console command, that write advanced nothing: run
-  `render-cache:epoch-advance` (per node - see the last bullet).
+  storing at all (two requests, look for `Age`). Every process whose
+  configuration enables RenderCache and whose database holds the
+  RenderCache migration advances generations for its own writes, so a
+  queue worker, a scheduled task, or a console command invalidates the
+  same generations the serving process would; confirm the writing process
+  actually has RenderCache enabled and migrated, since one that does not
+  writes nothing. Under `CoherenceMode::Lease`, a stale-but-stored entry
+  still catches up within `max_age_ms` rather than immediately. For
+  everything else, run `render-cache:epoch-advance` (per node - see the
+  last bullet).
 - **A page you expected to cache never carries an `Age` header.** It is
   being declined, not failing. Read the `reason` label on the `declined`
   lookup first - it names the exact contract that refused the render, from

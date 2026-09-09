@@ -57,9 +57,7 @@ policy table, the `_for_test` operators on `RenderCache` (`shell_for_test`,
 `l0_frame_ptr_for_test`, and `uninstall_for_test` among them), the key-input
 seam, the clock and coordinator configuration seams, the console report
 builders, and the lookup recorder that backs the declined-reason
-documentation test. Until iteration 006 delivers this, `testing` is a default
-feature and an ordinary application build compiles those seams into the
-production binary.
+documentation test.
 
 ### Complete and Composite representation models
 
@@ -138,10 +136,7 @@ application's own build id, supplied to `RenderCache::install` or derived in
 the application crate, so that the default changes with the application rather
 than with the framework crate. Two installs carrying different application
 build ids SHALL NOT share a stored entry. The rustdoc and the deployment
-chapter SHALL name the source of the value. Until iteration 006 delivers this,
-the default build id is the framework crate's own package version, which equals
-the application's version only under workspace versioning and does not change
-from one deploy to the next.
+chapter SHALL name the source of the value.
 
 ### Provider-backed L0 and L1 storage
 

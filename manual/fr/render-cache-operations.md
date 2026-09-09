@@ -392,10 +392,16 @@ qu'instables.
 ## Quand quelque chose ne va pas
 
 - **Une page montre un contenu que vous savez ancien.** Vérifiez si la route
-  stocke tout court (deux requêtes, cherchez `Age`). Si oui, et que
-  l'écriture qui aurait dû l'invalider venait d'un worker de file d'attente,
-  d'une tâche planifiée, ou d'une commande console, cette écriture n'a rien
-  fait avancer : exécutez `render-cache:epoch-advance` (par nœud - voir le
+  stocke tout court (deux requêtes, cherchez `Age`). Tout processus dont la
+  configuration active RenderCache et dont la base de données porte la
+  migration RenderCache fait avancer les générations pour ses propres
+  écritures, si bien qu'un worker de file d'attente, une tâche planifiée,
+  ou une commande console invalide les mêmes générations que le processus
+  qui sert ; vérifiez que le processus qui écrit a bien RenderCache activé
+  et migré, car celui qui ne l'a pas ne fait rien avancer. Sous
+  `CoherenceMode::Lease`, une entrée périmée mais encore stockée rattrape
+  son retard d'elle-même sous `max_age_ms`, plutôt qu'immédiatement. Pour
+  tout le reste, exécutez `render-cache:epoch-advance` (par nœud - voir le
   dernier point).
 - **Une page que vous attendiez en cache ne porte jamais d'en-tête `Age`.**
   Elle est refusée, elle n'échoue pas. Lisez d'abord l'étiquette `reason`

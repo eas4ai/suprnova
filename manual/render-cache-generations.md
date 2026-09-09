@@ -141,11 +141,20 @@ precisely and cached normally.
 Reads through `DB::table(..)` know their table and cache normally.
 
 **Invisible, and your responsibility.** A request header read through
-`Request::header`, a `Config::get` call, and an Eloquent global scope that
-filters a query from its own per-request state all change what a render
+`Request::header` and a `Config::get` call both change what a render
 produces without the collector seeing anything. Declare the matching
 variance dimension on such a route; nothing here can catch the omission for
 you.
+
+**Global scopes.** An Eloquent global scope declares what its filter
+depends on. A `GlobalScope` returning `ScopeDependency::Constant` records
+nothing and costs no cache hits. The default, `ScopeDependency::PerRequest`,
+requires the scope's `apply` to read that state through an instrumented
+accessor - `suprnova::live::current_tenant()`, `Auth::id()`,
+`Lang::locale()`. A per-request scope whose evaluation reads none of them
+narrows the render to `Uncacheable` and names itself in the decline, so an
+invisible tenant filter costs you the cache rather than costing your
+visitors each other's rows.
 
 **Feature flags.** A read of a flag the `features` table holds - at any scope
 key, the global default included - observes that flag's own generation.

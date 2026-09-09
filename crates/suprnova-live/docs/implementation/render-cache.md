@@ -263,14 +263,6 @@ is never stored:
   is treated as a write and advances `Broad`, the safe direction, while a
   side-effecting `SELECT nextval(..)` is treated as a read and advances
   nothing.
-- **An Eloquent global scope's own per-request state.** `ScopeRegistry`'s own
-  documentation invites a `GlobalScope::apply` implementation to read
-  per-request state, such as the current tenant, from an application-defined
-  thread-local, `tokio::task_local!`, or atomic, and filter the query by it.
-  A query built through `Model::query()` this way changes the render's body
-  with nothing here ever observing the read. A route whose models carry a
-  tenant-scoped global scope needs its own declared `Tenant` variance;
-  nothing here can detect the omission.
 
 Two narrower cases are exceptions, not full coverage:
 
@@ -308,11 +300,6 @@ second a deliberate gap, neither a guard weakness:
   opens no path to serving one visitor's page to another. This is a host
   behaviour: the engine's classifier is unchanged and still narrows on the
   reasons it is given.
-- **Authorization decisions are always treated as per-principal.**
-  `Gate::allows` records only that a decision was evaluated, never what it
-  consulted, so an `AuthorizationRead` reason always requires the
-  `Principal` dimension. A route keyed only by `Tenant` whose gate check is
-  genuinely per-tenant never caches unless it also declares `Principal`.
 - **Every Inertia document render observes a locale.** Inertia's own
   document shell builds `<html lang>` from `Lang::locale()` unconditionally,
   so this observation happens whether or not the page's own data has
@@ -320,13 +307,6 @@ second a deliberate gap, neither a guard weakness:
   Inertia route that does not declare `Locale` variance, on every request:
   this fails closed rather than leaking, but it fails silently from the
   response's own point of view, and declaring `Locale` is the fix.
-- **Only the serving process advances generations.** The write-side
-  instrumentation is opened by `RenderCache::install`, which only the
-  serving process calls (`serve` and `web-run`), so writes from queue
-  workers, scheduled tasks, and console commands advance no generation and
-  `bump_permission_version` there is a no-op. A page that depends on such a
-  write stays current only within its freshness window; `advance_epoch` is
-  the operator remedy after a job that changes cached content.
 
 A route handler that branches its output on a header or a config value,
 without also declaring the matching variance, is outside what this
@@ -645,14 +625,17 @@ non-GET/HEAD method, a non-200 status, a streaming body, a response that
 sets a cookie, or a response carrying a hop-by-hop, connection, or tracing
 header (`UNSAFE_RESPONSE_HEADERS`).
 
-The documented limits from "the honest boundary" apply directly to
+The documented rules from "the honest boundary" apply directly to
 classification: an anonymous render whose bytes derive from an input
 classification cannot see stays storable, so declaring the matching
-variance is the route's own job; per-tenant authorization
-requires a route to also declare `Principal`; header, `Config::get`, and an
-Eloquent global scope's own task-local reads are invisible to
-classification entirely; a custom feature-flag evaluator, or a scope key
-that is neither `user:` nor `team:`, is invisible too; and an Inertia
+variance is the route's own job; a per-tenant-only authorization decision
+requires a route to declare `Tenant`, while a decision that also consults a
+per-user fact, or one the recording cannot resolve, still requires
+`Principal`; header and `Config::get` reads are invisible to classification
+entirely; an undeclared global scope defaults to requiring its `apply` to
+read per-request state through an instrumented accessor, and narrows to
+`Uncacheable` when it does not; a custom feature-flag evaluator, or a scope
+key that is neither `user:` nor `team:`, is invisible too; and an Inertia
 document's unconditional locale read means the route must declare `Locale`
 or it is declined on every request.
 

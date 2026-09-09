@@ -399,9 +399,15 @@ flatterhaft.
 
 - **Eine Seite zeigt Inhalt, von dem Sie wissen, dass er alt ist.** Prüfen
   Sie, ob die Route überhaupt speichert (zwei Anfragen, nach `Age` sehen).
-  Wenn ja und wenn der Schreibzugriff, der sie hätte invalidieren sollen, von
-  einem Queue-Worker, einer geplanten Aufgabe oder einem Konsolenbefehl kam,
-  hat dieser Schreibzugriff nichts erhöht: Führen Sie
+  Jeder Prozess, dessen Konfiguration RenderCache aktiviert und dessen
+  Datenbank die RenderCache-Migration enthält, erhöht Generationen für die
+  eigenen Schreibzugriffe, sodass ein Queue-Worker, eine geplante Aufgabe
+  oder ein Konsolenbefehl dieselben Generationen ungültig macht wie der
+  dienende Prozess; prüfen Sie, ob der schreibende Prozess RenderCache
+  tatsächlich aktiviert und migriert hat, denn einer, bei dem das nicht der
+  Fall ist, erhöht nichts. Unter `CoherenceMode::Lease` holt ein
+  veraltet-aber-gespeicherter Eintrag innerhalb von `max_age_ms` von selbst
+  auf, statt sofort. Führen Sie für alles andere
   `render-cache:epoch-advance` aus (pro Knoten, siehe den letzten Punkt).
 - **Eine Seite, von der Sie Caching erwartet haben, trägt nie einen
   `Age`-Header.** Sie wird abgelehnt, sie scheitert nicht. Lesen Sie zuerst

@@ -155,11 +155,21 @@ Las lecturas a través de `DB::table(..)` conocen su tabla y se cachean con
 normalidad.
 
 **Invisibles, y responsabilidad tuya.** Una cabecera de petición leída a
-través de `Request::header`, una llamada a `Config::get` y un global scope
-de Eloquent que filtra una consulta a partir de su propio estado por
-petición cambian todos ellos lo que produce un render sin que el recolector
-vea nada. Declara la dimensión de varianza correspondiente en una ruta así;
-nada aquí puede detectar la omisión por ti.
+través de `Request::header` y una llamada a `Config::get` cambian ambas lo
+que produce un render sin que el recolector vea nada. Declara la dimensión
+de varianza correspondiente en una ruta así; nada aquí puede detectar la
+omisión por ti.
+
+**Scopes globales.** Un global scope de Eloquent declara de qué depende su
+filtro. Un `GlobalScope` que devuelve `ScopeDependency::Constant` no
+registra nada y no cuesta aciertos de caché. El valor por defecto,
+`ScopeDependency::PerRequest`, exige que el `apply` del scope lea ese
+estado a través de un accesor instrumentado -
+`suprnova::live::current_tenant()`, `Auth::id()`, `Lang::locale()`. Un
+scope por petición cuya evaluación no lee ninguno de ellos estrecha el
+render a `Uncacheable` y se nombra a sí mismo en el rechazo, así que un
+filtro de tenant invisible te cuesta la caché a ti en lugar de costarles a
+tus visitantes las filas de otros.
 
 **Indicadores de característica.** Una lectura de un indicador que la tabla
 `features` contiene - en cualquier clave de scope, incluido el valor por

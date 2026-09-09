@@ -158,11 +158,21 @@ gecacht.
 Lesezugriffe über `DB::table(..)` kennen ihre Tabelle und cachen normal.
 
 **Unsichtbar und in Ihrer Verantwortung.** Ein über `Request::header`
-gelesener Anfrage-Header, ein `Config::get`-Aufruf und ein globaler
-Eloquent-Scope, der eine Query aus seinem eigenen Zustand pro Anfrage
-filtert, ändern alle, was ein Rendering erzeugt, ohne dass der Sammler
-irgendetwas sieht. Deklarieren Sie auf einer solchen Route die passende
-Varianzdimension; nichts hier kann das Versäumnis für Sie abfangen.
+gelesener Anfrage-Header und ein `Config::get`-Aufruf ändern beide, was ein
+Rendering erzeugt, ohne dass der Sammler irgendetwas sieht. Deklarieren Sie
+auf einer solchen Route die passende Varianzdimension; nichts hier kann das
+Versäumnis für Sie abfangen.
+
+**Globale Scopes.** Ein globaler Eloquent-Scope deklariert, wovon sein
+Filter abhängt. Ein `GlobalScope`, der `ScopeDependency::Constant`
+zurückgibt, zeichnet nichts auf und kostet keine Cache-Treffer. Der
+Standardwert, `ScopeDependency::PerRequest`, verlangt, dass das `apply` des
+Scopes diesen Zustand über einen instrumentierten Zugriff liest -
+`suprnova::live::current_tenant()`, `Auth::id()`, `Lang::locale()`. Ein
+anfragebezogener Scope, dessen Auswertung keinen davon liest, verengt das
+Rendering auf `Uncacheable` und nennt sich selbst in der Ablehnung, sodass
+ein unsichtbarer Mandanten-Filter Sie den Cache kostet, statt Ihre Besucher
+gegenseitig deren Zeilen zu kosten.
 
 **Feature-Flags.** Ein Lesen eines Flags, das die Tabelle `features` hält -
 bei jedem Scope-Schlüssel, den globalen Standardwert eingeschlossen -

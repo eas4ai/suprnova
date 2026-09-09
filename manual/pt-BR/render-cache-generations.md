@@ -150,11 +150,21 @@ Leituras por meio de `DB::table(..)` conhecem a sua tabela e entram em
 cache normalmente.
 
 **Invisíveis, e de sua responsabilidade.** Um cabeçalho de requisição lido
-por meio de `Request::header`, uma chamada a `Config::get` e um escopo
-global do Eloquent que filtra uma consulta a partir do seu próprio estado
-por requisição, todos mudam o que uma renderização produz sem que o coletor
-veja nada. Declare a dimensão de variância correspondente em uma rota
-dessas; nada aqui consegue capturar essa omissão por você.
+por meio de `Request::header` e uma chamada a `Config::get` mudam ambos o
+que uma renderização produz sem que o coletor veja nada. Declare a
+dimensão de variância correspondente em uma rota dessas; nada aqui
+consegue capturar essa omissão por você.
+
+**Escopos globais.** Um escopo global do Eloquent declara do que seu
+filtro depende. Um `GlobalScope` que retorna `ScopeDependency::Constant`
+não registra nada e não custa nenhum acerto de cache. O padrão,
+`ScopeDependency::PerRequest`, exige que o `apply` do escopo leia esse
+estado através de um acessor instrumentado -
+`suprnova::live::current_tenant()`, `Auth::id()`, `Lang::locale()`. Um
+escopo por requisição cuja avaliação não lê nenhum deles estreita a
+renderização para `Uncacheable` e se nomeia na recusa, então um filtro de
+tenant invisível custa o cache a você em vez de custar aos seus
+visitantes as linhas uns dos outros.
 
 **Sinalizadores de recurso.** Uma leitura de um sinalizador que a tabela
 `features` contém - em qualquer chave de escopo, incluindo o padrão global -

@@ -84,8 +84,6 @@ generation and SHALL notify the cached evaluator in front of it, so no reader
 keeps serving stale identity-scope bits past the change. No `Feature`
 dependency SHALL be recorded for a flag with no scoped rule at all, preserving
 the property that a flag which does not depend on the reader costs nothing.
-Until iteration 006 delivers this, nothing produces a `Feature` identity, and a
-published entry keeps its old answer until its own freshness schedule expires.
 
 ### ORM query and model dependencies
 
@@ -117,9 +115,7 @@ observation, because only a table authority survives a row that does not exist
 yet. A write to another row of the same table SHALL leave a point-read entry
 current, while a write to the observed row, or its deletion, SHALL invalidate
 it. The invalidation-storm workload SHALL record the point-read ratio, and the
-generations chapter of the manual SHALL state the rule. Until iteration 006
-delivers this, a point read observes its table unconditionally, so any write to
-that table invalidates every entry that read a row from it.
+generations chapter of the manual SHALL state the rule.
 
 ### Transaction-aware write advancement
 
@@ -158,8 +154,6 @@ serves HTTP, so a queue worker, a scheduled task, or a console command advances
 the same generations the serving process advances for the same write. The rule
 that opens the write side in such a process, and its tests, are owned by
 `16-cache-variance-privacy-and-stitching.md` under Private representation keys.
-Until iteration 006 delivers this, a write from a process that does not serve
-HTTP advances no generation at all.
 
 ### Consistent render observation and publication reread
 

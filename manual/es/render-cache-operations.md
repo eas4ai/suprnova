@@ -385,11 +385,17 @@ reproducibles en lugar de inestables.
 ## Cuando algo va mal
 
 - **Una página muestra contenido que sabes que es viejo.** Comprueba si la
-  ruta está almacenando siquiera (dos peticiones, busca `Age`). Si lo está,
-  y la escritura que debería haberla invalidado vino de un worker de cola,
-  una tarea programada o un comando de consola, esa escritura no avanzó
-  nada: ejecuta `render-cache:epoch-advance` (por nodo; ver el último
-  punto).
+  ruta está almacenando siquiera (dos peticiones, busca `Age`). Todo
+  proceso cuya configuración habilita RenderCache y cuya base de datos
+  tiene la migración de RenderCache avanza generaciones para sus propias
+  escrituras, así que un worker de cola, una tarea programada o un
+  comando de consola invalida las mismas generaciones que invalidaría el
+  proceso que sirve; confirma que el proceso que escribe tiene RenderCache
+  habilitado y migrado, ya que uno que no lo tiene no avanza nada. Bajo
+  `CoherenceMode::Lease`, una entrada obsoleta pero almacenada se pone al
+  día por sí sola dentro de `max_age_ms`, en lugar de inmediatamente. Para
+  todo lo demás, ejecuta `render-cache:epoch-advance` (por nodo; ver el
+  último punto).
 - **Una página que esperabas que cacheara nunca lleva cabecera `Age`.**
   Está siendo rechazada, no fallando. Lee primero la etiqueta `reason` del
   lookup `declined` - nombra el contrato exacto que rechazó el render, del

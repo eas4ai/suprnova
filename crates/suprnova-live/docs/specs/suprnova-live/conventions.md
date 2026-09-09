@@ -275,12 +275,6 @@ untouched.
 - The default build and every `_for_test` consumer SHALL stay unchanged, so
   day-to-day verification is not narrowed by the new shape, and the feature
   matrix step SHALL cover the testing-off build of the framework crate.
-- Until iteration 006 delivers this shape, `testing` is a default feature and
-  an ordinary application build compiles those seams into the production
-  binary. The same feature also gates encryption-key installation, the
-  forced-encrypt-failure switch, request query overrides, and the session test
-  scopes, so turning it off is framework-wide work rather than a change local
-  to one domain.
 
 ### Documentation and translation parity
 

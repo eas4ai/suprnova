@@ -156,11 +156,21 @@ Les lectures via `DB::table(..)` connaissent leur table et se mettent en
 cache normalement.
 
 **Invisible, et de votre responsabilité.** Un en-tête de requête lu via
-`Request::header`, un appel à `Config::get`, et une portée globale Eloquent
-qui filtre une requête depuis son propre état par requête changent tous ce
-qu'un rendu produit sans que le collecteur ne voie quoi que ce soit.
-Déclarez la dimension de variance correspondante sur une telle route ; rien
-ici ne peut rattraper cet oubli à votre place.
+`Request::header` et un appel à `Config::get` changent tous deux ce qu'un
+rendu produit sans que le collecteur ne voie quoi que ce soit. Déclarez la
+dimension de variance correspondante sur une telle route ; rien ici ne peut
+rattraper cet oubli à votre place.
+
+**Portées globales.** Une portée globale Eloquent déclare ce dont dépend
+son filtre. Une `GlobalScope` qui retourne `ScopeDependency::Constant`
+n'enregistre rien et ne coûte aucun succès de cache. La valeur par défaut,
+`ScopeDependency::PerRequest`, exige que le `apply` de la portée lise cet
+état via un accesseur instrumenté - `suprnova::live::current_tenant()`,
+`Auth::id()`, `Lang::locale()`. Une portée propre à la requête dont
+l'évaluation n'en lit aucun restreint le rendu à `Uncacheable` et se nomme
+elle-même dans le refus, si bien qu'un filtre de tenant invisible vous
+coûte le cache plutôt que de coûter à vos visiteurs les lignes les uns des
+autres.
 
 **Flags de fonctionnalité.** Une lecture d'un flag que la table `features`
 contient - à n'importe quelle clé de portée, la valeur par défaut globale
