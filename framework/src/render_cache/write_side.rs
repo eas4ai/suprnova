@@ -1,6 +1,6 @@
 //! Whether this process advances RenderCache generations.
 //!
-//! [`super::INSTALLED`] answers "is a serving runtime installed here", which
+//! `INSTALLED` answers "is a serving runtime installed here", which
 //! is the right question for the middleware and the wrong one for a write:
 //! a queue worker, a scheduled task, and a console command all write through
 //! the same ORM the server does, share the same database, and have no
