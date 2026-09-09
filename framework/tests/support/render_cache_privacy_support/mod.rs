@@ -93,7 +93,10 @@ struct PrivacyMigrator;
 #[async_trait::async_trait]
 impl MigratorTrait for PrivacyMigrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(suprnova::render_cache::migration::Migration)]
+        vec![
+            Box::new(suprnova::render_cache::migration::Migration),
+            Box::new(suprnova::rbac::migrations::CreateRbacTables),
+        ]
     }
 }
 
@@ -560,6 +563,27 @@ pub fn ensure_tenant_only_gate() {
     });
 }
 
+/// The model discriminator and ability the RBAC-gated route checks. Fixed
+/// strings rather than `HasRoles::rbac_model_type`, so the test can grant
+/// the permission through the free functions without an authenticatable
+/// value in hand.
+const RBAC_MODEL_TYPE: &str = "privacy_suite::Principal";
+const RBAC_PERMISSION: &str = "articles.publish";
+
+/// Body driven by a real database-backed permission check: the five RBAC
+/// tables are read through `DB::select_one` and `DB::scalar`, which is the
+/// path that used to mark the whole render unobservable.
+async fn rbac_gated_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let id = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    let allowed = suprnova::rbac::has_permission_for_model(RBAC_MODEL_TYPE, &id, RBAC_PERMISSION)
+        .await
+        .map_err(|error| HttpResponse::text(format!("rbac check failed: {error}")).status(500))?;
+    Ok(HttpResponse::html(format!(
+        "rbac render {n} allowed={allowed}"
+    )))
+}
+
 /// A flag whose only rule is at one specific user: `alice` gets `true`,
 /// everyone else falls through to no rule at all and takes the default.
 const USER_SCOPED_FLAG: &str = "privacy-user-scoped-flag";
@@ -855,6 +879,7 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
             reads_request_auth_user_id_handler,
         )
         .into();
+    let router: Router = router.get(RBAC_GATED_ROUTE, rbac_gated_handler).into();
     let stitched_mount = LiveMount::<DogfoodCounter>::identity_bound(
         STITCHED_ROUTE,
         "counter",
@@ -979,9 +1004,11 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .expect("attach principal-declared authz policy")
         .try_render_cache(
             REQUEST_AUTH_USER_ID_ROUTE,
-            GroupPolicy::from(principal_declared),
+            GroupPolicy::from(principal_declared.clone()),
         )
         .expect("attach request-auth-user-id policy")
+        .try_render_cache(RBAC_GATED_ROUTE, GroupPolicy::from(principal_declared))
+        .expect("attach rbac-gated policy")
         .try_render_cache(STITCHED_ROUTE, GroupPolicy::from(stitched_declared))
         .expect("attach stitched policy");
 
@@ -1149,6 +1176,9 @@ pub const PRINCIPAL_DECLARED_AUTHZ_ROUTE: &str = "/privacy/principal-declared-au
 /// Declares `Principal`, reads the uninstrumented `Request::auth_user_id()`
 /// beside the instrumented accessor.
 pub const REQUEST_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-request-auth-user-id/{id}";
+/// Declares `Principal`, body driven by a database-backed RBAC permission
+/// check for the signed-in principal.
+pub const RBAC_GATED_ROUTE: &str = "/privacy/rbac-gated/{id}";
 /// `PublicShellStitched`, declares nothing, and renders a Live document with
 /// one identity-bound island inside a shell that reads no identity at all.
 /// The one route here whose stored representation is deliberately *shared*

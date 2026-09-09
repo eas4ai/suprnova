@@ -47,7 +47,7 @@ use render_cache_privacy_support::{
     AUTHZ_DRIVEN_ROUTE, Harness, IMPERSONATED_ROUTE, LOCALE_LATE_MIDDLEWARE_ROUTE,
     LOCALE_NESTED_SCOPE_ROUTE, LOCALE_SWITCHES_ROUTE, LOCALE_VARIES_ROUTE, NAMED_GUARD_ONLY_ROUTE,
     NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE, PRINCIPAL_DECLARED_AUTHZ_ROUTE,
-    PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE, READS_AUTH_ID_ROUTE,
+    PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE, RBAC_GATED_ROUTE, READS_AUTH_ID_ROUTE,
     READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE,
     READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE,
     REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY, STITCHED_ROUTE,
@@ -1781,4 +1781,120 @@ async fn a_per_user_gate_still_requires_principal() {
         after_declared,
         "and the documented remedy, declaring Principal, still caches"
     );
+}
+
+/// Iteration 006, definition-of-done item 1, second half. A route whose
+/// body comes from a real RBAC permission check is stored, because the
+/// five statements behind that check name the tables they read instead of
+/// marking the render unobservable, and granting the permission advances
+/// `model_permissions`, which rebuilds it.
+///
+/// Verified failing by reverting `has_roles`'s `exists` helper to
+/// `DB::scalar`: the repeat request rendered again, because the render was
+/// marked incomplete and could never be stored.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_rbac_gated_route_is_stored_and_a_permission_grant_rebuilds_it() {
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, RBAC_GATED_ROUTE),
+        "the route under test must be attached to a policy"
+    );
+
+    let denied = dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::OK);
+    assert!(
+        denied.text().contains("allowed=false"),
+        "alice holds no permission yet - got {}",
+        denied.text()
+    );
+    let after_first = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "an RBAC-gated render is observable and therefore storable"
+    );
+
+    suprnova::rbac::give_permission_to_model(
+        "privacy_suite::Principal",
+        "alice",
+        "articles.publish",
+    )
+    .await
+    .expect("grant the permission");
+
+    let granted = dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert!(
+        granted.text().contains("allowed=true"),
+        "the grant must reach the cached page - got {}",
+        granted.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "the write to model_permissions moved a generation the render observed"
+    );
+}
+
+/// Every RBAC statement's table list is the list its own SQL reads. A
+/// statement that grows a `JOIN` without naming the joined table would
+/// otherwise observe less than it read, and the entry it allowed to be
+/// stored would survive a write to the unnamed table.
+#[test]
+fn rbac_statements_name_every_table_they_read() {
+    let (reads, writes) = suprnova::rbac::observed_rbac_statements_for_test();
+    assert!(reads.len() >= 8, "every read statement is listed");
+    assert!(writes.len() >= 5, "every write statement is listed");
+
+    for (sql, declared) in reads {
+        let mut tokens = sql.split_whitespace();
+        let mut found: Vec<&str> = Vec::new();
+        while let Some(token) = tokens.next() {
+            if token == "FROM" || token == "JOIN" {
+                let table = tokens
+                    .next()
+                    .unwrap_or_else(|| panic!("FROM or JOIN with no table in {sql:?}"));
+                if !found.contains(&table) {
+                    found.push(table);
+                }
+            }
+        }
+        let mut declared_sorted: Vec<&str> = declared.to_vec();
+        declared_sorted.sort_unstable();
+        found.sort_unstable();
+        assert_eq!(
+            found, declared_sorted,
+            "the declared tables must be exactly what {sql:?} reads"
+        );
+    }
+
+    for (sql, declared) in writes {
+        assert_eq!(
+            declared.len(),
+            1,
+            "a write statement names exactly one table: {sql:?}"
+        );
+        let table = declared[0];
+        assert!(
+            sql.contains(&format!("INSERT INTO {table} ")),
+            "{sql:?} must insert into its declared table {table}"
+        );
+    }
 }

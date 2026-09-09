@@ -786,6 +786,36 @@ impl DB {
         Ok(row.as_ref().and_then(query_result_to_dynamic_row))
     }
 
+    /// [`DB::select_one`] for a statement whose tables the caller knows:
+    /// observes each named table precisely instead of marking the render
+    /// unobservable.
+    ///
+    /// `pub(crate)` on purpose. The honest boundary for application raw SQL
+    /// is unchanged - a caller who writes the statement is also the only
+    /// one who could get its table list wrong, and a wrong list is worse
+    /// than no list: it lets an entry be stored on a dependency set that
+    /// nothing will ever advance. Only statements this crate owns, whose
+    /// table lists are literals beside their SQL and are asserted against
+    /// that SQL by a test, may use it.
+    pub(crate) async fn select_one_observing(
+        sql: &str,
+        values: Vec<SeaValue>,
+        tables: &[&str],
+    ) -> Result<Option<DynamicRow>, FrameworkError> {
+        for table in tables {
+            crate::render_cache::collector::observe_table_read(table);
+        }
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+    }
+
     /// Run a raw SELECT, return the FIRST column of the FIRST row.
     /// Mirrors Laravel's `DB::scalar($sql, $bindings)`.
     ///
@@ -820,6 +850,34 @@ impl DB {
             .ok_or_else(|| FrameworkError::database("DB::scalar: query returned no rows"))?;
         row.try_get_by_index::<T>(0)
             .map_err(|e| FrameworkError::database(format!("DB::scalar: {e}")))
+    }
+
+    /// [`DB::scalar`] for a statement whose tables the caller knows. See
+    /// [`DB::select_one_observing`] for why this is `pub(crate)`.
+    pub(crate) async fn scalar_observing<T>(
+        sql: &str,
+        values: Vec<SeaValue>,
+        tables: &[&str],
+    ) -> Result<T, FrameworkError>
+    where
+        T: sea_orm::TryGetable,
+    {
+        for table in tables {
+            crate::render_cache::collector::observe_table_read(table);
+        }
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| {
+                FrameworkError::database("DB::scalar_observing: query returned no rows")
+            })?;
+        row.try_get_by_index::<T>(0)
+            .map_err(|e| FrameworkError::database(format!("DB::scalar_observing: {e}")))
     }
 
     /// Run a raw INSERT statement. Returns `true` when at least one row
@@ -967,6 +1025,27 @@ impl DB {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         crate::render_cache::orm::after_unknown_write().await?;
+        Ok(result.rows_affected())
+    }
+
+    /// [`DB::affecting_statement`] for a write whose single table the caller
+    /// knows: advances that table rather than the broad authority every
+    /// representation observes. See [`DB::select_one_observing`] for why
+    /// this is `pub(crate)`.
+    pub(crate) async fn affecting_statement_on_table(
+        sql: &str,
+        values: Vec<SeaValue>,
+        table: &str,
+    ) -> Result<u64, FrameworkError> {
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_table_write(table).await?;
         Ok(result.rows_affected())
     }
 

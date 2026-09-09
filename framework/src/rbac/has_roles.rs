@@ -53,40 +53,154 @@ fn backend() -> Result<DatabaseBackend, FrameworkError> {
     Ok(DB::connection()?.inner().get_database_backend())
 }
 
-/// `DB::select_one` with this module's placeholders rendered first.
-async fn select_one(
-    sql: &str,
-    values: Vec<Value>,
-) -> Result<Option<crate::database::DynamicRow>, FrameworkError> {
-    DB::select_one(&render(sql, backend()?), values).await
+/// One statement this module issues, beside the tables it names.
+///
+/// The list is the render-cache observation contract for the statement: a
+/// read observes every table in it, and a write advances the single table
+/// in it. `rbac_statements_name_every_table_they_read` parses the `FROM`
+/// and `JOIN` clauses of every read below and refuses any list that does
+/// not match, so a statement that grows a join without naming the joined
+/// table fails the suite instead of silently observing less than it read.
+#[derive(Clone, Copy)]
+pub(crate) struct ObservedStatement {
+    /// The statement text, with this module's `?` placeholders.
+    pub(crate) sql: &'static str,
+    /// Every table the statement names, in the order it names them.
+    pub(crate) tables: &'static [&'static str],
 }
 
-/// `DB::insert` with this module's placeholders rendered first.
-async fn insert(sql: &str, values: Vec<Value>) -> Result<bool, FrameworkError> {
-    DB::insert(&render(sql, backend()?), values).await
+const FIND_ROLE_ID: ObservedStatement = ObservedStatement {
+    sql: "SELECT id FROM roles WHERE name = ? AND guard_name = ? LIMIT 1",
+    tables: &["roles"],
+};
+const FIND_PERMISSION_ID: ObservedStatement = ObservedStatement {
+    sql: "SELECT id FROM permissions WHERE name = ? AND guard_name = ? LIMIT 1",
+    tables: &["permissions"],
+};
+const ROLE_HAS_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM role_permissions WHERE role_id = ? AND permission_id = ?",
+    tables: &["role_permissions"],
+};
+const MODEL_HAS_ROLE_ID: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM model_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
+    tables: &["model_roles"],
+};
+const MODEL_HAS_PERMISSION_ID: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM model_permissions WHERE model_type = ? AND model_id = ? AND \
+          permission_id = ?",
+    tables: &["model_permissions"],
+};
+const MODEL_HAS_ROLE_NAMED: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM model_roles \
+          INNER JOIN roles ON roles.id = model_roles.role_id \
+          WHERE model_roles.model_type = ? \
+            AND model_roles.model_id = ? \
+            AND roles.name = ? \
+            AND roles.guard_name = ?",
+    tables: &["model_roles", "roles"],
+};
+const MODEL_HAS_DIRECT_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM model_permissions \
+          INNER JOIN permissions ON permissions.id = model_permissions.permission_id \
+          WHERE model_permissions.model_type = ? \
+            AND model_permissions.model_id = ? \
+            AND permissions.name = ? \
+            AND permissions.guard_name = ?",
+    tables: &["model_permissions", "permissions"],
+};
+const MODEL_HAS_INHERITED_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "SELECT COUNT(*) FROM model_roles \
+          INNER JOIN roles ON roles.id = model_roles.role_id \
+          INNER JOIN role_permissions ON role_permissions.role_id = roles.id \
+          INNER JOIN permissions ON permissions.id = role_permissions.permission_id \
+          WHERE model_roles.model_type = ? \
+            AND model_roles.model_id = ? \
+            AND permissions.name = ? \
+            AND permissions.guard_name = ? \
+            AND roles.guard_name = ?",
+    tables: &["model_roles", "roles", "role_permissions", "permissions"],
+};
+
+const INSERT_ROLE: ObservedStatement = ObservedStatement {
+    sql: "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
+    tables: &["roles"],
+};
+const INSERT_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "INSERT INTO permissions (name, display_name, guard_name) VALUES (?, ?, ?)",
+    tables: &["permissions"],
+};
+const INSERT_ROLE_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
+    tables: &["role_permissions"],
+};
+const INSERT_MODEL_ROLE: ObservedStatement = ObservedStatement {
+    sql: "INSERT INTO model_roles (model_type, model_id, role_id) VALUES (?, ?, ?)",
+    tables: &["model_roles"],
+};
+const INSERT_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "INSERT INTO model_permissions (model_type, model_id, permission_id) VALUES (?, ?, ?)",
+    tables: &["model_permissions"],
+};
+
+/// Every read statement this module issues, for the table-list contract.
+pub(crate) const READ_STATEMENTS: &[ObservedStatement] = &[
+    FIND_ROLE_ID,
+    FIND_PERMISSION_ID,
+    ROLE_HAS_PERMISSION,
+    MODEL_HAS_ROLE_ID,
+    MODEL_HAS_PERMISSION_ID,
+    MODEL_HAS_ROLE_NAMED,
+    MODEL_HAS_DIRECT_PERMISSION,
+    MODEL_HAS_INHERITED_PERMISSION,
+];
+
+/// Every write statement this module issues, for the same contract.
+pub(crate) const WRITE_STATEMENTS: &[ObservedStatement] = &[
+    INSERT_ROLE,
+    INSERT_PERMISSION,
+    INSERT_ROLE_PERMISSION,
+    INSERT_MODEL_ROLE,
+    INSERT_MODEL_PERMISSION,
+];
+
+/// `DB::select_one_observing` with this module's placeholders rendered
+/// first and the statement's own table list handed along.
+async fn select_one(
+    statement: ObservedStatement,
+    values: Vec<Value>,
+) -> Result<Option<crate::database::DynamicRow>, FrameworkError> {
+    DB::select_one_observing(&render(statement.sql, backend()?), values, statement.tables).await
+}
+
+/// `DB::scalar_observing` for the `SELECT COUNT(*)` existence checks.
+async fn exists(statement: ObservedStatement, values: Vec<Value>) -> Result<bool, FrameworkError> {
+    let count: i64 =
+        DB::scalar_observing(&render(statement.sql, backend()?), values, statement.tables).await?;
+    Ok(count > 0)
+}
+
+/// `DB::affecting_statement_on_table` for this module's inserts: the one
+/// table the statement writes advances, rather than the broad authority
+/// `DB::insert` would have advanced.
+async fn insert(statement: ObservedStatement, values: Vec<Value>) -> Result<bool, FrameworkError> {
+    let table = statement
+        .tables
+        .first()
+        .copied()
+        .ok_or_else(|| FrameworkError::internal("rbac insert statement names no table"))?;
+    let rows =
+        DB::affecting_statement_on_table(&render(statement.sql, backend()?), values, table).await?;
+    Ok(rows > 0)
 }
 
 async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
-    let row = select_one(
-        "SELECT id FROM roles WHERE name = ? AND guard_name = ? LIMIT 1",
-        vec![value(name), value(guard_name)],
-    )
-    .await?;
+    let row = select_one(FIND_ROLE_ID, vec![value(name), value(guard_name)]).await?;
     row.map(|row| row.get_int("id")).transpose()
 }
 
 async fn find_permission_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
-    let row = select_one(
-        "SELECT id FROM permissions WHERE name = ? AND guard_name = ? LIMIT 1",
-        vec![value(name), value(guard_name)],
-    )
-    .await?;
+    let row = select_one(FIND_PERMISSION_ID, vec![value(name), value(guard_name)]).await?;
     row.map(|row| row.get_int("id")).transpose()
-}
-
-async fn exists(sql: &str, values: Vec<Value>) -> Result<bool, FrameworkError> {
-    let count: i64 = DB::scalar(&render(sql, backend()?), values).await?;
-    Ok(count > 0)
 }
 
 /// Create a role on the default `"web"` guard, returning its id.
@@ -106,7 +220,7 @@ pub async fn create_role_on_guard(name: &str, guard_name: &str) -> Result<i64, F
         return Ok(id);
     }
     insert(
-        "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
+        INSERT_ROLE,
         vec![value(name), value(name), value(guard_name)],
     )
     .await?;
@@ -135,7 +249,7 @@ pub async fn create_permission_on_guard(
         return Ok(id);
     }
     insert(
-        "INSERT INTO permissions (name, display_name, guard_name) VALUES (?, ?, ?)",
+        INSERT_PERMISSION,
         vec![value(name), value(name), value(guard_name)],
     )
     .await?;
@@ -165,7 +279,7 @@ pub async fn give_permission_to_role_on_guard(
     let role_id = create_role_on_guard(role_name, guard_name).await?;
     let permission_id = create_permission_on_guard(permission_name, guard_name).await?;
     if exists(
-        "SELECT COUNT(*) FROM role_permissions WHERE role_id = ? AND permission_id = ?",
+        ROLE_HAS_PERMISSION,
         vec![int_value(role_id), int_value(permission_id)],
     )
     .await?
@@ -173,7 +287,7 @@ pub async fn give_permission_to_role_on_guard(
         return Ok(());
     }
     insert(
-        "INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
+        INSERT_ROLE_PERMISSION,
         vec![int_value(role_id), int_value(permission_id)],
     )
     .await?;
@@ -205,7 +319,7 @@ pub async fn assign_role_to_model_on_guard(
 ) -> Result<(), FrameworkError> {
     let role_id = create_role_on_guard(role_name, guard_name).await?;
     if exists(
-        "SELECT COUNT(*) FROM model_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
+        MODEL_HAS_ROLE_ID,
         vec![value(model_type), value(model_id), int_value(role_id)],
     )
     .await?
@@ -213,7 +327,7 @@ pub async fn assign_role_to_model_on_guard(
         return Ok(());
     }
     insert(
-        "INSERT INTO model_roles (model_type, model_id, role_id) VALUES (?, ?, ?)",
+        INSERT_MODEL_ROLE,
         vec![value(model_type), value(model_id), int_value(role_id)],
     )
     .await?;
@@ -243,7 +357,7 @@ pub async fn give_permission_to_model_on_guard(
 ) -> Result<(), FrameworkError> {
     let permission_id = create_permission_on_guard(permission_name, guard_name).await?;
     if exists(
-        "SELECT COUNT(*) FROM model_permissions WHERE model_type = ? AND model_id = ? AND permission_id = ?",
+        MODEL_HAS_PERMISSION_ID,
         vec![value(model_type), value(model_id), int_value(permission_id)],
     )
     .await?
@@ -251,7 +365,7 @@ pub async fn give_permission_to_model_on_guard(
         return Ok(());
     }
     insert(
-        "INSERT INTO model_permissions (model_type, model_id, permission_id) VALUES (?, ?, ?)",
+        INSERT_MODEL_PERMISSION,
         vec![value(model_type), value(model_id), int_value(permission_id)],
     )
     .await?;
@@ -275,12 +389,7 @@ pub async fn has_role_for_model_on_guard(
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
     exists(
-        "SELECT COUNT(*) FROM model_roles \
-         INNER JOIN roles ON roles.id = model_roles.role_id \
-         WHERE model_roles.model_type = ? \
-           AND model_roles.model_id = ? \
-           AND roles.name = ? \
-           AND roles.guard_name = ?",
+        MODEL_HAS_ROLE_NAMED,
         vec![
             value(model_type),
             value(model_id),
@@ -314,12 +423,7 @@ pub async fn has_permission_for_model_on_guard(
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
     let direct = exists(
-        "SELECT COUNT(*) FROM model_permissions \
-         INNER JOIN permissions ON permissions.id = model_permissions.permission_id \
-         WHERE model_permissions.model_type = ? \
-           AND model_permissions.model_id = ? \
-           AND permissions.name = ? \
-           AND permissions.guard_name = ?",
+        MODEL_HAS_DIRECT_PERMISSION,
         vec![
             value(model_type),
             value(model_id),
@@ -333,15 +437,7 @@ pub async fn has_permission_for_model_on_guard(
     }
 
     exists(
-        "SELECT COUNT(*) FROM model_roles \
-         INNER JOIN roles ON roles.id = model_roles.role_id \
-         INNER JOIN role_permissions ON role_permissions.role_id = roles.id \
-         INNER JOIN permissions ON permissions.id = role_permissions.permission_id \
-         WHERE model_roles.model_type = ? \
-           AND model_roles.model_id = ? \
-           AND permissions.name = ? \
-           AND permissions.guard_name = ? \
-           AND roles.guard_name = ?",
+        MODEL_HAS_INHERITED_PERMISSION,
         vec![
             value(model_type),
             value(model_id),
@@ -418,6 +514,32 @@ pub trait HasRoles: Authenticatable {
         )
         .await
     }
+}
+
+/// One statement's SQL beside its declared table list, in the shape
+/// [`observed_rbac_statements_for_test`] returns - named so its signature
+/// reads as two lists instead of a nested tuple type.
+#[cfg(any(test, feature = "testing"))]
+type ObservedStatementForTest = (&'static str, &'static [&'static str]);
+
+/// The statements this module issues, each beside the tables it names, for
+/// the contract test that parses the SQL back.
+///
+/// Test seam: the lists are the render-cache observation contract, and the
+/// only way to check them against the SQL they belong to is to hand both to
+/// a test. Returns reads first, writes second.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[must_use]
+pub fn observed_rbac_statements_for_test()
+-> (Vec<ObservedStatementForTest>, Vec<ObservedStatementForTest>) {
+    let map = |statements: &'static [ObservedStatement]| {
+        statements
+            .iter()
+            .map(|statement| (statement.sql, statement.tables))
+            .collect()
+    };
+    (map(READ_STATEMENTS), map(WRITE_STATEMENTS))
 }
 
 #[cfg(test)]
