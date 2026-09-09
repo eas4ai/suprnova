@@ -187,7 +187,7 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
 
 ### `Checkout` - universal, opens the client widget
 
-Every provider implements `Checkout`. Call `start_session` to get a flow-tagged `SessionPayload` that your frontend renders. `session_status` (default: `NotSupported`; overridden by providers whose sessions can be interrogated, e.g. Stripe) reports the authoritative provider-side state of a session you started earlier.
+Every provider implements `Checkout`. Call `start_session` to get a flow-tagged `SessionPayload` that your frontend renders. `session_status` (default: `NotSupported`; overridden by providers whose sessions can be interrogated, Stripe and Paddle) reports the authoritative provider-side state of a session you started earlier.
 
 ```rust,ignore
 #[async_trait]
@@ -209,7 +209,8 @@ pub trait Checkout: Send + Sync {
 | `success_return_url` | `String` | Where to send the user after payment |
 | `cancel_return_url` | `String` | Where to send the user if they abandon |
 | `amount_hint` | `Option<Money>` | Override or hint for one-off amounts |
-| `idempotency_key` | `Option<String>` | For safe retries |
+| `idempotency_key` | `Option<String>` | Forwarded by Stripe; rejected by Paddle when present |
+| `metadata` | `Option<Value>` | Correlation data attached to the provider checkout and its payment or subscription |
 
 `session_status` is the server-side verification primitive for redirect
 flows. When the customer lands back on your return page, do NOT trust the
@@ -637,7 +638,8 @@ Handle `RequiresClientAction` by returning the payload to your frontend. The fro
 
 ## Idempotency keys
 
-Every mutating DTO has an optional `idempotency_key: Option<String>`. Set one on retryable network calls:
+Checkout, charge, refund, and subscription mutation DTOs expose an optional
+`idempotency_key: Option<String>`. Set one on supported Stripe calls:
 
 ```rust,ignore
 provider.start_session(StartSessionRequest {
@@ -653,7 +655,13 @@ provider.subscribe(SubscribeRequest {
 }).await?;
 ```
 
-Stripe honors idempotency keys via the `Idempotency-Key` HTTP header. Paddle has an equivalent mechanism. If a request fails mid-flight and you retry with the same key, the provider returns the original response instead of creating a duplicate charge or subscription.
+Stripe forwards supported request keys in the `Idempotency-Key` HTTP header.
+Retry the same operation with the same key and parameters. Paddle does not
+accept client-supplied idempotency keys; its checkout and subscription update
+methods return `NotSupported` when a key is present. Persist the transaction ID
+when creation succeeds. After an uncertain Paddle create, reconcile provider
+state before issuing another create. Correlation metadata does not deduplicate
+requests.
 
 ## The discriminator pattern
 

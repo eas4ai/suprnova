@@ -108,6 +108,35 @@ fn optional_paddle_timestamp(
     }
 }
 
+fn paddle_capture_timestamp(
+    event: &WebhookEvent,
+    data: &serde_json::Value,
+) -> PaymentResult<Option<chrono::DateTime<chrono::Utc>>> {
+    let payments = match data.get("payments") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(payments)) => payments,
+        Some(_) => {
+            return Err(paddle_snapshot_error(
+                event,
+                "payments",
+                "must be an array when present",
+            ));
+        }
+    };
+    let mut paid_at = None;
+    for payment in payments {
+        if payment.get("status").and_then(serde_json::Value::as_str) == Some("captured") {
+            let captured_at = optional_paddle_timestamp(
+                event,
+                payment.get("captured_at"),
+                "payments.captured_at",
+            )?;
+            paid_at = paid_at.max(captured_at);
+        }
+    }
+    Ok(paid_at)
+}
+
 fn checked_paddle_payment_snapshot(event: &WebhookEvent) -> PaymentResult<Option<PaymentSnapshot>> {
     let Some(kind) = event.neutral else {
         return Ok(None);
@@ -175,7 +204,14 @@ fn checked_paddle_payment_snapshot(event: &WebhookEvent) -> PaymentResult<Option
                 "details.totals.tax",
                 false,
             )?;
-            let paid_at = optional_paddle_timestamp(event, data.get("billed_at"), "billed_at")?;
+            let paid_at = if matches!(
+                kind,
+                NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid
+            ) {
+                paddle_capture_timestamp(event, data)?
+            } else {
+                None
+            };
             let Some(provider_customer_id) = provider_customer_id else {
                 return Ok(None);
             };
@@ -309,7 +345,26 @@ impl WebhookHandler for PaddleProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let neutral: Option<NeutralEventKind> = paddle_event_to_neutral(&provider_event_type);
+        let neutral = if matches!(
+            provider_event_type.as_str(),
+            "adjustment.created" | "adjustment.updated"
+        ) {
+            let action = raw
+                .pointer("/data/action")
+                .and_then(serde_json::Value::as_str);
+            let status = raw
+                .pointer("/data/status")
+                .and_then(serde_json::Value::as_str);
+            match (action, status) {
+                (Some("refund"), Some("approved")) => Some(NeutralEventKind::PaymentRefunded),
+                (Some("chargeback" | "chargeback_warning"), Some("approved")) => {
+                    Some(NeutralEventKind::PaymentDisputed)
+                }
+                _ => None,
+            }
+        } else {
+            paddle_event_to_neutral(&provider_event_type)
+        };
 
         Ok(WebhookEvent {
             provider: "paddle".into(),
@@ -327,8 +382,7 @@ impl WebhookHandler for PaddleProvider {
     /// carry `subscription_id` when they belong to a subscription billing
     /// cycle.
     ///
-    /// Adjustment events (`adjustment.created` / `adjustment.updated`, mapped
-    /// to [`NeutralEventKind::PaymentRefunded`]) are NOT transactions: their
+    /// Approved refund and dispute adjustments are NOT transactions: their
     /// `id` is the adjustment id (`adj_…`) and the transaction they adjust is
     /// in a separate `transaction_id` field (`txn_…`). The mirror must be
     /// keyed off `transaction_id` so a refund updates the original transaction
@@ -402,7 +456,8 @@ impl WebhookHandler for PaddleProvider {
     /// - **Transaction** (`transaction.*` → succeeded / failed / invoice
     ///   paid). `data.id` is the transaction id (`txn_…`); totals live under
     ///   `data.details.totals.{total,tax}` as decimal-string minor units;
-    ///   currency is `data.currency_code`; settle time is `data.billed_at`.
+    ///   currency is `data.currency_code`; settle time is the latest captured
+    ///   payment attempt timestamp, when available.
     /// - **Adjustment** (`adjustment.*` → refunded / chargeback). `data.id`
     ///   is the adjustment id (`adj_…`) - NOT a transaction - and the
     ///   transaction it adjusts is `data.transaction_id`. Totals live at
@@ -615,7 +670,10 @@ mod tests {
         assert_eq!(snap.amount_tax_minor, 100);
         assert_eq!(snap.currency, "EUR");
         assert_eq!(snap.status, "succeeded");
-        assert!(snap.paid_at.is_some(), "billed_at must parse to paid_at");
+        assert!(
+            snap.paid_at.is_none(),
+            "invoice issuance is not payment capture"
+        );
     }
 
     #[test]
@@ -695,12 +753,12 @@ mod tests {
                 } }),
             ),
             (
-                "billed_at",
+                "captured_at",
                 serde_json::json!({ "data": {
                     "id": "txn_test",
                     "customer_id": "ctm_test",
                     "currency_code": "USD",
-                    "billed_at": "yesterday",
+                    "payments": [{"status":"captured", "captured_at":"yesterday"}],
                     "details": { "totals": { "total": "4200" } }
                 } }),
             ),
@@ -1164,5 +1222,164 @@ mod signature_hex_tests {
                 "{body:?} is not a valid event body and must be refused"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod settlement_contract_tests {
+    use super::*;
+    use crate::PaddleEnvironment;
+    use serde_json::json;
+
+    fn provider() -> PaddleProvider {
+        PaddleProvider::new(
+            "test-api",
+            "test-webhook",
+            "test-client",
+            PaddleEnvironment::Sandbox,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn issued_invoice_is_not_a_paid_event() {
+        let provider = provider();
+        let event = provider
+            .parse_event(
+                &serde_json::to_vec(&json!({
+                    "event_id": "evt_billed", "event_type": "transaction.billed",
+                    "data": {"id": "txn_test", "customer_id": "ctm_test", "currency_code": "USD",
+                        "details": {"totals": {"total": "2900", "tax": "0"}}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(event.neutral, None);
+        assert!(
+            provider
+                .try_extract_payment_snapshot(&event)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adjustment_classification_requires_action_and_approval() {
+        let provider = provider();
+        for event_type in ["adjustment.created", "adjustment.updated"] {
+            for (action, status, expected) in [
+                ("refund", "pending_approval", None),
+                ("refund", "rejected", None),
+                (
+                    "refund",
+                    "approved",
+                    Some(NeutralEventKind::PaymentRefunded),
+                ),
+                ("credit", "approved", None),
+                ("chargeback_reverse", "approved", None),
+                ("chargeback_warning_reverse", "approved", None),
+                (
+                    "chargeback",
+                    "approved",
+                    Some(NeutralEventKind::PaymentDisputed),
+                ),
+                (
+                    "chargeback_warning",
+                    "approved",
+                    Some(NeutralEventKind::PaymentDisputed),
+                ),
+            ] {
+                let event = provider.parse_event(&serde_json::to_vec(&json!({
+                    "event_id": "evt_adjustment", "event_type": event_type,
+                    "data": {"id": "adj_test", "transaction_id": "txn_test", "customer_id": "ctm_test",
+                        "action": action, "status": status, "currency_code": "USD", "totals": {"total": "500", "tax": "0"}}
+                })).unwrap()).unwrap();
+                assert_eq!(event.neutral, expected, "{event_type} {action} {status}");
+                let snapshot = provider.try_extract_payment_snapshot(&event).unwrap();
+                assert_eq!(snapshot.is_some(), expected.is_some());
+                if let Some(snapshot) = snapshot {
+                    assert_eq!(snapshot.provider_transaction_id, "txn_test");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn payment_timestamp_uses_capture_and_allows_later_subscription_link() {
+        let provider = provider();
+        for (kind, subscription) in [
+            ("transaction.paid", None),
+            ("transaction.completed", Some("sub_test")),
+        ] {
+            let event = provider.parse_event(&serde_json::to_vec(&json!({
+                "event_id": format!("evt_{kind}"), "event_type": kind,
+                "data": {"id": "txn_test", "customer_id": "ctm_test", "subscription_id": subscription,
+                    "currency_code": "USD", "details": {"totals": {"total": "2900", "tax": "0"}},
+                    "billed_at": "2026-09-09T10:00:00Z", "custom_data": {"attempt": "checkout-1"},
+                    "payments": [
+                        {"status":"captured", "captured_at":"2026-09-09T11:00:00Z"},
+                        {"status":"captured", "captured_at":"2026-09-09T10:30:00Z"},
+                        {"status":"error", "captured_at":"2026-09-09T12:00:00Z"}
+                    ]}
+            })).unwrap()).unwrap();
+            let snapshot = provider
+                .try_extract_payment_snapshot(&event)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                snapshot.paid_at.unwrap().to_rfc3339(),
+                "2026-09-09T11:00:00+00:00"
+            );
+            assert_eq!(snapshot.provider_subscription_id.as_deref(), subscription);
+            assert_eq!(
+                snapshot.provider_metadata["custom_data"]["attempt"],
+                "checkout-1"
+            );
+        }
+    }
+
+    #[test]
+    fn invoice_timestamp_without_capture_does_not_invent_payment_time() {
+        let provider = provider();
+        let event = provider
+            .parse_event(
+                &serde_json::to_vec(&json!({
+                    "event_id":"evt_paid", "event_type":"transaction.paid", "data": {
+                        "id":"txn_test", "customer_id":"ctm_test", "currency_code":"USD",
+                        "billed_at":"2026-09-09T10:00:00Z", "details":{"totals":{"total":"2900"}}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            provider
+                .try_extract_payment_snapshot(&event)
+                .unwrap()
+                .unwrap()
+                .paid_at
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_event_does_not_reuse_an_earlier_capture_time() {
+        let provider = provider();
+        let event = provider
+            .parse_event(
+                &serde_json::to_vec(&json!({
+                    "event_id":"evt_failed", "event_type":"transaction.payment_failed", "data": {
+                        "id":"txn_test", "customer_id":"ctm_test", "currency_code":"USD",
+                        "details":{"totals":{"total":"2900"}},
+                        "payments":[{"status":"captured", "captured_at":"2026-09-09T10:00:00Z"}]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let snapshot = provider
+            .try_extract_payment_snapshot(&event)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.status, "failed");
+        assert!(snapshot.paid_at.is_none());
     }
 }

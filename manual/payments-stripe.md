@@ -116,8 +116,15 @@ Payments flag. Put Stripe's `{CHECKOUT_SESSION_ID}` template literal in
 your `success_return_url` - Stripe substitutes the real `cs_…` id on
 redirect, and your return page feeds it to `session_status`.
 
-`Checkout::session_status` maps `GET /v1/checkout/sessions/{id}` onto
-the neutral `CheckoutSessionState`:
+Checkout metadata is attached to the Session and to the resulting
+PaymentIntent (`payment_intent_data.metadata`) or Subscription
+(`subscription_data.metadata`). Elements attaches it directly to the
+PaymentIntent. As with customer metadata, strings pass through, non-string
+values become JSON strings, and null values are omitted. Supply an object
+with stable correlation identifiers.
+
+`Checkout::session_status` retrieves `cs_` IDs from
+`GET /v1/checkout/sessions/{id}` and maps them to `CheckoutSessionState`:
 
 | Stripe `status` / `payment_status` | `CheckoutSessionState` |
 |---|---|
@@ -125,6 +132,12 @@ the neutral `CheckoutSessionState`:
 | `expired` | `Expired` |
 | `complete` + `paid` or `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
 | `complete` + `unpaid` (delayed settlement) | `Complete { paid: false, … }` |
+
+For an Elements `pi_` ID, it retrieves `GET /v1/payment_intents/{id}`.
+Only `succeeded` maps to `Complete { paid: true, ... }`; `canceled` maps to
+`Expired`, and processing, authorization, and customer-action states remain
+`Open`. Invalid IDs and provider errors return errors. A card authorization
+that still requires capture does not count as a collected payment.
 
 `payment_ref` carries the session's PaymentIntent id (`pi_…`) so return
 pages and sweeps can correlate the session with `Payment` operations and
@@ -552,31 +565,15 @@ webhook deliveries are two separate stories. Read them as such.
 
 ### Outbound: per-method coverage
 
-Stripe supports request idempotency via the `Idempotency-Key` HTTP
-request header - the same key with the same body returns the same
-response object for a 24-hour replay window; a mismatched body returns
-an error. The Suprnova Stripe adapter does **not** uniformly thread the
-DTO's `idempotency_key` field onto that header today. The actual
-behaviour as of this writing:
+The adapter forwards a supplied `idempotency_key` in Stripe's
+`Idempotency-Key` HTTP header for checkout (hosted and Elements), charge,
+refund, subscription creation, and subscription update. Blank or invalid
+header values fail before a request is sent. An absent key stays absent.
 
-| Method | DTO field | What the adapter does |
-|---|---|---|
-| `Payment::charge` | `ChargeRequest::idempotency_key` | Forwarded into the POST body as `idempotency_key=...` (not the HTTP header). Stripe's API does **not** read body-form idempotency keys, so this is best treated as not effective until the adapter migrates to the request-header path. |
-| `Payment::refund` | `RefundRequest::idempotency_key` | Silently discarded - the field is not forwarded. |
-| `Checkout::start_session` | `StartSessionRequest::idempotency_key` | Silently discarded. |
-| `Subscription::subscribe` / `update` | `*Request::idempotency_key` | Silently discarded. |
-
-If you rely on at-most-once semantics for charge/refund retries
-against Stripe today, gate the retry at your own call site (a
-deterministic domain key persisted in your DB, with a unique index
-preventing the second insert) until the adapter wires the header
-through. The DTO fields are accepted on the API but not currently
-honoured all the way to the wire - set them to `None` in tests and
-production code so the gap is explicit, and don't assume Stripe is
-deduplicating your retries.
-
-This is a known gap in the v1 adapter and a candidate fix for the
-next release; the surface shape stays the same once the wiring lands.
+Persist a stable key per operation and reuse it with identical parameters
+when retrying. A different operation needs a different key. Provider replay
+retention is finite, so retain your own operation record and reconcile an
+uncertain outcome before retrying outside that window.
 
 ### Inbound: webhook deduplication
 

@@ -13,15 +13,18 @@
 //! For `SessionMode::Subscription` we create a hosted Checkout Session and
 //! return its url so the frontend redirects.
 //!
-//! `session_status` retrieves a Checkout Session and maps it to the
+//! `session_status` retrieves a Checkout Session or Elements PaymentIntent and maps it to the
 //! provider-neutral `CheckoutSessionState` - the verification primitive
 //! return pages and reconciliation sweeps run against.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_shared::{
     CheckoutSession, CheckoutSessionPaymentStatus, CheckoutSessionStatus, PaymentIntent,
+    PaymentIntentStatus,
 };
 
 use suprnova::payments::{
@@ -30,6 +33,7 @@ use suprnova::payments::{
 };
 
 use crate::StripeProvider;
+use crate::customer::metadata_to_string_map;
 use crate::payment::stripe_currency_to_money;
 
 #[derive(Serialize)]
@@ -41,6 +45,8 @@ struct CreatePaymentIntentParams<'a> {
     automatic_payment_methods_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +71,17 @@ struct CreateCheckoutSessionParams<'a> {
         skip_serializing_if = "std::ops::Not::not"
     )]
     managed_payments_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payment_intent_data: Option<CheckoutMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_data: Option<CheckoutMetadata>,
+}
+
+#[derive(Serialize)]
+struct CheckoutMetadata {
+    metadata: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -78,9 +95,7 @@ where
     S: serde::Serializer,
 {
     // Stripe wire format for arrays: line_items[0][price]=...&line_items[0][quantity]=...
-    // serde_urlencoded handles this naturally via tuple-serialization, but the array-index
-    // syntax requires a flat string. We emit a single comma-separated price list as
-    // line_items[0][price] for v1 - most subscriptions are single-price.
+    // The SDK's serde_qs encoder indexes this sequence and nests each item's fields.
     use serde::ser::SerializeSeq;
     let mut seq = s.serialize_seq(Some(items.len()))?;
     for item in items {
@@ -130,6 +145,7 @@ fn session_to_state(session: CheckoutSession) -> PaymentResult<CheckoutSessionSt
 #[async_trait]
 impl Checkout for StripeProvider {
     async fn start_session(&self, req: StartSessionRequest) -> PaymentResult<SessionPayload> {
+        let metadata = metadata_to_string_map(req.metadata.as_ref());
         match req.mode {
             SessionMode::OneOff => {
                 // Predefined Prices → hosted Checkout Session (mode=payment).
@@ -153,6 +169,10 @@ impl Checkout for StripeProvider {
                         line_items,
                         allow_promotion_codes: true,
                         managed_payments_enabled: self.managed_payments(),
+                        metadata: metadata.clone(),
+                        // Session metadata is not copied to its PaymentIntent by Stripe.
+                        payment_intent_data: metadata.map(|metadata| CheckoutMetadata { metadata }),
+                        subscription_data: None,
                     };
 
                     let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
@@ -193,6 +213,7 @@ impl Checkout for StripeProvider {
                     customer: &req.customer_ref,
                     automatic_payment_methods_enabled: true,
                     description: None,
+                    metadata,
                 };
 
                 let request = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
@@ -241,6 +262,10 @@ impl Checkout for StripeProvider {
                     // field is sent (Stripe defaults to disallowed).
                     allow_promotion_codes: false,
                     managed_payments_enabled: false,
+                    metadata: metadata.clone(),
+                    payment_intent_data: None,
+                    // Subscription webhooks must retain the checkout correlation data.
+                    subscription_data: metadata.map(|metadata| CheckoutMetadata { metadata }),
                 };
 
                 let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
@@ -265,11 +290,54 @@ impl Checkout for StripeProvider {
         }
     }
 
-    /// Retrieve a Checkout Session and report its provider-neutral state.
+    /// Retrieve a Checkout Session or Elements PaymentIntent and report its state.
     async fn session_status(
         &self,
         provider_session_id: &str,
     ) -> PaymentResult<CheckoutSessionState> {
+        let suffix = provider_session_id
+            .strip_prefix("pi_")
+            .or_else(|| provider_session_id.strip_prefix("cs_"))
+            .filter(|suffix| !suffix.is_empty());
+        if suffix.is_none()
+            || !provider_session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(PaymentError::Validation(
+                "expected a Stripe Checkout Session or PaymentIntent identifier".into(),
+            ));
+        }
+        if provider_session_id.starts_with("pi_") {
+            let intent: PaymentIntent = RequestBuilder::new(
+                StripeMethod::Get,
+                format!("/payment_intents/{provider_session_id}"),
+            )
+            .customize::<PaymentIntent>()
+            .send(self.client())
+            .await
+            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.retrieve: {e}")))?;
+            return match intent.status {
+                PaymentIntentStatus::Succeeded => Ok(CheckoutSessionState::Complete {
+                    paid: true,
+                    payment_ref: Some(intent.id.as_str().to_owned()),
+                    amount_total: Some(stripe_currency_to_money(
+                        intent.amount_received,
+                        intent.currency,
+                    )?),
+                }),
+                PaymentIntentStatus::Canceled => Ok(CheckoutSessionState::Expired),
+                PaymentIntentStatus::Processing
+                | PaymentIntentStatus::RequiresCapture
+                | PaymentIntentStatus::RequiresAction
+                | PaymentIntentStatus::RequiresConfirmation
+                | PaymentIntentStatus::RequiresPaymentMethod => Ok(CheckoutSessionState::Open),
+                other => Err(PaymentError::Provider(format!(
+                    "PaymentIntent has unrecognized status: {}",
+                    other.as_str()
+                ))),
+            };
+        }
         let path = format!("/checkout/sessions/{provider_session_id}");
 
         let session: CheckoutSession = RequestBuilder::new(StripeMethod::Get, &path)
@@ -291,8 +359,8 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Param serialization - field names and skip behavior. serde_json
-    // sees the same serde attributes the wire encoder does, so renames
-    // and skip_serializing_if gates are exercised without a network.
+    // exercises serde attributes only. idempotency_tests captures actual
+    // SDK HTTP requests to verify form encoding and successful responses.
     // -----------------------------------------------------------------
 
     fn params<'a>(
@@ -309,6 +377,9 @@ mod tests {
             line_items,
             allow_promotion_codes,
             managed_payments_enabled,
+            metadata: None,
+            payment_intent_data: None,
+            subscription_data: None,
         }
     }
 

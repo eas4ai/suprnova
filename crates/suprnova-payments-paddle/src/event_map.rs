@@ -5,12 +5,13 @@ use suprnova::payments::NeutralEventKind;
 /// Map a Paddle event_type string (e.g. `"transaction.completed"`) to the
 /// framework's provider-agnostic `NeutralEventKind`, or `None` if no mapping
 /// exists. Callers should fall through to `provider_event_type` + raw payload
-/// for unmapped events.
+/// for unmapped events. Adjustment events require their payload's action and
+/// approval status, so only `WebhookHandler::parse_event` classifies them.
+/// An issued invoice (`transaction.billed`) does not confirm collection.
 pub fn paddle_event_to_neutral(t: &str) -> Option<NeutralEventKind> {
     Some(match t {
         "transaction.completed" | "transaction.paid" => NeutralEventKind::PaymentSucceeded,
         "transaction.payment_failed" => NeutralEventKind::PaymentFailed,
-        "adjustment.created" | "adjustment.updated" => NeutralEventKind::PaymentRefunded,
         "subscription.created" => NeutralEventKind::SubscriptionCreated,
         "subscription.updated"
         | "subscription.activated"
@@ -18,7 +19,6 @@ pub fn paddle_event_to_neutral(t: &str) -> Option<NeutralEventKind> {
         | "subscription.resumed"
         | "subscription.trialing" => NeutralEventKind::SubscriptionUpdated,
         "subscription.canceled" => NeutralEventKind::SubscriptionCanceled,
-        "transaction.billed" => NeutralEventKind::InvoicePaid,
         "customer.created" => NeutralEventKind::CustomerCreated,
         "customer.updated" => NeutralEventKind::CustomerUpdated,
         _ => return None,
@@ -43,10 +43,7 @@ mod tests {
             paddle_event_to_neutral("subscription.canceled"),
             Some(NeutralEventKind::SubscriptionCanceled)
         );
-        assert_eq!(
-            paddle_event_to_neutral("adjustment.created"),
-            Some(NeutralEventKind::PaymentRefunded)
-        );
+        assert_eq!(paddle_event_to_neutral("adjustment.created"), None);
     }
 
     #[test]
