@@ -178,10 +178,12 @@ impl Gate {
     /// [`Self::denies`](Self::denies), and [`Self::authorize`](Self::authorize) all route
     /// through it, so `before`/`after` hooks apply uniformly.
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
-        crate::render_cache::collector::observe_authorization_read();
-        global()
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global()
             .raw::<U, R>(action, user, resource)
-            .unwrap_or_else(registry::default_denial)
+            .unwrap_or_else(registry::default_denial);
+        crate::render_cache::collector::end_authorization_decision(window);
+        response
     }
 
     /// Async sibling of [`inspect`](Self::inspect).
@@ -190,11 +192,13 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Response {
-        crate::render_cache::collector::observe_authorization_read();
-        global()
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global()
             .raw_async::<U, R>(action, user, resource)
             .await
-            .unwrap_or_else(registry::default_denial)
+            .unwrap_or_else(registry::default_denial);
+        crate::render_cache::collector::end_authorization_decision(window);
+        response
     }
 
     /// The raw evaluation result, preserving the *undefined* case as `None`.
@@ -205,8 +209,10 @@ impl Gate {
     /// filled in. This distinguishes "explicitly denied" from "no rule
     /// defined", mirroring Laravel's `Gate::raw`.
     pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
-        crate::render_cache::collector::observe_authorization_read();
-        global().raw::<U, R>(action, user, resource)
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().raw::<U, R>(action, user, resource);
+        crate::render_cache::collector::end_authorization_decision(window);
+        response
     }
 
     /// Async sibling of [`raw`](Self::raw).
@@ -215,8 +221,10 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Option<Response> {
-        crate::render_cache::collector::observe_authorization_read();
-        global().raw_async::<U, R>(action, user, resource).await
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().raw_async::<U, R>(action, user, resource).await;
+        crate::render_cache::collector::end_authorization_decision(window);
+        response
     }
 
     /// Register a hook that runs **before** any gate for the user type `U`.

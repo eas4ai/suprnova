@@ -96,18 +96,24 @@
 //!   variance is the route's own job. That is the same residual the
 //!   header and configuration bullets below describe, and reclassifying
 //!   the identity read neither widened nor narrowed it.
-//! - **Authorization decisions are always treated as per-principal.**
-//!   `Gate::allows` records that a decision was evaluated, never what the
-//!   decision consulted, so `AuthorizationRead` requires the `Principal`
-//!   dimension unconditionally. A route keyed only by `Tenant` whose gate is
-//!   genuinely per-tenant therefore never caches, even though it is safe -
-//!   proven functional, not a leak, by the sixth review. This is deliberate
-//!   and fails closed: nothing here can tell a per-tenant gate from a
-//!   per-user one, and treating every decision as per-user is the only safe
-//!   default. The remedy is for such a route to declare `Principal`
-//!   alongside `Tenant`, which partitions by both and does cache. Parked for
-//!   a later iteration: having `Gate` record the identity it consulted would
-//!   let the value comparison decide instead of the mapping.
+//! - **An authorization decision's own consult decides its axis.** Each
+//!   `Gate` evaluation runs inside a consult window
+//!   (`crate::render_cache::collector::begin_authorization_decision`), and
+//!   what the decision recorded between that window opening and closing is
+//!   what it is judged by. Principal material inside the window makes the
+//!   render's consult `Principal` and requires the `Principal` dimension;
+//!   tenant material alone makes it `TenantOnly` and requires `Tenant`, so
+//!   a route keyed by `Tenant` alone whose gate reads
+//!   `suprnova::live::current_tenant()` caches and partitions by tenant
+//!   (`a_tenant_only_gate_caches_under_tenant_alone`). A decision that
+//!   recorded nothing at all also requires `Principal`: a gate body that
+//!   decided from its own `user` argument through no instrumented accessor
+//!   is indistinguishable here from one that decided from a constant, and
+//!   the conservative reading is the only safe one
+//!   (`a_per_user_gate_still_requires_principal`). The remedy for such a
+//!   gate is to read what it decides on through an instrumented accessor,
+//!   or to declare `Principal` alongside `Tenant`. Nested decisions compose:
+//!   an outer window's deltas include every read an inner window saw.
 //! - **Eloquent global scopes are not instrumented.** A registered
 //!   [`crate::eloquent::scopes::GlobalScope`] runs inside every
 //!   `Model::query` call, and its own registration doc invites the scope to

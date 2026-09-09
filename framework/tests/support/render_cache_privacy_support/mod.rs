@@ -326,6 +326,17 @@ async fn authz_driven_handler(request: Request) -> Response {
     )))
 }
 
+/// Body driven by a decision whose evaluation reads only the tenant. The
+/// handler itself touches no accessor at all, so everything the collector
+/// records for this route happens inside the gate's own consult window.
+async fn tenant_only_gate_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let allowed = suprnova::Gate::allows::<bool, bool>(TENANT_ONLY_GATE, &true, &true);
+    Ok(HttpResponse::html(format!(
+        "tenant-only-gate render {n} allowed={allowed}"
+    )))
+}
+
 /// Reads the tenant *and* the identity: a tenant-keyed route whose body
 /// still varies per user inside one tenant.
 async fn reads_tenant_and_identity_handler(request: Request) -> Response {
@@ -529,6 +540,23 @@ pub fn ensure_role_gate() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         suprnova::Gate::define::<bool, bool>(ROLE_GATE, |is_admin: &bool, _resource| *is_admin);
+    });
+}
+
+/// A gate that decides from the current tenant and nothing else, read
+/// through the framework's own instrumented accessor. The consult window
+/// around its evaluation therefore records tenant material and no
+/// principal material, which is what makes the decision `TenantOnly`.
+const TENANT_ONLY_GATE: &str = "privacy-suite-tenant-only-gate";
+
+/// Registers [`TENANT_ONLY_GATE`] exactly once per process, for the reason
+/// [`ensure_role_gate`] gives.
+pub fn ensure_tenant_only_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<bool, bool>(TENANT_ONLY_GATE, |_user: &bool, _resource| {
+            suprnova::live::current_tenant().as_deref() == Some("acme")
+        });
     });
 }
 
@@ -750,6 +778,12 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .into();
     let router: Router = router.get(AUTHZ_DRIVEN_ROUTE, authz_driven_handler).into();
     let router: Router = router
+        .get(TENANT_ONLY_GATE_ROUTE, tenant_only_gate_handler)
+        .into();
+    let router: Router = router
+        .get(TENANT_ONLY_GATE_UNDECLARED_ROUTE, tenant_only_gate_handler)
+        .into();
+    let router: Router = router
         .get(
             TENANT_DECLARED_READS_IDENTITY_ROUTE,
             reads_tenant_and_identity_handler,
@@ -858,6 +892,16 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
         .expect("attach crate-root auth-user-id policy")
         .try_render_cache(AUTHZ_DRIVEN_ROUTE, GroupPolicy::from(no_variance.clone()))
         .expect("attach authz-driven policy")
+        .try_render_cache(
+            TENANT_ONLY_GATE_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-only-gate policy")
+        .try_render_cache(
+            TENANT_ONLY_GATE_UNDECLARED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach tenant-only-gate-undeclared policy")
         .try_render_cache(
             TENANT_DECLARED_READS_IDENTITY_ROUTE,
             GroupPolicy::from(tenant_declared.clone()),
@@ -1053,6 +1097,10 @@ pub const READS_AUTH_ID_ROUTE: &str = "/privacy/reads-auth-id";
 pub const READS_CRATE_ROOT_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-crate-root-auth-user-id";
 /// Declares nothing, body driven by `Gate::allows` alone.
 pub const AUTHZ_DRIVEN_ROUTE: &str = "/privacy/authz-driven";
+/// Declares `Tenant`, body driven by a tenant-only authorization decision.
+pub const TENANT_ONLY_GATE_ROUTE: &str = "/privacy/tenant-only-gate/{id}";
+/// The same handler on a route that declares nothing.
+pub const TENANT_ONLY_GATE_UNDECLARED_ROUTE: &str = "/privacy/tenant-only-gate-undeclared/{id}";
 /// Declares `Tenant` only, reads the tenant *and* the identity.
 pub const TENANT_DECLARED_READS_IDENTITY_ROUTE: &str =
     "/privacy/tenant-declared-reads-identity/{id}";

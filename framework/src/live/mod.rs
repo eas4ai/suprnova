@@ -61,7 +61,7 @@ pub use runtime::{
 };
 pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
-pub use tenant::{LiveTenantMiddleware, LiveTenantResolver};
+pub use tenant::{LiveTenantMiddleware, LiveTenantResolver, current_tenant};
 
 /// Versioned browser event and effect contracts declared by Live components.
 pub mod metadata {

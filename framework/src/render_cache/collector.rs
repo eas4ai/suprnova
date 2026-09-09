@@ -717,21 +717,6 @@ pub fn observe_locale_value(locale: &str) {
 pub fn observe_session_read() {
     with_context(|context| context.session_read = true);
 }
-/// An authorization decision was evaluated, with nothing recorded about
-/// what it consulted.
-///
-/// Kept only until the gate's own evaluation entry points are wrapped in
-/// consult windows ([`begin_authorization_decision`]); it joins the
-/// conservative consult, which is exactly what the boolean it replaced
-/// meant.
-pub fn observe_authorization_read() {
-    with_context(|context| {
-        context.authorization = context
-            .authorization
-            .join(suprnova_live::render_cache::AuthorizationConsult::Principal);
-    });
-}
-
 /// The counters at the start of a consult window. Opaque: only
 /// [`end_authorization_decision`] can read it, so no caller can invent a
 /// window that never opened.

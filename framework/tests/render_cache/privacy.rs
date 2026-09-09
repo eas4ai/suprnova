@@ -51,10 +51,11 @@ use render_cache_privacy_support::{
     READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE,
     READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE,
     REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY, STITCHED_ROUTE,
-    TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
+    TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_ONLY_GATE_ROUTE,
+    TENANT_ONLY_GATE_UNDECLARED_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
     boot_with_cache_installed_before_the_auth_middleware, boot_with_render_cache, counting_route,
-    dispatch_get, ensure_role_gate, island_tag, route_is_under_a_policy, session_cookie,
-    stitched_scope,
+    dispatch_get, ensure_role_gate, ensure_tenant_only_gate, island_tag, route_is_under_a_policy,
+    session_cookie, stitched_scope,
 };
 use suprnova::StatusCode;
 use suprnova::render_cache::RenderCache;
@@ -1635,5 +1636,149 @@ async fn a_permission_version_bump_leaves_the_shared_shell_and_re_mounts_every_i
         stitched_scope(&bob.text()),
         stitched_scope(&alice.text()),
         "and the island in it was mounted for bob, here and now"
+    );
+}
+
+/// Iteration 006, definition-of-done item 1. A gate whose evaluation reads
+/// only the tenant, through `suprnova::live::current_tenant()`, classifies
+/// under `AuthorizationTenantRead`, which the `Tenant` dimension satisfies.
+/// Two tenants get two representations and neither is ever served the
+/// other's body.
+///
+/// Verified failing by reverting `Gate::inspect` to
+/// `observe_authorization_read()`: the repeat request stopped being a hit,
+/// because `AuthorizationRead` demanded a `Principal` dimension this route
+/// does not declare.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tenant_only_gate_caches_under_tenant_alone() {
+    ensure_tenant_only_gate();
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, TENANT_ONLY_GATE_ROUTE),
+        "the route under test must be attached to a policy"
+    );
+
+    let acme = dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(acme.status, StatusCode::OK);
+    assert!(
+        acme.text().contains("allowed=true"),
+        "sanity: the gate is registered and reads the tenant - got {}",
+        acme.text()
+    );
+    let after_acme = counting_route::renders();
+
+    let acme_again = dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert!(acme_again.text().contains("allowed=true"));
+    assert_eq!(
+        counting_route::renders(),
+        after_acme,
+        "a tenant-only decision caches under the Tenant dimension alone"
+    );
+
+    let globex = dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate/1",
+        &[("x-test-tenant", "globex")],
+    )
+    .await;
+    assert!(
+        globex.text().contains("allowed=false"),
+        "globex must never be served acme's authorized body - got {}",
+        globex.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_acme + 1,
+        "the second tenant is a genuine miss, so the key partitions by tenant"
+    );
+
+    let globex_again = dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate/1",
+        &[("x-test-tenant", "globex")],
+    )
+    .await;
+    assert!(globex_again.text().contains("allowed=false"));
+    assert_eq!(
+        counting_route::renders(),
+        after_acme + 1,
+        "and each tenant's own repeat is a hit against its own partition"
+    );
+}
+
+/// The negative control for the same gate: with no dimension declared,
+/// `AuthorizationTenantRead` has nothing to partition by and the route is
+/// never stored.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tenant_only_gate_without_tenant_variance_is_declined() {
+    ensure_tenant_only_gate();
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, TENANT_ONLY_GATE_UNDECLARED_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+
+    dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate-undeclared/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    let after_first = counting_route::renders();
+    let repeat = dispatch_get(
+        &harness,
+        "/privacy/tenant-only-gate-undeclared/1",
+        &[("x-test-tenant", "acme")],
+    )
+    .await;
+    assert_eq!(repeat.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "a tenant-only decision on a route declaring nothing is never stored"
+    );
+}
+
+/// The conservative half of the same rule: a gate that consults no
+/// instrumented accessor at all still requires `Principal`, because the
+/// recording cannot tell a body-argument decision from a constant.
+///
+/// Verified discriminating by making `end_authorization_decision` join
+/// `TenantOnly` for an empty window: the undeclared route below started
+/// caching, which is the leak the conservative default exists to stop.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_per_user_gate_still_requires_principal() {
+    ensure_role_gate();
+    let harness = boot_with_render_cache().await;
+
+    dispatch_get(&harness, AUTHZ_DRIVEN_ROUTE, &[("x-test-role", "admin")]).await;
+    let after_first = counting_route::renders();
+    dispatch_get(&harness, AUTHZ_DRIVEN_ROUTE, &[("x-test-role", "admin")]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "a decision that consulted nothing resolvable still needs Principal declared"
+    );
+
+    dispatch_get(&harness, "/privacy/principal-declared-authz/1", &[]).await;
+    let after_declared = counting_route::renders();
+    dispatch_get(&harness, "/privacy/principal-declared-authz/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_declared,
+        "and the documented remedy, declaring Principal, still caches"
     );
 }
