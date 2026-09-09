@@ -47,6 +47,11 @@ pub(crate) mod stitch;
 pub mod telemetry;
 #[doc(hidden)]
 pub mod testing;
+/// Whether this process advances generations: the probe, its decision
+/// table, and the process-wide tri-state that holds the answer.
+pub mod write_side;
+
+pub(crate) use write_side::write_side_open;
 
 pub use config::{
     CoordinatorConfig, FailurePolicy, L0Limits, L1Config, Profile, RenderCacheConfig,
@@ -1040,6 +1045,40 @@ impl RenderCache {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
+    }
+
+    /// Test-only: closes the serving runtime's gate and returns the write
+    /// side's probe to `Unknown`, so a test can prove what a process that
+    /// never ran `install` does on a write.
+    ///
+    /// Leaves the runtime itself in place: the middleware reads
+    /// [`Self::runtime`], not the gate, so a test can keep dispatching
+    /// requests while this process is, for write purposes, a worker.
+    /// `mark_installed` puts the gate back.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn uninstall_for_test() {
+        INSTALLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        write_side::reset_for_test();
+    }
+
+    /// Test-only: forces the configuration answer the write side's probe
+    /// reads, and returns the probe to `Unknown` so the next write uses it.
+    /// `None` restores the real answer. See
+    /// [`write_side::set_enabled_for_test`].
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_write_side_enabled_for_test(enabled: Option<bool>) {
+        write_side::set_enabled_for_test(enabled);
+        write_side::reset_for_test();
+    }
+
+    /// Test-only: the write-side decision this process has fixed.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn write_side_decision_for_test() -> write_side::WriteSideDecision {
+        write_side::decision()
     }
 }
 

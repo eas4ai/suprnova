@@ -18,6 +18,9 @@ use crate::render_cache_operations_support;
 use render_cache_operations_support::{
     boot_with_file_l1, boot_with_render_cache, clock, counting_route, dispatch_get,
 };
+use suprnova::Model;
+use suprnova::attrs;
+use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::console::{epoch_advance_report_for_test, inspect_report_for_test};
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 
@@ -415,5 +418,233 @@ async fn console_epoch_advance_propagates_when_the_ledger_is_unavailable() {
         result.is_err(),
         "N1: a ledger failure must fail the command, never resolve with a \
          printed epoch value"
+    );
+}
+
+/// Iteration 006, definition-of-done item 4. A write made by a process that
+/// never ran `RenderCache::install` - a queue worker, a scheduled task, a
+/// console command - advances the same generations the serving process
+/// advances, so the entry that depended on the write rebuilds.
+///
+/// Verified failing by reverting `orm::advance` to `super::is_installed()`:
+/// the `posts` generation stood still and the next request was a hit
+/// serving the pre-write body.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_write_with_no_runtime_installed_advances_the_ledger() {
+    use render_cache_operations_support::Post;
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    let harness = boot_with_render_cache().await;
+    let table = DependencyIdentity::table("posts");
+    let ledger = SqlGenerationLedger::new();
+
+    dispatch_get(&harness, "/posts/1", &[]).await;
+    let after_first = counting_route::renders();
+    dispatch_get(&harness, "/posts/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "the route is cached before the out-of-process write"
+    );
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+
+    // From here on this process is not a serving process: no runtime
+    // installed, exactly like a queue worker.
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    Post::create(attrs! { title: "written outside the server" })
+        .await
+        .expect("write a post");
+
+    let after = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+    assert!(
+        after > before,
+        "an uninstalled process advances the generation its write changed"
+    );
+
+    // Re-open the serving gate; the runtime itself was never torn down.
+    suprnova::render_cache::mark_installed();
+    dispatch_get(&harness, "/posts/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "the entry that depended on the write rebuilds"
+    );
+}
+
+/// The permission generation is the same rule: a console command that
+/// revokes a role advances it from wherever it runs.
+#[tokio::test]
+#[serial_test::serial]
+async fn bump_permission_version_with_no_runtime_installed_advances_the_permission_generation() {
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    let _harness = boot_with_render_cache().await;
+    let identity = suprnova::render_cache::collector::permission_version_identity();
+    let ledger = SqlGenerationLedger::new();
+    let before = ledger
+        .current(&[identity.digest()])
+        .await
+        .expect("current")
+        .get(&identity)
+        .unwrap_or(0);
+
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    suprnova::render_cache::RenderCache::bump_permission_version()
+        .await
+        .expect("bump from an uninstalled process");
+    suprnova::render_cache::mark_installed();
+
+    let after = ledger
+        .current(&[identity.digest()])
+        .await
+        .expect("current")
+        .get(&identity)
+        .unwrap_or(0);
+    assert_eq!(
+        after,
+        before + 1,
+        "bump_permission_version works from any process that writes"
+    );
+}
+
+/// A process with RenderCache disabled by configuration opens nothing and
+/// writes nothing to the ledger, which is what keeps every application that
+/// does not use RenderCache paying no RenderCache SQL at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_process_with_render_cache_disabled_writes_nothing() {
+    use render_cache_operations_support::Post;
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova::render_cache::write_side::WriteSideDecision;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    let _harness = boot_with_render_cache().await;
+    let table = DependencyIdentity::table("posts");
+    let ledger = SqlGenerationLedger::new();
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(false));
+
+    Post::create(attrs! { title: "written with the cache disabled" })
+        .await
+        .expect("write a post");
+
+    assert_eq!(
+        suprnova::render_cache::RenderCache::write_side_decision_for_test(),
+        WriteSideDecision::Closed,
+        "a disabled process fixes Closed without probing the schema"
+    );
+    let after = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+    assert_eq!(after, before, "and advances nothing");
+
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
+    suprnova::render_cache::mark_installed();
+}
+
+/// Every row of the probe's decision table, against the pure function that
+/// holds it, so no row needs a database to be proven.
+#[test]
+fn the_write_side_decision_table() {
+    use suprnova::render_cache::write_side::{WriteSideDecision, decide};
+
+    // Installed wins over everything: the serving process advances.
+    assert_eq!(decide(true, false, false, None), WriteSideDecision::Open);
+    assert_eq!(
+        decide(true, true, true, Some(false)),
+        WriteSideDecision::Open
+    );
+    // Disabled by configuration fixes Closed without a probe.
+    assert_eq!(
+        decide(false, false, true, Some(true)),
+        WriteSideDecision::Closed
+    );
+    // Enabled but disconnected decides nothing: the write itself needs a
+    // connection, so the next write probes again.
+    assert_eq!(
+        decide(false, true, false, None),
+        WriteSideDecision::Undecided
+    );
+    // Enabled and connected: the schema decides.
+    assert_eq!(
+        decide(false, true, true, Some(true)),
+        WriteSideDecision::Open
+    );
+    assert_eq!(
+        decide(false, true, true, Some(false)),
+        WriteSideDecision::Closed
+    );
+    // A probe that failed decides nothing; the error propagates instead.
+    assert_eq!(
+        decide(false, true, true, None),
+        WriteSideDecision::Undecided
+    );
+}
+
+/// A fixed decision is not probed again: two writes after `Closed` issue no
+/// statement beyond the writes themselves.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_closed_write_side_is_not_probed_again() {
+    use render_cache_operations_support::{Post, statements};
+
+    let _harness = boot_with_render_cache().await;
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(false));
+
+    // The first write is what fixes the decision.
+    Post::create(attrs! { title: "first" })
+        .await
+        .expect("first write");
+
+    statements::reset();
+    Post::create(attrs! { title: "second" })
+        .await
+        .expect("second write");
+    let one_write = statements::count();
+
+    statements::reset();
+    Post::create(attrs! { title: "third" })
+        .await
+        .expect("third write");
+    Post::create(attrs! { title: "fourth" })
+        .await
+        .expect("fourth write");
+    let two_writes = statements::count();
+
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
+    suprnova::render_cache::mark_installed();
+
+    // Whatever one `INSERT` costs on this backend, two of them cost exactly
+    // twice as much: no probe, no ledger read, no ledger write, and nothing
+    // that happens only once.
+    assert!(one_write > 0, "a write runs at least one statement");
+    assert_eq!(
+        two_writes,
+        one_write * 2,
+        "a fixed decision is never probed again"
     );
 }

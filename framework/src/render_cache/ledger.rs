@@ -160,6 +160,39 @@ pub(crate) async fn migration_present() -> Result<bool, FrameworkError> {
     }
 }
 
+/// [`migration_present`] read on a pooled primary connection rather than
+/// through the ambient executor.
+///
+/// The write side's probe must never run inside a caller's transaction. On
+/// PostgreSQL a failed statement poisons the enclosing transaction, and
+/// `COMMIT` on a poisoned transaction returns the ROLLBACK tag without
+/// raising, so probing a missing table from inside a caller's transaction
+/// would discard that caller's own write while reporting success.
+/// `primary_executor` honours an ambient transaction by design, which is
+/// right for a generation read and wrong here, so this takes the primary
+/// pool directly - a connection no caller transaction owns.
+///
+/// # Errors
+///
+/// Returns the database error when the probe fails for any reason other
+/// than the table being absent, and when no primary connection exists.
+pub(crate) async fn migration_present_off_transaction() -> Result<bool, FrameworkError> {
+    use sea_orm::ConnectionTrait as _;
+
+    let connection = DB::get()?;
+    let backend = connection.inner().get_database_backend();
+    let statement = sea_orm::Statement::from_sql_and_values(
+        backend,
+        "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+        vec![],
+    );
+    match connection.inner().query_one_raw(statement).await {
+        Ok(_) => Ok(true),
+        Err(e) if is_missing_table_error(&e.to_string()) => Ok(false),
+        Err(e) => Err(database_error(e)),
+    }
+}
+
 /// Whether the tier migration's tables are present on the primary
 /// connection.
 ///
@@ -354,7 +387,7 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 pub async fn advance_in_current_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
-    if !super::is_installed() || identities.is_empty() {
+    if !super::write_side_open().await? || identities.is_empty() {
         return Ok(());
     }
     let tx = Transaction::current().ok_or_else(|| {
@@ -443,14 +476,13 @@ async fn advance_through(
             if matches!(on_missing_table, MissingTablePolicy::Skip)
                 && is_missing_table_error(&e.to_string()) =>
         {
-            // See ruling R65: silent when no RenderCache runtime is
-            // installed (the ordinary case for every application and test
-            // database that does not use RenderCache at all), but a
-            // process-lifetime-once warning when one is - a schema that
-            // regressed underneath an installed runtime stops advancing
-            // generations silently otherwise, and every entry it should
-            // have invalidated is served stale forever.
-            if super::is_installed() {
+            // A table that disappeared after the write side said it was
+            // present is the same schema regression in a worker as in the
+            // server (ruling R65, re-keyed for iteration 006): both stop
+            // advancing generations, and every entry that depended on the
+            // tables the write touched is served without invalidation until
+            // the migration is applied.
+            if super::write_side::decision() == super::write_side::WriteSideDecision::Open {
                 WARNED_MISSING_TABLE_AFTER_INSTALL.call_once(|| {
                     tracing::warn!(
                         target: "suprnova::render_cache",
@@ -577,7 +609,7 @@ pub async fn advance_via_handle(
     handle: &TxHandle,
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
-    if !super::is_installed() {
+    if !super::write_side_open().await? {
         return Ok(());
     }
     advance_through(

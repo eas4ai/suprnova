@@ -10,7 +10,10 @@
 //! stale the moment the write commits. A write path that never calls one
 //! of these advances nothing, and pages that depended on it keep being
 //! served after it changes - see ruling R48 for exactly that failure mode
-//! on the soft-delete `restore` override.
+//! on the soft-delete `restore` override. Which *process* ran the write
+//! makes no difference: every process whose configuration enables
+//! RenderCache and whose database holds the migration advances generations
+//! (see `super::write_side`).
 
 use sea_orm::{EntityTrait, IntoActiveModel, PrimaryKeyTrait};
 use serde::Serialize;
@@ -24,14 +27,16 @@ use crate::{DB, FrameworkError};
 /// Advances `identities` inside the current ambient transaction, or opens
 /// one around just the advance when none is active.
 ///
-/// Returns `Ok(())` immediately, issuing no SQL at all, when no RenderCache
-/// runtime has been installed for this process
-/// (`super::is_installed`). This is the fix that makes an entire class of
-/// failure disappear rather than merely handling it: an application that
-/// never installs RenderCache - every existing application, and nearly
-/// every test database - now performs zero RenderCache SQL on any write,
-/// so a write can never be put at risk by a probe that was never issued.
-/// See fix1 item 1.
+/// Returns `Ok(())` immediately, issuing no SQL at all, when this process
+/// does not advance generations (`super::write_side_open`): either its
+/// configuration disables RenderCache, or its database does not hold the
+/// RenderCache migration. That keeps the property this gate was introduced
+/// for - an application that never uses RenderCache performs zero
+/// RenderCache SQL on any write - while letting a queue worker, a scheduled
+/// task, or a console command against a RenderCache database advance
+/// exactly what the same write advances in the server. The probe runs at
+/// most once per process and off any caller transaction; see
+/// `super::write_side`.
 ///
 /// The common case - a write issued inside `DB::transaction`, or one whose
 /// caller already opened a transaction for it - takes the first branch:
@@ -57,7 +62,7 @@ use crate::{DB, FrameworkError};
 /// reserved permission-version identity through this same path so a bump is
 /// persisted and logged the way every ORM write's advance is.
 pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
-    if !super::is_installed() {
+    if !super::write_side_open().await? {
         return Ok(());
     }
     if in_transaction() {
@@ -124,7 +129,7 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    if !super::is_installed() {
+    if !super::write_side_open().await? {
         return Ok(());
     }
     advance(model_identities(model)?).await
@@ -159,7 +164,7 @@ where
     // Same reasoning as `after_model_write`: check before `model_identities`
     // runs rather than after, since `advance_via_tx` / `advance_via_handle`
     // check `is_installed` only once they are called.
-    if !super::is_installed() {
+    if !super::write_side_open().await? {
         return Ok(());
     }
     super::ledger::advance_via_tx(tx, &model_identities(model)?).await

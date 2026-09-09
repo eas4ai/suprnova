@@ -34,11 +34,19 @@ use suprnova::render_cache::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    App, Auth, ConnectionTrait, Crypt, EncryptionKey, HttpResponse, MiddlewareRegistry, Next,
-    Request, Response, Router, handle_request,
+    App, Auth, ConnectionTrait, Crypt, EncryptionKey, HttpResponse, MiddlewareRegistry, Model,
+    Next, Request, Response, Router, handle_request,
 };
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
+
+/// The table a cached route reads, so a write made with no runtime
+/// installed has something a published entry actually depends on.
+#[suprnova::model(table = "posts", timestamps = false, fillable = ["title"])]
+pub struct Post {
+    pub id: i64,
+    pub title: String,
+}
 
 struct OperationsMigrator;
 
@@ -144,6 +152,57 @@ async fn private_handler(_request: Request) -> Response {
     Ok(HttpResponse::html(format!("private render {n}")))
 }
 
+/// Lists posts, so the render observes the `posts` table.
+async fn posts_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let titles = Post::all()
+        .await
+        .map_err(|error| HttpResponse::text(format!("query failed: {error}")).status(500))?
+        .into_iter()
+        .map(|post| post.title)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(HttpResponse::html(format!(
+        "posts render {n} titles={titles}"
+    )))
+}
+
+/// The route whose entry a write from an uninstalled process must reach.
+pub const POSTS_ROUTE: &str = "/posts/{id}";
+
+/// Counts the statements this harness's connection runs, the same way the
+/// middleware support's own counter does, so a test can prove a fixed
+/// `Closed` decision issues no ledger SQL at all.
+pub mod statements {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STATEMENTS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many statements have run since the last [`reset`].
+    #[must_use]
+    pub fn count() -> u64 {
+        STATEMENTS.load(Ordering::SeqCst)
+    }
+
+    /// Zeroes the counter.
+    pub fn reset() {
+        STATEMENTS.store(0, Ordering::SeqCst);
+    }
+
+    /// Points `conn`'s metric callback at this counter. Installing needs
+    /// sole ownership of the pool, so this runs immediately after
+    /// connecting and before the connection is cloned anywhere.
+    ///
+    /// Compiled only under the `testing` feature, because
+    /// `DbConnection::observe_statements_for_test` only exists there.
+    #[cfg(feature = "testing")]
+    pub(crate) fn install(conn: &mut suprnova::database::DbConnection) -> bool {
+        conn.observe_statements_for_test(|| {
+            STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
 /// Everything one test needs: the router and middleware registry to
 /// dispatch through, plus the adjustable clock.
 pub struct Harness {
@@ -194,7 +253,7 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .min_connections(1)
         .logging(false)
         .build();
-    let conn = suprnova::database::DbConnection::connect(&config)
+    let mut conn = suprnova::database::DbConnection::connect(&config)
         .await
         .expect("connect sqlite");
     conn.inner()
@@ -205,9 +264,24 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .execute_unprepared("PRAGMA busy_timeout=5000")
         .await
         .expect("set busy timeout");
+    #[cfg(feature = "testing")]
+    assert!(
+        statements::install(&mut conn),
+        "the statement counter needs sole ownership of the pool"
+    );
+    statements::reset();
     OperationsMigrator::up(conn.inner(), None)
         .await
         .expect("apply render cache migration");
+    conn.inner()
+        .execute_unprepared(
+            "CREATE TABLE posts (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                title TEXT NOT NULL\
+             )",
+        )
+        .await
+        .expect("create posts table");
     TestContainer::singleton(conn.clone());
 
     let clock = Arc::new(AdjustableTestClock::new(1_000_000));
@@ -257,8 +331,9 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
     let router: Router = router.get("/stale/{id}", stale_handler).into();
     let router: Router = router.get("/inverted/{id}", stale_handler).into();
     let router: Router = router.get("/private-l1/{id}", private_handler).into();
+    let router: Router = router.get(POSTS_ROUTE, posts_handler).into();
     let router = router
-        .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
+        .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy.clone()))
         .expect("attach cached policy")
         .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
         .expect("attach private policy")
@@ -267,7 +342,9 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .try_render_cache("/inverted/{id}", GroupPolicy::from(inverted_policy))
         .expect("attach inverted policy")
         .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
-        .expect("attach private l1 policy");
+        .expect("attach private l1 policy")
+        .try_render_cache(POSTS_ROUTE, GroupPolicy::from(cached_policy))
+        .expect("attach posts policy");
 
     let mut config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")

@@ -371,6 +371,25 @@ impl RenderCacheConfig {
         Self::from_source(&|name| std::env::var(name).ok())
     }
 
+    /// Whether `RENDER_CACHE_ENABLED` permits RenderCache in this process,
+    /// read on its own.
+    ///
+    /// The write side's probe uses this rather than [`Self::from_env`] on
+    /// purpose: a worker has no L1 tier, no coordinator, and no profile to
+    /// get right, and a malformed value for any of those must not stop its
+    /// writes from advancing generations. Same rule as `from_env`: enabled
+    /// unless the variable is exactly `false` or `0`.
+    #[must_use]
+    pub fn enabled_from_env() -> bool {
+        Self::enabled_from_source(&|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::enabled_from_env`] over any reader, so the rule can be
+    /// proven against fixed pairs rather than the process environment.
+    fn enabled_from_source(read: &dyn Fn(&str) -> Option<String>) -> bool {
+        read("RENDER_CACHE_ENABLED").is_none_or(|value| value != "false" && value != "0")
+    }
+
     /// [`Self::from_env`] over any reader, so the parser can be proven
     /// against fixed pairs rather than against the process environment.
     ///
