@@ -23,7 +23,7 @@
 //! already holding the one connection its transaction was granted, so
 //! asking the pool for a second blocks until the pool's acquire timeout
 //! fires, on any backend, not only a single-connection test database. See
-//! [`write_side_open`]'s `caller_holds_pool_connection` parameter: when
+//! `write_side_open`'s `caller_holds_pool_connection` parameter: when
 //! that is set, this module skips the probe rather than wait for a
 //! connection it cannot be sure exists, and stays `Undecided` until a
 //! write asks again from outside a transaction.
