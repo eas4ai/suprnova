@@ -691,14 +691,18 @@ async fn advance_storm_row(id: i64) -> Result<(), Box<dyn Error>> {
 /// Measures whether a write to one row invalidates a key that never read
 /// that row.
 ///
-/// This is the fact the burst shape below exists for, measured rather than
-/// assumed. `Model::find` calls `observe_table_read` on every invocation
-/// (`framework/src/eloquent/model.rs:220`) as well as
-/// `observe_record_read_json` for the row it hydrated, so every key on this
-/// route observes the shared `posts` table identity, and any write moves
-/// it. If that ever stopped being true this returns `false`, the result
-/// file says so, and the sweeps below would begin to fail - which is the
-/// signal to change the shape rather than the label.
+/// Iteration 006, definition-of-done item 5 narrowed `Model::find` on a
+/// hit: it now observes the row's own record and the table's unkeyed-write
+/// identity, not the table itself (`framework/src/eloquent/model.rs`), so
+/// a row-level write elsewhere in the table - the shape `advance_storm_row`
+/// takes - no longer reaches a key that read a different row. This
+/// therefore returns `false` since that change landed; the result file
+/// says so under `fanout_is_table_wide`. The burst shape below still
+/// invalidates every key every burst regardless: `writes_per_burst` is at
+/// least [`IDENTITIES`], so every row's own record is written inside each
+/// burst, which record-level invalidation catches on its own. A change
+/// that made this return `true` again, or that shrank a burst below one
+/// write per identity, is what would need the shape re-checked.
 async fn measure_write_fanout(harness: &Harness, post_ids: &[i64]) -> Result<bool, Box<dyn Error>> {
     let untouched = format!(
         "{}/{}?page=1",

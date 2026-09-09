@@ -1879,3 +1879,250 @@ async fn a_global_only_flag_records_a_feature_dependency_and_no_identity_axis() 
     );
     assert!(!report.context.tenant_read, "and on no tenant");
 }
+
+/// What one read records, in a collector scope attributed the way the Live
+/// completion middleware attributes a handler's own reads.
+async fn report_of<F>(read: F) -> suprnova::render_cache::collector::CollectorReport
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    suprnova::render_cache::collector::Collector::scope(async move {
+        suprnova::render_cache::collector::begin_handler();
+        read.await;
+        suprnova::render_cache::collector::current_report().expect("a collector is active")
+    })
+    .await
+}
+
+/// The generations an entry built from `read` would have closed on, and the
+/// epoch it closed at.
+async fn window_of<F>(read: F) -> (suprnova_live::render_cache::generation::GenerationSet, u64)
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    use suprnova_live::render_cache::generation::ObservationWindow;
+
+    let ledger = SqlGenerationLedger::new();
+    let epoch = ledger.epoch().await.expect("epoch");
+    let report = report_of(read).await;
+    let mut window = ObservationWindow::open(epoch);
+    for identity in report.storable().expect("the report is storable") {
+        window.observe(identity.clone()).expect("observe");
+    }
+    (window.close(&ledger).await.expect("close"), epoch)
+}
+
+/// Iteration 006, definition-of-done item 5, the whole point of it. A
+/// point-read entry is not invalidated by a row-level write to a different
+/// row of the same table.
+///
+/// Verified failing by restoring `observe_table_read(Self::TABLE)` at the
+/// top of `Model::find`: the entry observed the table, the write to the
+/// other row advanced it, and the entry was refused.
+#[tokio::test]
+async fn a_point_read_entry_survives_a_write_to_another_row() {
+    boot().await;
+    let kept = Post::create(attrs! { title: "kept" })
+        .await
+        .expect("create");
+    let other = Post::create(attrs! { title: "other" })
+        .await
+        .expect("create");
+    let id = kept.id;
+
+    let (observed, epoch) = window_of(async move {
+        Post::find(id).await.expect("find").expect("row");
+    })
+    .await;
+
+    let mut other = other;
+    other.title = "changed".to_owned();
+    other.save().await.expect("save");
+
+    assert!(
+        !entry_is_invalidated(&observed, epoch).await,
+        "a row-level write elsewhere in the table leaves a point-read entry current"
+    );
+}
+
+/// The other direction, which must keep working: a write to the row the
+/// entry read still reaches it.
+#[tokio::test]
+async fn a_point_read_entry_is_invalidated_by_a_write_to_its_row() {
+    boot().await;
+    let post = Post::create(attrs! { title: "read" })
+        .await
+        .expect("create");
+    let id = post.id;
+
+    let (observed, epoch) = window_of(async move {
+        Post::find(id).await.expect("find").expect("row");
+    })
+    .await;
+
+    let mut post = post;
+    post.title = "written".to_owned();
+    post.save().await.expect("save");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "the record identity is what a point-read entry is protected by"
+    );
+}
+
+/// Deleting the row is a write to it.
+#[tokio::test]
+async fn a_point_read_entry_is_invalidated_by_deleting_its_row() {
+    boot().await;
+    let post = Post::create(attrs! { title: "doomed" })
+        .await
+        .expect("create");
+    let id = post.id;
+
+    let (observed, epoch) = window_of(async move {
+        Post::find(id).await.expect("find").expect("row");
+    })
+    .await;
+
+    post.delete().await.expect("delete");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "a deleted row must not go on being served"
+    );
+}
+
+/// A bulk write cannot name the rows it changed, so it advances the table's
+/// unkeyed-write identity, which every point read observes beside its
+/// record - even a bulk write whose filter matched a different row.
+#[tokio::test]
+async fn a_point_read_entry_is_invalidated_by_a_bulk_update_of_its_table() {
+    boot().await;
+    let kept = Post::create(attrs! { title: "kept" })
+        .await
+        .expect("create");
+    Post::create(attrs! { title: "other" })
+        .await
+        .expect("create");
+    let id = kept.id;
+
+    let (observed, epoch) = window_of(async move {
+        Post::find(id).await.expect("find").expect("row");
+    })
+    .await;
+
+    Post::query()
+        .filter("title", "other")
+        .update_all(attrs! { title: "bulk" })
+        .await
+        .expect("bulk update");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "a write that named no rows might have touched this one"
+    );
+}
+
+/// A point read that returned nothing observes the table, because an insert
+/// is what would change the answer.
+#[tokio::test]
+async fn a_point_read_of_a_missing_row_observes_the_table_and_is_invalidated_by_an_insert() {
+    boot().await;
+
+    let report = report_of(async {
+        assert!(
+            Post::find(9_999_999_i64).await.expect("find").is_none(),
+            "the fixture id must not exist"
+        );
+    })
+    .await;
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::table("posts")),
+        "a miss observes the table, got {:?}",
+        report.observed
+    );
+
+    let (observed, epoch) = window_of(async {
+        Post::find(9_999_999_i64).await.expect("find");
+    })
+    .await;
+    Post::create(attrs! { title: "now it exists" })
+        .await
+        .expect("create");
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "an insert changes what a missing-row read answers"
+    );
+}
+
+/// `find_many` with every id present records one record identity per row
+/// and one unkeyed-write identity, and never the table.
+#[tokio::test]
+async fn find_many_with_every_id_present_observes_records_and_unkeyed_writes_only() {
+    boot().await;
+    let first = Post::create(attrs! { title: "one" }).await.expect("create");
+    let second = Post::create(attrs! { title: "two" }).await.expect("create");
+    let ids = [first.id, second.id];
+
+    let report = report_of(async move {
+        let rows = Post::find_many(ids).await.expect("find_many");
+        assert_eq!(rows.len(), 2, "both fixture rows exist");
+    })
+    .await;
+
+    assert!(
+        report.observed.contains(&DependencyIdentity::record(
+            "posts",
+            first.id.to_string().as_bytes()
+        )),
+        "the first row's record identity is recorded"
+    );
+    assert!(
+        report.observed.contains(&DependencyIdentity::record(
+            "posts",
+            second.id.to_string().as_bytes()
+        )),
+        "and the second's"
+    );
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::unkeyed_write("posts")),
+        "with one unkeyed-write identity beside them"
+    );
+    assert!(
+        !report
+            .observed
+            .contains(&DependencyIdentity::table("posts")),
+        "and never the table, got {:?}",
+        report.observed
+    );
+}
+
+/// `find_many` that could not return a row for every id it was given also
+/// observes the table: an insert of the missing id changes the answer.
+#[tokio::test]
+async fn find_many_with_a_missing_id_also_observes_the_table() {
+    boot().await;
+    let present = Post::create(attrs! { title: "present" })
+        .await
+        .expect("create");
+
+    let report = report_of(async move {
+        let rows = Post::find_many([present.id, 9_999_999_i64])
+            .await
+            .expect("find_many");
+        assert_eq!(rows.len(), 1, "only one of the two ids exists");
+    })
+    .await;
+
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::table("posts")),
+        "a missing id makes the read depend on the table, got {:?}",
+        report.observed
+    );
+}

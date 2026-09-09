@@ -667,9 +667,17 @@ async fn eloquent_paginate_using_observes_the_table_even_when_the_count_query_fa
     assert!(report.observed.contains(&DependencyIdentity::table(TABLE)));
 }
 
+// Iteration 006, definition-of-done item 5 (see
+// `framework/tests/render_cache/orm.rs`'s point-read suite): a hydrated
+// point read observes the record and the table's unkeyed-write identity,
+// never the table itself - that is what lets an entry built from one row
+// survive a write to a different row of the same table. This test used to
+// assert the table was observed on a hit; that assertion encoded the
+// behaviour this iteration replaces, so it moved to the record and
+// unkeyed-write identities instead of being restored.
 #[tokio::test]
 #[serial]
-async fn eloquent_find_observes_the_table_and_the_record() {
+async fn eloquent_find_observes_the_record_and_unkeyed_write() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
     let created = Probe::create(attrs!(name: "a", amount: 1.0))
@@ -682,17 +690,30 @@ async fn eloquent_find_observes_the_table_and_the_record() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.observed.contains(&DependencyIdentity::table(TABLE)));
     let expected_record = DependencyIdentity::record(TABLE, created.id.to_string().as_bytes());
     assert!(
         report.observed.contains(&expected_record),
         "find must observe the record built from the model's own JSON-encoded primary key"
     );
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::unkeyed_write(TABLE)),
+        "and the table's unkeyed-write identity beside it"
+    );
+    assert!(
+        !report.observed.contains(&DependencyIdentity::table(TABLE)),
+        "but never the table itself, got {:?}",
+        report.observed
+    );
 }
 
+// Same move as above: with every requested id present, `find_many` observes
+// one record per row and the table's unkeyed-write identity, never the
+// table.
 #[tokio::test]
 #[serial]
-async fn eloquent_find_many_observes_the_table() {
+async fn eloquent_find_many_observes_records_and_unkeyed_write() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
     let a = Probe::create(attrs!(name: "a", amount: 1.0))
@@ -708,7 +729,31 @@ async fn eloquent_find_many_observes_the_table() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.observed.contains(&DependencyIdentity::table(TABLE)));
+    assert!(
+        report.observed.contains(&DependencyIdentity::record(
+            TABLE,
+            a.id.to_string().as_bytes()
+        )),
+        "the first row's record identity is recorded"
+    );
+    assert!(
+        report.observed.contains(&DependencyIdentity::record(
+            TABLE,
+            b.id.to_string().as_bytes()
+        )),
+        "and the second's"
+    );
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::unkeyed_write(TABLE)),
+        "with the table's unkeyed-write identity beside them"
+    );
+    assert!(
+        !report.observed.contains(&DependencyIdentity::table(TABLE)),
+        "but never the table, got {:?}",
+        report.observed
+    );
 }
 
 #[tokio::test]

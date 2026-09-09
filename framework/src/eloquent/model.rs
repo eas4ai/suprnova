@@ -47,6 +47,17 @@ use crate::eloquent::events::ModelEventHooks;
 use crate::eloquent::fillable::Fillable;
 use crate::error::FrameworkError;
 
+/// Records a table read and hands the error back unchanged.
+///
+/// Used on every failure path of a point read, so a read that failed is
+/// never recorded as narrower than a whole-table read: the row it would
+/// have returned is unknown, and an entry that depended on "no answer" has
+/// to be invalidated by anything that could change it.
+fn table_read_then<E>(table: &str, error: E) -> E {
+    crate::render_cache::collector::observe_table_read(table);
+    error
+}
+
 /// The Eloquent CRUD lifecycle. Auto-implemented for every
 /// `#[suprnova::model]` struct.
 ///
@@ -217,8 +228,9 @@ where
     where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
-        crate::render_cache::collector::observe_table_read(Self::TABLE);
-        Self::__dispatch_retrieving().await?;
+        Self::__dispatch_retrieving()
+            .await
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
         // T11/T12: route through resolve_read so the read honours any
         // ambient `DB::transaction` closure scope, per-model
         // `connection = "..."` default, and `__read_replica__`
@@ -229,23 +241,40 @@ where
             None,
             Self::default_connection_name(),
         )
-        .await?;
+        .await
+        .map_err(|error| table_read_then(Self::TABLE, error))?;
         let row = exec
             .select_one(Self::Entity::find_by_id(id))
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let hydrated = row.map(Self::try_from_storage).transpose()?;
-        if let Some(ref m) = hydrated {
+            .map_err(|e| table_read_then(Self::TABLE, FrameworkError::database(e.to_string())))?;
+        let hydrated = row
+            .map(Self::try_from_storage)
+            .transpose()
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
+        match hydrated {
+            // A hydrated row depends on that row and on any write that
+            // could have touched it without naming it, and on nothing else:
+            // this is what lets a cached page built from one row survive
+            // every write to every other row of the table.
+            //
             // Guarded on `is_active()` before computing
-            // `primary_key_value_json()`/`to_string()` - both would
-            // otherwise run unconditionally on every `find`, including on
-            // the (common) request that has no collector scope at all.
-            if crate::render_cache::collector::is_active() {
-                crate::render_cache::collector::observe_record_read_json(
-                    Self::TABLE,
-                    &m.primary_key_value_json(),
-                );
+            // `primary_key_value_json()`/`to_string()`, which would
+            // otherwise run on every `find`, including the common request
+            // with no collector scope at all.
+            Some(ref m) => {
+                if crate::render_cache::collector::is_active() {
+                    crate::render_cache::collector::observe_record_read_json(
+                        Self::TABLE,
+                        &m.primary_key_value_json(),
+                    );
+                    crate::render_cache::collector::observe_unkeyed_write(Self::TABLE);
+                }
             }
+            // No row: the answer changes when one is inserted, which no
+            // record identity can express.
+            None => crate::render_cache::collector::observe_table_read(Self::TABLE),
+        }
+        if let Some(ref m) = hydrated {
             Self::__dispatch_retrieved(m).await?;
         }
         Ok(hydrated)
@@ -291,8 +320,10 @@ where
         if id_vec.is_empty() {
             return Ok(Vec::new());
         }
-        crate::render_cache::collector::observe_table_read(Self::TABLE);
-        Self::__dispatch_retrieving().await?;
+        let requested = id_vec.len();
+        Self::__dispatch_retrieving()
+            .await
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
         let pk = <Self::Entity as EntityTrait>::PrimaryKey::iter()
             .next()
             .expect("model has at least one primary-key column");
@@ -302,11 +333,12 @@ where
             None,
             Self::default_connection_name(),
         )
-        .await?;
+        .await
+        .map_err(|error| table_read_then(Self::TABLE, error))?;
         let rows = exec
             .select_all(Self::Entity::find().filter(pk.into_column().is_in(id_vec.clone())))
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            .map_err(|e| table_read_then(Self::TABLE, FrameworkError::database(e.to_string())))?;
 
         let mut by_id: HashMap<_, _> = rows
             .into_iter()
@@ -314,11 +346,30 @@ where
                 let model = Self::try_from_storage(row)?;
                 Ok((model.primary_key_value(), model))
             })
-            .collect::<Result<HashMap<_, _>, FrameworkError>>()?;
+            .collect::<Result<HashMap<_, _>, FrameworkError>>()
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
         let ordered: Vec<Self> = id_vec
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
             .collect();
+        if crate::render_cache::collector::is_active() {
+            for row in &ordered {
+                crate::render_cache::collector::observe_record_read_json(
+                    Self::TABLE,
+                    &row.primary_key_value_json(),
+                );
+            }
+            if !ordered.is_empty() {
+                crate::render_cache::collector::observe_unkeyed_write(Self::TABLE);
+            }
+            // Fewer rows than ids asked for: an insert of a missing id
+            // changes the answer, and so does a duplicate id in the request
+            // (the second copy finds the row already taken), which this
+            // treats as a miss. Over-observing is the safe direction.
+            if ordered.len() != requested {
+                crate::render_cache::collector::observe_table_read(Self::TABLE);
+            }
+        }
         for row in &ordered {
             Self::__dispatch_retrieved(row).await?;
         }

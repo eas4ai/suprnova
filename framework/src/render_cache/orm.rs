@@ -170,13 +170,29 @@ where
     super::ledger::advance_via_tx(tx, &model_identities(model)?).await
 }
 
+/// The `Table` and `UnkeyedWrite` identities a write that named no rows
+/// advances: every row of the table, and the per-table identity every point
+/// read observes beside the record it returned.
+///
+/// The pair is what keeps a point-read entry both narrow and safe: a
+/// row-level write advances `Table` and `Record` only, so it cannot reach a
+/// point-read entry for another row, while a bulk update, a table-builder
+/// write, or a raw statement on the table advances this and reaches every
+/// point-read entry the table has.
+fn unkeyed_identities(table: &str) -> Result<Vec<DependencyIdentity>, FrameworkError> {
+    Ok(vec![
+        DependencyIdentity::try_table(table)
+            .map_err(|_| FrameworkError::internal("table name out of bounds"))?,
+        DependencyIdentity::try_unkeyed_write(table)
+            .map_err(|_| FrameworkError::internal("table name out of bounds"))?,
+    ])
+}
+
 /// After a bulk update or delete (`Builder::update_all` / `delete_all`):
-/// the table generation.
+/// the table generation and the table's unkeyed-write identity, because the
+/// statement cannot name the rows it changed.
 pub async fn after_bulk_write(table: &str) -> Result<(), FrameworkError> {
-    advance(vec![DependencyIdentity::try_table(table).map_err(
-        |_| FrameworkError::internal("table name out of bounds"),
-    )?])
-    .await
+    advance(unkeyed_identities(table)?).await
 }
 
 /// Explicit-transaction-override form of [`after_bulk_write`] for
@@ -193,14 +209,14 @@ pub async fn after_bulk_write_with_handle(
     handle: &crate::database::transaction::TxHandle,
     table: &str,
 ) -> Result<(), FrameworkError> {
-    let identity = DependencyIdentity::try_table(table)
-        .map_err(|_| FrameworkError::internal("table name out of bounds"))?;
-    super::ledger::advance_via_handle(handle, &[identity]).await
+    super::ledger::advance_via_handle(handle, &unkeyed_identities(table)?).await
 }
 
 /// After a query-builder write on a known table (`DB::table(...).insert` /
-/// `.update` / `.delete`). Same effect as [`after_bulk_write`]; kept as a
-/// separate name so each call site reads with its own intent.
+/// `.update` / `.delete`), and after a raw statement whose single table the
+/// caller named (`DB::affecting_statement_on_table`). Same effect as
+/// [`after_bulk_write`] - the table and its unkeyed-write identity - kept as
+/// a separate name so each call site reads with its own intent.
 pub async fn after_table_write(table: &str) -> Result<(), FrameworkError> {
     after_bulk_write(table).await
 }
