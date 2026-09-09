@@ -267,6 +267,13 @@ fn render_cache_workloads_result_reports_every_workload_with_its_correctness_con
         storm["every_write_invalidates_every_key"].is_boolean(),
         "the storm measures its own write fan-out rather than assuming one"
     );
+    let ratio = storm["point_read_invalidation_ratio"]
+        .as_f64()
+        .expect("the storm records the fraction of keys one row write invalidates");
+    assert!(
+        (0.0..=1.0).contains(&ratio),
+        "point_read_invalidation_ratio {ratio} outside [0, 1]"
+    );
 
     // Bounds derived from the recorded shape, never a constant: a key
     // rebuilds at least once per burst and at most once per sweep.

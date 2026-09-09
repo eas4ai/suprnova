@@ -32,14 +32,15 @@
 //!
 //! `invalidation_storm` reports `quiescent_hit_p95_microseconds`, not a
 //! hit latency during the writes, and the name says so. Every render on the
-//! storm route calls `Model::find`, which observes the `posts` *table*
-//! identity as well as the record it hydrated
-//! (`framework/src/eloquent/model.rs:220`), so a single write to any row
-//! invalidates all sixty-four keys. The workload measures that fact rather
-//! than assuming it (`every_write_invalidates_every_key`), and it follows
-//! that no key can be a hit while a write is in flight. What is measured
-//! instead is the hit that follows a rebuild, once the burst of writes has
-//! landed.
+//! storm route calls `Model::find`, which observes the row it hydrated and
+//! the `posts` table's unkeyed-write identity, never the table itself
+//! (`framework/src/eloquent/model.rs`), so a row-level write invalidates
+//! only the keys that read that row. `point_read_invalidation_ratio`
+//! measures exactly that fraction over all sixty-four keys, and
+//! `every_write_invalidates_every_key` keeps measuring the older question
+//! rather than assuming either answer. The bursts below still write every
+//! one of the twelve rows, so every key does rebuild once per burst, and
+//! the hit latency reported is the one that follows a rebuild.
 //!
 //! `multi_node` reports `fan_in_p95_microseconds` over hand-driven
 //! coordinator calls - admission, and for the one leader the publication
@@ -253,6 +254,7 @@ struct InvalidationStorm {
     writes_per_burst: usize,
     sweeps_per_burst: usize,
     every_write_invalidates_every_key: bool,
+    point_read_invalidation_ratio: f64,
     hits: u64,
     rebuilds: u64,
     rebuilds_per_write: f64,
@@ -724,6 +726,51 @@ async fn measure_write_fanout(harness: &Harness, post_ids: &[i64]) -> Result<boo
     Ok(counting_route::renders() == before + 1)
 }
 
+/// The fraction of this workload's keys that one row-level write to one
+/// post invalidates.
+///
+/// Measured the way [`measure_write_fanout`] measures, but over every key
+/// rather than one: warm the whole set, prove it quiet, write one row, and
+/// count how many keys rebuild on the next pass. With the point-read rule
+/// in place the answer is the number of keys that read the written row over
+/// the number of keys, so this workload's twelve record identities behind
+/// sixty-four keys give roughly one in eleven, not the one it used to be.
+///
+/// Leaves every key warm except the ones the write invalidated, which is
+/// what the storm's own first sweep expects, since its first burst writes
+/// every row.
+async fn measure_point_read_invalidation_ratio(
+    harness: &Harness,
+    paths: &[String],
+    post_ids: &[i64],
+) -> Result<f64, Box<dyn Error>> {
+    for path in paths {
+        dispatch_get(harness, path, &[]).await;
+    }
+    let warm = counting_route::renders();
+    for path in paths {
+        dispatch_get(harness, path, &[]).await;
+    }
+    expect(
+        counting_route::renders(),
+        warm,
+        "renders a repeat pass over a warm key set causes",
+    )?;
+
+    advance_storm_row(post_ids[0]).await?;
+    let before = counting_route::renders();
+    for path in paths {
+        dispatch_get(harness, path, &[]).await;
+    }
+    let invalidated = counting_route::renders() - before;
+
+    // Through `f64::from(u32)`, which is lossless, so neither side needs a
+    // cast or a lint suppression.
+    let invalidated = f64::from(u32::try_from(invalidated)?);
+    let total = f64::from(u32::try_from(paths.len())?);
+    Ok(invalidated / total)
+}
+
 /// Requests every key once, returning each response's body and the
 /// microseconds it took.
 ///
@@ -791,6 +838,8 @@ async fn run_invalidation_storm(
     let post_ids = create_posts(IDENTITIES).await?;
     let paths = storm_paths(&post_ids);
     let every_write_invalidates_every_key = measure_write_fanout(harness, &post_ids).await?;
+    let point_read_invalidation_ratio =
+        measure_point_read_invalidation_ratio(harness, &paths, &post_ids).await?;
 
     let bursts = scaled(STORM_BURSTS, timed);
     let writes = if timed {
@@ -901,7 +950,8 @@ async fn run_invalidation_storm(
     println!(
         "invalidation_storm: hits={hits} rebuilds={rebuilds} per_write={rebuilds_per_write:.4} \
          quiescent_hit_p95={:.3}us statements_per_hit={statements_per_hit} \
-         fanout_is_table_wide={every_write_invalidates_every_key}",
+         fanout_is_table_wide={every_write_invalidates_every_key} \
+         point_read_ratio={point_read_invalidation_ratio:.4}",
         timing.p95
     );
     Ok(InvalidationStorm {
@@ -912,6 +962,7 @@ async fn run_invalidation_storm(
         writes_per_burst,
         sweeps_per_burst: SWEEPS_PER_BURST,
         every_write_invalidates_every_key,
+        point_read_invalidation_ratio,
         hits,
         rebuilds,
         rebuilds_per_write,
