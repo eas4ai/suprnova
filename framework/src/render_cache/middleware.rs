@@ -235,6 +235,22 @@ const MAX_WAIT_REBUILD_DEPTH: u32 = 8;
 /// with.
 struct ProviderFailure(Request, Next);
 
+/// The render could not run because the request was no longer available to
+/// hand to it.
+///
+/// `run_render` moves the request into a slot so the render can happen
+/// inside a database transaction, and exactly one of the transaction
+/// closure and the non-transactional fallback takes it back out. If
+/// neither did, there is nothing left to serve: unlike every other
+/// failure in this module there is no request to pass to `next`, so this
+/// cannot degrade to an uncached render the way `ProviderFailure` does.
+///
+/// It is unreachable by construction. It exists so that a violation is a
+/// controlled 500 rather than a panic unwinding through the request task
+/// and the mutex that holds the slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RenderRequestLost;
+
 /// The RenderCache middleware: one global layer that serves proven
 /// Complete representations. See the module documentation for the request
 /// flow.
@@ -2029,7 +2045,7 @@ async fn lead_render(
     race_points::fire(&race_points::BEFORE_VIEW).await;
     let method = request.method().as_str().to_owned();
     let if_none_match = request.header("if-none-match").map(str::to_owned);
-    let (response, report, observed) = run_render(
+    let rendered = run_render(
         runtime,
         request,
         next,
@@ -2038,6 +2054,16 @@ async fn lead_render(
         policy.class() == RepresentationClass::PublicShellStitched,
     )
     .await;
+    let Ok((response, report, observed)) = rendered else {
+        // `RenderRequestLost`: there is no request left to hand to `next`,
+        // so this is the one failure in this module that cannot degrade to
+        // an uncached render. Release the lease so the route is not left
+        // fenced, and answer with a controlled 500 rather than panicking
+        // inside the request task.
+        let _ = runtime.coordinator.release(lease).await;
+        LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
+        return Ok(HttpResponse::text("").status(500));
+    };
     // Test-only race seam (R72/R83): fires the instant the read view has
     // closed and the observed generation set is fixed, before anything
     // judges it. A write armed here is invisible to the render and visible
@@ -2144,11 +2170,22 @@ async fn lead_render(
                 | ClassificationReason::AuthorizationRead
                 | ClassificationReason::AuthorizationTenantRead => None,
             })
-            .expect(
-                "classify only narrows to Uncacheable through SessionValueRead, \
-                 SecretContextRead, or UndeclaredContext, so at least one of them is in \
-                 `reasons` whenever `class` is Uncacheable",
-            );
+            .unwrap_or_else(|| {
+                // The same rule the rest of this function follows: an
+                // `Uncacheable` class always carries one of the three
+                // reasons above, but if it ever did not, declining under a
+                // less precise label is right and failing the request is
+                // not. The assertion fails the test suite; production
+                // declines, which is what an `Uncacheable` class asks for
+                // either way.
+                debug_assert!(
+                    false,
+                    "classify only narrows to Uncacheable through SessionValueRead, \
+                     SecretContextRead, or UndeclaredContext, so at least one of them is in \
+                     `reasons` whenever `class` is Uncacheable"
+                );
+                LookupDeclineReason::UnreasonedPrivateClass
+            });
         LookupOutcome::Declined(reason).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -2211,10 +2248,10 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    if let Some(mismatch) =
+    if let Some(reason) =
         key_used_different_values_than_the_render_saw(&job, &classification, &report, runtime)
     {
-        LookupOutcome::Declined(LookupDeclineReason::from(mismatch)).record();
+        LookupOutcome::Declined(reason).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2632,10 +2669,19 @@ impl From<KeyMismatch> for LookupDeclineReason {
             (VarianceDimension::Tenant, KeyMismatchKind::Divergent) => Self::TenantDivergent,
             (VarianceDimension::Locale, KeyMismatchKind::Undeclared) => Self::LocaleUndeclared,
             (VarianceDimension::Locale, KeyMismatchKind::Divergent) => Self::LocaleDivergent,
-            (other, _) => unreachable!(
-                "key_used_different_values_than_the_render_saw only ever builds a \
-                 KeyMismatch for Principal, Tenant, or Locale; got {other:?}"
-            ),
+            (other, _) => {
+                // Unreachable today, and a panic here would turn a caching
+                // bug into a failed request. Caching is an optimization, so
+                // an unattributable mismatch declines like any other rather
+                // than taking the response down with it. The assertion still
+                // fails the test suite if a future dimension reaches here.
+                debug_assert!(
+                    false,
+                    "key_used_different_values_than_the_render_saw only ever builds a \
+                     KeyMismatch for Principal, Tenant, or Locale; got {other:?}"
+                );
+                Self::UnreasonedPrivateClass
+            }
         }
     }
 }
@@ -2645,7 +2691,7 @@ fn key_used_different_values_than_the_render_saw(
     classification: &ClassificationOutcome,
     report: &super::collector::CollectorReport,
     runtime: &RenderCacheRuntime,
-) -> Option<KeyMismatch> {
+) -> Option<LookupDeclineReason> {
     let declared = job.variance().dimensions();
 
     if !report.context.locale_material.is_empty() {
@@ -2653,20 +2699,20 @@ fn key_used_different_values_than_the_render_saw(
             Some(key_value) => {
                 for observed_locale in &report.context.locale_material {
                     if &DimensionValue::Public(observed_locale.clone()) != key_value {
-                        return Some(KeyMismatch {
+                        return Some(LookupDeclineReason::from(KeyMismatch {
                             dimension: VarianceDimension::Locale,
                             kind: KeyMismatchKind::Divergent,
-                        });
+                        }));
                     }
                 }
             }
             // An observed locale with no declared `Locale` dimension at all:
             // the route would otherwise cache one language for everyone.
             None => {
-                return Some(KeyMismatch {
+                return Some(LookupDeclineReason::from(KeyMismatch {
                     dimension: VarianceDimension::Locale,
                     kind: KeyMismatchKind::Undeclared,
-                });
+                }));
             }
         }
     }
@@ -2691,10 +2737,19 @@ fn key_used_different_values_than_the_render_saw(
                 // already declines on an `Uncacheable` classification
                 // before this guard ever runs (see that branch), so
                 // `classification.reasons` cannot hold one of these here.
-                unreachable!(
+                //
+                // If it ever did, the safe answer is to decline, never to
+                // continue: continuing would publish an entry whose own
+                // classification says it must not be shared. A panic is
+                // equally wrong here, because it would fail the request
+                // over a caching bug. The assertion fails the test suite
+                // instead, and production declines.
+                debug_assert!(
+                    false,
                     "a session/secret/undeclared reason must force Uncacheable inside \
                      classify, which the caller already declines before this guard runs"
                 );
+                return Some(LookupDeclineReason::UnreasonedPrivateClass);
             }
         };
         if observed_ids.is_empty() {
@@ -2704,10 +2759,10 @@ fn key_used_different_values_than_the_render_saw(
                 declared.get(&required),
                 Some(DimensionValue::Private(_) | DimensionValue::Anonymous)
             ) {
-                return Some(KeyMismatch {
+                return Some(LookupDeclineReason::from(KeyMismatch {
                     dimension: required,
                     kind: KeyMismatchKind::Undeclared,
-                });
+                }));
             }
             continue;
         }
@@ -2723,13 +2778,21 @@ fn key_used_different_values_than_the_render_saw(
                 VarianceDimension::Tenant => {
                     DimensionValue::Private(PrivateMaterial::tenant(&runtime.keys, observed_id))
                 }
-                _ => unreachable!("only Principal and Tenant reasons reach this match"),
+                _ => {
+                    // Same rule as the two arms above: a caching invariant
+                    // that fails must not fail the request. Only Principal
+                    // and Tenant reasons reach this match today, and the
+                    // assertion fails the test suite if that stops being
+                    // true, but production declines rather than panics.
+                    debug_assert!(false, "only Principal and Tenant reasons reach this match");
+                    return Some(LookupDeclineReason::UnreasonedPrivateClass);
+                }
             };
             if declared.get(&required) != Some(&expected) {
-                return Some(KeyMismatch {
+                return Some(LookupDeclineReason::from(KeyMismatch {
                     dimension: required,
                     kind: KeyMismatchKind::Divergent,
-                });
+                }));
             }
         }
     }
@@ -2922,16 +2985,19 @@ async fn run_render(
     epoch: u64,
     observes_permission_generation: bool,
     stitched: bool,
-) -> (
-    Response,
-    super::collector::CollectorReport,
-    Result<GenerationSet, RenderObservationFailure>,
-) {
+) -> Result<
+    (
+        Response,
+        super::collector::CollectorReport,
+        Result<GenerationSet, RenderObservationFailure>,
+    ),
+    RenderRequestLost,
+> {
     let backend = DB::connection()
         .ok()
         .map(|conn| conn.inner().get_database_backend());
     let Some(backend) = backend else {
-        return render_under_collector(
+        return Ok(render_under_collector(
             request,
             next,
             epoch,
@@ -2939,7 +3005,7 @@ async fn run_render(
             observes_permission_generation,
             stitched,
         )
-        .await;
+        .await);
     };
     let slot: Arc<std::sync::Mutex<Option<Request>>> =
         Arc::new(std::sync::Mutex::new(Some(request)));
@@ -2951,11 +3017,19 @@ async fn run_render(
         let next = next_for_closure.clone();
         let ledger = Arc::clone(&ledger_for_closure);
         Box::pin(async move {
-            let request = slot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("the request is taken exactly once, by this closure, when it runs");
+            let Some(request) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                // Unreachable: this closure is the only taker while the
+                // transaction is open. Reported as an error rather than a
+                // panic so a violation cannot unwind through the request
+                // task or poison the slot's mutex for the fallback below.
+                debug_assert!(
+                    false,
+                    "the request is taken exactly once, by this closure, when it runs"
+                );
+                return Err(crate::FrameworkError::internal(
+                    "render cache: the render request was already taken",
+                ));
+            };
             Ok::<_, crate::FrameworkError>(
                 render_under_collector(
                     request,
@@ -2971,7 +3045,7 @@ async fn run_render(
     })
     .await;
     match result {
-        Ok(triple) => triple,
+        Ok(triple) => Ok(triple),
         Err(_) => {
             // The transaction could not even open, so the closure above
             // never ran and the request is still sitting in the slot.
@@ -2979,12 +3053,16 @@ async fn run_render(
             // request: correctness downstream is unaffected (the fresh
             // reread still catches a move), only the snapshot-consistency
             // optimization is lost.
-            let request = slot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("a failed DB::transaction never invoked its closure");
-            render_under_collector(
+            let Some(request) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                // Unreachable: a transaction that failed to open never ran
+                // the closure, so the slot still holds the request. If it
+                // does not, there is no request left to render and no way
+                // to degrade to an uncached response, so the caller turns
+                // this into a controlled 500.
+                debug_assert!(false, "a failed DB::transaction never invoked its closure");
+                return Err(RenderRequestLost);
+            };
+            Ok(render_under_collector(
                 request,
                 next,
                 epoch,
@@ -2992,7 +3070,7 @@ async fn run_render(
                 observes_permission_generation,
                 stitched,
             )
-            .await
+            .await)
         }
     }
 }
