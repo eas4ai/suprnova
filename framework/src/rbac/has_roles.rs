@@ -143,6 +143,7 @@ const INSERT_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
 };
 
 /// Every read statement this module issues, for the table-list contract.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) const READ_STATEMENTS: &[ObservedStatement] = &[
     FIND_ROLE_ID,
     FIND_PERMISSION_ID,
@@ -155,6 +156,7 @@ pub(crate) const READ_STATEMENTS: &[ObservedStatement] = &[
 ];
 
 /// Every write statement this module issues, for the same contract.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) const WRITE_STATEMENTS: &[ObservedStatement] = &[
     INSERT_ROLE,
     INSERT_PERMISSION,

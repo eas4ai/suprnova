@@ -132,6 +132,7 @@ impl LookupDeclineReason {
     }
 
     /// Every variant, for the documentation test.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) const ALL: &'static [LookupDeclineReason] = &[
         Self::PolicyUncacheable,
         Self::Method,

@@ -71,6 +71,7 @@ async fn epoch_advance_report() -> Result<String, FrameworkError> {
 /// Test-only: exposes [`epoch_advance_report`] to integration tests
 /// outside this crate. Not part of the public console command API.
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub async fn epoch_advance_report_for_test() -> Result<String, FrameworkError> {
     epoch_advance_report().await
 }
@@ -145,6 +146,7 @@ async fn inspect_report(key: &str) -> Result<String, FrameworkError> {
 /// Test-only: exposes [`inspect_report`] to integration tests outside this
 /// crate. Not part of the public console command API.
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub async fn inspect_report_for_test(key: &str) -> Result<String, FrameworkError> {
     inspect_report(key).await
 }

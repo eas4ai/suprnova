@@ -310,6 +310,7 @@ fn unknown_value(variable: &str, accepted: &str) -> FrameworkError {
 impl RenderCacheConfig {
     /// Test-only: inject the clock the runtime reads instead of the system
     /// clock. `#[doc(hidden)]`: not part of the public contract.
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]
     pub fn with_clock_for_test(mut self, clock: Arc<dyn Clock>) -> Self {
@@ -320,6 +321,7 @@ impl RenderCacheConfig {
     /// Test-only: inject the rebuild coordinator the runtime uses instead of
     /// the one [`Self::coordinator`] describes. `#[doc(hidden)]`: not part
     /// of the public contract.
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]
     pub fn with_coordinator_for_test(mut self, coordinator: Arc<dyn RebuildCoordinator>) -> Self {
