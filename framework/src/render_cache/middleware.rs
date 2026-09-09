@@ -114,15 +114,19 @@
 //!   gate is to read what it decides on through an instrumented accessor,
 //!   or to declare `Principal` alongside `Tenant`. Nested decisions compose:
 //!   an outer window's deltas include every read an inner window saw.
-//! - **Eloquent global scopes are not instrumented.** A registered
-//!   [`crate::eloquent::scopes::GlobalScope`] runs inside every
-//!   `Model::query` call, and its own registration doc invites the scope to
-//!   read per-request state such as the current tenant id out of a
-//!   thread-local, a `tokio::task_local!`, or an atomic, none of which this
-//!   collector observes; a tenant-scoped global scope therefore partitions
-//!   what the render reads without recording a `Tenant` observation, so the
-//!   remedy is to declare `Tenant` variance on every route whose models
-//!   carry one.
+//! - **Eloquent global scopes declare what their filter reads.** A
+//!   registered [`crate::eloquent::scopes::GlobalScope`] runs inside every
+//!   `Model::query` call, and it answers
+//!   [`crate::eloquent::scopes::ScopeDependency`] for itself. `Constant`
+//!   means the filter is the same for every request and records nothing
+//!   beyond the query's own table reads. `PerRequest`, which is the
+//!   default a scope gets by saying nothing, means the filter reads
+//!   per-request state, and that read SHALL go through an instrumented
+//!   accessor: an evaluation that records no resolvable read narrows the
+//!   render to `Uncacheable` and names the scope in diagnostics. A
+//!   tenant-scoped scope on a route that never declared its tenant is
+//!   therefore declined rather than published under a key that does not
+//!   partition it.
 //!
 //! A route handler that branches its output on a header or a config value -
 //! without also declaring the corresponding variance - is outside what this
