@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! Integration tests for the `render_cache` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
