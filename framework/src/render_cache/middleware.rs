@@ -1981,14 +1981,7 @@ async fn lead_render(
             PrivateMaterial::tenant(&runtime.keys, id)
         }),
         session_read: report.context.session_read,
-        // Shim until Task 2 gives `CollectedContext` its own
-        // `AuthorizationConsult`: the boolean's only meaning today is "a
-        // decision happened", which is exactly the conservative consult.
-        authorization: if report.context.authorization_read {
-            suprnova_live::render_cache::AuthorizationConsult::Principal
-        } else {
-            suprnova_live::render_cache::AuthorizationConsult::None
-        },
+        authorization: report.context.authorization,
         secret_context_read: report.context.secret_context_read,
         undeclared_reads: report.undeclared.clone(),
     };

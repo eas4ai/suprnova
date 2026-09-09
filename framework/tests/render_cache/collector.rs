@@ -15,6 +15,7 @@ use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::collector::{self, Collector, current_report};
 use suprnova::testing::TestDatabase;
 use suprnova::{Model, attrs, model};
+use suprnova_live::render_cache::AuthorizationConsult;
 use suprnova_live::render_cache::generation::MAX_OBSERVATIONS;
 
 #[tokio::test]
@@ -208,7 +209,10 @@ async fn gate_inspect_observes_authorization() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.context.authorization_read);
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal
+    );
 }
 
 #[tokio::test]
@@ -220,13 +224,16 @@ async fn gate_inspect_async_observes_authorization() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.context.authorization_read);
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal
+    );
 }
 
 /// `raw` bypasses `inspect` entirely (it preserves the "undefined" case as
 /// `None` instead of normalizing to a default deny), so it needs its own
 /// hook rather than inheriting `inspect`'s. This test fails if that hook is
-/// removed: nothing else on this call path sets `authorization_read`.
+/// removed: nothing else on this call path joins `authorization`.
 #[tokio::test]
 async fn gate_raw_observes_authorization() {
     let report = Collector::scope(async {
@@ -235,7 +242,10 @@ async fn gate_raw_observes_authorization() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.context.authorization_read);
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal
+    );
 }
 
 /// Async sibling of [`gate_raw_observes_authorization`]; same reasoning.
@@ -247,7 +257,10 @@ async fn gate_raw_async_observes_authorization() {
         collector::current_report().expect("report")
     })
     .await;
-    assert!(report.context.authorization_read);
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal
+    );
 }
 
 // ---- Attribution: gate, content, slot ---------------------------------
@@ -828,4 +841,173 @@ async fn eloquent_sole_value_observes_the_table() {
     })
     .await;
     assert!(report.observed.contains(&DependencyIdentity::table(TABLE)));
+}
+
+#[tokio::test]
+async fn a_consult_window_that_saw_a_principal_read_joins_principal() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let window = collector::begin_authorization_decision();
+        collector::observe_principal_value("alice");
+        collector::end_authorization_decision(window);
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal,
+        "a decision that read a principal is per-principal"
+    );
+}
+
+#[tokio::test]
+async fn a_consult_window_that_saw_only_tenant_reads_joins_tenant_only() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let window = collector::begin_authorization_decision();
+        collector::observe_tenant_value("acme");
+        collector::end_authorization_decision(window);
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::TenantOnly,
+        "a decision that read only the tenant partitions by tenant"
+    );
+}
+
+#[tokio::test]
+async fn a_consult_window_that_saw_no_resolvable_read_joins_principal() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        // A principal read *outside* the window: the decision itself
+        // consulted nothing the recording can resolve, which is the gate
+        // body deciding from its own `user` argument.
+        collector::observe_principal_value("alice");
+        let window = collector::begin_authorization_decision();
+        collector::end_authorization_decision(window);
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal,
+        "a decision the recording cannot resolve stays conservative"
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_only_decision_followed_by_a_per_user_one_joins_principal() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let first = collector::begin_authorization_decision();
+        collector::observe_tenant_value("acme");
+        collector::end_authorization_decision(first);
+        let second = collector::begin_authorization_decision();
+        collector::observe_principal_value("alice");
+        collector::end_authorization_decision(second);
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal,
+        "one per-user decision anywhere in the render keeps the whole render conservative"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_consult_window_is_counted_by_the_window_around_it() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let outer = collector::begin_authorization_decision();
+        let inner = collector::begin_authorization_decision();
+        collector::observe_principal_value("alice");
+        collector::end_authorization_decision(inner);
+        collector::end_authorization_decision(outer);
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::Principal,
+        "the outer window's deltas include the inner window's reads"
+    );
+}
+
+#[tokio::test]
+async fn resolvable_reads_counts_every_identity_and_locale_observation() {
+    Collector::scope(async {
+        collector::begin_handler();
+        assert_eq!(collector::resolvable_reads(), 0);
+        collector::observe_principal_read();
+        assert_eq!(collector::resolvable_reads(), 1);
+        collector::observe_tenant_read();
+        assert_eq!(collector::resolvable_reads(), 2);
+        collector::observe_locale_value("de-DE");
+        assert_eq!(collector::resolvable_reads(), 3);
+        // A value observation is a read as well as a value.
+        collector::observe_principal_value("alice");
+        assert!(collector::resolvable_reads() > 3);
+    })
+    .await;
+    assert_eq!(
+        collector::resolvable_reads(),
+        0,
+        "outside a scope there is nothing to count"
+    );
+}
+
+#[tokio::test]
+async fn an_unkeyed_write_read_is_recorded_as_its_own_identity() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        collector::observe_unkeyed_write("posts");
+        current_report().expect("active")
+    })
+    .await;
+    assert!(
+        report
+            .observed
+            .contains(&DependencyIdentity::unkeyed_write("posts")),
+        "a point read's unkeyed-write dependency is recorded under its own identity"
+    );
+    assert!(
+        !report
+            .observed
+            .contains(&DependencyIdentity::table("posts")),
+        "and never as the table"
+    );
+}
+
+#[tokio::test]
+async fn folding_the_gate_bucket_joins_its_consult_and_adds_its_read_counts() {
+    let mut report = Collector::scope(async {
+        // No `begin_handler`: these are gate reads.
+        let window = collector::begin_authorization_decision();
+        collector::observe_tenant_value("acme");
+        collector::observe_tenant_value("acme");
+        collector::end_authorization_decision(window);
+        collector::begin_handler();
+        collector::observe_principal_read();
+        current_report().expect("active")
+    })
+    .await;
+    assert_eq!(
+        report.gate.context.authorization,
+        AuthorizationConsult::TenantOnly
+    );
+    assert_eq!(report.context.authorization, AuthorizationConsult::None);
+    report.fold_gate_into_content();
+    assert_eq!(
+        report.context.authorization,
+        AuthorizationConsult::TenantOnly,
+        "the folded report carries what the gate's own decisions consulted"
+    );
+    assert_eq!(
+        report.context.tenant_reads, 2,
+        "the gate's two tenant observations are added to the content bucket's none"
+    );
+    assert_eq!(report.context.principal_reads, 1);
 }

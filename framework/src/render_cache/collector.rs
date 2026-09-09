@@ -195,8 +195,25 @@ pub struct CollectedContext {
     pub locale_material: BTreeSet<String>,
     /// A session value was read.
     pub session_read: bool,
-    /// An authorization decision was evaluated.
-    pub authorization_read: bool,
+    /// Monotonic count of principal observations
+    /// ([`observe_principal_read`] and [`observe_principal_value`]), for
+    /// consult windows and [`resolvable_reads`]. Counted rather than
+    /// flagged because a consult window is a *delta* over one decision's
+    /// evaluation, and a boolean that was already true before the window
+    /// opened says nothing about what happened inside it.
+    pub principal_reads: u64,
+    /// Monotonic count of tenant observations, for consult windows and
+    /// [`resolvable_reads`]. See [`Self::principal_reads`].
+    pub tenant_reads: u64,
+    /// Monotonic count of locale observations ([`observe_locale_value`]),
+    /// for [`resolvable_reads`]. A locale is per-request state a global
+    /// scope may legitimately filter by, so it counts as a resolvable read
+    /// even though it is not an identity axis.
+    pub locale_reads: u64,
+    /// What the render's authorization decisions consulted, joined across
+    /// every decision. Replaces the earlier `authorization_read` boolean,
+    /// whose single bit could only ever mean the conservative answer.
+    pub authorization: suprnova_live::render_cache::AuthorizationConsult,
     /// Secret configuration was read.
     pub secret_context_read: bool,
     /// Observation bound exceeded, or a dependency could not be encoded
@@ -308,7 +325,10 @@ impl CollectorReport {
         content.tenant_material.extend(gate.context.tenant_material);
         content.locale_material.extend(gate.context.locale_material);
         content.session_read |= gate.context.session_read;
-        content.authorization_read |= gate.context.authorization_read;
+        content.principal_reads += gate.context.principal_reads;
+        content.tenant_reads += gate.context.tenant_reads;
+        content.locale_reads += gate.context.locale_reads;
+        content.authorization = content.authorization.join(gate.context.authorization);
         content.secret_context_read |= gate.context.secret_context_read;
         // No `overflowed` fold: the gate context has no overflow state to
         // carry. Both producers - `mark_incomplete` and `observe`'s bound
@@ -572,6 +592,24 @@ pub fn observe_table_read(table: &str) {
     }
 }
 
+/// A read that only a write which named no rows can invalidate: the
+/// per-table [`DependencyIdentity::UnkeyedWrite`] identity every
+/// primary-key point read observes beside the record it returned.
+///
+/// This is what lets a point-read entry survive a row-level write to
+/// another row of the same table while a bulk `update_all`, a
+/// `DB::table(..)` write, or a raw statement on the table still reaches
+/// it. See [`observe_table_read`] for the bound-failure behaviour.
+pub fn observe_unkeyed_write(table: &str) {
+    if !is_active() {
+        return;
+    }
+    match DependencyIdentity::try_unkeyed_write(table) {
+        Ok(identity) => observe(identity),
+        Err(_) => mark_incomplete(),
+    }
+}
+
 /// A record read by primary key bytes. See [`observe_table_read`] for the
 /// bound-failure behaviour.
 ///
@@ -630,7 +668,10 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
 
 /// The principal was resolved or checked.
 pub fn observe_principal_read() {
-    with_context(|context| context.principal_read = true);
+    with_context(|context| {
+        context.principal_read = true;
+        context.principal_reads += 1;
+    });
 }
 /// The principal was resolved to a concrete value. Fix round 5: records
 /// what was actually read, not merely that something was; fix round 6:
@@ -640,18 +681,23 @@ pub fn observe_principal_read() {
 pub fn observe_principal_value(id: &str) {
     with_context(|context| {
         context.principal_read = true;
+        context.principal_reads += 1;
         context.principal_material.insert(id.to_owned());
     });
 }
 /// The tenant was resolved or checked.
 pub fn observe_tenant_read() {
-    with_context(|context| context.tenant_read = true);
+    with_context(|context| {
+        context.tenant_read = true;
+        context.tenant_reads += 1;
+    });
 }
 /// The tenant was resolved to a concrete value. Fix round 5: see
 /// `observe_principal_value`'s own doc; the same reasoning applies.
 pub fn observe_tenant_value(id: &str) {
     with_context(|context| {
         context.tenant_read = true;
+        context.tenant_reads += 1;
         context.tenant_material.insert(id.to_owned());
     });
 }
@@ -663,6 +709,7 @@ pub fn observe_tenant_value(id: &str) {
 /// recording it at the point of every read.
 pub fn observe_locale_value(locale: &str) {
     with_context(|context| {
+        context.locale_reads += 1;
         context.locale_material.insert(locale.to_owned());
     });
 }
@@ -670,10 +717,91 @@ pub fn observe_locale_value(locale: &str) {
 pub fn observe_session_read() {
     with_context(|context| context.session_read = true);
 }
-/// An authorization decision was evaluated.
+/// An authorization decision was evaluated, with nothing recorded about
+/// what it consulted.
+///
+/// Kept only until the gate's own evaluation entry points are wrapped in
+/// consult windows ([`begin_authorization_decision`]); it joins the
+/// conservative consult, which is exactly what the boolean it replaced
+/// meant.
 pub fn observe_authorization_read() {
-    with_context(|context| context.authorization_read = true);
+    with_context(|context| {
+        context.authorization = context
+            .authorization
+            .join(suprnova_live::render_cache::AuthorizationConsult::Principal);
+    });
 }
+
+/// The counters at the start of a consult window. Opaque: only
+/// [`end_authorization_decision`] can read it, so no caller can invent a
+/// window that never opened.
+#[derive(Clone, Copy, Debug)]
+pub struct ConsultWindow {
+    principal_reads: u64,
+    tenant_reads: u64,
+}
+
+/// Opens a consult window around one authorization decision. Returns the
+/// counters as they stood; `None` outside a collector scope, and `None`
+/// inside an identity-bound mount, where a read is counted and recorded
+/// nowhere.
+///
+/// Nested windows compose: an outer window's deltas include every read an
+/// inner window saw, so a `before` hook that itself evaluates a gate can
+/// only ever make the outer decision more conservative, never less.
+#[must_use]
+pub fn begin_authorization_decision() -> Option<ConsultWindow> {
+    with_context(|context| ConsultWindow {
+        principal_reads: context.principal_reads,
+        tenant_reads: context.tenant_reads,
+    })
+}
+
+/// Closes the window opened by [`begin_authorization_decision`] and joins
+/// what the decision consulted into the render's own consult.
+///
+/// Principal observations inside the window, or none of either kind, join
+/// [`AuthorizationConsult::Principal`](suprnova_live::render_cache::AuthorizationConsult::Principal);
+/// tenant observations alone join
+/// [`TenantOnly`](suprnova_live::render_cache::AuthorizationConsult::TenantOnly).
+/// A decision that recorded no resolvable read at all is conservative on
+/// purpose: the gate body may have decided from its `user` argument
+/// through no instrumented accessor, and the recording cannot tell that
+/// from a constant.
+pub fn end_authorization_decision(window: Option<ConsultWindow>) {
+    use suprnova_live::render_cache::AuthorizationConsult;
+
+    let Some(window) = window else {
+        return;
+    };
+    with_context(|context| {
+        let principal = context
+            .principal_reads
+            .saturating_sub(window.principal_reads);
+        let tenant = context.tenant_reads.saturating_sub(window.tenant_reads);
+        let consulted = if principal > 0 || tenant == 0 {
+            AuthorizationConsult::Principal
+        } else {
+            AuthorizationConsult::TenantOnly
+        };
+        context.authorization = context.authorization.join(consulted);
+    });
+}
+
+/// How many identity or locale observations the current bucket has
+/// recorded: the sum of [`CollectedContext::principal_reads`],
+/// [`CollectedContext::tenant_reads`], and
+/// [`CollectedContext::locale_reads`]. Zero outside a collector scope.
+///
+/// A global scope's evaluation is bracketed by two of these, so a scope
+/// that declared it reads per-request state and then read none can be
+/// named (see `crate::eloquent::scopes`).
+#[must_use]
+pub fn resolvable_reads() -> u64 {
+    with_context(|context| context.principal_reads + context.tenant_reads + context.locale_reads)
+        .unwrap_or(0)
+}
+
 /// Secret configuration was read. No framework read hooks this
 /// automatically (see the module documentation); application code and
 /// later adapters call it explicitly to mark a representation as having
