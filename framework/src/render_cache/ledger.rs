@@ -753,6 +753,38 @@ impl GenerationLedger for SqlGenerationLedger {
             .map_err(|e| provider_error(database_error(e)))?;
         Ok(epoch as u64)
     }
+
+    async fn lift_epoch_above(&self, stamped: u64) -> Result<u64, RenderCacheError> {
+        let bound = i64::try_from(stamped)
+            .map_err(|_| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        let lifted = bound
+            .checked_add(1)
+            .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        // The same primary pin `epoch` and `advance_epoch` take: the lift is
+        // the recovery lever, and a lagging replica must never answer for it.
+        let exec = primary_executor().await.map_err(provider_error)?;
+        let backend = exec.backend();
+        let binds = placeholders(backend, 2).map_err(provider_error)?;
+        let (set, guard) = binds
+            .split_once(", ")
+            .ok_or_else(|| RenderCacheError::new(RenderCacheErrorKind::ProviderUnavailable))?;
+        let sql = format!(
+            "UPDATE suprnova_render_epochs SET epoch = {set} \
+             WHERE singleton = 1 AND epoch <= {guard}"
+        );
+        exec.run(sea_orm::Statement::from_sql_and_values(
+            backend,
+            &sql,
+            vec![Value::from(lifted), Value::from(bound)],
+        ))
+        .await
+        .map_err(|e| provider_error(database_error(e)))?;
+        // Read back the way `epoch` reads it, so a missing singleton fails
+        // the way `advance_epoch` fails rather than reporting a lift that
+        // never landed. A zero row count is not a failure: it is the
+        // ordinary answer when another node already lifted past `stamped`.
+        self.epoch().await
+    }
 }
 
 #[cfg(test)]

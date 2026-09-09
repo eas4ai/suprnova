@@ -110,6 +110,7 @@ async fn an_observation_window_detects_any_moved_generation() {
     match CoherenceCheck::compare(&observed, &current, current_epoch, window_epoch) {
         CoherenceCheck::Moved(moved) => assert_eq!(moved, vec![user_7().digest()]),
         CoherenceCheck::Coherent => panic!("a moved generation must be visible"),
+        CoherenceCheck::Rewound { .. } => panic!("the epoch never went backward here"),
     }
     let mut full = ObservationWindow::open(1);
     // The broad authority seeded by `open` already occupies one slot, so
@@ -151,6 +152,7 @@ async fn an_epoch_change_reports_the_broad_authority_moved_with_no_generation_ch
             );
         }
         CoherenceCheck::Coherent => panic!("an epoch change must be visible"),
+        CoherenceCheck::Rewound { .. } => panic!("the epoch never went backward here"),
     }
 }
 
@@ -176,5 +178,77 @@ async fn a_full_observation_window_closes_to_exactly_the_bound() {
         observed.len(),
         MAX_OBSERVATIONS,
         "the closed set holds exactly the bound, including the broad authority"
+    );
+}
+
+#[tokio::test]
+async fn an_unkeyed_write_identity_is_bounded_and_distinct_from_its_table() {
+    assert_eq!(
+        DependencyIdentity::unkeyed_write("posts"),
+        DependencyIdentity::UnkeyedWrite("posts".to_owned())
+    );
+    assert_ne!(
+        DependencyIdentity::unkeyed_write("posts").digest(),
+        DependencyIdentity::table("posts").digest(),
+        "a write that named no rows is not the same dependency as the whole table"
+    );
+    assert_ne!(
+        DependencyIdentity::unkeyed_write("posts").digest(),
+        DependencyIdentity::unkeyed_write("tags").digest()
+    );
+    assert_eq!(
+        DependencyIdentity::unkeyed_write("posts").digest(),
+        DependencyIdentity::unkeyed_write("posts").digest(),
+        "the digest is stable"
+    );
+    assert!(DependencyIdentity::try_unkeyed_write("").is_err());
+    assert!(DependencyIdentity::try_unkeyed_write(&"t".repeat(129)).is_err());
+}
+
+#[tokio::test]
+async fn a_stamp_above_the_authority_is_rewound_and_one_below_it_is_moved() {
+    let ledger = MemoryGenerationLedger::new();
+    let window = ObservationWindow::open(ledger.epoch().await.expect("epoch"));
+    let observed = window.close(&ledger).await.expect("close");
+    let current = ledger.current(&observed.digests()).await.expect("current");
+
+    match CoherenceCheck::compare(&observed, &current, 3, 7) {
+        CoherenceCheck::Rewound { stamped, authority } => {
+            assert_eq!(stamped, 7);
+            assert_eq!(authority, 3);
+        }
+        other => panic!("a stamp above the authority must be Rewound, got {other:?}"),
+    }
+
+    match CoherenceCheck::compare(&observed, &current, 7, 3) {
+        CoherenceCheck::Moved(moved) => assert_eq!(
+            moved,
+            vec![DependencyIdentity::broad().digest()],
+            "an advanced epoch still reports the broad authority as moved"
+        ),
+        other => panic!("a stamp below the authority must be Moved, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lifting_raises_a_lower_epoch_above_the_stamp_and_leaves_a_higher_one_alone() {
+    let ledger = MemoryGenerationLedger::new();
+    assert_eq!(ledger.epoch().await.expect("epoch"), 1);
+
+    let lifted = ledger.lift_epoch_above(9).await.expect("lift");
+    assert_eq!(lifted, 10, "the epoch is set to one past the stamp");
+    assert_eq!(ledger.epoch().await.expect("epoch"), 10);
+
+    let again = ledger.lift_epoch_above(9).await.expect("lift");
+    assert_eq!(again, 10, "lifting the same stamp twice changes nothing");
+
+    let lower = ledger.lift_epoch_above(4).await.expect("lift");
+    assert_eq!(lower, 10, "a stamp below the epoch never lowers it");
+
+    ledger.rewind_epoch_for_test(2);
+    assert_eq!(
+        ledger.epoch().await.expect("epoch"),
+        2,
+        "the test seam is what a restore does to the singleton"
     );
 }

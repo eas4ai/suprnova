@@ -4,8 +4,8 @@
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{KeyId, UnixMillis};
 use suprnova_live::render_cache::variance::{
-    ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial, VarianceDescriptor,
-    classify,
+    AuthorizationConsult, ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial,
+    VarianceDescriptor, classify,
 };
 use suprnova_live::render_cache::{RepresentationClass, VarianceDimension};
 
@@ -230,7 +230,7 @@ fn tenant_and_authorization_observations_both_accumulate() {
     let keys = keys_from(7);
     let observed = ObservedContext {
         tenant: Some(PrivateMaterial::tenant(&keys, "tenant-1")),
-        authorization_read: true,
+        authorization: AuthorizationConsult::Principal,
         ..ObservedContext::default()
     };
     let outcome = classify(RepresentationClass::PublicShared, &observed);
@@ -368,4 +368,65 @@ fn an_application_dimension_writes_its_prefixed_canonical_name_exactly_once() {
     expected.extend_from_slice(b"dark");
     assert_eq!(descriptor.canonical_bytes(), expected);
     assert_eq!(descriptor.canonical_len(), expected.len());
+}
+
+#[test]
+fn a_tenant_only_consult_narrows_to_private_cached_with_its_own_reason() {
+    let observed = ObservedContext {
+        authorization: AuthorizationConsult::TenantOnly,
+        ..ObservedContext::default()
+    };
+    let outcome = classify(RepresentationClass::PublicShared, &observed);
+    assert_eq!(outcome.class, RepresentationClass::PrivateCached);
+    assert_eq!(
+        outcome.reasons,
+        vec![ClassificationReason::AuthorizationTenantRead],
+        "a decision that consulted only tenant material carries its own reason"
+    );
+
+    let principal = ObservedContext {
+        authorization: AuthorizationConsult::Principal,
+        ..ObservedContext::default()
+    };
+    let outcome = classify(RepresentationClass::PublicShared, &principal);
+    assert_eq!(outcome.class, RepresentationClass::PrivateCached);
+    assert_eq!(
+        outcome.reasons,
+        vec![ClassificationReason::AuthorizationRead],
+        "a decision that consulted principal material keeps the conservative reason"
+    );
+
+    let none = ObservedContext {
+        authorization: AuthorizationConsult::None,
+        ..ObservedContext::default()
+    };
+    let outcome = classify(RepresentationClass::PublicShared, &none);
+    assert_eq!(
+        outcome.class,
+        RepresentationClass::PublicShared,
+        "a render that evaluated no decision narrows nothing"
+    );
+    assert!(outcome.reasons.is_empty());
+}
+
+#[test]
+fn joining_consults_is_commutative_and_principal_absorbing() {
+    use AuthorizationConsult::{None as NoConsult, Principal, TenantOnly};
+
+    for (left, right, expected) in [
+        (NoConsult, NoConsult, NoConsult),
+        (NoConsult, TenantOnly, TenantOnly),
+        (NoConsult, Principal, Principal),
+        (TenantOnly, TenantOnly, TenantOnly),
+        (TenantOnly, Principal, Principal),
+        (Principal, Principal, Principal),
+    ] {
+        assert_eq!(left.join(right), expected, "{left:?} join {right:?}");
+        assert_eq!(right.join(left), expected, "join is commutative");
+    }
+    assert_eq!(
+        AuthorizationConsult::default(),
+        NoConsult,
+        "a render that evaluated nothing starts at None"
+    );
 }

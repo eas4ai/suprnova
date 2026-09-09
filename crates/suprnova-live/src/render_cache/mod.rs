@@ -85,8 +85,8 @@ pub use store::{
     StoreInspection, StoredEntry,
 };
 pub use variance::{
-    ClassificationOutcome, ClassificationReason, DimensionValue, ObservedContext, PrivateMaterial,
-    VarianceDescriptor, VarianceDimension, classify,
+    AuthorizationConsult, ClassificationOutcome, ClassificationReason, DimensionValue,
+    ObservedContext, PrivateMaterial, VarianceDescriptor, VarianceDimension, classify,
 };
 
 /// Closed failure categories for RenderCache contracts; messages never carry

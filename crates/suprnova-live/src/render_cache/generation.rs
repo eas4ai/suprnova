@@ -48,8 +48,9 @@ pub type Generation = u64;
 ///
 /// The checked constructors (`try_table`/`table`, `try_record`/`record`,
 /// `try_query_class`/`query_class`, `try_config`/`config`,
-/// `try_feature`/`feature`) enforce the name and key bounds; constructing a
-/// variant directly bypasses those bounds entirely, so callers inside this
+/// `try_feature`/`feature`, `try_unkeyed_write`/`unkeyed_write`) enforce the
+/// name and key bounds; constructing a variant directly bypasses those
+/// bounds entirely, so callers inside this
 /// crate should prefer the constructors over building a variant by hand.
 #[derive(
     Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -82,6 +83,14 @@ pub enum DependencyIdentity {
     Config(String),
     /// A feature flag.
     Feature(String),
+    /// Rows of a table changed by a write that did not name them: a bulk
+    /// update or delete, a table-builder write, or a raw statement on a
+    /// known table. Observed by every point read beside its `Record`, so a
+    /// write that might have touched the row still reaches the entry;
+    /// advanced by every unkeyed write. A row-level write advances `Table`
+    /// and `Record` only, which is what lets a point-read entry survive a
+    /// write to another row.
+    UnkeyedWrite(String),
     /// The locale catalog.
     Locale,
     /// Route table version.
@@ -176,6 +185,19 @@ impl DependencyIdentity {
         Ok(Self::Feature(name.to_owned()))
     }
 
+    /// An unkeyed-write identity; panics only on an unbounded name, so
+    /// callers with untrusted names use [`Self::try_unkeyed_write`].
+    #[must_use]
+    pub fn unkeyed_write(table: &str) -> Self {
+        Self::try_unkeyed_write(table).expect("bounded table name")
+    }
+
+    /// An unkeyed-write identity with bounds checked.
+    pub fn try_unkeyed_write(table: &str) -> Result<Self, RenderCacheError> {
+        bounded(table)?;
+        Ok(Self::UnkeyedWrite(table.to_owned()))
+    }
+
     /// The broad authority.
     #[must_use]
     pub const fn broad() -> Self {
@@ -197,6 +219,7 @@ impl DependencyIdentity {
             Self::Locale => (7, vec![]),
             Self::Route => (8, vec![]),
             Self::Broad => (9, vec![]),
+            Self::UnkeyedWrite(table) => (10, vec![table.as_bytes()]),
         };
         hasher.update([tag]);
         for part in parts {
@@ -358,6 +381,18 @@ pub trait GenerationLedger: Send + Sync {
     async fn advance(&self, identities: &[DependencyIdentity]) -> Result<(), RenderCacheError>;
     /// The authority epoch.
     async fn epoch(&self) -> Result<u64, RenderCacheError>;
+    /// Raises the authority epoch to one past `stamped`, and only when the
+    /// epoch is still at or below it; returns the epoch after the call
+    /// either way.
+    ///
+    /// The recovery half of [`CoherenceCheck::Rewound`]: a node that meets
+    /// a stamp the authority never issued lifts the authority past every
+    /// such stamp, so the rest of the deployment converges through the
+    /// paths an operator's epoch advance already uses. Deliberately
+    /// without a default body: a ledger that cannot lift cannot claim
+    /// rewind safety, and a silently absent lift would leave a restored
+    /// deployment refusing the same entries for ever.
+    async fn lift_epoch_above(&self, stamped: u64) -> Result<u64, RenderCacheError>;
     /// Current generations for the digests together with the authority
     /// epoch. The default is the two reads in order; a database ledger
     /// overrides it with one batched statement so a publication's fresh
@@ -400,6 +435,15 @@ impl MemoryGenerationLedger {
         self.lock_state().epoch += 1;
     }
 
+    /// Sets the authority epoch to `to`, the way restoring a database
+    /// backup taken before the current deploy does. Test seam: this ledger
+    /// is never a production authority (see the type's own doc), and a
+    /// rewind cannot otherwise be produced, since `advance_epoch` only
+    /// counts up.
+    pub fn rewind_epoch_for_test(&self, to: u64) {
+        self.lock_state().epoch = to;
+    }
+
     /// Locks the state, recovering it from poison rather than propagating a
     /// panic across this ledger's operations.
     fn lock_state(&self) -> MutexGuard<'_, LedgerState> {
@@ -437,6 +481,14 @@ impl GenerationLedger for MemoryGenerationLedger {
 
     async fn epoch(&self) -> Result<u64, RenderCacheError> {
         Ok(self.lock_state().epoch)
+    }
+
+    async fn lift_epoch_above(&self, stamped: u64) -> Result<u64, RenderCacheError> {
+        let mut state = self.lock_state();
+        if state.epoch <= stamped {
+            state.epoch = stamped.saturating_add(1);
+        }
+        Ok(state.epoch)
     }
 }
 
@@ -502,6 +554,17 @@ pub enum CoherenceCheck {
     /// These dependency digests moved (an epoch change is reported as the
     /// digest of [`DependencyIdentity::Broad`]).
     Moved(Vec<[u8; 32]>),
+    /// The observation carries an epoch above the authority's own: the
+    /// authority was rewound, most often by restoring a database backup
+    /// taken before the entry was published. Reported before any
+    /// dependency comparison, because no generation read from a rewound
+    /// authority can judge a stamp the authority never issued.
+    Rewound {
+        /// The epoch the observation carries.
+        stamped: u64,
+        /// The epoch the authority now reports.
+        authority: u64,
+    },
 }
 
 impl CoherenceCheck {
@@ -514,6 +577,12 @@ impl CoherenceCheck {
         epoch: u64,
         observed_epoch: u64,
     ) -> Self {
+        if observed_epoch > epoch {
+            return Self::Rewound {
+                stamped: observed_epoch,
+                authority: epoch,
+            };
+        }
         let mut moved = Vec::new();
         if epoch != observed_epoch {
             moved.push(DependencyIdentity::Broad.digest());

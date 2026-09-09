@@ -1306,6 +1306,10 @@ async fn authority_coherence(
         match CoherenceCheck::compare(&header.observed, &current, epoch, header.epoch) {
             CoherenceCheck::Coherent => Coherence::Coherent,
             CoherenceCheck::Moved(_) => Coherence::Moved,
+            // Shim until Task 10 adds `Coherence::Rewound` and the lift: a
+            // rewound stamp is at minimum a move, which is what this code
+            // already does with an epoch mismatch in either direction.
+            CoherenceCheck::Rewound { .. } => Coherence::Moved,
         },
     )
 }
@@ -1977,7 +1981,14 @@ async fn lead_render(
             PrivateMaterial::tenant(&runtime.keys, id)
         }),
         session_read: report.context.session_read,
-        authorization_read: report.context.authorization_read,
+        // Shim until Task 2 gives `CollectedContext` its own
+        // `AuthorizationConsult`: the boolean's only meaning today is "a
+        // decision happened", which is exactly the conservative consult.
+        authorization: if report.context.authorization_read {
+            suprnova_live::render_cache::AuthorizationConsult::Principal
+        } else {
+            suprnova_live::render_cache::AuthorizationConsult::None
+        },
         secret_context_read: report.context.secret_context_read,
         undeclared_reads: report.undeclared.clone(),
     };
@@ -2422,6 +2433,9 @@ fn key_used_different_values_than_the_render_saw(
             ClassificationReason::TenantObserved => {
                 (VarianceDimension::Tenant, &report.context.tenant_material)
             }
+            ClassificationReason::AuthorizationTenantRead => {
+                (VarianceDimension::Tenant, &report.context.tenant_material)
+            }
             ClassificationReason::SessionValueRead
             | ClassificationReason::SecretContextRead
             | ClassificationReason::UndeclaredContext => {
@@ -2739,6 +2753,9 @@ async fn fresh_reread_is_coherent(
             race_points::fire(&race_points::AFTER_REREAD).await;
             Ok(())
         }
+        // Shim until Task 10: a candidate judged against a rewound
+        // authority is discarded, exactly as a moved one is.
+        CoherenceCheck::Rewound { .. } => Err(()),
         CoherenceCheck::Moved(_) => Err(()),
     }
 }

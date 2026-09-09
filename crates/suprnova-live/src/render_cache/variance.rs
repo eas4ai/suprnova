@@ -331,6 +331,38 @@ impl VarianceDescriptor {
     }
 }
 
+/// Which identity axes a render's authorization decisions consulted.
+///
+/// Recorded per decision by the framework's consult window and joined
+/// across every decision the render evaluated, so one per-user check
+/// anywhere in a render keeps the whole render conservative.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AuthorizationConsult {
+    /// No authorization decision was evaluated.
+    #[default]
+    None,
+    /// Every decision consulted tenant material and nothing per-principal.
+    TenantOnly,
+    /// At least one decision consulted principal material, both axes, or
+    /// nothing the recording could resolve.
+    Principal,
+}
+
+impl AuthorizationConsult {
+    /// The more conservative of two consults: `Principal` absorbs
+    /// everything, `TenantOnly` absorbs `None`. Commutative and
+    /// associative, so the order decisions ran in cannot change the
+    /// answer.
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Principal, _) | (_, Self::Principal) => Self::Principal,
+            (Self::TenantOnly, _) | (_, Self::TenantOnly) => Self::TenantOnly,
+            (Self::None, Self::None) => Self::None,
+        }
+    }
+}
+
 /// What rendering observed about identity and context.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObservedContext {
@@ -340,8 +372,8 @@ pub struct ObservedContext {
     pub tenant: Option<PrivateMaterial>,
     /// A session value was read (not merely a session id).
     pub session_read: bool,
-    /// A private authorization decision was evaluated.
-    pub authorization_read: bool,
+    /// What the render's authorization decisions consulted.
+    pub authorization: AuthorizationConsult,
     /// Secret configuration or feature context was read.
     pub secret_context_read: bool,
     /// Request context outside the declared variance affected rendering.
@@ -359,6 +391,8 @@ pub enum ClassificationReason {
     SessionValueRead,
     /// A private authorization decision was evaluated.
     AuthorizationRead,
+    /// A private authorization decision consulted only tenant material.
+    AuthorizationTenantRead,
     /// Secret context was read.
     SecretContextRead,
     /// Undeclared request context affected output.
@@ -414,12 +448,18 @@ pub fn classify(
             &mut class,
         );
     }
-    if observed.authorization_read {
-        narrow(
+    match observed.authorization {
+        AuthorizationConsult::None => {}
+        AuthorizationConsult::TenantOnly => narrow(
+            RepresentationClass::PrivateCached,
+            ClassificationReason::AuthorizationTenantRead,
+            &mut class,
+        ),
+        AuthorizationConsult::Principal => narrow(
             RepresentationClass::PrivateCached,
             ClassificationReason::AuthorizationRead,
             &mut class,
-        );
+        ),
     }
     if observed.secret_context_read {
         narrow(
