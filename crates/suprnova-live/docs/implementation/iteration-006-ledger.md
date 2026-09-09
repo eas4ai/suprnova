@@ -84,9 +84,11 @@ items 7 to 9 and the parts of 15 those three touch.
 (`framework/src/render_cache/decline.rs`, 32 variants) rather than an
 untyped flag. Every one of the ten decline branches in `lead_render`
 (`framework/src/render_cache/middleware.rs`) obtains its reason from a
-typed value computed at that branch: `run_render` now returns
-`Result<_, RenderObservationFailure>` (`Overflowed`, `LedgerRead`,
-`HandlerNotBegun`) instead of an `Option`; the existing
+typed value computed at that branch: `run_render`'s success tuple now
+carries a `Result<GenerationSet, RenderObservationFailure>`
+(`Overflowed`, `LedgerRead`, `HandlerNotBegun`) in place of an `Option`,
+nested inside the `Result<_, RenderRequestLost>` the safe-failure fix
+below adds around the whole function; the existing
 `Eligibility::Decline` payload converts directly; the first of
 `SessionValueRead`/`SecretContextRead`/`UndeclaredContext` present in a
 narrowed classification maps one to one; `live::document_declines` returns

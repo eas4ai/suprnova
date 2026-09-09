@@ -193,12 +193,12 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", fea
 
 A entrada de produção desliga as features padrão e lista as nove que
 ficam ligadas (todo padrão exceto `testing`). A dependência de
-desenvolvimento liga `testing` de novo - o resolvedor de features do Cargo
-só traz as features de uma dependência de desenvolvimento para `cargo
-test` e outros builds `--tests`, então `cargo build --bin app` (ou `--bin
-console`) nunca a vê. `testing` é uma feature exclusiva de dependência de
-desenvolvimento: nada no seu próprio `src/` ou `cmd/` deveria ligá-la para
-um target binário.
+desenvolvimento liga `testing` de novo - o resolvedor de features do
+Cargo só traz as features de uma dependência de desenvolvimento para
+`cargo test` e outros builds `--tests`, então `cargo build --bin app`
+(ou `--bin console`) nunca a vê. `testing` é uma feature exclusiva de
+dependência de desenvolvimento: nada no seu próprio `src/` ou `cmd/`
+deveria ligá-la para um target binário.
 
 O repositório do framework prova que isso se sustenta com um crate
 pequeno cujo único trabalho é falhar ao compilar: ele referencia, por
