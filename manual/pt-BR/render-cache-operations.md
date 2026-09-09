@@ -105,7 +105,7 @@ um provedor ou um backend:
 
 | Contador | Atributo |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`, e `reason` quando `outcome="declined"` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | nenhum |
 | `suprnova.render_cache.rebuilds` | nenhum |
@@ -129,9 +129,35 @@ um provedor ou um backend:
   esgotada.
 - `moved` - a releitura depois de renderizar encontrou uma dependência ou o
   epoch alterados; o candidato foi descartado, nunca publicado.
-- `declined` - a renderização não era armazenável: elegibilidade, um
-  relatório de observação transbordado, uma classificação `Uncacheable`, uma
-  regra de documento Live, ou um limite.
+- `declined` - a renderização não era armazenável, por uma de trinta e
+  duas razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
+  `reason` só é emitido junto de `outcome="declined"`; qualquer outro
+  desfecho não carrega nenhum. A razão é calculada a partir de um valor
+  tipado no ramo exato que recusou, nunca reconstruída depois a partir da
+  resposta, de modo que nomeia o contrato que de fato recusou a
+  renderização:
+
+  - Elegibilidade (`policy.eligibility`, espelhando o próprio
+    `DeclineReason` do motor): `policy_uncacheable`, `method`, `status`,
+    `streaming`, `sets_cookie`, `unsafe_header_name`.
+  - Observação (o relatório do coletor e a leitura do ledger dentro da
+    transação): `observation_overflowed`, `ledger_read_failed`,
+    `handler_not_begun`.
+  - Classificação reduzida a `Uncacheable`: `session_value_read`,
+    `secret_context_read`, `undeclared_context`.
+  - Fatos do documento Live: `identity_bound_without_stitching`,
+    `invalid_stitch_capture`, `no_store_intent`,
+    `unresolvable_seed_deadline`.
+  - Invariantes sobre a chave (se as próprias observações da renderização
+    concordam com os valores com que a chave de lookup já havia sido
+    construída): `unreasoned_private_class`, `principal_undeclared`,
+    `principal_divergent`, `tenant_undeclared`, `tenant_divergent`,
+    `locale_undeclared`, `locale_divergent`.
+  - Publicação: `seed_deadline_elapsed`, `unsafe_header_value`,
+    `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `composite_too_many_slots`, `composite_digest_mismatch`,
+    `composite_empty_slot`, `composite_slot_not_found`,
+    `composite_slot_ambiguous`.
 
 `hits` incrementa apenas para `l0`, `l1`, `conditional` e `stale`.
 `publications` conta apenas um armazenamento respondendo "publicado", nunca
@@ -362,11 +388,14 @@ torna esses testes reproduzíveis em vez de instáveis.
   tarefa agendada ou de um comando de console, essa escrita não avançou nada:
   execute `render-cache:epoch-advance` (por nó - veja o último item).
 - **Uma página que você esperava que entrasse em cache nunca carrega um
-  cabeçalho `Age`.** Ela está sendo recusada, não falhando. Percorra a lista
-  de classificação em [RenderCache](render-cache.md): uma leitura de sessão,
-  uma leitura de identidade em uma rota sem variância `Principal`, uma
-  leitura de localidade sem variância `Locale`, uma verificação de
-  autorização, ou uma leitura de SQL bruto.
+  cabeçalho `Age`.** Ela está sendo recusada, não falhando. Leia primeiro o
+  rótulo `reason` do lookup `declined` - ele nomeia o contrato exato que
+  recusou a renderização, a partir do conjunto fechado em "Telemetria"
+  acima - depois, para uma das razões reduzidas por classificação, percorra
+  a lista de classificação em [RenderCache](render-cache.md): uma leitura
+  de sessão, uma leitura de identidade em uma rota sem variância
+  `Principal`, uma leitura de localidade sem variância `Locale`, uma
+  verificação de autorização, ou uma leitura de SQL bruto.
 - **Um backend está inalcançável.** O `RENDER_CACHE_FAILURE` decide: `open`
   (o padrão) serve a rota sem cache, `closed` responde um `503` puro. Um
   backend ausente no boot interrompe o boot, com uma frase nomeando a

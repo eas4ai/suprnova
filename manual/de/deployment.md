@@ -169,6 +169,41 @@ Commiten Sie niemals `.env.production` (oder irgendeine Datei mit `APP_KEY` oder
 `DATABASE_URL`) zu Ihrem Repository. Verwenden Sie den Secrets-Store Ihrer Plattform
 und lesen Sie die Werte zur Bereitstellungszeit.
 
+## Produktions-Build-Form
+
+Die Binärdatei, die das Dockerfile baut, führt niemals das `testing`-Feature
+des Frameworks mit sich - die Installer für Verschlüsselungsschlüssel, die
+Storage-Fakes und die RenderCache-Testhooks, die eine Testsuite braucht,
+sind herauskompiliert. Ihre gescaffoldete `Cargo.toml` (und die Dogfood-App
+im Suprnova-Repository selbst) nimmt diese Form durch Konstruktion an, mit
+zwei Dependency-Einträgen:
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+```
+
+Der Produktionseintrag schaltet die Standard-Features aus und listet die
+neun auf, die eingeschaltet bleiben (jeder Standard außer `testing`). Die
+Dev-Dependency schaltet `testing` wieder ein - der Feature-Resolver von
+Cargo zieht die Features einer Dev-Dependency nur für `cargo test` und
+andere `--tests`-Builds heran, sodass `cargo build --bin app` (oder
+`--bin console`) es nie sieht. `testing` ist ausschließlich ein
+Dev-Dependency-Feature: Nichts in Ihrem eigenen `src/` oder `cmd/` sollte
+es für ein Binary-Target einschalten.
+
+Das Framework-Repository belegt das mit einer kleinen Crate, deren einzige
+Aufgabe es ist, nicht zu kompilieren: Sie referenziert jedes hinter
+`testing` versteckte Framework-Element per Pfad, und das Release-Gate prüft,
+dass das Referenzieren ohne das Feature ein Kompilierfehler ist, während
+es mit dem Feature gelingt.
+
 ## Migrationen beim Start
 
 Der Standard `./app` (und explizite `./app serve`) Befehl führt alle

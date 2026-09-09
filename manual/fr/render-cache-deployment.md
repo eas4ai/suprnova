@@ -72,7 +72,7 @@ Choisissez selon ce que vous avez réellement besoin de partager :
 | `RENDER_CACHE_LEASE_MS` | 30 000 | durée de vie d'un bail de reconstruction |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | plafond de requêtes en attente dans le processus |
 | `RENDER_CACHE_FAILURE` | `open` | `open` sert la route sans cache en cas de défaillance d'un fournisseur, `closed` répond `503` |
-| `APP_BUILD_ID` | une version de crate figée à la compilation (voir ci-dessous) | cantonne chaque entrée au build qui l'a produite |
+| `APP_BUILD_ID` | la version du paquet de l'application (voir ci-dessous) | cantonne chaque entrée au build qui l'a produite |
 
 Le profil est un raccourci, pas un verrou. `RENDER_CACHE_L1` et
 `RENDER_CACHE_COORDINATOR` remplacent chacune leur propre moitié, si bien
@@ -87,22 +87,37 @@ ce message, parce qu'une valeur d'environnement peut porter un secret.
 
 **Réglez `APP_BUILD_ID` explicitement, une fois par déploiement.** Elle est
 mêlée à chaque clé de recherche, donc la changer est ce qui empêche un
-nouveau build de servir des entrées publiées par le précédent. Sa valeur par
-défaut n'est pas ce que le nom suggère : `RenderCacheConfig::from_env` se
-replie sur `env!("CARGO_PKG_VERSION")`, qui est développé à la compilation à
-l'intérieur de la crate `suprnova`, si bien que la valeur par défaut est la
-version de la crate du **framework**. Elle n'est égale à la version de votre
-application que parce que toutes deux prennent `version.workspace = true` du
-même workspace, et dans les deux cas elle ne bouge que quand quelqu'un
-incrémente un numéro de version. Un déploiement qui change un template, une
-traduction, ou un handler sans incrémenter de version garde le même
-identifiant de build et peut servir des entrées publiées par le build
-précédent. Réglez-la sur quelque chose qui change chaque fois que vous
-livrez - un identifiant de commit ou un identifiant de version :
+nouveau build de servir des entrées publiées par le précédent. En l'absence
+de la variable, `RenderCacheConfig::from_env` se replie sur la propre
+version du paquet de votre application : `#[suprnova::main]` enregistre
+`CARGO_PKG_VERSION` à partir de la compilation propre de la crate de
+l'application, au moment où elle charge l'environnement, et c'est cette
+valeur enregistrée sur laquelle la valeur par défaut se replie ici. Seul un
+binaire qui n'étend jamais `#[suprnova::main]` se replie plus loin encore,
+sur la version de cette crate du **framework** elle-même - nommée ainsi
+parce qu'elle est sinon facile à confondre avec celle de l'application.
+Dans les deux cas la valeur ne bouge que quand quelqu'un incrémente un
+numéro de version, et une version de paquet change rarement par
+déploiement : un déploiement qui change un template, une traduction, ou un
+handler sans incrémenter de version garde le même identifiant de build et
+peut servir des entrées publiées par le build précédent. Réglez-la sur
+quelque chose qui change chaque fois que vous livrez - un identifiant de
+commit ou un identifiant de version :
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
+
+Une installation qui ne lit jamais l'environnement règle la même valeur
+dans le code avec `RenderCacheConfig::with_build_id`, qui l'emporte sur ce
+qu'a choisi `from_env` - un `APP_BUILD_ID` explicite inclus - pour une
+application qui dérive son propre identifiant par déploiement de façon
+programmatique.
+
+Quelle que soit la valeur que vous réglez, le binaire de production qui la
+lit est censé être construit dans la [forme de build de
+production](deployment.md#production-build-shape) de Suprnova - les
+fonctionnalités par défaut éteintes, `testing` réservé à `cargo test` seul.
 
 Le propre registre d'instances de Live se configure séparément, parce qu'il
 relève de l'autorité de Live plutôt que du stockage du cache :

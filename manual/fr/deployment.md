@@ -177,6 +177,42 @@ Ne validez jamais `.env.production` (ou tout fichier contenant `APP_KEY` ou
 `DATABASE_URL`) dans votre repo. Utilisez le magasin de secrets de votre
 plateforme et lisez les valeurs au moment du déploiement.
 
+## Forme de build de production
+
+Le binaire que construit le Dockerfile ne porte jamais la fonctionnalité
+`testing` du framework - les installateurs de clé de chiffrement, les
+fakes de stockage et les hooks de test de RenderCache dont une suite de
+tests a besoin sont compilés hors du binaire. Votre `Cargo.toml` généré
+par le scaffolder (et l'app dogfood dans le dépôt Suprnova lui-même) prend
+cette forme par construction, avec deux entrées de dépendance :
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+```
+
+L'entrée de production éteint les fonctionnalités par défaut et liste les
+neuf qui restent allumées (tout le défaut sauf `testing`). La
+dépendance de développement rallume `testing` - le résolveur de
+fonctionnalités de Cargo ne tire les fonctionnalités d'une dépendance de
+développement que pour `cargo test` et les autres builds `--tests`, si
+bien que `cargo build --bin app` (ou `--bin console`) ne la voit jamais.
+`testing` est une fonctionnalité de dépendance de développement
+uniquement : rien dans votre propre `src/` ou `cmd/` ne devrait l'allumer
+pour une cible binaire.
+
+Le dépôt du framework prouve que cela tient avec une petite crate dont le
+seul travail est d'échouer à la compilation : elle référence par chemin
+chaque élément du framework protégé derrière `testing`, et le gate de
+release vérifie que les référencer sans la fonctionnalité est une erreur
+de compilation tandis que les référencer avec elle réussit.
+
 ## Migrations au démarrage
 
 La commande `./app` par défaut (et `./app serve` explicite) applique toute

@@ -58,7 +58,7 @@ RenderCache 用**配置档**来回答这件事：一个配置档指名一个进�
 | `RENDER_CACHE_LEASE_MS` | 30,000 | 重建租约的存活时长 |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | 进程内等待者上限 |
 | `RENDER_CACHE_FAILURE` | `open` | `open` 在提供者出故障时以不缓存的方式服务该路由，`closed` 应答 `503` |
-| `APP_BUILD_ID` | 一个编译进来的 crate 版本（见下文） | 把每一个条目限定在生成它的那次构建的命名空间下 |
+| `APP_BUILD_ID` | 应用自己的包版本（见下文） | 把每一个条目限定在生成它的那次构建的命名空间下 |
 
 配置档是一种简写，不是一把锁。`RENDER_CACHE_L1` 和 `RENDER_CACHE_COORDINATOR`
 各自覆盖自己的那一半，所以一个想把条目放在数据库、却把重建租约留在进程内的部署
@@ -69,18 +69,28 @@ RenderCache 用**配置档**来回答这件事：一个配置档指名一个进�
 携带秘密。
 
 **请显式设置 `APP_BUILD_ID`，每次部署设一次。** 它被混进每一个查找键，所以改动
-它正是阻止一个新构建去服务上一个构建发布的条目的手段。它的默认值并不是这个名字
-听上去的那样：`RenderCacheConfig::from_env` 回退到 `env!("CARGO_PKG_VERSION")`，
-而它是在 `suprnova` crate 内部于编译期展开的，所以这个默认值是**框架** crate 的
-版本。它之所以等于你应用的版本，只是因为两者都从同一个工作空间取
-`version.workspace = true`；而无论哪种情况，它都只在有人抬一次版本号时才会动。
-一次改了模板、翻译或处理程序、却没有抬版本号的部署，会保持同一个构建 id，因而
-可能服务上一个构建发布的条目。请把它设成每次发布都会变的东西 - 一个提交 id 或者
-一个发布标识：
+它正是阻止一个新构建去服务上一个构建发布的条目的手段。缺了这个变量的时候，
+`RenderCacheConfig::from_env` 会回退到你应用自己的包版本：`#[suprnova::main]`
+会在加载环境的那一刻，从应用 crate 自身的编译中记录下 `CARGO_PKG_VERSION`，
+而这里的默认值回退到的正是这个被记录下来的值。只有一个从未展开过
+`#[suprnova::main]` 的二进制文件，才会再往下回退一层，落到这个**框架** crate
+自身的版本上 - 之所以这样点名，是因为不然就很容易把它误认成应用自己的版本。
+无论哪种情况，这个值都只在有人抬一次版本号时才会动，而一个包版本很少会随着
+每次部署改变：一次改了模板、翻译或处理程序、却没有抬版本号的部署，会保持同
+一个构建 id，因而可能服务上一个构建发布的条目。请把它设成每次发布都会变的
+东西 - 一个提交 id 或者一个发布标识：
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
+
+一个从不读取环境的安装，会用 `RenderCacheConfig::with_build_id` 在代码里设置
+同一个值 - 它会覆盖 `from_env` 本来选中的东西，包括一个显式的 `APP_BUILD_ID`
+在内 - 供一个以编程方式自行推导每次部署标识的应用使用。
+
+无论你设置的是哪个值，读取它的那个生产二进制文件，都被期望是在 Suprnova 的
+[生产构建形态](deployment.md#production-build-shape)下构建出来的：默认特性
+全部关闭，`testing` 只留给 `cargo test`。
 
 Live 自己的实例账本是单独配置的，因为它是 Live 的权威，而不是缓存的存储：
 `LIVE_LEDGER_DRIVER`（`memory`、`database` 或 `redis`）、`LIVE_REDIS_URL` 和

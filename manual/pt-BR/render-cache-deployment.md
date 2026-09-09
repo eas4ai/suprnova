@@ -71,7 +71,7 @@ Escolha pelo que você de fato precisa compartilhar:
 | `RENDER_CACHE_LEASE_MS` | 30.000 | tempo de vida do lease de reconstrução |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | teto de waiters em processo |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serve a rota sem cache em uma falha de provedor, `closed` responde `503` |
-| `APP_BUILD_ID` | uma versão de crate compilada junto (veja abaixo) | isola cada entrada no namespace do build que a produziu |
+| `APP_BUILD_ID` | a versão do pacote da aplicação (veja abaixo) | isola cada entrada no namespace do build que a produziu |
 
 O perfil é um atalho, não uma trava. `RENDER_CACHE_L1` e
 `RENDER_CACHE_COORDINATOR` sobrescrevem cada um a sua metade, de modo que
@@ -86,20 +86,35 @@ ambiente pode carregar um segredo.
 
 **Defina `APP_BUILD_ID` explicitamente, uma vez por deploy.** Ele é
 misturado em toda chave de busca, então mudá-lo é o que impede um build novo
-de servir entradas que o anterior publicou. Seu padrão não é o que o nome
-sugere: `RenderCacheConfig::from_env` recai para `env!("CARGO_PKG_VERSION")`,
-que se expande em tempo de compilação dentro do crate `suprnova`, então o
-padrão é a versão do crate do **framework**. Ele só é igual à versão da sua
-aplicação porque ambos pegam `version.workspace = true` do mesmo workspace
-e, de todo modo, ele só se move quando alguém incrementa um número de
-versão. Um deploy que muda um template, uma tradução ou um handler sem
-incrementar a versão mantém o mesmo id de build e pode servir entradas que o
-build anterior publicou. Defina-o como algo que muda toda vez que você
-entrega - um id de commit ou um identificador de release:
+de servir entradas que o anterior publicou. Na ausência da variável,
+`RenderCacheConfig::from_env` recai para a própria versão do pacote da sua
+aplicação: `#[suprnova::main]` registra `CARGO_PKG_VERSION` a partir da
+compilação do próprio crate da aplicação, no momento em que carrega o
+ambiente, e é esse valor registrado para o qual o padrão recai aqui.
+Somente um binário que nunca expande `#[suprnova::main]` recai ainda mais
+longe, para a versão do próprio crate do **framework** - nomeada assim
+porque é fácil confundi-la com a da aplicação de outro modo. De todo modo
+o valor só se move quando alguém incrementa um número de versão, e uma
+versão de pacote raramente muda por deploy: um deploy que muda um
+template, uma tradução ou um handler sem incrementar a versão mantém o
+mesmo id de build e pode servir entradas que o build anterior publicou.
+Defina-o como algo que muda toda vez que você entrega - um id de commit ou
+um identificador de release:
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
+
+Uma instalação que nunca lê o ambiente define o mesmo valor em código com
+`RenderCacheConfig::with_build_id`, que sobrescreve o que quer que
+`from_env` tenha escolhido - um `APP_BUILD_ID` explícito incluído - para
+uma aplicação que deriva seu próprio identificador por deploy de forma
+programática.
+
+Qualquer que seja o valor definido, espera-se que o binário de produção
+que o lê esteja construído na [forma de build de
+produção](deployment.md#production-build-shape) da Suprnova: com as
+features padrão desligadas e `testing` reservado só para `cargo test`.
 
 O próprio ledger de instâncias do Live é configurado à parte, porque ele é
 autoridade do Live e não armazenamento do cache: `LIVE_LEDGER_DRIVER`

@@ -79,7 +79,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 
 | 计数器 | 属性 |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`，以及 `outcome="declined"` 时的 `reason` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | 无 |
 | `suprnova.render_cache.rebuilds` | 无 |
@@ -97,8 +97,31 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 - `bypass` - 一个未声明的查询参数、一个无法解析的已声明差异化维度，或者一份已
   耗尽的等待者名单。
 - `moved` - 渲染之后的那次重读发现某项依赖或纪元变过了；候选被丢弃，从未发布。
-- `declined` - 这次渲染不可存储：资格审查、一份溢出的观察报告、一个
-  `Uncacheable` 分类、一条 Live 文档规则，或者某个上限。
+- `declined` - 这次渲染不可存储，属于下面三十二个理由中的一个，携带在
+  `outcome` 旁边的 `reason` 属性里。`reason` 只在 `outcome="declined"` 时才
+  会给出；其他任何结果都不携带它。这个理由是在真正做出拒绝的那个分支上，从
+  一个类型化的值计算出来的，而绝不是事后从响应反推出来的，所以它点名的正是
+  真正拒绝了这次渲染的那份契约：
+
+  - 资格审查（`policy.eligibility`，映照引擎自身的 `DeclineReason`）：
+    `policy_uncacheable`、`method`、`status`、`streaming`、`sets_cookie`、
+    `unsafe_header_name`。
+  - 观察（收集器的报告以及事务内部的账本读取）：`observation_overflowed`、
+    `ledger_read_failed`、`handler_not_begun`。
+  - 被收窄为 `Uncacheable` 的分类：`session_value_read`、
+    `secret_context_read`、`undeclared_context`。
+  - Live 文档事实：`identity_bound_without_stitching`、
+    `invalid_stitch_capture`、`no_store_intent`、
+    `unresolvable_seed_deadline`。
+  - 关于键的不变量（渲染自身的观察是否与查找键早已据以构建的那些值一致）：
+    `unreasoned_private_class`、`principal_undeclared`、
+    `principal_divergent`、`tenant_undeclared`、`tenant_divergent`、
+    `locale_undeclared`、`locale_divergent`。
+  - 发布：`seed_deadline_elapsed`、`unsafe_header_value`、
+    `composite_capture_invalid`、`composite_slot_count_mismatch`、
+    `composite_too_many_slots`、`composite_digest_mismatch`、
+    `composite_empty_slot`、`composite_slot_not_found`、
+    `composite_slot_ambiguous`。
 
 `hits` 只在 `l0`、`l1`、`conditional` 和 `stale` 上递增。`publications` 只统计
 一个存储回答了“已发布”的情况，绝不统计被栅栏挡下或被拒绝的尝试。`rebuilds` 每
@@ -279,9 +302,12 @@ assert!(installed, "the statement observer needs an unshared connection");
   工作进程、一个计划任务或一个控制台命令，那次写入什么都没推进：运行
   `render-cache:epoch-advance`（要按节点来 - 见最后一条）。
 - **一个你本以为会缓存的页面从来不带 `Age` 头。** 它是被拒绝了，不是失败了。
-  请对着 [RenderCache](render-cache.md) 里的分类清单逐条排查：一次会话读取、
-  一次在没有 `Principal` 差异化维度的路由上的身份读取、一次没有 `Locale`
-  差异化维度的语言环境读取、一次授权检查，或者一次原始 SQL 读取。
+  先看一眼被拒绝（`declined`）那次查找上的 `reason` 标签：它点名的正是真正
+  拒绝了这次渲染的那份契约，取自上面“遥测”里的那个封闭集合。然后，针对某个
+  被分类收窄出来的理由，请对着 [RenderCache](render-cache.md) 里的分类清单
+  逐条排查：一次会话读取、一次在没有 `Principal` 差异化维度的路由上的身份
+  读取、一次没有 `Locale` 差异化维度的语言环境读取、一次授权检查，或者一次
+  原始 SQL 读取。
 - **某个后端不可达。** 由 `RENDER_CACHE_FAILURE` 决定：`open`（默认）以不缓存
   的方式服务该路由，`closed` 应答一个光秃秃的 `503`。而一个在启动时就缺失的
   后端会直接让启动停下，并给出一句点名要修的迁移或变量的话。

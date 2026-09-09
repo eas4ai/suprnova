@@ -73,7 +73,7 @@ Wählen Sie danach, was Sie tatsächlich teilen müssen:
 | `RENDER_CACHE_LEASE_MS` | 30.000 | Lebensdauer der Neuaufbau-Lease |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | Obergrenze für Wartende im Prozess |
 | `RENDER_CACHE_FAILURE` | `open` | `open` bedient die Route bei einem Provider-Fehler ungecacht, `closed` antwortet mit `503` |
-| `APP_BUILD_ID` | eine einkompilierte Crate-Version (siehe unten) | ordnet jeden Eintrag dem Build zu, der ihn erzeugt hat |
+| `APP_BUILD_ID` | die Paketversion der Anwendung (siehe unten) | ordnet jeden Eintrag dem Build zu, der ihn erzeugt hat |
 
 Das Profil ist eine Kurzschreibweise, keine Festlegung. `RENDER_CACHE_L1`
 und `RENDER_CACHE_COORDINATOR` überschreiben jeweils ihre eigene Hälfte,
@@ -89,21 +89,35 @@ Meldung nie wiederholt, denn ein Umgebungswert kann ein Geheimnis tragen.
 **Setzen Sie `APP_BUILD_ID` ausdrücklich, einmal pro Deployment.** Sie geht
 in jeden Lookup-Schlüssel ein, sodass ihre Änderung das ist, was einen neuen
 Build daran hindert, Einträge auszuliefern, die der vorherige veröffentlicht
-hat. Ihr Standardwert ist nicht das, was der Name nahelegt:
-`RenderCacheConfig::from_env` fällt auf `env!("CARGO_PKG_VERSION")` zurück,
-was zur Kompilierzeit innerhalb der Crate `suprnova` expandiert, sodass der
-Standardwert die Version der **Framework**-Crate ist. Sie stimmt nur deshalb
-mit der Version Ihrer Anwendung überein, weil beide
-`version.workspace = true` aus demselben Workspace übernehmen, und so oder so
-bewegt sie sich nur, wenn jemand eine Versionsnummer erhöht. Ein Deployment,
-das ein Template, eine Übersetzung oder einen Handler ohne Versionserhöhung
-ändert, behält dieselbe Build-Id und kann Einträge ausliefern, die der
-vorherige Build veröffentlicht hat. Setzen Sie sie auf etwas, das sich bei
-jeder Auslieferung ändert, etwa eine Commit-Id oder eine Release-Kennung:
+hat. Fehlt die Variable, greift `RenderCacheConfig::from_env` auf die eigene
+Paketversion Ihrer Anwendung zurück: `#[suprnova::main]` zeichnet
+`CARGO_PKG_VERSION` aus der Kompilierung der Anwendungs-Crate selbst auf, in
+dem Moment, in dem es die Umgebung lädt, und dieser aufgezeichnete Wert ist
+es, worauf der Standardwert hier zurückfällt. Nur ein Binary, das
+`#[suprnova::main]` nie expandiert, fällt noch weiter zurück, auf die
+Version dieser **Framework**-Crate selbst - so benannt, weil sie sonst
+leicht mit der der Anwendung verwechselt wird. So oder so bewegt sich der
+Wert nur, wenn jemand eine Versionsnummer erhöht, und eine Paketversion
+ändert sich selten pro Deployment: Ein Deployment, das ein Template, eine
+Übersetzung oder einen Handler ohne Versionserhöhung ändert, behält
+dieselbe Build-Id und kann Einträge ausliefern, die der vorherige Build
+veröffentlicht hat. Setzen Sie sie auf etwas, das sich bei jeder
+Auslieferung ändert, etwa eine Commit-Id oder eine Release-Kennung:
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
+
+Eine Installation, die die Umgebung nie liest, setzt denselben Wert im Code
+mit `RenderCacheConfig::with_build_id`, was überschreibt, wofür sich
+`from_env` auch immer entschieden hat - ein ausdrückliches `APP_BUILD_ID`
+eingeschlossen - für eine Anwendung, die ihre eigene Kennung pro Deployment
+programmatisch ableitet.
+
+Welchen Wert Sie auch setzen, das Produktions-Binary, das ihn liest, wird
+in Suprnovas [Produktions-Build-Form](deployment.md#production-build-shape)
+gebaut erwartet - Standard-Features aus, `testing` allein `cargo test`
+vorbehalten.
 
 Das eigene Instanz-Ledger von Live wird getrennt konfiguriert, denn es ist
 die Autorität von Live und nicht der Speicher des Cache:

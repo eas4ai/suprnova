@@ -111,7 +111,7 @@ Provider oder ein Backend benannt:
 
 | Zähler | Attribut |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`, und `reason`, wenn `outcome="declined"` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | keines |
 | `suprnova.render_cache.rebuilds` | keines |
@@ -135,9 +135,35 @@ Provider oder ein Backend benannt:
 - `moved` - das erneute Lesen nach dem Rendern hat festgestellt, dass sich
   eine Abhängigkeit oder die Epoche geändert hatte; der Kandidat wurde
   verworfen und nie veröffentlicht.
-- `declined` - das Rendering war nicht speicherbar: die Eignung, ein
-  übergelaufener Beobachtungsbericht, eine `Uncacheable`-Klassifizierung,
-  eine Regel für Live-Dokumente oder eine Grenze.
+- `declined` - das Rendering war nicht speicherbar, aus einem von
+  zweiunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
+  `outcome`. `reason` wird nur zusammen mit `outcome="declined"`
+  ausgegeben; jedes andere Ergebnis führt keinen. Der Grund wird aus einem
+  typisierten Wert an genau der Verzweigung berechnet, die abgelehnt hat,
+  nie im Nachhinein aus der Antwort rekonstruiert, sodass er den Vertrag
+  benennt, der das Rendering tatsächlich verweigert hat:
+
+  - Eignung (`policy.eligibility`, spiegelt die eigene `DeclineReason` der
+    Engine): `policy_uncacheable`, `method`, `status`, `streaming`,
+    `sets_cookie`, `unsafe_header_name`.
+  - Beobachtung (der Bericht des Collectors und das Ledger-Lesen innerhalb
+    der Transaktion): `observation_overflowed`, `ledger_read_failed`,
+    `handler_not_begun`.
+  - Klassifizierung, die zu `Uncacheable` eingeengt wurde:
+    `session_value_read`, `secret_context_read`, `undeclared_context`.
+  - Fakten des Live-Dokuments: `identity_bound_without_stitching`,
+    `invalid_stitch_capture`, `no_store_intent`,
+    `unresolvable_seed_deadline`.
+  - Invarianten über den Schlüssel (ob die eigenen Beobachtungen des
+    Renderings mit den Werten übereinstimmen, aus denen der
+    Lookup-Schlüssel bereits gebaut war): `unreasoned_private_class`,
+    `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
+    `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
+  - Veröffentlichung: `seed_deadline_elapsed`, `unsafe_header_value`,
+    `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `composite_too_many_slots`, `composite_digest_mismatch`,
+    `composite_empty_slot`, `composite_slot_not_found`,
+    `composite_slot_ambiguous`.
 
 `hits` zählt nur für `l0`, `l1`, `conditional` und `stale` hoch.
 `publications` zählt nur einen Store, der mit „veröffentlicht“ antwortet, nie
@@ -378,11 +404,15 @@ flatterhaft.
   hat dieser Schreibzugriff nichts erhöht: Führen Sie
   `render-cache:epoch-advance` aus (pro Knoten, siehe den letzten Punkt).
 - **Eine Seite, von der Sie Caching erwartet haben, trägt nie einen
-  `Age`-Header.** Sie wird abgelehnt, sie scheitert nicht. Arbeiten Sie die
-  Klassifizierungsliste in [RenderCache](render-cache.md) durch: ein
-  Sitzungslesen, ein Identitätslesen auf einer Route ohne
-  `Principal`-Varianz, ein Locale-Lesen ohne `Locale`-Varianz, eine
-  Autorisierungsprüfung oder ein Lesen mit rohem SQL.
+  `Age`-Header.** Sie wird abgelehnt, sie scheitert nicht. Lesen Sie zuerst
+  das `reason`-Label des `declined`-Lookups - es benennt den genauen
+  Vertrag, der das Rendering tatsächlich verweigert hat, aus der
+  geschlossenen Menge unter „Telemetrie" oben - und arbeiten Sie dann, für
+  einen der klassifizierungsbedingten Gründe, die Klassifizierungsliste in
+  [RenderCache](render-cache.md) durch: ein Sitzungslesen, ein
+  Identitätslesen auf einer Route ohne `Principal`-Varianz, ein Locale-Lesen
+  ohne `Locale`-Varianz, eine Autorisierungsprüfung oder ein Lesen mit rohem
+  SQL.
 - **Ein Backend ist nicht erreichbar.** `RENDER_CACHE_FAILURE` entscheidet:
   `open` (der Standard) bedient die Route ungecacht, `closed` antwortet mit
   einem nackten `503`. Ein Backend, das beim Boot fehlt, stoppt stattdessen

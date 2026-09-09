@@ -106,7 +106,7 @@ nivel, un proveedor o un backend:
 
 | Contador | Atributo |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`, y `reason` cuando `outcome="declined"` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | ninguno |
 | `suprnova.render_cache.rebuilds` | ninguno |
@@ -129,9 +129,35 @@ nivel, un proveedor o un backend:
   declarada que no se puede resolver, o una lista de espera agotada.
 - `moved` - la relectura posterior al render encontró que una dependencia o
   el epoch habían cambiado; la candidata se descartó, nunca se publicó.
-- `declined` - el render no era almacenable: elegibilidad, un informe de
-  observación desbordado, una clasificación `Uncacheable`, una regla de
-  documento Live, o una cota.
+- `declined` - el render no era almacenable, por una de las treinta y dos
+  razones de abajo, llevada en el atributo `reason` junto a `outcome`.
+  `reason` se emite solo junto a `outcome="declined"`; cualquier otro
+  desenlace no lleva ninguna. La razón se calcula a partir de un valor
+  tipado en la rama exacta que la rechazó, nunca reconstruida a posteriori
+  a partir de la respuesta, de modo que nombra el contrato que realmente
+  rechazó el render:
+
+  - Elegibilidad (`policy.eligibility`, que refleja el propio
+    `DeclineReason` del motor): `policy_uncacheable`, `method`, `status`,
+    `streaming`, `sets_cookie`, `unsafe_header_name`.
+  - Observación (el informe del colector y la lectura del ledger dentro de
+    la transacción): `observation_overflowed`, `ledger_read_failed`,
+    `handler_not_begun`.
+  - Clasificación reducida a `Uncacheable`: `session_value_read`,
+    `secret_context_read`, `undeclared_context`.
+  - Hechos del documento Live: `identity_bound_without_stitching`,
+    `invalid_stitch_capture`, `no_store_intent`,
+    `unresolvable_seed_deadline`.
+  - Invariantes sobre la clave (si las propias observaciones del render
+    concuerdan con los valores con los que ya se había construido la clave
+    de lookup): `unreasoned_private_class`, `principal_undeclared`,
+    `principal_divergent`, `tenant_undeclared`, `tenant_divergent`,
+    `locale_undeclared`, `locale_divergent`.
+  - Publicación: `seed_deadline_elapsed`, `unsafe_header_value`,
+    `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `composite_too_many_slots`, `composite_digest_mismatch`,
+    `composite_empty_slot`, `composite_slot_not_found`,
+    `composite_slot_ambiguous`.
 
 `hits` se incrementa solo para `l0`, `l1`, `conditional` y `stale`.
 `publications` cuenta solo un store que responde «publicado», nunca un
@@ -365,7 +391,10 @@ reproducibles en lugar de inestables.
   nada: ejecuta `render-cache:epoch-advance` (por nodo; ver el último
   punto).
 - **Una página que esperabas que cacheara nunca lleva cabecera `Age`.**
-  Está siendo rechazada, no fallando. Repasa la lista de clasificación de
+  Está siendo rechazada, no fallando. Lee primero la etiqueta `reason` del
+  lookup `declined` - nombra el contrato exacto que rechazó el render, del
+  conjunto cerrado en «Telemetría» arriba - y luego, para una de las
+  razones reducidas por clasificación, repasa la lista de clasificación de
   [RenderCache](render-cache.md): una lectura de sesión, una lectura de
   identidad en una ruta sin varianza `Principal`, una lectura de locale sin
   varianza `Locale`, una comprobación de autorización, o una lectura de SQL

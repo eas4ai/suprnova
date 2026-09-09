@@ -67,7 +67,7 @@ Choose by what you actually need to share:
 | `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serves the route uncached on a provider failure, `closed` answers `503` |
-| `APP_BUILD_ID` | a compiled-in crate version (see below) | namespaces every entry to the build that produced it |
+| `APP_BUILD_ID` | the application's package version (see below) | namespaces every entry to the build that produced it |
 
 The profile is a shorthand, not a lock. `RENDER_CACHE_L1` and
 `RENDER_CACHE_COORDINATOR` each override their own half, so a deployment
@@ -81,20 +81,27 @@ carry a secret.
 
 **Set `APP_BUILD_ID` explicitly, once per deploy.** It is mixed into every
 lookup key, so changing it is what stops a new build from serving entries
-the previous one published. Its default is not what the name suggests:
-`RenderCacheConfig::from_env` falls back to `env!("CARGO_PKG_VERSION")`,
-which expands at compile time inside the `suprnova` crate, so the default is
-the **framework** crate's version. It equals your application's version only
-because both take `version.workspace = true` from the same workspace, and
-either way it moves only when someone bumps a version number. A deploy that
-changes a template, a translation, or a handler without a version bump keeps
-the same build id and can serve entries the previous build published. Set it
-to something that changes every time you ship - a commit id or a release
-identifier:
+the previous one published. Absent the variable, `RenderCacheConfig::from_env`
+takes your application's own package version: `#[suprnova::main]` records
+`CARGO_PKG_VERSION` from the application crate's own compilation the moment
+it loads the environment, and that recorded value is what the default falls
+back to here. Only a binary that never expands `#[suprnova::main]` falls
+back further, to this **framework** crate's own version - named as such
+because it is otherwise easy to mistake for the application's. Either way
+the value moves only when someone bumps a version number, and a package
+version rarely changes per deploy: a deploy that changes a template, a
+translation, or a handler without a version bump keeps the same build id and
+can serve entries the previous build published. Set it to something that
+changes every time you ship - a commit id or a release identifier:
 
 ```bash
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
+
+An install that never reads the environment sets the same value in code
+with `RenderCacheConfig::with_build_id`, which overrides whatever
+`from_env` chose - explicit `APP_BUILD_ID` included - for an application
+that derives its own per-deploy identifier programmatically.
 
 Whichever value you set, the production binary that reads it is expected
 to be built in Suprnova's [production build shape](deployment.md#production-build-shape) -

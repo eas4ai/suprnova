@@ -174,6 +174,42 @@ Nunca confirmes `.env.production` (o cualquier archivo que contenga `APP_KEY` o
 `DATABASE_URL`) en tu repositorio. Usa el almacén de secretos de tu plataforma
 y lee los valores en tiempo de despliegue.
 
+## Forma de build de producción
+
+El binario que construye el Dockerfile nunca lleva la característica
+`testing` del framework: los instaladores de claves de cifrado, los fakes
+de almacenamiento y los hooks de prueba de RenderCache que una suite de
+pruebas necesita quedan fuera de la compilación. Tu `Cargo.toml`
+generado por el scaffolder (y la app dogfood en el propio repositorio de
+Suprnova) toma esta forma por construcción, con dos entradas de
+dependencia:
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+```
+
+La entrada de producción apaga las características por defecto y lista
+las nueve que se quedan encendidas (todas las por defecto salvo
+`testing`). La dependencia de desarrollo vuelve a encender `testing`: el
+resolutor de características de Cargo solo trae las características de una
+dependencia de desarrollo para `cargo test` y otros builds `--tests`, así
+que `cargo build --bin app` (o `--bin console`) nunca la ve. `testing` es
+una característica de dependencia de desarrollo únicamente: nada en tu
+propio `src/` o `cmd/` debería encenderla para un target binario.
+
+El repositorio del framework demuestra esto con un crate pequeño cuyo
+único trabajo es fallar al compilar: referencia por ruta cada elemento del
+framework protegido tras `testing`, y el gate de release comprueba que
+referenciarlos sin la característica es un error de compilación mientras
+que referenciarlos con ella tiene éxito.
+
 ## Migraciones en el arranque
 
 El comando predeterminado `./app` (y `./app serve` explícito) aplica cualquier

@@ -111,7 +111,7 @@ un fournisseur, ou un backend :
 
 | Compteur | Attribut |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`, et `reason` quand `outcome="declined"` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | aucun |
 | `suprnova.render_cache.rebuilds` | aucun |
@@ -133,9 +133,35 @@ un fournisseur, ou un backend :
   déclarée impossible à résoudre, ou une liste d'attente épuisée.
 - `moved` - la relecture après le rendu a trouvé qu'une dépendance ou
   l'epoch avait changé ; le candidat a été écarté, jamais publié.
-- `declined` - le rendu n'était pas stockable : éligibilité, rapport
-  d'observation débordé, classification `Uncacheable`, règle de document
-  Live, ou une borne.
+- `declined` - le rendu n'était pas stockable, pour l'une des trente-deux
+  raisons ci-dessous, portée dans l'attribut `reason` à côté de `outcome`.
+  `reason` n'est émis qu'aux côtés de `outcome="declined"` ; tout autre
+  résultat n'en porte aucun. La raison est calculée à partir d'une valeur
+  typée à la branche exacte qui a refusé, jamais reconstruite après coup à
+  partir de la réponse, si bien qu'elle nomme le contrat qui a réellement
+  refusé le rendu :
+
+  - Éligibilité (`policy.eligibility`, qui reflète le propre
+    `DeclineReason` du moteur) : `policy_uncacheable`, `method`, `status`,
+    `streaming`, `sets_cookie`, `unsafe_header_name`.
+  - Observation (le rapport du collecteur et la lecture du registre à
+    l'intérieur de la transaction) : `observation_overflowed`,
+    `ledger_read_failed`, `handler_not_begun`.
+  - Classification réduite à `Uncacheable` : `session_value_read`,
+    `secret_context_read`, `undeclared_context`.
+  - Faits du document Live : `identity_bound_without_stitching`,
+    `invalid_stitch_capture`, `no_store_intent`,
+    `unresolvable_seed_deadline`.
+  - Invariants sur la clé (si les propres observations du rendu
+    concordent avec les valeurs à partir desquelles la clé de lookup avait
+    déjà été construite) : `unreasoned_private_class`,
+    `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
+    `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
+  - Publication : `seed_deadline_elapsed`, `unsafe_header_value`,
+    `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `composite_too_many_slots`, `composite_digest_mismatch`,
+    `composite_empty_slot`, `composite_slot_not_found`,
+    `composite_slot_ambiguous`.
 
 `hits` ne s'incrémente que pour `l0`, `l1`, `conditional` et `stale`.
 `publications` ne compte qu'un magasin répondant « publié », jamais une
@@ -372,7 +398,10 @@ qu'instables.
   fait avancer : exécutez `render-cache:epoch-advance` (par nœud - voir le
   dernier point).
 - **Une page que vous attendiez en cache ne porte jamais d'en-tête `Age`.**
-  Elle est refusée, elle n'échoue pas. Parcourez la liste de classification
+  Elle est refusée, elle n'échoue pas. Lisez d'abord l'étiquette `reason`
+  du lookup `declined` - elle nomme le contrat exact qui a refusé le rendu,
+  parmi l'ensemble fermé de « Télémétrie » ci-dessus - puis, pour l'une des
+  raisons réduites par classification, parcourez la liste de classification
   dans [RenderCache](render-cache.md) : une lecture de session, une lecture
   d'identité sur une route sans variance `Principal`, une lecture de locale
   sans variance `Locale`, une vérification d'autorisation, ou une lecture

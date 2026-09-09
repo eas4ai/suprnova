@@ -98,7 +98,7 @@ cargo run --bin console -- render-cache:epoch-advance
 
 | カウンター | 属性 |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`。`outcome="declined"` のときは `reason` も |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | なし |
 | `suprnova.render_cache.rebuilds` | なし |
@@ -118,8 +118,33 @@ cargo run --bin console -- render-cache:epoch-advance
   ディメンション、または使い切られた待機者の一覧。
 - `moved`: レンダリング後の読み直しで、依存かエポックが変わっていたことが
   判明した。候補は破棄され、公開はされなかった。
-- `declined`: レンダリングが保存可能ではなかった。適格性、あふれた観測レポート、
-  `Uncacheable` の分類、Live ドキュメントの規則、または何らかの上限による。
+- `declined`: レンダリングが保存できませんでした。理由は下記 32 個のうちの
+  いずれかで、`outcome` の隣にある `reason` 属性に載って運ばれます。
+  `reason` が出るのは `outcome="declined"` のときだけで、それ以外の結果には
+  一切運ばれません。この理由は、実際に却下したその分岐において型付きの値から
+  計算されるのであって、あとからレスポンスを見て再構成されるのではありません。
+  つまり、実際にレンダリングを拒んだ契約の名前がそのまま出ます:
+
+  - 適格性（`policy.eligibility`。エンジン自身の `DeclineReason` を
+    映し取ります）: `policy_uncacheable`、`method`、`status`、
+    `streaming`、`sets_cookie`、`unsafe_header_name`。
+  - 観測（コレクターのレポートとトランザクション内でのレジャー読み取り）:
+    `observation_overflowed`、`ledger_read_failed`、`handler_not_begun`。
+  - `Uncacheable` へ絞り込まれた分類: `session_value_read`、
+    `secret_context_read`、`undeclared_context`。
+  - Live ドキュメントの事実: `identity_bound_without_stitching`、
+    `invalid_stitch_capture`、`no_store_intent`、
+    `unresolvable_seed_deadline`。
+  - キーに関する不変条件（レンダリング自身の観測が、ルックアップキーが
+    すでに組み立てられていた値と一致するかどうか）:
+    `unreasoned_private_class`、`principal_undeclared`、
+    `principal_divergent`、`tenant_undeclared`、`tenant_divergent`、
+    `locale_undeclared`、`locale_divergent`。
+  - 公開: `seed_deadline_elapsed`、`unsafe_header_value`、
+    `composite_capture_invalid`、`composite_slot_count_mismatch`、
+    `composite_too_many_slots`、`composite_digest_mismatch`、
+    `composite_empty_slot`、`composite_slot_not_found`、
+    `composite_slot_ambiguous`。
 
 `hits` が増えるのは `l0`、`l1`、`conditional`、`stale` のときだけです。
 `publications` が数えるのは、ストアが「公開した」と答えたときだけで、
@@ -342,7 +367,10 @@ assert!(installed, "the statement observer needs an unshared connection");
   何も進めていません。`render-cache:epoch-advance` を実行してください
   （ノードごとに。最後の項目を参照）。
 - **キャッシュされると思っていたページが、`Age` ヘッダーを一度も運ばない。**
-  それは失敗しているのではなく、却下されています。
+  それは失敗しているのではなく、却下されています。まず `declined` の
+  ルックアップにある `reason` ラベルを読んでください。それは、上記の
+  「テレメトリ」にある閉じた集合の中から、レンダリングを実際に拒んだ契約を
+  名指しします。そのうえで、分類によって絞り込まれた理由のひとつについては、
   [RenderCache](render-cache.md) の分類の一覧を順に当たってください。
   セッションの読み取り、`Principal` バリエーションのないルートでの
   アイデンティティの読み取り、`Locale` バリエーションのないロケールの読み取り、

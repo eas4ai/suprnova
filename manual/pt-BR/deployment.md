@@ -171,6 +171,41 @@ Nunca faça commit de `.env.production` (ou qualquer arquivo contendo
 `APP_KEY` ou `DATABASE_URL`) em seu repositório. Use o armazenamento de
 segredos de sua plataforma e leia os valores no momento do deploy.
 
+## Forma de build de produção
+
+O binário que o Dockerfile constrói nunca carrega a feature `testing` do
+framework - os instaladores de chave de criptografia, os fakes de
+armazenamento e os hooks de teste do RenderCache que uma suíte de testes
+precisa ficam fora da compilação. Seu `Cargo.toml` gerado pelo scaffolder
+(e o app dogfood no próprio repositório da Suprnova) assume essa forma por
+construção, com duas entradas de dependência:
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+```
+
+A entrada de produção desliga as features padrão e lista as nove que
+ficam ligadas (todo padrão exceto `testing`). A dependência de
+desenvolvimento liga `testing` de novo - o resolvedor de features do Cargo
+só traz as features de uma dependência de desenvolvimento para `cargo
+test` e outros builds `--tests`, então `cargo build --bin app` (ou `--bin
+console`) nunca a vê. `testing` é uma feature exclusiva de dependência de
+desenvolvimento: nada no seu próprio `src/` ou `cmd/` deveria ligá-la para
+um target binário.
+
+O repositório do framework prova que isso se sustenta com um crate
+pequeno cujo único trabalho é falhar ao compilar: ele referencia, por
+caminho, cada item do framework protegido atrás de `testing`, e o gate de
+release verifica que referenciá-los sem a feature é um erro de compilação
+enquanto referenciá-los com ela tem sucesso.
+
 ## Migrações ao inicializar
 
 O comando padrão `./app` (e explícito `./app serve`) aplica todas as migrações
