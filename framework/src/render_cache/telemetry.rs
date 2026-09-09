@@ -56,3 +56,120 @@ pub const EPOCH_REWINDS: &str = "suprnova.render_cache.epoch_rewinds";
 /// outcome. `STITCH_ASSEMBLIES` and `STITCH_SLOTS` carry their own closed
 /// value sets, documented on each.
 pub const OUTCOME: &str = "outcome";
+/// Attribute `reason`, emitted only on `LOOKUPS` and only alongside
+/// `outcome="declined"` (see `decline::LookupDeclineReason::as_str`): every
+/// other outcome carries no `reason`. The value is `snake_case` of a closed
+/// compile-time enum variant, never anything derived from a route name, a
+/// key, an identity digest, or a header value.
+///
+/// The closed value set, grouped as the reason's own definition groups it:
+///
+/// - Eligibility: `policy_uncacheable`, `method`, `status`, `streaming`,
+///   `sets_cookie`, `unsafe_header_name`.
+/// - Observation: `observation_overflowed`, `ledger_read_failed`,
+///   `handler_not_begun`.
+/// - Classification narrowed to `Uncacheable`: `session_value_read`,
+///   `secret_context_read`, `undeclared_context`.
+/// - Live document facts: `identity_bound_without_stitching`,
+///   `invalid_stitch_capture`, `no_store_intent`,
+///   `unresolvable_seed_deadline`.
+/// - Invariants over the key: `unreasoned_private_class`,
+///   `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
+///   `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
+/// - Publication: `seed_deadline_elapsed`, `unsafe_header_value`,
+///   `composite_capture_invalid`, `composite_slot_count_mismatch`,
+///   `composite_too_many_slots`, `composite_digest_mismatch`,
+///   `composite_empty_slot`, `composite_slot_not_found`,
+///   `composite_slot_ambiguous`.
+pub const REASON: &str = "reason";
+
+/// One lookup recorded for a test: the `outcome` label, and, for a decline,
+/// the `reason` label beside it.
+///
+/// Compiled only under `cfg(test)` or the `testing` feature, the same seam
+/// `middleware::race_points` uses: an integration test under
+/// `framework/tests/` is a separate crate with no `cfg(test)` of its own
+/// reaching this library, so it can only see this recorder through the
+/// feature.
+#[cfg(any(test, feature = "testing"))]
+pub struct RecordedLookup {
+    /// The `outcome` label this lookup recorded.
+    pub outcome: &'static str,
+    /// The `reason` label, present only when `outcome` is `"declined"`.
+    pub reason: Option<&'static str>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+mod recorder {
+    use std::sync::Mutex;
+
+    use super::RecordedLookup;
+
+    /// Bounds the recorder the same way a test-only channel is bounded
+    /// anywhere else in this crate: a runaway test cannot grow this without
+    /// limit, and 4096 is far past what any single test in this suite
+    /// dispatches.
+    const MAX_RECORDED: usize = 4096;
+
+    static RECORDED: Mutex<Vec<RecordedLookup>> = Mutex::new(Vec::new());
+
+    pub(super) fn push(outcome: &'static str, reason: Option<&'static str>) {
+        let mut recorded = RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+        if recorded.len() < MAX_RECORDED {
+            recorded.push(RecordedLookup { outcome, reason });
+        }
+    }
+
+    pub(super) fn drain() -> Vec<RecordedLookup> {
+        let recorded = RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+        recorded
+            .iter()
+            .map(|lookup| RecordedLookup {
+                outcome: lookup.outcome,
+                reason: lookup.reason,
+            })
+            .collect()
+    }
+
+    pub(super) fn clear() {
+        let mut recorded = RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+        recorded.clear();
+    }
+}
+
+/// Records one lookup outcome (and, for a decline, its reason) into the
+/// test-only recorder; a no-op outside `cfg(any(test, feature = "testing"))`.
+/// Called from [`super::middleware::LookupOutcome::record`], alongside the
+/// real metric increment, never instead of it.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn record_for_test(outcome: &'static str, reason: Option<&'static str>) {
+    recorder::push(outcome, reason);
+}
+
+/// The lookups recorded since the last [`reset_recorded_lookups_for_test`],
+/// oldest first, bounded to 4096.
+#[cfg(any(test, feature = "testing"))]
+#[must_use]
+pub fn recorded_lookups_for_test() -> Vec<RecordedLookup> {
+    recorder::drain()
+}
+
+/// Clears the recorder. Test-only cleanup; production code never calls
+/// this.
+#[cfg(any(test, feature = "testing"))]
+pub fn reset_recorded_lookups_for_test() {
+    recorder::clear();
+}
+
+/// Every closed `reason` label, `snake_case`, in the same order
+/// [`REASON`]'s own doc groups them. For the documentation test that pins
+/// each one appears in the operations manual chapter; not itself an
+/// `outcome` or `reason` value recorded anywhere.
+#[cfg(any(test, feature = "testing"))]
+#[must_use]
+pub fn decline_reason_labels_for_test() -> Vec<&'static str> {
+    super::decline::LookupDeclineReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect()
+}

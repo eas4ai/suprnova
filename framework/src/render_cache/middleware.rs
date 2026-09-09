@@ -205,6 +205,7 @@ use crate::telemetry::metrics::Metrics;
 use super::L1Provider;
 use super::collector::{self, Collector};
 use super::config::RenderCacheConfig;
+use super::decline::LookupDeclineReason;
 use super::live;
 use super::registry::RenderCachePolicyTable;
 use super::stitch;
@@ -600,7 +601,10 @@ impl FoundEntry {
     }
 }
 
-/// Closed lookup outcome, for telemetry's `outcome` attribute.
+/// Closed lookup outcome, for telemetry's `outcome` attribute. `Declined`
+/// carries the typed reason a decline branch computed, never optional: a
+/// decline branch that records this variant without naming a reason does
+/// not compile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LookupOutcome {
     L0Hit,
@@ -610,7 +614,7 @@ pub(crate) enum LookupOutcome {
     Miss,
     Bypass,
     Moved,
-    Declined,
+    Declined(LookupDeclineReason),
 }
 
 impl LookupOutcome {
@@ -623,13 +627,40 @@ impl LookupOutcome {
             Self::Miss => "miss",
             Self::Bypass => "bypass",
             Self::Moved => "moved",
-            Self::Declined => "declined",
+            Self::Declined(_) => "declined",
+        }
+    }
+
+    /// The reason a `Declined` outcome carries; `None` for every other
+    /// outcome, which is exactly when `REASON` is never attached.
+    const fn reason(self) -> Option<LookupDeclineReason> {
+        match self {
+            Self::Declined(reason) => Some(reason),
+            Self::L0Hit
+            | Self::L1Hit
+            | Self::Conditional
+            | Self::Stale
+            | Self::Miss
+            | Self::Bypass
+            | Self::Moved => None,
         }
     }
 
     pub(crate) fn record(self) {
-        Metrics::counter(render_cache_telemetry::LOOKUPS)
-            .inc_with(&[(render_cache_telemetry::OUTCOME, self.as_str())]);
+        let reason = self.reason();
+        match reason {
+            Some(reason) => Metrics::counter(render_cache_telemetry::LOOKUPS).inc_with(&[
+                (render_cache_telemetry::OUTCOME, self.as_str()),
+                (render_cache_telemetry::REASON, reason.as_str()),
+            ]),
+            None => Metrics::counter(render_cache_telemetry::LOOKUPS)
+                .inc_with(&[(render_cache_telemetry::OUTCOME, self.as_str())]),
+        }
+        #[cfg(any(test, feature = "testing"))]
+        render_cache_telemetry::record_for_test(
+            self.as_str(),
+            reason.map(LookupDeclineReason::as_str),
+        );
         if matches!(
             self,
             Self::L0Hit | Self::L1Hit | Self::Conditional | Self::Stale
@@ -2017,26 +2048,38 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return response;
     };
-    let Some(observed) = observed else {
-        // The report overflowed (ruling R55: an incomplete dependency set
-        // is never storable), the in-transaction ledger read itself
-        // failed, or this is a stitched route whose handler never began
-        // and whose content bucket is therefore empty (see
-        // [`render_under_collector`]); in every case there is nothing
-        // safe to publish or to compare against later, so this candidate
-        // is declined here rather than carrying a stand-in forward.
-        LookupOutcome::Declined.record();
-        let _ = runtime.coordinator.release(lease).await;
-        return Ok(response);
+    let observed = match observed {
+        Ok(observed) => observed,
+        Err(failure) => {
+            // The report overflowed (ruling R55: an incomplete dependency
+            // set is never storable), the in-transaction ledger read
+            // itself failed, or this is a stitched route whose handler
+            // never began and whose content bucket is therefore empty
+            // (see [`render_under_collector`]); in every case there is
+            // nothing safe to publish or to compare against later, so
+            // this candidate is declined here rather than carrying a
+            // stand-in forward.
+            let reason = match failure {
+                RenderObservationFailure::Overflowed => LookupDeclineReason::ObservationOverflowed,
+                RenderObservationFailure::LedgerRead => LookupDeclineReason::LedgerReadFailed,
+                RenderObservationFailure::HandlerNotBegun => LookupDeclineReason::HandlerNotBegun,
+            };
+            LookupOutcome::Declined(reason).record();
+            let _ = runtime.coordinator.release(lease).await;
+            return Ok(response);
+        }
     };
 
     let signals = response_signals(&response, &method);
-    let eligibility = policy.eligibility(&signals);
-    let Eligibility::Store(_) = eligibility else {
-        LookupOutcome::Declined.record();
+    // The narrowed `Store(class)` payload is unused below: `classify` is
+    // driven off `policy.class()` (the route's *declared* class), never
+    // off this eligibility narrowing (see the classification comment
+    // below). Only whether the render is eligible at all matters here.
+    if let Eligibility::Decline(decline_reason) = policy.eligibility(&signals) {
+        LookupOutcome::Declined(LookupDeclineReason::from(decline_reason)).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
-    };
+    }
     // Fix round 4, Leak B: classification is driven by what the collector
     // observed, never by re-reading an accessor - the previous version
     // re-read `Auth::id()` here, which is the *default guard's* slot
@@ -2080,7 +2123,33 @@ async fn lead_render(
     };
     let classification = classify(policy.class(), &observed_context);
     if classification.class == RepresentationClass::Uncacheable {
-        LookupOutcome::Declined.record();
+        // `classify` narrows to `Uncacheable` only through one of these
+        // three reasons (see its own body), so the first one present in
+        // evaluation order is the one that actually forced it here.
+        let reason = classification
+            .reasons
+            .iter()
+            .find_map(|reason| match reason {
+                ClassificationReason::SessionValueRead => {
+                    Some(LookupDeclineReason::SessionValueRead)
+                }
+                ClassificationReason::SecretContextRead => {
+                    Some(LookupDeclineReason::SecretContextRead)
+                }
+                ClassificationReason::UndeclaredContext => {
+                    Some(LookupDeclineReason::UndeclaredContext)
+                }
+                ClassificationReason::PrincipalObserved
+                | ClassificationReason::TenantObserved
+                | ClassificationReason::AuthorizationRead
+                | ClassificationReason::AuthorizationTenantRead => None,
+            })
+            .expect(
+                "classify only narrows to Uncacheable through SessionValueRead, \
+                 SecretContextRead, or UndeclaredContext, so at least one of them is in \
+                 `reasons` whenever `class` is Uncacheable",
+            );
+        LookupOutcome::Declined(reason).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2091,8 +2160,22 @@ async fn lead_render(
     // narrow or widen `classification.class` (see `document_declines`'s own
     // doc for why the document's cache intent does not feed classification
     // at all, and why the *declared* class is what it is passed).
-    if live::document_declines(report.live_document.as_ref(), policy.class()) {
-        LookupOutcome::Declined.record();
+    if let Some(document_decline) =
+        live::document_declines(report.live_document.as_ref(), policy.class())
+    {
+        let reason = match document_decline {
+            live::LiveDocumentDecline::IdentityBoundWithoutStitching => {
+                LookupDeclineReason::IdentityBoundWithoutStitching
+            }
+            live::LiveDocumentDecline::InvalidStitchCapture => {
+                LookupDeclineReason::InvalidStitchCapture
+            }
+            live::LiveDocumentDecline::NoStoreIntent => LookupDeclineReason::NoStoreIntent,
+            live::LiveDocumentDecline::UnresolvableSeedDeadline => {
+                LookupDeclineReason::UnresolvableSeedDeadline
+            }
+        };
+        LookupOutcome::Declined(reason).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2124,12 +2207,14 @@ async fn lead_render(
         classification_for_invariant
     };
     if is_unreasoned_private_class(&classification_for_invariant, policy.class()) {
-        LookupOutcome::Declined.record();
+        LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
-    if key_used_different_values_than_the_render_saw(&job, &classification, &report, runtime) {
-        LookupOutcome::Declined.record();
+    if let Some(mismatch) =
+        key_used_different_values_than_the_render_saw(&job, &classification, &report, runtime)
+    {
+        LookupOutcome::Declined(LookupDeclineReason::from(mismatch)).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2153,7 +2238,7 @@ async fn lead_render(
         // The seed's own promotion deadline was reached between the render
         // starting and this point; publishing it now would store an entry
         // that is already dead on arrival.
-        LookupOutcome::Declined.record();
+        LookupOutcome::Declined(LookupDeclineReason::SeedDeadlineElapsed).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2166,7 +2251,7 @@ async fn lead_render(
         now,
         seed_deadline_ms,
     ) else {
-        LookupOutcome::Declined.record();
+        LookupOutcome::Declined(LookupDeclineReason::UnsafeHeaderValue).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     };
@@ -2180,15 +2265,39 @@ async fn lead_render(
     // bytes as a Complete representation, exactly as before.
     let published = match (is_stitched(policy), report.live_document.as_ref()) {
         (true, Some(facts)) => stitch::build_composite_entry(header, response.body(), facts),
-        _ => Some(DecodedEntry::Complete(CompleteEntry::new(
+        _ => Ok(DecodedEntry::Complete(CompleteEntry::new(
             header,
             Bytes::copy_from_slice(response.body()),
         ))),
     };
-    let Some(entry) = published else {
-        LookupOutcome::Declined.record();
-        let _ = runtime.coordinator.release(lease).await;
-        return Ok(response);
+    let entry = match published {
+        Ok(entry) => entry,
+        Err(composite_error) => {
+            let reason = match composite_error {
+                stitch::CompositeBuildError::CaptureInvalid => {
+                    LookupDeclineReason::CompositeCaptureInvalid
+                }
+                stitch::CompositeBuildError::SlotCountMismatch => {
+                    LookupDeclineReason::CompositeSlotCountMismatch
+                }
+                stitch::CompositeBuildError::TooManySlots => {
+                    LookupDeclineReason::CompositeTooManySlots
+                }
+                stitch::CompositeBuildError::DigestMismatch => {
+                    LookupDeclineReason::CompositeDigestMismatch
+                }
+                stitch::CompositeBuildError::EmptySlot => LookupDeclineReason::CompositeEmptySlot,
+                stitch::CompositeBuildError::SlotNotFound => {
+                    LookupDeclineReason::CompositeSlotNotFound
+                }
+                stitch::CompositeBuildError::SlotAmbiguous => {
+                    LookupDeclineReason::CompositeSlotAmbiguous
+                }
+            };
+            LookupOutcome::Declined(reason).record();
+            let _ = runtime.coordinator.release(lease).await;
+            return Ok(response);
+        }
     };
     store_entry(runtime, &lease, policy, &job, &entry, &observed, now).await;
     let _ = runtime.coordinator.release(lease).await;
@@ -2487,12 +2596,56 @@ fn is_unreasoned_private_class(
 /// `Config::get` read produces no `ClassificationReason` at all, so there is
 /// nothing here to compare against. This guard is not a substitute for a
 /// route correctly declaring its own variance.
+/// How a [`KeyMismatch`] failed: the key named no value at all for the
+/// dimension the render observed, or it named one that disagrees with what
+/// the render observed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeyMismatchKind {
+    /// The key declares no value for this dimension at all.
+    Undeclared,
+    /// The key declares a value that differs from what the render observed.
+    Divergent,
+}
+
+/// One dimension on which `key_used_different_values_than_the_render_saw`
+/// found the lookup key disagreeing with what the render actually
+/// observed - the typed value that guard returns instead of a bare
+/// `bool`, so its caller can attribute the resulting decline to the exact
+/// [`LookupDeclineReason`] rather than one label for every mismatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KeyMismatch {
+    pub(crate) dimension: VarianceDimension,
+    pub(crate) kind: KeyMismatchKind,
+}
+
+impl From<KeyMismatch> for LookupDeclineReason {
+    /// Only `Principal`, `Tenant`, and `Locale` ever reach here: those are
+    /// the only dimensions `key_used_different_values_than_the_render_saw`
+    /// ever builds a [`KeyMismatch`] for.
+    fn from(mismatch: KeyMismatch) -> Self {
+        match (mismatch.dimension, mismatch.kind) {
+            (VarianceDimension::Principal, KeyMismatchKind::Undeclared) => {
+                Self::PrincipalUndeclared
+            }
+            (VarianceDimension::Principal, KeyMismatchKind::Divergent) => Self::PrincipalDivergent,
+            (VarianceDimension::Tenant, KeyMismatchKind::Undeclared) => Self::TenantUndeclared,
+            (VarianceDimension::Tenant, KeyMismatchKind::Divergent) => Self::TenantDivergent,
+            (VarianceDimension::Locale, KeyMismatchKind::Undeclared) => Self::LocaleUndeclared,
+            (VarianceDimension::Locale, KeyMismatchKind::Divergent) => Self::LocaleDivergent,
+            (other, _) => unreachable!(
+                "key_used_different_values_than_the_render_saw only ever builds a \
+                 KeyMismatch for Principal, Tenant, or Locale; got {other:?}"
+            ),
+        }
+    }
+}
+
 fn key_used_different_values_than_the_render_saw(
     job: &RenderJob,
     classification: &ClassificationOutcome,
     report: &super::collector::CollectorReport,
     runtime: &RenderCacheRuntime,
-) -> bool {
+) -> Option<KeyMismatch> {
     let declared = job.variance().dimensions();
 
     if !report.context.locale_material.is_empty() {
@@ -2500,13 +2653,21 @@ fn key_used_different_values_than_the_render_saw(
             Some(key_value) => {
                 for observed_locale in &report.context.locale_material {
                     if &DimensionValue::Public(observed_locale.clone()) != key_value {
-                        return true;
+                        return Some(KeyMismatch {
+                            dimension: VarianceDimension::Locale,
+                            kind: KeyMismatchKind::Divergent,
+                        });
                     }
                 }
             }
             // An observed locale with no declared `Locale` dimension at all:
             // the route would otherwise cache one language for everyone.
-            None => return true,
+            None => {
+                return Some(KeyMismatch {
+                    dimension: VarianceDimension::Locale,
+                    kind: KeyMismatchKind::Undeclared,
+                });
+            }
         }
     }
 
@@ -2525,13 +2686,15 @@ fn key_used_different_values_than_the_render_saw(
             ClassificationReason::SessionValueRead
             | ClassificationReason::SecretContextRead
             | ClassificationReason::UndeclaredContext => {
-                debug_assert_eq!(
-                    classification.class,
-                    RepresentationClass::Uncacheable,
+                // `classify` only ever pushes one of these three reasons
+                // while narrowing to `Uncacheable`, and `lead_render`
+                // already declines on an `Uncacheable` classification
+                // before this guard ever runs (see that branch), so
+                // `classification.reasons` cannot hold one of these here.
+                unreachable!(
                     "a session/secret/undeclared reason must force Uncacheable inside \
                      classify, which the caller already declines before this guard runs"
                 );
-                return true;
             }
         };
         if observed_ids.is_empty() {
@@ -2541,7 +2704,10 @@ fn key_used_different_values_than_the_render_saw(
                 declared.get(&required),
                 Some(DimensionValue::Private(_) | DimensionValue::Anonymous)
             ) {
-                return true;
+                return Some(KeyMismatch {
+                    dimension: required,
+                    kind: KeyMismatchKind::Undeclared,
+                });
             }
             continue;
         }
@@ -2560,17 +2726,41 @@ fn key_used_different_values_than_the_render_saw(
                 _ => unreachable!("only Principal and Tenant reasons reach this match"),
             };
             if declared.get(&required) != Some(&expected) {
-                return true;
+                return Some(KeyMismatch {
+                    dimension: required,
+                    kind: KeyMismatchKind::Divergent,
+                });
             }
         }
     }
 
-    false
+    None
 }
 
-/// Closes a collector report into the generations it observed, or `None`
-/// when the report overflowed (see [`super::collector::CollectorReport::storable`])
-/// or the ledger read itself failed.
+/// Why a render's observed dependencies could not be closed into a
+/// [`GenerationSet`] - the typed value `close_window`, `render_under_collector`,
+/// and `run_render` carry outward instead of a bare `None`, so
+/// `lead_render`'s branch 1 attributes the resulting decline to the
+/// [`LookupDeclineReason`] the failure actually was, rather than one
+/// reconstructed after the fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RenderObservationFailure {
+    /// The collector's report overflowed (see
+    /// [`super::collector::CollectorReport::storable`]), or an identity the
+    /// observation window could not hold - final review, F10: unreachable
+    /// today, because `MAX_COLLECTED` is one below `MAX_OBSERVATIONS` so a
+    /// storable report always fits, kept as a decline rather than a silent
+    /// omission against a future bound change.
+    Overflowed,
+    /// The in-transaction ledger read itself failed.
+    LedgerRead,
+    /// A stitched route's handler never began, so its content bucket is
+    /// empty (see `render_under_collector`'s own doc).
+    HandlerNotBegun,
+}
+
+/// Closes a collector report into the generations it observed, or the typed
+/// [`RenderObservationFailure`] that made that impossible.
 ///
 /// Called from *inside* the render's own transaction (see [`run_render`])
 /// so this reread and the render's own data reads share one snapshot, not
@@ -2580,13 +2770,15 @@ fn key_used_different_values_than_the_render_saw(
 /// landed a week ago.
 ///
 /// Ruling R55: obtains the observed list only through `storable()`, never
-/// `observed` directly, and stores nothing when it returns `None`.
+/// `observed` directly, and stores nothing when it returns `Err`.
 async fn close_window(
     report: &super::collector::CollectorReport,
     epoch: u64,
     ledger: &dyn GenerationLedger,
-) -> Option<GenerationSet> {
-    let identities = report.storable()?;
+) -> Result<GenerationSet, RenderObservationFailure> {
+    let identities = report
+        .storable()
+        .ok_or(RenderObservationFailure::Overflowed)?;
     let mut window = ObservationWindow::open(epoch);
     for identity in identities {
         // Final review, F10: an identity the window cannot hold is a
@@ -2595,9 +2787,14 @@ async fn close_window(
         // report always fits; a future bound change that broke that would
         // otherwise drop identities from the stored set silently, which is
         // the unsafe direction (an entry no write can invalidate).
-        window.observe(identity.clone()).ok()?;
+        window
+            .observe(identity.clone())
+            .map_err(|_| RenderObservationFailure::Overflowed)?;
     }
-    window.close(ledger).await.ok()
+    window
+        .close(ledger)
+        .await
+        .map_err(|_| RenderObservationFailure::LedgerRead)
 }
 
 /// The isolation level the render transaction asks for on the active
@@ -2663,9 +2860,9 @@ fn key_carries_a_resolved_principal(variance: &VarianceDescriptor) -> bool {
 /// that returns a page instead of calling the next layer, a tenant
 /// refusal), so the content bucket is empty and classifying from it alone
 /// would publish that gate response as the route's shared shell. The
-/// decline reuses the same "no generation set" signal an overflowed
-/// report already returns, so [`lead_render`] records the existing
-/// `declined` outcome and no new telemetry label is introduced.
+/// decline carries its own [`RenderObservationFailure::HandlerNotBegun`]
+/// reason, distinct from an overflowed report or a failed ledger read, so
+/// [`lead_render`] can name which of the three happened.
 async fn render_under_collector(
     request: Request,
     next: Next,
@@ -2676,7 +2873,7 @@ async fn render_under_collector(
 ) -> (
     Response,
     super::collector::CollectorReport,
-    Option<GenerationSet>,
+    Result<GenerationSet, RenderObservationFailure>,
 ) {
     Collector::scope(async move {
         if observes_permission_generation {
@@ -2688,7 +2885,7 @@ async fn render_under_collector(
             report.fold_gate_into_content();
         }
         let observed = if stitched && !report.handler_began {
-            None
+            Err(RenderObservationFailure::HandlerNotBegun)
         } else {
             close_window(&report, epoch, ledger).await
         };
@@ -2728,7 +2925,7 @@ async fn run_render(
 ) -> (
     Response,
     super::collector::CollectorReport,
-    Option<GenerationSet>,
+    Result<GenerationSet, RenderObservationFailure>,
 ) {
     let backend = DB::connection()
         .ok()

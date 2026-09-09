@@ -102,7 +102,7 @@ provider, or a backend:
 
 | Counter | Attribute |
 |---|---|
-| `suprnova.render_cache.lookups` | `outcome` |
+| `suprnova.render_cache.lookups` | `outcome`, and `reason` when `outcome="declined"` |
 | `suprnova.render_cache.hits` | `outcome` |
 | `suprnova.render_cache.publications` | none |
 | `suprnova.render_cache.rebuilds` | none |
@@ -122,9 +122,34 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable: eligibility, an overflowed
-  observation report, an `Uncacheable` classification, a Live document rule,
-  or a bound.
+- `declined` - the render was not storable, for one of the thirty-two
+  reasons below, carried in the `reason` attribute beside `outcome`.
+  `reason` is emitted only alongside `outcome="declined"`; every other
+  outcome carries none. The reason is computed from a typed value at the
+  exact branch that declined, never reconstructed from the response
+  afterwards, so it names the contract that actually refused the render:
+
+  - Eligibility (`policy.eligibility`, mirroring the engine's own
+    `DeclineReason`): `policy_uncacheable`, `method`, `status`,
+    `streaming`, `sets_cookie`, `unsafe_header_name`.
+  - Observation (the collector's report and the in-transaction ledger
+    read): `observation_overflowed`, `ledger_read_failed`,
+    `handler_not_begun`.
+  - Classification narrowed to `Uncacheable`: `session_value_read`,
+    `secret_context_read`, `undeclared_context`.
+  - Live document facts: `identity_bound_without_stitching`,
+    `invalid_stitch_capture`, `no_store_intent`,
+    `unresolvable_seed_deadline`.
+  - Invariants over the key (whether the render's own observations agree
+    with the values the lookup key was already built from):
+    `unreasoned_private_class`, `principal_undeclared`,
+    `principal_divergent`, `tenant_undeclared`, `tenant_divergent`,
+    `locale_undeclared`, `locale_divergent`.
+  - Publication: `seed_deadline_elapsed`, `unsafe_header_value`,
+    `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `composite_too_many_slots`, `composite_digest_mismatch`,
+    `composite_empty_slot`, `composite_slot_not_found`,
+    `composite_slot_ambiguous`.
 
 `hits` increments only for `l0`, `l1`, `conditional`, and `stale`.
 `publications` counts only a store answering "published", never a fenced or
@@ -339,7 +364,10 @@ counter, which is what makes these tests reproducible rather than flaky.
   task, or a console command, that write advanced nothing: run
   `render-cache:epoch-advance` (per node - see the last bullet).
 - **A page you expected to cache never carries an `Age` header.** It is
-  being declined, not failing. Work through the classification list in
+  being declined, not failing. Read the `reason` label on the `declined`
+  lookup first - it names the exact contract that refused the render, from
+  the closed set in "Telemetry" above - then, for one of the
+  classification-narrowed reasons, work through the classification list in
   [RenderCache](render-cache.md): a session read, an identity read on a
   route with no `Principal` variance, a locale read with no `Locale`
   variance, an authorization check, or a raw SQL read.

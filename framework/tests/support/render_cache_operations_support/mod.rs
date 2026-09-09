@@ -152,6 +152,18 @@ async fn private_handler(_request: Request) -> Response {
     Ok(HttpResponse::html(format!("private render {n}")))
 }
 
+/// Always answers `404`, on an otherwise ordinary cacheable route: the
+/// eligibility check's `Status` decline, with no session, principal, tenant,
+/// or locale read involved at all.
+async fn not_found_handler(_request: Request) -> Response {
+    counting_route::record();
+    Ok(HttpResponse::text("not found").status(404))
+}
+
+/// A cacheable route whose handler always answers `404`, so a lookup
+/// against it declines on eligibility's `Status` check rather than storing.
+pub const NOT_FOUND_ROUTE: &str = "/not-found/{id}";
+
 /// Lists posts, so the render observes the `posts` table.
 async fn posts_handler(_request: Request) -> Response {
     let n = counting_route::record();
@@ -332,6 +344,7 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
     let router: Router = router.get("/inverted/{id}", stale_handler).into();
     let router: Router = router.get("/private-l1/{id}", private_handler).into();
     let router: Router = router.get(POSTS_ROUTE, posts_handler).into();
+    let router: Router = router.get(NOT_FOUND_ROUTE, not_found_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy.clone()))
         .expect("attach cached policy")
@@ -343,8 +356,10 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .expect("attach inverted policy")
         .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
         .expect("attach private l1 policy")
-        .try_render_cache(POSTS_ROUTE, GroupPolicy::from(cached_policy))
-        .expect("attach posts policy");
+        .try_render_cache(POSTS_ROUTE, GroupPolicy::from(cached_policy.clone()))
+        .expect("attach posts policy")
+        .try_render_cache(NOT_FOUND_ROUTE, GroupPolicy::from(cached_policy))
+        .expect("attach not-found policy");
 
     let mut config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")

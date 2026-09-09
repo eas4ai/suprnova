@@ -15,13 +15,16 @@
 //! resumes the test - the exact reason
 //! `render_cache_middleware_support`'s own doc gives for the same choice.
 use crate::render_cache_operations_support;
+use crate::render_cache_privacy_support;
 use render_cache_operations_support::{
-    boot_with_file_l1, boot_with_render_cache, clock, counting_route, dispatch_get,
+    NOT_FOUND_ROUTE, boot_with_file_l1, boot_with_render_cache, clock, counting_route, dispatch_get,
 };
 use suprnova::Model;
+use suprnova::StatusCode;
 use suprnova::attrs;
 use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::console::{epoch_advance_report_for_test, inspect_report_for_test};
+use suprnova::render_cache::telemetry;
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 
 #[tokio::test]
@@ -654,8 +657,6 @@ async fn a_closed_write_side_is_not_probed_again() {
 /// because what matters is that the set stays closed and distinct.
 #[test]
 fn the_render_cache_telemetry_names_are_closed_and_distinct() {
-    use suprnova::render_cache::telemetry;
-
     let names = [
         telemetry::LOOKUPS,
         telemetry::HITS,
@@ -679,5 +680,184 @@ fn the_render_cache_telemetry_names_are_closed_and_distinct() {
         telemetry::EPOCH_REWINDS,
         "suprnova.render_cache.epoch_rewinds",
         "the operations chapter's telemetry table quotes this name"
+    );
+}
+
+// ── Plan F: declined lookups record a reason ────────────────────────────
+//
+// Every test below resets the recorder first, so it only ever inspects
+// what its own one or two dispatches produced. Each dispatches once (or
+// twice, for the outcome/reason correspondence) and reads back the
+// `reason` label the framework actually attached, rather than inferring it
+// from the response.
+
+/// Reads a session value on a route that declares no variance at all: the
+/// classification narrows to `Uncacheable` through `SessionValueRead`, and
+/// nothing else in `reasons` could have forced it, so `lead_render` records
+/// exactly that reason.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_session_value_read_declines_with_reason_session_value_read() {
+    telemetry::reset_recorded_lookups_for_test();
+    let harness = render_cache_privacy_support::boot_with_render_cache().await;
+    render_cache_privacy_support::dispatch_get(
+        &harness,
+        render_cache_privacy_support::READS_SESSION_MUT_ROUTE,
+        &[],
+    )
+    .await;
+
+    let declined: Vec<_> = telemetry::recorded_lookups_for_test()
+        .into_iter()
+        .filter(|lookup| lookup.outcome == "declined")
+        .collect();
+    assert_eq!(declined.len(), 1, "exactly one declined lookup");
+    assert_eq!(declined[0].reason, Some("session_value_read"));
+}
+
+/// The existing header-driven gate from the privacy support: a body driven
+/// by an authorization decision alone, on a route that declares no
+/// `Principal` variance. After Plan E the unresolved consult still requires
+/// `Principal`, so the key guard's empty-set arm finds no declared
+/// dimension for it and declines with `PrincipalUndeclared`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_principal_gate_without_principal_variance_declines_with_reason_principal_undeclared() {
+    telemetry::reset_recorded_lookups_for_test();
+    render_cache_privacy_support::ensure_role_gate();
+    let harness = render_cache_privacy_support::boot_with_render_cache().await;
+    render_cache_privacy_support::dispatch_get(
+        &harness,
+        render_cache_privacy_support::AUTHZ_DRIVEN_ROUTE,
+        &[("x-test-role", "admin")],
+    )
+    .await;
+
+    let declined: Vec<_> = telemetry::recorded_lookups_for_test()
+        .into_iter()
+        .filter(|lookup| lookup.outcome == "declined")
+        .collect();
+    assert_eq!(declined.len(), 1, "exactly one declined lookup");
+    assert_eq!(declined[0].reason, Some("principal_undeclared"));
+}
+
+/// A route that reads the negotiated locale without declaring the `Locale`
+/// dimension: the key guard's locale check runs unconditionally, before
+/// the classification-reasons loop, and declines with `LocaleUndeclared`
+/// because the route names no `Locale` value for the key to compare
+/// against at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_undeclared_locale_declines_with_reason_locale_undeclared() {
+    telemetry::reset_recorded_lookups_for_test();
+    let harness = render_cache_privacy_support::boot_with_render_cache().await;
+    render_cache_privacy_support::dispatch_get(
+        &harness,
+        render_cache_privacy_support::UNDECLARED_LOCALE_ROUTE,
+        &[("x-test-locale", "de")],
+    )
+    .await;
+
+    let declined: Vec<_> = telemetry::recorded_lookups_for_test()
+        .into_iter()
+        .filter(|lookup| lookup.outcome == "declined")
+        .collect();
+    assert_eq!(declined.len(), 1, "exactly one declined lookup");
+    assert_eq!(declined[0].reason, Some("locale_undeclared"));
+}
+
+/// A 404 on an otherwise ordinary cached route: eligibility's own `Status`
+/// check declines before classification or the key guard ever run.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_ineligible_status_declines_with_reason_status() {
+    telemetry::reset_recorded_lookups_for_test();
+    let harness = boot_with_render_cache().await;
+    let path = NOT_FOUND_ROUTE.replace("{id}", "1");
+    let response = dispatch_get(&harness, &path, &[]).await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+
+    let declined: Vec<_> = telemetry::recorded_lookups_for_test()
+        .into_iter()
+        .filter(|lookup| lookup.outcome == "declined")
+        .collect();
+    assert_eq!(declined.len(), 1, "exactly one declined lookup");
+    assert_eq!(declined[0].reason, Some("status"));
+}
+
+/// The four declines above name four distinct reasons - proof the closed
+/// set actually distinguishes contracts rather than collapsing them behind
+/// one shared label.
+#[test]
+fn the_four_named_declines_are_four_distinct_reasons() {
+    let reasons = [
+        "session_value_read",
+        "principal_undeclared",
+        "locale_undeclared",
+        "status",
+    ];
+    let mut sorted = reasons.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        reasons.len(),
+        "no two of the four share a label"
+    );
+}
+
+/// A hit and a miss both record `reason: None`; only a decline ever carries
+/// one.
+#[tokio::test]
+#[serial_test::serial]
+async fn declined_is_the_only_outcome_that_carries_a_reason() {
+    telemetry::reset_recorded_lookups_for_test();
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/cached/1", &[]).await;
+    dispatch_get(&harness, "/cached/1", &[]).await;
+
+    let recorded = telemetry::recorded_lookups_for_test();
+    assert!(
+        recorded.iter().any(|lookup| lookup.outcome == "miss"),
+        "sanity: the first request missed"
+    );
+    assert!(
+        recorded.iter().any(|lookup| lookup.outcome == "l0"),
+        "sanity: the second request hit"
+    );
+    for lookup in &recorded {
+        if lookup.outcome == "declined" {
+            assert!(
+                lookup.reason.is_some(),
+                "a declined outcome must carry a reason"
+            );
+        } else {
+            assert!(
+                lookup.reason.is_none(),
+                "outcome {} unexpectedly carried a reason",
+                lookup.outcome
+            );
+        }
+    }
+}
+
+/// Every closed `reason` label appears, backticked, in the operations
+/// manual's Telemetry section - the chapter an operator actually reads
+/// when a route's `declined` rate is high.
+#[test]
+fn every_decline_reason_is_documented_in_the_operations_chapter() {
+    let manual_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../manual/render-cache-operations.md"
+    );
+    let manual = std::fs::read_to_string(manual_path)
+        .unwrap_or_else(|error| panic!("read {manual_path}: {error}"));
+    let missing: Vec<&str> = telemetry::decline_reason_labels_for_test()
+        .into_iter()
+        .filter(|label| !manual.contains(&format!("`{label}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the operations chapter is missing these reason labels: {missing:?}"
     );
 }

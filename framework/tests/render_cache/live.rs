@@ -65,7 +65,7 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..Default::default()
     };
     assert!(
-        !document_declines(Some(&public), RepresentationClass::PublicShared),
+        document_declines(Some(&public), RepresentationClass::PublicShared).is_none(),
         "a public seed with a resolved deadline stores"
     );
     let bound = LiveDocumentFacts {
@@ -73,7 +73,7 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..public.clone()
     };
     assert!(
-        document_declines(Some(&bound), RepresentationClass::PublicShared),
+        document_declines(Some(&bound), RepresentationClass::PublicShared).is_some(),
         "an identity-bound island never stores on a route that did not declare stitching"
     );
     let no_store = LiveDocumentFacts {
@@ -81,11 +81,11 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..public.clone()
     };
     assert!(
-        document_declines(Some(&no_store), RepresentationClass::PublicShared),
+        document_declines(Some(&no_store), RepresentationClass::PublicShared).is_some(),
         "a document that declared NoStore never stores"
     );
     assert!(
-        !document_declines(None, RepresentationClass::PublicShared),
+        document_declines(None, RepresentationClass::PublicShared).is_none(),
         "a plain route with no Live document is left alone"
     );
     let no_deadline = LiveDocumentFacts {
@@ -93,7 +93,7 @@ fn declines_identity_bound_islands_no_store_intents_and_deadline_free_seeds() {
         ..public
     };
     assert!(
-        document_declines(Some(&no_deadline), RepresentationClass::PublicShared),
+        document_declines(Some(&no_deadline), RepresentationClass::PublicShared).is_some(),
         "a seed document without a resolvable deadline is not stored"
     );
 }
@@ -105,18 +105,9 @@ fn identity_bound_islands_decline_unless_the_route_is_declared_stitched() {
         seed_deadline_ms: None,
         ..Default::default()
     };
-    assert!(document_declines(
-        Some(&bound),
-        RepresentationClass::PublicShared
-    ));
-    assert!(document_declines(
-        Some(&bound),
-        RepresentationClass::PrivateCached
-    ));
-    assert!(!document_declines(
-        Some(&bound),
-        RepresentationClass::PublicShellStitched
-    ));
+    assert!(document_declines(Some(&bound), RepresentationClass::PublicShared).is_some());
+    assert!(document_declines(Some(&bound), RepresentationClass::PrivateCached).is_some());
+    assert!(document_declines(Some(&bound), RepresentationClass::PublicShellStitched).is_none());
     let invalid = LiveDocumentFacts {
         stitch: StitchCapture {
             invalid: true,
@@ -125,7 +116,7 @@ fn identity_bound_islands_decline_unless_the_route_is_declared_stitched() {
         ..bound.clone()
     };
     assert!(
-        document_declines(Some(&invalid), RepresentationClass::PublicShellStitched),
+        document_declines(Some(&invalid), RepresentationClass::PublicShellStitched).is_some(),
         "a capture that could not be represented declines even a stitched route"
     );
     let no_store = LiveDocumentFacts {
@@ -133,7 +124,7 @@ fn identity_bound_islands_decline_unless_the_route_is_declared_stitched() {
         ..bound
     };
     assert!(
-        document_declines(Some(&no_store), RepresentationClass::PublicShellStitched),
+        document_declines(Some(&no_store), RepresentationClass::PublicShellStitched).is_some(),
         "NoStore means this cache too, stitched or not"
     );
 }
@@ -327,10 +318,7 @@ async fn an_island_that_cannot_be_described_as_a_slot_invalidates_the_capture() 
         facts.stitch.slots.is_empty(),
         "an island with no describable slot is never recorded as one"
     );
-    assert!(document_declines(
-        Some(&facts),
-        RepresentationClass::PublicShellStitched
-    ));
+    assert!(document_declines(Some(&facts), RepresentationClass::PublicShellStitched).is_some());
 }
 
 #[tokio::test]
@@ -880,10 +868,11 @@ async fn a_failed_identity_bound_mount_publishes_a_shell_with_no_island_bytes() 
         "the `?` on the failed mount returned before `record_mount` ran"
     );
     assert!(
-        !document_declines(
+        document_declines(
             report.live_document.as_ref(),
             RepresentationClass::PublicShared
-        ),
+        )
+        .is_none(),
         "with no recorded island there is nothing for the Live decline to fire on"
     );
 

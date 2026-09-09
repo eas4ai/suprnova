@@ -166,11 +166,29 @@ pub fn record_document_intent(intent: &DocumentResponseIntent) {
     }
 }
 
+/// Why the Live facts recorded so far forbid storing this render, in the
+/// order [`document_declines`] tests them. Closed at compile time, so a new
+/// reason a future fact check adds cannot be forgotten at the telemetry
+/// boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveDocumentDecline {
+    /// An identity-bound island was mounted on a route that did not
+    /// declare [`RepresentationClass::PublicShellStitched`].
+    IdentityBoundWithoutStitching,
+    /// A stitched route's capture is not a trustworthy account of the
+    /// request.
+    InvalidStitchCapture,
+    /// A rendered document declared `NoStore`.
+    NoStoreIntent,
+    /// A public-seed island's promotion deadline could not be resolved.
+    UnresolvableSeedDeadline,
+}
+
 /// Whether the Live facts recorded so far forbid storing this render at
 /// all: an identity-bound island on a route that did not declare stitching,
 /// a stitched route whose capture is not trustworthy, a document that
 /// declared `NoStore`, or a public-seed island whose deadline could not be
-/// resolved. Returns `false` - never a class - for everything else; this can
+/// resolved. Returns `None` - never a class - for everything else; this can
 /// only decline, never narrow or widen `classify`'s own output.
 ///
 /// `declared` is the route's own declared class, not the class `classify`
@@ -190,15 +208,25 @@ pub fn record_document_intent(intent: &DocumentResponseIntent) {
 /// downstream `Cache-Control` a browser or CDN sees. `NoStore` still
 /// declines, because an author who said "do not store" meant this cache too.
 #[must_use]
-pub fn document_declines(facts: Option<&LiveDocumentFacts>, declared: RepresentationClass) -> bool {
-    let Some(facts) = facts else {
-        return false;
-    };
+pub fn document_declines(
+    facts: Option<&LiveDocumentFacts>,
+    declared: RepresentationClass,
+) -> Option<LiveDocumentDecline> {
+    let facts = facts?;
     let stitched = declared == RepresentationClass::PublicShellStitched;
-    (facts.identity_bound_islands > 0 && !stitched)
-        || (stitched && facts.stitch.invalid)
-        || facts.no_store
-        || (facts.public_seed_islands > 0 && facts.seed_deadline_ms.is_none())
+    if facts.identity_bound_islands > 0 && !stitched {
+        return Some(LiveDocumentDecline::IdentityBoundWithoutStitching);
+    }
+    if stitched && facts.stitch.invalid {
+        return Some(LiveDocumentDecline::InvalidStitchCapture);
+    }
+    if facts.no_store {
+        return Some(LiveDocumentDecline::NoStoreIntent);
+    }
+    if facts.public_seed_islands > 0 && facts.seed_deadline_ms.is_none() {
+        return Some(LiveDocumentDecline::UnresolvableSeedDeadline);
+    }
+    None
 }
 
 /// Milliseconds until the seed deadline, `Some(0)` when it has passed, `None` without seeds.

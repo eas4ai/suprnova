@@ -562,25 +562,68 @@ fn count_slot(outcome: &'static str) {
 ///    island, and one outside every island is a hole, because step 4
 ///    declined rather than hand back a truncated list.
 ///
-/// Nothing here is fallible in the error sense: every rejection is a
-/// decline, and the caller records it under the existing declined outcome.
+/// Why [`build_composite_entry`] declined to publish, in the order its own
+/// numbered steps run. Every rejection is a decline - the caller records it
+/// under the existing declined outcome, never propagates it as a request
+/// failure.
+///
+/// [`Self::TooManySlots`] is reused past its literal name for every bound
+/// this function enforces beyond the slot count: the nonce-hole scan
+/// (step 4), the nonce-bearing header and per-header hole counts (step 5),
+/// a shell segment or slot index that could not fit its wire encoding, and
+/// [`CompositeEntry::new`]'s own structural validation (step 7). All of
+/// these are the same shape of failure as too many slots - a bounded
+/// resource in the composite graph exceeded, and `MAX_SEGMENTS` already
+/// groups every one of them under a single combined bound - so one reason
+/// names all of them rather than a reason per bound that would still be
+/// indistinguishable at the telemetry boundary. [`Self::SlotAmbiguous`] is
+/// likewise reused for two different islands whose placements overlap
+/// (also step 3): the placement cannot be unambiguously assigned to one
+/// slot or the other, the same fact an island located more than once names
+/// for a single slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompositeBuildError {
+    /// The capture is marked invalid.
+    CaptureInvalid,
+    /// The capture's slot count does not match the mounted islands.
+    SlotCountMismatch,
+    /// The capture exceeds the maximum slot count.
+    TooManySlots,
+    /// The response body does not match the captured document digest.
+    DigestMismatch,
+    /// A captured slot's markup is empty.
+    EmptySlot,
+    /// A captured slot's markup could not be located in the body.
+    SlotNotFound,
+    /// A captured slot's markup, or its placement among the others,
+    /// could not be unambiguously resolved in the body.
+    SlotAmbiguous,
+}
+
+/// Nothing here is fallible in the error sense a caller propagates: every
+/// [`CompositeBuildError`] is a decline, and `lead_render` records it under
+/// the existing declined outcome with the matching
+/// [`super::decline::LookupDeclineReason`].
 pub(crate) fn build_composite_entry(
     header: EntryHeader,
     body: &[u8],
     facts: &LiveDocumentFacts,
-) -> Option<DecodedEntry> {
+) -> Result<DecodedEntry, CompositeBuildError> {
     // 1. The capture accounts for every identity-bound island, within bound.
     let capture = &facts.stitch;
-    if capture.invalid
-        || capture.slots.len() != facts.identity_bound_islands
-        || capture.slots.len() > MAX_STITCH_SLOTS
-    {
-        return None;
+    if capture.invalid {
+        return Err(CompositeBuildError::CaptureInvalid);
+    }
+    if capture.slots.len() != facts.identity_bound_islands {
+        return Err(CompositeBuildError::SlotCountMismatch);
+    }
+    if capture.slots.len() > MAX_STITCH_SLOTS {
+        return Err(CompositeBuildError::TooManySlots);
     }
     // 2. The response body is the body the document rendered.
     let digest: [u8; 32] = Sha256::digest(body).into();
     if capture.document_digest != Some(digest) {
-        return None;
+        return Err(CompositeBuildError::DigestMismatch);
     }
     // 3. Locate every island exactly once, then prove the placements are
     //    disjoint and put them in document order. `find_all` counts
@@ -590,25 +633,29 @@ pub(crate) fn build_composite_entry(
     let mut placed: Vec<(usize, usize, usize)> = Vec::with_capacity(capture.slots.len());
     for (index, slot) in capture.slots.iter().enumerate() {
         if slot.html.is_empty() {
-            return None;
+            return Err(CompositeBuildError::EmptySlot);
         }
         let mut found = find_all(body, &slot.html, 2);
-        if found.len() != 1 {
-            return None;
+        match found.len() {
+            0 => return Err(CompositeBuildError::SlotNotFound),
+            1 => {}
+            _ => return Err(CompositeBuildError::SlotAmbiguous),
         }
         let start = found.remove(0);
         placed.push((start, start + slot.html.len(), index));
     }
     placed.sort_by_key(|(start, _, _)| *start);
     if placed.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-        return None;
+        return Err(CompositeBuildError::SlotAmbiguous);
     }
     // 4. Nonce holes, over the island ranges just proved disjoint. The
-    //    helper declines for the whole document, so `?` carries that out.
+    //    helper declines for the whole document when its own bounded scan
+    //    is exceeded.
     let nonce = capture.nonce.as_deref().filter(|nonce| !nonce.is_empty());
     let islands: Vec<(usize, usize)> = placed.iter().map(|(s, e, _)| (*s, *e)).collect();
     let holes = match nonce {
-        Some(nonce) => collect_holes(body, nonce.as_bytes(), &islands)?,
+        Some(nonce) => collect_holes(body, nonce.as_bytes(), &islands)
+            .ok_or(CompositeBuildError::TooManySlots)?,
         None => Vec::new(),
     };
     // 5. Every replayable header whose value carries the nonce becomes a
@@ -625,7 +672,7 @@ pub(crate) fn build_composite_entry(
                 continue;
             }
             if nonce_headers.len() >= MAX_NONCE_HEADERS {
-                return None;
+                return Err(CompositeBuildError::TooManySlots);
             }
             let mut pieces = Vec::new();
             let mut rest = value;
@@ -638,7 +685,7 @@ pub(crate) fn build_composite_entry(
                 pieces.push(HeaderPiece::Nonce);
                 rest = &rest[at + nonce.len()..];
                 if pieces.len() > MAX_NONCE_HOLES {
-                    return None;
+                    return Err(CompositeBuildError::TooManySlots);
                 }
             }
             if !rest.is_empty() {
@@ -657,7 +704,7 @@ pub(crate) fn build_composite_entry(
     //    finished shared answer; see this function's own doc for why a
     //    nonce alone is enough to make it a Composite one.
     if capture.slots.is_empty() && holes.is_empty() && nonce_headers.is_empty() {
-        return Some(DecodedEntry::Complete(CompleteEntry::new(
+        return Ok(DecodedEntry::Complete(CompleteEntry::new(
             header,
             Bytes::copy_from_slice(body),
         )));
@@ -683,14 +730,17 @@ pub(crate) fn build_composite_entry(
         if start > cursor {
             shell.extend_from_slice(&body[cursor..start]);
             segments.push(Segment::Literal {
-                len: u32::try_from(start - cursor).ok()?,
+                len: u32::try_from(start - cursor)
+                    .map_err(|_| CompositeBuildError::TooManySlots)?,
             });
         }
         match cut {
             Cut::Slot(capture_index) => {
                 segments.push(Segment::Slot { index: slot_index });
                 slots.push(stitch_slot(&capture.slots[capture_index].descriptor));
-                slot_index = slot_index.checked_add(1)?;
+                slot_index = slot_index
+                    .checked_add(1)
+                    .ok_or(CompositeBuildError::TooManySlots)?;
             }
             Cut::Nonce => segments.push(Segment::Nonce),
         }
@@ -699,7 +749,8 @@ pub(crate) fn build_composite_entry(
     if cursor < body.len() {
         shell.extend_from_slice(&body[cursor..]);
         segments.push(Segment::Literal {
-            len: u32::try_from(body.len() - cursor).ok()?,
+            len: u32::try_from(body.len() - cursor)
+                .map_err(|_| CompositeBuildError::TooManySlots)?,
         });
     }
     let shell = Bytes::from(shell);
@@ -713,11 +764,12 @@ pub(crate) fn build_composite_entry(
     // recomputes it at hit time; a shell that drifted from the digest it
     // was recorded with is what that recomputation catches.
     for index in 0..graph.slots.len() {
-        graph.slots[index].surrounding = surrounding_digest(&graph, &shell, index).ok()?;
+        graph.slots[index].surrounding = surrounding_digest(&graph, &shell, index)
+            .map_err(|_| CompositeBuildError::TooManySlots)?;
     }
     CompositeEntry::new(header, graph, shell)
-        .ok()
         .map(DecodedEntry::Composite)
+        .map_err(|_| CompositeBuildError::TooManySlots)
 }
 
 /// One cut in the rendered body: an island to re-render on every hit, or a

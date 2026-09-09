@@ -32,6 +32,9 @@ pub mod config;
 /// reachable from integration tests outside this crate; it registers no
 /// public command API of its own (see its own module doc).
 pub mod console;
+/// The closed decline-reason set behind `outcome="declined"`; every item is
+/// `pub(crate)`, reached only from [`middleware`], [`live`], and [`stitch`].
+pub(crate) mod decline;
 pub mod file_store;
 pub mod ledger;
 pub mod live;
