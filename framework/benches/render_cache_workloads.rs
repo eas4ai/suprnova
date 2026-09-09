@@ -71,6 +71,8 @@
 // modules: these support modules re-export names this bench has no use for,
 // and a private module would report each of them as an unused import here
 // while the test binary next door uses every one.
+#[path = "../tests/support/render_cache_feature_evaluator_support.rs"]
+pub mod render_cache_feature_evaluator_support;
 #[path = "../tests/support/render_cache_middleware_support/mod.rs"]
 pub mod render_cache_middleware_support;
 #[path = "../tests/support/render_cache_tiers_support/mod.rs"]

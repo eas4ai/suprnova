@@ -2140,57 +2140,24 @@ async fn feature_version_declared_handler(_request: Request) -> Response {
     Ok(HttpResponse::html(format!("feature-version render {n}")))
 }
 
-/// The framework's own [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator),
-/// installed as featureflag's process-global default the way
-/// `features::bootstrap_database_cached` does in a real application - which
-/// is what `install_evaluator` / `set_global_default` is for, and why these
-/// tests can drive `is_enabled!` over real HTTP rather than only at the unit
-/// level: unlike `featureflag::evaluator::with_default`, the global default
-/// is not a synchronous scope and survives every await point in a request.
-static FEATURE_EVALUATOR: tokio::sync::OnceCell<Arc<suprnova::features::DatabaseEvaluator>> =
-    tokio::sync::OnceCell::const_new();
-
-/// Seeds the four flags these tests read and installs the evaluator
-/// process-globally, exactly once per test process.
+/// Installs the framework's own [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator)
+/// (as one half of a shared `Chain`) as featureflag's process-global
+/// default the way `features::bootstrap_database_cached` does in a real
+/// application - which is what `install_evaluator` / `set_global_default`
+/// is for, and why these tests can drive `is_enabled!` over real HTTP
+/// rather than only at the unit level: unlike
+/// `featureflag::evaluator::with_default`, the global default is not a
+/// synchronous scope and survives every await point in a request.
 ///
-/// The four cover the whole scope matrix fix round 7 turns on:
-/// `user-scoped-flag` has a rule at the reader's own identity;
-/// `team-scoped-flag` at the reader's team; `global-flag` at neither; and
-/// `another-users-override-flag` has a rule at *someone else's* identity
-/// plus a global rule, which is the case that distinguishes "record by flag
-/// scope" from "record by the scope key that matched this reader".
+/// Delegates to `render_cache_feature_evaluator_support`: featureflag's
+/// global default is a genuine process-wide `OnceLock` with no reset, and
+/// `render_cache_privacy_support` needs its own evaluator visible through
+/// that same one slot. See that module's doc for why a shared installer
+/// exists at all and why chaining the two is safe for this module's own
+/// four flags (`user-scoped-flag`, `team-scoped-flag`, `global-flag`,
+/// `another-users-override-flag`).
 async fn install_feature_evaluator() {
-    FEATURE_EVALUATOR
-        .get_or_init(|| async {
-            let evaluator = Arc::new(
-                suprnova::features::DatabaseEvaluator::new_in_memory()
-                    .await
-                    .expect("in-memory feature evaluator"),
-            );
-            evaluator
-                .set_flag("user-scoped-flag", "user:alice", true)
-                .await
-                .expect("seed the user-scoped flag");
-            evaluator
-                .set_flag("team-scoped-flag", "team:alpha", true)
-                .await
-                .expect("seed the team-scoped flag");
-            evaluator
-                .set_flag("global-flag", "", true)
-                .await
-                .expect("seed the globally scoped flag");
-            evaluator
-                .set_flag("another-users-override-flag", "", false)
-                .await
-                .expect("seed the global rule of the override flag");
-            evaluator
-                .set_flag("another-users-override-flag", "user:bob", true)
-                .await
-                .expect("seed bob's override");
-            suprnova::features::install_evaluator(evaluator.clone());
-            evaluator
-        })
-        .await;
+    crate::render_cache_feature_evaluator_support::install().await;
 }
 
 /// Fix round 7, finding 1: the body is driven entirely by a **team-scoped**
