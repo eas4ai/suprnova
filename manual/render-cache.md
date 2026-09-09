@@ -215,16 +215,24 @@ it ran, in terms you will recognize:
   anything to do with language - so an Inertia route needs `Locale`
   declared to ever cache at all, even one with no translated content of its
   own.
-- **You checked authorization.** `Gate` always treats a decision as
-  per-visitor, so it needs `Principal` declared even on a route keyed only
-  by `Tenant`, until the gate's own check is provably per-tenant.
-  RenderCache cannot tell the difference on its own.
-- **A model behind the page carries a tenant-scoped global scope.** A
-  global scope that reads the current tenant from its own request-local
-  state to filter a query - the pattern Suprnova's own `GlobalScope`
-  documentation shows - changes what the query returns without RenderCache
-  ever seeing that read. Declare `Tenant` variance on any route backed by
-  such a model; nothing here can catch the omission for you.
+- **You checked authorization.** A decision is judged by what its own
+  evaluation read. A gate whose body reads only the tenant - through
+  `suprnova::live::current_tenant()`, say - classifies under `Tenant` alone
+  and caches on a route keyed by `Tenant`. A gate that reads a per-user
+  fact, or that reads nothing RenderCache can see, still needs `Principal`
+  declared: a body that decided from its `user` argument through no
+  instrumented accessor is indistinguishable from one that decided from a
+  constant, and the safe reading of that is the conservative one.
+- **A model behind the page carries a global scope that reads per-request
+  state.** Declare what the scope depends on. A `GlobalScope` returning
+  `ScopeDependency::Constant` records nothing and costs no cache hits. The
+  default, `ScopeDependency::PerRequest`, requires the scope's `apply` to
+  read that state through an instrumented accessor -
+  `suprnova::live::current_tenant()`, `Auth::id()`, `Lang::locale()`. A
+  per-request scope whose evaluation reads none of them narrows the render
+  to `Uncacheable` and names itself in the decline, so an invisible tenant
+  filter costs you the cache rather than costing your visitors each other's
+  rows.
 - **You read a secret configuration value, or an undeclared request
   context.** Both force `Uncacheable`. A response's dependence on an
   ordinary request header, or on `Config::get`, is invisible to RenderCache
@@ -234,16 +242,19 @@ it ran, in terms you will recognize:
   `DB::select_on`.** The framework cannot name the tables a raw statement
   read, so the render is never stored; it is still served. Reads through
   `DB::table(..)` know their table and are cached normally, and so is
-  `Auth::user()`, which resolves through that path. RBAC role and permission
-  checks read through those raw statements too, so a cached route that
-  evaluates one is never stored.
+  `Auth::user()`, which resolves through that path.
+  The framework's own RBAC role and permission checks name the five tables
+  they read - `roles`, `permissions`, `role_permissions`, `model_roles`, and
+  `model_permissions` - so a cached route that evaluates one is observed
+  precisely and cached normally.
 - **The write was made by a queue worker, a scheduled task, or a console
-  command.** Only a process that ran `RenderCache::install` (the server)
-  advances generations; writes from other processes do not, and
-  `RenderCache::bump_permission_version()` there does nothing. A page
-  depending on such a write stays current only within its freshness window;
-  run `render-cache:epoch-advance` after a job that changes what cached
-  pages show.
+  command.** Nothing special is needed any more. Every process whose
+  configuration enables RenderCache and whose database holds the RenderCache
+  migration advances generations, so such a write invalidates exactly what
+  the same write invalidates in the server, and
+  `RenderCache::bump_permission_version()` works from any of them. A process
+  with `RENDER_CACHE_ENABLED=false`, or one whose database does not hold the
+  migration, advances nothing and issues no RenderCache SQL at all.
 
 On PostgreSQL the render runs in a `REPEATABLE READ` transaction so that what
 it read and the generations it recorded agree; a cached route's handler that

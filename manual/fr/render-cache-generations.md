@@ -84,24 +84,31 @@ Aucune clé de cache n'a été nommée nulle part dans cette séquence. Une
 générations à l'intérieur de cette même transaction, si bien qu'une écriture
 annulée ne fait rien avancer du tout.
 
-## L'invalidation est aujourd'hui à la granularité de la table
+## À quel point l'invalidation est étroite
 
 C'est la chose la plus importante à savoir avant de dimensionner une route
 mise en cache.
 
-Une lecture ponctuelle via l'ORM enregistre l'identité de la **table** en
-plus de celle de la ligne. `Model::find` appelle
-`observe_table_read(Self::TABLE)` avant de chercher quoi que ce soit et
-`observe_record_read_json` après avoir hydraté une ligne, si bien qu'une
-entrée qui a lu une seule ligne dépend de toute la table. Toute écriture
-dans cette table invalide donc **chaque** entrée mise en cache qui y a lu,
-et pas seulement les entrées qui ont lu la ligne qui a changé.
+Une lecture ponctuelle par clé primaire qui retourne une ligne enregistre
+l'identité de cette **ligne** et l'identité d'**écriture sans clé** de la
+table, pas la table elle-même. `Model::find`, `Model::find_or_fail`, et
+`Model::find_many` observent chacun une identité d'enregistrement par ligne
+hydratée et une identité d'écriture sans clé à côté, si bien qu'une
+écriture au niveau de la ligne ailleurs dans la table laisse l'entrée à
+jour, tandis qu'un `update_all` ou `delete_all` massif, une écriture par
+`DB::table(..)`, ou une instruction brute sur la table l'atteint encore.
+Une lecture ponctuelle qui ne retourne aucune ligne observe la table à la
+place, parce qu'insérer la ligne manquante est ce qui changerait la
+réponse.
 
-C'est sûr - cela ne peut qu'invalider trop, jamais trop peu - et c'est
-mesuré plutôt que supposé. La charge de tempête d'invalidation dans
-`framework/benches/render_cache_workloads.rs` publie 64 clés sur 12
-identités d'enregistrement, exécute 1 000 écritures, et enregistre l'ampleur
-de propagation observée dans
+Toute autre lecture est à la granularité de la table : `Model::all`, chaque
+terminal `Builder`, et chaque chargement de relation enregistrent la table
+entière, si bien que toute écriture dans cette table invalide chaque entrée
+mise en cache qui y a lu. C'est sûr - cela ne peut qu'invalider trop, jamais
+trop peu - et c'est mesuré plutôt que supposé. La charge de tempête
+d'invalidation dans `framework/benches/render_cache_workloads.rs` publie 64
+clés sur 12 identités d'enregistrement, exécute 1 000 écritures, et
+enregistre l'ampleur de propagation observée dans
 `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json` (abrégé ;
 l'objet enregistré porte aussi les champs de rafale, de balayage, de hit, de
 reconstruction, d'instruction et de latence) :
@@ -111,11 +118,17 @@ reconstruction, d'instruction et de latence) :
   "keys": 64,
   "identities": 12,
   "writes": 1000,
-  "every_write_invalidates_every_key": true,
+  "every_write_invalidates_every_key": false,
+  "point_read_invalidation_ratio": 0.09375,
   "rebuilds_per_write": 1.28,
   "final_bodies_coherent": true
 }
 ```
+
+`every_write_invalidates_every_key` vaut `false` parce qu'une lecture
+ponctuelle ne dépend plus de toute sa table ; `point_read_invalidation_ratio`
+est le nombre qui l'a remplacée comme celui qu'il vaut la peine de
+surveiller.
 
 Concevez en conséquence. Une route mise en cache adossée à une table dans
 laquelle votre application écrit sans cesse reconstruira sans cesse, quelle
@@ -133,11 +146,14 @@ laisse passer.
 **Refusé d'emblée.** Le SQL brut via `DB::select`, `DB::select_one`,
 `DB::scalar`, ou `DB::select_on` ne peut pas nommer les tables que son
 instruction a lues, donc le rendu est marqué inobservable et n'est jamais
-stocké. La réponse est tout de même servie, correctement, à chaque fois. Les
-propres vérifications de rôle et de permission RBAC du framework lisent de
-cette façon, donc une route mise en cache qui en évalue une ne stocke
-jamais. Les lectures via `DB::table(..)` connaissent leur table et se
-mettent en cache normalement.
+stocké. La réponse est tout de même servie, correctement, à chaque fois.
+Les propres vérifications de rôle et de permission RBAC du framework
+nomment les cinq tables qu'elles lisent - `roles`, `permissions`,
+`role_permissions`, `model_roles`, et `model_permissions` - donc une route
+mise en cache qui en évalue une est observée avec précision et mise en
+cache normalement.
+Les lectures via `DB::table(..)` connaissent leur table et se mettent en
+cache normalement.
 
 **Invisible, et de votre responsabilité.** Un en-tête de requête lu via
 `Request::header`, un appel à `Config::get`, et une portée globale Eloquent
@@ -146,14 +162,25 @@ qu'un rendu produit sans que le collecteur ne voie quoi que ce soit.
 Déclarez la dimension de variance correspondante sur une telle route ; rien
 ici ne peut rattraper cet oubli à votre place.
 
-**Lacunes connues.** Rien ne fait avancer une génération pour un flag de
-fonctionnalité quand le flag change, et une écriture faite par un worker de
-file d'attente, une tâche planifiée, ou une commande console ne fait rien
-avancer du tout, parce que seul le processus qui a exécuté
-`RenderCache::install` porte l'instrumentation du côté écriture. Une page
-qui dépend d'une telle écriture ne reste à jour que dans sa fenêtre de
-fraîcheur ; exécutez `render-cache:epoch-advance` après un job qui change ce
-que montrent les pages mises en cache. Voir
+**Flags de fonctionnalité.** Une lecture d'un flag que la table `features`
+contient - à n'importe quelle clé de portée, la valeur par défaut globale
+incluse - observe la génération propre de ce flag.
+`DatabaseEvaluator::set_flag` la fait avancer après que la nouvelle valeur
+est visible pour les lecteurs, et `DatabaseEvaluator::reload()` la fait
+avancer pour chaque flag dont les règles stockées ont changé, et indique à
+l'évaluateur mis en cache lesquels c'était. Un flag que la table ne
+contient pas n'enregistre rien : ce rendu dépendait de la valeur par défaut
+compilée dans `is_enabled!`, pas d'un état stocké.
+
+**Le côté écriture.** Tout processus dont la configuration active
+RenderCache et dont la base de données porte la migration RenderCache fait
+avancer les générations, si bien qu'une écriture faite par un worker de
+file d'attente, une tâche planifiée, ou une commande console invalide
+exactement ce que la même écriture invalide dans le serveur, et
+`RenderCache::bump_permission_version()` fonctionne depuis n'importe lequel
+d'entre eux. Un processus avec `RENDER_CACHE_ENABLED=false`, ou dont la
+base de données ne porte pas la migration, ne fait rien avancer et n'émet
+aucun SQL de RenderCache. Voir
 [Exploitation de RenderCache](render-cache-operations.md).
 
 ## Ce que coûte un hit

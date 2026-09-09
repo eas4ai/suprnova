@@ -76,20 +76,26 @@ No cache key was named anywhere in that sequence. An ORM write inside a
 `DB::transaction` advances its generations inside that same transaction, so
 a rolled-back write advances nothing at all.
 
-## Invalidation is table-granular today
+## How narrow invalidation is
 
 This is the single most important thing to know before you size a cached
 route.
 
-A point read through the ORM records the **table** identity as well as the
-row identity. `Model::find` calls `observe_table_read(Self::TABLE)` before
-it looks anything up and `observe_record_read_json` after it hydrates a row,
-so an entry that read one row depends on the whole table. Any write to that
-table therefore invalidates **every** cached entry that read from it, not
-just the entries that read the row that changed.
+A primary-key point read that returns a row records that **row's** identity
+and the table's **unkeyed-write** identity, not the table itself.
+`Model::find`, `Model::find_or_fail`, and `Model::find_many` each observe
+one record identity per row they hydrated and one unkeyed-write identity
+beside them, so a row-level write elsewhere in the table leaves the entry
+current, while a bulk `update_all` or `delete_all`, a `DB::table(..)` write,
+or a raw statement on the table still reaches it. A point read that returns
+no row observes the table instead, because inserting the missing row is what
+would change the answer.
 
-That is safe - it can only invalidate too much, never too little - and it is
-measured rather than assumed. The invalidation-storm workload in
+Every other read is table-granular: `Model::all`, every `Builder` terminal,
+and every relation load record the whole table, so any write to that table
+invalidates every cached entry that read from it. That is safe - it can only
+invalidate too much, never too little - and it is measured rather than
+assumed. The invalidation-storm workload in
 `framework/benches/render_cache_workloads.rs` publishes 64 keys over 12
 record identities, drives 1,000 writes, and records the fan-out it observed
 in `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json`
@@ -101,11 +107,16 @@ statement, and latency fields):
   "keys": 64,
   "identities": 12,
   "writes": 1000,
-  "every_write_invalidates_every_key": true,
+  "every_write_invalidates_every_key": false,
+  "point_read_invalidation_ratio": 0.09375,
   "rebuilds_per_write": 1.28,
   "final_bodies_coherent": true
 }
 ```
+
+`every_write_invalidates_every_key` is `false` because a point read no longer
+depends on its whole table; `point_read_invalidation_ratio` is what replaced
+it as the number worth watching.
 
 Design around it. A cached route backed by a table your application writes
 to constantly will rebuild constantly, whatever its freshness window says. A
@@ -122,8 +133,11 @@ through.
 **Declined outright.** Raw SQL through `DB::select`, `DB::select_one`,
 `DB::scalar`, or `DB::select_on` cannot name the tables its statement read,
 so the render is marked unobservable and never stored. The response is still
-served, correctly, every time. The framework's own RBAC role and permission
-checks read this way, so a cached route that evaluates one never stores.
+served, correctly, every time.
+The framework's own RBAC role and permission checks name the five tables
+they read - `roles`, `permissions`, `role_permissions`, `model_roles`, and
+`model_permissions` - so a cached route that evaluates one is observed
+precisely and cached normally.
 Reads through `DB::table(..)` know their table and cache normally.
 
 **Invisible, and your responsibility.** A request header read through
@@ -133,13 +147,22 @@ produces without the collector seeing anything. Declare the matching
 variance dimension on such a route; nothing here can catch the omission for
 you.
 
-**Known gaps.** Nothing advances a generation for a feature flag when the
-flag changes, and a write made by a queue worker, a scheduled task, or a
-console command advances nothing at all, because only the process that ran
-`RenderCache::install` carries the write-side instrumentation. A page
-depending on such a write stays current only within its freshness window;
-run `render-cache:epoch-advance` after a job that changes what cached pages
-show. See [RenderCache Operations](render-cache-operations.md).
+**Feature flags.** A read of a flag the `features` table holds - at any scope
+key, the global default included - observes that flag's own generation.
+`DatabaseEvaluator::set_flag` advances it after the new value is visible to
+readers, and `DatabaseEvaluator::reload()` advances it for every flag whose
+stored rules changed and tells the cached evaluator which ones those were. A
+flag the table does not hold records nothing: that render depended on the
+default compiled into `is_enabled!`, not on stored state.
+
+**The write side.** Every process whose configuration enables RenderCache and
+whose database holds the RenderCache migration advances generations, so a
+write made by a queue worker, a scheduled task, or a console command
+invalidates exactly what the same write invalidates in the server, and
+`RenderCache::bump_permission_version()` works from any of them. A process
+with `RENDER_CACHE_ENABLED=false`, or one whose database does not hold the
+migration, advances nothing and issues no RenderCache SQL at all. See
+[RenderCache Operations](render-cache-operations.md).
 
 ## What a hit costs
 

@@ -80,23 +80,30 @@ Nenhuma chave de cache foi nomeada em lugar algum daquela sequência. Uma
 escrita do ORM dentro de um `DB::transaction` avança as suas gerações dentro
 daquela mesma transação, então uma escrita revertida não avança nada.
 
-## A invalidação hoje tem granularidade de tabela
+## Quão estreita é a invalidação
 
 Esta é a coisa mais importante a saber antes de você dimensionar uma rota em
 cache.
 
-Uma leitura pontual através do ORM registra a identidade da **tabela** além
-da identidade da linha. `Model::find` chama `observe_table_read(Self::TABLE)`
-antes de procurar qualquer coisa e `observe_record_read_json` depois de
-hidratar uma linha, então uma entrada que leu uma linha depende da tabela
-inteira. Qualquer escrita naquela tabela portanto invalida **toda** entrada
-em cache que leu dela, e não apenas as entradas que leram a linha que mudou.
+Uma leitura pontual por chave primária que retorna uma linha registra a
+identidade dessa **linha** e a identidade de **escrita sem chave** da
+tabela, não a tabela em si. `Model::find`, `Model::find_or_fail`, e
+`Model::find_many` observam, cada um, uma identidade de registro por linha
+que hidrataram e uma identidade de escrita sem chave ao lado, então uma
+escrita no nível da linha em outro lugar da tabela deixa a entrada atual,
+enquanto um `update_all` ou `delete_all` em massa, uma escrita por
+`DB::table(..)`, ou uma instrução bruta na tabela ainda a alcança. Uma
+leitura pontual que não retorna linha observa a tabela em vez disso, porque
+inserir a linha que falta é o que mudaria a resposta.
 
-Isso é seguro - só é capaz de invalidar demais, nunca de menos - e é medido
-em vez de presumido. A carga de trabalho de tempestade de invalidação em
-`framework/benches/render_cache_workloads.rs` publica 64 chaves sobre 12
-identidades de registro, executa 1.000 escritas e registra o fan-out que
-observou em
+Toda outra leitura tem granularidade de tabela: `Model::all`, todo terminal
+de `Builder`, e todo carregamento de relação registram a tabela inteira,
+então qualquer escrita naquela tabela invalida toda entrada em cache que
+leu dela. Isso é seguro - só é capaz de invalidar demais, nunca de menos -
+e é medido em vez de presumido. A carga de trabalho de tempestade de
+invalidação em `framework/benches/render_cache_workloads.rs` publica 64
+chaves sobre 12 identidades de registro, executa 1.000 escritas e registra
+o fan-out que observou em
 `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json`
 (resumido; o objeto registrado também carrega os campos de burst, varredura,
 hit, reconstrução, instrução e latência):
@@ -106,11 +113,16 @@ hit, reconstrução, instrução e latência):
   "keys": 64,
   "identities": 12,
   "writes": 1000,
-  "every_write_invalidates_every_key": true,
+  "every_write_invalidates_every_key": false,
+  "point_read_invalidation_ratio": 0.09375,
   "rebuilds_per_write": 1.28,
   "final_bodies_coherent": true
 }
 ```
+
+`every_write_invalidates_every_key` é `false` porque uma leitura pontual
+não depende mais da tabela inteira; `point_read_invalidation_ratio` é o
+número que a substituiu como o que vale a pena observar.
 
 Projete levando isso em conta. Uma rota em cache apoiada em uma tabela na
 qual sua aplicação escreve constantemente vai reconstruir constantemente,
@@ -129,10 +141,13 @@ passar.
 `DB::select_one`, `DB::scalar` ou `DB::select_on` não consegue nomear as
 tabelas que a sua instrução leu, então a renderização é marcada como não
 observável e nunca é armazenada. A resposta ainda é servida, corretamente,
-toda vez. As próprias verificações de papel e de permissão RBAC do framework
-leem desse jeito, então uma rota em cache que avalia uma delas nunca
-armazena. Leituras por meio de `DB::table(..)` conhecem a sua tabela e
-entram em cache normalmente.
+toda vez.
+As próprias verificações de papel e de permissão RBAC do framework nomeiam
+as cinco tabelas que leem - `roles`, `permissions`, `role_permissions`,
+`model_roles`, e `model_permissions` - então uma rota em cache que avalia
+uma delas é observada com precisão e entra em cache normalmente.
+Leituras por meio de `DB::table(..)` conhecem a sua tabela e entram em
+cache normalmente.
 
 **Invisíveis, e de sua responsabilidade.** Um cabeçalho de requisição lido
 por meio de `Request::header`, uma chamada a `Config::get` e um escopo
@@ -141,14 +156,23 @@ por requisição, todos mudam o que uma renderização produz sem que o coletor
 veja nada. Declare a dimensão de variância correspondente em uma rota
 dessas; nada aqui consegue capturar essa omissão por você.
 
-**Lacunas conhecidas.** Nada avança uma geração para um sinalizador de
-recurso quando o sinalizador muda, e uma escrita feita por um worker de
-fila, uma tarefa agendada ou um comando de console não avança absolutamente
-nada, porque apenas o processo que executou `RenderCache::install` carrega a
-instrumentação do lado da escrita. Uma página que depende de tal escrita
-permanece atual apenas dentro da sua janela de validade; execute
-`render-cache:epoch-advance` depois de um job que muda o que as páginas em
-cache exibem. Veja
+**Sinalizadores de recurso.** Uma leitura de um sinalizador que a tabela
+`features` contém - em qualquer chave de escopo, incluindo o padrão global -
+observa a própria geração desse sinalizador. `DatabaseEvaluator::set_flag`
+a avança depois que o novo valor fica visível para os leitores, e
+`DatabaseEvaluator::reload()` a avança para todo sinalizador cujas regras
+armazenadas mudaram, e informa ao avaliador em cache quais foram esses. Um
+sinalizador que a tabela não contém não registra nada: essa renderização
+dependia do padrão compilado em `is_enabled!`, não de estado armazenado.
+
+**O lado da escrita.** Todo processo cuja configuração habilita o
+RenderCache e cujo banco de dados contém a migração do RenderCache avança
+gerações, então uma escrita feita por um worker de fila, uma tarefa
+agendada ou um comando de console invalida exatamente o que a mesma
+escrita invalida no servidor, e `RenderCache::bump_permission_version()`
+funciona a partir de qualquer um deles. Um processo com
+`RENDER_CACHE_ENABLED=false`, ou um cujo banco de dados não contém a
+migração, não avança nada e não emite nenhum SQL do RenderCache. Veja
 [Operações do RenderCache](render-cache-operations.md).
 
 ## Quanto custa um hit

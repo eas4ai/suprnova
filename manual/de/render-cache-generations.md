@@ -86,25 +86,31 @@ ORM-Schreibzugriff innerhalb einer `DB::transaction` erhöht seine
 Generationen innerhalb genau dieser Transaktion, sodass ein
 zurückgerollter Schreibzugriff überhaupt nichts erhöht.
 
-## Die Invalidierung ist heute tabellengranular
+## Wie eng die Invalidierung ist
 
 Das ist das mit Abstand Wichtigste, das Sie wissen sollten, bevor Sie eine
 gecachte Route dimensionieren.
 
-Ein Punktlesen über den ORM zeichnet die Identität der **Tabelle** ebenso auf
-wie die Identität der Zeile. `Model::find` ruft
-`observe_table_read(Self::TABLE)` auf, bevor es irgendetwas nachschlägt, und
-`observe_record_read_json`, nachdem es eine Zeile hydriert hat, sodass ein
-Eintrag, der eine Zeile gelesen hat, von der ganzen Tabelle abhängt. Jeder
-Schreibzugriff auf diese Tabelle invalidiert deshalb **jeden** gecachten
-Eintrag, der daraus gelesen hat, und nicht nur die Einträge, die die
-geänderte Zeile gelesen haben.
+Ein Punktlesen über den Primärschlüssel, das eine Zeile zurückgibt, zeichnet
+die Identität dieser **Zeile** und die **Unkeyed-Write**-Identität der
+Tabelle auf, nicht die Tabelle selbst. `Model::find`, `Model::find_or_fail`
+und `Model::find_many` beobachten jeweils eine Datensatz-Identität pro
+hydrierter Zeile und daneben eine Unkeyed-Write-Identität, sodass ein
+zeilenweiser Schreibzugriff anderswo in der Tabelle den Eintrag aktuell
+lässt, während ein Sammel-`update_all` oder `delete_all`, ein
+`DB::table(..)`-Schreibzugriff oder eine rohe Anweisung auf der Tabelle ihn
+weiterhin erreicht. Ein Punktlesen, das keine Zeile zurückgibt, beobachtet
+stattdessen die Tabelle, weil das Einfügen der fehlenden Zeile das wäre, was
+die Antwort ändern würde.
 
-Das ist sicher - es kann nur zu viel invalidieren, nie zu wenig - und es ist
-gemessen statt angenommen. Die Invalidierungssturm-Last in
-`framework/benches/render_cache_workloads.rs` veröffentlicht 64 Schlüssel
-über 12 Datensatz-Identitäten, treibt 1.000 Schreibzugriffe und zeichnet den
-beobachteten Fan-out in
+Jedes andere Lesen ist tabellengranular: `Model::all`, jedes
+`Builder`-Terminal und jedes Laden einer Relation zeichnen die ganze Tabelle
+auf, sodass jeder Schreibzugriff auf diese Tabelle jeden gecachten Eintrag
+invalidiert, der daraus gelesen hat. Das ist sicher - es kann nur zu viel
+invalidieren, nie zu wenig - und es ist gemessen statt angenommen. Die
+Invalidierungssturm-Last in `framework/benches/render_cache_workloads.rs`
+veröffentlicht 64 Schlüssel über 12 Datensatz-Identitäten, treibt 1.000
+Schreibzugriffe und zeichnet den beobachteten Fan-out in
 `crates/suprnova-live/benchmarks/render-cache-workloads-v1.json` auf
 (gekürzt; das aufgezeichnete Objekt trägt außerdem die Felder für Burst,
 Sweep, Treffer, Neuaufbau, Statement und Latenz):
@@ -114,11 +120,16 @@ Sweep, Treffer, Neuaufbau, Statement und Latenz):
   "keys": 64,
   "identities": 12,
   "writes": 1000,
-  "every_write_invalidates_every_key": true,
+  "every_write_invalidates_every_key": false,
+  "point_read_invalidation_ratio": 0.09375,
   "rebuilds_per_write": 1.28,
   "final_bodies_coherent": true
 }
 ```
+
+`every_write_invalidates_every_key` ist `false`, weil ein Punktlesen nicht
+mehr von der ganzen Tabelle abhängt; `point_read_invalidation_ratio` ist die
+Zahl, die stattdessen die Beachtung wert ist.
 
 Gestalten Sie darum herum. Eine gecachte Route, die auf einer Tabelle
 aufbaut, in die Ihre Anwendung ständig schreibt, wird ständig neu aufbauen,
@@ -138,10 +149,13 @@ speichert und welche es durchlässt.
 `DB::scalar` oder `DB::select_on` kann die Tabellen, die seine Anweisung
 gelesen hat, nicht benennen, also wird das Rendering als unbeobachtbar
 markiert und nie gespeichert. Die Antwort wird trotzdem jedes Mal korrekt
-ausgeliefert. Die eigenen RBAC-Rollen- und Berechtigungsprüfungen des
-Frameworks lesen auf diese Weise, sodass eine gecachte Route, die eine davon
-auswertet, nie speichert. Lesezugriffe über `DB::table(..)` kennen ihre
-Tabelle und cachen normal.
+ausgeliefert.
+Die eigenen RBAC-Rollen- und Berechtigungsprüfungen des Frameworks nennen
+die fünf Tabellen, die sie lesen - `roles`, `permissions`,
+`role_permissions`, `model_roles` und `model_permissions` - daher wird eine
+gecachte Route, die eine davon auswertet, präzise beobachtet und normal
+gecacht.
+Lesezugriffe über `DB::table(..)` kennen ihre Tabelle und cachen normal.
 
 **Unsichtbar und in Ihrer Verantwortung.** Ein über `Request::header`
 gelesener Anfrage-Header, ein `Config::get`-Aufruf und ein globaler
@@ -150,14 +164,25 @@ filtert, ändern alle, was ein Rendering erzeugt, ohne dass der Sammler
 irgendetwas sieht. Deklarieren Sie auf einer solchen Route die passende
 Varianzdimension; nichts hier kann das Versäumnis für Sie abfangen.
 
-**Bekannte Lücken.** Nichts erhöht eine Generation für ein Feature-Flag,
-wenn das Flag sich ändert, und ein Schreibzugriff durch einen Queue-Worker,
-eine geplante Aufgabe oder einen Konsolenbefehl erhöht überhaupt nichts, denn
-nur der Prozess, der `RenderCache::install` ausgeführt hat, trägt die
-Instrumentierung der Schreibseite. Eine Seite, die von einem solchen
-Schreibzugriff abhängt, bleibt nur innerhalb ihres Frische-Fensters aktuell;
-führen Sie `render-cache:epoch-advance` aus, nachdem ein Job gelaufen ist,
-der ändert, was gecachte Seiten anzeigen. Siehe
+**Feature-Flags.** Ein Lesen eines Flags, das die Tabelle `features` hält -
+bei jedem Scope-Schlüssel, den globalen Standardwert eingeschlossen -
+beobachtet die eigene Generation dieses Flags. `DatabaseEvaluator::set_flag`
+erhöht sie, nachdem der neue Wert für Leser sichtbar ist, und
+`DatabaseEvaluator::reload()` erhöht sie für jedes Flag, dessen gespeicherte
+Regeln sich geändert haben, und teilt dem gecachten Evaluator mit, welche das
+waren. Ein Flag, das die Tabelle nicht hält, zeichnet nichts auf: Dieses
+Rendering hing vom in `is_enabled!` einkompilierten Standardwert ab, nicht
+von gespeichertem Zustand.
+
+**Die Schreibseite.** Jeder Prozess, dessen Konfiguration RenderCache
+aktiviert und dessen Datenbank die RenderCache-Migration enthält, erhöht
+Generationen, sodass ein Schreibzugriff durch einen Queue-Worker, eine
+geplante Aufgabe oder einen Konsolenbefehl genau das ungültig macht, was
+derselbe Schreibzugriff im Server ungültig macht, und
+`RenderCache::bump_permission_version()` funktioniert aus jedem von ihnen
+heraus. Ein Prozess mit `RENDER_CACHE_ENABLED=false`, oder einer, dessen
+Datenbank die Migration nicht enthält, erhöht nichts und gibt überhaupt kein
+RenderCache-SQL aus. Siehe
 [RenderCache Betrieb](render-cache-operations.md).
 
 ## Was ein Treffer kostet

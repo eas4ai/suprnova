@@ -234,19 +234,27 @@ pendant son exécution, en des termes que vous reconnaîtrez :
   une route Inertia a besoin que `Locale` soit déclarée pour pouvoir un
   jour mettre en cache, même une route sans aucun contenu traduit qui lui
   soit propre.
-- **Vous avez vérifié une autorisation.** `Gate` traite toujours une
-  décision comme propre à chaque visiteur, donc il a besoin que `Principal`
-  soit déclarée même sur une route dont la clé ne repose que sur `Tenant`,
-  tant que la vérification du gate elle-même n'est pas démontrablement
-  propre à chaque tenant. RenderCache ne peut pas faire la différence de
-  lui-même.
-- **Un modèle derrière la page porte une portée globale bornée par
-  tenant.** Une portée globale qui lit le tenant courant depuis son propre
-  état local à la requête pour filtrer une requête - le pattern que montre
-  la documentation de `GlobalScope` de Suprnova lui-même - change ce que
-  retourne la requête sans que RenderCache ne voie jamais cette lecture.
-  Déclarez la variance `Tenant` sur toute route adossée à un tel modèle ;
-  rien ici ne peut rattraper cet oubli à votre place.
+- **Vous avez vérifié une autorisation.** Une décision est jugée par ce que
+  sa propre évaluation a lu. Un gate dont le corps ne lit que le tenant -
+  via `suprnova::live::current_tenant()`, par exemple - se classe sous
+  `Tenant` seul et met en cache sur une route dont la clé repose sur
+  `Tenant`. Un gate qui lit une donnée propre à l'utilisateur, ou qui ne lit
+  rien que RenderCache puisse voir, a quand même besoin que `Principal`
+  soit déclarée : un corps qui a décidé à partir de son argument `user`
+  sans passer par un accesseur instrumenté est indiscernable d'un corps qui
+  a décidé à partir d'une constante, et la lecture prudente de cela est la
+  lecture conservatrice.
+- **Un modèle derrière la page porte une portée globale qui lit un état
+  propre à la requête.** Déclarez ce dont dépend la portée. Une
+  `GlobalScope` qui retourne `ScopeDependency::Constant` n'enregistre rien
+  et ne coûte aucun succès de cache. La valeur par défaut,
+  `ScopeDependency::PerRequest`, exige que le `apply` de la portée lise cet
+  état via un accesseur instrumenté - `suprnova::live::current_tenant()`,
+  `Auth::id()`, `Lang::locale()`. Une portée propre à la requête dont
+  l'évaluation n'en lit aucun restreint le rendu à `Uncacheable` et se
+  nomme elle-même dans le refus, si bien qu'un filtre de tenant invisible
+  vous coûte le cache plutôt que de coûter à vos visiteurs les lignes les
+  uns des autres.
 - **Vous avez lu une valeur de configuration secrète, ou un contexte de
   requête non déclaré.** Les deux forcent `Uncacheable`. La dépendance
   d'une réponse à un en-tête de requête ordinaire, ou à `Config::get`, est
@@ -257,17 +265,22 @@ pendant son exécution, en des termes que vous reconnaîtrez :
   tables qu'une instruction brute a lues, donc le rendu n'est jamais
   stocké ; il est tout de même servi. Les lectures via `DB::table(..)`
   connaissent leur table et sont mises en cache normalement, tout comme
-  `Auth::user()`, qui se résout via ce chemin. Les vérifications de rôle
-  et de permission RBAC lisent elles aussi via ces instructions brutes,
-  donc une route mise en cache qui en évalue une n'est jamais stockée.
+  `Auth::user()`, qui se résout via ce chemin.
+  Les vérifications de rôle et de permission RBAC du framework lui-même
+  nomment les cinq tables qu'elles lisent - `roles`, `permissions`,
+  `role_permissions`, `model_roles`, et `model_permissions` - donc une
+  route mise en cache qui en évalue une est observée avec précision et
+  mise en cache normalement.
 - **L'écriture a été faite par un worker de file d'attente, une tâche
-  planifiée, ou une commande console.** Seul un processus ayant exécuté
-  `RenderCache::install` (le serveur) fait avancer les générations ; les
-  écritures faites par d'autres processus ne les font pas avancer, et
-  `RenderCache::bump_permission_version()` n'y fait rien non plus. Une
-  page qui dépend d'une telle écriture ne reste à jour que dans sa
-  fenêtre de fraîcheur ; exécutez `render-cache:epoch-advance` après un
-  job qui change ce que montrent les pages mises en cache.
+  planifiée, ou une commande console.** Plus rien de spécial n'est
+  nécessaire. Tout processus dont la configuration active RenderCache et
+  dont la base de données porte la migration RenderCache fait avancer les
+  générations, si bien qu'une telle écriture invalide exactement ce que la
+  même écriture invalide dans le serveur, et
+  `RenderCache::bump_permission_version()` fonctionne depuis n'importe
+  lequel d'entre eux. Un processus avec `RENDER_CACHE_ENABLED=false`, ou
+  dont la base de données ne porte pas la migration, ne fait rien avancer
+  et n'émet aucun SQL de RenderCache.
 
 Sous PostgreSQL, le rendu s'exécute dans une transaction `REPEATABLE READ`
 afin que ce qu'il a lu et les générations qu'il a enregistrées concordent ;

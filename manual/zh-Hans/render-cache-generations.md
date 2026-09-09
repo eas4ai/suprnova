@@ -63,32 +63,44 @@ pub async fn todos(_request: Request) -> Response {
 那个序列里没有任何地方指名过一个缓存键。一次在 `DB::transaction` 内部的 ORM
 写入，会在同一个事务内部推进它的那些世代，所以一次被回滚的写入什么都不会推进。
 
-## 今天的失效是按表粒度的
+## 失效有多窄
 
 这是你在为一个被缓存的路由估算规模之前，最需要知道的一件事。
 
-一次通过 ORM 的点读取，除了记录行标识之外，也会记录**表**标识。`Model::find` 在
-查找任何东西之前调用 `observe_table_read(Self::TABLE)`，在把一行水合之后调用
-`observe_record_read_json`，所以一个只读了一行的条目依赖的是整张表。因此，对
-那张表的任何写入都会使**每一个**从它读过的缓存条目失效，而不只是那些读过被改动
-的那一行的条目。
+一次按主键进行、并返回了一行的点读取，记录的是那一**行**的标识和这张表
+的**无键写入**标识，而不是表本身。`Model::find`、`Model::find_or_fail`
+和 `Model::find_many` 各自会为它们水合的每一行观测一个记录标识，并在
+旁边观测一个无键写入标识，所以表中别处的一次按行写入会让这个条目保持
+最新，而一次批量的 `update_all` 或 `delete_all`、一次 `DB::table(..)`
+写入，或者一条对该表的原始语句，仍然会波及到它。一次没有返回行的点
+读取，则会转而观测这张表，因为插入那一行缺失的记录正是会改变答案的
+操作。
 
-这是安全的 - 它只可能失效得太多，绝不会太少 - 而且它是被测量出来的，不是假定
-的。`framework/benches/render_cache_workloads.rs` 里的失效风暴工作负载，在 12 个
-记录标识上发布 64 个键，驱动 1,000 次写入，并把它观察到的扇出记录在
-`crates/suprnova-live/benchmarks/render-cache-workloads-v1.json` 里（有删节；
-记录下来的对象还带有 burst、sweep、hit、rebuild、statement 和 latency 字段）：
+其他所有读取都是按表粒度的：`Model::all`、每一个 `Builder` 终结方法，
+以及每一次关联加载，都会记录整张表，所以对那张表的任何写入都会使从它
+读过的每一个缓存条目失效。这是安全的 - 它只可能失效得太多，绝不会太少 -
+而且它是被测量出来的，不是假定的。`framework/benches/render_cache_workloads.rs`
+里的失效风暴工作负载，在 12 个记录标识上发布 64 个键，驱动 1,000 次
+写入，并把它观察到的扇出记录在
+`crates/suprnova-live/benchmarks/render-cache-workloads-v1.json` 里
+（有删节；记录下来的对象还带有 burst、sweep、hit、rebuild、statement 和
+latency 字段）：
 
 ```json
 "invalidation_storm": {
   "keys": 64,
   "identities": 12,
   "writes": 1000,
-  "every_write_invalidates_every_key": true,
+  "every_write_invalidates_every_key": false,
+  "point_read_invalidation_ratio": 0.09375,
   "rebuilds_per_write": 1.28,
   "final_bodies_coherent": true
 }
 ```
+
+`every_write_invalidates_every_key` 之所以是 `false`，是因为一次点读取
+不再依赖它的整张表；`point_read_invalidation_ratio` 就是取代它、成为
+值得关注的那个数字。
 
 请围绕它来做设计。一个由你的应用不断写入的表所支撑的被缓存路由，无论它的新鲜度
 窗口怎么说，都会不断重建。一个由“编辑发布点什么才会变”的表所支撑的被缓存路由，
@@ -102,20 +114,33 @@ pub async fn todos(_request: Request) -> Response {
 
 **直接拒绝。** 通过 `DB::select`、`DB::select_one`、`DB::scalar` 或
 `DB::select_on` 执行的原始 SQL，无法为它那条语句读取的表命名，所以这次渲染会被
-标记为不可观察，并且永远不会被存储。响应仍然每一次都会被正确地提供。框架自己的
-RBAC 角色与权限检查就是这样读取的，所以一个执行了其中之一的被缓存路由永远不会
-存储。通过 `DB::table(..)` 进行的读取知道自己的表，会被正常缓存。
+标记为不可观察，并且永远不会被存储。响应仍然每一次都会被正确地提供。
+框架自身的 RBAC 角色与权限检查会指明它们所读取的五张表 - `roles`、
+`permissions`、`role_permissions`、`model_roles`，以及
+`model_permissions` - 因此一个执行了其中之一的被缓存路由会被精确地
+观测到，并按正常方式被缓存。
+通过 `DB::table(..)` 进行的读取知道自己的表，会被正常缓存。
 
 **看不见，而且归你负责。** 通过 `Request::header` 读取的一个请求头、一次
 `Config::get` 调用，以及一个从自己的每请求状态出发过滤查询的 Eloquent 全局
 作用域，都会在收集器什么也看不到的情况下改变一次渲染产生的内容。请在这样的路由
 上声明匹配的差异化维度；这里没有任何机制能替你捕捉这种遗漏。
 
-**已知的缺口。** 当一个功能标志发生变化时，没有任何东西会为它推进一个世代；而
-一次由队列工作进程、计划任务或控制台命令做出的写入，什么世代都不会推进，因为
-只有运行了 `RenderCache::install` 的那个进程才带有写入侧的埋点。依赖这样一次
-写入的页面，只会在它的新鲜度窗口内保持最新；请在一个会改变已缓存页面所显示内容
-的作业之后，运行 `render-cache:epoch-advance`。参见
+**功能标志。** 对一个 `features` 表持有的标志的读取 - 不论是在哪个
+scope key 上，包括全局默认值在内 - 都会观测那个标志自己的世代。
+`DatabaseEvaluator::set_flag` 会在新值对读取者可见之后推进它，而
+`DatabaseEvaluator::reload()` 会为每一个存储规则发生了变化的标志推进
+它，并告诉被缓存的求值器具体是哪些标志变了。一个该表没有持有的标志，
+则什么都不会记录：那次渲染依赖的是编译进 `is_enabled!` 里的默认值，
+而不是存储下来的状态。
+
+**写入侧。** 任何配置启用了 RenderCache、且其数据库持有 RenderCache
+迁移的进程都会推进世代，所以一次由队列工作进程、计划任务或控制台命令
+做出的写入，所使无效的内容与同一次写入在服务器中所使无效的内容完全
+一致，`RenderCache::bump_permission_version()` 在其中任何一个进程里都
+能正常工作。一个 `RENDER_CACHE_ENABLED=false` 的进程，或者一个数据库
+没有持有该迁移的进程，则什么都不会推进，也完全不会发出任何 RenderCache
+SQL。参见
 [RenderCache 运维](render-cache-operations.md)。
 
 ## 一次命中的代价
