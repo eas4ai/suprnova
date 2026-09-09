@@ -7,7 +7,7 @@ sob esta chave, e isso ainda está atual?** e **como eu faço tudo parar?**
 Ele responde a uma terceira - "esta rota está sendo servida a partir de uma
 cópia armazenada, afinal?" - por telemetria e pelo cabeçalho `Age` em vez de
 por um comando, porque essa pergunta é sobre tráfego e não sobre uma
-entrada. Há dois comandos de console, seis contadores de telemetria, uma
+entrada. Há dois comandos de console, sete contadores de telemetria, uma
 varredura de disco limitada e uma alavanca de emergência.
 
 Este capítulo é a superfície operacional: os comandos, exatamente o que eles
@@ -100,7 +100,7 @@ estava em cache sob o seu conjunto de permissões anterior.
 
 ## Telemetria
 
-Seis nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
+Sete nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
 um provedor ou um backend:
 
 | Contador | Atributo |
@@ -111,6 +111,7 @@ um provedor ou um backend:
 | `suprnova.render_cache.rebuilds` | nenhum |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.epoch_rewinds` | nenhum |
 
 `lookups` e `hits` carregam o mesmo conjunto fechado de oito desfechos:
 
@@ -140,6 +141,14 @@ reconstrução em segundo plano disparada.
 Os dois contadores de costura carregam os seus próprios conjuntos:
 `assembled` e `fail_document` para montagens; `rendered`, `omitted`,
 `fallback` e `failed` para slots.
+
+`epoch_rewinds` conta detecções, não entradas: um incremento a cada vez
+que um nó encontra uma entrada ou um epoch em lease carimbado acima do
+próprio epoch da autoridade, sobe o epoch do ledger para além desse
+carimbo, e limpa a sua própria L0. Um valor diferente de zero depois de
+uma restauração de banco de dados é o sinal de que a restauração foi
+percebida. Um valor diferente de zero em qualquer outro momento significa
+que uma autoridade andou para trás por um motivo que ninguém pretendia.
 
 **Uma taxa alta de `declined` é o sinal que vale um alerta.** Ela significa
 que rotas que você incluiu estão renderizando e servindo corretamente sem
@@ -388,81 +397,38 @@ torna esses testes reproduzíveis em vez de instáveis.
 
 O ledger de gerações é a autoridade contra a qual todo hit é provado, então
 restaurar o banco de dados muda o que "atual" significa para toda entrada já
-armazenada. Três fatos do código decidem o que uma entrada armazenada faz em
-seguida, e nenhum deles é "ela é silenciosamente descartada".
+armazenada. Duas coisas decidem o que uma entrada armazenada faz em
+seguida, e nenhuma delas é "ela é silenciosamente descartada".
 
-**Uma entrada movida não é automaticamente retida.** A comparação de
-coerência (`CoherenceCheck::compare`) é uma desigualdade em *qualquer* das
-direções, então uma entrada armazenada cujas gerações observadas diferem das
-do ledger restaurado é um movimento para qualquer lado que os números tenham
-ido. Mas um movimento não é uma recusa de servir: o middleware avalia uma
-entrada movida com uma idade efetiva de pelo menos o seu intervalo de
-validade (`freshness_state` em
-`framework/src/render_cache/middleware.rs`) e, em uma rota que declara uma
-janela de obsolescência servível, isso a coloca na faixa de obsoleta
-servível. **O visitante recebe a cópia pré-restauração uma vez, sob
-`Warning`, enquanto a reconstrução roda atrás da requisição.** Essa é a mesma
-passagem de bastão que
-[Gerações do RenderCache](render-cache-generations.md) descreve, e o passo 4
-de `an_orm_write_invalidates_the_todos_document_through_generations` a
-afirma. Uma rota `PrivateCached` nunca faz isso - a sua borda de morte é a
-sua borda de validade - e uma rota que não declarou janela de obsolescência
-servível também não; ambas reconstroem em primeiro plano.
+**Isso é tratado para você.** A primeira leitura de autoridade depois da
+restauração que encontra um epoch ou uma entrada carimbados acima do valor
+restaurado recusa essa entrada de imediato - nem servida uma vez sob
+`Warning`, em nenhuma idade, seja lá o que a política de validade da rota
+diga -, reconstrói-a, sobe o epoch do ledger para um a mais que o carimbo
+mais alto que viu, substitui o lease de epoch daquele nó pelo valor
+elevado, e limpa a L0 daquele nó. Todo outro nó vê o epoch elevado na sua
+própria próxima leitura de autoridade: imediatamente sob
+`CoherenceMode::Authority`, e dentro de `max_age_ms` sob
+`CoherenceMode::Lease`. `suprnova.render_cache.epoch_rewinds` conta cada
+detecção.
 
-**Um avanço de epoch é por processo.** O `RenderCache::advance_epoch` avança
-o epoch do ledger, depois descarta o lease de epoch *deste* processo e limpa
-a L0 *deste* processo. Os nós irmãos mantêm os dois: as suas entradas na L0 e
-o epoch pré-restauração que eles têm em lease. Cada um fica sabendo na sua
-próxima leitura de autoridade - imediatamente no seu próximo hit sob
-`CoherenceMode::Authority`, e até `max_age_ms` depois sob
-`CoherenceMode::Lease` - que é exatamente o que os três testes
+É isso, e é a mesma convergência que um `render-cache:epoch-advance` de
+operador produz, alcançada sem o operador. Os três testes
 `an_epoch_advanced_by_another_node_*` em
-`framework/tests/render_cache/middleware.rs` medem. Até lá um irmão pode
-servir uma entrada pré-restauração e, em uma rota obsoleta servível, pode
-servi-la sob `Warning` como acima.
+`framework/tests/render_cache/middleware.rs` medem o limite de propagação,
+e `a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts` mede a recusa.
 
-**A camada compartilhada não é varrida só por uma mudança de epoch.** A
-varredura da camada de arquivo remove uma entrada quando a sua retenção
-passou *ou* o seu epoch de fence é `<` que o atual. Se restaurar o backup
-baixou o epoch do ledger para abaixo de valores sob os quais a implantação já
-havia publicado entradas, essas entradas carregam um epoch de fence que agora
-é *maior* que o atual, então essa cláusula não as recupera; elas esperam a
-sua retenção acabar em vez disso. A camada de banco de dados é varrida
-apenas por um `RenderCache::sweep()` explícito. A camada Redis se recupera
-sozinha, mas no ritmo do próprio Redis: cada hash de
-entrada é armazenado sob `<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (prefixo
-padrão `suprnova_render:`) com um `PEXPIRE` definido a partir da retenção da
-entrada, então esperar acabar a maior retenção que você declarou é a opção
-passiva.
-
-Então o procedimento, em ordem:
-
-1. **Execute `render-cache:epoch-advance` uma vez**, antes que a implantação
-   restaurada sirva. Ele falha ruidosamente em vez de relatar sucesso quando
-   o singleton de epoch está ausente, que é também como você descobre que a
-   migração não voltou junto com os dados.
-2. **Esvazie a camada L1 compartilhada.** Apague o conteúdo do diretório da
-   camada de arquivo, `DELETE FROM suprnova_render_entries`, ou apague as
-   chaves Redis que casam com `<prefix>entry:*` - o que quer que o perfil
-   configure. Faça isso em vez de esperar por uma varredura, pelo motivo
-   acima.
-3. **Cubra a L0 de cada nó, com o tráfego ainda desligado.** O avanço só
-   limpou o nó que o executou, então até este passo estar feito um irmão não
-   coberto ainda pode servir uma entrada pré-restauração uma vez - e é por
-   isso que o tráfego fica desligado até aqui, e não até o passo 2. Ou
-   reinicie os outros nós - um processo novo tem uma L0 vazia e nenhum epoch
-   em lease, então a sua primeira requisição lê a autoridade restaurada - ou
-   execute `render-cache:epoch-advance` em cada um deles, o que limpa a L0 de
-   cada um conforme roda. A segunda opção incrementa o epoch do ledger uma
-   vez por nó, o que não custa nada: o epoch só avança dali em diante, e todo
-   nó acaba lendo o último valor. As duas são seguras; o reinício é
-   a mais simples de raciocinar, e é a única que não precisa de aritmética de
-   modo `Lease`.
-
-Os passos 2 e 3 são o que torna o passo 1 completo em vez de parcial. Pule-os
-e, em uma rota com uma janela de obsolescência servível, uma representação
-pré-restauração ainda pode ser servida uma vez - corretamente marcada com
-`Warning`, e reconstruída logo em seguida, mas servida.
+**Um passo opcional resta.** Esvazie a camada L1 compartilhada se uma rota
+com uma janela de obsolescência servível não puder servir nem uma vez uma
+representação pré-restauração antes da sua reconstrução. A subida de epoch
+é o que torna isso alcançável: uma entrada de L1 carimbada *abaixo* do
+epoch elevado volta a ser uma entrada movida comum, e uma entrada movida em
+uma rota assim é servida uma vez sob `Warning` enquanto a reconstrução roda
+atrás da requisição. Apague o conteúdo do diretório da camada de arquivo,
+`DELETE FROM suprnova_render_entries`, ou apague as chaves Redis que casam
+com `<prefix>entry:*` - o que quer que o perfil configure. Pule esse passo
+e o pior caso é um corpo pré-restauração marcado `Warning` por cada chave
+assim.
 
 ## Medindo
 
@@ -530,7 +496,7 @@ confirmar que uma entrada existe, sob que classe ela está armazenada e qual é
 o tamanho dela, sem jamais ver o seu conteúdo. A invalidação é um incremento
 de epoch que não custa nada para aplicar e toca apenas neste cache - as suas
 sessões e a sua fila não estão no raio da explosão. A telemetria é um
-conjunto fechado de seis contadores com conjuntos fechados de atributos, que
+conjunto fechado de sete contadores com conjuntos fechados de atributos, que
 é o que torna um dashboard sobre eles estável entre releases em vez de um
 punhado de strings que derivam. A troca é que não existe comando de "apague
 esta chave": as alavancas são por entrada e somente de leitura, ou de epoch

@@ -7,7 +7,7 @@ clé, et est-ce encore à jour ?** et **comment fait-on tout arrêter ?** Il
 répond à une troisième - « cette route est-elle seulement servie depuis une
 copie stockée ? » - par la télémétrie et par l'en-tête `Age` plutôt que par
 une commande, parce que cette question porte sur le trafic plutôt que sur
-une entrée. Il y a deux commandes console, six compteurs de télémétrie, un
+une entrée. Il y a deux commandes console, sept compteurs de télémétrie, un
 balayage disque borné, et un levier d'urgence.
 
 Ce chapitre est la surface d'exploitation : les commandes, exactement ce
@@ -106,7 +106,7 @@ permissions.
 
 ## Télémétrie
 
-Six noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
+Sept noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
 un fournisseur, ou un backend :
 
 | Compteur | Attribut |
@@ -117,6 +117,7 @@ un fournisseur, ou un backend :
 | `suprnova.render_cache.rebuilds` | aucun |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.epoch_rewinds` | aucun |
 
 `lookups` et `hits` portent le même ensemble fermé de huit résultats :
 
@@ -144,6 +145,15 @@ en arrière-plan lancée.
 Les deux compteurs de couture portent leurs propres ensembles : `assembled`
 et `fail_document` pour les assemblages ; `rendered`, `omitted`, `fallback`
 et `failed` pour les emplacements.
+
+`epoch_rewinds` compte des détections, pas des entrées : un incrément
+chaque fois qu'un nœud rencontre une entrée ou un epoch loué estampillé
+au-dessus de l'epoch propre de l'autorité, fait avancer l'epoch du
+registre au-delà de cet estampillage, et vide son propre L0. Une valeur
+non nulle après une restauration de base de données est le signal que la
+restauration a été remarquée. Une valeur non nulle à tout autre moment
+signifie qu'une autorité a reculé pour une raison que personne n'avait
+voulue.
 
 **Un taux de `declined` élevé est le signal sur lequel il vaut la peine
 d'alerter.** Il signifie que des routes que vous avez activées se rendent et
@@ -400,87 +410,41 @@ qu'instables.
 
 Le registre des générations est l'autorité contre laquelle chaque hit est
 prouvé, si bien que restaurer la base de données change ce que « à jour »
-signifie pour chaque entrée déjà stockée. Trois faits tirés du code décident
-de ce qu'une entrée stockée fait ensuite, et aucun d'eux n'est « elle est
+signifie pour chaque entrée déjà stockée. Deux choses décident de ce qu'une
+entrée stockée fait ensuite, et aucune des deux n'est « elle est
 discrètement écartée ».
 
-**Une entrée déplacée n'est pas automatiquement retenue.** La comparaison de
-cohérence (`CoherenceCheck::compare`) est une inégalité dans *l'un ou
-l'autre* sens, si bien qu'une entrée stockée dont les générations observées
-diffèrent de celles du registre restauré est un déplacement quel que soit le
-sens des nombres. Mais un déplacement n'est pas un refus de servir : le
-middleware évalue une entrée déplacée à un âge effectif d'au moins son
-intervalle de fraîcheur (`freshness_state` dans
-`framework/src/render_cache/middleware.rs`), et sur une route qui déclare
-une fenêtre périmée-servable cela la place dans la bande périmée-servable.
-**Le visiteur reçoit une fois la copie d'avant la restauration, sous
-`Warning`, pendant que la reconstruction s'exécute derrière la requête.**
-C'est le même passage de relais que décrit
-[Générations de RenderCache](render-cache-generations.md), et l'étape 4 de
-`an_orm_write_invalidates_the_todos_document_through_generations` l'asserte.
-Une route `PrivateCached` ne fait jamais cela - son bord de mort est son
-bord de fraîcheur - et une route qui n'a déclaré aucune fenêtre
-périmée-servable non plus ; toutes deux reconstruisent au premier plan.
+**C'est pris en charge pour vous.** La première lecture d'autorité après la
+restauration qui rencontre un epoch ou une entrée estampillé au-dessus de
+la valeur restaurée refuse cette entrée purement et simplement - jamais
+servie ne serait-ce qu'une fois sous `Warning`, à aucun âge, quoi que dise
+la politique de fraîcheur de la route -, la reconstruit, fait avancer
+l'epoch du registre à un cran au-dessus du plus haut estampillage vu,
+remplace le bail d'epoch de ce nœud par la valeur avancée, et vide le L0 de
+ce nœud. Tout autre nœud voit l'epoch avancé à sa propre prochaine lecture
+d'autorité : immédiatement sous `CoherenceMode::Authority`, et sous
+`max_age_ms` sous `CoherenceMode::Lease`.
+`suprnova.render_cache.epoch_rewinds` compte chaque détection.
 
-**Un avancement d'epoch est propre au processus.**
-`RenderCache::advance_epoch` fait avancer l'epoch du registre, puis abandonne
-le bail d'epoch de *ce* processus et vide le L0 de *ce* processus. Ses nœuds
-frères gardent les deux : leurs entrées L0 et l'epoch d'avant la
-restauration qu'ils ont loué. Chacun l'apprend à sa prochaine lecture
-d'autorité - immédiatement à son tout prochain hit sous
-`CoherenceMode::Authority`, et jusqu'à `max_age_ms` plus tard sous
-`CoherenceMode::Lease` - ce qui est exactement ce que mesurent les trois
-tests `an_epoch_advanced_by_another_node_*` dans
-`framework/tests/render_cache/middleware.rs`. D'ici là, un frère peut servir
-une entrée d'avant la restauration, et sur une route périmée-servable il
-peut la servir sous `Warning` comme ci-dessus.
+C'est tout, et c'est la même convergence que produit un
+`render-cache:epoch-advance` d'opérateur, atteinte sans l'opérateur. Les
+trois tests `an_epoch_advanced_by_another_node_*` dans
+`framework/tests/render_cache/middleware.rs` mesurent la borne de
+propagation, et `a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts`
+mesure le refus.
 
-**Le palier partagé n'est pas balayé par un simple changement d'epoch.** Le
-balayage du palier fichier retire une entrée quand sa rétention s'est
-écoulée *ou* que son epoch de barrière est `<` à l'epoch courant. Si
-restaurer la sauvegarde a abaissé l'epoch du registre en dessous de valeurs
-sous lesquelles le déploiement avait déjà publié des entrées, ces entrées
-portent un epoch de barrière désormais *supérieur* à l'epoch courant, si
-bien que cette clause ne les récupère pas ; elles attendent plutôt la fin de
-leur rétention. Le palier base de données n'est balayé que par un
-`RenderCache::sweep()`
-explicite. Le palier Redis se récupère lui-même, mais selon le calendrier
-propre à Redis : chaque hash d'entrée est stocké sous
-`<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (préfixe par défaut
-`suprnova_render:`) avec un `PEXPIRE` réglé depuis la rétention de l'entrée,
-si bien qu'attendre la fin de la plus longue rétention que vous avez
-déclarée est l'option passive.
-
-Donc la procédure, dans l'ordre :
-
-1. **Exécutez `render-cache:epoch-advance` une fois**, avant que le
-   déploiement restauré ne serve. Elle échoue bruyamment plutôt que de
-   rapporter un succès quand le singleton d'epoch est absent, ce qui est
-   aussi la façon dont vous découvrez que la migration n'est pas revenue
-   avec les données.
-2. **Videz le palier L1 partagé.** Supprimez le contenu du répertoire du
-   palier fichier, `DELETE FROM suprnova_render_entries`, ou supprimez les
-   clés Redis correspondant à `<prefix>entry:*` - selon le palier que le
-   profil configure. Faites-le plutôt que d'attendre un balayage, pour la
-   raison ci-dessus.
-3. **Couvrez le L0 de chaque nœud, trafic toujours coupé.** L'avancement n'a
-   vidé que le nœud qui l'a exécuté, si bien que tant que cette étape n'est
-   pas faite un frère non couvert peut encore servir une fois une entrée
-   d'avant la restauration - c'est pourquoi le trafic reste coupé jusqu'ici,
-   et pas seulement jusqu'à l'étape 2. Soit redémarrez les autres nœuds - un
-   processus neuf a un L0 vide et aucun epoch loué, donc sa première requête
-   lit l'autorité restaurée - soit exécutez `render-cache:epoch-advance` sur
-   chacun d'eux, ce qui vide le L0 de chacun au passage. La seconde option
-   incrémente l'epoch du registre une fois par nœud, ce qui ne coûte rien :
-   l'epoch ne fait ensuite qu'avancer, et chaque nœud finit par lire la
-   dernière valeur. Les deux sont sûres ; le redémarrage est le plus simple
-   à raisonner, et c'est le seul qui ne demande aucun calcul en mode
-   `Lease`.
-
-Les étapes 2 et 3 sont ce qui rend l'étape 1 complète plutôt que partielle.
-Sautez-les et, sur une route dotée d'une fenêtre périmée-servable, une
-représentation d'avant la restauration peut encore être servie une fois -
-correctement marquée `Warning`, et reconstruite juste après, mais servie.
+**Une étape facultative demeure.** Videz le palier L1 partagé si une route
+dotée d'une fenêtre périmée-servable ne doit pas servir ne serait-ce
+qu'une fois une représentation d'avant la restauration avant sa
+reconstruction. C'est l'avancement qui rend cela atteignable : une entrée
+L1 estampillée *sous* l'epoch avancé redevient une entrée déplacée
+ordinaire, et une entrée déplacée sur une telle route est servie une fois
+sous `Warning` pendant que la reconstruction s'exécute derrière la requête.
+Supprimez le contenu du répertoire du palier fichier, `DELETE FROM
+suprnova_render_entries`, ou supprimez les clés Redis correspondant à
+`<prefix>entry:*` - selon le palier que le profil configure. Sautez cette
+étape et le pire cas est un corps d'avant la restauration marqué `Warning`
+par clé de ce genre.
 
 ## Le mesurer
 
@@ -550,7 +514,7 @@ stockée, et quelle taille elle fait, sans qu'on lui montre jamais son
 contenu. L'invalidation est un incrément d'epoch qui ne coûte rien à
 appliquer et ne touche que ce cache - vos sessions et votre file d'attente
 ne sont pas dans le périmètre d'impact. La télémétrie est un ensemble fermé
-de six compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
+de sept compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
 tableau de bord bâti dessus stable d'une version à l'autre plutôt qu'un jeu
 de chaînes qui dérivent. Le marché, c'est qu'il n'y a aucune commande
 « supprime cette clé-ci » : les leviers sont en lecture seule par entrée, ou

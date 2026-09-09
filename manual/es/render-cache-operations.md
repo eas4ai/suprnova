@@ -7,7 +7,7 @@ clave, y sigue vigente?** y **¿cómo hago que todo se detenga?** Responde a
 una tercera, «¿se está sirviendo esta ruta desde una copia almacenada,
 siquiera?», mediante la telemetría y la cabecera `Age` en lugar de mediante
 un comando, porque esa pregunta va de tráfico y no de una entrada. Hay dos
-comandos de consola, seis contadores de telemetría, un barrido de disco
+comandos de consola, siete contadores de telemetría, un barrido de disco
 acotado y una palanca de emergencia.
 
 Este capítulo es la superficie operativa: los comandos, exactamente qué
@@ -101,7 +101,7 @@ coincidiendo con lo que se cacheó bajo su anterior conjunto de permisos.
 
 ## Telemetría
 
-Seis nombres de contador cerrados, y nada en ninguno de ellos nombra un
+Siete nombres de contador cerrados, y nada en ninguno de ellos nombra un
 nivel, un proveedor o un backend:
 
 | Contador | Atributo |
@@ -112,6 +112,7 @@ nivel, un proveedor o un backend:
 | `suprnova.render_cache.rebuilds` | ninguno |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.epoch_rewinds` | ninguno |
 
 `lookups` y `hits` llevan el mismo conjunto cerrado de ocho desenlaces:
 
@@ -140,6 +141,14 @@ en segundo plano lanzada.
 Los dos contadores de cosido llevan sus propios conjuntos: `assembled` y
 `fail_document` para los ensamblajes; `rendered`, `omitted`, `fallback` y
 `failed` para los slots.
+
+`epoch_rewinds` cuenta detecciones, no entradas: un incremento cada vez
+que un nodo encuentra una entrada o un epoch arrendado estampado por
+encima del propio epoch de la autoridad, sube el epoch del libro mayor por
+encima de ese sello y vacía su propia L0. Un valor distinto de cero
+después de restaurar la base de datos es la señal de que se notó la
+restauración. Un valor distinto de cero en cualquier otro momento
+significa que una autoridad retrocedió por una razón que nadie pretendía.
 
 **Una tasa alta de `declined` es la señal por la que vale la pena alertar.**
 Significa que rutas que incluiste están renderizando y sirviendo
@@ -395,84 +404,39 @@ reproducibles en lugar de inestables.
 
 El libro mayor de generaciones es la autoridad contra la que se demuestra
 cada acierto, así que restaurar la base de datos cambia lo que significa
-«vigente» para toda entrada ya almacenada. Tres hechos del código deciden
-qué hace a continuación una entrada almacenada, y ninguno de ellos es «se
-descarta en silencio».
+«vigente» para toda entrada ya almacenada. Dos cosas deciden qué hace a
+continuación una entrada almacenada, y ninguna de ellas es «se descarta en
+silencio».
 
-**Una entrada movida no se retiene automáticamente.** La comparación de
-coherencia (`CoherenceCheck::compare`) es una desigualdad en *cualquiera*
-de las dos direcciones, así que una entrada almacenada cuyas generaciones
-observadas difieren de las del libro mayor restaurado es un movimiento
-hacia donde sea que fueran los números. Pero un movimiento no es una
-negativa a servir: el middleware evalúa una entrada movida con una
-antigüedad efectiva de al menos su intervalo fresco (`freshness_state` en
-`framework/src/render_cache/middleware.rs`), y en una ruta que declara una
-ventana obsoleta-servible eso la deja en la banda obsoleta-servible. **Al
-visitante se le sirve una vez la copia previa a la restauración, bajo
-`Warning`, mientras la reconstrucción se ejecuta por detrás de la
-petición.** Ese es el mismo traspaso que describe
-[RenderCache Generaciones](render-cache-generations.md), y el paso 4 de
-`an_orm_write_invalidates_the_todos_document_through_generations` lo
-asevera. Una ruta `PrivateCached` nunca hace esto, porque su borde muerto
-es su borde fresco, y tampoco lo hace una ruta que no declaró ventana
-obsoleta-servible; ambas reconstruyen en primer plano.
+**Se ocupa de ello por ti.** La primera lectura de autoridad tras la
+restauración que encuentra un epoch o una entrada estampados por encima
+del valor restaurado rehúsa esa entrada por completo - ni siquiera se
+sirve una vez bajo `Warning`, a ninguna antigüedad, diga lo que diga la
+política de frescura de la ruta -, la reconstruye, sube el epoch del
+libro mayor a uno por encima del sello más alto que vio, sustituye el
+lease de epoch de ese nodo por el valor elevado, y vacía la L0 de ese
+nodo. Todo otro nodo ve el epoch elevado en su propia siguiente lectura
+de autoridad: de inmediato bajo `CoherenceMode::Authority`, y dentro de
+`max_age_ms` bajo `CoherenceMode::Lease`.
+`suprnova.render_cache.epoch_rewinds` cuenta cada detección.
 
-**Un avance de epoch es por proceso.** `RenderCache::advance_epoch` avanza
-el epoch del libro mayor, luego descarta el lease de epoch de *este*
-proceso y vacía la L0 de *este* proceso. Sus nodos hermanos conservan
-ambas cosas: sus entradas de L0 y el epoch previo a la restauración que
-tienen arrendado. Cada uno se entera en su siguiente lectura de autoridad,
-de inmediato en su siguiente acierto bajo `CoherenceMode::Authority` y
-hasta `max_age_ms` después bajo `CoherenceMode::Lease`, que es exactamente
-lo que miden las tres pruebas `an_epoch_advanced_by_another_node_*` de
-`framework/tests/render_cache/middleware.rs`. Hasta entonces un hermano
-puede servir una entrada previa a la restauración, y en una ruta
-obsoleta-servible puede servirla bajo `Warning` como arriba.
+Eso es todo, y es la misma convergencia que produce el
+`render-cache:epoch-advance` de un operador, alcanzada sin el operador.
+Las tres pruebas `an_epoch_advanced_by_another_node_*` de
+`framework/tests/render_cache/middleware.rs` miden la cota de propagación,
+y `a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts` mide la negativa.
 
-**El nivel compartido no lo barre un cambio de epoch por sí solo.** El
-barrido del nivel de archivo elimina una entrada cuando su retención ha
-transcurrido *o* su epoch de valla es `<` que el actual. Si restaurar la
-copia de seguridad bajó el epoch del libro mayor por debajo de valores bajo
-los que el despliegue ya había publicado entradas, esas entradas llevan un
-epoch de valla que ahora es *mayor* que el actual, así que esa cláusula no
-las recupera; en su lugar esperan a que se agote su retención. El nivel de
-base de datos solo lo barre un `RenderCache::sweep()` explícito. El nivel
-de Redis se recupera solo, pero según el calendario del propio Redis: cada
-hash de entrada se almacena bajo `<RENDER_CACHE_REDIS_PREFIX>entry:<key>`
-(prefijo por defecto `suprnova_render:`) con un `PEXPIRE` fijado a partir
-de la retención de la entrada, así que esperar a que se agote la retención
-más larga que hayas declarado es la opción pasiva.
-
-Así que el procedimiento, en orden:
-
-1. **Ejecuta `render-cache:epoch-advance` una vez**, antes de que el
-   despliegue restaurado sirva. Falla ruidosamente en lugar de informar de
-   éxito cuando falta el singleton de epoch, que es además cómo te enteras
-   de que la migración no volvió con los datos.
-2. **Vacía el nivel L1 compartido.** Borra el contenido del directorio del
-   nivel de archivo, `DELETE FROM suprnova_render_entries`, o borra las
-   claves de Redis que coincidan con `<prefix>entry:*`, según el nivel que
-   configure el perfil. Haz esto en lugar de esperar un barrido, por la
-   razón de más arriba.
-3. **Cubre la L0 de cada nodo, con el tráfico todavía cortado.** El avance
-   solo vació el nodo que lo ejecutó, así que hasta que este paso esté
-   hecho un hermano sin cubrir todavía puede servir una vez una entrada
-   previa a la restauración, y por eso el tráfico sigue cortado hasta aquí
-   y no hasta el paso 2. O reinicias los demás nodos (un proceso nuevo
-   tiene una L0 vacía y ningún epoch arrendado, así que su primera petición
-   lee la autoridad restaurada) o ejecutas `render-cache:epoch-advance` en
-   cada uno de ellos, lo cual vacía la L0 de cada uno según se ejecuta. La
-   segunda opción sube el epoch del libro mayor una vez por nodo, lo que no
-   cuesta nada: a partir de ahí el epoch solo avanza, y todos los nodos
-   acaban leyendo el último valor. Ambas son seguras; el reinicio es el más
-   sencillo de razonar, y es el único que no necesita aritmética de modo
-   `Lease`.
-
-Los pasos 2 y 3 son lo que hace que el paso 1 sea completo en lugar de
-parcial. Sáltatelos y, en una ruta con una ventana obsoleta-servible, una
-representación previa a la restauración todavía puede servirse una vez:
-correctamente marcada con `Warning`, y reconstruida justo después, pero
-servida.
+**Queda un paso opcional.** Vacía el nivel L1 compartido si una ruta con
+una ventana obsoleta-servible no debe servir ni una vez una representación
+previa a la restauración antes de su reconstrucción. La subida de epoch es
+lo que lo hace alcanzable: una entrada de L1 estampada *por debajo* del
+epoch elevado vuelve a ser una entrada movida ordinaria, y una entrada
+movida en una ruta así se sirve una vez bajo `Warning` mientras la
+reconstrucción se ejecuta por detrás de la petición. Borra el contenido
+del directorio del nivel de archivo, `DELETE FROM suprnova_render_entries`,
+o borra las claves de Redis que coincidan con `<prefix>entry:*`, según el
+nivel que configure el perfil. Sáltatelo y el peor caso es un cuerpo
+previo a la restauración marcado `Warning` por cada clave así.
 
 ## Medirlo
 
@@ -541,7 +505,7 @@ operador puede confirmar que una entrada existe, bajo qué clase está
 almacenada y cuán grande es, sin que se le muestre nunca su contenido. La
 invalidación es una subida de epoch que no cuesta nada aplicar y que toca
 solo esta caché: tus sesiones y tu cola no están en el radio de la
-explosión. La telemetría es un conjunto cerrado de seis contadores con
+explosión. La telemetría es un conjunto cerrado de siete contadores con
 conjuntos de atributos cerrados, que es lo que hace que un panel sobre
 ellos sea estable entre versiones en lugar de un conjunto de cadenas que se
 va a la deriva. El intercambio es que no hay comando de «borra esta clave»:

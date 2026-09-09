@@ -6,7 +6,7 @@ is this node holding under this key, and is it still current?** and **how do
 I make everything stop?** It answers a third - "is this route being served
 from a stored copy at all?" - through telemetry and through the `Age` header
 rather than through a command, because that question is about traffic rather
-than about one entry. There are two console commands, six telemetry
+than about one entry. There are two console commands, seven telemetry
 counters, one bounded disk sweep, and one emergency lever.
 
 This chapter is the operating surface: the commands, exactly what they print
@@ -97,7 +97,7 @@ changed keeps matching whatever was cached under their prior permission set.
 
 ## Telemetry
 
-Six closed counter names, and nothing in any of them names a tier, a
+Seven closed counter names, and nothing in any of them names a tier, a
 provider, or a backend:
 
 | Counter | Attribute |
@@ -108,6 +108,7 @@ provider, or a backend:
 | `suprnova.render_cache.rebuilds` | none |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.epoch_rewinds` | none |
 
 `lookups` and `hits` carry the same closed set of eight outcomes:
 
@@ -132,6 +133,13 @@ rejected attempt. `rebuilds` counts one per spawned background rebuild.
 The two stitch counters carry their own sets: `assembled` and
 `fail_document` for assemblies; `rendered`, `omitted`, `fallback`, and
 `failed` for slots.
+
+`epoch_rewinds` counts detections, not entries: one increment each time a
+node meets an entry or a leased epoch stamped above the authority's own,
+lifts the ledger's epoch past that stamp, and clears its own L0. A non-zero
+value after a database restore is the signal that the restore was noticed. A
+non-zero value at any other time means an authority moved backwards for a
+reason nobody intended.
 
 **A high `declined` rate is the signal worth alerting on.** It means routes
 you opted in are rendering and serving correctly while never being stored,
@@ -363,75 +371,36 @@ counter, which is what makes these tests reproducible rather than flaky.
 
 The generation ledger is the authority every hit is proved against, so
 restoring the database changes what "current" means for every entry already
-stored. Three facts from the code decide what a stored entry does next, and
-none of them is "it is quietly dropped".
+stored. Two things decide what a stored entry does next, and neither of them
+is "it is quietly dropped".
 
-**A moved entry is not automatically withheld.** The coherence comparison
-(`CoherenceCheck::compare`) is an inequality in *either* direction, so a
-stored entry whose observed generations differ from the restored ledger's is
-a move whichever way the numbers went. But a move is not a refusal to serve:
-the middleware evaluates a moved entry at an effective age of at least its
-fresh interval (`freshness_state` in
-`framework/src/render_cache/middleware.rs`), and on a route that declares a
-stale-servable window that lands it in the stale-servable band. **The
-visitor is served the pre-restore copy once, under `Warning`, while the
-rebuild runs behind the request.** That is the same handoff
-[RenderCache Generations](render-cache-generations.md) describes, and step 4
-of `an_orm_write_invalidates_the_todos_document_through_generations` asserts
-it. A `PrivateCached` route never does this - its dead edge is its fresh edge -
-and neither does a route that declared no stale-servable window; both
-rebuild in the foreground.
+**It is handled for you.** The first authority read after the restore that
+meets an epoch or an entry stamped above the restored value refuses that
+entry outright - not served once under `Warning`, not at any age, whatever
+the route's freshness policy says - rebuilds it, lifts the ledger's epoch to
+one past the highest stamp it saw, replaces that node's epoch lease with the
+lifted value, and clears that node's L0. Every other node sees the lifted
+epoch at its own next authority read: immediately under
+`CoherenceMode::Authority`, and within `max_age_ms` under
+`CoherenceMode::Lease`. `suprnova.render_cache.epoch_rewinds` counts each
+detection.
 
-**An epoch advance is per process.** `RenderCache::advance_epoch` advances
-the ledger's epoch, then drops *this* process's epoch lease and clears
-*this* process's L0. Its sibling nodes keep both: their L0 entries and the
-pre-restore epoch they have leased. Each learns at its next authority read -
-immediately on its very next hit under `CoherenceMode::Authority`, and up to
-`max_age_ms` later under `CoherenceMode::Lease` - which is exactly what the
+That is the whole of it, and it is the same convergence an operator's
+`render-cache:epoch-advance` produces, reached without the operator. The
 three `an_epoch_advanced_by_another_node_*` tests in
-`framework/tests/render_cache/middleware.rs` measure. Until then a sibling
-can serve a pre-restore entry, and on a stale-servable route it can serve it
-under `Warning` as above.
+`framework/tests/render_cache/middleware.rs` measure the propagation bound,
+and `a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts` measures the
+refusal.
 
-**The shared tier is not swept by an epoch change alone.** The file tier's
-sweep removes an entry when its retention has elapsed *or* its fence epoch
-is `<` the current one. If restoring the backup lowered the ledger's epoch
-below values the deployment had already published entries under, those
-entries carry a fence epoch that is now *higher* than the current one, so
-that clause does not reclaim them; they wait out their retention instead.
-The database tier is swept only by an explicit `RenderCache::sweep()`. The
-Redis tier reclaims itself, but on Redis's own schedule: each entry hash is
-stored under `<RENDER_CACHE_REDIS_PREFIX>entry:<key>` (default prefix
-`suprnova_render:`) with a `PEXPIRE` set from the entry's retention, so
-waiting out the longest retention you declared is the passive option.
-
-So the procedure, in order:
-
-1. **Run `render-cache:epoch-advance` once**, before the restored deployment
-   serves. It fails loudly rather than reporting success when the epoch
-   singleton is missing, which is also how you find out the migration did
-   not come back with the data.
-2. **Empty the shared L1 tier.** Delete the file tier's directory contents,
-   `DELETE FROM suprnova_render_entries`, or delete the Redis keys matching
-   `<prefix>entry:*` - whichever tier the profile configures. Do this rather
-   than waiting for a sweep, for the reason above.
-3. **Cover every node's L0, with traffic still off.** The advance only
-   cleared the node that ran it, so until this step is done an uncovered
-   sibling can still serve a pre-restore entry once - which is why traffic
-   stays off until here, not until step 2. Either restart the other nodes -
-   a fresh process has an empty L0 and no leased epoch, so its first request
-   reads the restored authority - or run `render-cache:epoch-advance` on
-   each of them, which clears each one's L0 as it runs. The second option
-   bumps the ledger's epoch once per node, which costs nothing: the epoch
-   only ever moves forward from there, and every node ends up reading the
-   last value. Both are safe; the restart is
-   the simpler one to reason about, and it is the only one that needs no
-   `Lease`-mode arithmetic.
-
-Steps 2 and 3 are what make step 1 complete rather than partial. Skip them
-and, on a route with a stale-servable window, a pre-restore representation
-can still be served once - correctly marked `Warning`, and rebuilt right
-after, but served.
+**One optional step remains.** Empty the shared L1 tier if a route with a
+stale-servable window must not serve a pre-restore representation once
+before its rebuild. The lift is what makes that reachable: an L1 entry
+stamped *below* the lifted epoch is an ordinary moved entry again, and a
+moved entry on such a route is served once under `Warning` while the rebuild
+runs behind the request. Delete the file tier's directory contents,
+`DELETE FROM suprnova_render_entries`, or delete the Redis keys matching
+`<prefix>entry:*` - whichever tier the profile configures. Skip it and the
+worst case is one `Warning`-marked pre-restore body per such key.
 
 ## Measuring it
 
@@ -496,7 +465,7 @@ Inspection is body-free by construction, so an operator can confirm an entry
 exists, what class it is stored under, and how large it is, without ever
 being shown its contents. Invalidation is an epoch bump that costs nothing
 to apply and touches only this cache - your sessions and your queue are not
-in the blast radius. Telemetry is a closed set of six counters with closed
+in the blast radius. Telemetry is a closed set of seven counters with closed
 attribute sets, which is what makes a dashboard over them stable across
 releases rather than a set of strings that drift. The trade is that there is
 no "delete this one key" command: the levers are per entry read-only, or

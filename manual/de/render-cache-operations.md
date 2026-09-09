@@ -7,7 +7,7 @@ Schlüssel, und ist es noch aktuell?** und **Wie bringe ich alles zum
 Stillstand?** Eine dritte, „Wird diese Route überhaupt aus einer
 gespeicherten Kopie bedient?“, beantwortet er über Telemetrie und über den
 `Age`-Header statt über einen Befehl, denn diese Frage handelt vom Verkehr
-und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, sechs
+und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, sieben
 Telemetriezähler, einen begrenzten Bereinigungslauf auf der Festplatte und
 einen Notfallhebel.
 
@@ -106,7 +106,7 @@ unter seinem vorherigen Berechtigungssatz gecacht wurde.
 
 ## Telemetrie
 
-Sechs geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
+Sieben geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
 Provider oder ein Backend benannt:
 
 | Zähler | Attribut |
@@ -117,6 +117,7 @@ Provider oder ein Backend benannt:
 | `suprnova.render_cache.rebuilds` | keines |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.epoch_rewinds` | keines |
 
 `lookups` und `hits` tragen dieselbe geschlossene Menge von acht Ergebnissen:
 
@@ -146,6 +147,15 @@ einen pro angestoßenem Neuaufbau im Hintergrund.
 Die beiden Stitch-Zähler tragen ihre eigenen Mengen: `assembled` und
 `fail_document` für Zusammensetzungen; `rendered`, `omitted`, `fallback` und
 `failed` für Slots.
+
+`epoch_rewinds` zählt Erkennungen, nicht Einträge: eine Erhöhung jedes Mal,
+wenn ein Knoten auf einen Eintrag oder eine verleaste Epoche trifft, die
+über der eigenen Epoche der Autorität gestempelt ist, die Epoche des
+Ledgers über diesen Stempel hinaus anhebt und sein eigenes L0 leert. Ein
+von null verschiedener Wert nach einer Wiederherstellung der Datenbank ist
+das Signal, dass die Wiederherstellung bemerkt wurde. Ein von null
+verschiedener Wert zu jedem anderen Zeitpunkt bedeutet, dass eine Autorität
+aus einem von niemandem beabsichtigten Grund rückwärtsgelaufen ist.
 
 **Eine hohe `declined`-Rate ist das Signal, auf das zu alarmieren sich
 lohnt.** Sie bedeutet, dass Routen, die Sie aufgenommen haben, korrekt
@@ -408,90 +418,42 @@ flatterhaft.
 
 Das Generations-Ledger ist die Autorität, gegen die jeder Treffer
 nachgewiesen wird, sodass die Wiederherstellung der Datenbank ändert, was
-„aktuell“ für jeden bereits gespeicherten Eintrag bedeutet. Drei Tatsachen
-aus dem Code entscheiden, was ein gespeicherter Eintrag als Nächstes tut, und
-keine davon lautet „er wird still verworfen“.
+„aktuell“ für jeden bereits gespeicherten Eintrag bedeutet. Zwei Dinge
+entscheiden, was ein gespeicherter Eintrag als Nächstes tut, und keins von
+beiden lautet „er wird still verworfen“.
 
-**Ein bewegter Eintrag wird nicht automatisch zurückgehalten.** Der
-Kohärenzvergleich (`CoherenceCheck::compare`) ist eine Ungleichheit in
-*beide* Richtungen, sodass ein gespeicherter Eintrag, dessen beobachtete
-Generationen von denen des wiederhergestellten Ledgers abweichen, eine
-Bewegung ist, egal in welche Richtung die Zahlen gingen. Doch eine Bewegung
-ist keine Verweigerung der Auslieferung: Die Middleware bewertet einen
-bewegten Eintrag mit einem effektiven Alter von mindestens seinem
-Frische-Intervall (`freshness_state` in
-`framework/src/render_cache/middleware.rs`), und auf einer Route, die ein
-Veraltet-auslieferbar-Fenster deklariert, landet er damit in diesem Band.
-**Der Besucher bekommt die Kopie von vor der Wiederherstellung einmal
-ausgeliefert, unter `Warning`, während der Neuaufbau hinter der Anfrage
-läuft.** Das ist dieselbe Übergabe, die
-[RenderCache Generationen](render-cache-generations.md) beschreibt, und
-Schritt 4 von
-`an_orm_write_invalidates_the_todos_document_through_generations` sichert sie
-zu. Eine `PrivateCached`-Route tut das nie, denn ihre Todesgrenze ist ihre
-Frische-Grenze, und eine Route, die kein Veraltet-auslieferbar-Fenster
-deklariert hat, ebenso wenig; beide bauen im Vordergrund neu auf.
+**Das wird für Sie erledigt.** Das erste Autoritätslesen nach der
+Wiederherstellung, das auf eine Epoche oder einen Eintrag trifft, die bzw.
+der über dem wiederhergestellten Wert gestempelt ist, verweigert diesen
+Eintrag rundweg - nicht einmal unter `Warning` ausgeliefert, in keinem
+Alter, was auch immer die Frische-Richtlinie der Route sagt -, baut ihn neu
+auf, hebt die Epoche des Ledgers auf eins über den höchsten gesehenen
+Stempel an, ersetzt die Epochen-Lease dieses Knotens durch den angehobenen
+Wert und leert das L0 dieses Knotens. Jeder andere Knoten sieht die
+angehobene Epoche bei seinem eigenen nächsten Autoritätslesen: sofort unter
+`CoherenceMode::Authority` und innerhalb von `max_age_ms` unter
+`CoherenceMode::Lease`. `suprnova.render_cache.epoch_rewinds` zählt jede
+Erkennung.
 
-**Ein Vorrücken der Epoche gilt pro Prozess.** `RenderCache::advance_epoch`
-rückt die Epoche des Ledgers vor, gibt dann die Epochen-Lease *dieses*
-Prozesses ab und leert das L0 *dieses* Prozesses. Seine Nachbarknoten
-behalten beides: ihre L0-Einträge und die Epoche von vor der
-Wiederherstellung, die sie verleast haben. Jeder erfährt es bei seinem
-nächsten Autoritätslesen - sofort bei seinem allernächsten Treffer unter
-`CoherenceMode::Authority` und bis zu `max_age_ms` später unter
-`CoherenceMode::Lease` -, und genau das messen die drei Tests
-`an_epoch_advanced_by_another_node_*` in
-`framework/tests/render_cache/middleware.rs`. Bis dahin kann ein Nachbar
-einen Eintrag von vor der Wiederherstellung ausliefern, und auf einer
-veraltet-auslieferbaren Route kann er ihn wie oben unter `Warning`
-ausliefern.
+Das ist bereits alles, und es ist dieselbe Konvergenz, die der
+Betreiberbefehl `render-cache:epoch-advance` erzeugt, nur ohne den
+Betreiber erreicht. Die drei Tests `an_epoch_advanced_by_another_node_*` in
+`framework/tests/render_cache/middleware.rs` messen die Ausbreitungsgrenze,
+und `a_rewound_epoch_refuses_the_entry_rebuilds_and_lifts` misst die
+Verweigerung.
 
-**Die geteilte Ebene wird von einer Epochenänderung allein nicht bereinigt.**
-Der Bereinigungslauf der Datei-Ebene entfernt einen Eintrag, wenn seine
-Aufbewahrung verstrichen ist *oder* seine Fence-Epoche `<` der aktuellen
-ist. Hat die Wiederherstellung der Sicherung die Epoche des Ledgers unter
-Werte gesenkt, unter denen die Bereitstellung bereits Einträge
-veröffentlicht hatte, dann tragen diese Einträge eine Fence-Epoche, die nun
-*höher* ist als die aktuelle, sodass jene Klausel sie nicht zurückgewinnt;
-sie warten stattdessen ihre Aufbewahrung ab. Die Datenbank-Ebene wird nur
-durch ein ausdrückliches `RenderCache::sweep()` bereinigt. Die
-Redis-Ebene gewinnt sich selbst zurück, aber nach Redis' eigenem Zeitplan:
-Jeder Eintrags-Hash wird unter `<RENDER_CACHE_REDIS_PREFIX>entry:<key>`
-gespeichert (Standardpräfix `suprnova_render:`), mit einem `PEXPIRE`, das aus
-der Aufbewahrung des Eintrags gesetzt wird, sodass das Abwarten der längsten
-von Ihnen deklarierten Aufbewahrung die passive Option ist.
-
-Also das Verfahren, der Reihe nach:
-
-1. **Führen Sie `render-cache:epoch-advance` einmal aus**, bevor die
-   wiederhergestellte Bereitstellung ausliefert. Es scheitert lautstark,
-   statt Erfolg zu melden, wenn das Epochen-Singleton fehlt, und so erfahren
-   Sie zugleich, dass die Migration nicht mit den Daten zurückgekommen ist.
-2. **Leeren Sie die geteilte L1-Ebene.** Löschen Sie den Inhalt des
-   Verzeichnisses der Datei-Ebene, `DELETE FROM suprnova_render_entries`,
-   oder löschen Sie die Redis-Schlüssel, die auf `<prefix>entry:*` passen,
-   je nachdem, welche Ebene das Profil konfiguriert. Tun Sie das, statt auf
-   einen Bereinigungslauf zu warten, aus dem oben genannten Grund.
-3. **Decken Sie das L0 jedes Knotens ab, noch ohne Verkehr.** Das Vorrücken
-   hat nur den Knoten geleert, der es ausgeführt hat, sodass bis zum
-   Abschluss dieses Schritts ein nicht abgedeckter Nachbar einen Eintrag von
-   vor der Wiederherstellung noch einmal ausliefern kann, und genau deshalb
-   bleibt der Verkehr bis hierher aus und nicht nur bis Schritt 2. Starten
-   Sie entweder die anderen Knoten neu - ein frischer Prozess hat ein leeres
-   L0 und keine verleaste Epoche, sodass seine erste Anfrage die
-   wiederhergestellte Autorität liest -, oder führen Sie
-   `render-cache:epoch-advance` auf jedem von ihnen aus, was jeweils dessen
-   L0 leert, während es läuft. Die zweite Option erhöht die Epoche des
-   Ledgers einmal pro Knoten, was nichts kostet: Die Epoche bewegt sich von
-   da an nur noch vorwärts, und jeder Knoten liest am Ende den letzten Wert.
-   Beide sind sicher; über den Neustart lässt sich einfacher nachdenken, und
-   er ist der einzige, der keine Rechnerei im `Lease`-Modus braucht.
-
-Die Schritte 2 und 3 machen Schritt 1 vollständig statt teilweise. Lassen
-Sie sie aus, und auf einer Route mit einem Veraltet-auslieferbar-Fenster kann
-eine Repräsentation von vor der Wiederherstellung noch einmal ausgeliefert
-werden - korrekt mit `Warning` markiert und gleich danach neu aufgebaut,
-aber ausgeliefert.
+**Ein optionaler Schritt bleibt.** Leeren Sie die geteilte L1-Ebene, wenn
+eine Route mit einem Veraltet-auslieferbar-Fenster keine Repräsentation von
+vor der Wiederherstellung auch nur einmal vor ihrem Neuaufbau ausliefern
+darf. Erst das Anheben macht das erreichbar: Ein L1-Eintrag, der *unter* der
+angehobenen Epoche gestempelt ist, ist wieder ein gewöhnlicher bewegter
+Eintrag, und ein bewegter Eintrag auf einer solchen Route wird einmal unter
+`Warning` ausgeliefert, während der Neuaufbau hinter der Anfrage läuft.
+Löschen Sie den Inhalt des Verzeichnisses der Datei-Ebene, `DELETE FROM
+suprnova_render_entries`, oder löschen Sie die Redis-Schlüssel, die auf
+`<prefix>entry:*` passen, je nachdem, welche Ebene das Profil konfiguriert.
+Lassen Sie es aus, und der schlimmste Fall ist ein `Warning`-markierter
+Body von vor der Wiederherstellung pro solchem Schlüssel.
 
 ## Es messen
 
@@ -560,7 +522,7 @@ kann, dass ein Eintrag existiert, unter welcher Klasse er gespeichert ist und
 wie groß er ist, ohne je seinen Inhalt gezeigt zu bekommen. Die
 Invalidierung ist ein Epochensprung, der nichts kostet und nur diesen Cache
 berührt: Ihre Sitzungen und Ihre Queue liegen nicht im Wirkungsradius. Die
-Telemetrie ist eine geschlossene Menge von sechs Zählern mit geschlossenen
+Telemetrie ist eine geschlossene Menge von sieben Zählern mit geschlossenen
 Attributmengen, und das macht ein Dashboard darüber über Releases hinweg
 stabil statt zu einem Satz driftender Zeichenketten. Der Preis ist, dass es
 keinen Befehl „lösche genau diesen einen Schlüssel“ gibt: Die Hebel sind pro
