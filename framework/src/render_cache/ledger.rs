@@ -387,7 +387,10 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 pub async fn advance_in_current_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
-    if !super::write_side_open().await? || identities.is_empty() {
+    // Only ever called from inside the caller's ambient transaction (see
+    // `orm::advance`), which already holds the pool connection it was
+    // granted - `true` so `write_side_open` never waits on a second one.
+    if !super::write_side_open(true).await? || identities.is_empty() {
         return Ok(());
     }
     let tx = Transaction::current().ok_or_else(|| {
@@ -609,7 +612,10 @@ pub async fn advance_via_handle(
     handle: &TxHandle,
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
-    if !super::write_side_open().await? {
+    // `handle` is an explicit transaction handle - this call already holds
+    // the pool connection it was granted, so `write_side_open` must never
+    // wait on a second one; see that function's `caller_holds_pool_connection`.
+    if !super::write_side_open(true).await? {
         return Ok(());
     }
     advance_through(

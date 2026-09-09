@@ -14,6 +14,19 @@
 //! then costs nothing, so an application that never uses RenderCache still
 //! pays no RenderCache SQL on any write - the property `INSTALLED` was
 //! introduced to guarantee and that this must not lose.
+//!
+//! The probe itself runs on a connection taken directly from the pool
+//! (`ledger::migration_present_off_transaction`), never on a caller's
+//! transaction - a failing probe must not poison a write the caller is
+//! also making. That means the probe needs a connection of its own, which
+//! a caller already inside a transaction cannot safely wait for: it is
+//! already holding the one connection its transaction was granted, so
+//! asking the pool for a second blocks until the pool's acquire timeout
+//! fires, on any backend, not only a single-connection test database. See
+//! [`write_side_open`]'s `caller_holds_pool_connection` parameter: when
+//! that is set, this module skips the probe rather than wait for a
+//! connection it cannot be sure exists, and stays `Undecided` until a
+//! write asks again from outside a transaction.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -103,12 +116,30 @@ fn enabled() -> bool {
 /// rather than the serving process's answer frozen in. `Undecided` fixes
 /// nothing either: the next write asks again.
 ///
+/// `caller_holds_pool_connection` is true when the call is made from inside
+/// a transaction - ambient (`CURRENT_TX`) or an explicit `_with_tx` /
+/// `with_tx` handle - that already holds the one connection it was granted
+/// from the pool. The schema probe (`migration_present_off_transaction`)
+/// needs a *second*, separate pooled connection: on a pool with no spare
+/// connection - a single-connection test database is the extreme case, but
+/// any pool can be briefly exhausted - asking for one blocks until the
+/// pool's acquire timeout fires, which stalls the caller's write and can
+/// exhaust the pool for everyone else waiting on it. So when this call
+/// would otherwise probe the schema and the caller already holds a pool
+/// connection, the probe is skipped and the process stays `Undecided`:
+/// the write itself still runs, and the next call - from this caller's next
+/// write, or from any write made outside a transaction - asks again. This
+/// never blocks `installed`, `disabled`, or `disconnected` answers, none of
+/// which touch the database.
+///
 /// # Errors
 ///
 /// Propagates the schema probe's own database error, without fixing a
 /// decision on it: a database that could not be reached is not the same
 /// answer as one without the migration.
-pub(crate) async fn write_side_open() -> Result<bool, FrameworkError> {
+pub(crate) async fn write_side_open(
+    caller_holds_pool_connection: bool,
+) -> Result<bool, FrameworkError> {
     match STATE.load(Ordering::Relaxed) {
         OPEN => return Ok(true),
         CLOSED => return Ok(false),
@@ -117,7 +148,11 @@ pub(crate) async fn write_side_open() -> Result<bool, FrameworkError> {
     let installed = super::is_installed();
     let enabled = enabled();
     let connected = DB::is_connected();
-    let migration = if !installed && enabled && connected {
+    let needs_schema_probe = !installed && enabled && connected;
+    if needs_schema_probe && caller_holds_pool_connection {
+        return Ok(false);
+    }
+    let migration = if needs_schema_probe {
         Some(super::ledger::migration_present_off_transaction().await?)
     } else {
         None

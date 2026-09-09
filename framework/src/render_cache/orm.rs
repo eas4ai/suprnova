@@ -62,10 +62,11 @@ use crate::{DB, FrameworkError};
 /// reserved permission-version identity through this same path so a bump is
 /// persisted and logged the way every ORM write's advance is.
 pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
-    if !super::write_side_open().await? {
+    let already_in_transaction = in_transaction();
+    if !super::write_side_open(already_in_transaction).await? {
         return Ok(());
     }
-    if in_transaction() {
+    if already_in_transaction {
         return super::ledger::advance_in_current_transaction(&identities).await;
     }
     if !DB::is_connected() {
@@ -129,7 +130,7 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    if !super::write_side_open().await? {
+    if !super::write_side_open(in_transaction()).await? {
         return Ok(());
     }
     advance(model_identities(model)?).await
@@ -163,8 +164,11 @@ where
 {
     // Same reasoning as `after_model_write`: check before `model_identities`
     // runs rather than after, since `advance_via_tx` / `advance_via_handle`
-    // check `is_installed` only once they are called.
-    if !super::write_side_open().await? {
+    // check `is_installed` only once they are called. `tx` is an explicit
+    // transaction handle, so this call already holds the pool connection
+    // that handle was granted - pass `true` so `write_side_open` never
+    // waits on a second one.
+    if !super::write_side_open(true).await? {
         return Ok(());
     }
     super::ledger::advance_via_tx(tx, &model_identities(model)?).await
