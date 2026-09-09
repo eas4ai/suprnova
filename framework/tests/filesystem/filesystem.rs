@@ -1,4 +1,4 @@
-#![cfg(feature = "filesystem")]
+#![cfg(all(feature = "filesystem", feature = "testing"))]
 
 //! Integration tests for the `Storage` facade.
 //!

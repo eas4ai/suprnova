@@ -40,6 +40,35 @@ fn read(p: impl AsRef<std::path::Path>) -> String {
         .unwrap_or_else(|e| panic!("read {}: {e}", p.as_ref().display()))
 }
 
+/// Pins the production build shape (design doc section 5.1): the
+/// production dependency turns default features off and lists the nine
+/// non-`testing` defaults, and a dev-dependency turns `testing` back on
+/// for tests only.
+fn assert_production_build_shape(cargo: &str) {
+    let production_features = "default-features = false, features = [\"filesystem\", \
+         \"database-sqlite\", \"database-postgres\", \"database-mysql\", \"vector-mariadb\", \
+         \"web-push\", \"localization\", \"magnetar-oauth\", \"media\"] }";
+    assert!(
+        cargo.contains(production_features),
+        "Cargo.toml's production dependency must turn default features off \
+         and list the nine non-testing defaults: {cargo}"
+    );
+    assert!(
+        cargo.contains("[dev-dependencies]"),
+        "Cargo.toml declares a [dev-dependencies] table: {cargo}"
+    );
+    let dev_section = cargo
+        .split("[dev-dependencies]")
+        .nth(1)
+        .expect("[dev-dependencies] table present");
+    assert!(
+        dev_section
+            .contains(r#"suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = ""#)
+            && dev_section.contains(r#"features = ["testing"] }"#),
+        "Cargo.toml's dev-dependency must turn `testing` back on: {cargo}"
+    );
+}
+
 #[test]
 fn inertia_starter_scaffolds_console_binary_and_commands_dir() {
     let tmp = TempDir::new().unwrap();
@@ -76,6 +105,7 @@ fn inertia_starter_scaffolds_console_binary_and_commands_dir() {
         "Cargo.toml declares the console [[bin]]: {cargo}"
     );
     assert!(cargo.contains("path = \"src/bin/console.rs\""));
+    assert_production_build_shape(&cargo);
 
     let lib = read(project.join("src/lib.rs"));
     assert!(
@@ -109,6 +139,7 @@ fn api_starter_scaffolds_console_binary_and_commands_dir() {
     let cargo = read(project.join("Cargo.toml"));
     assert!(cargo.contains("name = \"console\""));
     assert!(cargo.contains("path = \"src/bin/console.rs\""));
+    assert_production_build_shape(&cargo);
 
     let lib = read(project.join("src/lib.rs"));
     assert!(lib.contains("pub mod commands;"));

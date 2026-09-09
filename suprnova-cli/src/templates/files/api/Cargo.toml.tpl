@@ -22,7 +22,10 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "{framework_tag}" }
+# Production build shape: default features off, the nine non-`testing`
+# defaults listed explicitly, so the binaries above never carry a test
+# seam. See the manual, "Production build shape" (deployment.md).
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "{framework_tag}", default-features = false, features = ["filesystem", "database-sqlite", "database-postgres", "database-mysql", "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media"] }
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }
 sea-orm = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono", "postgres-use-serial-pk"] }
@@ -32,3 +35,9 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 validator = { version = "0.20", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# Turns `testing` back on for `cargo test` and every `--tests` build
+# only; it never reaches the binaries above. See the manual,
+# "Production build shape" (deployment.md).
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "{framework_tag}", features = ["testing"] }

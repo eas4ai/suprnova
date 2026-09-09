@@ -20,6 +20,7 @@
     "scripts/check-live-gate.sh",
     "scripts/check-msrv.sh",
     "scripts/check-feature-matrix.sh",
+    "scripts/check-production-build.sh",
     "scripts/check-audit.sh",
     "scripts/check-downstream-dependencies.sh",
     "scripts/check-downstream-dependencies.py",

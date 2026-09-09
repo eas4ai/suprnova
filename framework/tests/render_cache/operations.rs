@@ -432,6 +432,7 @@ async fn console_epoch_advance_propagates_when_the_ledger_is_unavailable() {
 /// Verified failing by reverting `orm::advance` to `super::is_installed()`:
 /// the `posts` generation stood still and the next request was a hit
 /// serving the pre-write body.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_model_write_with_no_runtime_installed_advances_the_ledger() {
@@ -488,6 +489,7 @@ async fn a_model_write_with_no_runtime_installed_advances_the_ledger() {
 
 /// The permission generation is the same rule: a console command that
 /// revokes a role advances it from wherever it runs.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn bump_permission_version_with_no_runtime_installed_advances_the_permission_generation() {
@@ -526,6 +528,7 @@ async fn bump_permission_version_with_no_runtime_installed_advances_the_permissi
 /// A process with RenderCache disabled by configuration opens nothing and
 /// writes nothing to the ledger, which is what keeps every application that
 /// does not use RenderCache paying no RenderCache SQL at all.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_process_with_render_cache_disabled_writes_nothing() {
@@ -609,6 +612,7 @@ fn the_write_side_decision_table() {
 
 /// A fixed decision is not probed again: two writes after `Closed` issue no
 /// statement beyond the writes themselves.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_closed_write_side_is_not_probed_again() {
@@ -695,6 +699,7 @@ fn the_render_cache_telemetry_names_are_closed_and_distinct() {
 /// classification narrows to `Uncacheable` through `SessionValueRead`, and
 /// nothing else in `reasons` could have forced it, so `lead_render` records
 /// exactly that reason.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_session_value_read_declines_with_reason_session_value_read() {
@@ -720,6 +725,7 @@ async fn a_session_value_read_declines_with_reason_session_value_read() {
 /// `Principal` variance. After Plan E the unresolved consult still requires
 /// `Principal`, so the key guard's empty-set arm finds no declared
 /// dimension for it and declines with `PrincipalUndeclared`.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn a_principal_gate_without_principal_variance_declines_with_reason_principal_undeclared() {
@@ -746,6 +752,7 @@ async fn a_principal_gate_without_principal_variance_declines_with_reason_princi
 /// the classification-reasons loop, and declines with `LocaleUndeclared`
 /// because the route names no `Locale` value for the key to compare
 /// against at all.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn an_undeclared_locale_declines_with_reason_locale_undeclared() {
@@ -768,6 +775,7 @@ async fn an_undeclared_locale_declines_with_reason_locale_undeclared() {
 
 /// A 404 on an otherwise ordinary cached route: eligibility's own `Status`
 /// check declines before classification or the key guard ever run.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn an_ineligible_status_declines_with_reason_status() {
@@ -808,6 +816,7 @@ fn the_four_named_declines_are_four_distinct_reasons() {
 
 /// A hit and a miss both record `reason: None`; only a decline ever carries
 /// one.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn declined_is_the_only_outcome_that_carries_a_reason() {
@@ -844,6 +853,7 @@ async fn declined_is_the_only_outcome_that_carries_a_reason() {
 /// Every closed `reason` label appears, backticked, in the operations
 /// manual's Telemetry section - the chapter an operator actually reads
 /// when a route's `declined` rate is high.
+#[cfg(feature = "testing")]
 #[test]
 fn every_decline_reason_is_documented_in_the_operations_chapter() {
     let manual_path = concat!(

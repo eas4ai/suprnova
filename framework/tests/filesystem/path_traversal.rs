@@ -1,4 +1,4 @@
-#![cfg(feature = "filesystem")]
+#![cfg(all(feature = "filesystem", feature = "testing"))]
 
 //! Path-traversal confinement for local-filesystem disks.
 //!

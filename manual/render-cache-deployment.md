@@ -96,6 +96,10 @@ identifier:
 APP_BUILD_ID=$(git rev-parse --short HEAD)
 ```
 
+Whichever value you set, the production binary that reads it is expected
+to be built in Suprnova's [production build shape](deployment.md#production-build-shape) -
+default features off, `testing` reserved for `cargo test` alone.
+
 Live's own instance ledger is configured separately, because it is Live's
 authority rather than the cache's storage: `LIVE_LEDGER_DRIVER` (`memory`,
 `database`, or `redis`), `LIVE_REDIS_URL`, and `LIVE_REDIS_PREFIX`. A

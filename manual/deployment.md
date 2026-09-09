@@ -173,6 +173,39 @@ Never commit `.env.production` (or any file containing `APP_KEY` or
 `DATABASE_URL`) to your repo. Use your platform's secrets store and
 read the values at deploy time.
 
+## Production build shape
+
+The binary the Dockerfile builds never carries the framework's `testing`
+feature - the encryption-key installers, storage fakes, and RenderCache
+test hooks that a test suite needs are compiled out. Your scaffolded
+`Cargo.toml` (and the dogfood app in the Suprnova repository itself) takes
+this shape by construction with two dependency entries:
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+```
+
+The production entry turns default features off and lists the nine that
+stay on (every default except `testing`). The dev-dependency turns
+`testing` back on - Cargo's feature resolver only pulls in a
+dev-dependency's features for `cargo test` and other `--tests` builds, so
+`cargo build --bin app` (or `--bin console`) never sees it. `testing` is a
+dev-dependency feature only: nothing in your own `src/` or `cmd/` should
+turn it on for a binary target.
+
+The framework repository proves this holds with a small crate whose only
+job is to fail to compile: it references every framework item gated
+behind `testing` by path, and the release gate checks that referencing
+them without the feature is a compile error while referencing them with
+it succeeds.
+
 ## Migrations on boot
 
 The default `./app` (and explicit `./app serve`) command applies any

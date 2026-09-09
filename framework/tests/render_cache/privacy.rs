@@ -1858,6 +1858,7 @@ async fn an_rbac_gated_route_is_stored_and_a_permission_grant_rebuilds_it() {
 /// statement that grows a `JOIN` without naming the joined table would
 /// otherwise observe less than it read, and the entry it allowed to be
 /// stored would survive a write to the unnamed table.
+#[cfg(feature = "testing")]
 #[test]
 fn rbac_statements_name_every_table_they_read() {
     let (reads, writes) = suprnova::rbac::observed_rbac_statements_for_test();

@@ -234,6 +234,15 @@
       "capabilities": ["bash", "cargo", "git"]
     },
     {
+      "id": "production-build",
+      "name": "production build shape",
+      "tiers": ["full"],
+      "argv": ["scripts/check-production-build.sh"],
+      "timeout_seconds": 1800,
+      "category": "code",
+      "capabilities": ["bash", "cargo", "git"]
+    },
+    {
       "id": "feature-pinecone-tests",
       "name": "Pinecone feature tests",
       "tiers": ["full"],

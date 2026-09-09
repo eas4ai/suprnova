@@ -18,7 +18,13 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-suprnova = { path = "../framework" }
+# Production build shape: default features off, the nine non-`testing`
+# defaults listed explicitly, so the binaries below never carry a test
+# seam. See manual/deployment.md, "Production build shape".
+suprnova = { path = "../framework", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
 sea-orm = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-use-serial-pk"] }
@@ -36,6 +42,11 @@ url = "2.5.8"
 tokio-util = "0.7.18"
 
 [dev-dependencies]
+# Turns `testing` back on for `cargo test -p app` and every `--tests`
+# build only; it never reaches the `app` or `console` binaries built
+# from [dependencies] alone. See manual/deployment.md, "Production
+# build shape".
+suprnova = { path = "../framework", features = ["testing"] }
 # End-to-end tests against a one-shot server using the framework's
 # public `handle_request` adapter need hyper for the client + transport.
 hyper = { version = "1", features = ["full"] }

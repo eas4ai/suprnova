@@ -1,4 +1,4 @@
-#![cfg(feature = "filesystem")]
+#![cfg(all(feature = "filesystem", feature = "testing"))]
 
 //! Read-through disk options: `copy: false` (no promotion) and `copy` /
 //! `rename` of a source that lives only on the fallback.

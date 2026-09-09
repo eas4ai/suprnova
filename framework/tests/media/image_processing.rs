@@ -194,6 +194,7 @@ async fn to_response_carries_the_processed_mime() {
     assert!(!resp.body().is_empty());
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial_test::serial]
 async fn storage_roundtrip() {

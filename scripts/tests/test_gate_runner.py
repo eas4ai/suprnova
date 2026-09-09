@@ -276,6 +276,12 @@ class StepRegistryTests(unittest.TestCase):
                 ["scripts/check-feature-matrix.sh"],
             ),
             (
+                "production-build",
+                ["full"],
+                1800,
+                ["scripts/check-production-build.sh"],
+            ),
+            (
                 "feature-pinecone-tests",
                 ["full"],
                 1800,

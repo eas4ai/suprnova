@@ -450,6 +450,7 @@ async fn cached_chain_handles_scoped_override_then_delete() {
 /// `reload` reports exactly the features whose stored rules differ from the
 /// snapshot it replaced: added, removed, and flipped, and nothing for an
 /// unchanged row.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn reload_reports_added_removed_and_flipped_features_and_nothing_else() {
     use std::sync::{Arc, Mutex};

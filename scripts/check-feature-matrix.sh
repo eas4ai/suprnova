@@ -5,6 +5,10 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MINIMAL_FEATURES="database-sqlite,database-postgres,broadcasting-fanout"
+# The production build shape (design doc section 2, vocabulary): the
+# default feature set minus `testing`. See manual/deployment.md,
+# "Production build shape".
+PRODUCTION_FEATURES="filesystem,database-sqlite,database-postgres,database-mysql,vector-mariadb,web-push,localization,magnetar-oauth,media"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -261,6 +265,15 @@ run "Nation X minimal profile" \
     cargo check -p suprnova --no-default-features --features "$MINIMAL_FEATURES"
 run "Nation X minimal test targets" \
     cargo check -p suprnova --no-default-features --features "$MINIMAL_FEATURES" --tests
+# The production build shape (design doc sections 2 and 5): default
+# features off, the nine non-`testing` defaults. Proves the framework
+# itself - not just the dogfood app's Cargo.toml - compiles in the shape
+# `scripts/check-production-build.sh` builds the dogfood binary in, with
+# and without its own test targets.
+run "production build shape profile" \
+    cargo check -p suprnova --no-default-features --features "$PRODUCTION_FEATURES"
+run "production build shape test targets" \
+    cargo check -p suprnova --no-default-features --features "$PRODUCTION_FEATURES" --tests
 run "filesystem-off doctests" \
     cargo test -p suprnova --no-default-features --features "$MINIMAL_FEATURES" --doc
 # The test binaries were folded one per module on 2026-09-05, so each former

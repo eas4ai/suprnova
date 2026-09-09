@@ -23,6 +23,7 @@ EXPECTED_INDEX_MODES = {
     "scripts/check-msrv.sh": "100755",
     "scripts/check-mysql.sh": "100755",
     "scripts/check-postgres.sh": "100755",
+    "scripts/check-production-build.sh": "100755",
     "scripts/check-prose-dashes.sh": "100755",
     "scripts/check-redis.sh": "100755",
     "scripts/gate-assets.json": "100644",

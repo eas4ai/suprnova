@@ -1,4 +1,4 @@
-#![cfg(feature = "filesystem")]
+#![cfg(all(feature = "filesystem", feature = "testing"))]
 
 //! `copy_between_disks` must not leave a partial destination object when the
 //! transfer fails mid-stream.
