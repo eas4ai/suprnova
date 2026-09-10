@@ -285,8 +285,7 @@ Root-Span.
 `traceparent` auf jedem ausgehenden Aufruf, sodass der nachgelagerte
 Dienst denselben Trace fortsetzt.
 
-Zusammen ergibt `vorgelagerter Dienst → Ihr Handler → nachgelagerter
-Dienst` einen einzigen zusammenhängenden Trace, ohne manuelle
+Zusammen ergibt `upstream service → your handler → downstream service` einen einzigen zusammenhängenden Trace, ohne manuelle
 Span-Verdrahtung in Ihren Handlern.
 
 **Fehlerstatus.** Gibt ein Handler ein 5xx zurück, wird der

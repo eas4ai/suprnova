@@ -278,7 +278,7 @@ direto do navegador) permanece um span raiz limpo.
 injeta o contexto de trace ativo como `traceparent` em toda chamada de
 saída, para que o serviço downstream continue o mesmo trace.
 
-Juntando os dois: `serviço upstream → seu handler → serviço downstream`
+Juntando os dois: `upstream service → your handler → downstream service`
 é um único trace conectado, sem nenhuma fiação manual de span nos seus
 handlers.
 
@@ -408,7 +408,7 @@ ou perde o que ainda estiver bufferizado.
 | Junção de trace distribuído | Automática - `traceparent` de entrada extraído, de saída injetado |
 | Ler o id de solicitação atual | `current_request_id()` |
 | Propagar o id para um spawn | `spawn_with_request_id(future)` |
-| Observador síncrono de consulta | `DB::listen(\|q\| { ... })` |
+| Observador síncrono de consulta | `DB::listen(|q| { ... })` |
 | Observador best-effort de consulta | `EventFacade::listen::<QueryExecuted, _>(...)` |
 | Capturar consultas para testes | `DB::enable_query_log()` → `DB::get_query_log()` |
 
