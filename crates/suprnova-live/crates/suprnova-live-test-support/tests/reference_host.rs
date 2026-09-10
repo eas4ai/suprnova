@@ -1269,6 +1269,35 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     let transport_id = transport["transport"].as_str().expect("transport");
     let memberships = transport["memberships"].as_array().expect("memberships");
     assert_eq!(memberships.len(), 2);
+
+    // The transport path advertises the registered events of the descriptor it
+    // carries in the same response. It hardcoded an empty array until iteration
+    // 006, so nothing outside the framework's own tests ever checked that
+    // projection; an empty array here would mean it is unchecked again.
+    for membership in memberships {
+        let events = membership["browser_authorization"]["events"]
+            .as_array()
+            .expect("events");
+        assert!(
+            !events.is_empty(),
+            "the transport path must advertise its descriptor's registered events: {membership}"
+        );
+        for event in events {
+            let object = event.as_object().expect("event object");
+            for field in ["maximum_fanout", "name", "payload_contract", "schema", "targets"] {
+                assert!(
+                    object.contains_key(field),
+                    "registered event is missing {field}: {event}"
+                );
+            }
+            for camel in ["maximumFanout", "maximumHops", "payloadContract"] {
+                assert!(
+                    !object.contains_key(camel),
+                    "descriptor fields are snake_case since schema version 2: {event}"
+                );
+            }
+        }
+    }
     for (index, membership) in memberships.iter().enumerate() {
         let subscription = membership["subscription"].as_str().expect("subscription");
         let membership_path =

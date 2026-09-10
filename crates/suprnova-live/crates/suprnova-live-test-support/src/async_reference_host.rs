@@ -314,6 +314,33 @@ impl AsyncReferenceAuthority {
             .collect())
     }
 
+    /// Projects the registered events of the descriptor a response actually
+    /// carries, by verifying that descriptor and reading its own claims.
+    ///
+    /// A response that advertises events from anywhere else can disagree with
+    /// the descriptor beside it, which is the one thing a reference host must
+    /// never do: reading them back out of the signed bytes makes the two
+    /// agree by construction.
+    pub(crate) fn events_from_descriptor(
+        &self,
+        descriptor: &str,
+        now: UnixMillis,
+    ) -> Result<Vec<Value>, &'static str> {
+        let parsed =
+            SubscriptionDescriptor::parse(descriptor).map_err(|_| "descriptor_invalid")?;
+        let verified = self
+            .codec
+            .verify(&parsed, now)
+            .map_err(|_| "descriptor_invalid")?;
+        Ok(verified
+            .claims()
+            .events()
+            .as_slice()
+            .iter()
+            .map(event_contract_json)
+            .collect())
+    }
+
     /// Registers one exact open physical transport before membership may commit.
     pub fn open_transport(
         &mut self,
