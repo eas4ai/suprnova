@@ -7,7 +7,7 @@ sob esta chave, e isso ainda está atual?** e **como eu faço tudo parar?**
 Ele responde a uma terceira - "esta rota está sendo servida a partir de uma
 cópia armazenada, afinal?" - por telemetria e pelo cabeçalho `Age` em vez de
 por um comando, porque essa pergunta é sobre tráfego e não sobre uma
-entrada. Há dois comandos de console, sete contadores de telemetria, uma
+entrada. Há dois comandos de console, oito contadores de telemetria, uma
 varredura de disco limitada e uma alavanca de emergência.
 
 Este capítulo é a superfície operacional: os comandos, exatamente o que eles
@@ -100,7 +100,7 @@ estava em cache sob o seu conjunto de permissões anterior.
 
 ## Telemetria
 
-Sete nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
+Oito nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
 um provedor ou um backend:
 
 | Contador | Atributo |
@@ -111,6 +111,7 @@ um provedor ou um backend:
 | `suprnova.render_cache.rebuilds` | nenhum |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
 | `suprnova.render_cache.epoch_rewinds` | nenhum |
 
 `lookups` e `hits` carregam o mesmo conjunto fechado de oito desfechos:
@@ -130,7 +131,7 @@ um provedor ou um backend:
 - `moved` - a releitura depois de renderizar encontrou uma dependência ou o
   epoch alterados; o candidato foi descartado, nunca publicado.
 - `declined` - a renderização não era armazenável, por uma de trinta e
-  duas razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
+  oito razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
   `reason` só é emitido junto de `outcome="declined"`; qualquer outro
   desfecho não carrega nenhum. A razão é calculada a partir de um valor
   tipado no ramo exato que recusou, nunca reconstruída depois a partir da
@@ -157,16 +158,34 @@ um provedor ou um backend:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` incrementa apenas para `l0`, `l1`, `conditional` e `stale`.
 `publications` conta apenas um armazenamento respondendo "publicado", nunca
 uma tentativa barrada por fence ou rejeitada. `rebuilds` conta uma por
 reconstrução em segundo plano disparada.
 
-Os dois contadores de costura carregam os seus próprios conjuntos:
+Os dois contadores de costura de ilha carregam os seus próprios conjuntos:
 `assembled` e `fail_document` para montagens; `rendered`, `omitted`,
 `fallback` e `failed` para slots.
+
+`suprnova.render_cache.stitch.nested` distingue o próprio desfecho de um
+segmento interno em cache e nomeado do de um slot de ilha, com um
+incremento por tentativa de resolução de um `Segment::Nested`. O seu
+atributo `outcome` assume exatamente um de `resolved`, `omitted`,
+`fallback` e `failed`; o seu atributo `cause` assume exatamente um de
+`none` (usado apenas quando `outcome="resolved"`), `fetch_failed`,
+`version_mismatch`, `length_mismatch`, `depth_exceeded`, `cycle` e
+`unauthorized`. Nenhum dos dois atributos carrega alguma vez uma chave, um
+nome de rota ou um digest de identidade. Um segmento falho ou degradado
+sempre se resolve através da política que o grafo que o inclui declarou
+para ele (`FailDocument`/`Omit`/`Fallback`), exatamente como acontece com a
+própria falha de um slot de ilha; `outcome="failed"` (proveniente de uma
+política `FailDocument`) abandona a montagem do documento inteiro e recai
+no próprio handler sem cache da rota.
 
 `epoch_rewinds` conta detecções, não entradas: um incremento a cada vez
 que um nó encontra uma entrada ou um epoch em lease carimbado acima do

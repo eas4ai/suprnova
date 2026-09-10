@@ -7,7 +7,7 @@ clé, et est-ce encore à jour ?** et **comment fait-on tout arrêter ?** Il
 répond à une troisième - « cette route est-elle seulement servie depuis une
 copie stockée ? » - par la télémétrie et par l'en-tête `Age` plutôt que par
 une commande, parce que cette question porte sur le trafic plutôt que sur
-une entrée. Il y a deux commandes console, sept compteurs de télémétrie, un
+une entrée. Il y a deux commandes console, huit compteurs de télémétrie, un
 balayage disque borné, et un levier d'urgence.
 
 Ce chapitre est la surface d'exploitation : les commandes, exactement ce
@@ -106,7 +106,7 @@ permissions.
 
 ## Télémétrie
 
-Sept noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
+Huit noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
 un fournisseur, ou un backend :
 
 | Compteur | Attribut |
@@ -117,6 +117,7 @@ un fournisseur, ou un backend :
 | `suprnova.render_cache.rebuilds` | aucun |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
 | `suprnova.render_cache.epoch_rewinds` | aucun |
 
 `lookups` et `hits` portent le même ensemble fermé de huit résultats :
@@ -133,7 +134,7 @@ un fournisseur, ou un backend :
   déclarée impossible à résoudre, ou une liste d'attente épuisée.
 - `moved` - la relecture après le rendu a trouvé qu'une dépendance ou
   l'epoch avait changé ; le candidat a été écarté, jamais publié.
-- `declined` - le rendu n'était pas stockable, pour l'une des trente-deux
+- `declined` - le rendu n'était pas stockable, pour l'une des trente-huit
   raisons ci-dessous, portée dans l'attribut `reason` à côté de `outcome`.
   `reason` n'est émis qu'aux côtés de `outcome="declined"` ; tout autre
   résultat n'en porte aucun. La raison est calculée à partir d'une valeur
@@ -161,16 +162,34 @@ un fournisseur, ou un backend :
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` ne s'incrémente que pour `l0`, `l1`, `conditional` et `stale`.
 `publications` ne compte qu'un magasin répondant « publié », jamais une
 tentative barrée ou rejetée. `rebuilds` compte une unité par reconstruction
 en arrière-plan lancée.
 
-Les deux compteurs de couture portent leurs propres ensembles : `assembled`
-et `fail_document` pour les assemblages ; `rendered`, `omitted`, `fallback`
-et `failed` pour les emplacements.
+Les deux compteurs de couture d'îlot portent leurs propres ensembles :
+`assembled` et `fail_document` pour les assemblages ; `rendered`,
+`omitted`, `fallback` et `failed` pour les emplacements.
+
+`suprnova.render_cache.stitch.nested` distingue le résultat propre d'un
+segment interne mis en cache et nommé de celui d'un emplacement d'îlot,
+avec un incrément par tentative de résolution d'un `Segment::Nested`. Son
+attribut `outcome` prend exactement l'une de `resolved`, `omitted`,
+`fallback` et `failed` ; son attribut `cause` prend exactement l'une de
+`none` (utilisée seulement quand `outcome="resolved"`), `fetch_failed`,
+`version_mismatch`, `length_mismatch`, `depth_exceeded`, `cycle` et
+`unauthorized`. Aucun des deux attributs ne porte jamais de clé, de nom de
+route, ni de digest d'identité. Un segment en échec ou dégradé se résout
+toujours par la politique que le graphe englobant a déclarée pour lui
+(`FailDocument`/`Omit`/`Fallback`), exactement comme le fait l'échec d'un
+emplacement d'îlot lui-même ; `outcome="failed"` (issu d'une politique
+`FailDocument`) abandonne l'assemblage pour tout le document et retombe
+sur le handler sans cache propre de la route.
 
 `epoch_rewinds` compte des détections, pas des entrées : un incrément
 chaque fois qu'un nœud rencontre une entrée ou un epoch loué estampillé

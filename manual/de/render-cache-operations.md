@@ -7,7 +7,7 @@ Schlüssel, und ist es noch aktuell?** und **Wie bringe ich alles zum
 Stillstand?** Eine dritte, „Wird diese Route überhaupt aus einer
 gespeicherten Kopie bedient?“, beantwortet er über Telemetrie und über den
 `Age`-Header statt über einen Befehl, denn diese Frage handelt vom Verkehr
-und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, sieben
+und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, acht
 Telemetriezähler, einen begrenzten Bereinigungslauf auf der Festplatte und
 einen Notfallhebel.
 
@@ -106,7 +106,7 @@ unter seinem vorherigen Berechtigungssatz gecacht wurde.
 
 ## Telemetrie
 
-Sieben geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
+Acht geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
 Provider oder ein Backend benannt:
 
 | Zähler | Attribut |
@@ -117,6 +117,7 @@ Provider oder ein Backend benannt:
 | `suprnova.render_cache.rebuilds` | keines |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
 | `suprnova.render_cache.epoch_rewinds` | keines |
 
 `lookups` und `hits` tragen dieselbe geschlossene Menge von acht Ergebnissen:
@@ -136,7 +137,7 @@ Provider oder ein Backend benannt:
   eine Abhängigkeit oder die Epoche geändert hatte; der Kandidat wurde
   verworfen und nie veröffentlicht.
 - `declined` - das Rendering war nicht speicherbar, aus einem von
-  zweiunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
+  achtunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
   `outcome`. `reason` wird nur zusammen mit `outcome="declined"`
   ausgegeben; jedes andere Ergebnis führt keinen. Der Grund wird aus einem
   typisierten Wert an genau der Verzweigung berechnet, die abgelehnt hat,
@@ -163,16 +164,34 @@ Provider oder ein Backend benannt:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` zählt nur für `l0`, `l1`, `conditional` und `stale` hoch.
 `publications` zählt nur einen Store, der mit „veröffentlicht“ antwortet, nie
 einen mit einem Fence abgewiesenen oder abgelehnten Versuch. `rebuilds` zählt
 einen pro angestoßenem Neuaufbau im Hintergrund.
 
-Die beiden Stitch-Zähler tragen ihre eigenen Mengen: `assembled` und
+Die beiden Insel-Stitch-Zähler tragen ihre eigenen Mengen: `assembled` und
 `fail_document` für Zusammensetzungen; `rendered`, `omitted`, `fallback` und
 `failed` für Slots.
+
+`suprnova.render_cache.stitch.nested` unterscheidet das eigene Ergebnis
+eines benannten, gecachten inneren Segments von dem eines Insel-Slots, mit
+einer Erhöhung pro Auflösungsversuch eines `Segment::Nested`. Sein Attribut
+`outcome` nimmt genau einen von `resolved`, `omitted`, `fallback` und
+`failed` an; sein Attribut `cause` nimmt genau einen von `none` (nur
+verwendet, wenn `outcome="resolved"`), `fetch_failed`, `version_mismatch`,
+`length_mismatch`, `depth_exceeded`, `cycle` und `unauthorized` an. Keines
+der beiden Attribute führt je einen Schlüssel, einen Routennamen oder einen
+Identitätsdigest mit sich. Ein fehlgeschlagenes oder degradiertes Segment
+wird immer über die Richtlinie behandelt, die der einschließende Graph dafür
+erklärt hat (`FailDocument`/`Omit`/`Fallback`), genau wie das Fehlschlagen
+eines Insel-Slots selbst; `outcome="failed"` (aus einer `FailDocument`-
+Richtlinie) bricht die Zusammensetzung für das ganze Dokument ab und fällt
+zurück auf den eigenen ungecachten Handler der Route.
 
 `epoch_rewinds` zählt Erkennungen, nicht Einträge: eine Erhöhung jedes Mal,
 wenn ein Knoten auf einen Eintrag oder eine verleaste Epoche trifft, die

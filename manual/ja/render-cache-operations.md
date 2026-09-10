@@ -7,7 +7,7 @@
 保存済みコピーから配信されているのか」には、コマンドではなくテレメトリと `Age`
 ヘッダーを通じて答えます。その問いは 1 つのエントリについてではなく、トラフィック
 についてのものだからです。コンソールコマンドが 2 つ、テレメトリのカウンターが
-7 つ、境界付きのディスクスイープが 1 つ、そして緊急のレバーが 1 つあります。
+8 つ、境界付きのディスクスイープが 1 つ、そして緊急のレバーが 1 つあります。
 
 この章は、その運用の表面です。コマンドと、それが正確に何を印字し、何を見られる
 のか。カウンターと、その閉じた結果の集合。ファイル階層がどうディスクを回収する
@@ -93,7 +93,7 @@ cargo run --bin console -- render-cache:epoch-advance
 
 ## テレメトリ
 
-閉じた 7 つのカウンター名があり、そのどれもが階層、プロバイダー、バックエンドを
+閉じた 8 つのカウンター名があり、そのどれもが階層、プロバイダー、バックエンドを
 名指ししません:
 
 | カウンター | 属性 |
@@ -104,6 +104,7 @@ cargo run --bin console -- render-cache:epoch-advance
 | `suprnova.render_cache.rebuilds` | なし |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`、`cause` |
 | `suprnova.render_cache.epoch_rewinds` | なし |
 
 `lookups` と `hits` は、8 つの結果からなる同じ閉じた集合を運びます:
@@ -118,7 +119,7 @@ cargo run --bin console -- render-cache:epoch-advance
   ディメンション、または使い切られた待機者の一覧。
 - `moved`: レンダリング後の読み直しで、依存かエポックが変わっていたことが
   判明した。候補は破棄され、公開はされなかった。
-- `declined`: レンダリングが保存できませんでした。理由は下記 32 個のうちの
+- `declined`: レンダリングが保存できませんでした。理由は下記 38 個のうちの
   いずれかで、`outcome` の隣にある `reason` 属性に載って運ばれます。
   `reason` が出るのは `outcome="declined"` のときだけで、それ以外の結果には
   一切運ばれません。この理由は、実際に却下したその分岐において型付きの値から
@@ -144,16 +145,33 @@ cargo run --bin console -- render-cache:epoch-advance
     `composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
-    `composite_slot_ambiguous`。
+    `composite_slot_ambiguous`、`composite_nested_unauthorizable`、
+    `composite_nested_wider_class`、`composite_nested_longer_freshness`、
+    `composite_nested_depth_exceeded`、`composite_nested_cycle`、
+    `composite_nested_unresolvable`。
 
 `hits` が増えるのは `l0`、`l1`、`conditional`、`stale` のときだけです。
 `publications` が数えるのは、ストアが「公開した」と答えたときだけで、
 フェンスされた試みや拒否された試みは決して数えません。`rebuilds` は、起動された
 バックグラウンド再構築 1 つにつき 1 を数えます。
 
-ステッチの 2 つのカウンターは、それぞれ独自の集合を運びます。組み立てについては
-`assembled` と `fail_document`、スロットについては `rendered`、`omitted`、
-`fallback`、`failed` です。
+アイランドステッチの 2 つのカウンターは、それぞれ独自の集合を運びます。
+組み立てについては `assembled` と `fail_document`、スロットについては
+`rendered`、`omitted`、`fallback`、`failed` です。
+
+`suprnova.render_cache.stitch.nested` は、名前付きの内側のキャッシュ済み
+セグメント自身の結果を、アイランドのスロットの結果とは区別します。
+`Segment::Nested` の解決を試みるたびに 1 増えます。`outcome` 属性が
+取り得るのは `resolved`、`omitted`、`fallback`、`failed` のいずれか 1 つ
+だけです。`cause` 属性が取り得るのは `none`（`outcome="resolved"` のとき
+だけ使われます）、`fetch_failed`、`version_mismatch`、`length_mismatch`、
+`depth_exceeded`、`cycle`、`unauthorized` のいずれか 1 つだけです。
+どちらの属性も、キーやルート名、アイデンティティダイジェストを運ぶことは
+決してありません。失敗した、または劣化したセグメントは、それを含むグラフが
+宣言したポリシー（`FailDocument`/`Omit`/`Fallback`）を通じて必ず解決され、
+これはアイランドのスロット自身の失敗とまったく同じです。`outcome="failed"`
+（`FailDocument` ポリシーによるもの）はドキュメント全体の組み立てを放棄し、
+ルート自身の未キャッシュのハンドラへフォールバックします。
 
 `epoch_rewinds` が数えるのは検出であって、エントリではありません。ノードが、
 権威自身のエポックより上に刻印されたエントリまたはリース済みエポックに出会う

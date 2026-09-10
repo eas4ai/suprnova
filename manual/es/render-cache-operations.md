@@ -7,7 +7,7 @@ clave, y sigue vigente?** y **¿cómo hago que todo se detenga?** Responde a
 una tercera, «¿se está sirviendo esta ruta desde una copia almacenada,
 siquiera?», mediante la telemetría y la cabecera `Age` en lugar de mediante
 un comando, porque esa pregunta va de tráfico y no de una entrada. Hay dos
-comandos de consola, siete contadores de telemetría, un barrido de disco
+comandos de consola, ocho contadores de telemetría, un barrido de disco
 acotado y una palanca de emergencia.
 
 Este capítulo es la superficie operativa: los comandos, exactamente qué
@@ -101,7 +101,7 @@ coincidiendo con lo que se cacheó bajo su anterior conjunto de permisos.
 
 ## Telemetría
 
-Siete nombres de contador cerrados, y nada en ninguno de ellos nombra un
+Ocho nombres de contador cerrados, y nada en ninguno de ellos nombra un
 nivel, un proveedor o un backend:
 
 | Contador | Atributo |
@@ -112,6 +112,7 @@ nivel, un proveedor o un backend:
 | `suprnova.render_cache.rebuilds` | ninguno |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
 | `suprnova.render_cache.epoch_rewinds` | ninguno |
 
 `lookups` y `hits` llevan el mismo conjunto cerrado de ocho desenlaces:
@@ -129,7 +130,7 @@ nivel, un proveedor o un backend:
   declarada que no se puede resolver, o una lista de espera agotada.
 - `moved` - la relectura posterior al render encontró que una dependencia o
   el epoch habían cambiado; la candidata se descartó, nunca se publicó.
-- `declined` - el render no era almacenable, por una de las treinta y dos
+- `declined` - el render no era almacenable, por una de las treinta y ocho
   razones de abajo, llevada en el atributo `reason` junto a `outcome`.
   `reason` se emite solo junto a `outcome="declined"`; cualquier otro
   desenlace no lleva ninguna. La razón se calcula a partir de un valor
@@ -157,16 +158,34 @@ nivel, un proveedor o un backend:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` se incrementa solo para `l0`, `l1`, `conditional` y `stale`.
 `publications` cuenta solo un store que responde «publicado», nunca un
 intento vallado o rechazado. `rebuilds` cuenta uno por cada reconstrucción
 en segundo plano lanzada.
 
-Los dos contadores de cosido llevan sus propios conjuntos: `assembled` y
-`fail_document` para los ensamblajes; `rendered`, `omitted`, `fallback` y
-`failed` para los slots.
+Los dos contadores de cosido de isla llevan sus propios conjuntos:
+`assembled` y `fail_document` para los ensamblajes; `rendered`, `omitted`,
+`fallback` y `failed` para los slots.
+
+`suprnova.render_cache.stitch.nested` distingue el propio desenlace de un
+segmento cacheado interno con nombre del de un slot de isla, con un
+incremento por cada intento de resolución de un `Segment::Nested`. Su
+atributo `outcome` toma exactamente uno de `resolved`, `omitted`,
+`fallback` y `failed`; su atributo `cause` toma exactamente uno de `none`
+(usado solo cuando `outcome="resolved"`), `fetch_failed`,
+`version_mismatch`, `length_mismatch`, `depth_exceeded`, `cycle` y
+`unauthorized`. Ninguno de los dos atributos lleva jamás una clave, un
+nombre de ruta ni un digest de identidad. Un segmento fallido o degradado
+siempre se resuelve mediante la política que el grafo que lo incluye
+declaró para él (`FailDocument`/`Omit`/`Fallback`), exactamente como lo
+hace el propio fallo de un slot de isla; `outcome="failed"` (procedente de
+una política `FailDocument`) abandona el ensamblaje de todo el documento y
+recae en el propio handler sin cachear de la ruta.
 
 `epoch_rewinds` cuenta detecciones, no entradas: un incremento cada vez
 que un nodo encuentra una entrada o un epoch arrendado estampado por

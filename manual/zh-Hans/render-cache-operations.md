@@ -4,7 +4,7 @@
 问题，而且从不打印一个已存储的页面：**这个节点在这个键下持有什么，它还是最新的
 吗？**以及**我怎么让一切停下来？**它还回答第三个问题 - “这个路由到底有没有在从
 一份已存储的副本被服务？” - 但那是通过遥测和 `Age` 头，而不是通过一条命令，因为
-那个问题问的是流量，而不是某一个条目。这里有两条控制台命令、七个遥测计数器、
+那个问题问的是流量，而不是某一个条目。这里有两条控制台命令、八个遥测计数器、
 一次有界的磁盘清扫，以及一根紧急拉杆。
 
 本章讲的是这套运维界面：那些命令、它们究竟打印什么又能看见什么；那些计数器和
@@ -74,7 +74,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 
 ## 遥测
 
-七个封闭的计数器名称，而且它们当中没有任何一个会点名某个层级、某个提供者或某个
+八个封闭的计数器名称，而且它们当中没有任何一个会点名某个层级、某个提供者或某个
 后端：
 
 | 计数器 | 属性 |
@@ -85,6 +85,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 | `suprnova.render_cache.rebuilds` | 无 |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`、`cause` |
 | `suprnova.render_cache.epoch_rewinds` | 无 |
 
 `lookups` 和 `hits` 携带同一个封闭的八种结果集合：
@@ -97,7 +98,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 - `bypass` - 一个未声明的查询参数、一个无法解析的已声明差异化维度，或者一份已
   耗尽的等待者名单。
 - `moved` - 渲染之后的那次重读发现某项依赖或纪元变过了；候选被丢弃，从未发布。
-- `declined` - 这次渲染不可存储，属于下面三十二个理由中的一个，携带在
+- `declined` - 这次渲染不可存储，属于下面三十八个理由中的一个，携带在
   `outcome` 旁边的 `reason` 属性里。`reason` 只在 `outcome="declined"` 时才
   会给出；其他任何结果都不携带它。这个理由是在真正做出拒绝的那个分支上，从
   一个类型化的值计算出来的，而绝不是事后从响应反推出来的，所以它点名的正是
@@ -121,14 +122,28 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
     `composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
-    `composite_slot_ambiguous`。
+    `composite_slot_ambiguous`、`composite_nested_unauthorizable`、
+    `composite_nested_wider_class`、`composite_nested_longer_freshness`、
+    `composite_nested_depth_exceeded`、`composite_nested_cycle`、
+    `composite_nested_unresolvable`。
 
 `hits` 只在 `l0`、`l1`、`conditional` 和 `stale` 上递增。`publications` 只统计
 一个存储回答了“已发布”的情况，绝不统计被栅栏挡下或被拒绝的尝试。`rebuilds` 每
 派生一次后台重建统计一次。
 
-那两个缝合计数器携带它们自己的集合：组装是 `assembled` 和 `fail_document`；
-槽位是 `rendered`、`omitted`、`fallback` 和 `failed`。
+那两个岛屿缝合计数器携带它们自己的集合：组装是 `assembled` 和
+`fail_document`；槽位是 `rendered`、`omitted`、`fallback` 和 `failed`。
+
+`suprnova.render_cache.stitch.nested` 把一个具名内部缓存分段自身的结果，
+与一个岛屿槽位的结果区分开来，每尝试解析一次 `Segment::Nested` 就加一次。
+它的 `outcome` 属性只会取 `resolved`、`omitted`、`fallback`、`failed` 之一；
+它的 `cause` 属性只会取 `none`（仅在 `outcome="resolved"` 时使用）、
+`fetch_failed`、`version_mismatch`、`length_mismatch`、`depth_exceeded`、
+`cycle`、`unauthorized` 之一。这两个属性都绝不会携带键、路由名或身份摘要。
+一个失败或降级的分段，总是通过包含它的图为它声明的策略
+（`FailDocument`/`Omit`/`Fallback`）来解决，跟一个岛屿槽位自身的失败一模
+一样；`outcome="failed"`（来自 `FailDocument` 策略）会放弃整个文档的组装，
+转而落到该路由自己那个不缓存的处理程序上。
 
 `epoch_rewinds` 数的是检测次数，不是条目数：每当一个节点遇到一个盖着高于
 权威自身纪元戳记的条目或租来的纪元，它就加一次，然后把账本的纪元推进到超过
