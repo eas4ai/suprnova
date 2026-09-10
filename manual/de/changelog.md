@@ -5,6 +5,1338 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 2.0.0 - 2026-09-10
+
+### Sicherheit
+
+- **Ein Bearer-Token und eine Web-Session sind jetzt getrennte Identitäten.**
+  Der Benutzer-Cache mit Anfrage-Scope hielt einen einzigen Slot für den
+  aktuellen Benutzer, in den alles schrieb und aus dem alles las: Eine von
+  `SessionMiddleware` hydrierte Browser-Session erfüllte deshalb in derselben
+  Anfrage einen `TokenGuard`, und ein für den Web-Guard aufgelöster Benutzer
+  wurde an Code zurückgegeben, der nach dem API-Guard gefragt hatte.
+  Bearer-Credentials tragen in diesem Cache jetzt ihre eigene Herkunft:
+  `BearerTokenMiddleware` hält den validierten Identifier in einem eigenen
+  Bearer-Slot fest, `TokenGuard` löst den vollständigen Benutzer dort auf und
+  legt ihn dort ab, und nur etwas, das über ein Bearer-Credential angekommen
+  ist, kann einen Token-Guard erfüllen. Session-Guards werden am selben Ort
+  pro Guard-Namen zwischengespeichert, `Auth::guard("admin").user()` und
+  `Auth::guard("web").user()` in einer Anfrage liefern also nicht mehr beide
+  das Ergebnis dessen, der zuerst lief. Die generischen Slots bleiben als
+  Kompatibilitätssicht für die statische `Auth`-Fassade erhalten, gespiegelt
+  allein vom konfigurierten Standard-Guard, sodass sich `Auth::id()`,
+  `Auth::check()` und `AuthMiddleware` für eine Anwendung mit einem Guard und
+  für eine reine Token-Anfrage, die nie eine Session installiert, exakt wie
+  bisher verhalten.
+
+- **Ein benannter Guard behält seinen eigenen Principal, sein eigenes
+  Remember-me-Credential und seinen eigenen Widerruf.** Eine Anmeldung über
+  `Auth::guard("admin")` schrieb den Identifier in denselben
+  Session-Schlüssel, den der Standard-Guard verwendet: Zwei Guards in einer
+  Anwendung teilten sich also einen Principal, und wer sich aus einem von
+  beiden abmeldete, meldete sich aus beiden ab. In der persistierten Session
+  besitzt jeder Guard jetzt seinen eigenen Eintrag unter der Map
+  `_auth_guards`, und das Remember-me-Cookie trägt einen Guard-markierten
+  Carrier (`suprnova.remember.v1:` gefolgt vom Guard-Namen und dem
+  Credential), sodass ein für einen Guard ausgestelltes Cookie keinen anderen
+  erneut authentifizieren kann. Ein Cookie ohne dieses Präfix wird als das des
+  Standard-Guards gelesen - und genau das ist ein von einer früheren
+  Veröffentlichung ausgestelltes Cookie -, das Upgrade meldet also niemanden
+  ab; ein Carrier, der eine Version benennt, die dieser Build nicht versteht,
+  wird abgelehnt statt geraten. Der Widerruf folgt derselben Grenze: Das
+  Abmelden und der Rotationspfad der Middleware selbst ziehen genau den
+  Selektor zurück, den der besitzende Guard ausgestellt hat, statt jedes
+  Credential, das der Benutzer hält.
+
+- **`BasicAuthMiddleware` nimmt einen veralteten Session-Slot nicht mehr als
+  Nachweis an.** Ihre nicht zustandslose Form übersprang den Header
+  `Authorization`, sobald `Auth::check()` wahr war, und `Auth::check()` liest
+  den Slot für den aktuellen Benutzer mit Anfrage-Scope, den alles weiter vorn
+  in der Kette gefüllt haben konnte. Sie fragt jetzt nach dem persistierten
+  Session-Principal des Guards, mit dem sie konfiguriert wurde, und lehnt
+  rundheraus ab, wenn dieser Guard fehlt oder kein zustandsbehafteter Guard
+  ist: Eine Anfrage wird ohne Anmeldedaten also nur dann zugelassen, wenn eine
+  echte Session-Zeile sagt, wem sie gehört. Die zustandslose Form las den
+  Header ohnehin immer neu und ist unverändert.
+
+- **Remember-me-Credentials rotieren als ein einziger atomarer Austausch.**
+  Die Rotation entfernte bislang das angenommene Credential und fügte seinen
+  Nachfolger als zwei Schreibvorgänge ein: Ein Fehlschlag dazwischen
+  verbrauchte ein gültiges Credential und ließ den Besucher ohne Weg zurück,
+  und ein Absturz ließ beide Zeilen aktiv. Das Standardschema ersetzt jetzt
+  eine exakte, weiterhin gültige Zeile in einer einzigen Operation durch ihren
+  vorbereiteten Nachfolger, und ein Store, der das bedingte Entfernen und das
+  ersetzende Einfügen nicht atomar machen kann, ist fail-closed, statt beides
+  getrennt auszuführen. Der Selektor wird exakt abgeglichen, ein Credential
+  wird also nie durch eine Präfix-Kollision zurückgezogen, und ein synchroner
+  Identitätswechsel innerhalb eines Handlers reiht genau das Credential, das
+  er ungültig gemacht hat, zum Widerruf am Ende der Anfrage ein, statt es
+  aktiv zu lassen.
+
+- **Die Zwei-Faktor-Zulassung ist serialisiert, und ein fehlschlagender
+  Lockout-Schreibvorgang reißt die Anfrage mit sich.** Zwei Worker, die
+  denselben Code nachwiesen, konnten den Versuchszähler beide lesen, bevor
+  einer von ihnen ihn schrieb: Ein Brute-Force-Budget ließ dadurch mehr
+  Versuche zu, als es erlaubte. Die Verifikation reserviert Versuchskapazität
+  jetzt innerhalb derselben serialisierten Store-Operation, die den Versuch
+  zulässt, und gibt sowohl die Reservierung als auch jeden in dieser einen
+  Entscheidung beobachteten Zustand eines endgültigen Fehlschlags zurück; eine
+  Zeremonie, die nicht committen kann, storniert ihren vorbereiteten Nachweis,
+  und der Standard des Stornierungspfads ist fail-closed, damit eine
+  bestehende Verifier-Implementierung reservierte Kapazität nicht
+  stillschweigend verlieren kann. Ein fehlschlagender Schreibvorgang auf den
+  Lockout-Zähler wird nicht mehr geschluckt: Der Versuch wird abgelehnt. Eine
+  Session, die auf einen zweiten Faktor wartet, hochzustufen, ist eine einzige
+  atomare Migration, und das Bearer-Credential wird unterdrückt, bevor auf den
+  Storage-Aufruf gewartet wird, sodass ein Timeout oder ein Backend-Fehlschlag
+  nie ein Credential an einer Session hängen lassen kann, die das Framework
+  nicht committet hat.
+
+- **Die Session-Rotation ist fail-closed.** Eine Session-ID zu rotieren
+  zerstört die alte Zeile und schreibt eine neue. Ein fehlgeschlagenes
+  Zerstören wurde protokolliert und übergangen, was die vorherige
+  authentifizierte Zeile für jeden wiederholbar ließ, der das alte Cookie
+  hält. Die Middleware kehrt jetzt zurück, bevor sie den Ersatz schreibt und
+  bevor sie die neue ID ausstellt, und lässt auf dem Rückweg das alte
+  Credential des Browsers ablaufen. Davon getrennt: Das Cookie, das eine
+  frische oder rotierte Session trägt, wird gebaut, bevor die Zeile committet
+  wird - ein Cookie, das sich nicht konstruieren ließ, hinterließ bislang eine
+  Session im Store, die kein Browser je vorzeigen konnte, und hinterlässt
+  jetzt überhaupt nichts.
+
+- **Eine Session, die ihren Benutzer überlebt, autorisiert nicht mehr, und der
+  Widerruf der Sessions eines Benutzers erreicht auch die benannten Guards.**
+  `AuthMiddleware` behandelte das Vorhandensein eines persistierten
+  Identifiers als Nachweis einer Identität: Ein gelöschter oder per
+  Soft-Delete gelöschter Benutzer kam damit weiterhin durch jede geschützte
+  Route, bis die Session ablief. Sie löst den Benutzer jetzt über den Provider
+  auf und räumt den veralteten Slot, wenn der Provider nichts findet; eine
+  Anwendung, an die überhaupt kein Benutzer-Provider gebunden ist, behält den
+  schnellen Pfad allein über den Identifier, erkannt an einem eigenen Fehler
+  statt am Abgleich von Meldungstext, und jeder andere Provider-Fehlschlag ist
+  ein Fehler statt eines Durchlassens. `destroy_all_for_user` glich nur die
+  indizierte Spalte `user_id` ab, die für eine allein über einen benannten
+  Guard authentifizierte Session null ist: Solche Sessions überlebten ein
+  „überall abmelden“. Jetzt werden zusätzlich die Guard-Identitäten in jeder
+  überlebenden Payload verglichen.
+
+- **Zeremonien der Geräteautorisierung wechseln ihren Zustand atomar und
+  werden vor dem Verbrauch validiert.** Einen Gerätecode zu genehmigen las die
+  Zeremonie, verbrauchte sie dann und schrieb dann den Grant: Ein zwischen dem
+  Lesen und dem Verbrauchen unter demselben Selektor ausgestellter Ersatz
+  konnte deshalb anstelle des tatsächlich genehmigten Datensatzes verbraucht
+  werden. Der Store-Contract bindet die verbrauchende Transaktion jetzt an
+  genau den Datensatz, den ein vorheriges Lesen beobachtet hat, und wechselt
+  den Zustand einer Zeremonie, während er eine andere in einem einzigen
+  atomaren Schritt verbraucht. Beide Methoden sind standardmäßig fail-closed,
+  eine externe Store-Implementierung bleibt also quellkompatibel, ohne
+  stillschweigend das schwächere Verhalten zu bekommen.
+
+- **Eine Provider-Token-Erneuerung mit unbekanntem Ausgang wird abgeriegelt,
+  nicht wiederholt.** Eine Erneuerung für ein verknüpftes Konto, die begann
+  und dann ihre Antwort verlor, hinterließ einen gewöhnlichen Claim, der
+  planmäßig ablief: Ein zweiter Worker erneuerte deshalb denselben Grant, und
+  eines der beiden Ergebnisse wurde verworfen - mitsamt einem Refresh-Token
+  zum einmaligen Gebrauch. Einen Austausch zu starten ersetzt jetzt den
+  Eigentümer des Claims durch einen reservierten Austausch-Eigentümer und
+  bewahrt dabei die ursprüngliche Frist, sodass Nachfolger einen laufenden
+  Austausch von einem verwaisten unterscheiden können, und ein Store darf eine
+  Zeile, deren Eigentümer in diesem reservierten Namensraum liegt, niemals
+  zurückholen. Stores, die die Abriegelung nicht implementieren, sind
+  fail-closed.
+
+- **Web Push verweigert das Senden über einen Transport, der einer
+  Weiterleitung folgen könnte.** `EndpointPolicy::Strict` validiert die
+  Endpunkt-URL des Abonnements, aber die Validierung deckte immer nur die
+  anfängliche URL ab: Ein Client, der Weiterleitungen folgt, macht aus einem
+  validierten Endpunkt eine `3xx` irgendwohin, und reqwest folgt
+  Weiterleitungen standardmäßig. Ein Client, den dieses Crate baut, hat
+  Weiterleitungen jetzt zwangsweise deaktiviert, und das neue
+  `WebPushClient::with_client_builder` wendet jede Option an, die ein Aufrufer
+  will (Proxy, TLS-Pinning, Timeouts), und überschreibt dabei die
+  Weiterleitungs-Policy. `WebPushClient::with_client`, das einen bereits
+  gebauten Client entgegennimmt, dessen Weiterleitungs-Policy sich nicht
+  inspizieren lässt, verweigert unter `Strict` jetzt das Senden mit
+  `WebPushError::UnconfinedRedirects` - vor der Verschlüsselung und vor jeder
+  Anfrage. `WebPushClient::allow_unconfined_redirects` ist das ausdrückliche
+  Opt-out für einen Aufrufer, der weiß, dass sein Client sicher ist.
+
+- **Eine signierte URL ist an genau den Pfad gebunden, für den sie signiert
+  wurde.** Signierung und Verifikation schnitten beide vor dem Hashen einen
+  abschließenden Schrägstrich ab, was `/orders/1` und `/orders/1/` zu einer
+  Signatur machte und einen Proxy, der einen Schrägstrich anhängt,
+  ununterscheidbar von einem Client machte, der den Pfad verändert. Der Pfad
+  wird jetzt genau so gehasht, wie er dasteht, eine Signatur deckt also einen
+  Pfad ab und nur einen.
+
+- **Ein Cache-Schlüssel kann keine Sperre und keinen Tag-Index mehr
+  adressieren.** Redis-Datensätze für Sperren, Tags und Schlüssel-Tags lagen
+  hinter dem konfigurierten Präfix unter einem NUL-Wächterzeichen, und ein vom
+  Aufrufer übergebener Schlüssel, der mit diesem Wächterzeichen begann,
+  landete im selben Raum: Ein `Cache::forget` konnte deshalb eine verteilte
+  Sperre freigeben, die jemand anderes hielt. Werte und jeder interne
+  Datensatztyp tragen jetzt eigene Namensraum-Komponenten vor dem Schlüssel
+  des Aufrufers, die beiden Räume können sich also nicht treffen. Ein
+  gewöhnlicher Schlüssel wird genau dort gespeichert, wo er vorher lag, nichts
+  bereits Zwischengespeichertes wird also verwaist. Der In-Memory-Treiber hat
+  dieselbe Trennung bekommen.
+
+- **Zahlungs-Webhooks lehnen ab, was sie nicht identifizieren können, und
+  klassifizieren Duplikate anhand der Datenbank statt anhand von
+  Meldungstext.** Ein Provider-Event mit einem fehlenden, nicht als String
+  vorliegenden oder nur aus Leerraum bestehenden Identifier betrat bislang den
+  gemeinsamen Idempotenz-Namensraum unter einem leeren Schlüssel, wo es mit
+  jedem anderen solchen Event kollidierte; es wird jetzt abgelehnt, bevor
+  irgendein Zustand geschrieben wird. Ein nebenläufiges Duplikat wird am
+  strukturierten Unique-Violation-Code von SeaORM erkannt statt an
+  menschenlesbarem Fehlertext, den auch ein unverwandter Fehlschlag enthalten
+  kann, und nur ein erneutes Lesen eines committeten `processed_at` wird als
+  solches bestätigt, ein fehlgeschlagener Spiegel-Schreibvorgang bleibt also
+  wiederholbar. Stripes Signatur-Zeitstempel wird als vorzeichenlose absolute
+  Differenz verglichen, ein extremer Wert für `t=` gibt also einen
+  Signaturfehler zurück, statt überzulaufen, und eine negativ konfigurierte
+  Toleranz akzeptiert nur eine exakte Übereinstimmung. Die Webhook-Route
+  bewahrt den typisierten Status eines Bodys, den sie abgelehnt hat, ein Body
+  über der Obergrenze ist also weiterhin eine `413` und keine eingeebnete
+  `400`.
+
+- **Eine nicht idempotente HTTP-Anfrage wird nach einem Transportfehler nicht
+  mehr wiederholt.** Die Retry-Policy verlangte bereits das ausdrückliche
+  Opt-in `retry_non_idempotent`, bevor sie ein `POST` oder `PATCH`
+  wiederholte, das mit `5xx` geantwortet hatte, aber der Zweig für
+  Transportfehler daneben prüfte nicht: Eine Anfrage, deren Verbindung abriss,
+  nachdem der Server sie bereits angenommen hatte, wurde deshalb erneut
+  gesendet. Beide Zweige wenden jetzt dieselbe Regel an.
+
+- **Session-Lebensdauern können nicht in einen Massenablauf überlaufen.**
+  `SESSION_LIFETIME` und `SESSION_REMEMBER_LIFETIME` sind Minuten, die mit
+  sechzig multipliziert und dann in einer Datumsarithmetik, die bei Überlauf
+  panikt, auf einen gespeicherten Zeitstempel addiert werden: Ein zu großer
+  Wert brach deshalb entweder den Prozess ab oder lief in eine Frist in der
+  Vergangenheit über, die jede Session auf einen Schlag ablaufen ließ. Beide
+  werden vor der Multiplikation auf `MAX_SESSION_LIFETIME_MINUTES` begrenzt,
+  der Datenbank-Treiber deckelt für eine im Code gebaute Konfiguration
+  genauso, und eine Aufräumgrenze, die sich nicht darstellen lässt, wird
+  übersprungen, statt an die Datenbank geschickt zu werden - das ist der
+  Unterschied zwischen „nichts einsammeln“ und „alles einsammeln“.
+
+- **Machine-to-Machine-Cache-Identitäten sind eindeutig.** Der
+  Cache-Schlüssel des Token-Brokers verkettete den Provider, den Client und
+  die normalisierte Scope-Menge: Zwei verschiedene Anfragen, deren Komponenten
+  zufällig zu derselben Zeichenkette zusammenliefen, teilten sich deshalb
+  einen zwischengespeicherten Token. Der Schlüssel ist jetzt eine versionierte
+  Domäne mit längenpräfigierten Komponenten, die keine Kombination von
+  Eingaben zur Kollision bringen kann.
+
+- **Bei einem Idempotenz-Lease wird nachgewiesen, dass es noch gehalten wird,
+  bevor sein Ergebnis als abgeriegelt gemeldet wird.** Das Lease wurde
+  regelmäßig erneuert, während der Body lief, und ein transienter
+  Erneuerungsfehler galt als Verlust, während ein Body, der zwischen zwei
+  Erneuerungen fertig wurde, als abgeriegelt gemeldet wurde, ohne dass jemand
+  gefragt hätte, ob die Sperre noch da war. Ein transienter Erneuerungsfehler
+  wird jetzt wiederholt und erst nach mehreren aufeinanderfolgenden
+  Fehlschlägen aufgegeben, und nach dem Abschluss des Bodys muss eine letzte,
+  auf den Eigentümer bezogene Erneuerung gelingen, bevor der Ausgang als
+  abgeriegelt gemeldet wird; ein Fehler in dieser letzten Prüfung antwortet
+  `FreshUnfenced`, denn die Eigentümerschaft ist dann unbekannt.
+
+- **Der Schlüsselring für die Verschlüsselung wird vor dem Bootstrap der
+  Anwendung validiert und installiert.** `Crypt` wurde von
+  `Server::from_config` initialisiert: Alles, was früher lief - der
+  Bootstrap-Callback, ein Konsolenbefehl, der Einstiegspunkt eines
+  Queue-Workers, der nie einen Server baut -, fand deshalb entweder keinen
+  Schlüsselring vor oder baute seinen eigenen. `#[suprnova::main]` lädt jetzt
+  die Umgebung und validiert und installiert dann den Ring, in dieser
+  Reihenfolge, bevor Ihr Bootstrap läuft. Die Validierung läuft bei jedem
+  Boot, auch nachdem der Ring installiert ist, ein Produktionsprozess mit
+  einem fehlenden oder fehlerhaften `APP_KEY` ist also weiterhin fail-closed,
+  während der prozessweite Schlüssel unveränderlich bleibt. Laravels
+  `APP_PREVIOUS_KEYS` wird als Alias für `APP_KEY_PREVIOUS` akzeptiert; sind
+  beide gesetzt und stimmen nicht überein, gewinnt der Suprnova-Name und das
+  Duplikat wird in einer Warnung benannt.
+
+### Hinzugefügt
+
+- **Suprnova Live ist Teil des Frameworks.** `suprnova::live` ist eine
+  servergesteuerte Interaktions-Engine: Eine Komponente ist eine
+  Rust-Struktur, deren Zustand auf dem Server lebt, deren View ein geprüftes
+  Askama-Template ist und deren Aktionen über ein signiertes Protokoll aus
+  einer kleinen Browser-Laufzeit laufen, die das neu gerenderte HTML an Ort
+  und Stelle morpht. Es gibt kein clientseitiges Zustandsmodell, das synchron
+  gehalten werden muss, kein Build-Werkzeug, das für die mitgelieferte
+  Laufzeit installiert werden muss, und kein Inline-JavaScript in Ihren
+  Dokumenten. Die Engine wird als internes Crate ausgeliefert, von dem das
+  Framework bedingungslos abhängt, es muss also nichts aktiviert werden; die
+  Browser-Hälfte wird als `@suprnova/live` veröffentlicht, und ihre exakten
+  geprüften Bytes werden vom Framework selbst ausgeliefert. `manual/live.md`
+  ist das Kapitel für Anwendungen, und ein von `suprnova new` erzeugtes
+  Projekt ist von Haus aus Live-fähig: Es schreibt `src/live/mod.rs` mit einer
+  leeren Registry und einer Funktion `routes()`, bindet die Registry in
+  `bootstrap.rs` und installiert die Routen aus `cmd/main.rs`.
+
+- **Komponenten werden mit `#[derive(LiveComponent)]` und `#[live]`
+  deklariert.** Das Derive benennt die Komponente und ihren View
+  (`#[live(name = "app.counter", view = "live/counter.html")]`); das Attribut
+  `#[live]` am `impl`-Block markiert die Methoden, die der Browser aufrufen
+  darf. Ein `#[public]`-Feld wird gerendert und im signierten Snapshot
+  mitgeführt, ein `#[model]`-Feld nimmt zusätzlich über `live:model`
+  Vorschläge des Browsers entgegen, und eine `#[action]`-Methode ist der
+  einzige Einstiegspunkt, den eine Anfrage erreichen kann; sie bekommt
+  validierte Argumente und gibt typisierte Ergebnisse wie eine Weiterleitung
+  oder einen Flash zurück. Jeder Feldtyp muss `Default` implementieren; eine
+  frische Insel startet von diesen Standardwerten, sofern ein Mount-Hook
+  nichts anderes sagt. Komponenten werden ausdrücklich über
+  `LiveRegistry::builder` registriert, und die Registry ist unveränderlich,
+  sobald die Laufzeit zusammengebaut ist - ein doppelter Name oder View oder
+  eine Komponente, deren Aktionen Validierung brauchen, ohne dass ein
+  Validierungs-Port gebunden ist, scheitert bei der Registrierung mit einem
+  typisierten `RegistryError`.
+
+- **`suprnova::view` ist ein geprüfter Contract für serverseitig gerenderte
+  Views, für gewöhnliche Routen ebenso wie für Live-Komponenten.**
+  `#[suprnova::view(path = "...")]` deklariert ein Template, `TrustedHtml` ist
+  der eine auditierte Typ, den ein Template unescaped ausgeben darf, und der
+  Filter `trusted_html` ist der Weg dorthin; `#[suprnova::view_filter]`
+  deklariert einen geprüften eigenen Filter. Askama ist der Unterbau, aber
+  Handler hängen von den eigenen Contracts des Frameworks ab statt von den
+  Modulen der Template-Engine, und `TemplateFailure` ist eine geschlossene,
+  redigierte Fehlermenge (`MissingData`, `InvalidData`, `Failed`) statt des
+  eigenen Fehlertexts der Engine.
+
+- **Die Direktiven-Grammatik `live:` ist geschlossen und wird gegen Ihre
+  Komponenten bewiesen.** Ein View bindet Verhalten mit `live:click`,
+  `live:submit`, `live:model`, `live:upload`, `live:key`, `live:loading` und
+  dem Rest der dokumentierten Menge - nie mit einer Inline-Ausdruckssprache
+  und nie mit einem vom Server zurückgegebenen Skript. `suprnova live:check`
+  baut Ihre Anwendung und lässt den integrierten Checker über jeden
+  registrierten View laufen: Eine unbekannte Aktion, ein unbekanntes
+  Model-Feld, ein roher `safe`-Filter oder ein Verstoß gegen die
+  Barrierefreiheit scheitert mit Datei, Zeile und Spalte. `--allow-unproved`
+  akzeptiert die dynamischen Strukturen, über die der Checker absichtlich
+  keine Aussage macht.
+
+- **`Router::try_live()` installiert den reservierten Live-Namensraum genau
+  einmal.** Es registriert `/__live/v1/action`, `/__live/v1/upload`, die
+  Steuerrouten `/__live/v1/async/*` samt WebSocket-Handshake und die
+  unveränderlichen Routen `/__live/v1/assets/*`, und der Start scheitert, wenn
+  eine Anwendungsroute `/__live` beanspruchen könnte. `Router::try_live_with`
+  nimmt einen `LiveRouteGuard` entgegen, dessen Middleware-Kette auf die
+  Routen für Aktionen, Uploads und asynchrone Steuerung sowie auf das
+  WebSocket-Upgrade angewendet wird; so hängt eine Anwendung ihre eigene
+  Authentifizierung, Mandantenfähigkeit und Ratenbegrenzung an. Asset-Routen
+  bleiben ungeschützt. Jede reservierte Anfrage trägt eine strenge Policy:
+  Fakten zu Session, Origin, CSRF, Principal, Mandant und Ratenbegrenzung
+  müssen alle von echter Middleware festgehalten worden sein, und eine
+  asynchrone Route, die nicht die vollständige Menge sieht, wird abgelehnt,
+  statt einen anonymen Transport zu öffnen.
+
+- **Eine Live-Anfrage weist ihren eigenen Origin nach, und Live zu benutzen
+  lockert sonst nichts.** Die mitgelieferte Laufzeit sendet den
+  Live-Media-Type und den browsereigenen Header `Sec-Fetch-Site` und trägt
+  keinen Session-Token, `CsrfMiddleware` prüft diesen Nachweis für eine
+  Live-Operation also eigenständig, gleich welche Origin-Policy die Anwendung
+  konfiguriert hat, und fällt für eine Cross-Site-Anfrage oder eine Anfrage
+  ohne diesen Header auf die Token-Validierung zurück. Gewöhnliche Routen
+  behalten die konfigurierte Policy, eine Anwendung muss `OriginPolicy` also
+  nicht mehr für die ganze Anwendung weiten, damit Live funktioniert.
+  `AuthMiddleware::optional()` ist die neue Guard-Form, die es dafür braucht:
+  Sie hält einen Principal fest, wenn es einen gibt, und lässt eine anonyme
+  Anfrage weiterlaufen, sodass anonyme Besucher auf einem öffentlichen Seed
+  handeln können, während eine identitätsgebundene Insel eine Anfrage ohne
+  Principal-Nachweis weiterhin ablehnt.
+
+- **Dokumente platzieren Inseln über `LiveDocument`.** Eine Dokumentroute baut
+  eines aus der Anfrage, mountet jede Insel mit `LiveMount` und gibt das
+  Bootstrap-Markup genau einmal aus. `LiveMount::public_seed` deklariert eine
+  Insel, die jeder Besucher rendern darf und deren Zustand ein
+  wiederverwendbarer Seed ist, der bei der ersten Aktion des Besuchers zu
+  einer echten Instanz hochgestuft wird; `LiveMount::identity_bound`
+  deklariert eine Insel, die zur aktuellen Session und zum aktuellen
+  Principal gehört, ihre Dokumentroute muss also authentifizieren.
+  `LiveDocument::bootstrap` gibt das inerte Konfigurationselement und die
+  geordneten Script-Tags mit Integrity-Attributen für die ESM- oder die
+  klassische Strategie aus, ergänzt die Upload- und die asynchrone Rolle,
+  wenn eine gemountete Komponente sie braucht, und auf Wunsch die
+  Stimulus-Brücke, und lehnt einen zweiten Bootstrap oder einen Mount nach
+  dem Bootstrap ab. `Router::try_live_mount` registriert einen Mount, und
+  `Router::try_live_document` deklariert eine Dokumentroute ohne Mounts beim
+  Start.
+
+- **Das Framework liefert genau die geprüften Browser-Artefakte aus.** Die
+  zehn deterministischen Build-Ausgaben sind eingebettet und werden bei der
+  ersten Benutzung gegen ihr Manifest validiert - fail-closed bei jeder
+  Abweichung in Digest, Länge, Dateiname, Rolle, Fähigkeit oder Version - und
+  werden unter `/__live/v1/assets/<identity>/<file>` für `GET` und `HEAD`
+  ausgeliefert, mit unveränderlichem Caching, starken Digest-Validatoren,
+  bedingten Anfragen, `nosniff` und geschlossenen Fehltreffern. Dokumente
+  enthalten keinen ausführbaren Inline-Code, eine strenge Policy
+  `script-src 'self'` hält also. `suprnova live:assets --out <dir>`
+  veröffentlicht dieselben Bytes atomar auf ein CDN oder in ein statisches
+  Verzeichnis, behandelt eine identische Veröffentlichung als aktuell und
+  verweigert es, ein Verzeichnis zu ersetzen, dessen Bytes abweichen, sofern
+  Sie nicht `--replace` übergeben.
+
+- **Live-Komponenten nehmen Datei-Uploads unter einer deklarierten, geprüften
+  Policy entgegen.** Ein Attribut `#[upload(policy = ...)]` an einem
+  `#[model]`-Feld deklariert die maximale Dateianzahl, deklarierte und
+  aggregierte Byte-Budgets, akzeptierte Media-Types und das
+  Ersetzungsverhalten über `UploadPolicy::builder`, und der View bindet es mit
+  `<input type="file" live:upload="avatar">`. Die Laufzeit erzeugt, überträgt
+  und schließt den Upload über `/__live/v1/upload` ab; die Bytes warten in
+  Quarantäne, bis die deklarierte Finalisierungsaktion läuft, und dann
+  übergibt das Framework sie dem `UploadFinalizer` der Anwendung, daneben
+  einem optionalen `UploadScanner` und `UploadApplicationValidator`. Jede
+  Steuerung wird über das Gate als
+  `live:<component>.upload.<field>.<Control>` autorisiert, für jedes von
+  `Create`, `Reacquire`, `Status`, `Queue`, `BeginTransfer`, `PutChunk`,
+  `Complete`, `Accept`, `BeginFinalize`, `CommitFinalize`, `Cancel`,
+  `Reject`, `Expire` und `Fail`. Jede Anfrage validiert den aktuellen Mount,
+  Principal, die Session, den Mandanten, die Komponente, das Feld und den
+  Dokument-Scope erneut, eine Sperre pro Handle serialisiert Races um Chunks,
+  Abschluss, Abbruch, Aktion, Finalisierung und Aufräumen, und Chunk-Bodys
+  reservieren das gemeinsame In-Flight-Budget, bevor sie puffern.
+  `Router::try_live_upload_reacquisition` deklariert einen der Anwendung
+  gehörenden Pfad außerhalb des reservierten Namensraums, wo ein Browser, der
+  seine Transferberechtigung verloren hat, eine frische bekommen kann - und
+  der nur der Session und dem Principal antwortet, die den Upload erzeugt
+  haben.
+
+- **Inseln aktualisieren sich asynchron über SSE, WebSocket oder Polling.**
+  Eine Komponente deklariert im Attribut `#[live]` die Streams, auf die sie
+  hört (`streams(stream(name = "activity", topics("activity"),
+  events(ActivityPosted)))`), das Framework signiert einen begrenzten
+  Abonnement-Deskriptor für den Besucher, und die Browser-Laufzeit öffnet
+  einen nativen Transport und fällt auf Polling zurück, wenn sie es nicht
+  kann. Das Abonnieren wird über die Gate-Fähigkeit
+  `live:<component>.stream.<name>` autorisiert; die Anwendung veröffentlicht
+  über `suprnova::live::LiveStreams`, wobei `refresh` abonnierten Inseln sagt,
+  dass sie frisch rendern sollen, und `event::<T>` eine typisierte Payload an
+  die registrierten Handler der Insel zustellt. Fanout, Hop-Anzahl und
+  Zustellung pro Dokument sind allesamt begrenzt. Polling ist ein
+  gewöhnliches frisches Rendern, der Zustand holt also auf, aber
+  Event-Payloads, die veröffentlicht wurden, während ein Transport nicht
+  verfügbar war, werden nicht nachgeholt - was die Laufzeit als degradierten
+  statt als aktuellen Stream meldet.
+
+- **Die Browser-Laufzeit ist ein striktes TypeScript-Paket, das als Kern- und
+  als optionale Bundles ausgeliefert wird.** `@suprnova/live` bootstrappt
+  einmal pro Dokument, entdeckt Inseln, parst die geschlossene
+  Direktiven-Grammatik, gibt jeder Insel begrenzte Arbeit und einen
+  wahrheitsgetreuen ausstehenden und fehlgeschlagenen Zustand, wendet eine
+  Response erst nach einem erfolgreichen Morph durch einen gepinnten privaten
+  Idiomorph-Adapter an und bewahrt Fokus, Formularzustand, Controller,
+  Scrollposition und History über Morphs und native Navigationen hinweg. Die
+  optionalen Bundles `uploads`, `async` und `stimulus` hängen sich über einen
+  typisierten Feature-Port an, in ESM- und in klassischer Form; Stimulus wird
+  nie in den Kern gebündelt. Es gibt darin nirgends ein `eval`, ein
+  `new Function`, ein vom Server zurückgegebenes Skript oder eine
+  Inline-Ausdruckssprache.
+
+- **Vier CLI-Befehle decken den Live-Arbeitsablauf ab.**
+  `suprnova live:make <name>` scaffoldet eine Komponente in `src/live/`, ihren
+  View in `templates/live/` und ihre Registrierung im Builder `registry()`,
+  deklariert das Modul, validiert jedes Ziel und verweigert Traversal und
+  Symlinks vor dem Schreiben, schreibt atomar, überschreibt nie, macht jede
+  Datei rückgängig, die ein fehlgeschlagener Lauf geschrieben hatte, und kann
+  einen Dry-Run melden. `suprnova live:check`, `suprnova live:inspect` und
+  `suprnova live:assets` sind dünne Clients eines verborgenen
+  Framework-Konsolenbefehls und eines begrenzten, versionierten
+  JSON-Lines-Protokolls; die CLI behält damit keine Abhängigkeit zum
+  Framework oder zur Engine und ist fail-closed, ohne zu schreiben, bei
+  allem, was nicht unterstützt, veraltet, abgeschnitten, übergroß oder
+  unerwartet ist. `live:inspect` meldet die gebundene Registry, die
+  Konfigurationsgrenzen, die installierten Upload-Fähigkeiten, die
+  zusammengebauten Laufzeitdienste und die Asset-Identität als Booleans für
+  Vorhandensein und als Zählwerte, nie als Zustand oder Geheimnisse.
+
+- **`suprnova::live::testing` bereitet Laufzeit und Mount-Katalog eines
+  Routers für In-Process-Tests vor.** `prepare_live_router_for_test` gibt
+  einem Test dieselbe Laufzeit, die der Server zusammenbaut: Ein Test kann
+  damit den Snapshot einer Insel aus ihrem Attribut
+  `data-suprnova-live-snapshot` dekodieren, eine Aktion mit einem echten
+  Session-Cookie und `Sec-Fetch-Site: same-origin` absetzen und über die echte
+  globale Middleware-Kette der Anwendung auf das angenommene Rendering
+  assertieren.
+
+- **RenderCache speichert eine nachweislich sichere Kopie der Response einer
+  Route und liefert die nächste passende Anfrage aus, ohne den Handler laufen
+  zu lassen.** Er ist ein Opt-in pro Route und pro Gruppe, er ändert nie, was
+  eine Anwendung tun kann, und eine Route, die er ablehnt, rendert und
+  liefert trotzdem korrekt aus. `Router::try_render_cache` nimmt ein bereits
+  registriertes Route-Muster auf und `Router::try_render_cache_group` jede
+  Route unter einem Pfadpräfix;
+  `RenderCache::install(router, RenderCacheConfig::from_env())` schließt die
+  Verdrahtung ab, nach jeder Middleware-Registrierung, die Locale, Session
+  oder Identität mit Anfrage-Scope herstellt. `RENDER_CACHE_ENABLED=false` ist
+  ein echter Ausschalter zur Installationszeit: Eine deaktivierte
+  Konfiguration gibt den Router unberührt zurück, sondiert nichts, registriert
+  nichts und lässt das Prozess-Gate geschlossen.
+
+- **Eine Cache-Policy nennt eine Repräsentationsklasse, eine Frische-Policy
+  und wie die Response geteilt werden darf.** `RenderCachePolicy::builder`
+  nimmt eine `RepresentationClass` entgegen, die von weit nach eng läuft -
+  `PublicShared`, `PublicShellStitched`, `PrivateCached`, `Uncacheable` -, und
+  `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` legt
+  fest, wie lange eine Repräsentation frisch ist und wie weit über diese Kante
+  hinaus eine gespeicherte Kopie danach ausgeliefert werden darf, während im
+  Hintergrund ein Neuaufbau läuft oder nachdem ein Neuaufbau im Vordergrund
+  fehlgeschlagen ist. `SharedCachePolicy` steuert, was einem gemeinsam
+  genutzten Cache vor der Anwendung mitgeteilt wird. Eine Route innerhalb
+  einer zwischengespeicherten Gruppe kann die umschließende Policy mit einem
+  `PolicyPatch` verengen, statt sie neu aufzuschreiben, und darf sie nur
+  verengen; eine einzelne Route aus einer zwischengespeicherten Gruppe
+  herauszunehmen ist ein Patch, der die Klasse auf `Uncacheable` setzt.
+
+- **Varianz wird deklariert, nie geraten.** Eine zwischengespeicherte
+  Repräsentation variiert nach Route-Muster, Pfadparametern und
+  Anwendungs-Build, sofern eine Policy nichts anderes sagt.
+  `QueryPolicy::declared([...])` benennt die Query-Parameter, die
+  Repräsentationen unterscheiden, und jeder andere Query-Parameter an einer
+  Anfrage umgeht den Cache für diese Anfrage, statt stillschweigend ignoriert
+  zu werden.
+  `.vary(VarianceDimension::Locale | ::Host | ::Tenant | ::Principal)`
+  partitioniert nach dem ausgehandelten Locale, dem Anfrage-Host, dem
+  aktuellen Mandanten oder dem angemeldeten Besucher, die letzten beiden als
+  opakes Schlüsselmaterial; eine `PrivateCached`-Route, die weder `Principal`
+  noch `Tenant` deklariert, lässt sich überhaupt nicht bauen. `Media` und
+  `Encoding` werden zusammen mit ihrer eigenen geschlossenen Menge über
+  `.vary_media(NegotiatedPolicy::declared([...], default)?)` und
+  `.vary_encoding(...)` deklariert: Die Middleware handelt `Accept` oder
+  `Accept-Encoding` der Anfrage nach RFC 9110 gegen diese Menge aus, wobei die
+  höchste Qualität gewinnt, bei gleicher Qualität die Reihenfolge des Headers
+  von links nach rechts erhalten bleibt, ein Wildcard als literales Token
+  verglichen statt expandiert wird und eine Qualität von `q=0`, außerhalb des
+  Bereichs oder nicht parsbar einen Kandidaten ausschließt, statt ihn auf den
+  Standard zu setzen. Ein fehlender, nicht passender oder nicht parsbarer
+  Header löst auf den deklarierten Standard auf und panikt nie. Sowohl der
+  Render-Schlüssel als auch der Header `Vary` nehmen ihren Wert aus dieser
+  einen Auflösung, sie können sich also nicht widersprechen.
+
+- **Ein ausgelieferter Treffer ist eine echte HTTP-Response mit echten
+  Validatoren.** Sie trägt `ETag` als starken Validator, den ein Client als
+  `If-None-Match` für eine `304` zurückschicken kann, dazu `Cache-Control`,
+  `Vary` und `Age` in ganzen Sekunden seit der Veröffentlichung - das
+  schnellste lokale Zeichen dafür, dass eine Response aus dem Store und nicht
+  aus einem Handler kam. Eine Response, die über ihr Frische-Intervall hinaus
+  ausgeliefert wird, trägt zusätzlich `Warning: 110 - "Response is Stale"`.
+  Bedingte Anfragen und `HEAD` werden aus dem gespeicherten Eintrag
+  beantwortet.
+
+- **Zwischengespeicherte Ausgabe wird gegen die Datenbank als aktuell
+  nachgewiesen, nicht angenommen.** Ein Collector mit Anfrage-Scope schreibt
+  jeden Lesevorgang eines Handlers dem zu, was er gelesen hat: einem Model,
+  einer Tabelle, einem Konfigurationswert, einem Feature-Flag, einer
+  Autorisierungsentscheidung, einer Identitätsachse. Jeder unterstützte
+  Schreibpfad auf der anderen Seite erhöht die Generation dessen, was er
+  geändert hat, in der Transaktion des Aufrufers, wo es eine gibt - die
+  Model- und Massenschreibvorgänge des ORM, die Query-Builder-Fassade, rohe
+  Tabellenschreibvorgänge, der Hydrationspfad der Zahlungen,
+  Feature-Flag-Schreibvorgänge und die RBAC-Statements für Rollen und
+  Berechtigungen einschließlich der neuen Widerrufe. Ein Treffer weist die
+  Generationen, von denen er abhängt, vor dem Ausliefern erneut nach, entweder
+  durch erneutes Lesen des Ledgers unter `CoherenceMode::Authority` oder gegen
+  ein Validierungs-Lease unter `CoherenceMode::Lease`, sodass nichts, was ein
+  Schreibvorgang ungültig gemacht hat, als aktuell ausgeliefert werden kann.
+  `RenderCache::bump_permission_version` ist die eine Invalidierung, die eine
+  Anwendung von Hand aufruft, aus dem Codepfad, der ändert, was ein
+  angemeldeter Benutzer darf; sie erhöht eine persistierte Generation, die
+  jedes nach Principal geschlüsselte Rendering beobachtet, übersteht einen
+  Neustart und tritt der Transaktion bei, in der die Rollenänderung läuft.
+
+- **Autorisierung, Feature-Flags und globale Scopes machen ehrlich mit.** Eine
+  Gate-Entscheidung wird nach der Identitätsachse beurteilt, die ihre
+  Auswertung tatsächlich herangezogen hat: Eine Abfrage, die nur den Mandanten
+  betrifft, braucht nur `Tenant` deklariert, während alles, was
+  Principal-Material aufgelöst hat oder überhaupt nichts Benennbares aufgelöst
+  hat, `Principal` braucht. Eine per RBAC geschützte Route wird
+  zwischengespeichert, und eine erteilte oder widerrufene Berechtigung baut
+  sie neu auf, denn die fünf Tabellen für Rollen und Berechtigungen werden
+  beobachtet, statt als Unbekanntes behandelt zu werden. Ein Lesevorgang auf
+  ein Feature-Flag beobachtet eine `Feature`-Generation, sobald der Snapshot
+  dieses Flag unter irgendeinem Scope-Schlüssel hält, `set_flag` erhöht sie,
+  und ein Neuladen der Flags erhöht sie für jedes Flag, das sein eigener Diff
+  als geändert gefunden hat. Ein Eloquent-`GlobalScope` deklariert
+  `ScopeDependency::Constant` oder behält den konservativen Standard
+  `PerRequest`, und ein Scope pro Anfrage, dessen Filter nichts gelesen hat,
+  was der Collector benennen kann, wird als undeklarierter Lesevorgang
+  festgehalten und verengt das Rendering auf `Uncacheable`, statt einen
+  Mandantenfilter stillschweigend wegzuspeichern.
+  `suprnova::live::current_tenant()` ist der instrumentierte Accessor, nach
+  dem ein Gate-Body oder ein Scope greift.
+
+- **Die Schreibseite ist in jedem Prozess offen, der über das ORM schreibt.**
+  Ein Queue-Worker, ein geplanter Task oder ein Konsolenbefehl schreibt über
+  dasselbe ORM wie der Server und ruft nie `RenderCache::install` auf: Seine
+  Schreibvorgänge erhöhten deshalb bislang keine Generation, und Seiten, die
+  von ihnen abhingen, wurden weiterhin veraltet ausgeliefert. Die Schreibseite
+  ist jetzt ein prozessweiter Tri-State, der höchstens einmal sondiert wird,
+  nie innerhalb der Transaktion eines Aufrufers, sodass jeder schreibende
+  Prozess dieselben Generationen erhöht wie der Server, während eine Anwendung
+  mit deaktiviertem Cache weiterhin überhaupt kein RenderCache-SQL absetzt.
+
+- **Drei Deployment-Profile entscheiden, wo Einträge und die Führung beim
+  Neuaufbau leben.** `RENDER_CACHE_PROFILE` wählt `embedded` (eine Dateistufe
+  pro Prozess unter `RENDER_CACHE_L1_DIR`, Führung im Prozess), `database`
+  (Einträge in `suprnova_render_entries`, Leases in
+  `suprnova_render_leases`, Live-Instanz-Datensätze in
+  `suprnova_live_instances` und `suprnova_live_promotions`) oder `redis` (ein
+  Redis-Hash pro Schlüssel plus ein Zähler für Veröffentlichungs-Token pro
+  Schlüssel). `RENDER_CACHE_L1` und `RENDER_CACHE_COORDINATOR` überschreiben
+  jede der beiden Hälften unabhängig, ein Deployment, das seine Einträge in
+  der Datenbank und seine Leases im Prozess haben will, sagt also genau das.
+  Die Wahrheit über Generationen zieht nicht mit um: Das datenbankgestützte
+  Ledger ist bei jedem Profil die Autorität, und genau das lässt Redis alles
+  verlieren, was es hält, ohne dass irgendetwas Veraltetes als aktuell
+  nachgewiesen würde. Die vollständige Tabelle ist `RENDER_CACHE_ENABLED`,
+  `RENDER_CACHE_PROFILE`, `RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`,
+  `RENDER_CACHE_L0_ENTRIES`, `RENDER_CACHE_L0_BYTES`, `RENDER_CACHE_L1_DIR`,
+  `RENDER_CACHE_L1_BYTES`, `RENDER_CACHE_REDIS_URL`,
+  `RENDER_CACHE_REDIS_PREFIX`, `RENDER_CACHE_LEASE_MS`,
+  `RENDER_CACHE_MAX_WAITERS`, `RENDER_CACHE_HINTS`, `RENDER_CACHE_FAILURE`
+  und `APP_BUILD_ID`. Eine Variable mit geschlossener Menge, der ein Wert
+  außerhalb ihrer Menge gegeben wird, lässt den Boot mit einer Meldung
+  scheitern, die die Variable benennt und den Wert nie wiederholt, denn ein
+  Umgebungswert kann ein Geheimnis tragen. Das Ledger der Live-Instanzen hat
+  sein eigenes `LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL` und
+  `LIVE_REDIS_PREFIX`, und beide Installationen sind beim Boot fail-closed
+  bei einer fehlenden Stufen-Migration oder einem Endpunkt, der nicht
+  antwortet.
+
+- **Ein Live-Dokument kann als gemeinsam genutzte Shell mit Inseln pro
+  Besucher zwischengespeichert werden.** Eine Route, die
+  `RepresentationClass::PublicShellStitched` deklariert, speichert die Shell
+  einmal als Composite-Eintrag, geschnitten aus den Slots, die
+  `LiveDocument::mount` erfasst hat, und bei einem Treffer hängt die
+  Middleware den vorbereiteten Eintrag an und ruft die Routenkette trotzdem
+  auf, sodass der eigene Guard und die Mandanten-Middleware der Route über
+  die Anfrage entscheiden, bevor die Live-Abschluss-Middleware jeden Slot
+  unter einer allein für diese Anfrage abgeleiteten Autorität neu mountet.
+  Eine Erfassung, die nicht exakt brauchbar ist - ein Slot, der nicht genau
+  einmal gefunden wird, ein Dokument-Digest, der nicht passt -, lehnt die
+  Veröffentlichung ab und speichert nichts. Die Grenzen sind 32 Slots, 64
+  Nonce-Löcher, 193 Graph-Segmente und je 4.096 Bytes für Slot-Parameter und
+  Fallbacks. Weil jede Zusammensetzung eine eigene Repräsentation ist,
+  antwortet keine Composite-Response mit `304` und beachtet keine
+  `If-None-Match`, und eine Zusammensetzung mit Slots wird mit
+  `Cache-Control: private, no-store` gesendet, während eine ohne Slots das
+  private `max-age` ihrer Klasse behält.
+
+- **Ein gespeichertes Composite kann einen anderen gespeicherten Eintrag als
+  eines seiner Segmente benennen.** `LiveNestedSegment` ist die typisierte
+  Deklaration, und `Router::try_live_nested_segment` registriert sie. Der
+  innere Eintrag behält seinen eigenen Schlüssel und seine eigene Version, er
+  wird also zu seinen eigenen Bedingungen und nicht zu denen des Einbindenden
+  invalidiert, neu veröffentlicht und abgeriegelt, und jedes Segment
+  deklariert, was passiert, wenn es sich nicht auflösen lässt: das Dokument
+  scheitern lassen, es weglassen oder einen begrenzten Fallback ausliefern.
+  Die Verschachtelung ist auf drei Ebenen und sechzehn verschachtelte
+  Segmente begrenzt, ein Zyklus wird als Zyklus gemeldet, auch wenn er
+  zugleich die Tiefe überschreiten würde, und die zusammengesetzte Länge wird
+  gegen die Body-Grenze geprüft, bevor ein einziges Byte kopiert wird. Die
+  Veröffentlichung wird verweigert für ein Composite, das ein inneres Segment
+  einer weiteren Repräsentationsklasse benennt, eines mit einem längeren
+  Frischefenster, einen transitiven Zyklus, einen Graphen jenseits der
+  Tiefengrenze oder ein inneres `PrivateCached`-Segment, das sich nie
+  auflösen könnte. Bei einem Treffer wird ein identitätsgebundenes inneres
+  Segment für den anfragenden Besucher neu autorisiert; eines, das als
+  identitätsfrei deklariert ist, überspringt das - was bewiesene
+  Identitätsfreiheit ist und keine Aufweichung davon.
+
+- **Knoten können einander mitteilen, dass sich gerade eine Generation bewegt
+  hat.** `RENDER_CACHE_HINTS` schaltet einen Redis-Pub/Sub-Kanal ein, der die
+  Abhängigkeits-Digests trägt, die eine Erhöhung gerade berührt hat;
+  standardmäßig eingeschaltet für das Profil `redis` und ausgeschaltet für
+  die anderen beiden, auf denselben `RENDER_CACHE_REDIS_URL` und
+  `RENDER_CACHE_REDIS_PREFIX` wie der Cache selbst. Die einzige Macht eines
+  Hinweises ist, einen Knoten früher revalidieren zu lassen, als sein eigenes
+  Lease es getan hätte: Er kann nie ein Lease verlängern oder anlegen, einen
+  Eintrag als aktuell nachweisen, das Lesen des Ledgers umgehen, das ein
+  Treffer weiterhin macht, oder die Autoritäts-Epoche anfassen - deshalb ist
+  der Kanal absichtlich nicht authentifiziert, und deshalb verweigert ein
+  nicht erreichbarer Hinweis-Endpunkt den Boot nicht so, wie eine nicht
+  erreichbare Cache-Stufe es tut. Ein Hinweis trägt keinen Zeitpunkt, es wird
+  also keine Annahme über Uhrenabweichungen zwischen Knoten gebraucht. Ein
+  Deployment mit ausgeschalteten Hinweisen, eines mit totem Kanal und eines,
+  das sie nie hatte, liefern dieselben Einträge aus und lassen dieselben
+  Neuaufbauten zu; nur der Zeitpunkt der Revalidierung unterscheidet sich.
+
+- **Zwei Konsolenbefehle und neun Telemetrie-Zähler sind die
+  Betriebsoberfläche.** `render-cache:inspect <key>` meldet
+  Repräsentationsklasse, `body_bytes`, weitere Metadaten eines gespeicherten
+  Eintrags und die aktuelle Autoritäts-Epoche, und er liest die
+  prozessinterne Stufe dieses Prozesses und sonst nichts - auf einem
+  gemeinsam genutzten Profil antwortet er also „was dieser Knoten im Speicher
+  hat“ und nicht „was das Deployment gespeichert hat“.
+  `render-cache:epoch-advance` ist die Notfall-Invalidierung: Er erhöht die
+  Autoritäts-Epoche, die in jeden Lookup-Schlüssel eingebacken ist,
+  gespeicherte Einträge geraten also außer Reichweite, ohne dass etwas
+  aufzuzählen oder zu löschen wäre, und auf dem Knoten, der ihn ausführt,
+  wirkt das sofort. Keiner von beiden gibt je einen gespeicherten Body oder
+  eine rohe Abhängigkeitsidentität aus, was assertiert und nicht bloß
+  behauptet wird. Die Zähler sind `suprnova.render_cache.lookups`, `.hits`,
+  `.publications`, `.rebuilds`, `.stitch.assemblies`, `.stitch.slots`,
+  `.stitch.nested`, `.hints` und `.epoch_rewinds`, alle mit geschlossenen
+  Attributen niedriger Kardinalität, die nie eine Route, einen Schlüssel,
+  einen Digest, eine Stufe oder einen Provider benennen.
+
+- **Ein abgelehnter Lookup sagt genau, welcher Contract ihn abgelehnt hat.**
+  `outcome="declined"` am Lookup-Zähler trägt jetzt ein Attribut `reason` aus
+  einer geschlossenen Menge von achtunddreißig Labels, berechnet aus einem
+  typisierten Wert an dem Zweig, der tatsächlich abgelehnt hat, statt
+  nachträglich aus der Response rekonstruiert. Sie sind nach Contract
+  gruppiert: Eignung (`policy_uncacheable`, `method`, `status`, `streaming`,
+  `sets_cookie`, `unsafe_header_name`), Beobachtung
+  (`observation_overflowed`, `ledger_read_failed`, `handler_not_begun`),
+  Klassifikation, Schlüssel-Abweichung, Live-Dokument und Composite-Bau.
+  Jedes Label ist im Betriebskapitel dokumentiert, und ein Test assertiert
+  das, statt der Prosa zu vertrauen. `reason` wird nur neben
+  `outcome="declined"` ausgegeben; ein Treffer und ein Fehltreffer tragen
+  keines.
+
+- **Eine Autoritäts-Epoche, die rückwärts geht, wird erkannt, abgelehnt und
+  überstiegen.** Eine Datenbankwiederherstellung kann die Epoche auf einen
+  Wert zurücksetzen, den das Deployment bereits benutzt hat, wodurch
+  Einträge, die unter dem alten höheren Wert veröffentlicht wurden, wieder
+  als aktuell nachgewiesen werden könnten. Ein Eintrag oder ein Lease, der
+  über der Autorität gestempelt ist, wird jetzt in jedem Alter abgelehnt, vor
+  jedem Abhängigkeitsvergleich, und der Knoten, der das erkennt, hebt die
+  Ledger-Epoche über den Stempel, gibt sein Lease ab, räumt seine
+  prozessinterne Stufe und erhöht `suprnova.render_cache.epoch_rewinds`.
+
+- **NOWPayments tritt neben Stripe und Paddle als Zahlungs-Adapter hinzu.**
+  Das Crate `suprnova-payments-nowpayments` erzeugt gehostete Rechnungen,
+  verifiziert Zahlungsbenachrichtigungen und liest den Zahlungsstatus mit dem
+  Händler-API-Schlüssel, und es registriert sich über
+  `NowPaymentsProvider::from_env()` als `nowpayments` in der gewöhnlichen
+  Provider-Registry. Es liest `NOWPAYMENTS_ENVIRONMENT` (`sandbox` oder
+  `production`, standardmäßig `sandbox`; ein unbekannter oder leerer Wert
+  lässt die Konfiguration scheitern), `NOWPAYMENTS_API_KEY`,
+  `NOWPAYMENTS_IPN_SECRET` und `NOWPAYMENTS_IPN_CALLBACK_URL` und verweigert
+  leere Anmeldedaten vor jeder HTTP-Anfrage. Sein Webhook-Endpunkt ist
+  `POST /webhooks/payments/nowpayments` über die gemeinsamen
+  `webhook_routes`, und er braucht genau die öffentliche HTTPS-Callback-URL
+  und Anfrage-Bodys, die den Adapter unverändert erreichen.
+  `manual/payments-nowpayments.md` ist das Kapitel.
+
+- **RBAC hat zu jedem erteilenden Helfer das widerrufende Gegenstück.** Die
+  Oberfläche exportierte die erteilende und die prüfende Hälfte einer
+  Zugriffskontroll-API und nichts, was Zugriff wieder wegnahm: Einem
+  Administrator seine Rolle zu entziehen bedeutete deshalb, Statements gegen
+  Join-Tabellen zu bauen, deren Semantik man erschließen musste - während
+  eines Vorfalls, denn dann greift man zum Widerruf.
+  `remove_permission_from_role`, `remove_role_from_model` und
+  `remove_permission_from_model` sind die freien Funktionen, jede mit dem
+  `_on_guard`-Gegenstück, das die erteilende Seite bereits hatte, und
+  `HasRoles::remove_role` und `HasRoles::remove_permission_to` bilden das
+  Paar an der Aufrufstelle. Ein Name, den es auf keinem solchen Guard gibt,
+  ist ein Fehler, ein Tippfehler oder ein auf den falschen Guard gerichteter
+  Aufruf ist also laut; eine Zuweisung, die das Model oder die Rolle nicht
+  hält, ist ein No-op, das `Ok` zurückgibt, die Wiederholung eines bereits
+  gelandeten Widerrufs ist also gefahrlos. Jeder Aufruf entfernt genau die
+  eine Zuweisung, die er benennt, ohne Massenlauf, und jedes Statement löst
+  seinen Executor zuerst über die umgebende Transaktion auf, sodass ein
+  Bündel aus Erteilen und Widerrufen innerhalb von `DB::transaction` als eine
+  Einheit committet oder zurückgerollt wird. Der Widerruf ist
+  quellenspezifisch und widerspricht `has_permission_for_model` nicht, das
+  eine direkte Erteilung vor einer über eine Rolle geerbten auflöst: Eine
+  Rolle zu entziehen lässt eine Berechtigung, die das Model auch direkt hält,
+  weiterhin mit wahr antworten, und die Rustdoc benennt den zweiten Aufruf,
+  der den tatsächlichen Zugriff beendet.
+
+- **Eine Anwendung kann ihren Router asynchron bauen.**
+  `Application::try_routes_async` nimmt eine Closure entgegen, die ein Future
+  zurückgibt, und `Server::try_from_config_with_routes_async` ist der
+  asynchrone Zwilling von `try_from_config_with_routes`, der sie beherbergt,
+  mit demselben Prolog und Epilog. Es gibt sie, weil `RenderCache::install`
+  nach den Tabellen des Generationen-Ledgers sondieren muss, bevor es eine
+  Laufzeit zusammenbauen kann, und die Routen-Closure der einzige Ort ist,
+  der sowohl einen Container als auch einen Router hat - keiner der beiden
+  Boot-Hooks hat beides. `routes`, `try_routes` und `try_routes_async`
+  schreiben denselben Slot, der zuletzt aufgerufene ist also der, den der
+  Server baut.
+
+- **Die Magnetar-Integration legt offen, was eine teilweise abgeschlossene
+  Anmeldung tatsächlich zurückgegeben hat.** `SignInOutcome` ist öffentlich,
+  ein Magic-Link-, OAuth- oder Passkey-Callback, der zu
+  `SignInOutcome::FactorRequired` auflöst, kann also behandelt werden, statt
+  als Fehlschlag gemeldet zu werden: Die Framework-Session wird nicht
+  gebunden, und der Selektor, den er trägt, kann über die behaltene
+  Host-Engine vervollständigt werden. `FactorAuth` und
+  `MagnetarFactorAuthEngine` sind die Typen, die diese Fortsetzung halten,
+  und `install_magnetar_oauth_engine` und
+  `install_magnetar_oauth_engine_with_factor` installieren eine OAuth-Engine
+  mit oder ohne eine solche. Fehlschläge des Magnetar-Bootstraps benennen
+  jetzt, was fehlt, statt einen generischen Installationsfehler zu melden.
+
+- **Der Contract des Queue-Treibers meldet, ob er einen Filter nach
+  Queue-Namen erfüllen kann.** `QueueFilterCapability` (`Supported`,
+  `Unsupported`, `Unknown`) ist das, was
+  `QueueDriver::queue_filter_capability` zurückgibt; der Standard ist
+  `Unknown`, nicht `Unsupported`, ein Drittanbieter-Treiber, der `pop_from`
+  bereits überschreibt, funktioniert also unverändert weiter, und ein
+  Decorator darf eine bekannte `Unsupported`-Connection vor dem Pollen
+  ablehnen, muss einen `Unknown`-Treiber aber für sich selbst antworten
+  lassen. `TerminalCallbackClaim` sind die Metadaten, die ein Worker
+  zurückbekommt, wenn er die terminalen Callbacks eines fertigen Batches
+  atomar beansprucht; sie tragen die dauerhafte Abschlusszeit und jeden im
+  selben kritischen Abschnitt sichtbaren Abbruch, sodass die
+  Callback-Entscheidung nicht aus einem Snapshot getroffen werden kann, der
+  veraltet war, bevor die Eigentümerschaft gewählt wurde.
+
+- **`Schedule::try_add` ist das fehlbare Geschwister von `Schedule::add`.**
+  Der Task-Name identifiziert einen Task beim direkten Nachschlagen und in
+  den verteilten Schlüsseln, die `TaskBuilder::on_one_server` und
+  `TaskBuilder::without_overlapping` verwenden, ein Name kann also nicht zwei
+  registrierte Einträge identifizieren, und ein Zeitplan, der denselben Namen
+  zweimal registriert hatte, hatte zwei Tasks, die um eine Sperre stritten.
+  Namen sind jetzt exakt, unterscheiden Groß- und Kleinschreibung und sind
+  eindeutig: `add` panikt bei einem Duplikat und der bestehende Task bleibt
+  erhalten, während `try_add` den Fehler für Code zurückgibt, der ihn lieber
+  selbst behandelt.
+
+- **Die Grenzen der Session-Lebensdauer und der Fehler der Session-Migration
+  sind öffentlich.** `MAX_SESSION_LIFETIME_SECS` und
+  `MAX_SESSION_LIFETIME_MINUTES` sind die Begrenzungen, die das Parsen der
+  Umgebung und der Datenbank-Treiber anwenden, und `SessionMigrationError`
+  wird exportiert, damit ein eigener `SessionStore` den Fehlschlag benennen
+  kann, den er zurückgibt.
+
+- **Gescaffoldete Projekte sind von Bauart her in Produktionsform.** Die
+  erzeugte `Cargo.toml` hängt vom Framework mit abgeschalteten
+  Standard-Features ab und listet die neun Standard-Features außer `testing`
+  ausdrücklich auf (`filesystem`, `database-sqlite`, `database-postgres`,
+  `database-mysql`, `vector-mariadb`, `web-push`, `localization`,
+  `magnetar-oauth`, `media`), und sie fügt `features = ["testing"]` als
+  Dev-Dependency wieder hinzu. Cargos Resolver zieht die Features einer
+  Dev-Dependency nur in `cargo test` und andere `--tests`-Builds,
+  `cargo build --bin app` kompiliert also nie eine Testnaht in ein
+  ausgeliefertes Binary, und `cargo test` ist unverändert.
+  `manual/deployment.md` dokumentiert die Form für eine bestehende Anwendung
+  zum Übernehmen.
+
+- **Die Standard-Build-ID des Caches kommt aus der Anwendung, nicht aus dem
+  Framework.** `#[suprnova::main]` hält die eigene `CARGO_PKG_VERSION` des
+  Anwendungs-Crates unmittelbar nach dem Laden der Umgebung fest, und
+  `RenderCacheConfig::from_env` löst `build_id` über ein ausdrückliches
+  `APP_BUILD_ID` auf, dann über jene festgehaltene Anwendungsversion, dann
+  über die eigene Version dieses Framework-Crates - Letzteres nur für ein
+  Binary, das `#[suprnova::main]` nie expandiert hat.
+  `RenderCacheConfig::with_build_id` überschreibt, was `from_env` auch immer
+  gewählt hat, für eine Anwendung, die ihren eigenen Bezeichner pro Deploy im
+  Code ableitet. Setzen Sie `APP_BUILD_ID` einmal pro Deploy ausdrücklich: Es
+  wird in jeden Lookup-Schlüssel eingemischt, und eine Paketversion ändert
+  sich selten, wenn Sie ein Template, eine Übersetzung oder eine
+  Handler-Korrektur ausliefern.
+
+### Geändert
+
+- **Ein Worker auf der Failover-Queue-Connection leert jetzt jede Connection,
+  nicht nur die primäre.** `FailoverQueueDriver` dokumentierte die von Laravel
+  geerbte Folge: Schreibzugriffe fielen die Liste hinunter, Lesezugriffe
+  nicht, alles, was auf einen Fallback ausgewichen war, lag also dort, bis
+  jemand einen zweiten Worker direkt gegen diesen Fallback laufen ließ. `pop`
+  und `pop_from` rotieren jetzt ihre Startverbindung und laufen dann die ganze
+  Liste der Reihe nach ab - die Rotation, damit eine wiederhergestellte,
+  ununterbrochen ausgelastete primäre Connection Arbeit nicht aushungern kann,
+  die auf einem Fallback gelandet ist, die Reihenfolge, damit ein Aufruf nicht
+  mehrere Jobs reservieren und einen davon zurückgeben kann. Jeder
+  Reservierung wird ein frisches aggregiertes Token ausgestellt, das der
+  Treiber auf die Connection zurückabbildet, der sie wirklich gehört, denn
+  innere Token sind nicht global eindeutig und zwei Backends können
+  berechtigterweise dieselbe UUID prägen; ein abgelaufenes oder unbekanntes
+  aggregiertes Token gilt als veraltet, statt an eine beliebige Connection
+  geschickt zu werden. Zähler und alle drei Auflistungen aggregieren jede
+  konfigurierte Connection in konfigurierter Reihenfolge, und `clear` versucht
+  es bei jeder; was ein Betreiber inspiziert, ist also der Rückstau, den
+  dieser Treiber tatsächlich abarbeiten kann. Ein Treiber deklariert über
+  `QueueDriver::queue_filter_capability`, ob er einen Filter nach Queue-Namen
+  erfüllen kann; der Standard ist `Unknown`, ein bestehender
+  Drittanbieter-Treiber bleibt also unberührt.
+
+- **Das minimale Workflow-Lease beträgt zwei Sekunden, und der erste Heartbeat
+  feuert sofort.** Der Heartbeat erneuert bei `max(lock_timeout / 2, 1s)`, ein
+  Lease von einer Sekunde war für seine erste Erneuerung also zum Zeitpunkt
+  seines eigenen Ablaufs oder danach fällig: Jede Latenz beim Beanspruchen und
+  jeder Jitter der Einplanung öffnete ein Fenster, durch das ein anderer
+  Worker gehen konnte, während der erste bereits Effekte ausführte. Der erste
+  Tick des Heartbeats wird nicht mehr übersprungen, was das Fenster zwischen
+  Beanspruchung und erster Erneuerung schließt, und die Zulassung wartet auf
+  eine eigene Erneuerung, bevor irgendein Benutzercode läuft, nicht erst
+  innerhalb eines Schritts. `WORKFLOW_LOCK_TIMEOUT_SECS` unter zwei wird mit
+  einer Warnung begrenzt, die sagt, warum, und eine im Code gebaute
+  Konfiguration, die ein kürzeres Lease trägt, scheitert an der Validierung.
+
+- **Ein Zahlungs-Provider ohne Kunden-Datensätze kann die Hydration des
+  Transaktions-Spiegels ablehnen.**
+  `WebhookHandler::mirrors_payment_transactions` ist standardmäßig `true`,
+  jeder bestehende Provider verhält sich also wie bisher; bei einem Provider,
+  der `false` zurückgibt, werden seine verifizierten Events weiterhin im
+  Webhook-Audit-Log persistiert und dedupliziert, Rückerstattungen
+  eingeschlossen, aber es wird kein Transaktions-Spiegel für Bestellungen
+  erfunden, die der Anwendung gehören und die sie gegen authentifizierten
+  Provider-Zustand abgleichen muss. `try_extract_payment_snapshot` ist die
+  fehlbare Form von `extract_payment_snapshot`, die der Hydrationspfad
+  verwendet: Ein `Err` lässt den Webhook ausstehend, damit der Provider ihn
+  wiederholt, während `Ok(None)` einem Event vorbehalten ist, das wirklich
+  keinen vollständigen Snapshot liefern kann. Beides sind bereitgestellte
+  Methoden, ein bestehender Treiber kompiliert und verhält sich also
+  unverändert.
+
+- **Ein Paddle-`transaction.billed` wird nicht mehr als eingenommenes Geld
+  gelesen.** Eine ausgestellte Rechnung bestätigt keine Einnahme, und sie als
+  Zahlungseingang zu behandeln markierte Bestellungen als bezahlt, die es
+  nicht waren. Genehmigte Anpassungen für Rückerstattungen und Widersprüche
+  werden als Anpassungen statt als Transaktionen klassifiziert, mit ihrer
+  Währung aus `data.currency_code` und ihrem Ausgleichszeitpunkt aus dem
+  jüngsten erfassten Zahlungsversuch, wo es einen gibt; nur
+  `WebhookHandler::parse_event` klassifiziert sie, denn die Entscheidung
+  braucht die Aktion und den Genehmigungsstatus der Payload selbst. Der
+  Adapter bewahrt außerdem die Händler-Korrelation, die er über den Checkout
+  bekommen hat, statt einen Kunden-Identifier einzusetzen, den Paddle.js nicht
+  als Kunden-Auth-Token akzeptiert, kodiert benutzerdefinierte Daten, die
+  keine Strings sind, über Kunden- und Checkout-Anfragen hinweg einheitlich
+  als JSON-Strings und gibt seinem HTTP-Client die Anfragefrist, die das
+  gepinnte SDK nicht setzt.
+
+- **Das Framework-Crate trägt drei neue Module und zwei neue harte
+  Abhängigkeiten.** `suprnova::live`, `suprnova::render_cache` und
+  `suprnova::view` sind bedingungslos vorhanden, nicht per Feature geschaltet,
+  das Framework hängt also jetzt in jedem Build vom internen Engine-Crate
+  `suprnova-live` und von `askama` ab. Keines der Module tut etwas, bis eine
+  Anwendung sich dafür entscheidet: `Router::try_live()` installiert Lives
+  reservierte Routen, und `RenderCache::install` mit einer Policy ist das, was
+  den Cache überhaupt etwas tun lässt.
+
+### Behoben
+
+- **Ein Batch-Job wird erst bestätigt, wenn seine Buchführung dauerhaft ist.**
+  Der Worker bestätigte ein erfolgreiches Batch-Mitglied und schrieb dann die
+  Batch-Buchführung: Ein Fehlschlag dazwischen ließ einem Batch dauerhaft ein
+  Settlement fehlen, und seine Abschluss-Callbacks feuerten nie. Die
+  Reservierung wird jetzt gehalten, bis jeder Schreibvorgang der Buchführung
+  gelingt; ein abgelehnter oder unsicherer Schreibvorgang lässt sie intakt,
+  sodass der Ablauf der Sichtbarkeit den Job erneut zustellt, und die
+  Eindeutigkeit von `(batch_id, job_id)` im Repository macht die Wiederholung
+  gefahrlos, selbst wenn der erste Schreibvorgang wirksam wurde und nur seine
+  Antwort verloren ging. Das Batch-Repository ist getrennt installierbar und
+  darf eine andere Datenbank adressieren - deshalb kann sich das nicht einfach
+  die Transaktion des Queue-Settlements teilen.
+
+- **Die terminalen Callbacks eines Batches werden genau einmal gewählt.** Zwei
+  Jobs, die die letzten beiden Einträge eines Batches abschlossen, konnten
+  beide einen ausstehenden Zählwert von null beobachten und beide die
+  Abschluss-Callbacks ausführen. Settlement-Zeilen sind jetzt die Quelle der
+  Wahrheit, und ihre übergeordnete Batch-Zeile wird vor dem Einfügen gesperrt,
+  sodass nebenläufige Jobs für einen Batch eine totale Ordnung bilden und
+  genau ein letztes Settlement die Null beobachtet - über Zeilensperren auf
+  PostgreSQL und MySQL und über die Writer-Sperre, die die serialisierte
+  Transaktion auf SQLite nimmt. Das Beanspruchen des Callback-Bündels gibt die
+  dauerhafte Abschlusszeit und jeden im selben kritischen Abschnitt sichtbaren
+  Abbruch zurück, ein Worker kann `then` also nicht aus einem Snapshot wählen,
+  der veraltet war, bevor die Eigentümerschaft gewählt wurde, und ein nicht
+  leerer Batch, dessen ausstehender Zählwert null erreicht hat, ist gegen
+  positives Wachstum versiegelt. Ein Abbruch, der nach einer unsicheren
+  Antwort bereits sichtbar war, wird bei der erneuten Zustellung nicht neu
+  gestempelt. Fehlschläge bei der Konstruktion von Envelopes, die beim Bauen
+  eines ausstehenden Batches gesammelt wurden, treten beim Dispatch zutage,
+  der den ganzen Batch vor jeder Mutation an Repository oder Treiber ablehnt,
+  statt von einem unfehlbaren Fluent-Builder geschluckt zu werden.
+
+- **Der Redis-Queue-Treiber riegelt jede terminale Operation gegen die
+  Zustellung ab, für die sie ausgestellt wurde.** `ack`, `nack`, `release` und
+  `settle` vergleichen jetzt den Consumer-Eigentümer und den Zustellzähler des
+  Stream-Eintrags mit der von `pop` erfassten Generation, und ein einziges
+  Redis-Skript wendet eine etwaige Nachfolger-Veröffentlichung und das `XACK`
+  gemeinsam an, sodass eine verzögerte Antwort, die den Aufrufer wiederholen
+  lässt, die Generation nicht mehr vorfindet und die Wiederholung zu einem
+  No-op wird statt zu einer doppelten Veröffentlichung. Weil `nack` von Natur
+  aus zwei Befehle sind (`XADD`, dann `XACK`), behält jede Reservierung einen
+  Lebenszyklus pro Token, der über jede fehlgeschlagene Operation hinweg
+  adressierbar bleibt und erst entfernt wird, nachdem die Bestätigung gelungen
+  ist; eine Wiederholung setzt also an dem Schritt an, der fehlschlug, statt
+  neu zu veröffentlichen. Der At-least-once-Contract des Treibers und die
+  Anforderung, dass Handler idempotent sind, stehen jetzt in der
+  Moduldokumentation, statt bloß mitgemeint zu sein. Consumer-Identitäten sind
+  pro Prozess isoliert, zwei Worker können sich also nicht gegenseitig die
+  ausstehenden Einträge beanspruchen.
+
+- **Eine Datenbank-Queue-Reservierung hält so lange, wie sie es sollte.**
+  `reserved_until` speichert ganze Sekunden, und Leser vergleichen es mit der
+  abgerundeten aktuellen Zeit: Die laufende Bruchteilssekunde wurde damit
+  stillschweigend von jedem Lease abgezogen, und ein Timeout unterhalb einer
+  Sekunde konnte auf nichts abrunden. Der absolute Ablaufzeitpunkt wird jetzt
+  aufgerundet.
+
+- **Schreibvorgänge auf Workflow-Schritte sind abgeriegelt, ein erschöpftes
+  Versuchsbudget wird terminal, und MySQL-Datumsspalten passen zu den
+  Entities, die sie lesen.** Ein Schritt-Schreibvorgang von einem Worker, der
+  seinen Claim bereits verloren hatte, konnte über dem Worker landen, dem der
+  Workflow jetzt gehört; Schreibvorgänge tragen jetzt das Fencing-Token des
+  Claims. Eine Zeile, deren Versuchsbudget bereits erschöpft ist, konnte weder
+  beansprucht noch für immer ausstehend gelassen werden: Das Claim-Statement
+  macht jetzt höchstens eine solche Zeile pro Poll terminal, mit disjunkten
+  Prädikaten für Aufräumen und Beanspruchen, sodass ein großer verwaister
+  Rückstau einen Worker-Poll nicht in einen unbegrenzten Schreibvorgang
+  verwandeln kann. Die frühen Workflow-Migrationen deklarierten
+  MySQL-Datumsspalten als `TIMESTAMP`, während die öffentlichen Entities
+  `chrono::NaiveDateTime` verwenden, dessen MySQL-Speichertyp `DATETIME` ist;
+  `NormalizeWorkflowDateTimesForMysql` ist eine additive Migration, die sie
+  konvertiert und auf PostgreSQL und SQLite wirkungslos ist.
+
+- **Einen Task abzubrechen lässt die aufgeschobenen Effekte einer Transaktion
+  nicht mehr im Stich.** Eine abgebrochene `DB::transaction` rollt ihre
+  Datenbankarbeit zurück, wenn SeaORM die Transaktion fallen lässt, aber
+  nichts rollte für sie einen aufgeschobenen Queue-Push zurück oder gab eine
+  gehaltene Eindeutigkeitssperre frei, und ein After-Commit-Callback, das beim
+  Eintreffen des Abbruchs bereits lief, wurde mitten im Effekt fallen
+  gelassen. Callbacks laufen jetzt als erwartete Kind-Tasks, in der
+  Reihenfolge der Registrierung, sodass eines, das bereits unterwegs ist, den
+  Abbruch seines Aufrufers überlebt, und der nicht gestartete Rest wird auf
+  einen abgekoppelten Task umgeleitet, der entweder die After-Commit-Liste
+  ausführt (die Transaktion hat committet) oder kompensiert (sie hat es
+  nicht). Ein panikendes Callback tritt als Fehler zutage, statt die Callbacks
+  hinter ihm zu überspringen, und ein `COMMIT`, den die Datenbank ablehnt,
+  nachdem die Closure die Anfrage bereits genommen hat, wird behandelt, statt
+  zu paniken.
+
+- **Disk-übergreifende Kopien und Read-Through-Caching räumen nach einem
+  abgebrochenen Task auf.** Ein Fehlschlag mitten im Strom verwarf das
+  teilweise geschriebene Zielobjekt bereits, aber ein Abbruch gibt überhaupt
+  keinen Fehler zurück, der Writer wurde also einfach fallen gelassen, und ein
+  abgeschnittenes Objekt oder ein zwischengelagerter Multipart-Upload blieb
+  zurück. Der Ziel-Writer gehört jetzt über den gesamten Transfer hinweg einem
+  Guard: Ein Fehler wird an Ort und Stelle mit demselben Abbruch und Löschen
+  wie bisher erledigt, während ein Abbruch dieses Aufräumen auf einen
+  abgekoppelten Task umleitet, und das Aufräumen selbst läuft zu Ende, auch
+  wenn der wartende Task währenddessen abgebrochen wird. Das Aufräumen zielt
+  nie auf ein veröffentlichtes Objekt, denn ein anderer Writer kann die
+  Bedingung gewonnen haben. Arbeit im lokalen Dateisystem wird am Leben
+  gehalten, bis sie fertig ist, denn ein Tokio-Dateisystem-Future fallen zu
+  lassen stoppt die blockierende Arbeit nicht, die es bereits abgeschickt hat.
+
+- **Zwei Throttle-Klauseln, die auf dieselbe Speicher-Identität hashten,
+  teilen sich nicht mehr einen Zähler.** Eine Regel zur Ratenbegrenzung mit
+  mehreren endlichen Klauseln konnte kollidieren, die Treffer der einen
+  Klausel zählten dann gegen das Budget der anderen. Kollidierende Klauseln
+  reservieren jetzt deterministische, eindeutige Identitäten für Zähler und
+  Timer, einmal berechnet, sodass das Gate, der aufgeschobene Treffer und die
+  Response-Header alle denselben Schlüssel verwenden, und alte Schlüssel
+  bleiben erhalten, wo keine Kollision besteht.
+
+- **Ein Sliding-Window-Durchlauf löscht keine Historie mehr, die ein längeres
+  Kontingent noch braucht.** Der In-Memory-Limiter verwarf einen Bucket,
+  dessen letzter Treffer älter war als das Fenster, nach dem gefragt wurde,
+  und verwarf damit den Datensatz, der ein bereits beobachtetes längeres
+  Kontingent auf demselben Schlüssel durchsetzte. Ein Bucket bleibt jetzt
+  erhalten, bis sein letzter festgehaltener Treffer älter ist als sowohl das
+  übergebene Fenster als auch das längste für ihn beobachtete
+  Kontingent-Fenster. Ein Dekrement unter den Mindestbetrag wird behandelt,
+  statt zu wenig zu zählen.
+
+- **Der In-Memory-Cache-Treiber lehnt ein Inkrement gegen einen Wert ab, der
+  keine ganze Zahl ist.** Redis' `INCRBY` und `DECRBY` verweigern eine
+  vorhandene Nicht-Ganzzahl und lassen ihren Wert und ihre TTL in Ruhe; der
+  Memory-Treiber überschrieb sie, derselbe Code verhielt sich also gegenüber
+  den beiden Backends unterschiedlich. Er parst jetzt vor dem Einfügen und
+  lässt den Eintrag bei einem Fehler unberührt. Davon getrennt: Redis' `add`
+  installiert einen fehlenden, nicht getaggten Wert und räumt veraltete
+  Tag-Metadaten in einem einzigen Skript, ein neueres getaggtes Überschreiben
+  kann also nicht mehr zwischen dem bedingten Schreibvorgang und dem darauf
+  folgenden Aufräumen landen.
+
+- **Einmalige Session-Daten von Inertia überleben eine fehlgeschlagene
+  Response.** `SessionMiddleware` altert `_flash.new.*` zu `_flash.old.*`,
+  bevor der Handler läuft: Eine Response, die beim Konstruieren fehlschlug,
+  ließ diese Werte deshalb für den Alterungsdurchlauf der nächsten Anfrage zum
+  Löschen zurück - der Benutzer verlor die Validierungsfehler oder die
+  Flash-Meldung, die erklärte, was schiefgegangen war. Ein Guard mit
+  Anfrage-Scope flasht sie jetzt bei jedem nicht committeten Ausstieg neu,
+  Abbruch eingeschlossen, und entfernt sie erst, nachdem die vollständige
+  Response gebaut worden ist.
+
+- **Fanout-Broadcasting wartet darauf, dass das Backend sagt, es habe
+  geschrieben.** `SeaProducer::send` reiht nur ein, und das zurückgegebene
+  Future ist das, was den tatsächlichen Schreibvorgang im Backend meldet: Eine
+  Zustellung wurde deshalb als gesendet gemeldet, wenn sie nur eingereiht war.
+  Jedes Senden in einem Durchgang wird jetzt unter einer gemeinsamen Frist auf
+  seine Quittung gepollt, was zugleich verhindert, dass ein nicht verfügbarer
+  Broker eine Anwendungsanfrage unbegrenzt offen hält. Heartbeats für die
+  Mitgliedschaft halten den Lese-Guard, bis jeder Snapshot-Heartbeat
+  eingereiht ist, ein nebenläufiges Untrack kann also nicht von einem
+  veralteten Heartbeat überholt werden.
+
+- **`suprnova generate-types` hinterlässt nie ein veraltetes oder
+  abgeschnittenes Artefakt.** Ein Scan, der früh endete, überschrieb die
+  Ausgabe bislang mit dem, was er hatte: Ein transienter Parse-Fehlschlag
+  löschte damit stillschweigend Typdefinitionen, die die Anwendung noch
+  benutzte. Die Dateierzeugung verweigert es jetzt, ein Artefakt nach einem
+  unvollständigen Scan zu überschreiben, schreibt atomar über eine
+  kollisionsfreie temporäre Nachbardatei mit begrenzten Wiederholungen und
+  überspringt den Schreibvorgang ganz, wenn der Inhalt unverändert ist. Ein
+  Symlink als Ausgabe behält sein bisheriges Verhalten: Das aufgelöste Ziel
+  wird atomar ersetzt und der Link bleibt an Ort und Stelle; ein geändertes
+  schreibgeschütztes Ziel wird abgelehnt.
+
+- **Zwei Fehlschläge von `suprnova`-Befehlen werden gemeldet statt
+  geschluckt.** `suprnova new` meldet ein fehlgeschlagenes `git init`, statt
+  ein Projekt als vollständig erzeugt darzustellen, und
+  `suprnova workflow:install` validiert den Migrationspfad, bevor es irgendein
+  Verzeichnis anlegt, ein ungültiger Pfad scheitert also, ohne einen halb
+  fertigen Baum zu hinterlassen.
+
+- **Ein Savepoint und die Registry seiner aufgeschobenen Effekte sind sich
+  über die Identität einig.** Das Savepoint-Statement und die Marke der
+  Registry verwendeten die ursprüngliche Schreibweise des Aufrufers, aber
+  Namen unterscheiden Groß- und Kleinschreibung nicht, und PostgreSQL
+  behandelt zusätzlich Namen, die ihre ersten 63 ASCII-Bytes teilen, als
+  gleich: Ein `ROLLBACK TO` konnte deshalb einen Savepoint abwickeln, dessen
+  aufgeschobene Effekte die Registry unter einem anderen Schlüssel abgelegt
+  hatte. Beide teilen sich jetzt eine einzige validierte, für das Backend
+  kanonische Identität. Die akzeptierte API-Grenze von 64 Bytes ist
+  unverändert.
+
+- **`suprnova <command> --help` gibt die Hilfe aus, statt den Befehl
+  auszuführen.** Die CLI deklarierte ein eigenes `help`-Flag und zog es nur
+  heran, wenn kein Unterbefehl angegeben war: Jedes andere `--help` gab
+  deshalb das Banner aus und führte den Befehl danach trotzdem aus.
+  `suprnova migrate:fresh --help` löschte jede Tabelle in der Datenbank, und
+  der Guard, der das gestoppt hätte, verweigert nur in Produktion, während
+  `APP_ENV` standardmäßig `local` ist. Clap besitzt jetzt `-h` und `--help`
+  auf der obersten Ebene und bei jedem Unterbefehl, in beiden Reihenfolgen der
+  Argumente, und das kuratierte Banner ist weiterhin das, was die oberste
+  Ebene ausgibt. Ein Test zählt die Unterbefehle aus clap selbst auf, ein
+  später hinzugefügter Unterbefehl ist also abgedeckt, ohne dass jemand daran
+  denken muss, ihn zu ergänzen.
+
+- **Ein gescaffoldetes Frontend nagelt den beim Boot gelesenen CSRF-Token
+  nicht mehr fest.** Die erzeugten Einstiegspunkte für Vue, Svelte und React
+  lasen `<meta name="csrf-token">` einmal beim Laden des Moduls und hängten
+  diesen Wert an jeden Inertia-Besuch. Das Anmelden rotiert die Session, der
+  erfasste Token veraltet, und der nächste zustandsändernde Besuch - typisch
+  das Abmelden - wurde mit `419 CSRF token mismatch` abgelehnt. Jede erzeugte
+  Anwendung wurde damit ausgeliefert. Der Hook ist weg: Der Inertia-Client
+  liest das Cookie `XSRF-TOKEN`, das `CsrfMiddleware` setzt, und gibt es
+  selbst in `X-XSRF-TOKEN` zurück, einmal pro Anfrage; der Wert, der reist,
+  ist also der, den der Browser in diesem Moment hält. Die serverseitige
+  Verifikation ist unverändert, und beide Header-Namen werden weiterhin
+  akzeptiert. Das Handbuchkapitel und die Moduldokumentation von
+  `suprnova::csrf` benannten den alten Hook als das, was zu tun sei; beide
+  benennen ihn jetzt als das, was zu vermeiden ist.
+
+- **Das XSRF-Cookie einer gescaffoldeten Anwendung ist über lokales HTTP
+  benutzbar.** `CsrfMiddleware::new()` setzt das per JavaScript lesbare Cookie
+  `XSRF-TOKEN` standardmäßig auf `Secure`, während das erzeugte `env.example`
+  für die Entwicklung `SESSION_SECURE=false` setzt: Ein Browser würde das
+  Cookie über `http://localhost` deshalb weder speichern noch zurückgeben, und
+  jede zustandsändernde Anfrage in der Entwicklung wurde mit `419` abgelehnt.
+  Der erzeugte Bootstrap übergibt seine `SessionConfig` jetzt an
+  `CsrfMiddleware::with_session_config`, was `Secure`, `SameSite`, `Domain`,
+  `Path` und die Lebensdauer des Session-Cookies auf das XSRF-Cookie kopiert,
+  sodass die beiden nicht auseinanderdriften können. Nichts wird abgeschwächt:
+  Die Token-Validierung, die Standard-Origin-Policy und die Produktions-Guards
+  sind unverändert.
+
+- **`suprnova make:command` erscheint auf dem Hilfebildschirm.** Der Befehl
+  scaffoldet einen Konsolenbefehl nach `src/commands/` und hatte keine Zeile
+  auf dem kuratierten Bildschirm, der einzige Weg, von seiner Existenz zu
+  erfahren, war also, in den Quelltext zu sehen. Der Bildschirm wird jetzt
+  gegen die Liste der Unterbefehle geprüft, die clap meldet, in beiden
+  Richtungen, sodass weder eine fehlende Zeile noch eine Zeile, die keinen
+  Befehl benennt, überleben kann.
+
+### Upgrade
+
+- **Die meisten Anwendungen brauchen keine Codeänderung.** Live und
+  RenderCache sind beide ein Opt-in: `suprnova::live` tut nichts, bis ein
+  Router `Router::try_live()` aufruft, und `suprnova::render_cache` tut
+  nichts, bis eine Route aufgenommen und `RenderCache::install` aufgerufen
+  wird. Alles andere in dieser Veröffentlichung ist eine Korrektur an
+  Verhalten, das Sie schon hatten. Die Version ist 2.0.0, weil die Oberfläche
+  des Frameworks um zwei ganze Subsysteme gewachsen ist und wegen der unten
+  aufgeführten konkreten Verhaltensänderungen, nicht weil die gewöhnliche
+  Anwendungs-API umgestellt worden wäre: Kein öffentliches Element im
+  Framework-Crate, im Makro-Crate oder in den Adapter-Crates für Zahlungen,
+  Magnetar und Web Push wurde entfernt oder umbenannt.
+
+- **Neubauzeiten und der Abhängigkeits-Fußabdruck steigen.** Das Framework
+  hängt jetzt in jedem Build vom internen Engine-Crate `suprnova-live` und von
+  `askama` ab, denn `suprnova::live`, `suprnova::render_cache` und
+  `suprnova::view` sind bedingungslose Module und keine Features. Es gibt
+  nichts zu aktivieren und nichts zu deaktivieren.
+
+- **Eine Anwendung, die RenderCache nie benutzt, zahlt eine Schema-Sondierung
+  pro Prozess.** `RENDER_CACHE_ENABLED` ist standardmäßig `true`, der erste
+  ORM-Schreibvorgang, den ein Prozess außerhalb einer Transaktion macht, fragt
+  also einmal, ob die RenderCache-Migration vorhanden ist; findet er sie
+  nicht, ist dieser Prozess für den Rest seines Lebens geschlossen und setzt
+  kein weiteres RenderCache-SQL ab. Setzen Sie `RENDER_CACHE_ENABLED=false`,
+  um auch dieses eine Statement zu überspringen. Die Sondierung läuft nie auf
+  der Transaktion eines Aufrufers, sie kann einen Schreibvorgang, den Sie
+  gerade machen, also nicht vergiften.
+
+- **Wer einen `WebPushClient` aus einem bereits gebauten `reqwest::Client`
+  baut, muss handeln.** `WebPushClient::with_client` verweigert unter dem
+  Standard `EndpointPolicy::Strict` jetzt das Senden und gibt
+  `WebPushError::UnconfinedRedirects` zurück, denn die Weiterleitungs-Policy
+  eines bereits gebauten Clients lässt sich nicht inspizieren, und reqwest
+  folgt Weiterleitungen standardmäßig. Wechseln Sie zu
+  `WebPushClient::with_client_builder`, das jede Transportoption beachtet, die
+  Sie gesetzt haben (Proxy, TLS, Timeouts), und Weiterleitungen zwangsweise
+  abschaltet, oder rufen Sie `WebPushClient::allow_unconfined_redirects` auf,
+  wenn Sie wissen, dass Ihr Client sicher ist. `WebPushClient::new` ist nicht
+  betroffen.
+
+- **Vor dem Upgrade ausgestellte signierte URLs, die einen abschließenden
+  Schrägstrich tragen, verifizieren nicht mehr.** Signierung und Verifikation
+  schnitten bislang beide vor dem Hashen einen abschließenden Schrägstrich ab;
+  beide hashen den Pfad jetzt exakt. Eine als `/orders/1` signierte URL
+  verifiziert weiterhin unter `/orders/1`, und nur unter `/orders/1` - ein
+  Proxy, der einen Schrägstrich anhängt, erzeugt jetzt
+  `SignatureVerdict::Invalid`. Wenn ein Proxy oder ein Framework vor Ihrer
+  Anwendung Pfade normalisiert, indem es einen Schrägstrich anhängt, signieren
+  Sie die URL so, wie die Anfrage ankommen wird.
+
+- **Ein Zeitplan mit zwei Tasks desselben Namens scheitert jetzt bei der
+  Registrierung.** `Schedule::add` panikt bei einem Duplikat und behält den
+  bereits registrierten Task. Benennen Sie einen von beiden um oder wechseln
+  Sie zu `Schedule::try_add` und behandeln Sie den Fehler. Namen sind exakt
+  und unterscheiden Groß- und Kleinschreibung.
+
+- **Ein Workflow-Lease kürzer als zwei Sekunden wird begrenzt oder
+  abgelehnt.** `WORKFLOW_LOCK_TIMEOUT_SECS` unter `2` wird auf `2` begrenzt,
+  mit einer Warnung, die den Grund benennt; eine im Code gebaute
+  `WorkflowConfig` mit einem kürzeren Lease scheitert an `validate`. Wenn Sie
+  absichtlich ein Lease von einer Sekunde betrieben haben: Der Heartbeat
+  konnte es nicht erneuern, bevor es ablief.
+
+- **Eine MySQL-Anwendung, die Workflows benutzt, sollte eine Migration
+  ergänzen.**
+  `suprnova::workflow::migrations::NormalizeWorkflowDateTimesForMysql`
+  konvertiert die Datumsspalten von `workflows` und `workflow_steps` von
+  `TIMESTAMP` nach `DATETIME`, was `chrono::NaiveDateTime` tatsächlich
+  speichert. Sie ist additiv und auf PostgreSQL und SQLite wirkungslos. MySQL
+  kann beide Tabellen beim Anwenden neu bauen und sperren, planen Sie sie also
+  entsprechend ein. Ein von `suprnova new` erzeugtes Projekt bekommt sie
+  automatisch verdrahtet.
+
+- **`AuthMiddleware` löst den Benutzer jetzt bei jeder geschützten Anfrage
+  auf.** Bislang nahm sie das Vorhandensein eines persistierten Identifiers
+  hin. Die Verhaltensänderung ist, dass eine Session, die einem gelöschten
+  oder per Soft-Delete gelöschten Benutzer gehört, nicht mehr autorisiert. Die
+  Kosten sind kleiner, als sie aussehen: Der aufgelöste Benutzer wird für den
+  Rest der Anfrage zwischengespeichert, ein Handler, der `Auth::user()` schon
+  aufgerufen hat, zahlt also nichts extra, und das Nachschlagen ist bloß vom
+  Handler in die Middleware gewandert. Nur eine geschützte Anfrage, deren
+  Handler den Benutzer nie aufgelöst hat, bekommt ein Provider-Nachschlagen
+  hinzu, das sie vorher nicht machte. Eine Anwendung ohne gebundenen
+  Benutzer-Provider behält den Pfad allein über den Identifier unverändert.
+  `BasicAuthMiddleware` verlangt in ihrer nicht zustandslosen Form jetzt, dass
+  der von ihr benannte Guard existiert und ein zustandsbehafteter Guard ist.
+
+- **`destroy_all_for_user` kostet mehr und widerruft mehr.** Es liest jetzt
+  die überlebenden Session-Zeilen und vergleicht zusätzlich zum indizierten
+  Abgleich auf `user_id` die Guard-Identitäten in jeder Payload; es erreicht
+  damit Sessions, die allein über einen benannten Guard authentifiziert
+  wurden. Ein Widerruf ist selten genug, dass Korrektheit vor Indexnutzung
+  gewählt wurde; wenn Sie es auf einem heißen Pfad aufrufen, ist das
+  wissenswert.
+
+- **Ein `POST` oder `PATCH`, das nach einem Transportfehler wiederholt wird,
+  braucht jetzt `retry_non_idempotent`.** Der `5xx`-Zweig verlangte es
+  bereits; der Zweig für Transportfehler nicht. Wenn Sie sich darauf verlassen
+  haben, dass eine abgerissene Verbindung für eine nicht idempotente Anfrage
+  wiederholt wird, entscheiden Sie sich ausdrücklich dafür.
+
+- **Ein Produktionsprozess mit einem fehlenden oder fehlerhaften `APP_KEY`
+  scheitert jetzt an `#[suprnova::main]`, nicht an `Server::from_config`.**
+  Das schließt ein Konsolen-Binary oder einen Worker-Einstiegspunkt ein, der
+  nie einen Server baut. Lokale, Entwicklungs- und Testumgebungen erzeugen
+  weiterhin einen flüchtigen Schlüssel und warnen. `APP_PREVIOUS_KEYS` wird
+  als Alias für `APP_KEY_PREVIOUS` akzeptiert; sind beide mit
+  unterschiedlichen Werten gesetzt, gewinnt der Suprnova-Name, und das
+  Duplikat wird in einer Warnung benannt, auf die Sie reagieren sollten.
+
+- **Ein Worker, der auf eine `failover`-Queue-Connection zeigt, leert jetzt
+  jede Connection in der Liste.** Wenn Sie einen zweiten Worker direkt gegen
+  eine Fallback-Connection laufen ließen - was die Hinweise zu 1.3.3 Ihnen
+  nahelegten -, werden dieser Worker und der Failover-Worker sie beide leeren.
+  Entfernen Sie den zusätzlichen Worker, oder behalten Sie ihn und nehmen Sie
+  die Konkurrenz in Kauf. Zähler und Auflistungen aggregieren jetzt jede
+  Connection, ein Dashboard, das `pending_size` auf der Failover-Connection
+  liest, meldet also eine größere Zahl als bisher.
+
+- **Eigene Store- und Treiber-Implementierungen bekommen fail-closed
+  Standardwerte, nie abgeschwächtes Verhalten.** Magnetars Stores für
+  Provider-Token, Zeremonien und Remember haben Methoden für die oben
+  beschriebenen atomaren Operationen bekommen; jede hat einen Standard, der
+  verweigert, statt die Operation nicht atomar auszuführen, eine externe
+  Implementierung kompiliert also weiterhin, meldet aber einen Fehlschlag, bis
+  sie die Methode implementiert.
+  `WebhookHandler::mirrors_payment_transactions` und
+  `try_extract_payment_snapshot`, `QueueDriver::queue_filter_capability` und
+  `GlobalScope::dependency` haben alle Standardwerte, die das bisherige
+  Verhalten exakt bewahren.
+
+- **Um Live zu übernehmen**, binden Sie während des Bootstraps eine Registry
+  mit
+  `App::singleton(crate::live::registry().expect("Live component registry"))`,
+  installieren Sie die reservierten Routen mit `Router::try_live_with` und
+  einem Guard, der Ihre `AuthMiddleware`, `LiveTenantMiddleware` und
+  `RateLimitMiddleware` trägt, und registrieren Sie `CsrfMiddleware::new()`
+  global - Live prüft seinen eigenen Origin-Nachweis, Sie müssen
+  `OriginPolicy` also nicht für die ganze Anwendung weiten, und wenn Sie sie
+  für etwas anderes geweitet haben, engen Sie sie wieder ein. Verwenden Sie
+  `AuthMiddleware::optional()` am Live-Guard, wenn anonyme Besucher auf
+  öffentlichen Seeds handeln sollen; `AuthMiddleware::new()` antwortet auf
+  jede anonyme Anfrage mit `401`, noch vor jeder Arbeit der Engine. Führen Sie
+  dann `suprnova live:make` und `suprnova live:check` aus. `manual/live.md`
+  enthält die vollständige Anleitung.
+
+- **Um RenderCache zu übernehmen**, fügen Sie
+  `suprnova::render_cache::migration::Migration` Ihrem `Migrator` hinzu (und
+  `suprnova::render_cache::migration::TierMigration` ebenfalls, wenn Sie das
+  Profil `database` oder `redis` betreiben), nehmen Sie Routen und Gruppen mit
+  `Router::try_render_cache` und `Router::try_render_cache_group` auf und
+  schließen Sie mit `RenderCache::install` ab. Weil `install` asynchron ist -
+  es sondiert nach den Tabellen des Ledgers, bevor es eine Laufzeit
+  zusammenbaut -, muss der Router über `Application::try_routes_async` gebaut
+  werden statt über `try_routes`. Die Installation muss nach jeder Middleware
+  kommen, die Locale, Session oder Identität mit Anfrage-Scope herstellt, und
+  nachdem jede Route und jede Gruppe aufgenommen worden ist. Ein gemeinsam
+  genutztes Profil verweigert den Boot ohne seine Stufen-Migration oder mit
+  einem Endpunkt, der nicht antwortet - das ist Absicht.
+
+- **Setzen Sie `APP_BUILD_ID` einmal pro Deploy.** Es wird in jeden
+  RenderCache-Lookup-Schlüssel eingemischt, es zu ändern ist also das, was
+  einen neuen Build daran hindert, Einträge auszuliefern, die der vorherige
+  veröffentlicht hat. Sein Standard ist die Paketversion Ihres
+  Anwendungs-Crates, die sich nicht ändert, wenn Sie ein Template, eine
+  Übersetzung oder eine Handler-Korrektur ausliefern. Eine Commit-ID
+  funktioniert: `APP_BUILD_ID=$(git rev-parse --short HEAD)`.
+
+- **Erwägen Sie, Ihre `Cargo.toml` in die Produktions-Build-Form zu
+  überführen.** Deklarieren Sie `suprnova` mit `default-features = false` plus
+  den neun Standard-Features außer `testing`, die Sie benutzen, und fügen Sie
+  `features = ["testing"]` unter `[dev-dependencies]` wieder hinzu. Cargo
+  zieht die Features einer Dev-Dependency nur in `cargo test` und andere
+  `--tests`-Builds, Ihre ausgelieferten Binaries tragen damit keine Testnähte
+  mehr, während `cargo test` unverändert weiterläuft. Ein von `suprnova new`
+  erzeugtes Projekt ist bereits in dieser Form; `manual/deployment.md`
+  dokumentiert sie für ein bestehendes.
+
+- **Wenn Sie die eigenständige `@suprnova/live`-Laufzeit konsumiert oder einen
+  eigenen Abonnement-Host geschrieben haben: Der Deskriptor für registrierte
+  Events hat sich geändert.** `DESCRIPTOR_SCHEMA_VERSION` ist von 1 auf 2
+  gewechselt, und die Felder des Deskriptors für registrierte Events heißen
+  jetzt `maximum_hops`, `maximum_fanout` und `payload_contract` statt
+  `maximumHops`, `maximumFanout` und `payloadContract` - sie waren die
+  einzigen camelCase-Schlüssel in einem öffentlichen JSON-Contract, der sonst
+  überall snake_case ist. Ein mit Schema-Version 1 signierter Deskriptor wird
+  mit `SubscriptionErrorKind::InvalidDescriptor` abgelehnt, statt mit drei
+  fehlenden Feldern gelesen zu werden. Nichts in einer Suprnova-Anwendung
+  1.3.7 konsumierte diesen Contract, für die meisten Leser gibt es also nichts
+  zu tun.
+
 ## 1.3.7 - 2026-08-26
 
 ### Hinzugefügt

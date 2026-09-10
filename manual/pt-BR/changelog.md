@@ -5,6 +5,1269 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 2.0.0 - 2026-09-10
+
+### Segurança
+
+- **Um bearer token e uma sessão web agora são identidades separadas.** O
+  cache de usuário com escopo de solicitação mantinha um único slot de
+  usuário atual em que tudo escrevia e de que tudo lia, então uma sessão de
+  navegador hidratada pelo `SessionMiddleware` satisfazia um `TokenGuard` na
+  mesma solicitação, e um usuário resolvido para o guard web era devolvido a
+  um código que havia pedido o guard de API. Credenciais bearer agora
+  carregam a própria procedência nesse cache: o `BearerTokenMiddleware`
+  registra o identificador que validou em um slot bearer só dele, o
+  `TokenGuard` resolve e guarda ali o usuário completo, e só algo que chegou
+  por uma credencial bearer consegue satisfazer um guard de token. Guards de
+  sessão são guardados por nome de guard no mesmo lugar, então
+  `Auth::guard("admin").user()` e `Auth::guard("web").user()` em uma mesma
+  solicitação não resolvem mais para aquele dos dois que rodou primeiro. Os
+  slots genéricos permanecem como uma visão de compatibilidade para a facade
+  estática `Auth`, espelhados apenas a partir do guard padrão configurado,
+  então `Auth::id()`, `Auth::check()` e `AuthMiddleware` se comportam
+  exatamente como se comportavam para uma aplicação com um guard só e para
+  uma solicitação somente de token que nunca instala uma sessão.
+
+- **Um guard nomeado mantém o próprio principal, a própria credencial de
+  remember-me e a própria revogação.** Fazer login através do
+  `Auth::guard("admin")` escrevia o identificador na mesma chave de sessão
+  que o guard padrão usa, então dois guards em uma aplicação compartilhavam
+  um principal só e sair de qualquer um dos dois deslogava dos dois. Na
+  sessão persistida cada guard agora é dono da própria entrada sob o mapa
+  `_auth_guards`, e o cookie de remember-me carrega um portador etiquetado
+  com o guard (`suprnova.remember.v1:` seguido do nome do guard e da
+  credencial), então um cookie emitido para um guard não consegue
+  reautenticar outro. Um cookie sem esse prefixo é lido como sendo do guard
+  padrão, que é exatamente o que um cookie emitido por um release anterior
+  é, então ninguém é deslogado pela atualização; um portador que nomeia uma
+  versão que esta build não entende é recusado em vez de adivinhado. A
+  revogação segue a mesma fronteira: sair, e o próprio caminho de rotação do
+  middleware, aposentam exatamente o seletor que o guard dono emitiu, em vez
+  de toda credencial que o usuário tem.
+
+- **O `BasicAuthMiddleware` não aceita mais um slot de sessão obsoleto como
+  prova.** A forma não stateless dele pulava o header `Authorization` sempre
+  que o `Auth::check()` fosse verdadeiro, e o `Auth::check()` lê o slot de
+  usuário atual com escopo de solicitação, que qualquer coisa mais cedo na
+  cadeia poderia ter preenchido. Ele agora pede o principal de sessão
+  persistido do guard com que foi configurado, e recusa de vez quando esse
+  guard está ausente ou não é um guard stateful, então uma solicitação só é
+  admitida sem credenciais quando uma linha de sessão real diz a quem ela
+  pertence. A forma stateless sempre releu o header e está inalterada.
+
+- **Credenciais de remember-me rotacionam como uma única substituição
+  atômica.** A rotação removia a credencial aceita e inseria a sucessora
+  dela como duas escritas: uma falha entre as duas consumia uma credencial
+  válida e deixava o visitante sem forma de voltar, e um crash deixava as
+  duas linhas vivas. O schema padrão agora substitui uma linha exata e ainda
+  válida pela sucessora preparada dela em uma única operação, e um
+  armazenamento que não consegue tornar atômicas a remoção condicional e a
+  inserção da substituta falha fechado em vez de executá-las separadamente.
+  A correspondência de seletor é exata, então uma credencial nunca é
+  aposentada por uma colisão de prefixo, e uma transição de identidade
+  síncrona dentro de um handler enfileira para revogação, no fim da
+  solicitação, exatamente a credencial que ela invalidou, em vez de deixá-la
+  viva.
+
+- **A admissão de dois fatores é serializada, e uma escrita de bloqueio que
+  falha derruba a solicitação junto.** Dois workers provando o mesmo código
+  podiam ler o contador de tentativas cada um antes de qualquer um dos dois
+  escrevê-lo, então um orçamento de força bruta admitia mais tentativas do
+  que permitia. A verificação agora reserva capacidade de tentativa dentro
+  da mesma operação serializada de armazenamento que admite a tentativa,
+  devolvendo tanto a reserva quanto qualquer estado de falha finalizada
+  observado nessa decisão única; uma cerimônia que não consegue fazer commit
+  cancela a prova preparada dela, e o padrão do caminho de cancelamento
+  falha fechado, para que uma implementação de verificador existente não
+  consiga vazar capacidade reservada em silêncio. Uma escrita de contador de
+  bloqueio que dá erro não é mais engolida: a tentativa é recusada. Promover
+  uma sessão que está esperando por um segundo fator é uma única migração
+  atômica, e a credencial bearer é suprimida antes de a chamada de
+  armazenamento ser aguardada, então um timeout ou uma falha de backend
+  nunca consegue deixar uma credencial presa a uma sessão de que o framework
+  não fez commit.
+
+- **A rotação de sessão falha fechada.** Rotacionar um id de sessão destrói
+  a linha antiga e escreve uma nova. Um destroy que dava erro era registrado
+  em log e ignorado, o que deixava a linha autenticada anterior passível de
+  replay por quem tivesse o cookie antigo. O middleware agora retorna antes
+  de escrever a substituta e antes de emitir o id novo, e expira a
+  credencial antiga do navegador na saída. Em separado, o cookie que carrega
+  uma sessão nova ou rotacionada é construído antes de a linha ser
+  commitada: um cookie que não podia ser construído deixava no armazenamento
+  uma sessão que navegador nenhum jamais conseguiria apresentar, e agora não
+  deixa nada para trás.
+
+- **Uma sessão que sobrevive ao próprio usuário para de autorizar, e revogar
+  as sessões de um usuário alcança os guards nomeados.** O `AuthMiddleware`
+  tratava a presença de um identificador persistido como prova de uma
+  identidade, então um usuário excluído ou excluído por soft delete seguia
+  passando por toda rota protegida até a sessão expirar. Ele agora resolve o
+  usuário através do provider e limpa o slot obsoleto quando o provider não
+  encontra nada; uma aplicação sem provider de usuários vinculado nenhum
+  mantém o caminho rápido só de identificador, reconhecido pelo erro próprio
+  dele e não por correspondência de texto de mensagem, e toda outra falha de
+  provider é um erro, e não uma passagem. O `destroy_all_for_user` só casava
+  com a coluna indexada `user_id`, que é nula para uma sessão autenticada
+  apenas através de um guard nomeado, então essas sessões sobreviviam a um
+  "sair de todos os lugares". Ele agora compara também as identidades de
+  guard dentro de cada payload sobrevivente.
+
+- **Cerimônias de autorização de dispositivo transicionam atomicamente e são
+  validadas antes de serem consumidas.** Aprovar um código de dispositivo
+  lia a cerimônia, depois a consumia, depois escrevia o grant, então uma
+  substituta emitida sob o mesmo seletor entre a leitura e o consumo podia
+  ser consumida no lugar do registro que de fato foi aprovado. O contrato de
+  armazenamento agora vincula a transação que consome ao registro exato que
+  uma leitura anterior observou, e transiciona uma cerimônia enquanto
+  consome outra em um único passo atômico. Os dois métodos falham fechado
+  por padrão, então uma implementação externa de armazenamento continua
+  compatível em código-fonte sem receber em silêncio o comportamento mais
+  fraco.
+
+- **Um refresh de token de provider cujo desfecho é desconhecido é cercado
+  por um fence, não repetido.** Um refresh de conta vinculada que começava e
+  então perdia a resposta deixava um claim comum que expirava no horário
+  previsto, então um segundo worker fazia refresh do mesmo grant e um dos
+  dois resultados era descartado, levando junto um refresh token de uso
+  único. Iniciar uma troca agora substitui o dono do claim por um dono de
+  troca reservado, preservando o prazo original, para que os seguidores
+  consigam distinguir uma troca viva de uma abandonada, e um armazenamento
+  nunca deve reivindicar de volta uma linha cujo dono esteja nesse namespace
+  reservado. Armazenamentos que não implementam o fence falham fechado.
+
+- **O Web Push recusa enviar através de um transporte que possa seguir um
+  redirecionamento.** O `EndpointPolicy::Strict` valida a URL de endpoint da
+  assinatura, mas a validação só cobria a URL inicial: um cliente que segue
+  redirecionamentos transforma um endpoint validado em um `3xx` para
+  qualquer lugar, e o reqwest segue redirecionamentos por padrão. Um cliente
+  que este crate constrói agora tem os redirecionamentos desabilitados à
+  força, e o novo `WebPushClient::with_client_builder` aplica toda opção que
+  o chamador queira (proxy, pinagem de TLS, timeouts) enquanto sobrescreve a
+  política de redirecionamento. O `WebPushClient::with_client`, que recebe
+  um cliente já construído cuja política de redirecionamento não pode ser
+  inspecionada, agora recusa enviar sob o `Strict` com
+  `WebPushError::UnconfinedRedirects`, antes da criptografia e antes de
+  qualquer solicitação. O `WebPushClient::allow_unconfined_redirects` é o
+  opt-out explícito para um chamador que sabe que o cliente dele é seguro.
+
+- **Uma URL assinada fica vinculada ao caminho exato para o qual foi
+  assinada.** A assinatura e a verificação as duas cortavam uma barra final
+  antes de fazer o hash, o que fazia de `/orders/1` e `/orders/1/` uma
+  assinatura só, e tornava um proxy que acrescenta uma barra indistinguível
+  de um cliente que edita o caminho. O caminho agora recebe hash exatamente
+  como aparece, então uma assinatura cobre um caminho e um caminho apenas.
+
+- **Uma chave de cache não consegue mais endereçar um lock ou um índice de
+  tags.** Registros de lock, de tag e de chave-tag do Redis viviam sob uma
+  sentinela NUL depois do prefixo configurado, e uma chave fornecida pelo
+  chamador que começasse com aquela sentinela caía no mesmo espaço, então um
+  `Cache::forget` podia liberar um lock distribuído que outra pessoa estava
+  segurando. Os valores e cada tipo de registro interno agora carregam
+  componentes de namespace distintos antes da chave do chamador, então os
+  dois espaços não conseguem se encontrar. Uma chave comum é armazenada
+  exatamente onde era antes, então nada já em cache fica órfão. O driver de
+  memória recebeu a mesma separação.
+
+- **Webhooks de pagamento recusam o que não conseguem identificar e
+  classificam duplicatas pelo banco de dados, e não por texto de mensagem.**
+  Um evento de provider com um identificador ausente, não string ou só de
+  espaços em branco entrava no namespace de idempotência compartilhado sob
+  uma chave em branco, onde colidia com todo outro evento assim; agora ele é
+  recusado antes de qualquer estado ser escrito. Uma duplicata concorrente é
+  reconhecida a partir do código estruturado de violação de unicidade do
+  SeaORM, e não a partir de um texto de erro legível por humanos que uma
+  falha não relacionada também pode conter, e só uma releitura de um
+  `processed_at` commitado é reconhecida como tal, então uma falha de
+  escrita no espelho continua passível de retentativa. O timestamp da
+  assinatura da Stripe é comparado com uma diferença absoluta sem sinal,
+  então um valor `t=` extremo retorna um erro de assinatura em vez de
+  estourar, e uma tolerância configurada negativa aceita apenas uma
+  correspondência exata. A rota de webhook preserva o status tipado de um
+  corpo que ela recusou, então um corpo acima do teto continua sendo um
+  `413`, e não um `400` achatado.
+
+- **Uma solicitação HTTP não idempotente não é mais reexecutada depois de um
+  erro de transporte.** A política de retentativa já exigia o opt-in
+  explícito `retry_non_idempotent` antes de reexecutar um `POST` ou um
+  `PATCH` que respondesse `5xx`, mas o ramo de erro de transporte ao lado
+  dele não conferia, então uma solicitação cuja conexão caiu depois de o
+  servidor já a ter aceitado era enviada de novo. Os dois ramos agora
+  aplicam a mesma regra.
+
+- **Tempos de vida de sessão não conseguem estourar em uma expiração em
+  massa.** O `SESSION_LIFETIME` e o `SESSION_REMEMBER_LIFETIME` são minutos
+  multiplicados por sessenta e depois somados a um timestamp armazenado em
+  aritmética de data que entra em panic no estouro, então um valor grande
+  demais ou abortava o processo ou dava a volta para um prazo no passado que
+  expirava toda sessão de uma vez. Os dois são limitados a
+  `MAX_SESSION_LIFETIME_MINUTES` antes da multiplicação, o driver de banco
+  de dados limita do mesmo jeito para uma configuração construída em código,
+  e um corte de coleta de lixo que não pode ser representado é pulado em vez
+  de enviado ao banco de dados, que é a diferença entre não coletar nada e
+  coletar tudo.
+
+- **Identidades de cache máquina-a-máquina são inequívocas.** A chave de
+  cache do broker de tokens concatenava o provider, o cliente e o conjunto
+  de escopos normalizado, então duas solicitações diferentes cujos
+  componentes por acaso se juntassem na mesma string compartilhavam um token
+  em cache só. A chave agora é um domínio versionado com componentes
+  prefixados por comprimento, que combinação de entradas nenhuma consegue
+  fazer colidir.
+
+- **Um lease de idempotência é provado ainda em posse antes de o resultado
+  dele ser reportado como cercado por um fence.** O lease se renovava
+  periodicamente enquanto o corpo rodava, e um erro transitório de renovação
+  era tratado como perda, enquanto um corpo que terminava entre duas
+  renovações era reportado como cercado sem que ninguém perguntasse se o
+  lock ainda estava lá. Um erro transitório de renovação agora é repetido e
+  só desiste depois de várias falhas consecutivas, e uma renovação final com
+  escopo por dono tem de ter sucesso depois de o corpo terminar antes de o
+  desfecho ser reportado como cercado; um erro nessa última conferência
+  responde `FreshUnfenced`, porque a posse é então desconhecida.
+
+- **O chaveiro de criptografia é validado e instalado antes do bootstrap da
+  aplicação.** O `Crypt` era inicializado pelo `Server::from_config`, então
+  tudo o que rodasse mais cedo - o callback de bootstrap, um comando de
+  console, um ponto de entrada de worker de fila que nunca constrói um
+  servidor - ou não encontrava chaveiro nenhum ou construía o próprio. O
+  `#[suprnova::main]` agora carrega o ambiente e depois valida e instala o
+  chaveiro, nessa ordem, antes de o seu bootstrap rodar. A validação roda a
+  cada boot mesmo depois de o chaveiro estar instalado, então um processo de
+  produção com um `APP_KEY` ausente ou malformado ainda falha fechado,
+  enquanto a chave de todo o processo continua imutável. O
+  `APP_PREVIOUS_KEYS` do Laravel é aceito como alias para o
+  `APP_KEY_PREVIOUS`; quando os dois estão definidos e discordam, o nome
+  Suprnova vence e o duplicado é nomeado em um aviso.
+
+### Adicionado
+
+- **O Suprnova Live faz parte do framework.** O `suprnova::live` é um motor
+  de interação dirigido pelo servidor: um componente é um struct Rust cujo
+  estado vive no servidor, cuja view é um template Askama verificado e cujas
+  ações rodam sobre um protocolo assinado a partir de um pequeno runtime de
+  navegador que aplica morph no HTML re-renderizado no lugar. Não há modelo
+  de estado no lado do cliente para manter sincronizado, nem ferramenta de
+  build para instalar para usar o runtime distribuído, nem JavaScript inline
+  nos seus documentos. O motor é distribuído como um crate interno de que o
+  framework depende incondicionalmente, então não há nada a habilitar; a
+  metade de navegador é publicada como `@suprnova/live` e os bytes exatos
+  revisados dela são servidos pelo próprio framework. O `manual/live.md` é o
+  capítulo voltado à aplicação, e um projeto criado pelo `suprnova new` já
+  vem pronto para o Live: ele escreve `src/live/mod.rs` com um registro
+  vazio e uma função `routes()`, vincula o registro no `bootstrap.rs` e
+  instala as rotas a partir do `cmd/main.rs`.
+
+- **Componentes são declarados com `#[derive(LiveComponent)]` e `#[live]`.**
+  O derive nomeia o componente e a view dele (`#[live(name = "app.counter",
+  view = "live/counter.html")]`); o atributo `#[live]` no bloco `impl` marca
+  os métodos que o navegador pode invocar. Um campo `#[public]` é
+  renderizado e carregado no snapshot assinado, um campo `#[model]` além
+  disso aceita propostas do navegador através do `live:model`, e um método
+  `#[action]` é o único ponto de entrada que uma solicitação consegue
+  alcançar, recebendo argumentos validados e retornando desfechos tipados
+  como um redirecionamento ou um flash. Todo tipo de campo tem de
+  implementar `Default`; uma ilha nova parte desses padrões, a menos que um
+  hook de mount diga outra coisa. Componentes são registrados explicitamente
+  através do `LiveRegistry::builder`, e o registro é imutável assim que o
+  runtime se monta - um nome ou uma view duplicados, ou um componente cujas
+  ações precisam de validação sem nenhuma porta de validação vinculada,
+  falham no registro com um `RegistryError` tipado.
+
+- **O `suprnova::view` é um contrato de view renderizada no servidor e
+  verificada, para rotas comuns tanto quanto para componentes Live.** O
+  `#[suprnova::view(path = "...")]` declara um template, o `TrustedHtml` é o
+  único tipo auditado que um template pode emitir sem escape, e o filtro
+  `trusted_html` é como ele chega lá; o `#[suprnova::view_filter]` declara
+  um filtro customizado verificado. O Askama é o substrato, mas os handlers
+  dependem dos contratos do próprio framework, e não dos módulos do motor de
+  templates, e o `TemplateFailure` é um conjunto de falhas fechado e
+  redigido (`MissingData`, `InvalidData`, `Failed`), e não o texto de erro
+  do próprio motor.
+
+- **A gramática de diretivas `live:` é fechada e provada contra os seus
+  componentes.** Uma view vincula comportamento com `live:click`,
+  `live:submit`, `live:model`, `live:upload`, `live:key`, `live:loading` e o
+  resto do conjunto documentado - nunca uma linguagem de expressões inline,
+  e nunca um script devolvido pelo servidor. O `suprnova live:check`
+  constrói a sua aplicação e roda o verificador integrado sobre toda view
+  registrada: uma ação desconhecida, um campo de model desconhecido, um
+  filtro `safe` cru ou uma violação de acessibilidade falham com o arquivo,
+  a linha e a coluna. O `--allow-unproved` aceita as estruturas dinâmicas
+  sobre as quais o verificador deliberadamente não faz afirmação nenhuma.
+
+- **O `Router::try_live()` instala o namespace Live reservado uma única
+  vez.** Ele registra `/__live/v1/action`, `/__live/v1/upload`, as rotas de
+  controle `/__live/v1/async/*` e o handshake de WebSocket, e as rotas
+  imutáveis `/__live/v1/assets/*`, e a inicialização falha se uma rota da
+  aplicação puder reivindicar `/__live`. O `Router::try_live_with` recebe um
+  `LiveRouteGuard` cuja cadeia de middlewares é aplicada às rotas de ação,
+  de upload e de controle assíncrono e ao upgrade de WebSocket, que é como
+  uma aplicação vincula a própria autenticação, o próprio tenant e a própria
+  limitação de taxa; rotas de asset ficam sem guard. Toda solicitação
+  reservada carrega uma política estrita: fatos de sessão, de origem, de
+  CSRF, de principal, de tenant e de limite de taxa têm todos de ter sido
+  registrados por middleware real, e uma rota assíncrona que não consegue
+  ver o conjunto completo é recusada em vez de abrir um transporte anônimo.
+
+- **Uma solicitação Live prova a própria origem, e usar o Live não relaxa
+  mais nada.** O runtime distribuído envia o tipo de mídia do Live e o
+  próprio header `Sec-Fetch-Site` do navegador e não carrega token de
+  sessão, então o `CsrfMiddleware` verifica essa prova sozinho para uma
+  operação Live, qualquer que seja a política de origem que a aplicação
+  configurou, e recai para a validação de token em uma solicitação
+  cross-site ou sem header. Rotas comuns mantêm a política configurada,
+  então uma aplicação não precisa mais alargar o `OriginPolicy` para a
+  aplicação inteira só para o Live funcionar. O `AuthMiddleware::optional()`
+  é a nova forma de guard de que isso precisa: ela registra um principal
+  quando existe um e deixa uma solicitação anônima seguir, então visitantes
+  anônimos podem agir sobre um seed público enquanto uma ilha vinculada a
+  identidade ainda recusa uma solicitação sem evidência de principal.
+
+- **Documentos posicionam ilhas através do `LiveDocument`.** Uma rota de
+  documento constrói um a partir da solicitação, monta cada ilha com o
+  `LiveMount` e emite a marcação de bootstrap exatamente uma vez. O
+  `LiveMount::public_seed` declara uma ilha que qualquer visitante pode
+  renderizar, cujo estado é um seed reutilizável promovido a uma instância
+  real na primeira ação do visitante; o `LiveMount::identity_bound` declara
+  uma ilha que pertence à sessão e ao principal atuais, então a rota de
+  documento dela tem de autenticar. O `LiveDocument::bootstrap` emite o
+  elemento de configuração inerte e as tags de script ordenadas com
+  atributos de integridade para a estratégia ESM ou para a clássica,
+  acrescenta os papéis de upload e de assíncrono quando um componente
+  montado precisa deles e a ponte do Stimulus sob demanda, e recusa um
+  segundo bootstrap ou um mount depois do bootstrap. O
+  `Router::try_live_mount` registra um mount, e o
+  `Router::try_live_document` declara uma rota de documento sem mounts de
+  inicialização.
+
+- **O framework serve os artefatos de navegador exatos e revisados.** As dez
+  saídas de build determinísticas são embutidas e validadas contra o
+  manifesto delas no primeiro uso, falhando fechado em qualquer desvio de
+  digest, de comprimento, de nome de arquivo, de papel, de capacidade ou de
+  versão, e são servidas a partir de `/__live/v1/assets/<identity>/<file>`
+  para `GET` e `HEAD` com cache imutável, validadores fortes de digest,
+  solicitações condicionais, `nosniff` e faltas fechadas. Documentos não
+  contêm código executável inline, então uma política estrita `script-src
+  'self'` se sustenta. O `suprnova live:assets --out <dir>` publica os
+  mesmos bytes em um CDN ou em um diretório estático de forma atômica, trata
+  uma publicação idêntica como já em dia, e recusa substituir um diretório
+  cujos bytes diferem, a menos que você passe `--replace`.
+
+- **Componentes Live aceitam uploads de arquivo sob uma política declarada e
+  verificada.** Um atributo `#[upload(policy = ...)]` sobre um campo
+  `#[model]` declara a contagem máxima de arquivos, os orçamentos de bytes
+  declarado e agregado, os tipos de mídia aceitos e o comportamento de
+  substituição através do `UploadPolicy::builder`, e a view o vincula com
+  `<input type="file" live:upload="avatar">`. O runtime cria, transfere e
+  completa o upload através do `/__live/v1/upload`; os bytes esperam em
+  quarentena até a ação de finalização declarada rodar, quando o framework
+  os entrega ao `UploadFinalizer` da aplicação, ao lado de um
+  `UploadScanner` e de um `UploadApplicationValidator` opcionais. Todo
+  controle é autorizado através do gate como
+  `live:<component>.upload.<field>.<Control>` para cada um de `Create`,
+  `Reacquire`, `Status`, `Queue`, `BeginTransfer`, `PutChunk`, `Complete`,
+  `Accept`, `BeginFinalize`, `CommitFinalize`, `Cancel`, `Reject`, `Expire`
+  e `Fail`. Toda solicitação revalida o mount, o principal, a sessão, o
+  tenant, o componente, o campo e o escopo de documento atuais, um lock por
+  handle serializa as corridas de chunk, de conclusão, de cancelamento, de
+  ação, de finalização e de limpeza, e corpos de chunk reservam o orçamento
+  compartilhado em voo antes de bufferizar. O
+  `Router::try_live_upload_reacquisition` declara um caminho de propriedade
+  da aplicação fora do namespace reservado onde um navegador que perdeu a
+  concessão de transferência dele consegue uma nova, respondendo apenas à
+  sessão e ao principal que criaram o upload.
+
+- **Ilhas se atualizam de forma assíncrona por SSE, WebSocket ou polling.**
+  Um componente declara os streams que escuta no atributo `#[live]`
+  (`streams(stream(name = "activity", topics("activity"),
+  events(ActivityPosted)))`), o framework assina um descritor de assinatura
+  limitado para o visitante, e o runtime de navegador abre um transporte
+  nativo e recai para polling quando não consegue. Assinar é autorizado
+  através da habilidade de gate `live:<component>.stream.<name>`; a
+  aplicação publica através do `suprnova::live::LiveStreams`, com o
+  `refresh` dizendo às ilhas assinadas para renderizarem do zero e o
+  `event::<T>` entregando um payload tipado aos handlers registrados da
+  ilha. O fan-out, a contagem de saltos e a entrega por documento são todos
+  limitados. O polling é uma renderização do zero comum, então o estado se
+  põe em dia, mas payloads de evento publicados enquanto um transporte
+  estava indisponível não são reproduzidos, o que o runtime reporta como um
+  stream degradado, e não como um stream atual.
+
+- **O runtime de navegador é um pacote TypeScript estrito que é distribuído
+  em um bundle core e em bundles opcionais.** O `@suprnova/live` faz
+  bootstrap uma vez por documento, descobre ilhas, faz o parse da gramática
+  fechada de diretivas, dá a cada ilha trabalho limitado e estado pendente e
+  falho verdadeiro, aplica uma resposta somente depois de um morph
+  bem-sucedido através de um adaptador privado do Idiomorph fixado, e
+  preserva foco, estado de formulário, controllers, scroll e histórico
+  através de morphs e navegações nativas. Os bundles opcionais `uploads`,
+  `async` e `stimulus` se acoplam através de uma porta de feature tipada,
+  nas formas ESM e clássica; o Stimulus nunca é embutido no core. Não há
+  `eval`, nem `new Function`, nem script devolvido pelo servidor, nem
+  linguagem de expressões inline em lugar nenhum dele.
+
+- **Quatro comandos de CLI cobrem o fluxo de trabalho do Live.** O `suprnova
+  live:make <name>` faz o scaffold de um componente em `src/live/`, da view
+  dele em `templates/live/` e do registro dele no builder `registry()`,
+  declara o módulo, valida todo alvo e recusa traversal e symlinks antes de
+  escrever, escreve atomicamente, nunca sobrescreve, desfaz todo arquivo que
+  uma execução que falhou tenha escrito, e consegue reportar uma execução de
+  teste. O `suprnova live:check`, o `suprnova live:inspect` e o `suprnova
+  live:assets` são clientes finos de um comando de console oculto do
+  framework e de um protocolo de linhas JSON limitado e versionado, então a
+  CLI não mantém dependência nenhuma do framework nem do motor e falha
+  fechada, sem escritas, diante de qualquer coisa não suportada, obsoleta,
+  truncada, grande demais ou inesperada. O `live:inspect` reporta o registro
+  vinculado, os limites de configuração, as capacidades de upload
+  instaladas, os serviços de runtime montados e a identidade de asset como
+  booleanos de presença e contagens, nunca como estado ou segredos.
+
+- **O `suprnova::live::testing` prepara o runtime e o catálogo de mounts de
+  um router para testes em processo.** O `prepare_live_router_for_test` dá a
+  um teste o mesmo runtime que o servidor monta, então um teste consegue
+  decodificar o snapshot de uma ilha a partir do atributo
+  `data-suprnova-live-snapshot` dela, enviar uma ação com um cookie de
+  sessão real e `Sec-Fetch-Site: same-origin`, e fazer asserções sobre a
+  renderização aceita através da pilha de middlewares globais real da
+  aplicação.
+
+- **O RenderCache armazena uma cópia provadamente segura da resposta de uma
+  rota e serve a próxima solicitação correspondente sem rodar o handler.** É
+  opt-in por rota e por grupo, nunca muda o que uma aplicação pode fazer, e
+  uma rota que ele recusa ainda assim renderiza e é servida corretamente. O
+  `Router::try_render_cache` opta por incluir um padrão de rota já
+  registrado e o `Router::try_render_cache_group` opta por incluir toda rota
+  sob um prefixo de caminho; o `RenderCache::install(router,
+  RenderCacheConfig::from_env())` termina a ligação depois de todo registro
+  de middleware que estabelece locale, sessão ou identidade com escopo de
+  solicitação. O `RENDER_CACHE_ENABLED=false` é um botão de desligar de
+  verdade no momento da instalação: uma configuração desabilitada devolve o
+  router intocado, não sonda nada, não registra nada e deixa o gate do
+  processo fechado.
+
+- **Uma política de cache declara uma classe de representação, uma política
+  de frescor e como a resposta pode ser compartilhada.** O
+  `RenderCachePolicy::builder` recebe uma `RepresentationClass` que vai da
+  mais ampla à mais estreita - `PublicShared`, `PublicShellStitched`,
+  `PrivateCached`, `Uncacheable` - e a `FreshnessPolicy::new(fresh_ms,
+  stale_servable_ms, stale_on_error_ms)` define por quanto tempo uma
+  representação é fresca e depois até que ponto além dessa borda uma cópia
+  armazenada pode ser servida enquanto uma reconstrução em segundo plano
+  roda ou depois de uma reconstrução em primeiro plano ter falhado. A
+  `SharedCachePolicy` controla o que se diz a um cache compartilhado à
+  frente da aplicação. Uma rota dentro de um grupo em cache pode estreitar a
+  política que a envolve com um `PolicyPatch` em vez de reafirmá-la, e só
+  pode torná-la mais estreita; tirar uma rota de um grupo em cache é um
+  patch que define a classe como `Uncacheable`.
+
+- **A variância é declarada, nunca adivinhada.** Uma representação em cache
+  varia por padrão de rota, por parâmetros de caminho e por build da
+  aplicação, a menos que uma política diga outra coisa. O
+  `QueryPolicy::declared([...])` nomeia os parâmetros de query string que
+  distinguem representações, e qualquer outro parâmetro de query em uma
+  solicitação faz aquela solicitação desviar do cache, em vez de ser
+  ignorado em silêncio. O `.vary(VarianceDimension::Locale | ::Host |
+  ::Tenant | ::Principal)` particiona pelo locale negociado, pelo host da
+  solicitação, pelo tenant atual ou pelo visitante autenticado, os dois
+  últimos como material de chave opaco; uma rota `PrivateCached` que não
+  declara nem `Principal` nem `Tenant` nem chega a ser construída. `Media` e
+  `Encoding` são declarados juntos com o conjunto fechado próprio deles
+  através do `.vary_media(NegotiatedPolicy::declared([...], default)?)` e do
+  `.vary_encoding(...)`: o middleware negocia o `Accept` ou o
+  `Accept-Encoding` da solicitação contra esse conjunto conforme a RFC 9110,
+  com a qualidade mais alta vencendo, a qualidade igual mantendo a ordem da
+  esquerda para a direita do próprio header, um curinga comparado como um
+  token literal em vez de expandido, e uma qualidade `q=0`, fora do
+  intervalo ou não parseável excluindo um candidato em vez de dar um padrão
+  a ele. Um header ausente, sem correspondência ou não parseável resolve
+  para o padrão declarado e nunca entra em panic. Tanto a chave de
+  renderização quanto o header `Vary` tiram o valor deles dessa mesma
+  resolução única, então eles não conseguem discordar.
+
+- **Um acerto servido é uma resposta HTTP de verdade com validadores de
+  verdade.** Ele carrega o `ETag` como um validador forte que um cliente
+  pode devolver como `If-None-Match` para um `304`, além de `Cache-Control`,
+  `Vary` e `Age` em segundos inteiros desde a publicação, que é o sinal
+  local mais rápido de que uma resposta saiu do armazenamento e não de um
+  handler. Uma resposta servida além do intervalo de frescor dela carrega
+  além disso `Warning: 110 - "Response is Stale"`. Solicitações condicionais
+  e `HEAD` são respondidas a partir da entrada armazenada.
+
+- **A saída em cache é provada atual contra o banco de dados, não
+  presumida.** Um coletor com escopo de solicitação atribui toda leitura que
+  um handler faz à coisa que ele leu: um model, uma tabela, um valor de
+  configuração, uma feature flag, uma decisão de autorização, um eixo de
+  identidade. Todo caminho de escrita suportado do outro lado avança a
+  geração daquilo que mudou, na própria transação do chamador quando há uma -
+  as escritas de model e em massa do ORM, a facade do query builder,
+  escritas cruas de tabela, o caminho de hidratação de pagamentos, escritas
+  de feature flag e os statements de papel e de permissão do RBAC, incluindo
+  as novas revogações. Um acerto reprova as gerações de que depende antes de
+  servir, seja relendo o ledger sob o `CoherenceMode::Authority`, seja
+  contra um lease de validação sob o `CoherenceMode::Lease`, então nada que
+  uma escrita tenha invalidado pode ser servido como atual. O
+  `RenderCache::bump_permission_version` é a única invalidação que uma
+  aplicação chama à mão, a partir do caminho de código que muda o que um
+  usuário autenticado pode fazer; ela avança uma geração persistida que toda
+  renderização chaveada por principal observa, sobrevive a um restart e
+  entra na transação em que a mudança de papel roda.
+
+- **Autorização, feature flags e escopos globais participam honestamente.**
+  Uma decisão de gate é julgada pelo eixo de identidade que a avaliação dela
+  de fato consultou, então uma consulta só de tenant precisa apenas de
+  `Tenant` declarado, enquanto qualquer coisa que tenha resolvido material
+  de principal, ou não tenha resolvido nada nomeável, precisa de
+  `Principal`. Uma rota protegida por RBAC entra em cache e uma concessão ou
+  revogação de permissão a reconstrói, porque as cinco tabelas de papel e de
+  permissão são observadas em vez de tratadas como uma incógnita. Uma
+  leitura de feature flag observa uma geração `Feature` sempre que o
+  snapshot mantém aquela flag em qualquer chave de escopo, o `set_flag` a
+  avança, e uma recarga de flags a avança para toda flag que o diff dela
+  própria encontrou alterada. Um `GlobalScope` do Eloquent declara
+  `ScopeDependency::Constant` ou mantém o padrão conservador `PerRequest`, e
+  um escopo por solicitação cujo filtro leu algo que o coletor não consegue
+  nomear é registrado como uma leitura não declarada e estreita a
+  renderização para `Uncacheable`, em vez de colocar um filtro de tenant em
+  cache em silêncio. O `suprnova::live::current_tenant()` é o acessor
+  instrumentado que um corpo de gate ou um escopo procura.
+
+- **O lado de escrita está aberto em todo processo que escreve através do
+  ORM.** Um worker de fila, uma tarefa agendada ou um comando de console
+  escreve através do mesmo ORM que o servidor usa e nunca chama o
+  `RenderCache::install`, então as escritas dele não avançavam geração
+  nenhuma e páginas que dependiam delas seguiam sendo servidas obsoletas. O
+  lado de escrita agora é um tri-estado de todo o processo sondado no máximo
+  uma vez, nunca dentro da transação de um chamador, então todo processo que
+  escreve avança as mesmas gerações que o servidor avança, enquanto uma
+  aplicação com o cache desabilitado continua não emitindo SQL nenhum do
+  RenderCache.
+
+- **Três perfis de deployment decidem onde vivem as entradas e a liderança
+  de reconstrução.** O `RENDER_CACHE_PROFILE` seleciona `embedded` (uma
+  camada de arquivos por processo sob o `RENDER_CACHE_L1_DIR`, liderança em
+  processo), `database` (entradas em `suprnova_render_entries`, leases em
+  `suprnova_render_leases`, registros de instância Live em
+  `suprnova_live_instances` e `suprnova_live_promotions`) ou `redis` (um
+  hash do Redis por chave, mais um contador de token de publicação por
+  chave). O `RENDER_CACHE_L1` e o `RENDER_CACHE_COORDINATOR` sobrescrevem
+  qualquer uma das duas metades de forma independente, então um deployment
+  que quer as entradas dele no banco de dados e os leases dele em processo
+  diz exatamente isso. A verdade sobre gerações não se move: o ledger
+  apoiado em banco de dados é a autoridade em todo perfil, que é o que deixa
+  o Redis perder tudo o que guarda sem que nada obsoleto seja provado atual.
+  A tabela completa é `RENDER_CACHE_ENABLED`, `RENDER_CACHE_PROFILE`,
+  `RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`, `RENDER_CACHE_L0_ENTRIES`,
+  `RENDER_CACHE_L0_BYTES`, `RENDER_CACHE_L1_DIR`, `RENDER_CACHE_L1_BYTES`,
+  `RENDER_CACHE_REDIS_URL`, `RENDER_CACHE_REDIS_PREFIX`,
+  `RENDER_CACHE_LEASE_MS`, `RENDER_CACHE_MAX_WAITERS`, `RENDER_CACHE_HINTS`,
+  `RENDER_CACHE_FAILURE` e `APP_BUILD_ID`. Uma variável de conjunto fechado
+  que receba um valor fora do conjunto dela faz o boot falhar com uma
+  mensagem que nomeia a variável e nunca repete o valor, porque um valor de
+  ambiente pode carregar um segredo. O ledger de instâncias Live tem os
+  próprios `LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL` e `LIVE_REDIS_PREFIX`, e
+  as duas instalações falham fechadas no boot diante de uma migração de
+  camada ausente ou de um endpoint que ninguém responde.
+
+- **Um documento Live pode ser colocado em cache como um shell compartilhado
+  com ilhas por visitante.** Uma rota que declara
+  `RepresentationClass::PublicShellStitched` armazena o shell uma vez como
+  uma entrada composta recortada a partir dos slots que o
+  `LiveDocument::mount` capturou, e em um acerto o middleware anexa a
+  entrada preparada e ainda assim chama a cadeia da rota, então o guard e o
+  middleware de tenant da própria rota decidem a solicitação antes de o
+  middleware de conclusão do Live remontar cada slot sob autoridade derivada
+  só para aquela solicitação. Uma captura que não seja exatamente utilizável -
+  um slot não encontrado exatamente uma vez, um digest de documento que
+  não bate - recusa a publicação e não armazena nada. Os limites são 32
+  slots, 64 buracos de nonce, 193 segmentos de grafo e 4.096 bytes cada para
+  parâmetros de slot e fallbacks. Como toda montagem é uma representação
+  distinta, resposta composta nenhuma responde `304` nem honra o
+  `If-None-Match`, e a uma montagem com slots se envia `Cache-Control:
+  private, no-store`, enquanto uma sem slot nenhum mantém o `max-age`
+  privado da classe dela.
+
+- **Um composto armazenado pode nomear outra entrada armazenada como um dos
+  segmentos dele.** O `LiveNestedSegment` é a declaração tipada e o
+  `Router::try_live_nested_segment` o registra. A entrada interna mantém a
+  chave própria e a versão própria, então ela é invalidada, republicada e
+  cercada nos termos dela e não nos de quem a inclui, e cada segmento
+  declara o que acontece quando ele não pode ser resolvido: falhar o
+  documento, omiti-lo ou servir um fallback limitado. O aninhamento é
+  limitado a três níveis e dezesseis segmentos aninhados, um ciclo é
+  reportado como um ciclo mesmo quando ele também estouraria a profundidade,
+  e o comprimento montado é conferido contra o limite de corpo antes de um
+  único byte ser copiado. A publicação é recusada para um composto que
+  nomeie um segmento interno de uma classe de representação mais ampla, um
+  com uma janela de frescor mais longa, um ciclo transitivo, um grafo além
+  do limite de profundidade ou um segmento interno `PrivateCached` que nunca
+  poderia ser resolvido. Em um acerto, um segmento interno vinculado a
+  identidade é reautorizado para o visitante que solicita; um declarado
+  livre de identidade pula isso, o que é liberdade de identidade provada, e
+  não um enfraquecimento dela.
+
+- **Nós conseguem dizer uns aos outros que uma geração acabou de se mover.**
+  O `RENDER_CACHE_HINTS` liga um canal de pub/sub do Redis que carrega os
+  digests de dependência que um avanço acabou de tocar, ligado por padrão
+  para o perfil `redis` e desligado para os outros dois, pegando carona no
+  mesmo `RENDER_CACHE_REDIS_URL` e `RENDER_CACHE_REDIS_PREFIX` do próprio
+  cache. O único poder de uma dica é fazer um nó revalidar mais cedo do que
+  o lease dele teria feito: ela nunca consegue estender ou criar um lease,
+  provar uma entrada atual, desviar da leitura do ledger que um acerto ainda
+  faz, nem tocar na época de autoridade, que é por que o canal é não
+  autenticado por design e por que um endpoint de dicas inalcançável não
+  recusa o boot do jeito que uma camada de cache inalcançável recusa. Uma
+  dica não carrega instante nenhum, então nenhuma suposição de desvio de
+  relógio entre nós é necessária. Um deployment com as dicas desligadas, um
+  cujo canal está morto e um que nunca as teve servem as mesmas entradas e
+  admitem as mesmas reconstruções; só o momento da revalidação difere.
+
+- **Dois comandos de console e nove contadores de telemetria são a
+  superfície de operação.** O `render-cache:inspect <key>` reporta a classe
+  de representação de uma entrada armazenada, o `body_bytes`, outros
+  metadados e a época de autoridade atual, e lê a camada em processo deste
+  processo e mais nada, então em um perfil compartilhado ele responde "o que
+  este nó tem em memória" em vez de "o que o deployment tem armazenado". O
+  `render-cache:epoch-advance` é a invalidação de emergência: ele avança a
+  época de autoridade, que está assada em toda chave de busca, então
+  entradas armazenadas ficam fora de alcance sem nada a enumerar e nada a
+  excluir, e no nó que o roda o efeito é imediato. Nenhum dos dois jamais
+  imprime um corpo armazenado ou uma identidade de dependência crua, o que é
+  afirmado em teste em vez de meramente declarado. Os contadores são
+  `suprnova.render_cache.lookups`, `.hits`, `.publications`, `.rebuilds`,
+  `.stitch.assemblies`, `.stitch.slots`, `.stitch.nested`, `.hints` e
+  `.epoch_rewinds`, todos com atributos fechados de baixa cardinalidade que
+  nunca nomeiam uma rota, uma chave, um digest, uma camada ou um provider.
+
+- **Uma busca recusada diz exatamente qual contrato a recusou.** O
+  `outcome="declined"` no contador de buscas agora carrega um atributo
+  `reason` vindo de um conjunto fechado de trinta e oito rótulos, calculado
+  a partir de um valor tipado no ramo que de fato recusou, em vez de
+  reconstruído depois a partir da resposta. Eles são agrupados por contrato:
+  elegibilidade (`policy_uncacheable`, `method`, `status`, `streaming`,
+  `sets_cookie`, `unsafe_header_name`), observação
+  (`observation_overflowed`, `ledger_read_failed`, `handler_not_begun`),
+  classificação, divergência de chave, documento Live e construção de
+  composto. Todo rótulo está documentado no capítulo de operações, e um
+  teste afirma isso em vez de confiar na prosa. O `reason` é emitido somente
+  ao lado do `outcome="declined"`; um acerto e uma falta não carregam
+  nenhum.
+
+- **Uma época de autoridade que anda para trás é detectada, recusada e
+  ultrapassada.** Uma restauração de banco de dados pode mover a época para
+  um valor que o deployment já usou, o que deixaria entradas publicadas sob
+  o valor antigo, mais alto, serem provadas atuais de novo. Uma entrada ou
+  um lease carimbados acima da autoridade agora são recusados em qualquer
+  idade, antes de qualquer comparação de dependência, e o nó que detecta
+  isso eleva a época do ledger para além do carimbo, larga o lease dele,
+  limpa a camada em processo dele e incrementa o
+  `suprnova.render_cache.epoch_rewinds`.
+
+- **O NOWPayments se junta ao Stripe e ao Paddle como adaptador de
+  pagamento.** O crate `suprnova-payments-nowpayments` cria faturas
+  hospedadas, verifica notificações de pagamento e lê o status de pagamento
+  com a chave de API do lojista, e se registra como `nowpayments` no
+  registro comum de providers através do `NowPaymentsProvider::from_env()`.
+  Ele lê o `NOWPAYMENTS_ENVIRONMENT` (`sandbox` ou `production`, com
+  `sandbox` como padrão; um valor desconhecido ou em branco falha a
+  configuração), o `NOWPAYMENTS_API_KEY`, o `NOWPAYMENTS_IPN_SECRET` e o
+  `NOWPAYMENTS_IPN_CALLBACK_URL`, e recusa credenciais em branco antes de
+  qualquer solicitação HTTP. O endpoint de webhook dele é o `POST
+  /webhooks/payments/nowpayments` através das `webhook_routes`
+  compartilhadas, e ele precisa da URL de callback HTTPS pública exata e de
+  corpos de solicitação que cheguem ao adaptador sem alteração. O
+  `manual/payments-nowpayments.md` é o capítulo.
+
+- **O RBAC tem a contraparte que revoga de todo helper que concede.** A
+  superfície exportava as metades que concedem e que checam de uma API de
+  controle de acesso e nada que tirasse acesso, então remover o papel de um
+  administrador significava compor statements contra tabelas de junção cuja
+  semântica você tinha de inferir - durante um incidente, que é quando se
+  recorre à revogação. O `remove_permission_from_role`, o
+  `remove_role_from_model` e o `remove_permission_from_model` são as funções
+  livres, cada uma com o par `_on_guard` que o lado que concede já tinha, e
+  o `HasRoles::remove_role` e o `HasRoles::remove_permission_to` fazem par
+  no ponto de chamada. Um nome que não existe em guard nenhum desses é um
+  erro, então um erro de digitação ou uma chamada mirada no guard errado é
+  barulhenta; uma atribuição que o model ou o papel não tem é um no-op que
+  retorna `Ok`, então repetir uma revogação que já aterrissou é seguro. Cada
+  chamada remove exatamente a única atribuição que ela nomeia, sem varredura
+  em massa, e todo statement resolve o executor dele através da transação
+  ambiente primeiro, então um pacote de conceder e revogar dentro de um
+  `DB::transaction` faz commit ou rollback como uma unidade só. A revogação
+  é específica da fonte e não contradiz o `has_permission_for_model`, que
+  resolve uma concessão direta antes de uma herdada de papel: tirar um papel
+  deixa uma permissão que o model também tem diretamente ainda respondendo
+  verdadeiro, e o rustdoc nomeia a segunda chamada que encerra o acesso
+  efetivo.
+
+- **Uma aplicação consegue construir o router dela de forma assíncrona.** O
+  `Application::try_routes_async` recebe uma closure que retorna um future,
+  e o `Server::try_from_config_with_routes_async` é o gêmeo assíncrono do
+  `try_from_config_with_routes` que a hospeda, compartilhando o mesmo
+  prólogo e o mesmo epílogo. Ele existe porque o `RenderCache::install` tem
+  de sondar as tabelas do ledger de gerações antes de conseguir montar um
+  runtime, e a closure de rotas é o único lugar que tem ao mesmo tempo um
+  container e um router - hook de boot nenhum tem os dois. O `routes`, o
+  `try_routes` e o `try_routes_async` escrevem o mesmo slot, então o último
+  chamado é o que o servidor constrói.
+
+- **A integração com o Magnetar expõe o que um sign-in parcialmente
+  concluído de fato retornou.** O `SignInOutcome` é público, então um
+  callback de magic link, de OAuth ou de passkey que resolve para
+  `SignInOutcome::FactorRequired` pode ser tratado em vez de ser reportado
+  como uma falha: a sessão do framework não é vinculada, e o seletor que ele
+  carrega pode ser completado através do host engine retido. O `FactorAuth`
+  e o `MagnetarFactorAuthEngine` são os tipos que seguram essa continuação,
+  e o `install_magnetar_oauth_engine` e o
+  `install_magnetar_oauth_engine_with_factor` instalam um engine de OAuth
+  com ou sem um. Falhas de bootstrap do Magnetar agora nomeiam o que está
+  faltando em vez de reportar um erro de instalação genérico.
+
+- **O contrato de driver de fila reporta se ele consegue honrar um filtro
+  por nome de fila.** O `QueueFilterCapability` (`Supported`, `Unsupported`,
+  `Unknown`) é o que o `QueueDriver::queue_filter_capability` retorna; o
+  padrão é `Unknown`, e não `Unsupported`, então um driver de terceiros que
+  já sobrescreve o `pop_from` continua funcionando inalterado, e um
+  decorador pode recusar uma conexão sabidamente `Unsupported` antes de
+  fazer poll, mas tem de deixar um driver `Unknown` responder por si. O
+  `TerminalCallbackClaim` são os metadados que um worker recebe de volta
+  quando reivindica atomicamente os callbacks terminais de um batch
+  terminado, carregando o horário de conclusão durável e qualquer
+  cancelamento visível na mesma seção crítica, para que a decisão de
+  callback não possa ser tomada a partir de um snapshot que ficou obsoleto
+  antes de a posse ser eleita.
+
+- **O `Schedule::try_add` é o irmão falível do `Schedule::add`.** O nome da
+  tarefa identifica uma tarefa na busca direta e nas chaves distribuídas
+  usadas pelo `TaskBuilder::on_one_server` e pelo
+  `TaskBuilder::without_overlapping`, então um nome não pode identificar
+  duas entradas registradas, e um agendamento que registrasse o mesmo nome
+  duas vezes tinha duas tarefas disputando um lock. Os nomes agora são
+  exatos, sensíveis a maiúsculas e minúsculas, e únicos: o `add` entra em
+  panic diante de uma duplicata e a tarefa existente é mantida, enquanto o
+  `try_add` retorna o erro para o código que preferir tratá-lo.
+
+- **Os limites de tempo de vida de sessão e o erro de migração de sessão são
+  públicos.** O `MAX_SESSION_LIFETIME_SECS` e o
+  `MAX_SESSION_LIFETIME_MINUTES` são os limitadores que o parsing de
+  ambiente e o driver de banco de dados aplicam, e o `SessionMigrationError`
+  é exportado para que um `SessionStore` customizado consiga nomear a falha
+  que ele retorna.
+
+- **Projetos com scaffold são construídos em formato de produção por
+  construção.** O `Cargo.toml` gerado depende do framework com as features
+  padrão desligadas e os nove padrões que não são `testing` listados
+  explicitamente (`filesystem`, `database-sqlite`, `database-postgres`,
+  `database-mysql`, `vector-mariadb`, `web-push`, `localization`,
+  `magnetar-oauth`, `media`), e reacrescenta `features = ["testing"]` como
+  dependência de desenvolvimento. O resolvedor do Cargo puxa as features de
+  uma dependência de desenvolvimento apenas para o `cargo test` e outras
+  builds `--tests`, então o `cargo build --bin app` nunca compila uma
+  costura de teste dentro de um binário distribuído, e o `cargo test` fica
+  inalterado. O `manual/deployment.md` documenta o formato para uma
+  aplicação existente adotar.
+
+- **O id de build padrão do cache vem da aplicação, e não do framework.** O
+  `#[suprnova::main]` registra o `CARGO_PKG_VERSION` do próprio crate da
+  aplicação logo depois de carregar o ambiente, e o
+  `RenderCacheConfig::from_env` resolve o `build_id` através de um
+  `APP_BUILD_ID` explícito, depois daquela versão de aplicação registrada,
+  depois da versão do próprio crate deste framework, somente para um binário
+  que nunca expandiu o `#[suprnova::main]`. O
+  `RenderCacheConfig::with_build_id` sobrescreve o que quer que o `from_env`
+  tenha escolhido, para uma aplicação que deriva o próprio identificador por
+  deploy em código. Defina o `APP_BUILD_ID` explicitamente uma vez por
+  deploy: ele é misturado em toda chave de busca, e uma versão de pacote
+  raramente muda quando você publica um template, uma tradução ou uma
+  correção de handler.
+
+### Alterado
+
+- **Um worker na conexão de fila com failover agora drena toda conexão, e
+  não só a primária.** O `FailoverQueueDriver` documentava a consequência
+  que herdou do Laravel: as escritas caíam pela lista, as leituras não,
+  então o que fizesse failover para um fallback ficava ali até alguém rodar
+  um segundo worker contra aquele fallback diretamente. O `pop` e o
+  `pop_from` agora rotacionam a conexão inicial deles e depois varrem a
+  lista inteira sequencialmente - rotação para que uma primária recuperada e
+  continuamente ocupada não consiga matar de fome o trabalho que aterrissou
+  em um fallback, sequencial para que uma chamada não consiga reservar
+  vários jobs e devolver um. Cada reserva recebe um token agregado novo que
+  o driver mapeia de volta à conexão que realmente é dona dele, porque
+  tokens internos não são globalmente únicos e dois backends podem
+  legitimamente cunhar o mesmo UUID; um token agregado expirado ou
+  desconhecido é tratado como obsoleto em vez de enviado a uma conexão
+  arbitrária. Os contadores e as três listagens agregam toda conexão
+  configurada na ordem configurada, e o `clear` tenta todas elas, então o
+  que um operador inspeciona é o backlog que este driver consegue de fato
+  consumir. Um driver declara se consegue honrar um filtro por nome de fila
+  através do `QueueDriver::queue_filter_capability`, que tem `Unknown` como
+  padrão, então um driver de terceiros existente não é afetado.
+
+- **O lease mínimo de workflow é de dois segundos, e o primeiro heartbeat
+  dispara imediatamente.** O heartbeat renova a `max(lock_timeout / 2, 1s)`,
+  então um lease de um segundo estava previsto para a primeira renovação
+  dele na própria expiração ou depois dela: qualquer latência de
+  reivindicação ou jitter de agendamento abria uma janela por onde outro
+  worker podia passar enquanto o primeiro já estava rodando efeitos. O
+  primeiro tick do heartbeat não é mais pulado, o que fecha a janela entre a
+  reivindicação e a primeira renovação, e a admissão aguarda uma renovação
+  com posse antes de qualquer código de usuário rodar, e não apenas dentro
+  de um passo. Um `WORKFLOW_LOCK_TIMEOUT_SECS` abaixo de dois é limitado com
+  um aviso que diz o porquê, e uma configuração construída em código que
+  carregue um lease mais curto falha na validação.
+
+- **Um provider de pagamento sem registros de cliente pode recusar a
+  hidratação do espelho de transações.** O
+  `WebhookHandler::mirrors_payment_transactions` tem `true` como padrão,
+  então todo provider existente se comporta como se comportava; um provider
+  que retorna `false` continua tendo os eventos verificados dele persistidos
+  e deduplicados no log de auditoria de webhooks, reembolsos incluídos, mas
+  nenhum espelho de transação é fabricado para pedidos de que a aplicação é
+  dona e que ela tem de reconciliar contra o estado autenticado do provider.
+  O `try_extract_payment_snapshot` é a forma falível do
+  `extract_payment_snapshot` que o caminho de hidratação usa: retornar `Err`
+  deixa o webhook pendente para que o provider o repita, enquanto o
+  `Ok(None)` fica reservado para um evento que genuinamente não consegue
+  fornecer um snapshot completo. Os dois são métodos providos, então um
+  driver existente compila e se comporta inalterado.
+
+- **Um `transaction.billed` do Paddle não é mais lido como dinheiro
+  recebido.** Uma fatura emitida não confirma recebimento, e tratá-la como
+  uma liquidação marcava como pagos pedidos que não estavam. Ajustes de
+  reembolso e de disputa aprovados são classificados como ajustes em vez de
+  transações, com a moeda deles tirada de `data.currency_code` e o horário
+  de liquidação deles tirado da última tentativa de pagamento capturada
+  quando há uma disponível; só o `WebhookHandler::parse_event` os
+  classifica, porque a decisão precisa da ação e do status de aprovação do
+  próprio payload. O adaptador também preserva a correlação de lojista que
+  recebeu através do checkout, em vez de substituí-la por um identificador
+  de cliente que o Paddle.js não aceita como token de autenticação de
+  cliente, codifica dados customizados não string como strings JSON de forma
+  consistente entre as solicitações de cliente e de checkout, e dá ao
+  cliente HTTP dele o prazo de solicitação que o SDK fixado não define.
+
+- **O crate do framework carrega três módulos novos e duas dependências
+  duras novas.** O `suprnova::live`, o `suprnova::render_cache` e o
+  `suprnova::view` são incondicionais, e não protegidos por feature, então o
+  framework agora depende do crate de motor interno `suprnova-live` e do
+  `askama` em toda build. Nenhum dos dois módulos faz coisa alguma até uma
+  aplicação optar por incluí-lo: o `Router::try_live()` é o que instala as
+  rotas reservadas do Live, e o `RenderCache::install` com uma política é o
+  que faz o cache fazer qualquer coisa.
+
+### Corrigido
+
+- **Um job de batch não é reconhecido até a contabilidade dele estar
+  durável.** O worker reconhecia um membro de batch bem-sucedido e depois
+  escrevia a escrituração do batch, então uma falha entre os dois deixava um
+  batch permanentemente com uma liquidação a menos, e os callbacks de
+  conclusão dele nunca disparavam. A reserva agora é mantida até toda
+  escrita de contabilidade ter sucesso; uma escrita recusada ou incerta a
+  deixa intacta, para que a expiração de visibilidade reentregue o job, e a
+  unicidade de `(batch_id, job_id)` do repositório torna a repetição segura
+  mesmo quando a primeira escrita fez efeito e só a resposta dela se perdeu.
+  O repositório de batches é instalável separadamente e pode endereçar um
+  banco de dados diferente, que é por que isto não pode simplesmente
+  compartilhar a transação de liquidação da fila.
+
+- **Os callbacks terminais de um batch são eleitos exatamente uma vez.**
+  Dois jobs terminando as duas últimas entradas de um batch podiam observar
+  os dois uma contagem de pendentes de zero e rodar os dois os callbacks de
+  conclusão. As linhas de liquidação agora são a fonte da verdade e a linha
+  do batch pai delas é travada antes da inserção, então jobs concorrentes de
+  um batch formam uma ordem total e exatamente uma liquidação final observa
+  zero - através de locks de linha no PostgreSQL e no MySQL, e através do
+  lock de escritor que a transação serializada toma no SQLite. Reivindicar o
+  pacote de callbacks devolve o horário de conclusão durável e qualquer
+  cancelamento visível naquela mesma seção crítica, então um worker não
+  consegue escolher o `then` a partir de um snapshot que ficou obsoleto
+  antes de a posse ser eleita, e um batch não vazio cuja contagem de
+  pendentes chegou a zero fica selado contra crescimento positivo. Um
+  cancelamento já visível depois de uma resposta incerta não é recarimbado
+  na reentrega. Falhas de construção de envelope coletadas enquanto se monta
+  um batch pendente são trazidas à tona no dispatch, que recusa o batch
+  inteiro antes de qualquer mutação de repositório ou de driver, em vez de
+  serem engolidas por um builder fluente infalível.
+
+- **O driver de fila do Redis cerca com fence toda operação terminal contra
+  a entrega para a qual ela foi emitida.** O `ack`, o `nack`, o `release` e
+  o `settle` agora comparam o dono consumidor e a contagem de entregas da
+  entrada de stream com a geração capturada pelo `pop`, e um único script
+  Redis aplica qualquer publicação sucessora e o `XACK` juntos, então uma
+  resposta atrasada que faz o chamador repetir encontra a geração já ida, e
+  a repetição vira um no-op em vez de uma publicação duplicada. Como o
+  `nack` é inerentemente dois comandos (`XADD` e depois `XACK`), cada
+  reserva retém um ciclo de vida por token que continua endereçável através
+  de toda operação que falhe e só é removido depois de o reconhecimento ter
+  sucesso, então uma repetição retoma no passo que falhou em vez de
+  republicar. O contrato de pelo-menos-uma-vez do driver e a exigência de
+  que os handlers sejam idempotentes agora estão declarados na documentação
+  do módulo em vez de ficarem implícitos. Identidades de consumidor são
+  isoladas por processo, então dois workers não conseguem reivindicar as
+  entradas pendentes um do outro.
+
+- **Uma reserva de fila de banco de dados dura o tempo que foi pedido.** O
+  `reserved_until` armazena segundos inteiros e os leitores o comparam com o
+  tempo atual arredondado para baixo, então o segundo fracionário atual era
+  silenciosamente tirado de todo lease e um timeout de menos de um segundo
+  podia arredondar para nada. O instante absoluto de expiração agora é
+  arredondado para cima.
+
+- **Escritas de passo de workflow são cercadas com fence, um orçamento de
+  tentativas esgotado vira terminal, e colunas de data do MySQL batem com as
+  entidades que as leem.** Uma escrita de passo vinda de um worker que já
+  tinha perdido a reivindicação dele podia aterrissar por cima do worker que
+  agora é dono do workflow; as escritas agora carregam o token de fencing da
+  reivindicação. Uma linha cujo orçamento de tentativas já está esgotado não
+  podia nem ser reivindicada nem ser deixada pendente para sempre: o
+  statement de reivindicação agora torna terminal no máximo uma linha dessas
+  por poll, com predicados de limpeza e de reivindicação disjuntos, para que
+  um backlog abandonado grande não consiga transformar um poll de worker em
+  uma escrita ilimitada. As migrações iniciais de workflow declaravam
+  colunas de data do MySQL como `TIMESTAMP`, enquanto as entidades públicas
+  usam `chrono::NaiveDateTime`, cujo tipo de armazenamento no MySQL é
+  `DATETIME`; a `NormalizeWorkflowDateTimesForMysql` é uma migração aditiva
+  que as converte e é um no-op no PostgreSQL e no SQLite.
+
+- **Cancelar uma task não abandona mais os efeitos diferidos de uma
+  transação.** Uma `DB::transaction` abortada desfaz o trabalho de banco de
+  dados dela quando o SeaORM larga a transação, mas nada desfazia um push de
+  fila diferido nem liberava um lock de unicidade mantido para ela, e um
+  callback pós-commit que já estava rodando quando o abort aterrissou era
+  largado no meio do efeito. Os callbacks agora rodam como tasks filhas
+  aguardadas, na ordem de registro, então um que já esteja em voo sobrevive
+  ao cancelamento de quem o chamou, e o resto que não começou é desviado
+  para uma task destacada que ou roda a lista de pós-commit (a transação de
+  fato fez commit) ou compensa (ela não fez). Um callback que entra em panic
+  surge como um erro em vez de pular os callbacks atrás dele, e um `COMMIT`
+  que o banco de dados recusa depois de a closure já ter tomado a
+  solicitação é tratado em vez de entrar em panic.
+
+- **Cópias entre discos e o cache read-through limpam depois de uma task
+  cancelada.** Uma falha no meio do stream já descartava o objeto de destino
+  parcial, mas um cancelamento não retorna erro nenhum, então o writer era
+  simplesmente largado e um objeto truncado ou um upload multipart preparado
+  ficava para trás. O writer de destino agora pertence a um guard ao longo
+  da transferência: um erro se resolve na hora com o mesmo abort e delete de
+  antes, enquanto um cancelamento desvia essa limpeza para uma task
+  destacada, e a própria limpeza roda até o fim mesmo que a task que a
+  aguarda seja cancelada durante ela. A limpeza nunca mira um objeto
+  publicado, porque outro writer pode ter vencido a condição. O trabalho de
+  sistema de arquivos local é mantido vivo até terminar, já que largar um
+  future de sistema de arquivos do Tokio não interrompe o trabalho
+  bloqueante que ele já submeteu.
+
+- **Duas cláusulas de throttle que faziam hash para a mesma identidade de
+  armazenamento não compartilham mais um contador.** Uma regra de limitação
+  de taxa com várias cláusulas finitas podia colidir, então os hits de uma
+  cláusula contavam contra o orçamento de outra. Cláusulas que colidem agora
+  reservam identidades de contador e de temporizador determinísticas e
+  inequívocas, calculadas uma vez para que o gate, o hit diferido e os
+  headers de resposta usem todos a mesma chave, e chaves antigas são
+  mantidas onde não há colisão.
+
+- **Uma varredura de janela deslizante não apaga mais o histórico de que uma
+  cota mais longa ainda precisa.** O limitador em memória descartava um
+  bucket cujo último hit fosse mais antigo do que a janela sobre a qual lhe
+  perguntaram, o que jogava fora o registro que aplicava uma cota mais longa
+  já observada na mesma chave. Um bucket agora é retido até o último hit
+  registrado dele ser mais antigo do que a janela fornecida e do que a maior
+  janela de cota observada para ele. Um decremento abaixo da quantidade
+  mínima é tratado em vez de subcontado.
+
+- **O driver de cache em memória recusa um incremento contra um valor não
+  inteiro.** O `INCRBY` e o `DECRBY` do Redis recusam um valor não inteiro
+  vivo e deixam o valor e o TTL dele em paz; o driver de memória o
+  sobrescrevia, então o mesmo código se comportava de forma diferente contra
+  os dois backends. Ele agora faz o parse antes de inserir e deixa a entrada
+  intocada em caso de erro. Em separado, o `add` do Redis instala um valor
+  sem tag ausente e limpa metadados de tag obsoletos em um único script,
+  então uma sobrescrita com tag mais nova não consegue mais aterrissar entre
+  a escrita condicional e a limpeza que a segue.
+
+- **Dados de sessão de uso único do Inertia sobrevivem a uma resposta que
+  falhou.** O `SessionMiddleware` envelhece `_flash.new.*` para
+  `_flash.old.*` antes de o handler rodar, então uma resposta que falhou
+  enquanto era construída deixava esses valores para serem excluídos pela
+  passagem de envelhecimento da solicitação seguinte - o usuário perdia os
+  erros de validação ou a mensagem de flash que explicava o que deu errado.
+  Um guard com escopo de solicitação agora os reenvia ao flash em toda saída
+  sem commit, cancelamento incluído, e só os remove depois de a resposta
+  completa ter sido construída.
+
+- **O fan-out de transmissão espera o backend dizer que escreveu.** O
+  `SeaProducer::send` só enfileira, e o future retornado é o que reporta a
+  escrita de fato no backend, então uma entrega era reportada como enviada
+  quando só tinha sido enfileirada. Todo envio de uma passagem agora tem o
+  recibo dele aguardado sob um único prazo, o que também impede que um
+  broker indisponível mantenha uma solicitação de aplicação aberta
+  indefinidamente. Heartbeats de participação seguram o guard de leitura até
+  todo heartbeat de snapshot estar enfileirado, então um untrack concorrente
+  não pode ser ultrapassado por um heartbeat obsoleto.
+
+- **O `suprnova generate-types` nunca deixa para trás um artefato obsoleto
+  ou truncado.** Uma varredura que terminava cedo sobrescrevia a saída com o
+  que quer que tivesse, então uma falha de parse transitória excluía em
+  silêncio definições de tipo que a aplicação ainda usava. A geração de
+  arquivos agora recusa sobrescrever um artefato depois de uma varredura
+  incompleta, escreve atomicamente através de um arquivo temporário irmão
+  livre de colisão com retentativas limitadas, e pula a escrita por completo
+  quando o conteúdo está inalterado. Um symlink de saída mantém o
+  comportamento anterior dele: o alvo resolvido é substituído atomicamente e
+  o link fica no lugar; um destino somente leitura que mudou é recusado.
+
+- **Duas falhas de comando do `suprnova` são reportadas em vez de
+  engolidas.** O `suprnova new` reporta um `git init` que falhou em vez de
+  apresentar um projeto como totalmente criado, e o `suprnova
+  workflow:install` valida o caminho da migração antes de criar qualquer
+  diretório, então um caminho inválido falha sem deixar para trás uma árvore
+  feita pela metade.
+
+- **Um savepoint e o registro de efeitos diferidos dele concordam sobre
+  identidade.** O statement de savepoint e a marca do registro usavam a
+  grafia original do chamador, mas os nomes são insensíveis a maiúsculas e
+  minúsculas e o PostgreSQL além disso trata como iguais os nomes que
+  compartilham os primeiros 63 bytes ASCII, então um `ROLLBACK TO` podia
+  desfazer um savepoint cujos efeitos diferidos o registro tinha arquivado
+  sob outra chave. Os dois agora compartilham uma identidade única, validada
+  e canônica para o backend. O limite aceito de 64 bytes da API está
+  inalterado.
+
+- **O `suprnova <command> --help` imprime a ajuda em vez de rodar o
+  comando.** A CLI declarava a própria flag `help` e a consultava somente
+  quando nenhum subcomando tinha sido dado, então todo outro `--help`
+  imprimia o banner e depois executava o comando mesmo assim. O `suprnova
+  migrate:fresh --help` derrubava toda tabela do banco de dados, e a
+  salvaguarda que o teria impedido só recusa em produção, enquanto o
+  `APP_ENV` tem `local` como padrão. O clap agora é dono do `-h` e do
+  `--help` no nível superior e em todo subcomando, em qualquer ordem de
+  argumentos, e o banner curado continua sendo o que o nível superior
+  imprime. Um teste enumera os subcomandos a partir do próprio clap, então
+  um subcomando acrescentado depois fica coberto sem ninguém lembrar de
+  acrescentá-lo.
+
+- **Um frontend com scaffold não fixa mais o token CSRF que leu no boot.**
+  Os pontos de entrada gerados de Vue, Svelte e React liam o `<meta
+  name="csrf-token">` uma vez no carregamento do módulo e anexavam aquele
+  valor a toda visita Inertia. Fazer login rotaciona a sessão, o token
+  capturado fica obsoleto, e a visita seguinte que muda estado - tipicamente
+  o logout - era recusada com `419 CSRF token mismatch`. Toda aplicação
+  gerada era distribuída com isso. O hook se foi: o cliente Inertia lê o
+  cookie `XSRF-TOKEN` que o `CsrfMiddleware` define e o ecoa de volta em
+  `X-XSRF-TOKEN` por conta própria, uma vez por solicitação, então o valor
+  que viaja é o que o navegador tem naquele momento. A verificação do lado
+  do servidor está inalterada e os dois nomes de header continuam aceitos. O
+  capítulo do manual e a documentação do módulo `suprnova::csrf` nomeavam o
+  hook antigo como a coisa a fazer; os dois agora o nomeiam como a coisa a
+  evitar.
+
+- **O cookie XSRF de uma aplicação com scaffold é utilizável sobre HTTP
+  local.** O `CsrfMiddleware::new()` define o cookie `XSRF-TOKEN` legível
+  por JS como `Secure` por padrão, enquanto o `env.example` gerado define
+  `SESSION_SECURE=false` para desenvolvimento, então um navegador não
+  armazenaria nem devolveria o cookie sobre `http://localhost` e toda
+  solicitação que muda estado em desenvolvimento era recusada com `419`. O
+  bootstrap gerado agora passa o `SessionConfig` dele para o
+  `CsrfMiddleware::with_session_config`, que copia o `Secure`, o `SameSite`,
+  o `Domain`, o `Path` e o tempo de vida do cookie de sessão para o cookie
+  XSRF, para que os dois não possam se separar. Nada é enfraquecido: a
+  validação de token, a política de origem padrão e as salvaguardas de
+  produção estão inalteradas.
+
+- **O `suprnova make:command` aparece na tela de ajuda.** O comando faz o
+  scaffold de um comando de console em `src/commands/` e não tinha linha
+  nenhuma na tela curada, então a única forma de saber que ele existia era
+  ler o código-fonte. A tela agora é conferida contra a lista de subcomandos
+  que o clap reporta, nos dois sentidos, então nem uma linha faltante nem
+  uma linha que não nomeie comando nenhum consegue sobreviver.
+
+### Atualizando
+
+- **A maioria das aplicações não precisa de mudança de código nenhuma.** O
+  Live e o RenderCache são os dois opt-in: o `suprnova::live` não faz nada
+  até um router chamar o `Router::try_live()`, e o `suprnova::render_cache`
+  não faz nada até uma rota ser incluída e o `RenderCache::install` ser
+  chamado. Todo o resto neste release é uma correção de um comportamento que
+  você já tinha. A versão é 2.0.0 porque a superfície do framework cresceu
+  em dois subsistemas inteiros e por causa das mudanças de comportamento
+  específicas listadas abaixo, e não porque a API comum de aplicação tenha
+  sido rearranjada: nenhum item público do crate do framework, do crate de
+  macros ou dos crates adaptadores de pagamento, do Magnetar e do Web Push
+  foi removido ou renomeado.
+
+- **Tempos de rebuild e pegada de dependências sobem.** O framework agora
+  depende do crate de motor interno `suprnova-live` e do `askama` em toda
+  build, porque o `suprnova::live`, o `suprnova::render_cache` e o
+  `suprnova::view` são módulos incondicionais em vez de features. Não há
+  nada a habilitar nem nada a desabilitar.
+
+- **Uma aplicação que nunca usa o RenderCache paga uma sondagem de schema
+  por processo.** O `RENDER_CACHE_ENABLED` tem `true` como padrão, então a
+  primeira escrita de ORM que um processo faz fora de uma transação pergunta
+  uma vez se a migração do RenderCache está presente; ao não encontrá-la,
+  aquele processo fica fechado pelo resto da vida dele e não emite mais SQL
+  nenhum do RenderCache. Defina `RENDER_CACHE_ENABLED=false` para pular até
+  esse único statement. A sondagem nunca roda na transação de um chamador,
+  então ela não consegue envenenar uma escrita que você esteja fazendo.
+
+- **Quem constrói um `WebPushClient` a partir de um `reqwest::Client` já
+  construído precisa agir.** O `WebPushClient::with_client` agora recusa
+  enviar sob o `EndpointPolicy::Strict` padrão e retorna
+  `WebPushError::UnconfinedRedirects`, porque a política de redirecionamento
+  de um cliente já construído não pode ser inspecionada e o reqwest segue
+  redirecionamentos por padrão. Mude para o
+  `WebPushClient::with_client_builder`, que honra toda opção de transporte
+  que você estava definindo (proxy, TLS, timeouts) e força os
+  redirecionamentos a ficarem desligados, ou chame o
+  `WebPushClient::allow_unconfined_redirects` se você sabe que o seu cliente
+  é seguro. O `WebPushClient::new` não é afetado.
+
+- **URLs assinadas emitidas antes da atualização que carregam uma barra
+  final param de verificar.** A assinatura e a verificação as duas cortavam
+  uma barra final antes de fazer o hash; as duas agora fazem o hash do
+  caminho exatamente. Uma URL assinada como `/orders/1` continua verificando
+  em `/orders/1`, e somente em `/orders/1` - um proxy que acrescenta uma
+  barra agora produz `SignatureVerdict::Invalid`. Se um proxy ou um
+  framework à frente da sua aplicação normaliza caminhos acrescentando uma
+  barra, assine a URL do jeito que a solicitação vai chegar.
+
+- **Um agendamento com duas tarefas de mesmo nome agora falha no registro.**
+  O `Schedule::add` entra em panic diante de uma duplicata, mantendo a
+  tarefa já registrada. Renomeie uma das duas, ou passe para o
+  `Schedule::try_add` e trate o erro. Os nomes são exatos e sensíveis a
+  maiúsculas e minúsculas.
+
+- **Um lease de workflow mais curto que dois segundos é limitado ou
+  recusado.** Um `WORKFLOW_LOCK_TIMEOUT_SECS` abaixo de `2` é limitado a `2`
+  com um aviso que nomeia o motivo; um `WorkflowConfig` construído em código
+  com um lease mais curto falha no `validate`. Se você estava rodando um
+  lease de um segundo deliberadamente, o heartbeat não conseguia renová-lo
+  antes de ele expirar.
+
+- **Uma aplicação MySQL que usa workflows deveria acrescentar uma
+  migração.** A
+  `suprnova::workflow::migrations::NormalizeWorkflowDateTimesForMysql`
+  converte as colunas de data de `workflows` e de `workflow_steps` de
+  `TIMESTAMP` para `DATETIME`, que é o que o `chrono::NaiveDateTime` de fato
+  armazena. Ela é aditiva, e um no-op no PostgreSQL e no SQLite. O MySQL
+  pode reconstruir e travar as duas tabelas enquanto a aplica, então
+  agende-a de acordo. Um projeto criado pelo `suprnova new` já a recebe
+  ligada automaticamente.
+
+- **O `AuthMiddleware` agora resolve o usuário em toda solicitação
+  protegida.** Ele costumava aceitar a presença de um identificador
+  persistido. A mudança de comportamento é que uma sessão pertencente a um
+  usuário excluído ou excluído por soft delete para de autorizar. O custo é
+  menor do que parece: o usuário resolvido fica em cache pelo resto da
+  solicitação, então um handler que já chamava o `Auth::user()` não paga
+  nada a mais e a busca simplesmente saiu do handler para o middleware. Só
+  uma solicitação protegida cujo handler nunca resolvia o usuário ganha uma
+  busca no provider que não fazia antes. Uma aplicação sem provider de
+  usuários vinculado mantém o caminho só de identificador inalterado. O
+  `BasicAuthMiddleware` na forma não stateless dele agora exige que o guard
+  que ele nomeia exista e seja um guard stateful.
+
+- **O `destroy_all_for_user` custa mais e revoga mais.** Ele agora lê as
+  linhas de sessão sobreviventes e compara as identidades de guard dentro de
+  cada payload, além da correspondência com o `user_id` indexado, então ele
+  alcança sessões autenticadas apenas através de um guard nomeado. A
+  revogação é rara o bastante para que a correção tenha sido escolhida em
+  vez do uso de índice; se você o chama em um caminho quente, vale saber
+  disso.
+
+- **Um `POST` ou um `PATCH` repetido depois de um erro de transporte agora
+  precisa do `retry_non_idempotent`.** O ramo do `5xx` já o exigia; o ramo
+  de erro de transporte não. Se você contava com uma conexão caída ser
+  repetida para uma solicitação não idempotente, opte por isso
+  explicitamente.
+
+- **Um processo de produção com um `APP_KEY` ausente ou malformado agora
+  falha no `#[suprnova::main]`, e não no `Server::from_config`.** Isso
+  inclui um binário de console ou um ponto de entrada de worker que nunca
+  constrói um servidor. Ambientes local, de desenvolvimento e de teste
+  continuam gerando uma chave transitória e avisando. O `APP_PREVIOUS_KEYS`
+  é aceito como alias para o `APP_KEY_PREVIOUS`; se os dois estiverem
+  definidos com valores diferentes, o nome Suprnova vence e o duplicado é
+  nomeado em um aviso sobre o qual você deveria agir.
+
+- **Um worker apontado para uma conexão de fila `failover` agora drena toda
+  conexão da lista.** Se você estava rodando um segundo worker contra uma
+  conexão de fallback diretamente - o que as notas da 1.3.3 mandavam fazer
+  -, aquele worker e o worker de failover vão estar os dois drenando ela.
+  Remova o worker extra, ou mantenha-o e aceite a competição. Os contadores
+  e as listagens agora agregam toda conexão, então um dashboard lendo
+  `pending_size` na conexão de failover vai reportar um número maior do que
+  reportava.
+
+- **Implementações customizadas de armazenamento e de driver ganham padrões
+  que falham fechado, nunca comportamento enfraquecido.** Os armazenamentos
+  de token de provider, de cerimônia e de remember do Magnetar ganharam
+  métodos para as operações atômicas descritas acima; cada um tem um padrão
+  que recusa em vez de executar a operação de forma não atômica, então uma
+  implementação externa ainda compila, mas vai reportar falha até
+  implementar o método. O `WebhookHandler::mirrors_payment_transactions` e o
+  `try_extract_payment_snapshot`, o `QueueDriver::queue_filter_capability` e
+  o `GlobalScope::dependency` têm todos padrões que preservam exatamente o
+  comportamento anterior.
+
+- **Para adotar o Live**, vincule um registro durante o bootstrap com
+  `App::singleton(crate::live::registry().expect("Live component
+  registry"))`, instale as rotas reservadas com o `Router::try_live_with` e
+  um guard carregando o seu `AuthMiddleware`, o `LiveTenantMiddleware` e o
+  `RateLimitMiddleware`, e registre o `CsrfMiddleware::new()` globalmente -
+  o Live verifica a própria prova de origem, então você não precisa alargar
+  o `OriginPolicy` para a aplicação inteira, e se você o alargou por outro
+  motivo, estreite-o de volta. Use o `AuthMiddleware::optional()` no guard
+  do Live se você quiser que visitantes anônimos ajam sobre seeds públicos;
+  o `AuthMiddleware::new()` responde `401` para toda solicitação anônima
+  antes de qualquer trabalho do motor. Depois rode o `suprnova live:make` e
+  o `suprnova live:check`. O `manual/live.md` tem o passo a passo completo.
+
+- **Para adotar o RenderCache**, acrescente a
+  `suprnova::render_cache::migration::Migration` ao seu `Migrator` (e também
+  a `suprnova::render_cache::migration::TierMigration` se você roda o perfil
+  `database` ou `redis`), inclua rotas e grupos com o
+  `Router::try_render_cache` e o `Router::try_render_cache_group`, e termine
+  com o `RenderCache::install`. Como o `install` é assíncrono - ele sonda as
+  tabelas do ledger antes de montar um runtime -, o router tem de ser
+  construído através do `Application::try_routes_async` em vez do
+  `try_routes`. A instalação tem de vir depois de todo middleware que
+  estabelece locale, sessão ou identidade com escopo de solicitação, e
+  depois de toda rota e todo grupo terem sido incluídos. Um perfil
+  compartilhado recusa dar boot sem a migração de camada dele ou com um
+  endpoint que ninguém responde, o que é deliberado.
+
+- **Defina o `APP_BUILD_ID` uma vez por deploy.** Ele é misturado em toda
+  chave de busca do RenderCache, então mudá-lo é o que impede uma build nova
+  de servir entradas que a anterior publicou. O padrão dele é a versão de
+  pacote do crate da sua aplicação, que não muda quando você publica um
+  template, uma tradução ou uma correção de handler. Um id de commit serve:
+  `APP_BUILD_ID=$(git rev-parse --short HEAD)`.
+
+- **Considere mover o seu `Cargo.toml` para o formato de build de
+  produção.** Declare o `suprnova` com `default-features = false` mais os
+  nove padrões que não são `testing` que você usa, e reacrescente `features
+  = ["testing"]` sob `[dev-dependencies]`. O Cargo puxa as features de uma
+  dependência de desenvolvimento apenas para o `cargo test` e outras builds
+  `--tests`, então os seus binários distribuídos param de carregar costuras
+  de teste enquanto o `cargo test` continua funcionando inalterado. Um
+  projeto criado pelo `suprnova new` já está nesse formato; o
+  `manual/deployment.md` o documenta para uma aplicação existente.
+
+- **Se você consumia o runtime `@suprnova/live` autônomo ou escreveu o
+  próprio host de assinaturas, o descritor de evento registrado mudou.** O
+  `DESCRIPTOR_SCHEMA_VERSION` passou de 1 para 2 e os campos de evento
+  registrado do descritor agora são `maximum_hops`, `maximum_fanout` e
+  `payload_contract`, em vez de `maximumHops`, `maximumFanout` e
+  `payloadContract` - eles eram as únicas chaves em camelCase em um contrato
+  JSON público que é snake_case em todo o resto. Um descritor assinado na
+  versão de schema 1 é recusado com
+  `SubscriptionErrorKind::InvalidDescriptor` em vez de ser lido com três
+  campos ausentes. Nada em uma aplicação Suprnova 1.3.7 consumia este
+  contrato, então para a maioria dos leitores não há nada a fazer.
+
 ## 1.3.7 - 2026-08-26
 
 ### Adicionado
