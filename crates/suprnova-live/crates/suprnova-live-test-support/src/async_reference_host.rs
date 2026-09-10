@@ -306,14 +306,6 @@ impl AsyncReferenceAuthority {
     /// claims, exposed here so a caller holding only the authority (such as the
     /// transport path, which never signs its own claims) can serialise the exact
     /// same registered events instead of hardcoding an empty list.
-    pub(crate) fn registered_events_json(&self) -> Result<Vec<Value>, &'static str> {
-        Ok(registered_event_contracts()?
-            .as_slice()
-            .iter()
-            .map(event_contract_json)
-            .collect())
-    }
-
     /// Projects the registered events of the descriptor a response actually
     /// carries, by verifying that descriptor and reading its own claims.
     ///
@@ -801,9 +793,10 @@ fn target_name(target: &EventTarget) -> String {
 /// Builds this reference host's own registered event contracts for the `orders`
 /// stream, independent of whatever the framework fixture registers.
 ///
-/// `claims` and [`AsyncReferenceAuthority::registered_events_json`] both call this
-/// single definition, so the authorize path and the transport path project the
-/// exact same registered events instead of each carrying its own copy.
+/// `claims` builds from this single definition, so a descriptor this host signs
+/// carries exactly these contracts. Both response paths then project the events
+/// back out of the descriptor they carry, never from here directly, so what a
+/// response advertises always matches the descriptor beside it.
 fn registered_event_contracts() -> Result<BoundedEventContracts, &'static str> {
     struct OrderUpdated;
     impl EventPayloadMetadata for OrderUpdated {
