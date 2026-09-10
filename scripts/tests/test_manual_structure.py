@@ -12,11 +12,10 @@ _CHECKER_PATH = _LOCAL_ROOT / "scripts" / "check-manual-structure.py"
 
 _CHANGELOG = "# Changelog\n\nNothing to declare.\n"
 
-# A chapter on the span ratchet, and one that is not. Both must be real entries
-# of SPAN_CHECKED_SOURCES / absent from it, so the tests assert the wiring and
-# not a fixture invented for them.
-_LISTED = "render-cache.md"
-_UNLISTED = "cli.md"
+# Two distinct chapter names the span tests use to tell one chapter's problems
+# from another's. Neither carries any special meaning to the checker.
+_CHAPTER = "render-cache.md"
+_OTHER_CHAPTER = "cli.md"
 
 
 def _load_checker():
@@ -60,15 +59,11 @@ class ManualCodeSpanTests(unittest.TestCase):
             (directory / "changelog.md").write_text(_CHANGELOG, encoding="utf-8")
         return self.checker.check_manual_structure(self.root)
 
-    def _one(self, english, mirror, *, name=_LISTED):
+    def _one(self, english, mirror, *, name=_CHAPTER):
         return self._check({name: (english, mirror)})
 
     def _span_messages(self, problems):
         return [problem.message for problem in problems if problem.kind == "spans"]
-
-    def test_the_ratchet_lists_only_chapters_proven_clean(self):
-        self.assertIn(_LISTED, self.checker.SPAN_CHECKED_SOURCES)
-        self.assertNotIn(_UNLISTED, self.checker.SPAN_CHECKED_SOURCES)
 
     def test_clean_mirror_reports_nothing(self):
         english = (
@@ -148,25 +143,27 @@ class ManualCodeSpanTests(unittest.TestCase):
 
         self.assertEqual(self._one(english, mirror), [])
 
-    def test_span_defect_is_reported_only_for_a_listed_chapter(self):
+    def test_a_span_defect_is_reported_for_every_chapter(self):
         english = "# Guide\n\nThe `RenderCache` stores a `Representation`.\n"
         mirror = "# Guide\n\nDer `RenderCache` speichert etwas.\n"
 
         problems = self._check(
-            {_LISTED: (english, mirror), _UNLISTED: (english, mirror)}
+            {_CHAPTER: (english, mirror), _OTHER_CHAPTER: (english, mirror)}
         )
         spans = [problem for problem in problems if problem.kind == "spans"]
 
-        self.assertEqual(len(spans), len(self.checker.LOCALES))
-        self.assertEqual({problem.file for problem in spans}, {_LISTED})
+        self.assertEqual(len(spans), 2 * len(self.checker.LOCALES))
+        self.assertEqual(
+            {problem.file for problem in spans}, {_CHAPTER, _OTHER_CHAPTER}
+        )
         for problem in spans:
             self.assertIn("`Representation`", problem.message)
 
-    def test_an_unlisted_chapter_is_still_checked_for_every_other_shape(self):
+    def test_a_chapter_is_still_checked_for_every_other_shape(self):
         english = "# Guide\n\n- one\n- two\n"
         mirror = "# Guide\n\n- eins\n"
 
-        problems = self._check({_UNLISTED: (english, mirror)})
+        problems = self._check({_OTHER_CHAPTER: (english, mirror)})
 
         self.assertEqual(len(problems), len(self.checker.LOCALES))
         self.assertEqual({problem.kind for problem in problems}, {"lists"})
@@ -239,6 +236,14 @@ class ManualCodeSpanTests(unittest.TestCase):
         )
 
         self.assertEqual(self._one(english, mirror), [])
+
+    def test_the_real_manual_tree_reports_no_problems(self):
+        # No fixture, no ratchet: run the checker over this worktree's actual
+        # `manual/` tree, so a regression anywhere in the corpus fails this
+        # suite and not only the gate.
+        problems = self.checker.check_manual_structure(_LOCAL_ROOT)
+
+        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":

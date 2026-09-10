@@ -16,29 +16,6 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 LOCALES = ("de", "es", "fr", "ja", "pt-BR", "zh-Hans")
 
-# Sources whose mirrors are held to the inline code span rule below.
-#
-# This list is a ratchet, not an inventory. The span rule compares the code
-# spans of an English chapter against each mirror, and the manual predates it:
-# most chapters carry differences that are a translation audit of their own, not
-# something this gate can act on. So the rule binds only where a chapter has
-# already been shown clean. A chapter joins this list on the day its six mirrors
-# pass, and from then on the docs tier refuses a regression in it. Chapters
-# absent from the list are checked for every other shape - headings, fences,
-# tables, lists, links - exactly as before; only their spans go unexamined.
-#
-# Never add a chapter to buy silence. Run the checker first; if it reports
-# spans for the chapter, the mirrors are wrong and the fix belongs in the
-# translation, not here.
-SPAN_CHECKED_SOURCES = (
-    "render-cache.md",
-    "render-cache-representations.md",
-    "render-cache-generations.md",
-    "render-cache-deployment.md",
-    "render-cache-operations.md",
-    "documentation.md",
-    "live.md",
-)
 _HEADING = re.compile(r"^(?: {0,3}|\s*(?:[-+*]|\d+[.)])\s+)(#{1,6})(?:\s+|$)")
 _LIST_ITEM = re.compile(r"^(\s*)([-+*]|\d+[.)])\s+")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -403,7 +380,6 @@ def _compare_shapes(
     locale: str,
     file: str,
     problems: list[Problem],
-    compare_spans: bool,
 ) -> None:
     comparisons = (
         ("headings", english.headings, localized.headings),
@@ -425,32 +401,32 @@ def _compare_shapes(
     # mirror repeating an English span more often than the English is fine -
     # splitting one sentence into two legitimately repeats the identifier.
     #
-    # Only for sources on the SPAN_CHECKED_SOURCES ratchet; see that list.
-    if compare_spans:
-        english_spans = Counter(english.spans)
-        localized_spans = Counter(localized.spans)
-        for span, missing in sorted((english_spans - localized_spans).items()):
-            problems.append(
-                Problem(
-                    locale,
-                    file,
-                    "spans",
-                    f"mirror drops the inline code span `{span}` "
-                    f"({missing} of {english_spans[span]} occurrence(s) missing)",
-                )
+    # Code-span parity holds for every chapter and every mirror. A reported
+    # defect is fixed in the translation, never by narrowing this rule.
+    english_spans = Counter(english.spans)
+    localized_spans = Counter(localized.spans)
+    for span, missing in sorted((english_spans - localized_spans).items()):
+        problems.append(
+            Problem(
+                locale,
+                file,
+                "spans",
+                f"mirror drops the inline code span `{span}` "
+                f"({missing} of {english_spans[span]} occurrence(s) missing)",
             )
-        for span, added in sorted((localized_spans - english_spans).items()):
-            if span in english_spans:
-                continue
-            problems.append(
-                Problem(
-                    locale,
-                    file,
-                    "spans",
-                    f"mirror adds the inline code span `{span}` "
-                    f"({added} occurrence(s)); the English source has no such span",
-                )
+        )
+    for span, added in sorted((localized_spans - english_spans).items()):
+        if span in english_spans:
+            continue
+        problems.append(
+            Problem(
+                locale,
+                file,
+                "spans",
+                f"mirror adds the inline code span `{span}` "
+                f"({added} occurrence(s)); the English source has no such span",
             )
+        )
     if localized.unclosed_fence:
         problems.append(Problem(locale, file, "fences", "unclosed fenced code block"))
 
@@ -564,7 +540,6 @@ def _validate_manual_structure(root: Path) -> tuple[list[Problem], int]:
                 locale=locale,
                 file=locale_name,
                 problems=problems,
-                compare_spans=source_name in SPAN_CHECKED_SOURCES,
             )
 
     return sorted(problems), len(sources)
