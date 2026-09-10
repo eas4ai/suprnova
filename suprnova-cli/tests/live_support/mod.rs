@@ -228,9 +228,13 @@ pub fn fake_project() -> &'static Path {
     static PROJECT: OnceLock<PathBuf> = OnceLock::new();
     PROJECT
         .get_or_init(|| {
+            // Under this package's own target directory, not the system temp
+            // dir: the project outlives every test in the process, so it is
+            // kept, and a kept directory in `/tmp` is one more leak per run.
+            // `cargo clean` removes these.
             let dir = tempfile::Builder::new()
                 .prefix("suprnova-live-fake-app-")
-                .tempdir()
+                .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
                 .expect("tempdir");
             let root = dir.keep();
             fs::write(

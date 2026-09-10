@@ -18,10 +18,13 @@ fn cargo_check(target: &str, target_dir: &Path) -> Output {
         .expect("run downstream cargo check")
 }
 
+/// A fresh, empty downstream target under this package's own target
+/// directory, never the system temp dir: it holds a whole second build of
+/// `suprnova`, far too many files for a tmpfs `/tmp`.
 fn fresh_target() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("suprnova-live-authoring-")
-        .tempdir()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .expect("create isolated downstream target")
 }
 
