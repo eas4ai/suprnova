@@ -34,6 +34,18 @@ pub const STITCH_ASSEMBLIES: &str = "suprnova.render_cache.stitch.assemblies";
 /// slot could not be resolved and the whole document falls back to the
 /// handler).
 pub const STITCH_SLOTS: &str = "suprnova.render_cache.stitch.slots";
+/// Counter: nested cached segments resolved while assembling a stitched hit.
+///
+/// Distinguishes an inner segment's outcomes from an island slot's under a
+/// closed pair of attributes, per spec: `outcome` takes exactly one value
+/// from `resolved`, `omitted`, `fallback`, `failed`; `cause` takes exactly
+/// one value from `none`, `fetch_failed`, `version_mismatch`,
+/// `length_mismatch`, `depth_exceeded`, `cycle`, `unauthorized`, with `none`
+/// used exactly when `outcome` is `resolved`.
+pub const STITCH_NESTED: &str = "suprnova.render_cache.stitch.nested";
+/// Attribute `cause`, emitted only on [`STITCH_NESTED`] beside `outcome`;
+/// see that constant's own doc for the closed value set.
+pub const CAUSE: &str = "cause";
 /// Counter: authority epoch rewinds detected and lifted past.
 ///
 /// Incremented once per detection, by the node that detected it: a stamp
@@ -53,8 +65,8 @@ pub const EPOCH_REWINDS: &str = "suprnova.render_cache.epoch_rewinds";
 /// `middleware.rs`'s `LookupOutcome::as_str`): `l0`, `l1`, `conditional`,
 /// `stale`, `miss`, `bypass`, `moved`, `declined`. `PUBLICATIONS` and
 /// `REBUILDS` carry no `outcome` attribute at all - each has exactly one
-/// outcome. `STITCH_ASSEMBLIES` and `STITCH_SLOTS` carry their own closed
-/// value sets, documented on each.
+/// outcome. `STITCH_ASSEMBLIES`, `STITCH_SLOTS`, and `STITCH_NESTED` carry
+/// their own closed value sets, documented on each.
 pub const OUTCOME: &str = "outcome";
 /// Attribute `reason`, emitted only on `LOOKUPS` and only alongside
 /// `outcome="declined"` (see `decline::LookupDeclineReason::as_str`): every
@@ -80,7 +92,9 @@ pub const OUTCOME: &str = "outcome";
 ///   `composite_capture_invalid`, `composite_slot_count_mismatch`,
 ///   `composite_too_many_slots`, `composite_digest_mismatch`,
 ///   `composite_empty_slot`, `composite_slot_not_found`,
-///   `composite_slot_ambiguous`.
+///   `composite_slot_ambiguous`, `composite_nested_wider_class`,
+///   `composite_nested_longer_freshness`, `composite_nested_depth_exceeded`,
+///   `composite_nested_cycle`, `composite_nested_unresolvable`.
 pub const REASON: &str = "reason";
 
 /// One lookup recorded for a test: the `outcome` label, and, for a decline,

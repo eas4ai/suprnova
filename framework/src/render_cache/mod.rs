@@ -874,6 +874,29 @@ impl RenderCache {
         }
     }
 
+    /// Test-only: the L0 publication fence token of the entry stored for a
+    /// route with empty params and anonymous variance, or `None` when
+    /// nothing is stored for it.
+    ///
+    /// This is the "stored version" a [`Segment::Nested`](suprnova_live::render_cache::composite::Segment)
+    /// names by reference: nothing in the engine's own entry types defines
+    /// a stored entry's version, so a test naming an inner entry from a
+    /// nested segment reads the exact number [`super::stitch::fetch_decoded_entry`]
+    /// compares against at hit time, and [`rewrite_composite_for_test`]
+    /// (indirectly, through the fence it bumps on republish) is what moves
+    /// it.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn stored_fence_token_for_test(pattern: &str) -> Option<u64> {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        let policy = runtime.table.effective_policy(pattern).expect("policy");
+        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy);
+        let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
+            .expect("key");
+        let stored = runtime.l0.get(&key).await.expect("l0 get")?;
+        Some(stored.fence.token)
+    }
+
     /// Test-only: L1 inspection of a route by pattern, params, and an
     /// optional login - the L1 counterpart of [`Self::inspect_route_for_test`]
     /// and [`Self::key_for_route_for_test`]. Added for fix round 2, item 5:

@@ -2305,7 +2305,9 @@ async fn lead_render(
     // all and so recorded nothing to check - publishes the response's own
     // bytes as a Complete representation, exactly as before.
     let published = match (is_stitched(policy), report.live_document.as_ref()) {
-        (true, Some(facts)) => stitch::build_composite_entry(header, response.body(), facts),
+        (true, Some(facts)) => {
+            stitch::build_composite_entry(runtime, header, response.body(), facts).await
+        }
         _ => Ok(DecodedEntry::Complete(CompleteEntry::new(
             header,
             Bytes::copy_from_slice(response.body()),
@@ -2314,27 +2316,7 @@ async fn lead_render(
     let entry = match published {
         Ok(entry) => entry,
         Err(composite_error) => {
-            let reason = match composite_error {
-                stitch::CompositeBuildError::CaptureInvalid => {
-                    LookupDeclineReason::CompositeCaptureInvalid
-                }
-                stitch::CompositeBuildError::SlotCountMismatch => {
-                    LookupDeclineReason::CompositeSlotCountMismatch
-                }
-                stitch::CompositeBuildError::TooManySlots => {
-                    LookupDeclineReason::CompositeTooManySlots
-                }
-                stitch::CompositeBuildError::DigestMismatch => {
-                    LookupDeclineReason::CompositeDigestMismatch
-                }
-                stitch::CompositeBuildError::EmptySlot => LookupDeclineReason::CompositeEmptySlot,
-                stitch::CompositeBuildError::SlotNotFound => {
-                    LookupDeclineReason::CompositeSlotNotFound
-                }
-                stitch::CompositeBuildError::SlotAmbiguous => {
-                    LookupDeclineReason::CompositeSlotAmbiguous
-                }
-            };
+            let reason = stitch::composite_build_error_reason(composite_error);
             LookupOutcome::Declined(reason).record();
             let _ = runtime.coordinator.release(lease).await;
             return Ok(response);

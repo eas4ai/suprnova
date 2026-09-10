@@ -27,7 +27,11 @@ use crate::render_cache_stitch_support::{
     FALLBACK_PATH, NONCE_PATH, OMIT_PATH, attribute, rewrite_stored_entry,
 };
 #[cfg(feature = "testing")]
-use suprnova_live::render_cache::composite::Segment;
+use suprnova::render_cache::testing::{nested_publish_check_for_test, publish_bare_entry_for_test};
+#[cfg(feature = "testing")]
+use suprnova_live::render_cache::composite::{Segment, SlotFailurePolicy};
+#[cfg(feature = "testing")]
+use suprnova_live::render_cache::key::RenderKey;
 
 /// A stitched route whose document holds nothing principal-specific is still
 /// a Complete representation: the class says the gate runs again on every
@@ -1282,4 +1286,892 @@ async fn a_request_that_rendered_two_documents_is_not_published() {
     )
     .await;
     assert_eq!(handler_renders(TWICE_RENDERED_PATH), before + 1);
+}
+
+// Plan H, Task 3: nested cached segments. `OPTIONAL_OMIT_PATH` is the outer
+// document in every test below - its guard is `AuthMiddleware::optional()`,
+// so both an anonymous visitor and a signed-in one reach assembly, and its
+// own identity-bound island (`stitch-optional-omit`) is a distinct document
+// key from every nested fixture used here, so the two are never confused.
+// `STITCHED_PATH` is published as an ordinary identity-bound Composite
+// first, exactly as `a_hit_assembles_each_principals_own_island_without_the_handler`
+// does, and then named by reference from `OPTIONAL_OMIT_PATH`'s own graph
+// through `rewrite_stored_entry`, since nothing in the current capture path
+// can declare a `Segment::Nested` from a real render.
+
+/// The no-leak test: an identity-bound nested segment is reauthorized on
+/// every request, exactly as a stitch slot is, so two principals hitting
+/// the *same* outer document each get their own inner island and neither
+/// ever sees the other's, and a request that cannot authorize at all gets
+/// neither. Mirrors the shape of `a_hit_assembles_each_principals_own_island_without_the_handler`
+/// and the cross-identity `Principal`/`Tenant` tests in `middleware.rs`,
+/// applied to a segment resolved by reference instead of a direct slot.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn a_nested_identity_bound_segment_is_reauthorized_per_request_and_never_leaks_across_identities()
+ {
+    let harness = boot().await;
+
+    // Publish the inner entry once, as user-a, then hit it again as user-b -
+    // an ordinary assembled hit against the one stored entry, re-mounted
+    // under a different identity.
+    //
+    // The inner entry is `OPTIONAL_FAIL_PATH`, not `STITCHED_PATH`: a nested
+    // entry's own re-mount binds the *outer* request's `MountedDocumentPath`
+    // into every identity-bound island it renders (the same document path
+    // an ordinary top-level hit binds), so its actual re-assembled length
+    // varies with the includer's own path length. `OPTIONAL_FAIL_PATH` and
+    // `OPTIONAL_OMIT_PATH` (the outer document below) are the same length
+    // (`"/stitch/optional-fail"` and `"/stitch/optional-omit"`, 21 bytes
+    // each), so the inner entry's length captured from a direct hit here
+    // equals its actual length once nested under that outer path. Pairing
+    // same-length paths is a test-construction fix, not a production one:
+    // see the task report for the underlying tension this exposes between
+    // a nested segment's declared `assembled_len` and a document path that
+    // is (correctly) bound per includer.
+    let inner_a = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_FAIL_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(inner_a.status, StatusCode::OK, "{}", inner_a.text());
+    let inner_b = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_FAIL_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(inner_b.status, StatusCode::OK, "{}", inner_b.text());
+    assert_eq!(
+        inner_a.body.len(),
+        inner_b.body.len(),
+        "same-length identities over a fresh session produce the same-length \
+         assembled document, which is what lets one declared `assembled_len` \
+         name either principal's own re-mount"
+    );
+
+    let inner_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        OPTIONAL_FAIL_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse the inner entry's own key");
+    let inner_version = RenderCache::stored_fence_token_for_test(OPTIONAL_FAIL_PATH)
+        .await
+        .expect("the inner entry is stored");
+    let assembled_len = u32::try_from(inner_a.body.len()).expect("the fixture body fits in a u32");
+
+    // Publish the outer document, then name the inner entry from its graph.
+    // A fresh render's own mount failure is not something `StitchFailurePolicy`
+    // degrades at all - that mechanism is hit-time only (see `render_slot`'s
+    // own doc) - so the first publish must be a request the island's guard
+    // actually admits; the anonymous case below is a *hit* on this entry.
+    let outer_publish = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-outer-publisher")],
+    )
+    .await;
+    assert_eq!(
+        outer_publish.status,
+        StatusCode::OK,
+        "{}",
+        outer_publish.text()
+    );
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: inner_key,
+            version: inner_version,
+            assembled_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+
+    let needle = "data-suprnova-live-document-key=\"stitch-optional-fail\"";
+    // Every request below is served from the one assembled hit, never a
+    // fresh handler render: `handler_renders` staying flat is what proves
+    // that, rather than inferring it from the needle's presence or absence.
+    let handler_before = handler_renders(OPTIONAL_OMIT_PATH);
+
+    let outer_a = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[
+            ("x-test-login", "user-a"),
+            ("cookie", &inner_a.session_cookie()),
+        ],
+    )
+    .await;
+    assert_eq!(outer_a.status, StatusCode::OK, "{}", outer_a.text());
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before,
+        "user-a's hit is served from the assembled entry, not a fresh render"
+    );
+    assert!(
+        outer_a.text().contains(needle),
+        "user-a's own request resolves the nested segment: {}",
+        outer_a.text()
+    );
+    let outer_a_scope =
+        decoded_snapshot(island_tag(&outer_a.text(), "stitch-optional-fail"))["body"]["scope"]
+            .clone();
+    assert_eq!(
+        outer_a_scope,
+        decoded_snapshot(island_tag(&inner_a.text(), "stitch-optional-fail"))["body"]["scope"],
+        "the nested island is user-a's own re-mount, not a replayed copy"
+    );
+
+    let outer_b = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[
+            ("x-test-login", "user-b"),
+            ("cookie", &inner_b.session_cookie()),
+        ],
+    )
+    .await;
+    assert_eq!(outer_b.status, StatusCode::OK, "{}", outer_b.text());
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before,
+        "user-b's hit is served from the assembled entry, not a fresh render"
+    );
+    assert!(
+        outer_b.text().contains(needle),
+        "user-b's own request resolves the nested segment too: {}",
+        outer_b.text()
+    );
+    let outer_b_scope =
+        decoded_snapshot(island_tag(&outer_b.text(), "stitch-optional-fail"))["body"]["scope"]
+            .clone();
+    assert_eq!(
+        outer_b_scope,
+        decoded_snapshot(island_tag(&inner_b.text(), "stitch-optional-fail"))["body"]["scope"],
+        "the nested island is user-b's own re-mount"
+    );
+    assert_ne!(
+        outer_a_scope, outer_b_scope,
+        "the no-leak property: user-b's response never carries user-a's scope"
+    );
+    // The no-leak property, checked against the full response text and not
+    // just the decoded scope value - mirroring the cross-identity
+    // `Principal`/`Tenant` leak tests in `middleware.rs`, applied to a
+    // segment resolved by reference instead of a direct slot.
+    let scope_a_text = outer_a_scope.to_string();
+    let scope_b_text = outer_b_scope.to_string();
+    assert!(
+        !outer_b.text().contains(&scope_a_text),
+        "user-b's response never carries user-a's scope: {}",
+        outer_b.text()
+    );
+    assert!(
+        !outer_a.text().contains(&scope_b_text),
+        "user-a's response never carries user-b's scope: {}",
+        outer_a.text()
+    );
+
+    // A request that cannot authorize the inner segment's own slot at all -
+    // no login, and the outer's guard is optional so it still reaches
+    // assembly - resolves through the segment's declared `Omit` and carries
+    // neither principal's island or scope.
+    let outer_anonymous = dispatch(&harness, Method::GET, OPTIONAL_OMIT_PATH, &[]).await;
+    assert_eq!(
+        outer_anonymous.status,
+        StatusCode::OK,
+        "{}",
+        outer_anonymous.text()
+    );
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before,
+        "the anonymous hit is also served from the assembled entry, not a fresh render"
+    );
+    let anonymous_text = outer_anonymous.text();
+    assert!(
+        !anonymous_text.contains(needle),
+        "an unauthorized request never receives the nested island: {anonymous_text}"
+    );
+    assert!(
+        !anonymous_text.contains(&scope_a_text) && !anonymous_text.contains(&scope_b_text),
+        "an unauthorized request's response carries neither principal's scope: {anonymous_text}"
+    );
+}
+
+/// A resolved inner entry that declares no identity binding at all is
+/// provably identity-free and skips reauthorization entirely - the
+/// contract's only escape from "every inner segment SHALL be reauthorized
+/// per request". `SEED_ONLY_PATH` publishes Complete (see
+/// `a_seed_only_document_under_the_stitched_class_stores_complete_and_still_runs_the_gate`):
+/// it has no `StitchSlot` at all, so there is nothing for `render_slot` to
+/// run over, and its class is `PublicShellStitched`, never `PrivateCached`.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn an_identity_free_nested_segment_skips_reauthorization() {
+    let harness = boot().await;
+
+    let inner = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-1")],
+    )
+    .await;
+    assert_eq!(inner.status, StatusCode::OK, "{}", inner.text());
+    let stored = RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("stored");
+    assert_eq!(
+        stored.kind,
+        EntryKind::Complete,
+        "an identity-free inner fixture must itself be Complete"
+    );
+
+    let inner_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        SEED_ONLY_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse the inner entry's own key");
+    let inner_version = RenderCache::stored_fence_token_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("the inner entry is stored");
+    let assembled_len = u32::try_from(inner.body.len()).expect("the fixture body fits in a u32");
+
+    // A fresh render's own mount failure is not something `StitchFailurePolicy`
+    // degrades at all - that mechanism is hit-time only (see `render_slot`'s
+    // own doc) - so the first publish must be a request the island's guard
+    // actually admits; the anonymous case below is a *hit* on this entry.
+    let outer_publish = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-outer-publisher")],
+    )
+    .await;
+    assert_eq!(
+        outer_publish.status,
+        StatusCode::OK,
+        "{}",
+        outer_publish.text()
+    );
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: inner_key,
+            version: inner_version,
+            assembled_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+
+    // No login at all: the outer's own guard is optional, and the nested
+    // segment names an identity-free entry, so nothing here needs
+    // reauthorization to appear.
+    let outer_anonymous = dispatch(&harness, Method::GET, OPTIONAL_OMIT_PATH, &[]).await;
+    assert_eq!(
+        outer_anonymous.status,
+        StatusCode::OK,
+        "{}",
+        outer_anonymous.text()
+    );
+    assert!(
+        outer_anonymous
+            .text()
+            .contains("data-suprnova-live-document-key=\"stitch-seed\""),
+        "an identity-free nested segment resolves without reauthorization: {}",
+        outer_anonymous.text()
+    );
+}
+
+/// On hit, an inner entry republished at a different version fails
+/// `verify_nested` and resolves through the declared policy: `FailDocument`
+/// abandons assembly for the whole document and falls through to the
+/// uncached handler (proven by the handler-render counter, exactly as
+/// `render_slot`'s own `FailDocument` case is proven elsewhere in this
+/// file), `Omit` leaves the segment out, and `Fallback` substitutes the
+/// declared fragment.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn a_version_mismatch_resolves_through_each_declared_policy() {
+    let harness = boot().await;
+
+    let inner = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(inner.status, StatusCode::OK, "{}", inner.text());
+    let inner_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        STITCHED_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse the inner entry's own key");
+    let real_version = RenderCache::stored_fence_token_for_test(STITCHED_PATH)
+        .await
+        .expect("the inner entry is stored");
+    let wrong_version = real_version + 1;
+    let assembled_len = u32::try_from(inner.body.len()).expect("the fixture body fits in a u32");
+
+    // A fresh render's own mount failure is not something `StitchFailurePolicy`
+    // degrades at all - that mechanism is hit-time only (see `render_slot`'s
+    // own doc) - so the first publish must be a request the island's guard
+    // actually admits; the anonymous case below is a *hit* on this entry.
+    let outer_publish = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-outer-publisher")],
+    )
+    .await;
+    assert_eq!(
+        outer_publish.status,
+        StatusCode::OK,
+        "{}",
+        outer_publish.text()
+    );
+    let needle = "data-suprnova-live-document-key=\"stitch-counter\"";
+
+    // FailDocument: the whole document falls through to the route's own
+    // uncached handler.
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph
+            .segments
+            .retain(|segment| !matches!(segment, Segment::Nested { .. }));
+        graph.segments.push(Segment::Nested {
+            key: inner_key.clone(),
+            version: wrong_version,
+            assembled_len,
+            on_failure: SlotFailurePolicy::FailDocument,
+        });
+    })
+    .await;
+    let handler_before = handler_renders(OPTIONAL_OMIT_PATH);
+    let fail_document = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-c")],
+    )
+    .await;
+    assert_eq!(
+        fail_document.status,
+        StatusCode::OK,
+        "{}",
+        fail_document.text()
+    );
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before + 1,
+        "FailDocument falls through to the route's own uncached handler"
+    );
+
+    // Omit: the segment is left out, served from the assembled hit.
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph
+            .segments
+            .retain(|segment| !matches!(segment, Segment::Nested { .. }));
+        graph.segments.push(Segment::Nested {
+            key: inner_key.clone(),
+            version: wrong_version,
+            assembled_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    let handler_before_omit = handler_renders(OPTIONAL_OMIT_PATH);
+    let omitted = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-c")],
+    )
+    .await;
+    assert_eq!(omitted.status, StatusCode::OK, "{}", omitted.text());
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before_omit,
+        "Omit is served from the assembled hit; the handler does not run"
+    );
+    assert!(
+        !omitted.text().contains(needle),
+        "the mismatched segment is left out: {}",
+        omitted.text()
+    );
+
+    // Fallback: the declared fragment substitutes for the segment.
+    let fallback_html = "<p>nested fallback fragment</p>";
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph
+            .segments
+            .retain(|segment| !matches!(segment, Segment::Nested { .. }));
+        graph.segments.push(Segment::Nested {
+            key: inner_key.clone(),
+            version: wrong_version,
+            assembled_len,
+            on_failure: SlotFailurePolicy::Fallback {
+                html: fallback_html.to_owned(),
+            },
+        });
+    })
+    .await;
+    let handler_before_fallback = handler_renders(OPTIONAL_OMIT_PATH);
+    let fallback = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-c")],
+    )
+    .await;
+    assert_eq!(fallback.status, StatusCode::OK, "{}", fallback.text());
+    assert_eq!(
+        handler_renders(OPTIONAL_OMIT_PATH),
+        handler_before_fallback,
+        "Fallback is also served from the assembled hit"
+    );
+    assert!(
+        fallback.text().contains(fallback_html),
+        "the mismatched segment substitutes its declared fallback: {}",
+        fallback.text()
+    );
+    assert!(!fallback.text().contains(needle));
+}
+
+/// A two-level nested document assembles and serves: `OPTIONAL_OMIT_PATH`
+/// names `OPTIONAL_FAIL_PATH` (itself rewritten to further name
+/// `SEED_ONLY_PATH`), so an authorized request's response carries both the
+/// reauthorized identity-bound island and the identity-free leaf's content
+/// two levels deep, and the leaf's stored bytes never change from being
+/// named by two different graphs - it is stored once under its own key, not
+/// copied.
+///
+/// The middle entry is `OPTIONAL_FAIL_PATH`, not `STITCHED_PATH`, for the
+/// same reason the no-leak test above uses it: the middle's own re-mount
+/// binds the outer's `MountedDocumentPath`, so its captured length must come
+/// from a direct hit whose own path is the same length as the outer's
+/// (`OPTIONAL_OMIT_PATH`). The leaf, `SEED_ONLY_PATH`, is identity-free and
+/// never re-mounted, so it carries no such constraint at any depth.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn a_two_level_nested_document_assembles_and_serves() {
+    let harness = boot().await;
+
+    let leaf = dispatch(
+        &harness,
+        Method::GET,
+        SEED_ONLY_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(leaf.status, StatusCode::OK, "{}", leaf.text());
+    let leaf_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        SEED_ONLY_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse the leaf entry's own key");
+    let leaf_version = RenderCache::stored_fence_token_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("the leaf entry is stored");
+    let leaf_len = u32::try_from(leaf.body.len()).expect("the leaf body fits in a u32");
+    let leaf_bytes_before = RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("stored")
+        .body_bytes;
+
+    let middle = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_FAIL_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(middle.status, StatusCode::OK, "{}", middle.text());
+    let middle_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        OPTIONAL_FAIL_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse the middle entry's own key");
+    rewrite_stored_entry(OPTIONAL_FAIL_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: leaf_key,
+            version: leaf_version,
+            assembled_len: leaf_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    let middle_version = RenderCache::stored_fence_token_for_test(OPTIONAL_FAIL_PATH)
+        .await
+        .expect("the middle entry is stored");
+    // The middle entry's own assembled length once it resolves the leaf,
+    // read back from a direct hit on it (same session, so the same
+    // identity-bound island re-mounts byte for byte) rather than computed:
+    // it is what a request naming *it* has to declare, and the engine's own
+    // `assembled_len` is a private implementation detail this test does not
+    // need to reconstruct.
+    let middle_with_leaf = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_FAIL_PATH,
+        &[
+            ("x-test-login", "user-a"),
+            ("cookie", &middle.session_cookie()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        middle_with_leaf.status,
+        StatusCode::OK,
+        "{}",
+        middle_with_leaf.text()
+    );
+    assert!(
+        middle_with_leaf
+            .text()
+            .contains("data-suprnova-live-document-key=\"stitch-seed\""),
+        "the middle entry itself resolves its own nested leaf: {}",
+        middle_with_leaf.text()
+    );
+    let middle_len =
+        u32::try_from(middle_with_leaf.body.len()).expect("the middle body fits in a u32");
+
+    // A fresh render's own mount failure is not something `StitchFailurePolicy`
+    // degrades at all - that mechanism is hit-time only (see `render_slot`'s
+    // own doc) - so the first publish must be a request the island's guard
+    // actually admits; the anonymous case below is a *hit* on this entry.
+    let outer_publish = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[("x-test-login", "user-outer-publisher")],
+    )
+    .await;
+    assert_eq!(
+        outer_publish.status,
+        StatusCode::OK,
+        "{}",
+        outer_publish.text()
+    );
+    rewrite_stored_entry(OPTIONAL_OMIT_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: middle_key,
+            version: middle_version,
+            assembled_len: middle_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+
+    let outer = dispatch(
+        &harness,
+        Method::GET,
+        OPTIONAL_OMIT_PATH,
+        &[
+            ("x-test-login", "user-a"),
+            ("cookie", &middle.session_cookie()),
+        ],
+    )
+    .await;
+    assert_eq!(outer.status, StatusCode::OK, "{}", outer.text());
+    let text = outer.text();
+    assert!(
+        text.contains("data-suprnova-live-document-key=\"stitch-optional-fail\""),
+        "the two-level nested document carries the identity-bound middle island: {text}"
+    );
+    assert!(
+        text.contains("data-suprnova-live-document-key=\"stitch-seed\""),
+        "and the leaf nested two levels deep: {text}"
+    );
+
+    let leaf_after = RenderCache::inspect_route_for_test(SEED_ONLY_PATH)
+        .await
+        .expect("still stored");
+    assert_eq!(
+        leaf_after.body_bytes, leaf_bytes_before,
+        "the leaf's stored bytes never changed: naming it from two different \
+         graphs never republishes or copies it"
+    );
+}
+
+/// Publish-time refusal, per the spec's narrowing rule: a composite naming
+/// an inner segment whose representation class is wider than the including
+/// document's is refused, and nothing declared it can name is stored under
+/// a live route to prove it - the check itself
+/// ([`nested_publish_check_for_test`]) is what `build_composite_entry` runs
+/// before a real composite is ever stored, driven with a hand-built graph
+/// since nothing in the current capture path can produce one.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn publishing_a_composite_naming_a_wider_inner_segment_is_refused() {
+    let harness = boot().await;
+    let outer = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(outer.status, StatusCode::OK, "{}", outer.text());
+
+    let wider_key = publish_bare_entry_for_test(
+        "plan-h-fixture-wider-class",
+        suprnova::render_cache::RepresentationClass::PublicShared,
+        60_000,
+    )
+    .await;
+
+    let reason = nested_publish_check_for_test(STITCHED_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: wider_key,
+            version: 0,
+            assembled_len: u32::try_from("nested fixture".len()).expect("fits"),
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    assert_eq!(
+        reason,
+        Some("composite_nested_wider_class"),
+        "a wider inner class is refused at publish"
+    );
+}
+
+/// Publish-time refusal: an inner segment whose freshness window is longer
+/// than the including document's is refused, reusing the same seam as the
+/// wider-class case above.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn publishing_a_composite_naming_a_longer_freshness_inner_segment_is_refused() {
+    let harness = boot().await;
+    let outer = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(outer.status, StatusCode::OK, "{}", outer.text());
+
+    // `boot()` publishes every stitched route, `STITCHED_PATH` included,
+    // under `generous_freshness()` (200_000_000ms); this fixture's window
+    // is longer still, comfortably under `MAX_INTERVAL_MS` (31 days).
+    let longer_key = publish_bare_entry_for_test(
+        "plan-h-fixture-longer-freshness",
+        suprnova::render_cache::RepresentationClass::PublicShellStitched,
+        250_000_000,
+    )
+    .await;
+
+    let reason = nested_publish_check_for_test(STITCHED_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: longer_key,
+            version: 0,
+            assembled_len: u32::try_from("nested fixture".len()).expect("fits"),
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    assert_eq!(
+        reason,
+        Some("composite_nested_longer_freshness"),
+        "a longer inner freshness window is refused at publish"
+    );
+}
+
+/// Publish-time refusal: a transitive cycle (A names B, B already names A)
+/// is refused, distinguished from a plain depth-exceeded outcome. `B`
+/// already naming `A` is staged directly through `rewrite_stored_entry`,
+/// the same way any hit-time drift case in this file is staged, since a
+/// cycle cannot otherwise arise inside one process (see that helper's own
+/// doc): publication can only ever see it because the *other* entry was
+/// republished after the fact, exactly as the spec's own reasoning for
+/// re-checking at assembly time describes.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn publishing_a_transitive_cycle_is_refused_at_publish() {
+    let harness = boot().await;
+    let a = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text());
+    let b = dispatch(
+        &harness,
+        Method::GET,
+        OMIT_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(b.status, StatusCode::OK, "{}", b.text());
+
+    let a_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        STITCHED_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse A's own key");
+    let a_version = RenderCache::stored_fence_token_for_test(STITCHED_PATH)
+        .await
+        .expect("A is stored");
+    let b_key =
+        RenderKey::from_base64url(&RenderCache::key_for_route_for_test(OMIT_PATH, &[], None))
+            .expect("parse B's own key");
+    let fixture_len = u32::try_from(a.body.len().min(b.body.len())).expect("fits");
+
+    // Stage B already naming A.
+    rewrite_stored_entry(OMIT_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: a_key,
+            version: a_version,
+            assembled_len: fixture_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    let b_version = RenderCache::stored_fence_token_for_test(OMIT_PATH)
+        .await
+        .expect("B is stored");
+
+    // Publishing A naming B closes the cycle.
+    let reason = nested_publish_check_for_test(STITCHED_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: b_key,
+            version: b_version,
+            assembled_len: fixture_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    assert_eq!(
+        reason,
+        Some("composite_nested_cycle"),
+        "a transitive cycle is refused, and refused as a cycle specifically"
+    );
+}
+
+/// Publish-time refusal: a graph that would exceed `MAX_NESTING_DEPTH`
+/// (3) once resolved is refused. `B` already names `C`, which is staged to
+/// already name an arbitrary fourth key that is never actually fetched -
+/// the depth bound is exceeded, and reported as such, before resolution
+/// ever gets far enough to ask whether that fourth key even exists.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn publishing_beyond_the_nesting_depth_bound_is_refused_at_publish() {
+    let harness = boot().await;
+    let a = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text());
+    let b = dispatch(
+        &harness,
+        Method::GET,
+        OMIT_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(b.status, StatusCode::OK, "{}", b.text());
+    let c = dispatch(
+        &harness,
+        Method::GET,
+        FALLBACK_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{}", c.text());
+
+    let b_key =
+        RenderKey::from_base64url(&RenderCache::key_for_route_for_test(OMIT_PATH, &[], None))
+            .expect("parse B's own key");
+    let b_version = RenderCache::stored_fence_token_for_test(OMIT_PATH)
+        .await
+        .expect("B is stored");
+    let c_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        FALLBACK_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse C's own key");
+    // A fourth key nothing here ever publishes: the depth bound is checked
+    // before any fetch, so it is refused without this key ever needing to
+    // resolve to anything.
+    let fourth_key = RenderKey::from_base64url(&RenderCache::key_for_route_for_test(
+        SEED_ONLY_PATH,
+        &[],
+        None,
+    ))
+    .expect("parse a distinct, unfetched fourth key");
+    let fixture_len =
+        u32::try_from(a.body.len().min(b.body.len()).min(c.body.len())).expect("fits");
+
+    // Stage C already naming the fourth key.
+    rewrite_stored_entry(FALLBACK_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: fourth_key,
+            version: 0,
+            assembled_len: fixture_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    let c_version = RenderCache::stored_fence_token_for_test(FALLBACK_PATH)
+        .await
+        .expect("C is stored");
+
+    // Stage B already naming C.
+    rewrite_stored_entry(OMIT_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: c_key,
+            version: c_version,
+            assembled_len: fixture_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    let b_version_after = RenderCache::stored_fence_token_for_test(OMIT_PATH)
+        .await
+        .expect("B is still stored");
+    assert!(b_version_after > b_version, "B was republished by staging");
+
+    // Publishing A naming B reaches depth 4 through the fourth key.
+    let reason = nested_publish_check_for_test(STITCHED_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: b_key,
+            version: b_version_after,
+            assembled_len: fixture_len,
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    assert_eq!(
+        reason,
+        Some("composite_nested_depth_exceeded"),
+        "exceeding the depth bound is refused, and refused as depth specifically"
+    );
 }
