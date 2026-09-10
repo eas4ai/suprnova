@@ -11,17 +11,26 @@
 //!
 //! # Setup
 //!
-//! Add the middleware after SessionMiddleware:
+//! Add the middleware after SessionMiddleware, and hand it the same
+//! `SessionConfig`:
 //!
 //! ```rust,no_run
 //! use suprnova::{global_middleware, SessionMiddleware, CsrfMiddleware, SessionConfig};
 //!
 //! pub async fn register() {
 //!     let config = SessionConfig::from_env();
-//!     global_middleware!(SessionMiddleware::new(config));
-//!     global_middleware!(CsrfMiddleware::new());
+//!     global_middleware!(SessionMiddleware::new(config.clone()));
+//!     global_middleware!(CsrfMiddleware::new().with_session_config(&config));
 //! }
 //! ```
+//!
+//! [`CsrfMiddleware::with_session_config`] copies the session cookie's
+//! `Secure`, `SameSite`, `Domain`, `Path` and lifetime onto the JS-readable
+//! `XSRF-TOKEN` cookie, so the two cannot drift apart. Without it that
+//! cookie is always `Secure`; a browser will neither store nor return it
+//! over `http://localhost`, so a development server running with
+//! `SESSION_SECURE=false` refuses every state-changing request with
+//! `419 CSRF token mismatch`.
 //!
 //! # Frontend Integration
 //!
@@ -31,22 +40,18 @@
 //! <meta name="csrf-token" content="{{ csrf_token() }}">
 //! ```
 //!
-//! Forward the token on every Inertia visit. Inertia 3 uses the native
-//! `fetch` API (no axios), so subscribe to the `before` event and inject
-//! the header from the meta tag:
+//! Do not forward the token by hand on every Inertia visit. The Inertia
+//! client sends its visits over XMLHttpRequest and, whenever the
+//! `XSRF-TOKEN` cookie this middleware sets is present, echoes it back in
+//! the `X-XSRF-TOKEN` header itself, once per request. Both header names
+//! are accepted here, so nothing further is needed.
 //!
-//! ```javascript
-//! import { router } from '@inertiajs/svelte' // or react / vue3
-//!
-//! const csrfToken = document
-//!     .querySelector('meta[name="csrf-token"]')
-//!     ?.getAttribute('content')
-//! if (csrfToken) {
-//!     router.on('before', (event) => {
-//!         event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken
-//!     })
-//! }
-//! ```
+//! Reading `<meta name="csrf-token">` once at module load and pinning that
+//! value into a header is the pattern to avoid: logging in rotates the
+//! session, the captured token goes stale, and the next visit - the logout
+//! - is refused with a `419`. A form that submits a `_token` field, or any
+//! code that reads the meta tag *per request* rather than once, is
+//! unaffected.
 
 pub mod middleware;
 

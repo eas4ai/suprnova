@@ -72,10 +72,11 @@ pour la première fois.
 Le middleware lit le token depuis l'un de ces trois emplacements, dans cet
 ordre (comme Laravel) :
 
-1. **En-tête `X-CSRF-TOKEN`** - ce qu'Inertia et les templates SPA
-   scaffoldés envoient.
+1. **En-tête `X-CSRF-TOKEN`** - ce qu'envoie une requête écrite à la main
+   après avoir lu la balise `<meta name="csrf-token">`.
 2. **En-tête `X-XSRF-TOKEN`** - convention Laravel / Axios / Angular :
-   JavaScript lit le cookie `XSRF-TOKEN` et renvoie sa valeur ici.
+   JavaScript lit le cookie `XSRF-TOKEN` et renvoie sa valeur ici. C'est
+   celui qu'utilisent les points d'entrée SPA scaffoldés.
 3. **Champ de formulaire `_token`** - pour les envois
    `application/x-www-form-urlencoded` provenant d'un formulaire HTML
    traditionnel.
@@ -93,31 +94,22 @@ handler qui souhaite le consulter.
 
 ## Côté frontend
 
-Le point d'entrée Svelte, React et Vue scaffoldé utilise le pipeline de visite natif d'Inertia 3, pas Axios. Chaque point d'entrée importe `router` depuis son adaptateur Inertia, lit le token de la balise meta, et l'attache dans un hook de routeur :
+Les points d'entrée Svelte, React et Vue scaffoldés ne contiennent aucun câblage CSRF, et c'est délibéré. Le client Inertia que le scaffold installe (`@inertiajs/svelte`, `@inertiajs/react`, `@inertiajs/vue3`, tous épinglés en `^3.6.1`) lit le cookie `XSRF-TOKEN` que `CsrfMiddleware` a attaché à la réponse précédente et pose lui-même l'en-tête `X-XSRF-TOKEN`, une fois par visite. Ce qui circule est toujours la valeur que le navigateur détient à cet instant : une connexion ou une déconnexion qui fait tourner le token de la session est donc suivie d'une visite qui transporte le nouveau.
 
-```ts
-const csrfToken = document
-  .querySelector('meta[name="csrf-token"]')
-  ?.getAttribute('content');
-if (csrfToken) {
-  router.on('before', (event) => {
-    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
-  });
-}
-```
+Ne lisez pas `<meta name="csrf-token">` une seule fois au chargement du module pour l'épingler dans un hook `router.on('before', ...)`. Cela fige le token tel qu'il était au démarrage de la page ; la première rotation abandonne la copie figée et la visite suivante qui change l'état est refusée avec un 419.
 
-La balise `<meta name="csrf-token">` est injectée automatiquement dans la vue de base Inertia par `framework/src/inertia/response.rs` - vous n'avez pas besoin de l'ajouter vous-même dans un projet généré. Chaque réponse Inertia transporte le token de la session courante dans le shell de page.
+La balise `<meta name="csrf-token">` est injectée automatiquement dans la vue de base Inertia par `framework/src/inertia/response.rs` - vous n'avez pas besoin de l'ajouter vous-même dans un projet généré. Chaque réponse Inertia transporte le token de la session courante dans le shell de page, et c'est là qu'une requête écrite à la main va le lire.
 
-Les `useForm` d'Inertia utilisent le même pipeline de visite et reçoivent donc l'en-tête de ce hook :
+Les `useForm` d'Inertia passent par le même pipeline de visite, si bien que le client pose le même en-tête sur leurs envois :
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN provient du hook du routeur
+form.post('/posts');
 ```
 
-Pour un appel `fetch` brut, lisez le token depuis la balise meta de la même façon :
+Pour un appel `fetch` brut, lisez le token depuis la balise meta vous-même :
 
 ```ts
 const token = document
