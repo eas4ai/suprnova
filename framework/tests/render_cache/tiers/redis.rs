@@ -1262,8 +1262,7 @@ async fn live_redis_a_subscriber_that_falls_behind_is_dropped_and_resubscribes()
 
     assert!(
         suprnova::render_cache::telemetry::recorded_hints_for_test()
-            .iter()
-            .any(|outcome| *outcome == "subscriber_dropped"),
+            .contains(&"subscriber_dropped"),
         "the drop is visible in telemetry, which is the only place it is visible at all"
     );
 
