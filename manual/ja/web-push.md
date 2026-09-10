@@ -232,7 +232,7 @@ suprnova::notifications::register_notification_factory::<OrderShipped>()?;
 suprnova::queue::worker::register_job::<suprnova::SendNotificationJob>();
 ```
 
-裏側では、キューに入れられたディスパッチは、`(notification_name, payload, per_channel_routes,channels)` を運ぶ `SendNotificationJob` を構築します。ワーカーは通知を再構成し、束縛済みのディスパッチャー上で名前によって `WebPushChannel` をルックアップし、`deliver(route,&notification)` を呼び出します - 同期的な `Notify::send` と同じコードパスです。
+裏側では、キューに入れられたディスパッチは、`(notification_name, payload, per_channel_routes, channels)` を運ぶ `SendNotificationJob` を構築します。ワーカーは通知を再構成し、束縛済みのディスパッチャー上で名前によって `WebPushChannel` をルックアップし、`deliver(route, &notification)` を呼び出します - 同期的な `Notify::send` と同じコードパスです。
 
 ## ブラウザ側
 
@@ -367,7 +367,7 @@ match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
 
 通知のディスパッチャーは、そのファンアウトを、通知名とチャネル数がタグ付けされた `notification.dispatch` というinfoスパンでラップします。成功した配信はそれぞれ `NotificationSent` イベントを発します。失敗は、チャネル名、ルート、エラー文字列を運ぶ `NotificationFailed` を発します。これらのいずれも、他のフレームワークのイベントを配線するのと同じ方法で、あなたのメトリクス / ログのパイプラインへ配線してください - [イベント](events.md)を参照してください。
 
-失効した購読は、`channel="webpush"`、エンドポイント、通知名を伴う構造化された `WARN` を発します。それが、自動化された購読クリーンアップジョブのためにスクレイプすべき信号です。
+失効した購読は、`channel="webpush"`、エンドポイント、通知名を伴う構造化されたWARNを発します。それが、自動化された購読クリーンアップジョブのためにスクレイプすべき信号です。
 
 ### Suprnovaが異なる設計を選んだ理由
 

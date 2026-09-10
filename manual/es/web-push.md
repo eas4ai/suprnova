@@ -335,7 +335,7 @@ implementar:
 1. Registrar un Service Worker.
 2. Pedirle permiso al usuario.
 3. Suscribirse mediante `pushManager.subscribe({ userVisibleOnly: true,
-   applicationServerKey: <tu clave pública VAPID> })`.
+   applicationServerKey: <your VAPID public key> })`.
 4. Hacer POST de `subscription.toJSON()` a un endpoint de Suprnova
    que lo almacene en la fila del usuario.
 
