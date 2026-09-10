@@ -613,7 +613,10 @@ pub fn inspect(bytes: &Bytes, limits: &EntryLimits) -> Result<EntryInspection, R
     })
 }
 
-mod render_key_serde {
+/// Base64url text (de)serialization for [`RenderKey`], reused by any typed
+/// field elsewhere in this crate that names a key without embedding key
+/// material in the wire form.
+pub(crate) mod render_key_serde {
     use serde::{Deserialize as _, Deserializer, Serializer};
 
     use super::RenderKey;

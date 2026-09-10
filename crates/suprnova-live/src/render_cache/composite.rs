@@ -1,13 +1,18 @@
 //! Composite entries: a typed, bounded segment graph over reusable shell
-//! bytes with stitch slots for identity-bound islands, and (in
-//! [`assemble`]) the deterministic request-time assembler that turns one
-//! graph plus current-request slot outcomes into final bytes.
+//! bytes with stitch slots for identity-bound islands, and (in [`assemble`]
+//! and `assemble_nested`) the deterministic request-time assembler that
+//! turns one graph plus current-request slot and nested outcomes into final
+//! bytes.
 //!
 //! A Composite entry never contains an island that depends on who asked;
 //! those islands are re-rendered by the host on every hit and dropped into
 //! typed slots here. The graph carries what each slot needs to be re-mounted
 //! (route, slot, document key, component, contract, protocol, build,
-//! canonical parameters, inert flags) and what to do if that fails.
+//! canonical parameters, inert flags) and what to do if that fails. A
+//! [`Segment::Nested`] segment names a cached segment owned by no including
+//! document instead: `descend_nested` and `verify_nested` are the typed
+//! checks a caller runs against it before fetching, trusting, or recursively
+//! assembling the entry it names.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,7 +22,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
-use super::entry::{EntryHeader, REPLAYABLE_HEADERS, SafeHeaders, Validator};
+use super::entry::{EntryHeader, REPLAYABLE_HEADERS, SafeHeaders, Validator, render_key_serde};
+use super::key::RenderKey;
 use super::{RenderCacheError, RenderCacheErrorKind};
 use crate::canonical::CanonicalValue;
 use crate::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
@@ -35,6 +41,20 @@ pub const MAX_NONCE_HOLES: usize = 64;
 /// literals between and around them: `2 * n + 1` with
 /// `n = MAX_STITCH_SLOTS + MAX_NONCE_HOLES`.
 pub const MAX_SEGMENTS: usize = 2 * (MAX_STITCH_SLOTS + MAX_NONCE_HOLES) + 1;
+/// Deepest ownership chain a nested composite MAY reach. Depth is the length
+/// of the chain from the top-level document down to the segment being
+/// resolved; an unnested composite is depth 1, so this bound allows two
+/// levels of [`Segment::Nested`] below the document that starts assembly.
+/// The spec fixes this as an initial policy value. Enforced again at
+/// assembly and not only at publication, because an inner segment MAY be
+/// republished under an including entry after publication already checked
+/// it, which can create a chain publication never saw.
+pub const MAX_NESTING_DEPTH: usize = 3;
+/// Most [`Segment::Nested`] segments one graph MAY declare, independent of
+/// `MAX_SEGMENTS`, which continues to bound a graph's segments as a whole.
+/// Bounds how many store reads one document's assembly can fan out into, so
+/// nesting alone cannot turn one document into hundreds of reads.
+pub const MAX_NESTED_SEGMENTS: usize = 16;
 /// Largest canonical parameter document one slot may carry, in bytes.
 pub const MAX_SLOT_PARAMETER_BYTES: usize = 4_096;
 /// Largest declared fallback fragment, in bytes (the canonical header string bound).
@@ -72,6 +92,27 @@ pub enum Segment {
     },
     /// The fresh nonce generated at assembly.
     Nonce,
+    /// A cached segment owned by no including document: named by key,
+    /// stored version, and assembled length rather than recursed into, so
+    /// one stored copy can be shared by several documents and invalidated
+    /// once. The three named facts let this graph's total assembled length
+    /// be computed as a sum of typed facts at every level, without
+    /// fetching or walking the inner graph; see `descend_nested` and
+    /// `verify_nested` in this module for how a resolver checks a fetched
+    /// inner entry against `key`, `version`, and `assembled_len` before its
+    /// bytes are used. `on_failure` is this segment's own resolution
+    /// policy, exactly as `StitchSlot::on_failure` is a slot's.
+    Nested {
+        /// Key of the inner entry, stored under no including document.
+        #[serde(with = "render_key_serde")]
+        key: RenderKey,
+        /// Version the graph named for the inner entry at build time.
+        version: u64,
+        /// The inner graph's own assembled length, in bytes.
+        assembled_len: u32,
+        /// Declared failure behavior, exactly like a stitch slot's.
+        on_failure: SlotFailurePolicy,
+    },
 }
 
 impl Segment {
@@ -80,7 +121,7 @@ impl Segment {
     pub const fn literal_len(&self) -> Option<u32> {
         match self {
             Self::Literal { len } => Some(*len),
-            Self::Slot { .. } | Self::Nonce => None,
+            Self::Slot { .. } | Self::Nonce | Self::Nested { .. } => None,
         }
     }
 }
@@ -278,10 +319,16 @@ impl SegmentGraph {
 
     /// Validates every structural rule and bound against a shell of `shell_len` bytes.
     pub fn validate(&self, shell_len: usize) -> Result<(), RenderCacheError> {
+        let nested_count = self
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment, Segment::Nested { .. }))
+            .count();
         if self.segments.len() > MAX_SEGMENTS
             || self.slots.len() > MAX_STITCH_SLOTS
             || self.shell_islands.len() > MAX_SHELL_ISLANDS
             || self.nonce_headers.len() > MAX_NONCE_HEADERS
+            || nested_count > MAX_NESTED_SEGMENTS
         {
             return Err(invalid());
         }
@@ -302,6 +349,13 @@ impl SegmentGraph {
                     next_slot += 1;
                 }
                 Segment::Nonce => holes += 1,
+                Segment::Nested { on_failure, .. } => {
+                    if let SlotFailurePolicy::Fallback { html } = on_failure
+                        && html.len() > MAX_FALLBACK_BYTES
+                    {
+                        return Err(invalid());
+                    }
+                }
             }
         }
         if literal_total != shell_len || next_slot != self.slots.len() || holes > MAX_NONCE_HOLES {
@@ -389,7 +443,9 @@ pub fn surrounding_digest(
                 literal_ranges.push(Some((cursor, end)));
                 cursor = end;
             }
-            Segment::Slot { .. } | Segment::Nonce => literal_ranges.push(None),
+            Segment::Slot { .. } | Segment::Nonce | Segment::Nested { .. } => {
+                literal_ranges.push(None);
+            }
         }
     }
     let position = graph
@@ -473,12 +529,27 @@ impl CompositeEntry {
     /// canonical header bytes under `EntryLimits::default()`'s
     /// `max_header_bytes`; that default is the contract, and the codec
     /// encodes under the same default, so the two can never diverge.
+    ///
+    /// A graph that names `header.key` in one of its own
+    /// [`Segment::Nested`] segments is refused here: a composite that
+    /// includes itself directly is bad the moment it is built, and
+    /// publication SHALL never store it. Transitive self-inclusion through
+    /// another stored entry, and the depth bound, both need the store to
+    /// resolve what a named key currently points to, so checking those
+    /// stays out of this host-neutral crate.
     pub fn new(
         header: EntryHeader,
         graph: SegmentGraph,
         shell: Bytes,
     ) -> Result<Self, RenderCacheError> {
         graph.validate(shell.len())?;
+        if graph
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::Nested { key, .. } if *key == header.key))
+        {
+            return Err(invalid());
+        }
         let canonical = CompositeHeader {
             entry: header.clone(),
             graph: graph.clone(),
@@ -628,21 +699,110 @@ fn assembly_failed() -> RenderCacheError {
     RenderCacheError::new(RenderCacheErrorKind::AssemblyFailed)
 }
 
-/// The exact final body length for `outcomes` against `graph`, computed from
-/// typed facts alone without copying a single byte: `shell_len` (the
-/// graph's own literal segments always sum to exactly this, per
+/// Why the assembler refused one [`Segment::Nested`] segment, distinct from
+/// the generic [`RenderCacheErrorKind::AssemblyFailed`] every other
+/// request-time rejection carries. Fetch failure and reauthorization are
+/// framework concerns with no engine-typed cause; this covers only what the
+/// engine determines from typed facts, for the framework's own telemetry
+/// mapping (`suprnova.render_cache.stitch.nested`'s `cause` attribute).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NestedFailureCause {
+    /// The named key already appears in the assembler's ancestor chain.
+    Cycle,
+    /// Descending into this segment would exceed [`MAX_NESTING_DEPTH`].
+    DepthExceeded,
+    /// The resolved entry's actual version disagreed with the named version.
+    VersionMismatch,
+    /// The resolved entry's actual assembled length disagreed with the named length.
+    LengthMismatch,
+}
+
+/// Checks one [`Segment::Nested`] key against the assembler's current chain
+/// of ancestor keys -- root first, including the entry that declares the
+/// segment -- for a cycle or a depth-bound violation, cycle first: a cyclic
+/// chain that also happens to exceed [`MAX_NESTING_DEPTH`] is always
+/// reported as [`NestedFailureCause::Cycle`], never
+/// [`NestedFailureCause::DepthExceeded`], because the depth bound alone
+/// would still terminate the cycle but name the wrong cause.
+///
+/// `chain` never includes the segment's own named `key`. A caller that goes
+/// on to fetch and assemble the inner entry passes `chain` unchanged as that
+/// deeper call's own ancestor chain: `chain` is already every key above the
+/// entry being resolved, and the deeper entry's own key has no place in a
+/// chain of the keys above it.
+pub fn descend_nested(chain: &[RenderKey], key: &RenderKey) -> Result<(), NestedFailureCause> {
+    if chain.iter().any(|ancestor| ancestor == key) {
+        return Err(NestedFailureCause::Cycle);
+    }
+    if chain.len() >= MAX_NESTING_DEPTH {
+        return Err(NestedFailureCause::DepthExceeded);
+    }
+    Ok(())
+}
+
+/// Compares a resolved inner entry's actual version and length against what
+/// the including graph named for it, version first. The named facts are a
+/// claim rather than a trust anchor: a caller uses this after fetching the
+/// inner entry and before treating its bytes as safe to include.
+pub fn verify_nested(
+    named_version: u64,
+    named_len: u32,
+    actual_version: u64,
+    actual_len: u32,
+) -> Result<(), NestedFailureCause> {
+    if actual_version != named_version {
+        return Err(NestedFailureCause::VersionMismatch);
+    }
+    if actual_len != named_len {
+        return Err(NestedFailureCause::LengthMismatch);
+    }
+    Ok(())
+}
+
+/// The outcome of one [`Segment::Nested`] segment for one request, matched
+/// against the graph's `Segment::Nested` occurrences in the same
+/// left-to-right order they appear in [`SegmentGraph::segments`]; there is
+/// no separate list to index into, unlike [`SegmentGraph::slots`].
+#[derive(Debug)]
+pub enum NestedOutcome {
+    /// The inner entry was fetched, checked against the ancestor chain with
+    /// [`descend_nested`], verified with [`verify_nested`], reauthorized,
+    /// and (if it has nested segments of its own) itself assembled.
+    Resolved {
+        /// The inner entry's actual stored version.
+        version: u64,
+        /// The inner entry's own assembled bytes.
+        body: Bytes,
+    },
+    /// The segment's declared fallback fragment is used.
+    Fallback,
+    /// The segment is left out.
+    Omitted,
+}
+
+/// The exact final body length for `outcomes` and `nested` against `graph`,
+/// computed from typed facts alone without copying a single byte: `shell_len`
+/// (the graph's own literal segments always sum to exactly this, per
 /// [`SegmentGraph::validate`]) plus each slot's rendered island or declared
-/// fallback fragment length (zero when omitted) plus one `nonce` length per
-/// [`Segment::Nonce`] hole. [`assemble`] calls this, and rejects a bound
-/// violation, before it allocates the body: an oversized rendered island is
-/// never materialized just to be measured and thrown away. Assumes
-/// `outcomes` already passed the outcome-identity and failure-policy
-/// validation `assemble` runs first, so a mismatched `on_failure` here is
+/// fallback fragment length (zero when omitted), plus each
+/// [`Segment::Nested`] segment's own *named* `assembled_len` when resolved
+/// (never the resolved entry's actual length, which [`verify_nested`] checks
+/// separately) or its declared fallback fragment length (zero when omitted),
+/// plus one `nonce` length per [`Segment::Nonce`] hole. A nested segment's
+/// contribution is a typed fact carried on the segment itself, so this sum
+/// never fetches, walks, or copies the inner graph it names, exactly as it
+/// never renders a slot's island merely to measure it. [`assemble`] and
+/// [`assemble_nested`] call this, and reject a bound violation, before
+/// allocating the body: an oversized rendered island or inner entry is never
+/// materialized just to be measured and thrown away. Assumes `outcomes` and
+/// `nested` already passed the outcome-identity and failure-policy
+/// validation the caller runs first, so a mismatched `on_failure` here is
 /// unreachable in practice; it still fails closed rather than assuming that
 /// invariant holds silently.
 fn assembled_len(
     graph: &SegmentGraph,
     outcomes: &[SlotOutcome],
+    nested: &[NestedOutcome],
     shell_len: usize,
     nonce: Option<&str>,
 ) -> Result<usize, RenderCacheError> {
@@ -660,6 +820,30 @@ fn assembled_len(
         };
         total = total.checked_add(piece_len).ok_or_else(assembly_failed)?;
     }
+    let mut nested_cursor = 0usize;
+    for segment in &graph.segments {
+        let Segment::Nested {
+            assembled_len: named_len,
+            on_failure,
+            ..
+        } = segment
+        else {
+            continue;
+        };
+        let outcome = nested.get(nested_cursor).ok_or_else(assembly_failed)?;
+        let piece_len = match outcome {
+            NestedOutcome::Resolved { .. } => *named_len as usize,
+            NestedOutcome::Fallback => match on_failure {
+                SlotFailurePolicy::Fallback { html } => html.len(),
+                SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
+                    return Err(assembly_failed());
+                }
+            },
+            NestedOutcome::Omitted => 0,
+        };
+        total = total.checked_add(piece_len).ok_or_else(assembly_failed)?;
+        nested_cursor += 1;
+    }
     let nonce_holes = graph
         .segments
         .iter()
@@ -675,17 +859,72 @@ fn assembled_len(
     Ok(total)
 }
 
-/// Turns one graph plus current-request outcomes into final bytes and headers.
-/// Pure and deterministic; every rejection is [`RenderCacheErrorKind::AssemblyFailed`].
+/// Turns one graph plus current-request outcomes into final bytes and
+/// headers. Pure and deterministic; every rejection is
+/// [`RenderCacheErrorKind::AssemblyFailed`]. Delegates to the same assembler
+/// [`assemble_nested`] uses, with no nested outcomes and no ancestors, so a
+/// graph that declares any [`Segment::Nested`] segment always fails here:
+/// use [`assemble_nested`] for one that does.
 pub fn assemble(
     entry: &CompositeEntry,
     input: AssemblyInput,
+    max_body_bytes: usize,
+) -> Result<AssembledDocument, RenderCacheError> {
+    assemble_impl(entry, input, &[], &[], max_body_bytes)
+}
+
+/// Turns one graph plus current-request slot and nested outcomes into final
+/// bytes and headers, exactly like [`assemble`], for a graph that declares
+/// [`Segment::Nested`] segments.
+///
+/// `nested` supplies one [`NestedOutcome`] per `Segment::Nested` in `entry`'s
+/// graph, in the same left-to-right order those segments appear in
+/// [`SegmentGraph::segments`]. `ancestors` is the chain of keys already being
+/// assembled above `entry`, root first, excluding `entry`'s own key -- an
+/// empty slice for a top-level document. The engine never fetches an inner
+/// entry itself: the caller fetches it, reauthorizes it, checks it with
+/// [`descend_nested`] and [`verify_nested`], and (if it nests further)
+/// assembles it with a recursive call to this function passing this call's
+/// own `ancestors` extended with nothing further -- the chain this function
+/// builds from `ancestors` plus `entry`'s own key is already the exact chain
+/// the deeper entry sits above, so it is also the deeper call's `ancestors`
+/// unchanged. Every failure, including a cycle or a depth, version, or
+/// length mismatch this function re-detects as defense in depth, is
+/// [`RenderCacheErrorKind::AssemblyFailed`]; a caller that needs the precise
+/// cause for its own policy decision and telemetry gets it from
+/// [`descend_nested`] and [`verify_nested`] directly, before calling here.
+pub fn assemble_nested(
+    entry: &CompositeEntry,
+    input: AssemblyInput,
+    nested: Vec<NestedOutcome>,
+    ancestors: &[RenderKey],
+    max_body_bytes: usize,
+) -> Result<AssembledDocument, RenderCacheError> {
+    assemble_impl(entry, input, &nested, ancestors, max_body_bytes)
+}
+
+fn assemble_impl(
+    entry: &CompositeEntry,
+    input: AssemblyInput,
+    nested: &[NestedOutcome],
+    ancestors: &[RenderKey],
     max_body_bytes: usize,
 ) -> Result<AssembledDocument, RenderCacheError> {
     let graph = entry.graph();
     if input.outcomes.len() != graph.slots.len() {
         return Err(assembly_failed());
     }
+    let nested_segment_count = graph
+        .segments
+        .iter()
+        .filter(|segment| matches!(segment, Segment::Nested { .. }))
+        .count();
+    if nested_segment_count != nested.len() {
+        return Err(assembly_failed());
+    }
+    let mut chain: Vec<RenderKey> = Vec::with_capacity(ancestors.len() + 1);
+    chain.extend_from_slice(ancestors);
+    chain.push(entry.header().key.clone());
     let nonce = match (&input.nonce, entry.needs_nonce()) {
         (Some(nonce), true) if valid_nonce(nonce) => Some(nonce.as_str()),
         (None, false) => None,
@@ -733,6 +972,46 @@ pub fn assemble(
             }
         }
     }
+    // Step 1b: every nested outcome must obey its segment's ancestor-chain
+    // and failure-policy rules, and a resolved one must match what the
+    // graph named for it. `descend_nested` and `verify_nested` are the same
+    // checks a caller runs before fetching or trusting an inner entry; this
+    // is defense in depth against a caller that resolved a segment without
+    // running them, not the primary place either check is meant to run.
+    let mut nested_cursor = 0usize;
+    for segment in &graph.segments {
+        let Segment::Nested {
+            key,
+            version,
+            assembled_len: named_len,
+            on_failure,
+        } = segment
+        else {
+            continue;
+        };
+        descend_nested(&chain, key).map_err(|_| assembly_failed())?;
+        match &nested[nested_cursor] {
+            NestedOutcome::Resolved {
+                version: actual_version,
+                body,
+            } => {
+                let actual_len = u32::try_from(body.len()).map_err(|_| assembly_failed())?;
+                verify_nested(*version, *named_len, *actual_version, actual_len)
+                    .map_err(|_| assembly_failed())?;
+            }
+            NestedOutcome::Fallback => {
+                if !matches!(on_failure, SlotFailurePolicy::Fallback { .. }) {
+                    return Err(assembly_failed());
+                }
+            }
+            NestedOutcome::Omitted => {
+                if !matches!(on_failure, SlotFailurePolicy::Omit) {
+                    return Err(assembly_failed());
+                }
+            }
+        }
+        nested_cursor += 1;
+    }
     // Step 2: the surrounding digest is recomputed from the graph and the
     // entry's own shell, never trusted from the stored slot alone, so a
     // shell that drifted after the digest was recorded is caught here.
@@ -747,12 +1026,13 @@ pub fn assemble(
     // `assembled_len`), so the bound is enforced and the body buffer sized
     // exactly before a single byte is copied.
     let shell = entry.shell();
-    let total_len = assembled_len(graph, &input.outcomes, shell.len(), nonce)?;
+    let total_len = assembled_len(graph, &input.outcomes, nested, shell.len(), nonce)?;
     if total_len > max_body_bytes {
         return Err(assembly_failed());
     }
     let mut body: Vec<u8> = Vec::with_capacity(total_len);
     let mut cursor = 0usize;
+    let mut nested_cursor = 0usize;
     // Redundant with the `total_len` bound just checked, given a correct
     // `assembled_len`; kept as a cheap per-append invariant rather than
     // trusting that one precomputed sum alone, in case the two ever drift.
@@ -782,6 +1062,19 @@ pub fn assemble(
                 SlotOutcome::Omitted => {}
             },
             Segment::Nonce => push(&mut body, nonce.ok_or_else(assembly_failed)?.as_bytes())?,
+            Segment::Nested { on_failure, .. } => {
+                match &nested[nested_cursor] {
+                    NestedOutcome::Resolved { body: inner, .. } => push(&mut body, inner)?,
+                    NestedOutcome::Fallback => match on_failure {
+                        SlotFailurePolicy::Fallback { html } => push(&mut body, html.as_bytes())?,
+                        SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
+                            return Err(assembly_failed());
+                        }
+                    },
+                    NestedOutcome::Omitted => {}
+                }
+                nested_cursor += 1;
+            }
         }
     }
     // Step 4: replayable headers are rebuilt from the stored header plus
@@ -836,8 +1129,14 @@ mod tests {
     }
 
     pub(super) fn header(keys: &SnapshotKeyRing) -> EntryHeader {
+        header_for(keys, "/stitched")
+    }
+
+    /// Like [`header`], but with a caller-chosen route pattern so a test can
+    /// build several entries with distinct keys.
+    pub(super) fn header_for(keys: &SnapshotKeyRing, pattern: &str) -> EntryHeader {
         EntryHeader {
-            key: RenderKey::for_test(keys, "/stitched"),
+            key: RenderKey::for_test(keys, pattern),
             class: RepresentationClass::PublicShellStitched,
             variance: VarianceDescriptor::new(),
             published_at_ms: 1_000,
@@ -855,6 +1154,48 @@ mod tests {
             .expect("safe headers"),
             content_encoding: None,
         }
+    }
+
+    /// A flat (unnested) composite entry whose whole body is one literal
+    /// segment: `body`, verbatim. Used as the innermost entry of a nested
+    /// chain, or anywhere a plain leaf entry is needed.
+    pub(super) fn flat_entry(keys: &SnapshotKeyRing, pattern: &str, body: &[u8]) -> CompositeEntry {
+        let shell = Bytes::copy_from_slice(body);
+        let graph = SegmentGraph {
+            segments: vec![Segment::Literal {
+                len: shell.len() as u32,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        CompositeEntry::new(header_for(keys, pattern), graph, shell).expect("flat entry")
+    }
+
+    /// A composite entry with an empty shell whose only segment is one
+    /// [`Segment::Nested`] naming `inner_key`/`inner_version`/`inner_len`.
+    /// Its own assembled length is exactly the inner segment's contribution,
+    /// letting a chain be built one level at a time.
+    pub(super) fn nesting_entry(
+        keys: &SnapshotKeyRing,
+        pattern: &str,
+        inner_key: RenderKey,
+        inner_version: u64,
+        inner_len: u32,
+        on_failure: SlotFailurePolicy,
+    ) -> CompositeEntry {
+        let graph = SegmentGraph {
+            segments: vec![Segment::Nested {
+                key: inner_key,
+                version: inner_version,
+                assembled_len: inner_len,
+                on_failure,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        CompositeEntry::new(header_for(keys, pattern), graph, Bytes::new()).expect("nesting entry")
     }
 
     pub(super) fn slot(name: &str, key: &str, on_failure: SlotFailurePolicy) -> StitchSlot {
@@ -1702,5 +2043,390 @@ mod tests {
             .find(|(name, _)| *name == "content-security-policy")
             .map(|(_, v)| v.to_owned());
         assert_eq!(csp.as_deref(), Some("script-src 'nonce-h34der-only'"));
+    }
+
+    // -- Nested segments -----------------------------------------------
+
+    #[test]
+    fn descend_nested_permits_exactly_three_levels_and_rejects_a_fourth() {
+        let keys = keys();
+        let a = RenderKey::for_test(&keys, "/a");
+        let b = RenderKey::for_test(&keys, "/b");
+        let c = RenderKey::for_test(&keys, "/c");
+        let d = RenderKey::for_test(&keys, "/d");
+        // Depth 1 -> 2: one ancestor, a distinct key.
+        assert_eq!(descend_nested(std::slice::from_ref(&a), &b), Ok(()));
+        // Depth 2 -> 3: two ancestors, a distinct key -- the depth-3 chain
+        // the spec says must still assemble.
+        assert_eq!(descend_nested(&[a.clone(), b.clone()], &c), Ok(()));
+        // Depth 3 -> 4 would exceed MAX_NESTING_DEPTH (3): rejected with
+        // the depth cause, not a cycle, even though `d` is distinct from
+        // every ancestor in the chain.
+        assert_eq!(
+            descend_nested(&[a, b, c], &d),
+            Err(NestedFailureCause::DepthExceeded)
+        );
+    }
+
+    #[test]
+    fn a_cycle_is_reported_even_when_it_would_also_exceed_the_depth_bound() {
+        let keys = keys();
+        let a = RenderKey::for_test(&keys, "/a");
+        let b = RenderKey::for_test(&keys, "/b");
+        let c = RenderKey::for_test(&keys, "/c");
+        // The chain is already at MAX_NESTING_DEPTH (3): a distinct fourth
+        // key fails as DepthExceeded (see the test above). Naming an
+        // ancestor instead must still fail as Cycle, never DepthExceeded --
+        // the depth bound alone would still terminate the cycle, but it
+        // would name the wrong cause.
+        assert_eq!(
+            descend_nested(&[a.clone(), b, c], &a),
+            Err(NestedFailureCause::Cycle)
+        );
+    }
+
+    #[test]
+    fn a_two_level_cycle_and_a_self_reference_both_fail_as_cycle_not_depth() {
+        let keys = keys();
+        let a = RenderKey::for_test(&keys, "/a");
+        let b = RenderKey::for_test(&keys, "/b");
+        // Self-reference: a segment inside A names A itself. Well within
+        // the depth bound (chain length 1), so only Cycle can explain it.
+        assert_eq!(
+            descend_nested(std::slice::from_ref(&a), &a),
+            Err(NestedFailureCause::Cycle)
+        );
+        // Two-level: A includes B, and B's own segment names A back. Still
+        // well within the depth bound (chain length 2).
+        assert_eq!(
+            descend_nested(&[a.clone(), b], &a),
+            Err(NestedFailureCause::Cycle)
+        );
+    }
+
+    #[test]
+    fn verify_nested_distinguishes_version_and_length_mismatch() {
+        assert_eq!(verify_nested(1, 10, 1, 10), Ok(()));
+        assert_eq!(
+            verify_nested(1, 10, 2, 10),
+            Err(NestedFailureCause::VersionMismatch)
+        );
+        assert_eq!(
+            verify_nested(1, 10, 1, 11),
+            Err(NestedFailureCause::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn too_many_nested_segments_is_invalid() {
+        let keys = keys();
+        let segments = (0..=MAX_NESTED_SEGMENTS)
+            .map(|i| Segment::Nested {
+                key: RenderKey::for_test(&keys, &format!("/nested-{i}")),
+                version: 1,
+                assembled_len: 0,
+                on_failure: SlotFailurePolicy::Omit,
+            })
+            .collect();
+        let graph = SegmentGraph {
+            segments,
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        assert!(
+            graph.validate(0).is_err(),
+            "MAX_NESTED_SEGMENTS (16) plus one must be rejected"
+        );
+    }
+
+    #[test]
+    fn a_composite_naming_itself_directly_is_refused_at_construction() {
+        let keys = keys();
+        let header = header_for(&keys, "/self-referencing");
+        let graph = SegmentGraph {
+            segments: vec![Segment::Nested {
+                key: header.key.clone(),
+                version: 1,
+                assembled_len: 0,
+                on_failure: SlotFailurePolicy::Omit,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        assert!(CompositeEntry::new(header, graph, Bytes::new()).is_err());
+    }
+
+    #[test]
+    fn assembled_len_uses_the_named_nested_length_not_the_resolved_bodys_actual_length() {
+        let keys = keys();
+        let inner_key = RenderKey::for_test(&keys, "/inner");
+        let graph = SegmentGraph {
+            segments: vec![Segment::Nested {
+                key: inner_key,
+                version: 1,
+                assembled_len: 1_000_000,
+                on_failure: SlotFailurePolicy::Omit,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        };
+        // The resolved body is empty; if the sum ever measured it instead
+        // of the segment's named `assembled_len`, this would compute 0.
+        let nested = vec![NestedOutcome::Resolved {
+            version: 1,
+            body: Bytes::new(),
+        }];
+        let total =
+            assembled_len(&graph, &[], &nested, 0, None).expect("sums from typed facts alone");
+        assert_eq!(
+            total, 1_000_000,
+            "the sum must come from the segment's named assembled_len, \
+             never the resolved body's actual length -- computable before \
+             any byte is copied or even inspected"
+        );
+    }
+
+    #[test]
+    fn assemble_nested_rejects_an_over_bound_total_length_but_accepts_it_exactly_at_the_bound() {
+        let keys = keys();
+        let inner_key = RenderKey::for_test(&keys, "/inner-bound");
+        let body = Bytes::from(vec![b'x'; 1_000]);
+        let outer = nesting_entry(
+            &keys,
+            "/outer-bound",
+            inner_key,
+            1,
+            1_000,
+            SlotFailurePolicy::Omit,
+        );
+        let input = || AssemblyInput {
+            outcomes: Vec::new(),
+            nonce: None,
+        };
+        assert_eq!(
+            assemble_nested(
+                &outer,
+                input(),
+                vec![NestedOutcome::Resolved {
+                    version: 1,
+                    body: body.clone(),
+                }],
+                &[],
+                999,
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "one byte under the named and actual length must be rejected"
+        );
+        assert!(
+            assemble_nested(
+                &outer,
+                input(),
+                vec![NestedOutcome::Resolved { version: 1, body }],
+                &[],
+                1_000,
+            )
+            .is_ok(),
+            "exactly at the bound must assemble"
+        );
+    }
+
+    #[test]
+    fn assemble_nested_fails_closed_on_a_version_or_a_length_mismatch() {
+        let keys = keys();
+        let inner_key = RenderKey::for_test(&keys, "/inner-mismatch");
+        let entry = nesting_entry(
+            &keys,
+            "/outer-mismatch",
+            inner_key,
+            5,
+            10,
+            SlotFailurePolicy::Omit,
+        );
+        let input = || AssemblyInput {
+            outcomes: Vec::new(),
+            nonce: None,
+        };
+        let matching_body = Bytes::from_static(b"0123456789");
+        assert!(
+            assemble_nested(
+                &entry,
+                input(),
+                vec![NestedOutcome::Resolved {
+                    version: 5,
+                    body: matching_body.clone(),
+                }],
+                &[],
+                1 << 20,
+            )
+            .is_ok(),
+            "matching version and length must assemble"
+        );
+        assert_eq!(
+            assemble_nested(
+                &entry,
+                input(),
+                vec![NestedOutcome::Resolved {
+                    version: 6,
+                    body: matching_body.clone(),
+                }],
+                &[],
+                1 << 20,
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "a version the graph did not name must fail closed"
+        );
+        assert_eq!(
+            assemble_nested(
+                &entry,
+                input(),
+                vec![NestedOutcome::Resolved {
+                    version: 5,
+                    body: Bytes::from_static(b"short"),
+                }],
+                &[],
+                1 << 20,
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed),
+            "a length the graph did not name must fail closed"
+        );
+    }
+
+    #[test]
+    fn assembling_past_the_depth_bound_fails_closed() {
+        let keys = keys();
+        let k1 = RenderKey::for_test(&keys, "/k1");
+        let k2 = RenderKey::for_test(&keys, "/k2");
+        let k4 = RenderKey::for_test(&keys, "/k4");
+        // `entry` sits at chain position 3 (`ancestors` already holds two
+        // keys above it); its one segment names a fourth, distinct key,
+        // which would make a depth-4 chain.
+        let entry = nesting_entry(&keys, "/k3", k4, 1, 0, SlotFailurePolicy::Omit);
+        assert_eq!(
+            assemble_nested(
+                &entry,
+                AssemblyInput {
+                    outcomes: Vec::new(),
+                    nonce: None,
+                },
+                vec![NestedOutcome::Omitted],
+                &[k1, k2],
+                1 << 20,
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed)
+        );
+    }
+
+    #[test]
+    fn assembling_a_two_level_cycle_fails_closed() {
+        let keys = keys();
+        let key_a = RenderKey::for_test(&keys, "/cycle-a");
+        // `entry_b` is what A's assembly would have descended into; its own
+        // segment names A back, well within the depth bound (chain length
+        // 2), so only a cycle can explain the rejection below.
+        let entry_b = nesting_entry(
+            &keys,
+            "/cycle-b",
+            key_a.clone(),
+            1,
+            0,
+            SlotFailurePolicy::Omit,
+        );
+        assert_eq!(
+            assemble_nested(
+                &entry_b,
+                AssemblyInput {
+                    outcomes: Vec::new(),
+                    nonce: None,
+                },
+                vec![NestedOutcome::Omitted],
+                std::slice::from_ref(&key_a),
+                1 << 20,
+            )
+            .map(|_| ())
+            .map_err(|e| e.kind()),
+            Err(RenderCacheErrorKind::AssemblyFailed)
+        );
+    }
+
+    #[test]
+    fn a_depth_three_nested_chain_assembles_and_its_length_is_the_named_sum() {
+        let keys = keys();
+        let leaf = flat_entry(&keys, "/leaf", b"<p>leaf</p>");
+        let leaf_assembled = assemble(
+            &leaf,
+            AssemblyInput {
+                outcomes: Vec::new(),
+                nonce: None,
+            },
+            1 << 20,
+        )
+        .expect("leaf assembles");
+        let leaf_len = u32::try_from(leaf_assembled.body().len()).expect("fits");
+        let leaf_key = leaf.header().key.clone();
+
+        let top_key = RenderKey::for_test(&keys, "/top");
+        let mid = nesting_entry(
+            &keys,
+            "/mid",
+            leaf_key,
+            7, // an arbitrary "version" this test controls at both ends
+            leaf_len,
+            SlotFailurePolicy::Omit,
+        );
+        let mid_assembled = assemble_nested(
+            &mid,
+            AssemblyInput {
+                outcomes: Vec::new(),
+                nonce: None,
+            },
+            vec![NestedOutcome::Resolved {
+                version: 7,
+                body: leaf_assembled.body().clone(),
+            }],
+            std::slice::from_ref(&top_key),
+            1 << 20,
+        )
+        .expect("depth-2 assembles");
+        assert_eq!(mid_assembled.body(), leaf_assembled.body());
+        let mid_len = u32::try_from(mid_assembled.body().len()).expect("fits");
+        let mid_key = mid.header().key.clone();
+
+        let top = nesting_entry(&keys, "/top", mid_key, 3, mid_len, SlotFailurePolicy::Omit);
+        assert_eq!(top.header().key, top_key);
+        let top_assembled = assemble_nested(
+            &top,
+            AssemblyInput {
+                outcomes: Vec::new(),
+                nonce: None,
+            },
+            vec![NestedOutcome::Resolved {
+                version: 3,
+                body: mid_assembled.body().clone(),
+            }],
+            &[],
+            1 << 20,
+        )
+        .expect("depth-3 chain assembles");
+        assert_eq!(
+            top_assembled.body(),
+            leaf_assembled.body(),
+            "three levels of Segment::Nested must relay the leaf's bytes exactly"
+        );
+        assert_eq!(
+            top_assembled.body().len(),
+            leaf_len as usize,
+            "the assembled length is the sum of typed facts at every level"
+        );
     }
 }
