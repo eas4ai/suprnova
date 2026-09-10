@@ -267,7 +267,7 @@ mediante su impl de `Drop`:
 - **Las transacciones de base de datos** se revierten. Un
   `DatabaseTransaction` de SeaORM tiene un impl de `Drop` que emite
   `ROLLBACK` sobre la conexión subyacente.
-- **Las guardas de `Mutex` y `RwLock`** se liberan. Una guarda de la
+- **Las guardas de Mutex y RwLock** se liberan. Una guarda de la
   biblioteca estándar o de `parking_lot` se libera al descartarse; otro
   que esté esperando puede tomarla de inmediato.
 - **Los descriptores de archivo** se cierran. El descriptor a nivel de
