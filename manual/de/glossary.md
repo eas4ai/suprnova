@@ -694,7 +694,7 @@ Metadaten jedes Mitglieds ausgibt. Nützlich für
 
 Eine [Kanal](#kanal-broadcasting)-Variante, die beim Abonnieren
 eine Autorisierung verlangt - `authorize(...)` muss für den
-abonnierenden Nutzer `true` zurückgeben. Nützlich für
+abonnierenden Nutzer true zurückgeben. Nützlich für
 Pro-Nutzer-Benachrichtigungsströme. Siehe
 [Broadcasting - Channels](broadcasting.md#channels).
 

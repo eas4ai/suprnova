@@ -312,7 +312,7 @@ Cross-Site Request Forgery（跨站请求伪造）。一个有状态会话必须
 
 ### Notifiable
 
-一个用户（或者任何能接收通知的对象）要实现的 trait - `route_for(channel)` 为这个具名通道返回地址（邮件地址、推送订阅、广播用户 id 等等），或者返回 `None` 来跳过。参见[通知 - `Notifiable` trait](notifications.md#the-notifiable-trait)。
+一个用户（或者任何能接收通知的对象）要实现的 trait - `route_for(channel)` 为这个具名通道返回地址（邮件地址、推送订阅、广播用户 id 等等），或者返回 `None` 来跳过。参见[通知 - Notifiable trait](notifications.md#the-notifiable-trait)。
 
 ### Notification
 

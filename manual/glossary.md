@@ -277,8 +277,9 @@ magic-call. See [Service Container](container.md).
 ### Factory (Eloquent)
 
 The `#[derive(Factory)]` macro and `Factory` trait that produce
-realistic test rows with `fake`-driven defaults - `UserFactory::times(5)
-.create_many().await?`. The Rust counterpart of Laravel's model factories.
+realistic test rows with `fake`-driven defaults -
+`UserFactory::times(5).create_many().await?`. The Rust counterpart of
+Laravel's model factories.
 See [Macros - Factories](macros.md#factories).
 
 ### Fail-closed
