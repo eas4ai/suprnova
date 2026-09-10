@@ -30,7 +30,7 @@ suprnova serve [OPTIONS]
 | `--no-restart` | `false` | No vuelve a crear un proceso de desarrollo que se haya caído; desmonta toda la sesión (comportamiento anterior). |
 | `--restart-tries <N>` | `5` | Deja de reintentar un proceso después de este número de caídas consecutivas. Se ignora con `--no-restart`, que ya termina la sesión en la primera caída. |
 | `--timestamps` | `false` | Anteponer a cada línea de salida una hora `HH:MM:SS`. |
-| `--json` | `false` | Emitir un objeto JSON por línea (NDJSON) en stdout en lugar de texto con prefijos; consulta [Salida JSON](#salida-json). Combinarlo con `--timestamps` no es un error: no tiene efecto adicional porque cada evento ya contiene su propia marca de tiempo. |
+| `--json` | `false` | Emitir un objeto JSON por línea (NDJSON) en stdout en lugar de texto con prefijos; consulta [Salida JSON](#salida-json). Combinarlo con `--timestamps` no es un error; `--timestamps` no tiene efecto adicional, porque cada evento ya contiene su propia marca de tiempo. |
 
 Los flags de la CLI tienen prioridad sobre las variables de entorno,
 que a su vez tienen prioridad sobre los valores por defecto
