@@ -146,7 +146,7 @@ Siehe [Scheduling-CLI](cli-scheduling.md) und das Kapitel
 | Befehl | Beschreibung |
 |---|---|
 | `suprnova workflow:work` | Startet den Workflow-Worker-Daemon. Zieht Workflow-Schritte aus der Registry und führt sie mit derselben Panic-Grenze wie HTTP-Handler aus. |
-| `suprnova workflow:install` | Legt die Migrationen `workflow` + `workflow_steps` in `src/migrations/` ab. In frischen Scaffolds bereits vorhanden. |
+| `suprnova workflow:install` | Legt die Migrationen workflow + workflow_steps in `src/migrations/` ab. In frischen Scaffolds bereits vorhanden. |
 
 Siehe [Workflows](workflows.md).
 
