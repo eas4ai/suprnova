@@ -1,5 +1,10 @@
 //! Bounded fan-in, fairness, coalescing, cancellation, and membership ceilings.
-use crate::live_async_support;
+// Its own test binary. It installs process-global Live state (the mount
+// catalog, and for assets the asset catalog OnceLock) that a second
+// installation in one process rejects.
+#[path = "../support/live_async_support/mod.rs"]
+mod live_async_support;
+
 
 use hyper::StatusCode;
 use live_async_support::*;

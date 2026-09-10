@@ -1,5 +1,9 @@
 //! Suprnova serves the exact reviewed Live artifacts and emits typed bootstrap markup.
 
+// Its own test binary. It installs process-global Live state (the mount
+// catalog, and for assets the asset catalog OnceLock) that a second
+// installation in one process rejects.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

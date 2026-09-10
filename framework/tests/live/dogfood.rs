@@ -1,7 +1,14 @@
 //! Live through the production middleware stack: real sessions, origin-verified
 //! CSRF, an authenticated principal, and tenant and rate-limit facts attached to
 //! the reserved routes with `Router::try_live_with`.
-use crate::live_dogfood_support;
+// Its own test binary. These tests bind the process-global Live runtime
+// and mount catalog, and a second binding in one process is rejected, so
+// this file may not be folded into `tests/live/main.rs`.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/live_dogfood_support/mod.rs"]
+mod live_dogfood_support;
+
 
 use std::sync::Arc;
 

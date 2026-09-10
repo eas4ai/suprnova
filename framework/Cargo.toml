@@ -410,3 +410,30 @@ path = "tests/eloquent/relations_morph_registry.rs"
 [[test]]
 name = "eloquent_soft_deletes"
 path = "tests/eloquent/soft_deletes.rs"
+
+# Each of these binds the process-global Live runtime and mount catalog, and a
+# second binding in one process is rejected, so each owns its binary rather
+# than folding into tests/live/main.rs.
+[[test]]
+name = "live_boot"
+path = "tests/live/boot.rs"
+
+[[test]]
+name = "live_boot_async_route_order"
+path = "tests/live/boot_async_route_order.rs"
+
+[[test]]
+name = "live_dogfood"
+path = "tests/live/dogfood.rs"
+
+[[test]]
+name = "live_dogfood_server"
+path = "tests/live/dogfood_server.rs"
+
+[[test]]
+name = "live_assets"
+path = "tests/live/assets.rs"
+
+[[test]]
+name = "live_async_backpressure"
+path = "tests/live/async_backpressure.rs"

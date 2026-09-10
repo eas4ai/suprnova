@@ -1,3 +1,9 @@
+// Its own test binary. These tests bind the process-global Live runtime
+// and mount catalog, and a second binding in one process is rejected, so
+// this file may not be folded into `tests/live/main.rs`.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+
 use std::sync::{Arc, Mutex};
 
 use http_body_util::BodyExt;
