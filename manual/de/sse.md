@@ -91,7 +91,7 @@ Arten:
 |-------------|----------|-----|
 | `SseEvent::data(text)` | Frame mit nur `data:`-Zeilen | Das minimale Event |
 | `SseEvent::json(event, &payload)` | Frame mit `event:` + JSON-`data:` | Der 95-%-Fall - `JSON.parse(evt.data)` auf dem Client |
-| `SseEvent::error(message)` | Frame mit `event: error` | Fehler-Event auf Domänenebene, zu unterscheiden vom Fehler auf Verbindungsebene, den der Browser bei einem Transportfehler feuert |
+| `SseEvent::error(message)` | Frame mit `event: error` | Fehler-Event auf Domänenebene, getrennt vom `error` auf Verbindungsebene, das der Browser bei einem Transportfehler feuert |
 | `SseEvent::comment(text)` | Comment | Keep-alive mit einem Marker, den der Betreiber in Logs erkennen kann |
 | `SseEvent::keep_alive()` | Leerer Comment (`:\n\n`) | Kanonischer Herzschlag mit minimaler Byte-Zahl |
 
@@ -490,8 +490,8 @@ Helper:
 | `suprnova::sse::StreamedEvent` | Ein Element, das auf ein `event_stream` gepusht wird - `{ event: String, data: serde_json::Value }`. |
 | `StreamedEvent::message(data)` / `StreamedEvent::named(event, data)` | Erzeugt mit dem Standardnamen `"update"` oder einem expliziten Namen. Beide liefern `Result<Self, serde_json::Error>`. |
 | `suprnova::sse::EndSignal` | Der abschließende Frame, den `event_stream` nach dem Ende des Produzenten sendet - `None` / `Message(String)` / `Event(StreamedEvent)`. `Default` ist `text("</stream>")`. |
-| `HttpResponse::event_stream(stream, end)` | Baut eine `event_stream`-Response aus jedem `Stream<Item = StreamedEvent> + Send + Sync + 'static>`. Baut auf `sse` auf. |
-| `HttpResponse::stream_json(stream)` | Baut eine `stream_json`-Response aus jedem `Stream<Item = impl Serialize> + Send + Sync + 'static>`. Baut auf `stream_bytes` auf. |
+| `HttpResponse::event_stream(stream, end)` | Baut eine `event_stream`-Response aus jedem `Stream<Item = StreamedEvent> + Send + Sync + 'static`. Baut auf `sse` auf. |
+| `HttpResponse::stream_json(stream)` | Baut eine `stream_json`-Response aus jedem `Stream<Item = impl Serialize> + Send + Sync + 'static`. Baut auf `stream_bytes` auf. |
 
 ## Nächste Schritte
 

@@ -75,7 +75,7 @@ data: tick 0
 | 构造函数 | 产出 | 用途 |
 |-------------|----------|-----|
 | `SseEvent::data(text)` | 只有 `data:` 行的 Frame | 最小化的事件 |
-| `SseEvent::json(event, &payload)` | 带 `event:` + JSON `data:` 的 Frame | 95% 的情形 - 客户端对 `evt.data` 调用 `JSON.parse()` |
+| `SseEvent::json(event, &payload)` | 带 `event:` + JSON `data:` 的 Frame | 95% 的情形 - 客户端调用 `JSON.parse(evt.data)` |
 | `SseEvent::error(message)` | 带 `event: error` 的 Frame | 领域层面的错误事件，与浏览器在传输失败时触发的连接层面的 `error` 不同 |
 | `SseEvent::comment(text)` | Comment | 带一个运维人员能在日志里认出的标记的保活消息 |
 | `SseEvent::keep_alive()` | 空 Comment（`:\n\n`） | 规范意义上字节数最少的心跳 |
