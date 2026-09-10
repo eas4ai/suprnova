@@ -42,6 +42,7 @@ use suprnova_live::render_cache::{
 };
 use suprnova_live_test_support::{ControlledClock, ledger_conformance};
 
+use crate::render_cache_middleware_support;
 use crate::render_cache_stitch_support;
 use crate::render_cache_tiers_support;
 use render_cache_stitch_support::{
@@ -1077,4 +1078,202 @@ fn config_at(prefix: &str) -> RedisProviderConfig {
         url: redis_url(),
         prefix: prefix.to_owned(),
     }
+}
+
+// --- Credible generation hints, across a real pub/sub channel ---
+
+/// The route the two hint tests below drive: five fresh minutes against a
+/// ten second lease, so an authority read inside the fresh window can only
+/// be the lease having ended. The same route
+/// `framework/tests/render_cache/hints.rs` uses for the tests that need no
+/// Redis at all.
+const HINTED_ROUTE: &str = "/short-leased/1";
+
+/// A digest that route's render genuinely observes.
+fn hinted_digest() -> suprnova::render_cache::DependencyIdentity {
+    suprnova::render_cache::DependencyIdentity::table("posts")
+}
+
+/// A digest nothing in the middleware harness observes.
+fn unhinted_digest() -> suprnova::render_cache::DependencyIdentity {
+    suprnova::render_cache::DependencyIdentity::config("nothing-in-this-harness-reads-this")
+}
+
+/// Publishes one hint body on `prefix`'s channel, as a peer node would.
+///
+/// The channel name is spelled here rather than imported, the way
+/// [`redis_token`] above spells the token key: these tests address the
+/// namespace the module documentation publishes, so a rename that did not
+/// reach the documentation would fail here.
+async fn publish_hint(conn: &mut redis::aio::ConnectionManager, prefix: &str, body: &str) -> i64 {
+    redis::cmd("PUBLISH")
+        .arg(format!("{prefix}hints"))
+        .arg(body)
+        .query_async(conn)
+        .await
+        .expect("publish a hint")
+}
+
+/// A hint published by another node reaches a subscribing node and shortens
+/// the lease it holds there.
+///
+/// Every wait is a state barrier: the subscription is awaited before
+/// anything is published into it, and the applied outcome is awaited rather
+/// than paused for. The proof is the statement counter - within its lease
+/// this route reaches the database not at all, and after the hint the very
+/// next request rereads the authority once.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_a_published_hint_shortens_a_subscribing_nodes_lease() {
+    let (config, mut conn, _cleanup) = boot_redis().await;
+    suprnova::render_cache::telemetry::reset_recorded_hints_for_test();
+    // Relative, never absolute: the subscription counter is process-global
+    // and every earlier test in this binary that configured a channel has
+    // already moved it. What this test needs is *this* runtime's own
+    // subscription, which is the next one after whatever the count reads
+    // now.
+    let base = RenderCache::hint_subscriptions_for_test();
+    let harness = render_cache_middleware_support::boot_with_render_cache_and_hints_for_test(
+        suprnova::render_cache::HintsConfig::Redis {
+            url: config.url.clone(),
+            prefix: config.prefix.clone(),
+        },
+    )
+    .await;
+
+    render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    assert_eq!(
+        render_cache_middleware_support::counting_route::renders(),
+        1,
+        "the second request is a hit, and it grants the lease"
+    );
+
+    render_cache_middleware_support::statements::reset();
+    render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    assert_eq!(
+        render_cache_middleware_support::statements::count(),
+        0,
+        "baseline: within the lease this route reaches the database not at all"
+    );
+
+    RenderCache::await_hint_subscriptions_for_test(base + 1).await;
+    let body = RenderCache::hint_body_for_test(&[hinted_digest().digest()]);
+    assert_eq!(
+        publish_hint(&mut conn, &config.prefix, &body).await,
+        1,
+        "exactly one subscriber, this node"
+    );
+    suprnova::render_cache::telemetry::await_hint_for_test("applied", 1).await;
+
+    render_cache_middleware_support::statements::reset();
+    let after = render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        render_cache_middleware_support::statements::count(),
+        1,
+        "the peer's hint shortened this node's lease, so this request rereads the authority"
+    );
+    assert_eq!(
+        render_cache_middleware_support::counting_route::renders(),
+        1,
+        "nothing had actually moved, so the reread found the entry coherent and it served"
+    );
+}
+
+/// A subscriber that falls behind is dropped and resubscribes, and the drop
+/// is recorded.
+///
+/// The applier is held before its next message, so exactly one message is in
+/// its hand and the bounded queue takes exactly `MAX_INBOUND_HINTS` more:
+/// the message after those is the one that cannot be queued, and it is that
+/// one - not a flood, and not a pause - that provokes the drop. Publishing
+/// exactly that many is what keeps this to a single drop rather than a
+/// reconnect loop the assertions would have to guess their way through.
+///
+/// Every message in the burst names a digest nothing here observes, so the
+/// backlog cannot record `applied` when it finally drains. That is what
+/// makes the final assertion mean what it says: the `applied` awaited at the
+/// end can only have come from the hint published *after* the resubscription,
+/// so the node is genuinely listening again.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires live Redis; run with --ignored live_redis"]
+async fn live_redis_a_subscriber_that_falls_behind_is_dropped_and_resubscribes() {
+    let (config, mut conn, _cleanup) = boot_redis().await;
+    suprnova::render_cache::telemetry::reset_recorded_hints_for_test();
+    let base = RenderCache::hint_subscriptions_for_test();
+    let harness = render_cache_middleware_support::boot_with_render_cache_and_hints_for_test(
+        suprnova::render_cache::HintsConfig::Redis {
+            url: config.url.clone(),
+            prefix: config.prefix.clone(),
+        },
+    )
+    .await;
+
+    render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    assert_eq!(
+        render_cache_middleware_support::counting_route::renders(),
+        1,
+        "the lease is granted before anything is published"
+    );
+
+    RenderCache::await_hint_subscriptions_for_test(base + 1).await;
+    let established = RenderCache::hint_subscriptions_for_test();
+    RenderCache::pause_hint_applier_for_test();
+
+    // One for the applier's own hand, `MAX_INBOUND_HINTS` for the queue,
+    // and one more that can go nowhere.
+    let filler = RenderCache::hint_body_for_test(&[unhinted_digest().digest()]);
+    for _ in 0..(suprnova::render_cache::hints::MAX_INBOUND_HINTS + 2) {
+        assert_eq!(
+            publish_hint(&mut conn, &config.prefix, &filler).await,
+            1,
+            "the subscriber is still there while the queue is filling"
+        );
+    }
+
+    suprnova::render_cache::telemetry::await_hint_for_test("subscriber_dropped", 1).await;
+    RenderCache::await_hint_subscriptions_for_test(established + 1).await;
+
+    // The queue is still full, and a message arriving into a full queue is
+    // what drops a subscription - so the backlog has to be gone before the
+    // hint that proves the new subscription works is published, or that
+    // hint would drop the very subscription it is meant to prove. Draining
+    // is awaited on the outcomes themselves: one message in the applier's
+    // hand plus `MAX_INBOUND_HINTS` queued, each recording the ignored
+    // outcome, and the one that could not be queued recording none.
+    RenderCache::resume_hint_applier_for_test();
+    suprnova::render_cache::telemetry::await_hint_for_test(
+        "ignored_unknown_key",
+        suprnova::render_cache::hints::MAX_INBOUND_HINTS + 1,
+    )
+    .await;
+
+    let body = RenderCache::hint_body_for_test(&[hinted_digest().digest()]);
+    assert_eq!(
+        publish_hint(&mut conn, &config.prefix, &body).await,
+        1,
+        "the resubscribed node is listening again"
+    );
+    suprnova::render_cache::telemetry::await_hint_for_test("applied", 1).await;
+
+    assert!(
+        suprnova::render_cache::telemetry::recorded_hints_for_test()
+            .iter()
+            .any(|outcome| *outcome == "subscriber_dropped"),
+        "the drop is visible in telemetry, which is the only place it is visible at all"
+    );
+
+    render_cache_middleware_support::statements::reset();
+    let after = render_cache_middleware_support::dispatch_get(&harness, HINTED_ROUTE, &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        render_cache_middleware_support::statements::count(),
+        1,
+        "the hint that arrived on the new subscription shortened the lease, so this request \
+         rereads the authority"
+    );
 }

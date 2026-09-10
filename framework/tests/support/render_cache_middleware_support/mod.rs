@@ -525,7 +525,14 @@ pub enum BootL1 {
 /// transaction began and never blocks a writer, and a writer never blocks
 /// a reader. That is exactly the isolation the render's read view needs.
 pub async fn boot_with_render_cache() -> Arc<Harness> {
-    boot(true, BootDatabase::FreshSqlite, BootL1::Disabled, None).await
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
 }
 
 /// Test-only for the fix round 1, item 2 regression test: boots exactly
@@ -537,7 +544,14 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
 /// already registered its own middleware" without also fighting this
 /// harness's own test-isolation clear.
 pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
-    boot(false, BootDatabase::FreshSqlite, BootL1::Disabled, None).await
+    boot(
+        false,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
 }
 
 /// Test-only for fix round 2, item 5: boots exactly like
@@ -550,7 +564,14 @@ pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> A
 /// this is the first and only place L1 actually runs together with the
 /// middleware.
 pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
-    boot(true, BootDatabase::FreshSqlite, BootL1::Fresh, None).await
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Fresh,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
 }
 
 /// Boots exactly like [`boot_with_render_cache_and_l1_for_test`], except
@@ -567,6 +588,27 @@ pub async fn boot_with_render_cache_and_l1_and_build_id_for_test(build_id: &str)
         BootDatabase::FreshSqlite,
         BootL1::Fresh,
         Some(build_id.to_owned()),
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Boots exactly like [`boot_with_render_cache`], except the installed
+/// configuration carries `hints`.
+///
+/// Every other boot here leaves the hint channel disabled, which is what
+/// `RenderCacheConfig::from_env` chooses for this harness's Embedded
+/// profile anyway; this is the one seam that turns it on, so that a test
+/// can prove what a configured-but-unreachable channel does to a node.
+pub async fn boot_with_render_cache_and_hints_for_test(
+    hints: suprnova::render_cache::HintsConfig,
+) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        hints,
     )
     .await
 }
@@ -581,7 +623,14 @@ pub async fn boot_with_render_cache_and_l1_and_build_id_for_test(build_id: &str)
 pub async fn boot_with_render_cache_on_live_server_for_test(
     conn: suprnova::database::DbConnection,
 ) -> Arc<Harness> {
-    boot(true, BootDatabase::LiveServer(conn), BootL1::Disabled, None).await
+    boot(
+        true,
+        BootDatabase::LiveServer(conn),
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
 }
 
 /// A simulated process restart (final review, F3 / ruling R119): a fresh
@@ -602,6 +651,7 @@ pub async fn reboot_with_render_cache_on_the_same_database_and_l1_for_test(
         BootDatabase::Existing(previous.conn.clone()),
         BootL1::Existing(l1_dir),
         None,
+        suprnova::render_cache::HintsConfig::Disabled,
     )
     .await
 }
@@ -623,6 +673,7 @@ pub async fn reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_
         BootDatabase::Existing(previous.conn.clone()),
         BootL1::Existing(l1_dir),
         Some(build_id.to_owned()),
+        suprnova::render_cache::HintsConfig::Disabled,
     )
     .await
 }
@@ -673,6 +724,7 @@ async fn boot(
     database: BootDatabase,
     l1: BootL1,
     build_id: Option<String>,
+    hints: suprnova::render_cache::HintsConfig,
 ) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
@@ -1469,6 +1521,7 @@ async fn boot(
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;
     config.enabled = true;
+    config.hints = hints;
     if let Some(build_id) = build_id {
         config = config.with_build_id(build_id);
     }
