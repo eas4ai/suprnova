@@ -75,6 +75,10 @@ voneinander - `Gate::has::<User, Post>("publish")` und
 | `Gate::none(&[...], &user, &resource)` | `bool` | True, wenn keine erlaubt |
 | `Gate::check(&[...], &user, &resource)` | `bool` | True, wenn alle erlauben |
 
+Jede Methode hat ein `_async`-Gegenstück, das sowohl für synchron als
+auch für asynchron registrierte Gates funktioniert, sodass Handler
+nicht wissen müssen, welche Art von Closure die Aktion unterstützt.
+
 ### Introspektion
 
 ```rust
