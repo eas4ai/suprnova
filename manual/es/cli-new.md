@@ -43,7 +43,7 @@ El asistente hace cuatro preguntas, en este orden:
 3. **Autor** - se usa como el autor del paquete de Cargo; por
    defecto toma tu `git config user.name <name@email>` si está
    establecido
-4. **Framework de frontend** - `Svelte (recomendado)`, `React`, o
+4. **Framework de frontend** - `Svelte (recommended)`, `React`, o
    `Vue`
 
 Tras confirmar, el generador de andamiaje escribe el proyecto,
@@ -83,13 +83,16 @@ Para backends de servicio sin SPA, usa `--api`:
 suprnova new my-api --api
 ```
 
-El iniciador de API no tiene frontend ni capa de Inertia. Inicializa
-Magnetar contra la conexión compartida de SeaORM, crea las migraciones y
-los modelos canónicos `app_users`, instala `BearerTokenMiddleware` y
-genera registro e inicio de sesión por contraseña contra `app_users`.
-El layout sigue siendo un crate único en `src/main.rs` (en lugar del
-workspace `cmd/main.rs` del iniciador SPA) y el `.env` se vincula al
-puerto 8765.
+El iniciador de API es considerablemente más pequeño: sin directorio
+`frontend/`, sin Inertia, sin vistas de autenticación, y con un layout
+de crate único en `src/main.rs`. Inicializa Magnetar contra la conexión
+compartida de SeaORM, crea el modelo canónico `app_users`, instala
+`BearerTokenMiddleware`, y usa `Auth::password()` para el registro y el
+inicio de sesión. `PASSKEY_RP_ID` y `PASSKEY_RP_ORIGIN` son leídos por
+el bootstrap generado con valores por defecto locales. El iniciador
+también incluye un controlador de usuarios de ejemplo y un
+serializador JSON `UserResource`, y se vincula al puerto 8765 en
+`.env`.
 
 `--api` es mutuamente excluyente con `--frontend`; pasar ambos
 produce un error. Bajo `--api`, solo se pregunta el nombre del

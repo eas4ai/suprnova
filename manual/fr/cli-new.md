@@ -41,7 +41,7 @@ L'assistant pose quatre questions, dans cet ordre :
 2. **Description** - utilisée comme description du package Cargo
 3. **Auteur** - utilisé comme auteur du package Cargo ; par défaut
    votre `git config user.name <name@email>` si défini
-4. **Framework frontend** - `Svelte (recommandé)`, `React`, ou `Vue`
+4. **Framework frontend** - `Svelte (recommended)`, `React`, ou `Vue`
 
 Après confirmation, le scaffolder écrit le projet, exécute `git init`
 (sauf `--no-git`), et affiche les prochaines étapes :
