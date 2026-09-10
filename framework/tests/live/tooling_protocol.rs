@@ -13,6 +13,7 @@ use suprnova::live::tooling_protocol::{
     AssetKind, Body, COMMAND_NAME, Envelope, MAX_LINE_BYTES, MAX_TEMPLATE_FILE_BYTES,
     MAX_TEMPLATE_ROOTS, MAX_TEXT_BYTES, Operation, Outcome, PROTOCOL_VERSION, Severity,
 };
+use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::live::{LiveComponent, LiveConfig, LiveRegistry, live};
 use suprnova::{App, Crypt, EncryptionKey, console};
 
@@ -49,21 +50,36 @@ impl ToolingBroken {
     }
 }
 
-fn fixture() {
+/// Prepares the process-wide container (once) and this test's own
+/// `LiveConfig`/`LiveRegistry` binding (every call).
+///
+/// `App::singleton` writes to the process-global container, which every
+/// other test file in this binary shares; a `LiveConfig`/`LiveRegistry`
+/// bound there is visible to (and replaceable by) any other test's own
+/// global binding. `run_check`/`run_inspect` resolve both through
+/// `App::resolve`, which checks the thread-local test container before
+/// the global one, so binding them through `TestContainer::singleton`
+/// under a `TestContainer::fake()` guard makes each call to `run` see
+/// only the exact two components this file registers, regardless of
+/// what else is linked into the binary. The guard must outlive the
+/// `execute` call, so the caller holds it.
+fn fixture() -> TestContainerGuard {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         App::init();
         Crypt::init(EncryptionKey::generate());
-        App::singleton(LiveConfig::standard());
-        App::singleton(
-            LiveRegistry::builder()
-                .register::<ToolingCounter>()
-                .expect("counter registers")
-                .register::<ToolingBroken>()
-                .expect("broken component registers")
-                .build(),
-        );
     });
+    let guard = TestContainer::fake();
+    TestContainer::singleton(LiveConfig::standard());
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .register::<ToolingCounter>()
+            .expect("counter registers")
+            .register::<ToolingBroken>()
+            .expect("broken component registers")
+            .build(),
+    );
+    guard
 }
 
 fn template_root() -> PathBuf {
@@ -75,7 +91,7 @@ fn run(
     operation: Operation,
     roots: Vec<PathBuf>,
 ) -> (Result<(), ToolingErrorKind>, Vec<Envelope>) {
-    fixture();
+    let _guard = fixture();
     let request = ToolRequest::new(protocol, operation, roots);
     let mut out = Vec::new();
     let result = execute(&request, &mut out).map_err(|error| error.kind());
