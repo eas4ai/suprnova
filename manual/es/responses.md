@@ -59,8 +59,9 @@ Existen cuatro constructores de streaming para respuestas de larga vida:
   valores `sse::StreamedEvent`, enmarca cada uno como `event: update` (o
   su nombre) y permite configurar un frame terminal. Consulta [SSE](sse.md).
 - `HttpResponse::stream_json(stream)` - equivalente a
-  `ResponseFactory::streamJson` de Laravel. Envuelve cualquier valor
-  `Serialize` y lo vacía como un único array JSON construido
+  `ResponseFactory::streamJson` de Laravel. Envuelve un `Stream` de
+  cualquier valor `Serialize` y lo vacía como un único array JSON
+  construido
   incrementalmente, en lugar de almacenar primero toda la colección.
   Consulta [SSE](sse.md#event-stream-and-stream-json).
 
