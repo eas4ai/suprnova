@@ -22,6 +22,17 @@
 //! nothing here reaches for a provider's own methods: sweeps, tallies,
 //! dialect statements, and hot slots are each proven where they live.
 //!
+//! The suite is not [`CompleteEntry`]-only: a Composite entry is proven
+//! here too, by the same reasoning as the corruption scenario, because a
+//! provider stores its bytes exactly as opaquely. A well-formed nested
+//! segment graph round-trips through the store and resolves; the same
+//! graph, read one ownership level deeper than it was published at, is
+//! refused by the closed depth cause rather than assembled anyway; and a
+//! stored graph naming a segment kind this build does not recognize - the
+//! shape a newer build's entry takes to an older one - is refused whole by
+//! [`decode`], never served half-understood. No provider can skip any of
+//! this: it is reached from [`run_all`] exactly like every other scenario.
+//!
 //! Three rules make the suite portable. It never waits, and never asks a
 //! provider to: every publication carries its own instant, and
 //! [`CONFORMANCE_RETENTION_MS`] is far longer than a run, so no scenario
@@ -34,8 +45,13 @@
 use bytes::Bytes;
 use suprnova_live::crypto::SnapshotKeyRing;
 use suprnova_live::render_cache::RenderCacheErrorKind;
+use suprnova_live::render_cache::composite::{
+    AssemblyInput, CompositeEntry, CompositeHeader, NestedFailureCause, NestedOutcome, Segment,
+    SegmentGraph, SlotFailurePolicy, assemble_nested, descend_nested,
+};
 use suprnova_live::render_cache::entry::{
-    CompleteEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, decode, encode,
+    CompleteEntry, DecodedEntry, EntryHeader, EntryKind, EntryLimits, SafeHeaders, decode, encode,
+    encode_composite, encode_raw_header_for_test_with_kind,
 };
 use suprnova_live::render_cache::generation::GenerationSet;
 use suprnova_live::render_cache::key::RenderKey;
@@ -92,6 +108,8 @@ pub async fn run_all(
     evict_removes(store, keys).await;
     two_keys_never_alias(store, keys).await;
     a_flipped_byte_and_a_truncated_frame_are_misses(store, keys, limits).await;
+    a_well_formed_nested_graph_resolves_and_excess_depth_is_refused(store, keys, limits).await;
+    a_composite_naming_an_unknown_segment_kind_is_refused_not_ignored(store, keys, limits).await;
     an_oversized_publish_is_rejected_and_stores_nothing(store, keys, max_bytes).await;
     inspect_counts_entries_and_bytes(store, keys).await;
 }
@@ -506,6 +524,249 @@ async fn a_flipped_byte_and_a_truncated_frame_are_misses(
     evict(store, &key).await;
 }
 
+/// A well-formed nested segment graph survives the store and resolves; the
+/// identical decoded entry, resolved as though it sat two ownership levels
+/// deeper than it was published at, is refused by the closed depth cause
+/// rather than assembled anyway.
+///
+/// The store's own contract is indifferent to Complete versus Composite: it
+/// hands back whatever bytes it was given, exactly as
+/// [`a_flipped_byte_and_a_truncated_frame_are_misses`] proves for a
+/// corrupted frame. This proves that indifference holds for a nested graph
+/// specifically, and resolves the accept and the depth-refusal from the
+/// same two stored, fetched-back entries, so the refusal below is shown
+/// refusing a graph that otherwise resolves, not merely failing to parse
+/// anything.
+async fn a_well_formed_nested_graph_resolves_and_excess_depth_is_refused(
+    store: &dyn RenderStore,
+    keys: &SnapshotKeyRing,
+    limits: &EntryLimits,
+) {
+    let leaf_name = "nested-leaf";
+    let leaf_key = key_for(keys, leaf_name);
+    let leaf_body = Bytes::from_static(b"<p>leaf</p>");
+    let leaf = composite_entry_for(
+        keys,
+        leaf_name,
+        SegmentGraph {
+            segments: vec![Segment::Literal {
+                len: leaf_body.len() as u32,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        },
+        leaf_body.clone(),
+    );
+    publish(
+        store,
+        &leaf_key,
+        encode_composite(&leaf, keys).expect("the leaf composite entry encodes"),
+        fence(1, 1),
+        CONFORMANCE_PUBLISHED_AT_MS,
+    )
+    .await;
+    let leaf_stored = hit(store, &leaf_key).await;
+    let leaf_decoded = match decode(&leaf_stored.bytes, keys, limits).expect("the leaf decodes") {
+        DecodedEntry::Composite(entry) => entry,
+        DecodedEntry::Complete(_) => panic!("a Composite entry decoded as Complete"),
+    };
+    assert!(
+        leaf_decoded.shell() == &leaf_body,
+        "the leaf decodes back to exactly the shell it was published with"
+    );
+
+    let outer_name = "nested-outer";
+    let outer_key = key_for(keys, outer_name);
+    let outer_version = 1;
+    let outer = composite_entry_for(
+        keys,
+        outer_name,
+        SegmentGraph {
+            segments: vec![Segment::Nested {
+                key: leaf_key.clone(),
+                version: outer_version,
+                assembled_len: leaf_body.len() as u32,
+                on_failure: SlotFailurePolicy::Omit,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        },
+        Bytes::new(),
+    );
+    publish(
+        store,
+        &outer_key,
+        encode_composite(&outer, keys).expect("the outer composite entry encodes"),
+        fence(1, 1),
+        CONFORMANCE_PUBLISHED_AT_MS,
+    )
+    .await;
+    let outer_stored = hit(store, &outer_key).await;
+    let outer_decoded = match decode(&outer_stored.bytes, keys, limits).expect("the outer decodes")
+    {
+        DecodedEntry::Composite(entry) => entry,
+        DecodedEntry::Complete(_) => panic!("a Composite entry decoded as Complete"),
+    };
+
+    // Accepted: resolved at the depth it was actually published at (the
+    // outer entry names no ancestors of its own), proving a well-formed
+    // depth-2 graph assembles rather than every graph merely failing to
+    // parse.
+    let assembled = assemble_nested(
+        &outer_decoded,
+        AssemblyInput {
+            outcomes: Vec::new(),
+            nonce: None,
+        },
+        vec![NestedOutcome::Resolved {
+            version: outer_version,
+            body: leaf_body.clone(),
+        }],
+        &[],
+        1 << 20,
+    )
+    .expect("a well-formed depth-2 graph, fetched back from the store, assembles");
+    assert!(
+        assembled.body() == &leaf_body,
+        "the assembled body is exactly the resolved inner entry's bytes"
+    );
+
+    // Refused: the identical decoded entry, resolved as though two more
+    // ownership levels already sat above it, so its own single
+    // `Segment::Nested` would make a fourth level -- one past
+    // `MAX_NESTING_DEPTH`.
+    let ancestor_a = key_for(keys, "nested-ancestor-a");
+    let ancestor_b = key_for(keys, "nested-ancestor-b");
+    let refused = assemble_nested(
+        &outer_decoded,
+        AssemblyInput {
+            outcomes: Vec::new(),
+            nonce: None,
+        },
+        vec![NestedOutcome::Resolved {
+            version: outer_version,
+            body: leaf_body.clone(),
+        }],
+        &[ancestor_a.clone(), ancestor_b.clone()],
+        1 << 20,
+    )
+    .err()
+    .map(|error| error.kind());
+    assert_eq!(
+        refused,
+        Some(RenderCacheErrorKind::AssemblyFailed),
+        "a fourth ownership level is refused rather than assembled"
+    );
+    assert_eq!(
+        descend_nested(&[ancestor_a, ancestor_b, outer_key.clone()], &leaf_key),
+        Err(NestedFailureCause::DepthExceeded),
+        "the precise closed cause is the depth bound, never a cycle or a mismatch"
+    );
+
+    evict(store, &outer_key).await;
+    evict(store, &leaf_key).await;
+}
+
+/// A stored Composite entry naming a segment kind this build does not
+/// recognize is refused whole by [`decode`], never served half-understood.
+///
+/// This is the forward-compatibility case: a future build may add a
+/// segment kind this one has never heard of, and the bytes such a build
+/// writes are exactly as valid, and exactly as opaque to a provider, as any
+/// other Composite entry. A build meeting that entry has no way to tell
+/// which part of an unknown segment is safe to skip and which changes the
+/// meaning of what surrounds it, so the only closed answer is to refuse the
+/// whole entry rather than assemble around the part it understands -- a
+/// half-understood cache entry would serve a wrong document, never no
+/// document. Mirrors
+/// [`a_flipped_byte_and_a_truncated_frame_are_misses`]'s rhythm (an intact
+/// positive control, then the same key republished mutated) for a defect
+/// that is well-formed and correctly signed rather than corrupted.
+async fn a_composite_naming_an_unknown_segment_kind_is_refused_not_ignored(
+    store: &dyn RenderStore,
+    keys: &SnapshotKeyRing,
+    limits: &EntryLimits,
+) {
+    let name = "nested-unknown-kind";
+    let key = key_for(keys, name);
+    let inner_key = key_for(keys, "nested-unknown-kind-inner");
+    let entry = composite_entry_for(
+        keys,
+        name,
+        SegmentGraph {
+            segments: vec![Segment::Nested {
+                key: inner_key,
+                version: 1,
+                assembled_len: 0,
+                on_failure: SlotFailurePolicy::Omit,
+            }],
+            slots: Vec::new(),
+            shell_islands: Vec::new(),
+            nonce_headers: Vec::new(),
+        },
+        Bytes::new(),
+    );
+    let header_json = serde_json::to_value(CompositeHeader {
+        entry: entry.header().clone(),
+        graph: entry.graph().clone(),
+    })
+    .expect("the composite header serializes");
+
+    let intact = encode_raw_header_for_test_with_kind(
+        &header_json,
+        entry.shell(),
+        keys,
+        EntryKind::Composite,
+    );
+    assert_eq!(
+        publish(
+            store,
+            &key,
+            intact,
+            fence(1, 1),
+            CONFORMANCE_PUBLISHED_AT_MS
+        )
+        .await,
+        PublishOutcome::Published,
+        "the intact entry publishes"
+    );
+    let stored = hit(store, &key).await;
+    decode(&stored.bytes, keys, limits).expect(
+        "the entry the forward-compatibility scenario mutates decodes before it is mutated",
+    );
+
+    let mut mutated = header_json;
+    mutated["graph"]["segments"][0]["kind"] = serde_json::json!("future_segment");
+    let forward_incompatible =
+        encode_raw_header_for_test_with_kind(&mutated, entry.shell(), keys, EntryKind::Composite);
+
+    assert_eq!(
+        publish(
+            store,
+            &key,
+            forward_incompatible,
+            fence(1, 2),
+            CONFORMANCE_PUBLISHED_AT_MS + CONFORMANCE_REPUBLISH_AFTER_MS,
+        )
+        .await,
+        PublishOutcome::Published,
+        "a store stores what it is given rather than validating it, exactly as for corrupted bytes"
+    );
+    let stored = hit(store, &key).await;
+    let refused = decode(&stored.bytes, keys, limits)
+        .err()
+        .map(|error| error.kind());
+    assert_eq!(
+        refused,
+        Some(RenderCacheErrorKind::EntryInvalid),
+        "an unrecognized segment kind is refused as an invalid entry, never partially trusted"
+    );
+
+    evict(store, &key).await;
+}
+
 /// Bytes past the configured bound are refused, and refused before anything
 /// is stored.
 async fn an_oversized_publish_is_rejected_and_stores_nothing(
@@ -668,6 +929,38 @@ fn encoded_entry(
     encode(&entry, keys).expect("the conformance entry encodes")
 }
 
+/// A signed Composite entry for one scenario's key, built straight from
+/// `graph` and `shell` rather than through the typed authoring surface: the
+/// nested-segment scenarios prove the store and the codec, not composition.
+fn composite_entry_for(
+    keys: &SnapshotKeyRing,
+    name: &str,
+    graph: SegmentGraph,
+    shell: Bytes,
+) -> CompositeEntry {
+    CompositeEntry::new(
+        EntryHeader {
+            key: key_for(keys, name),
+            class: RepresentationClass::PublicShellStitched,
+            variance: VarianceDescriptor::new(),
+            published_at_ms: CONFORMANCE_PUBLISHED_AT_MS,
+            fresh_ms: 60_000,
+            stale_servable_ms: 0,
+            stale_on_error_ms: 0,
+            observed: GenerationSet::default(),
+            epoch: 1,
+            seed_deadline_ms: None,
+            status: 200,
+            headers: SafeHeaders::from_pairs([("content-type", "text/html; charset=utf-8")])
+                .expect("the conformance headers are replayable"),
+            content_encoding: None,
+        },
+        graph,
+        shell,
+    )
+    .expect("the conformance composite entry constructs")
+}
+
 /// Reads a key, naming the operation rather than the key when a provider
 /// fails.
 async fn get(store: &dyn RenderStore, key: &RenderKey) -> Option<StoredEntry> {
@@ -704,4 +997,40 @@ async fn evict(store: &dyn RenderStore, key: &RenderKey) {
 /// Reads occupancy.
 async fn inspect(store: &dyn RenderStore) -> StoreInspection {
     store.inspect().await.expect("a store answers inspect")
+}
+
+#[cfg(test)]
+mod tests {
+    use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+    use suprnova_live::identity::{KeyId, UnixMillis};
+    use suprnova_live::render_cache::entry::EntryLimits;
+    use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits};
+
+    use super::run_all;
+
+    /// The maximum any scenario in this suite, including the nested and
+    /// forward-compatibility scenarios, publishes under.
+    const MAX_BYTES: usize = 1 << 20;
+
+    fn keys() -> SnapshotKeyRing {
+        let active = KeyRecord::new(
+            KeyId::parse("render-store-embedded").expect("key id"),
+            RootKey::new(vec![11; 32]).expect("root key"),
+            UnixMillis::new(0),
+            UnixMillis::new(u64::MAX / 2),
+            UnixMillis::new(u64::MAX),
+        )
+        .expect("key record");
+        SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
+    }
+
+    #[tokio::test]
+    async fn the_suite_passes_over_the_embedded_provider() {
+        let store = MemoryRenderStore::new(MemoryStoreLimits {
+            max_entries: 32,
+            max_bytes: MAX_BYTES,
+        });
+
+        run_all(&store, &keys(), &EntryLimits::default(), MAX_BYTES).await;
+    }
 }
