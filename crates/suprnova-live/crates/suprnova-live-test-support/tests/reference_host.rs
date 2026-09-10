@@ -1284,7 +1284,13 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         );
         for event in events {
             let object = event.as_object().expect("event object");
-            for field in ["maximum_fanout", "name", "payload_contract", "schema", "targets"] {
+            for field in [
+                "maximum_fanout",
+                "name",
+                "payload_contract",
+                "schema",
+                "targets",
+            ] {
                 assert!(
                     object.contains_key(field),
                     "registered event is missing {field}: {event}"

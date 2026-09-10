@@ -326,8 +326,7 @@ impl AsyncReferenceAuthority {
         descriptor: &str,
         now: UnixMillis,
     ) -> Result<Vec<Value>, &'static str> {
-        let parsed =
-            SubscriptionDescriptor::parse(descriptor).map_err(|_| "descriptor_invalid")?;
+        let parsed = SubscriptionDescriptor::parse(descriptor).map_err(|_| "descriptor_invalid")?;
         let verified = self
             .codec
             .verify(&parsed, now)
