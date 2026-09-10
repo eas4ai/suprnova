@@ -382,7 +382,7 @@ ahí.
 Cada TTL de Redis pasa por `PX` / `PEXPIRE`, no por `EX` / `EXPIRE`.
 Eso evita dos trampas:
 
-- Los `Duration` de menos de un segundo truncarían a `0 segundos` bajo
+- Los `Duration` de menos de un segundo truncarían a `0 seconds` bajo
   `EX`, algo que Redis rechaza (`SET … EX 0`) o, peor aún, interpreta
   como "elimina la clave" (`EXPIRE key 0`).
 - `Duration::ZERO` se acota a 1 ms antes de la llamada, así que ninguno
