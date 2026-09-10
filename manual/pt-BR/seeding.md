@@ -218,7 +218,7 @@ suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
 Uma busca sem correspondência retorna
-`FrameworkError::not_found("no seeder registered for \`X\`")`. O
+``FrameworkError::not_found("no seeder registered for `X`")``. O
 comando console propaga isso para um exit não-zero e uma linha de
 stderr - sem no-op silencioso.
 

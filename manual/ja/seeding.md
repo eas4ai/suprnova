@@ -162,7 +162,7 @@ suprnova::seed::run_all().await?;
 suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
-見つからない場合は `FrameworkError::not_found("no seeder registered for \`X\`")` を返します。コンソールコマンドは、それを非ゼロの終了コードとstderrの1行へ伝播させます - サイレントなno-opはありません。
+見つからない場合は ``FrameworkError::not_found("no seeder registered for `X`")`` を返します。コンソールコマンドは、それを非ゼロの終了コードとstderrの1行へ伝播させます - サイレントなno-opはありません。
 
 ### `count()` と `is_registered(name)`
 

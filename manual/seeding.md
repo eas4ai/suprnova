@@ -202,7 +202,7 @@ Run one named seeder without running the others. This is the engine for
 suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
-Misses return `FrameworkError::not_found("no seeder registered for \`X\`")`.
+Misses return ``FrameworkError::not_found("no seeder registered for `X`")``.
 The console command propagates that to a non-zero exit and a stderr line -
 no silent no-op.
 

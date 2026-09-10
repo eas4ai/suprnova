@@ -207,7 +207,7 @@ Ejecuta un sembrador con nombre sin ejecutar los demás. Este es el motor de
 suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
-Un fallo devuelve `FrameworkError::not_found("no seeder registered for \`X\`")`.
+Un fallo devuelve ``FrameworkError::not_found("no seeder registered for `X`")``.
 El comando de consola propaga eso a una salida distinta de cero y una línea en
 stderr - sin no-op silencioso.
 

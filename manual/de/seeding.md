@@ -223,7 +223,7 @@ suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
 Verfehlt der Name, liefert es
-`FrameworkError::not_found("no seeder registered for \`X\`")`. Der
+``FrameworkError::not_found("no seeder registered for `X`")``. Der
 Konsolenbefehl gibt das an einen Non-Zero-Exit und eine Stderr-Zeile
 weiter - kein stiller No-op.
 
