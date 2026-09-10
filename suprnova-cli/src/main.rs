@@ -3,22 +3,17 @@ mod secure_fs;
 mod templates;
 pub mod ui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "suprnova")]
 #[command(about = "A CLI for scaffolding Suprnova web applications", long_about = None)]
 #[command(version)]
-#[command(disable_help_flag = true)]
 #[command(disable_help_subcommand = true)]
 #[command(disable_version_flag = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Print help
-    #[arg(short, long, global = true)]
-    help: bool,
 
     /// Print version
     // Hand-declared rather than clap's generated flag, which offers `-V`
@@ -345,13 +340,23 @@ enum Commands {
     },
 }
 
-fn main() {
-    let cli = Cli::parse();
+/// The parser `main` runs, with the curated top-level help screen.
+///
+/// Only the top-level command's help is replaced. Every subcommand keeps
+/// clap's own generated help, and clap answers `-h` / `--help` while it is
+/// still parsing - before it validates required arguments, and long before
+/// `main` reaches the dispatch below. A help request can therefore never
+/// run a command.
+fn cli_command() -> clap::Command {
+    Cli::command().override_help(ui::help_text())
+}
 
-    if cli.help && cli.command.is_none() {
-        ui::print_help();
-        return;
-    }
+fn main() {
+    let mut matches = cli_command().get_matches();
+    let cli = match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(err) => err.format(&mut cli_command()).exit(),
+    };
 
     let command = match cli.command {
         Some(cmd) => cmd,
@@ -508,5 +513,132 @@ fn main() {
         Commands::KeyGenerate { show } => {
             commands::key_generate::run(show);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    /// Every subcommand this CLI defines, read back from clap itself so a
+    /// subcommand added later is covered without editing this test.
+    fn subcommand_names() -> Vec<String> {
+        let names: Vec<String> = cli_command()
+            .get_subcommands()
+            .map(|sc| sc.get_name().to_string())
+            .collect();
+        assert!(
+            names.len() > 30,
+            "expected the CLI's full subcommand list, got {names:?}"
+        );
+        names
+    }
+
+    /// A help request must never produce parsed arguments, for any
+    /// subcommand.
+    ///
+    /// `Ok` here is the defect this test exists for: it is exactly the
+    /// state in which `main` would fall through to the dispatch and run
+    /// the command (`suprnova migrate:fresh --help` dropped every table in
+    /// a local environment; `suprnova generate-types --help` rewrote the
+    /// types file). `Err(DisplayHelp)` is clap having answered during
+    /// parsing, which returns to `main` as a printed help screen and exit
+    /// code 0.
+    #[test]
+    fn help_flags_never_reach_dispatch_for_any_subcommand() {
+        for name in subcommand_names() {
+            for flag in ["--help", "-h"] {
+                let error = cli_command()
+                    .try_get_matches_from(["suprnova", name.as_str(), flag])
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("`suprnova {name} {flag}` parsed into a runnable command")
+                    });
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp,
+                    "`suprnova {name} {flag}` must display help, got {:?}",
+                    error.kind()
+                );
+                let rendered = error.render().to_string();
+                assert!(
+                    rendered.contains(&format!("Usage: suprnova {name}")),
+                    "`suprnova {name} {flag}` must print that subcommand's own \
+                     help; got:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// `--help` written before the subcommand is the same trap in a
+    /// different argument order. clap answers it at the top level, so it
+    /// cannot dispatch either.
+    #[test]
+    fn a_help_flag_before_a_subcommand_never_reaches_dispatch() {
+        for name in subcommand_names() {
+            for flag in ["--help", "-h"] {
+                let error = cli_command()
+                    .try_get_matches_from(["suprnova", flag, name.as_str()])
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("`suprnova {flag} {name}` parsed into a runnable command")
+                    });
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp,
+                    "`suprnova {flag} {name}` must display help, got {:?}",
+                    error.kind()
+                );
+            }
+        }
+    }
+
+    /// The top-level flags keep the curated screen rather than clap's
+    /// generated one.
+    #[test]
+    fn the_top_level_help_flags_print_the_curated_screen() {
+        for flag in ["--help", "-h"] {
+            let error = cli_command()
+                .try_get_matches_from(["suprnova", flag])
+                .expect_err("a help request never yields parsed arguments");
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+            let rendered = error.render().to_string();
+            for expected in ["USAGE:", "live:make", "migrate:fresh"] {
+                assert!(
+                    rendered.contains(expected),
+                    "`suprnova {flag}` must print the curated screen \
+                     (missing {expected:?}); got:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// `--version` never had the same defect, and this pins why: the flag
+    /// carries `ArgAction::Version`, so clap answers it while parsing
+    /// instead of handing `main` a value it could ignore.
+    #[test]
+    fn version_flags_are_answered_while_parsing() {
+        for flag in ["--version", "-v", "-V"] {
+            let error = cli_command()
+                .try_get_matches_from(["suprnova", flag])
+                .expect_err("a version request never yields parsed arguments");
+            assert_eq!(
+                error.kind(),
+                ErrorKind::DisplayVersion,
+                "`suprnova {flag}` must print the version, got {:?}",
+                error.kind()
+            );
+        }
+    }
+
+    /// A subcommand invoked without a help flag still parses, or the
+    /// assertions above would pass against a CLI that parses nothing.
+    #[test]
+    fn a_subcommand_without_a_help_flag_still_parses() {
+        let matches = cli_command()
+            .try_get_matches_from(["suprnova", "migrate:fresh"])
+            .expect("`suprnova migrate:fresh` parses");
+        assert_eq!(matches.subcommand_name(), Some("migrate:fresh"));
     }
 }

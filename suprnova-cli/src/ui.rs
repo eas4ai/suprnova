@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use console::{Style, Term, style};
 
 // ─── Brand colors ───────────────────────────────────────────
@@ -19,28 +21,37 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn banner() {
     let term = Term::stdout();
     let _ = term.clear_line();
+    print!("{}", banner_text());
+}
+
+/// Render the Suprnova banner with version.
+fn banner_text() -> String {
+    let mut out = String::new();
 
     for (i, line) in BANNER.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
-        match i {
-            1 => println!("{}", style(line).color256(220).bold()), // bright yellow
-            2 => println!("{}", style(line).color256(214).bold()), // yellow-orange
-            3 => println!("{}", style(line).color256(214).bold()), // orange
-            4 => println!("{}", style(line).color256(208).bold()), // deeper orange
-            5 => println!("{}", style(line).color256(203).bold()), // red-orange
-            6 => println!("{}", style(line).color256(197).bold()), // red
-            7 | 8 => println!("{}", style(line).color256(161).bold()), // deep magenta tail
-            _ => println!("{}", style(line).cyan()),
-        }
+        let styled = match i {
+            1 => style(line).color256(220).bold(),     // bright yellow
+            2 => style(line).color256(214).bold(),     // yellow-orange
+            3 => style(line).color256(214).bold(),     // orange
+            4 => style(line).color256(208).bold(),     // deeper orange
+            5 => style(line).color256(203).bold(),     // red-orange
+            6 => style(line).color256(197).bold(),     // red
+            7 | 8 => style(line).color256(161).bold(), // deep magenta tail
+            _ => style(line).cyan(),
+        };
+        let _ = writeln!(out, "{styled}");
     }
-    println!(
+    let _ = writeln!(
+        out,
         "  {} {}",
         style("A Rust web framework that doesn't gatekeep.").dim(),
-        style(format!("v{}", VERSION)).dim().italic(),
+        style(format!("v{VERSION}")).dim().italic(),
     );
-    println!();
+    let _ = writeln!(out);
+    out
 }
 
 /// Section header - used to group related output
@@ -163,88 +174,132 @@ pub fn br() {
     println!();
 }
 
-/// Custom help output - replaces clap's default
+/// The command list the help screen renders, grouped the way it groups them.
+const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "CREATE",
+        &[
+            ("new [name]", "Create a new Suprnova project"),
+            ("serve", "Start dev servers (backend + frontend)"),
+            ("dev:tls", "Trust portless CA + register HTTPS dev URL"),
+        ],
+    ),
+    (
+        "GENERATE",
+        &[
+            ("make:controller <name>", "Scaffold a new controller"),
+            ("make:action <name>", "Scaffold a new action"),
+            ("make:middleware <name>", "Scaffold a new middleware"),
+            ("make:migration <name>", "Scaffold a new migration"),
+            ("make:inertia <name>", "Scaffold an Inertia page"),
+            ("make:error <name>", "Scaffold a domain error"),
+            ("make:task <name>", "Scaffold a scheduled task"),
+        ],
+    ),
+    (
+        "LIVE",
+        &[
+            ("live:make <name>", "Scaffold a Live component and view"),
+            ("live:check", "Check Live views with the integrated checker"),
+            ("live:inspect", "Report safe Live runtime state"),
+            (
+                "live:assets --out <dir>",
+                "Publish the reviewed Live runtime artifacts",
+            ),
+        ],
+    ),
+    (
+        "DATABASE",
+        &[
+            ("migrate", "Run pending migrations"),
+            ("migrate:status", "Show migration status"),
+            ("migrate:rollback", "Rollback last migration(s)"),
+            ("migrate:fresh", "Drop all tables & re-migrate"),
+            ("db:sync", "Sync schema → entity files"),
+        ],
+    ),
+    (
+        "SCHEDULE",
+        &[
+            ("schedule:run", "Run due tasks once"),
+            ("schedule:work", "Start scheduler daemon"),
+            ("schedule:list", "List registered tasks"),
+        ],
+    ),
+    (
+        "WORKFLOW",
+        &[
+            ("workflow:work", "Start workflow worker"),
+            ("workflow:install", "Install workflow migrations"),
+        ],
+    ),
+    (
+        "SSR",
+        &[
+            ("ssr:start", "Launch Inertia SSR worker (foreground)"),
+            ("ssr:check", "Verify SSR worker is reachable"),
+        ],
+    ),
+    (
+        "DEPLOY",
+        &[
+            ("docker:init", "Generate production Dockerfile"),
+            ("docker:compose", "Generate docker-compose.yml"),
+        ],
+    ),
+    (
+        "SECURITY",
+        &[("key:generate", "Mint a fresh APP_KEY (AES-256, base64)")],
+    ),
+    (
+        "OTHER",
+        &[
+            ("generate-types", "Generate TS types from Rust structs"),
+            ("web:run", "Run web server (production)"),
+        ],
+    ),
+];
+
+/// Custom help output - replaces clap's generated top-level help.
+///
+/// `main` also hands [`help_text`] to clap as the top-level command's help,
+/// so a bare `suprnova`, `suprnova -h` and `suprnova --help` all render this
+/// same screen while every subcommand keeps clap's own generated help.
 pub fn print_help() {
-    banner();
-
-    println!("  {}", style("USAGE:").bold().underlined());
-    println!("    suprnova {}", style("<command> [options]").dim());
-    br();
-
-    println!("  {}", style("CREATE").bold().underlined());
-    help_line("new [name]", "Create a new Suprnova project");
-    help_line("serve", "Start dev servers (backend + frontend)");
-    help_line("dev:tls", "Trust portless CA + register HTTPS dev URL");
-    br();
-
-    println!("  {}", style("GENERATE").bold().underlined());
-    help_line("make:controller <name>", "Scaffold a new controller");
-    help_line("make:action <name>", "Scaffold a new action");
-    help_line("make:middleware <name>", "Scaffold a new middleware");
-    help_line("make:migration <name>", "Scaffold a new migration");
-    help_line("make:inertia <name>", "Scaffold an Inertia page");
-    help_line("make:error <name>", "Scaffold a domain error");
-    help_line("make:task <name>", "Scaffold a scheduled task");
-    br();
-
-    println!("  {}", style("LIVE").bold().underlined());
-    help_line("live:make <name>", "Scaffold a Live component and view");
-    help_line("live:check", "Check Live views with the integrated checker");
-    help_line("live:inspect", "Report safe Live runtime state");
-    help_line(
-        "live:assets --out <dir>",
-        "Publish the reviewed Live runtime artifacts",
-    );
-    br();
-
-    println!("  {}", style("DATABASE").bold().underlined());
-    help_line("migrate", "Run pending migrations");
-    help_line("migrate:status", "Show migration status");
-    help_line("migrate:rollback", "Rollback last migration(s)");
-    help_line("migrate:fresh", "Drop all tables & re-migrate");
-    help_line("db:sync", "Sync schema → entity files");
-    br();
-
-    println!("  {}", style("SCHEDULE").bold().underlined());
-    help_line("schedule:run", "Run due tasks once");
-    help_line("schedule:work", "Start scheduler daemon");
-    help_line("schedule:list", "List registered tasks");
-    br();
-
-    println!("  {}", style("WORKFLOW").bold().underlined());
-    help_line("workflow:work", "Start workflow worker");
-    help_line("workflow:install", "Install workflow migrations");
-    br();
-
-    println!("  {}", style("SSR").bold().underlined());
-    help_line("ssr:start", "Launch Inertia SSR worker (foreground)");
-    help_line("ssr:check", "Verify SSR worker is reachable");
-    br();
-
-    println!("  {}", style("DEPLOY").bold().underlined());
-    help_line("docker:init", "Generate production Dockerfile");
-    help_line("docker:compose", "Generate docker-compose.yml");
-    br();
-
-    println!("  {}", style("SECURITY").bold().underlined());
-    help_line("key:generate", "Mint a fresh APP_KEY (AES-256, base64)");
-    br();
-
-    println!("  {}", style("OTHER").bold().underlined());
-    help_line("generate-types", "Generate TS types from Rust structs");
-    help_line("web:run", "Run web server (production)");
-    br();
-
-    hint("Run 'suprnova <command> --help' for details on a specific command.");
-    br();
+    let term = Term::stdout();
+    let _ = term.clear_line();
+    print!("{}", help_text());
 }
 
-fn help_line(cmd: &str, desc: &str) {
-    let pad = 30_usize.saturating_sub(cmd.len());
-    println!(
-        "    {}{}{}",
-        style(cmd).cyan(),
-        " ".repeat(pad),
-        style(desc).dim(),
+/// Render the top-level help screen.
+pub fn help_text() -> String {
+    let mut out = banner_text();
+
+    let _ = writeln!(out, "  {}", style("USAGE:").bold().underlined());
+    let _ = writeln!(out, "    suprnova {}", style("<command> [options]").dim());
+    let _ = writeln!(out);
+
+    for (section, commands) in HELP_SECTIONS {
+        let _ = writeln!(out, "  {}", style(section).bold().underlined());
+        for (cmd, desc) in *commands {
+            let pad = 30_usize.saturating_sub(cmd.len());
+            let _ = writeln!(
+                out,
+                "    {}{}{}",
+                style(cmd).cyan(),
+                " ".repeat(pad),
+                style(desc).dim(),
+            );
+        }
+        let _ = writeln!(out);
+    }
+
+    let _ = writeln!(
+        out,
+        "  {}",
+        style("Run 'suprnova <command> --help' for details on a specific command.").dim()
     );
+    let _ = writeln!(out);
+
+    out
 }
