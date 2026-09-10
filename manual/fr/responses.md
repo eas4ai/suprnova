@@ -55,8 +55,8 @@ durée :
   ses propres erreurs en un message terminal du flux avant que le flux
   ne s'achève, car il n'existe aucun moyen de faire remonter au client
   une erreur au niveau du transport en plein milieu d'une réponse.
-- `HttpResponse::event_stream(stream, end)` - constructeur de flux
-  structuré pour Server-Sent Events. Enveloppe un `Stream` de valeurs
+- `HttpResponse::event_stream(stream, end)` -
+  `ResponseFactory::eventStream` de Laravel. Enveloppe un `Stream` de valeurs
   `sse::StreamedEvent`, encadre chacune comme `event: update` (ou son
   propre nom) plus un cadre terminal configurable. Voir [Événements serveur](sse.md).
 - `HttpResponse::stream_json(stream)` - le `ResponseFactory::streamJson`

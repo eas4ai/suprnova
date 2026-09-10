@@ -388,3 +388,75 @@ binary (`./node_modules/.bin/eslint . --max-warnings 0`) is what was
 actually run and found clean; and definition-of-done item 10's closing
 clause, regenerating the iteration 004 browser compatibility evidence, was
 not exercised by any command in this plan.
+
+## 2026-09-10 -- Manual inline-code-span parity, the whole corpus
+
+Plan I, the manual-parity plan, closed definition-of-done item 14 and the
+part of 15 it touches.
+
+### The ratchet is gone
+
+`SPAN_CHECKED_SOURCES` in `scripts/check-manual-structure.py`, the
+seven-chapter allowlist that scoped the inline-code-span comparison, is
+deleted along with its explanatory comment; `_compare_shapes` drops its
+`compare_spans` parameter and compares spans for every chapter and all six
+mirrors unconditionally. `scripts/tests/test_manual_structure.py` drops the
+ratchet-membership test, renames
+`test_span_defect_is_reported_only_for_a_listed_chapter` to
+`test_a_span_defect_is_reported_for_every_chapter` (now planting the same
+defect in two chapters and asserting both are reported), and adds
+`test_the_real_manual_tree_reports_no_problems`, which runs the checker over
+this repository's actual `manual/` tree rather than a fixture, so a future
+regression fails the unit suite and not only the gate. One fixture in
+`scripts/tests/test_gate_scoping.py`
+(`test_escaped_and_code_pipes_do_not_add_table_columns`) had relied on the
+ratchet excluding its synthetic chapter from span comparison to isolate a
+table column-counting check; its English and mirror code spans now carry the
+same identifiers, the way a real translation must, leaving the
+pipe-escaping and column-counting behavior it tests unchanged.
+
+### The corpus reached zero
+
+The whole manual started this plan at 1,591 span problems across 68 of 111
+chapters. 958 of them traced to one malformed construct in
+`manual/seeding.md`: a backslash-escaped backtick inside a single-backtick
+span, which CommonMark does not honor. Fixing that source construct and
+adding paragraph-bounded span extraction
+(`test_a_mis_nested_span_in_one_paragraph_does_not_taint_later_ones`) left
+633 genuine translation drifts. Paragraph-bounding itself cleared none of
+that count: on this corpus every amplified problem came through the
+seeding.md construct, so bounding is containment against a future
+mis-nesting, not a fix for anything this corpus had. A checker fix for
+block-quote markers
+(`test_a_span_wrapped_across_two_quoted_lines_drops_the_quote_marker`)
+cleared 8 more problems the corpus never really had, because the checker
+was folding a quoted line's `> ` marker into the span it compared. The
+remaining 625 were fixed by translation across five sequential batches
+(tasks 4a through 4e, each restamping `.manual-translations.lock`). The
+whole manual and all six mirrors (`de`, `es`, `fr`, `ja`, `pt-BR`,
+`zh-Hans`) now report zero span problems.
+
+### Open, not a defect here
+
+Several translation batches restored or retranslated sentences the mirrors
+had dropped or invented, across `de`, `es`, `fr`, `ja`, `pt-BR`, and
+`zh-Hans`. Every automated check passes, but the writer is not a native or
+fluent speaker of any of the six languages; the retranslated passages reused
+established vocabulary from the same chapters rather than inventing new
+wording, but have not had native-speaker naturalness review. This is a
+fluency question the automated checks cannot settle, not a correctness
+defect, and stays flagged for review before this documentation ships as
+final.
+
+### Evidence
+
+`python3 .superpowers/sdd/plan-i/census.py` (a throwaway, gitignored harness)
+and `python3 scripts/check-manual-structure.py` both report zero span
+problems over the real tree; both now call the same unconditional
+`_compare_shapes`, so this is two invocations of one code path rather than
+two independent checks. `python3 -m
+unittest discover -s scripts/tests -p 'test_*.py'` passes at 144 of 144.
+`scripts/check-manual-translations.sh`, `scripts/check-prose-dashes.sh`, and
+`scripts/check-live-contracts.sh` (which runs the spec, implementation-doc,
+and gate-contract checks together) all pass, and `git diff --check` reports
+nothing. No Cargo build ran; none was needed for this change.

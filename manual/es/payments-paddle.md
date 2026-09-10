@@ -380,7 +380,7 @@ Los métodos `extract_payload_ids`, `extract_payment_snapshot`, y
 de Paddle para que el framework pueda hidratar las tablas de copia
 local. Mapeo rápido:
 
-| `event_type` del webhook | `NeutralEventKind` | Efecto en la copia local |
+| event_type del webhook | `NeutralEventKind` | Efecto en la copia local |
 |---|---|---|
 | `transaction.completed`, `transaction.paid` | `PaymentSucceeded` | Upsert de `payments_transactions` |
 | `transaction.payment_failed` | `PaymentFailed` | Upsert de `payments_transactions` (fallido) |

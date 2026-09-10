@@ -269,18 +269,18 @@
 - **`MergeStrategy::Append`/`Prepend`/`Deep` 的 `match_on` 字段现在是 `Option<Vec<String>>`，不再是 `Option<String>`。** 直接构造结构体字面量形式的调用点 - `MergeStrategy::Append { match_on: Some("id".into()) }` - 将不再编译；请将字段名包进一个 `Vec`：`Some(vec!["id".into()])`。`match_on: None` 不受影响，无需修改。
 - **匹配的 partial reload 不再输出 `deferredProps`。** 从 partial-reload 响应读取 `page.deferredProps` 的代码 - 自定义 deferred-loading component、测试快照或端到端断言 - 现在会发现该键不存在，而不再列出请求未点名的 deferred prop。请从初始的（非 partial）visit 中读取公告；Laravel 将公告放在那里，官方客户端也在那里读取。
 - **裸 `except` 条目现在会丢弃其下的点号 prop 键。** `X-Inertia-Partial-Except: auth` 以前会留下注册在 `auth.user` 下的 prop，因为 gate 比较的是完整键；现在它会被丢弃。如果页面依赖裸 `except` 只裁剪精确键，请改为指名精确键（`except: ['auth.user']`），或改用点号路径 narrowing。
-- **`errors` 忽略 `only`/`except`。** 过滤掉处理程序提供的 `.with("errors", …)` prop，或用点号条目缩小它的 partial reload，现在会完整发送它。需要在 partial reload 中有意排除这个包的测试，应更新为显式标志它 - 使用 `.prop("errors", Prop::eager(…).optional())`，而不是依赖 partial-reload 列表。
+- **`errors` 忽略 `only`/`except`。** 过滤掉处理程序提供的 `.with("errors", …)` prop，或用点号条目缩小它的 partial reload，现在会完整发送它。需要在 partial reload 中有意排除这个 `errors` 包的测试，应更新为显式标志它 - 使用 `.prop("errors", Prop::eager(…).optional())`，而不是依赖 partial-reload 列表。
 - **`Prop::resolve_with_owner` 也会 gate 带标志的 prop。** 它此前会解析任何不是 `Prop::is_lazy()` 的 prop - eager value 或携带 flag 的 resolver - 而不咨询 include set。现在它会 gate 每一个带 resolver 的 prop，只有已经 materialized 的值才不经过 gate。因此 `#[data(lazy(deferred))]` 字段需要请求中的 `?include=<field>` 才会解析或公告，与其他每种 lazy 形态相同。将字段加入请求的 `?include=` 列表，或者如果它本来就不应选择启用，则删除 `lazy(...)` 属性。
 - **Scroll prop 的 `reset` 不再跟随 merge-intent 请求头。** 直接读取 `page.scrollProps[key].reset` 的代码 - 自定义 infinite-scroll component 或测试快照 - 在普通 revisit 上会看到 `reset: false`（以及 `mergeProps` 条目），而此前会看到 `reset: true` 且没有 merge metadata。官方 `<InfiniteScroll>` component 只在普通 revisit 上表现不同：它会在每个 `router` `success` 事件上监听 `reset`，而不仅是显式 `router.reload()`，所以普通 revisit 不会再清除已累积状态，除非 server 真正通过 `X-Inertia-Reset` 点名该键，与 Laravel 一致。在依赖旧的“任何非 append/prepend visit 都会 reset”行为的地方，请显式发送 `X-Inertia-Reset: <key>`。
 - **`Prop::match_on` 接收 `impl MatchOnFields`，不再接收 `impl Into<String>`。** 新 bound 使一次调用可以命名多个字段（`match_on(["id", "slug"])`），其 impl 列表刻意保持封闭 - 只包含 `&str`、`String`、`[T; N]` 和 `Vec<T>`。没有覆盖 `IntoIterator` 的 blanket impl：coherence 会拒绝它与 `&str` 和 `String` 的实现，因为没有任何东西阻止这些类型以后获得 `IntoIterator` 实现。以前能编译的三个参数类型现在不行：`&String`、`Cow<'_, str>` 和 `Box<str>`。请在调用点传入 `&str` - 对 `&String` 使用 `match_on(name.as_str())`，对 `Cow<'_, str>` 使用 `match_on(name.as_ref())`，对 `Box<str>` 使用 `match_on(&*name)`。
-- **点号 `only`/`except` 条目现在会缩小顶层 prop，而不是完全排除它。** 在此修复之前，`X-Inertia-Partial-Data: user.name` 会让 `should_include_eager` 查找精确匹配的 `"user"` 条目，找不到后静默丢弃整个 `user` prop - 请求一个字段的客户端什么也得不到。现在任何碰巧依赖这个缺口（把带点号的 `router.reload({ only: [...] })` 当成省略该键）的前端页面组件都会收到 `{ user: { name: ... } }`。无需修改代码 - 这是 Inertia v3 协议已经规定的请求/响应契约。相同修复也应用于 `should_include_optional`，并且其运行影响更大：一个点号 `only` 条目（`permissions.read`）现在算作对 `Optional` 或 `Defer` prop 顶层键的显式请求，而此前必须使用裸条目（`permissions`）才会触发。过去完全跳过该 prop resolver 的请求现在会运行它 - 如果 resolver 命中数据库或外部服务，已经发送点号 partial-reload 请求的客户端会开始在以前不做这项工作的请求上执行它。若应用有带点号 partial-reload 流量的 `Optional`/`Defer` prop，请在升级后关注 resolver 调用量。
+- **点号 `only`/`except` 条目现在会缩小顶层 prop，而不是完全排除它。** 在此修复之前，`X-Inertia-Partial-Data: user.name` 会让 `should_include_eager` 查找精确匹配的 `"user"` 条目，找不到后静默丢弃整个 `user` prop - 请求 `user` 的一个字段的客户端什么也得不到。现在任何碰巧依赖这个缺口（把带点号的 `router.reload({ only: [...] })` 当成省略该键）的前端页面组件都会收到 `{ user: { name: ... } }`。无需修改代码 - 这是 Inertia v3 协议已经规定的请求/响应契约。相同修复也应用于 `should_include_optional`，并且其运行影响更大：一个点号 `only` 条目（`permissions.read`）现在算作对 `Optional` 或 `Defer` prop 顶层键的显式请求，而此前必须使用裸条目（`permissions`）才会触发。过去完全跳过该 prop resolver 的请求现在会运行它 - 如果 resolver 命中数据库或外部服务，已经发送点号 partial-reload 请求的客户端会开始在以前不做这项工作的请求上执行它。若应用有带点号 partial-reload 流量的 `Optional`/`Defer` prop，请在升级后关注 resolver 调用量。
 - **`InertiaSharedData::share` 现在接收页面组件名称。** 在 `req` 后增加一个 `component: &str` 参数：
   ```diff
   -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
   +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
   ```
 
-  如果 provider 不需要按页面变化，请忽略它（`_component`） - Laravel 的 `RenderContext` 会为 `ProvidesInertiaProperties::toInertiaProperties` 携带同样的 `(component, request)` 配对。
+  如果 provider 不需要按页面变化，请忽略它（`_component`） - Laravel 的 `RenderContext` 会为 `ProvidesInertiaProperties::toInertiaProperties` 携带同样的 (`component`, `request`) 配对。
 - **`Prop` 是结构体，不是 enum。** 它的变体已移除；通过方法构建和读取 prop：
   - `Prop::Eager(v)` -> `Prop::eager(v)`
   - `Prop::EagerNone` -> `Prop::absent()`
@@ -360,7 +360,7 @@
 
 ### 变更
 
-- **Suprnova 已从 GitHub 的 `entrepeneur4lyf` 组织迁移到 `eas4ai`。** 软件包元数据、文档、依赖示例和 scaffold 模板中的仓库 URL 现在使用 `github.com/eas4ai`。新项目也使用受监控的作者邮箱 `shawn@eas4ai.com`。此版本没有改变任何运行时行为。
+- **Suprnova 已从 GitHub 的 entrepeneur4lyf 组织迁移到 `eas4ai`。** 软件包元数据、文档、依赖示例和 scaffold 模板中的仓库 URL 现在使用 `github.com/eas4ai`。新项目也使用受监控的作者邮箱 `shawn@eas4ai.com`。此版本没有改变任何运行时行为。
 
 ## 1.2.0 - 2026-08-05
 
@@ -510,7 +510,7 @@
 
 两处不属于启动失败的行为变化：
 
-- **`fill` 和 `first_or_new` 会拒绝格式错误的值。** 一个没法解码成其字段类型的值，此前会变成那个字段的 `Default`，并返回 `Ok` - `fill(attrs!{ age: "abc" })` 会把 `age` 设成 `0`，并报告成功。它现在会返回一个点名该字段的 `ValidationError`，并让模型保持不变。未知的列仍然会被静默跳过（与 Laravel 保持一致），数值类型的放宽转换仍然照常工作。
+- **`fill` 和 `first_or_new` 会拒绝格式错误的值。** 一个没法解码成其字段类型的值，此前会变成那个字段的 `Default`，并返回 `Ok` - `fill(attrs!{ age: "abc" })` 会让 `age = 0`，并报告成功。它现在会返回一个点名该字段的 `ValidationError`，并让模型保持不变。未知的列仍然会被静默跳过（与 Laravel 保持一致），数值类型的放宽转换仍然照常工作。
 - **`/_suprnova/health?db=true` 不再返回驱动程序错误。** 细节挪到了日志里；响应体仍然保留 `"database": "error"`。调试构建仍然会包含它。解析 `status` / `database` 的仪表盘不受影响。
 - **`url::signature_has_not_expired` 现在要求一个有效的签名**，并且已被弃用。它此前会对一个伪造的 URL 回答 `true` - 一个坏签名并不是“已过期”，因为它从来就没有一个可以错过的过期时间 - 所以任何单靠它来把关的处理程序，都会接受伪造的链接。它现在和 `has_valid_signature` 完全等价。如果您此前是用它来区分*已过期*和*无效*（好去渲染“请重新申请一个链接”，而不是一个 403），请改用会返回全部三种状态的 `url::signature_verdict`。这是刻意偏离 Laravel 的 `URL::signatureHasNotExpired` 的地方。
 

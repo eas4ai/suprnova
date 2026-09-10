@@ -47,7 +47,7 @@ Cela importe car :
   `TestContainer::bind(...)` lie à l'intérieur d'un thread sans
   toucher au conteneur global, donc les tests parallèles ne mélangent
   pas leurs services. La garde vide le conteneur de test lorsqu'elle
-  est détruite (`drop`).
+  est détruite.
 - **Les services à l'échelle de l'app passent par global** - lié une
   fois à l'amorçage, résolu partout.
 

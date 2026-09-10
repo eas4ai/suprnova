@@ -212,8 +212,9 @@ clientes obsoletos se recarguen), `Inertia303Middleware` (reescribe 302 →
 303 en visitas de Inertia que no sean GET para que la siguiente solicitud
 sea inequívocamente un GET) e `InertiaValidationRedirectMiddleware`
 (convierte un `422` en una visita de Inertia en un `303` de vuelta a la
-página del formulario con los errores en flash). Los cuatro solían
-requerir registro separado; `Inertia::install` los hace predeterminados.
+página del formulario con los errores en flash). `InertiaVersionMiddleware` e `Inertia303Middleware` solían requerir
+registro separado; `Inertia::install` los hace predeterminados a todos
+cuatro.
 Consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertia-install)
 para el orden completo de registro y lo que cierra cada middleware.
 
@@ -239,6 +240,12 @@ APP_ENV=production suprnova serve --backend-only
 
 `InertiaConfig::default()` deriva el modo de producción frente a desarrollo de
 `APP_ENV` (vía `Environment::detect().is_production()`) - `APP_ENV=production`
+es lo que hace que el shell HTML cargue los activos compilados en lugar
+del servidor de desarrollo de Vite. `Inertia::install` entonces falla el
+arranque de forma explícita si no puede encontrar un manifiesto que
+respalde esa decisión, en lugar de recurrir en silencio a una ruta
+codificada obsoleta.
+
 Suprnova lee `public/assets/.vite/manifest.json` para resolver
 puntos de entrada con hash más las importaciones transitivas para `modulepreload`. SSR es
 opcional - participa apuntando `InertiaConfig::ssr(...)` a un

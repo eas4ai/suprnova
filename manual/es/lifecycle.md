@@ -308,7 +308,7 @@ Una breve lista de invariantes que establece el ciclo de vida:
   período de gracia del orquestador.
 - **Cada drenaje aborta lo que abandona.** Las conexiones HTTP, los
   handlers de WebSocket y los supervisores obtienen cada uno una
-  ventana de gracia acotada, y luego se abortan y se esperan (`await`) -
+  ventana de gracia acotada, y luego se abortan y se esperan -
   incluida la tarea interna de un supervisor, de modo que la
   cancelación llega al cuerpo y no solo al wrapper de reinicio. Nada
   sigue ejecutándose más allá de su drenaje para emitir telemetría

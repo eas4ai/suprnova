@@ -429,6 +429,14 @@ Storage::register_read_through(
 )?;
 ```
 
+La bandera solo gobierna la promoción en el momento de la lectura, y
+nada más. Las escrituras, borrados, metadatos, listados, y los destinos
+de `copy` y `rename` se comportan exactamente igual que con la
+promoción activada - así que un disco con `copy: false` sigue
+aterrizando un objeto copiado o movido en el primario. Como no se
+escribe nada de vuelta, una lectura con `copy: false` solo trae el
+rango que pediste, en lugar del objeto completo.
+
 ### Copiar y mover a través del fallback
 
 `copy` y `rename` resuelven el origen contra el primario primero. Cuando

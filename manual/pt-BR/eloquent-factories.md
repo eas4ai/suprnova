@@ -99,7 +99,7 @@ de um contador que a função consiga alcançar.
 ## `#[derive(Factory)]` para o caso comum
 
 Quando o próprio model implementa `fake::Dummy` - seja via
-`#[derive(Dummy)]` ou uma impl `Dummy<Faker> for Model` escrita à
+`#[derive(Dummy)]` ou uma `impl Dummy<Faker> for Model` escrita à
 mão - o derive colapsa o marcador + impl em uma linha no model:
 
 ```rust

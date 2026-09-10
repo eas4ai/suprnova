@@ -230,7 +230,7 @@ App::bind::<dyn FeatureSync>(composite);
 ```
 
 `features::sync::notify(feature, scope_key)` resuelve
-`Arc<dyn FeatureSync>` desde el contenedor y espera (`await`) a
+`Arc<dyn FeatureSync>` desde el contenedor y espera a
 `on_flag_changed`. Es un no-op cuando no hay ningún sync vinculado -
 el comportamiento correcto para herramientas de administración fuera
 de proceso que solo escriben en la BD y no tienen ningún evaluador

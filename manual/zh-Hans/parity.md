@@ -189,7 +189,7 @@
 | Create / update / delete | `User::create(attrs)`、`user.update(attrs)`、`user.delete()` | 已实现 | 用于部分属性的 `attrs! { name: "...", email: "..." }` 宏 |
 | 批量赋值防护 | `#[model(fillable = [...])]` / `#[model(guarded = [...])]` + `unguarded \|\| { ... }` 作用域 | 已实现 | 严格模式用 `prevent_silently_discarding_attributes()` |
 | 软删除 | `#[model(soft_deletes)]` 自动注入 `deleted_at` + `SoftDeletes` trait | 已实现 | `with_trashed()`、`only_trashed()`、`restore()`、`force_delete()` |
-| `Prunable` / `MassPrunable` | `#[prunable] impl Prunable for User { ... }` + `model:prune` 工作进程 | 已实现 | 级联锁定到关系上 |
+| Prunable / MassPrunable | `#[prunable] impl Prunable for User { ... }` + `model:prune` 工作进程 | 已实现 | 级联锁定到关系上 |
 | 时间戳 | 有对应列时自动填充 `created_at`/`updated_at` | 已实现 | 通过 `#[model(timestamps = false)]` 禁用 |
 | 主键类型 | 默认 i64；通过 `#[model(unique_id = "uuid")]` 或 `unique_id = "ulid"` 使用 UUID / ULID | 已实现 | 插入时自动生成 id |
 | 本地作用域 | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | 已实现 | 在 `Builder<M>` 上做方法分发 |

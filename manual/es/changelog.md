@@ -2012,22 +2012,19 @@ recientes primero.
   completa de Inertia: un `router.reload({ only: ['stats'] })` explícito
   la vuelve a resolver en vez de no devolver nada.
 
-- **El transporte de SES ahora envía encabezados de mensaje
-  personalizados.** `Mail::to(..)
-  .header("List-Unsubscribe", ...)` y `Mailable::headers()` se
-  descartaban en silencio con `MAIL_DRIVER=ses`: el cuerpo de la
-  solicitud `Content.Simple` no tenía campo `Headers` y el constructor
-  de MIME crudo nunca leía `OutgoingMessage::
-  headers`, aunque todos los demás transportes los reenvían. Ambas
-  rutas de SES ahora los llevan - `Headers` como la lista
-  `{Name, Value}` de SES v2, y el MIME crudo como líneas de encabezado
-  reales - de modo que los enlaces de baja, los encabezados de hilo y
-  las pistas de enrutamiento sobreviven a un cambio de driver. Los
-  nombres de encabezado se validan por adelantado en ambas rutas - CR,
-  LF y NUL (los bytes de inyección, que el transporte de Mailgun ya
-  rechaza) y cualquier cosa que no sea un nombre de campo RFC 5322
-  válido (espacios, dos puntos, no ASCII) - así que adjuntar un archivo
-  nunca cambia si un mensaje se acepta.
+- **El transporte de SES ahora envía encabezados de mensaje personalizados.**
+  `Mail::to(..).header("List-Unsubscribe", ...)` y `Mailable::headers()` se
+  descartaban en silencio con `MAIL_DRIVER=ses`: el cuerpo de la solicitud
+  `Content.Simple` no tenía campo `Headers` y el constructor de MIME crudo
+  nunca leía `OutgoingMessage::headers`, aunque todos los demás transportes los
+  reenvían. Ambas rutas de SES ahora los llevan - `Headers` como la lista
+  `{Name, Value}` de SES v2, y el MIME crudo como líneas de encabezado reales -
+  de modo que los enlaces de baja, los encabezados de hilo y las pistas de
+  enrutamiento sobreviven a un cambio de driver. Los nombres de encabezado se
+  validan por adelantado en ambas rutas - CR, LF y NUL (los bytes de inyección,
+  que el transporte de Mailgun ya rechaza) y cualquier cosa que no sea un
+  nombre de campo RFC 5322 válido (espacios, dos puntos, no ASCII) - así que
+  adjuntar un archivo nunca cambia si un mensaje se acepta.
 
 ### Corregido
 
@@ -2108,7 +2105,7 @@ recientes primero.
   lanzamiento de 13.23.0, 13.24.0 y 13.25.0 se rastrearon punto por
   punto hasta la propia superficie del framework. Todo lo que llegó a
   una ruta de código de Suprnova está corregido en esta versión o tiene
-  una fila en [`parity.md`](parity.md) marcada como
+  una fila en [`manual/parity.md`](parity.md) marcada como
   `not yet` o `by design no`.
 
 ### Actualización
@@ -2173,7 +2170,7 @@ de código de tu parte.
 
 ### Cambiado
 
-- **Suprnova se trasladó de la organización de GitHub `entrepeneur4lyf` a
+- **Suprnova se trasladó de la organización de GitHub entrepeneur4lyf a
   `eas4ai`.** Las URL del
   repositorio en los metadatos de paquetes, la documentación, los ejemplos de
   dependencias y las plantillas de andamiaje ahora usan `github.com/eas4ai`.
@@ -2631,7 +2628,7 @@ Torii encontró ocho defectos, todos corregidos en el fork fijado
   promociona por lotes.
 - **Dos drenados de apagado esperaban para siempre.** Tanto
   `schedule:work` en Ctrl-C como el worker de flujo de trabajo tras la
-  cancelación esperaban (`await`) cada tarea en curso sin plazo, así
+  cancelación esperaban (await) cada tarea en curso sin plazo, así
   que una tarea que nunca retornaba mantenía el proceso abierto hasta
   el `SIGKILL` - un operador ve un demonio que "no se detiene". Ambos
   ahora esperan una gracia acotada, luego abortan lo que queda y
@@ -2937,7 +2934,7 @@ Dos adiciones que necesitan algo de ti solo si optas por ellas:
   construir su imagen (REL-01b).** Ningún andamiaje declaraba
   `default-run`, así que los nueve envoltorios de CLI que invocan
   `cargo run` fallaban en un proyecto recién creado. El Dockerfile
-  generado tenía cinco defectos independientes - un `COPY` de
+  generado tenía cinco defectos independientes - un COPY de
   lockfile faltante, `npm ci` sin lock, una etapa de caché que
   stubeaba uno de los dos binarios declarados, un build de frontend
   copiado desde una ruta que vite nunca crea, y una copia faltante de
@@ -2965,7 +2962,7 @@ Dos adiciones que necesitan algo de ti solo si optas por ellas:
   los dos, de forma permanente.
 - **Pinecone serializaba cada adquisición de índice (P2-14).** El
   bloqueo de escritura se sostenía a través de dos viajes de ida y
-  vuelta por red, y el `RwLock` justo de tokio hacía que un índice
+  vuelta por red, y el `RwLock` justo de `tokio` hacía que un índice
   frío estancara a todos los índices calientes.
 - **El monitor de tipos descartaba ráfagas (P2-13).** El antirrebote
   de flanco ascendente regeneraba en el primer archivo de una ráfaga y
@@ -3741,7 +3738,7 @@ despliegues sin filtrar no necesitaban migración.)*
   Svelte/React/Vue ahora fijan `@inertiajs/{svelte,react,vue3}` en
   `^3.4.0` (desde `3.1.1`), incorporando los modos de `router.poll`,
   `usePoll` dinámico, `Inertia.once`, la corrección de cancelación de
-  InfiniteScroll, y el `onSuccess` esperado (`awaited`) de Form. El
+  InfiniteScroll, y el `onSuccess` esperado (awaited) de Form. El
   servidor ya emite la superficie completa de page-object y
   encabezados de 3.4.0 (once-props, la familia de scroll
   prepend/deep-merge, `matchPropsOn`, props rescatadas/compartidas),
@@ -3856,7 +3853,7 @@ despliegues sin filtrar no necesitaban migración.)*
 
 - **La carga anticipada anidada** (`with(["posts.comments"])`) ahora
   es un número constante de consultas - el segmento final se carga en
-  una única consulta `IN` por lotes a través de todos los padres en
+  una única consulta IN por lotes a través de todos los padres en
   lugar de una consulta por padre (N+1).
 - **`where_has`/`where_doesnt_have`** cualifican las columnas del
   closure con la tabla objetivo, así que una columna presente tanto
@@ -4026,10 +4023,10 @@ y la CLI se instala con `cargo install --git`.
 - Carga anticipada vía `.with(...)`, `.with_count(...)`,
   `.load_missing(...)`
 - Motor EXISTS correlacionado para `has` / `where_has`
-- Dieciséis eventos de ciclo de vida (`retrieving`, `retrieved`,
-  `creating`, `created`, `updating`, `updated`, `saving`, `saved`,
-  `deleting`, `deleted`, `restoring`, `restored`, `force-deleting`,
-  `force-deleted`, `replicating`, `trashed`)
+- Dieciséis eventos de ciclo de vida (retrieving, retrieved,
+  creating, created, updating, updated, saving, saved,
+  deleting, deleted, restoring, restored, force-deleting,
+  force-deleted, replicating, `trashed`)
 - Trait `Observer<M>` con auto-registro por método vía el inventario
 - Scopes locales vía `#[scopes(M)]`, scopes globales vía
   `GlobalScope`
@@ -4123,7 +4120,7 @@ y la CLI se instala con `cargo install --git`.
   presencia configurable con recuperación ante caídas
 - Puente `Broadcastable` hacia `EventDispatcher`
 - Heartbeat con cierre ante ausencia de pong, con drenado
-  configurable de `WS_TASKS`
+  configurable de WS_TASKS
 - Middleware de WebSocket por ruta
 - Valores por defecto más seguros de 1 MiB / 64 KiB + factory
   `WsConfig::generous()`
@@ -4138,13 +4135,13 @@ y la CLI se instala con `cargo install --git`.
   `suprnova-web-push`)
 - Validación de subject VAPID, parseo de retry-after, tope de 8 KiB
   en el cuerpo de rechazo
-- Trait `Notifiable` para tipar destinatarios
+- Trait Notifiable para tipar destinatarios
 
 #### Eventos
 
 - Despachador de eventos tipado - `EventFacade::dispatch`,
   `EventFacade::listen<E, L>`, `EventFacade::forget`
-- Eventos `saving`/`updating` cancelables (devuelven
+- Eventos saving/updating cancelables (devuelven
   `EventResult::cancel`)
 - Oyentes encolables
 

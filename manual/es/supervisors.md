@@ -187,7 +187,7 @@ async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
 }
 ```
 
-El framework drena el `JoinSet` de supervisores con una ventana de
+El framework drena el JoinSet de supervisores con una ventana de
 gracia de 5 segundos tras la cancelación. Los supervisores que no
 respeten el token dentro de esa ventana se abortan mediante
 `JoinSet::abort_all`. Este drenaje se ejecuta después del drenaje de
@@ -198,7 +198,7 @@ Los supervisores que ignoren el token por completo seguirán
 ejecutándose hasta que expire la ventana de 5 segundos, y entonces se
 abortarán forzosamente. Si tu supervisor retiene recursos que
 necesitan vaciarse (descriptores de archivo abiertos, solicitudes HTTP
-en vuelo, registros parcialmente escritos), siempre haz `select` sobre
+en vuelo, registros parcialmente escritos), siempre haz select sobre
 `cancel.cancelled()` y limpia antes de retornar.
 
 ### Integradores y tests de integración
@@ -255,7 +255,7 @@ mensaje "supervisor returned Ok under Always policy; restarting" -
 no debían.
 
 Los supervisores no obtienen un span de tracing automático alrededor
-de `run()` - el `SupervisorRegistry` abre un span sobre el ciclo de
+de `run()` - el registro abre un span sobre el ciclo de
 vida (arranque, reinicio) pero no sobre el interior de la tarea. Emite
 tu propio `info_span!` o instrumenta (`instrument`) el cuerpo de tu
 bucle si quieres contexto de span sobre el trabajo hecho dentro del
@@ -334,12 +334,12 @@ crate (`suprnova::Supervisor`, etc.) además de la ruta más larga
 
 | Símbolo | Propósito |
 |--------|---------|
-| `Supervisor` | Trait a implementar sobre tu struct de supervisor. Métodos requeridos: `name() -> &'static str`, `async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError>`. Opcional: `restart_policy() -> RestartPolicy` (por defecto `OnError`). El token `cancel` se señaliza al apagar el proceso; haz `select` sobre `cancel.cancelled()` para salir de forma limpia antes de que expire la ventana de aborto de 5 segundos. |
+| `Supervisor` | Trait a implementar sobre tu struct de supervisor. Métodos requeridos: `name() -> &'static str`, `async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError>`. Opcional: `restart_policy() -> RestartPolicy` (por defecto `OnError`). El token `cancel` se señaliza al apagar el proceso; haz select sobre `cancel.cancelled()` para salir de forma limpia antes de que expire la ventana de aborto de 5 segundos. |
 | `RestartPolicy` | Enum con las variantes `OnError`, `Always`, `Never`. Controla cuándo el registro lanza una tarea de reemplazo. |
 | `SupervisorEntry` | Elemento de inventario. Declara `factory: fn() -> Box<dyn Supervisor>`. Envía una entrada por supervisor mediante `suprnova::inventory::submit!(SupervisorEntry { factory: || Box::new(MySupervisor) })`. |
-| `SupervisorRegistry::start_all()` | Fn async. Recorre todos los valores `SupervisorEntry` enviados, lanza cada supervisor como una tarea de Tokio independiente dentro del `JoinSet` del proceso, y empieza a vigilar los reinicios. Idempotente - los estáticos por proceso son `OnceLock`s. Llámala una vez desde tu `register()` de bootstrap. |
-| `SupervisorRegistry::shutdown(timeout)` | Fn async. Cancela el token de cancelación compartido para que cada supervisor que vigila `cancel.cancelled()` termine, drena el `JoinSet` hasta `timeout`, y luego hace `abort_all` con los rezagados. `Server::run` invoca esto como parte de su secuencia de apagado; los integradores y los tests de integración que llaman a `start_all` fuera de `Server::run` deben llamarlo ellos mismos para evitar que se filtren tareas. No-op si `start_all` nunca se llamó. |
-| `suprnova::supervisor::supervisor_tasks()` / `supervisor_cancel_token()` | Accesores que devuelven `Option<&'static …>` hacia el `JoinSet` y el token de cancelación subyacentes. Los usa la secuencia de apagado de `Server::run`; se exponen como `pub` para que los integradores que conducen el framework desde un binario propio puedan integrarse. El código de aplicación no debería necesitarlos. |
+| `SupervisorRegistry::start_all()` | Fn async. Recorre todos los valores `SupervisorEntry` enviados, lanza cada supervisor como una tarea de Tokio independiente dentro del JoinSet del proceso, y empieza a vigilar los reinicios. Idempotente - los estáticos por proceso son `OnceLock`s. Llámala una vez desde tu `register()` de bootstrap. |
+| `SupervisorRegistry::shutdown(timeout)` | Fn async. Cancela el token de cancelación compartido para que cada supervisor que vigila `cancel.cancelled()` termine, drena el JoinSet hasta `timeout`, y luego hace `abort_all` con los rezagados. `Server::run` invoca esto como parte de su secuencia de apagado; los integradores y los tests de integración que llaman a `start_all` fuera de `Server::run` deben llamarlo ellos mismos para evitar que se filtren tareas. No-op si `start_all` nunca se llamó. |
+| `suprnova::supervisor::supervisor_tasks()` / `supervisor_cancel_token()` | Accesores que devuelven `Option<&'static …>` hacia el JoinSet y el token de cancelación subyacentes. Los usa la secuencia de apagado de `Server::run`; se exponen como `pub` para que los integradores que conducen el framework desde un binario propio puedan integrarse. El código de aplicación no debería necesitarlos. |
 
 ## Siguiente
 

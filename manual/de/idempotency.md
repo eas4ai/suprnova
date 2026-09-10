@@ -124,10 +124,10 @@ eintreten kann.
 Der Vertrag, für den der HTTP-Header `Idempotency-Key` erfunden
 wurde. Der erste Aufrufer lässt den Rumpf laufen, speichert den
 Erfolgswert und bekommt `Replay::Fresh`. Ein späterer Aufrufer
-innerhalb des Fensters bekommt `Replay::Replayed(<ursprünglicher
-Wert>)` - den aufgezeichneten Rückgabewert, keinen Marker. Ein
-gleichzeitiger Aufrufer, der eintrifft, *während* der erste noch
-läuft, bekommt `Replay::InProgress`.
+innerhalb des Fensters bekommt `Replay::Replayed(<original value>)` -
+den aufgezeichneten Rückgabewert, keinen Marker. Ein gleichzeitiger
+Aufrufer, der eintrifft, *während* der erste noch läuft, bekommt
+`Replay::InProgress`.
 
 ```rust
 use std::time::Duration;
@@ -286,8 +286,8 @@ Stop-the-World-Pause, die länger dauert als die TTL. Das ist
 selten. Unmöglich ist es nicht, und früher war es unsichtbar.
 
 Die praktische Konsequenz: Wählen Sie eine TTL basierend auf Ihrem
-Dedupe-Fenster (`wie lange soll eine doppelte Anfrage dedupliziert
-werden?`), nicht basierend auf der Worst-Case-Laufzeit des Rumpfs.
+Dedupe-Fenster (`how long should a duplicate request be deduped?`),
+nicht basierend auf der Worst-Case-Laufzeit des Rumpfs.
 Ein 30-minütiger Rumpf mit einer 1-Minuten-TTL ist völlig in
 Ordnung - die Sperre wird während des Laufs des Rumpfs etwa
 neunzig Mal aufgefrischt.

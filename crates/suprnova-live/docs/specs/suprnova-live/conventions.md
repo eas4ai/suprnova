@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-09-09
+Last revised: 2026-09-10
 
 ## Authority and application
 
@@ -287,8 +287,6 @@ untouched.
 - The ratchet list of span-checked sources SHALL be retired once every source
   is covered, and the translation lock SHALL be restamped for every chapter
   that changed.
-- Until iteration 006 delivers this, span parity is enforced over the seven
-  listed RenderCache and documentation chapters only.
 
 ## Naming and organization
 
@@ -540,6 +538,25 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-09-10 -- Delivered the Documentation and translation parity rule:
+  inline-code-span parity now holds across the whole manual, and the ratchet
+  is gone. `_compare_shapes` in `scripts/check-manual-structure.py` compares
+  code spans for every chapter and all six mirrors unconditionally;
+  `SPAN_CHECKED_SOURCES` and its seven-chapter allowlist no longer exist. The
+  corpus started this plan at 1,591 span problems across 68 of 111 chapters;
+  958 of them traced to one malformed construct in `manual/seeding.md` (a
+  backslash-escaped backtick inside a single-backtick span, which CommonMark
+  does not honor), leaving 633 genuine translation drifts after that fix and
+  the paragraph-bounding tokenizer change. Paragraph-bounding itself cleared
+  none of that count: on this corpus every amplified problem came through the
+  seeding.md construct, so bounding is containment against a future
+  mis-nesting, not a fix for anything reported here. A block-quote handling
+  fix in the checker's tokenizer cleared 8 more problems the corpus never
+  really had; the remaining 625 were fixed by translation across five
+  batches. The whole manual and all six mirrors now report zero span
+  problems, and `test_the_real_manual_tree_reports_no_problems` runs the
+  checker over the real `manual/` tree so a future regression fails the
+  suite and not only the gate.
 - 2026-09-09 -- Delivered the production build shape rule: `app/Cargo.toml`
   and the CLI scaffold's Rust and API templates split the framework
   dependency into a production entry (`default-features = false` plus the

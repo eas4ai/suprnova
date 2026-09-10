@@ -675,16 +675,20 @@ O contrato que o Suprnova te dá:
 - **Conversão total**. Todo `FrameworkError` produz uma `HttpResponse`.
   Não há caminho de erro que derrube o servidor ou encerre a conexão
   silenciosamente.
-- **5xx sanitizado**. O corpo que vai pela rede para qualquer 5xx é o
-  genérico `{"message": "Internal Server Error", "request_id": "..."}`.
-  O detalhe flui para os logs + `ErrorOccurred`.
+- **5xx sanitizado**. O renderer comum substitui o `message` que vai
+  pela rede para qualquer 5xx por `Internal Server Error`; o detalhe
+  bruto flui para os logs e para `ErrorOccurred`. Um sentinela
+  `AlreadyReported` renderizado acidentalmente por HTTP retorna a
+  mesma mensagem genérica sem `request_id`.
 - **Visibilidade de debug opcional**. `APP_DEBUG=true` adiciona um
-  campo `debug_message` para 5xx, nunca `message`. Clientes de
-  produção não podem se acoplar acidentalmente a dados de
-  somente-dev.
-- **Request ids correlacionáveis**. Todo corpo de erro carrega o
-  request id (ou `null` quando não existe escopo de solicitação); o
-  mesmo id aparece na linha de log e no evento `ErrorOccurred`.
+  campo `debug_message` para respostas 5xx ordinárias, nunca
+  `message`. Clientes de produção não podem se acoplar
+  acidentalmente a dados de somente-dev.
+- **Request ids correlacionáveis**. Todo corpo de erro ordinário que
+  alcança o renderer comum carrega o request id (ou `null` quando não
+  existe escopo de solicitação); o mesmo id aparece na linha de log e
+  no evento `ErrorOccurred`. As três variantes de retorno antecipado
+  descritas acima ignoram esse campo.
 - **Recuperação de panic**. Panics em handlers e middleware são
   capturados, registrados em log, e roteados através do mesmo impl
   `From` que erros retornados. Sem drop de conexão, sem lacuna de

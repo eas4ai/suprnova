@@ -328,7 +328,7 @@ assertable.reload_except(["stats"]).await;
 assertable.load_deferred_props().await;
 ```
 
-Llamar a cualquiera sin `with_reload` primero entra en pánico con una instrucción. El resultado conserva el reloader para la siguiente recarga.
+Llamar a cualquiera sin `with_reload` primero entra en pánico con una instrucción. El resultado de una recarga lleva el mismo reloader consigo, así que un segundo `.reload_only(...).await` sobre él funciona sin volver a adjuntar uno.
 
 ### Por qué Suprnova diverge
 

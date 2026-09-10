@@ -995,8 +995,8 @@ DB::transaction(|_tx| {
 - El closure devuelve `Err` → **rollback** (el error original se
   propaga).
 - El closure entra en pánico → rollback (la transacción en curso se
-  descarta durante el unwind; el `drop` de `DatabaseTransaction` de
-  SeaORM hace rollback).
+  descarta durante el unwind; `DatabaseTransaction::drop` de SeaORM
+  hace rollback).
 
 Las lecturas dentro del closure ven las escrituras de la misma
 transacción (mediante una consulta a `CURRENT_TX` en cada llamada
@@ -2236,7 +2236,7 @@ GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 ```
 
 La paginación por cursor **reemplaza** cualquier `ORDER BY`
-existente en el builder - se requiere un orden `ASC` estable por PK
+existente en el builder - se requiere un orden ASC estable por PK
 para que `gt(boundary)` corte de forma determinista.
 
 **Forma del JSON:**
@@ -2417,7 +2417,7 @@ Misma restricción de PK `i64` que `chunk_by_id`.
 Los siete puntos de entrada **rechazan `.with(...)` de forma
 estrepitosa desde el principio** con un `FrameworkError::internal`.
 El clon entre batches del Builder descarta el plan de carga
-anticipada con el tipo borrado (su predicado `Box<dyn Any>` no es
+anticipada con el tipo borrado (su predicado `dyn Any` boxeado no es
 clonable sin endurecer la API pública), así que respetar el plan
 sería silenciosamente inconsistente entre batches. Vuelve a aplicar
 `.with(...)` dentro del closure de cada chunk cuando lo necesites -
@@ -2993,7 +2993,7 @@ pub struct Comment {
 
 Después de crear, guardar, actualizar o eliminar un comentario, se
 incrementa el `updated_at` de su post: un
-`UPDATE posts SET updated_at = ? WHERE id = ?`, sin `SELECT`. Así, una
+`UPDATE posts SET updated_at = ? WHERE id = ?`, sin SELECT. Así, una
 clave de caché basada en `post.updated_at` sigue siendo válida cuando
 solo cambia un hijo.
 
@@ -3020,7 +3020,7 @@ dispara el evento `saved` de cada padre. Suprnova resuelve el propietario
 mediante el registro de relaciones y escribe la columna directamente:
 una sentencia por relación actualizada, sin hidratación. Por tanto, la
 cascada tiene un solo nivel y no dispara eventos de los padres. Ese es
-el costo de que un guardado no emita un `SELECT` por cada relación
+el costo de que un guardado no emita un SELECT por cada relación
 actualizada. Usa un observer cuando necesites actualizar el abuelo o
 disparar el evento.
 

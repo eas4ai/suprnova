@@ -423,8 +423,8 @@ Regeln:
 - Ein Eintrag kann auch einen *Vorfahren* eines punktierten Prop-Schlüssels benennen. Eine unter `auth.user` registrierte Prop - per `.with("auth.user", …)` oder `App::inertia_share("auth.user", …)` - nimmt an `only: ['auth']` teil und wird vollständig übertragen, weil der Aufrufer nach dem gesamten Root `auth` fragte. Ein nacktes `except: ['auth']` lässt sie aus demselben Grund weg. Das Präfix muss an einer Segmentgrenze enden, sodass eine nicht verwandte Prop `authAgent.user` von beiden unberührt bleibt.
 - `except` gewinnt auf einem Pfad, den beide Header nennen, genau wie auf oberster Ebene.
 - Ein Pfad, der sich gegen den Wert nicht auflösen lässt - ein unbekanntes Feld oder einer, der durch einen Skalar oder ein Array statt durch ein Objekt führt - trägt für diesen Pfad nichts bei, ohne die zugleich angeforderten Geschwisterfelder wegzulassen.
-- Always-Props ignorieren `only`/`except` vollständig, Punktnotation eingeschlossen - sie werden immer vollständig übertragen.
-- Optional- und Defer-Props benötigen weiterhin die ausdrückliche Anforderung, um überhaupt aufgelöst zu werden. Ein punktierter Eintrag (`permissions.read`) zählt als diese Anforderung für den Top-Level-Schlüssel; der aufgelöste Wert wird genauso eingegrenzt wie bei einer Eager-Prop.
+- `Always`-Props ignorieren `only`/`except` vollständig, Punktnotation eingeschlossen - sie werden immer vollständig übertragen.
+- `Optional`- und `Defer`-Props benötigen weiterhin die ausdrückliche Anforderung, um überhaupt aufgelöst zu werden. Ein punktierter Eintrag (`permissions.read`) zählt als diese Anforderung für den Top-Level-Schlüssel; der aufgelöste Wert wird genauso eingegrenzt wie bei einer `Eager`-Prop.
 - Ein punktiertes `only` gegen eine Prop, deren aktueller Wert kein Objekt ist - ein String, eine Zahl, ein Array -, wird zu `{}` eingegrenzt, nicht zum ursprünglichen Wert. Die Reconciliation des Clients führt nur dann einen Deep Merge aus, wenn *sowohl* der gecachte als auch der eingehende Wert Objekte sind (`inertia-3.6.1/packages/core/src/response.ts` `nestedTopKeys`). Ein leeres Objekt scheitert gegen einen Nicht-Objekt-Cache an derselben Prüfung wie ein gefülltes; es ersetzt daher den gecachten Skalar direkt, statt darauf zusammengeführt zu werden. Vermeiden Sie eine punktierte Anforderung gegen eine Prop, die nicht als Objekt geformt ist.
 - Ein punktiertes `except` löscht das Feld nicht beim Client: Es verhindert die Aktualisierung dieses Felds in dieser Response, und das Merge des Clients stellt es aus seinem bereits gecachten Wert wieder her. `deepMergeObjects` baut das zusammengeführte Objekt, indem es zuerst den gecachten Wert klont und dann nur die Schlüssel überschreibt, die der Server tatsächlich gesendet hat; einen vom Server ausgeschnittenen Schlüssel berührt es nie, sodass er mit seinem alten Wert erhalten bleibt. Beim allerersten Laden dieser Prop durch einen Client (noch nichts gecacht) fehlt das ausgeschnittene Feld wirklich, weil kein Cache als Fallback vorhanden ist - das Verhalten „aus dem Cache wiederherstellen“ gilt nur für eine Seite, die der Client bereits gesehen hat.
 
@@ -1085,7 +1085,7 @@ createInertiaApp({
 
 Jeder String ist ein HTML-Element. Der Client stempelt ein
 `data-inertia`-Attribut auf alles, dem eines fehlt, damit er
-`head`-Elemente über Navigationen hinweg diffen kann; liefern Sie
+head-Elemente über Navigationen hinweg diffen kann; liefern Sie
 Ihr eigenes `data-inertia="og-title"`, wenn Sie stabile Identität
 statt positionsbasiertem Matching wollen.
 

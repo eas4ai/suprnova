@@ -294,7 +294,7 @@ capacité tout en supprimant le coût. Récupérez sur place là où l'état
 est sûr à continuer d'utiliser ; convertissez en erreur là où vous
 préférez un 500 propre à une mauvaise réponse. Les deux options
 laissent le reste du processus continuer à servir le trafic. Aucune
-des deux ne laisse un `unwrap` paniqué en attente de faire tomber le
+des deux ne laisse un unwrap paniqué en attente de faire tomber le
 sous-système au-dessus.
 
 C'est la même forme que la [décision fail-open contre
@@ -308,6 +308,6 @@ donne le plan de jeu pour le garder honnête.
 
 - [Gestion des erreurs](errors.md) - comment `FrameworkError::internal` devient le 500 assaini que le client reçoit, avec le message d'empoisonnement étiqueté préservé dans votre journal structuré.
 - [Conteneur de service](container.md) - où vivent réellement les registres globaux au processus que cette politique protège, et pourquoi le cloisonnement task-local/thread-local empêche les tests d'hériter des liaisons les uns des autres.
-- [Cycle de vie des requêtes](lifecycle.md) - la limite de panique (`execute_chain_safely`) qui capture l'`unwrap` de *dernier recours* et le convertit en un 500, pour que vous compreniez exactement ce que fait le filet de sécurité et pourquoi ce n'est pas une excuse pour esquiver la politique ci-dessus.
+- [Cycle de vie des requêtes](lifecycle.md) - la limite de panique (`execute_chain_safely`) qui capture l'unwrap de *dernier recours* et le convertit en un 500, pour que vous compreniez exactement ce que fait le filet de sécurité et pourquoi ce n'est pas une excuse pour esquiver la politique ci-dessus.
 - [Limitation de débit](rate-limiting.md) - l'histoire parallèle de `BackendErrorPolicy` pour les backends qui peuvent être *injoignables* plutôt qu'empoisonnés ; même principe de choix explicite, mode de défaillance différent.
 - [Tests](testing.md) - comment `TestContainer::fake` et la couche de conteneur thread-local empêchent les tests parallèles de polluer les registres les uns des autres, ce qui est le complément, au moment des tests, de l'histoire de la gestion de l'empoisonnement.

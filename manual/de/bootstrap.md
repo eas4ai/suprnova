@@ -105,9 +105,11 @@ aufzutauchen.
 ## Was in bootstrap gehört
 
 Eine echte `bootstrap`-Funktion erledigt eine kleine Anzahl klar
-unterschiedener Dinge. Jeder Unterabschnitt unten ist eines davon.
-Die `app/src/bootstrap.rs` der Beispiel-App übt alle davon aus und
-ist die funktionierende Referenz.
+unterschiedener Dinge. Die folgenden Unterabschnitte beschreiben die
+bootstrap-Zuständigkeiten, die einer Anwendung zur Verfügung stehen; die
+Beispielanwendung nutzt die meisten davon, aber nicht alle. Für die
+aktuelle Standard-Magnetar-Initialisierung verwenden Sie die Vorlage
+`src/bootstrap.rs` des API-Scaffolds als funktionierende Referenz.
 
 ### Datenbankverbindung
 

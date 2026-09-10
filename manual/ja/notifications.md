@@ -206,7 +206,7 @@ let push_channel = WebPushChannel::new(Arc::new(client), 86_400 /* TTL秒 */);
 
 受信者の `route_for("webpush")` は、シリアライズされた `SubscriptionInfo` のJSONを返します（ブラウザが `PushSubscription.toJSON()` から返してくるのと同じ形です - そのまま保存し、そのまま返してください）。TTLはプッシュサービスへ転送されます。
 
-プッシュサービスがチャネルに購読が失効したと伝えたとき（HTTP 404/410）、チャネルは構造化された `WARN` を記録し、成功を返します - その通知は、リトライすべき受信者がない終端状態に達したということです。オペレーターはログを見て、失効した購読を削除します。配信はエラーになりません。
+プッシュサービスがチャネルに購読が失効したと伝えたとき（HTTP 404/410）、チャネルは構造化された WARN を記録し、成功を返します - その通知は、リトライすべき受信者がない終端状態に達したということです。オペレーターはログを見て、失効した購読を削除します。配信はエラーになりません。
 
 完全なクライアントについては、[Web プッシュ](web-push.md)を参照してください。
 
@@ -270,7 +270,7 @@ set_dispatcher(Arc::new(dispatcher))?;
 
 `register_channel` は、チャネル名に対して最後の書き込みが勝ちます - `"mail"` という名前の2つのチャネルを登録すると、無音で最初のものが置き換えられます。これにより、テストのセットアップが快適になります。
 
-ディスパッチャーが登録していないチャネルを宣言する通知は、`WARN`（"no channel registered;skipping"）を記録し、次のチャネルへ進みます - ディスパッチは、未知のチャネル名でエラーにはなりません。
+ディスパッチャーが登録していないチャネルを宣言する通知は、WARN（`no channel registered; skipping`）を記録し、次のチャネルへ進みます - ディスパッチは、未知のチャネル名でエラーにはなりません。
 
 `set_dispatcher` は `Result<(), FrameworkError>` を返します。これは、ディスパッチャーのレジストリが `RwLock` の背後に存在するためです。エラー経路は、そのロックがポイズニングされている場合（以前の書き込み側がパニックした場合）にのみ発生します。実務上、起動時の呼び出し箇所は `?` を使います。
 
@@ -290,7 +290,7 @@ set_dispatcher(Arc::new(dispatcher))?;
 
 ### テレメトリ
 
-`NotificationDispatcher::notify` は、そのファンアウトを `notification.dispatch` という `tracing` のスパンでラップします:
+`NotificationDispatcher::notify` は、そのファンアウトを `notification.dispatch` という tracing のスパンでラップします:
 
 - `notification` - `Notification::notification_name()`
 - `channel_count` - 宣言されたチャネルの数
@@ -327,7 +327,7 @@ Notify::queue(&user, OrderShipped { tracking }).await?;
 3. キューに入れた時点で記録されたチャネルを反復する
 4. それぞれについて、`should_send(channel)` を再チェックし（拒否権を行使されたチャネルはスキップする）、束縛済みのディスパッチャー上でそのチャネルをルックアップし、`deliver(route, &notification)` を呼び出し、その後 `after_sending(channel)` を実行する
 
-キューに入れた時点で宣言されていたが、ワーカーが実行される時点で登録されていないチャネルは、`WARN` を記録し、スキップされます - 同期パスと同じ契約です。事前に解決されたルートを持たないチャネルは、無音でスキップされます（受信者がキューに入れた時点で `None` を返していたということです）。
+キューに入れた時点で宣言されていたが、ワーカーが実行される時点で登録されていないチャネルは、WARN を記録し、スキップされます - 同期パスと同じ契約です。事前に解決されたルートを持たないチャネルは、無音でスキップされます（受信者がキューに入れた時点で `None` を返していたということです）。
 
 `Notify::queue` は、enqueueの時点でも `should_send` を評価します。そのため、拒否権を行使されたチャネルは、そもそもenqueueされません。ワーカーの再チェックは、enqueueと実行の間に変化する状態をカバーします。キューに入れられたパスは、3つのライフサイクルイベント（`NotificationSending` / `NotificationSent` / `NotificationFailed`）を**発火させません** - それらは同期パス専用のままです。これらのイベントに依存する場合は、`Notify::send` を通じて送ってください。
 

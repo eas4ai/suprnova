@@ -543,7 +543,7 @@ recibir nombre. Prefiere `inertia`.
 
 ### Por qué Suprnova diverge
 
-Laravel renderiza una plantilla Blade; Suprnova renderiza un componente
+`Route::view` de Laravel renderiza una plantilla Blade; Suprnova renderiza un componente
 Inertia porque su sistema de plantillas es Inertia, no Blade. El nombre
 del componente es una cadena de runtime, así que aquí no recibe la
 comprobación de página en tiempo de compilación que hace la macro

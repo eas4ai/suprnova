@@ -275,13 +275,17 @@ translated | inserted | translated""",
         self._assert_problem("fr", "chapter.md", "tables")
 
     def test_escaped_and_code_pipes_do_not_add_table_columns(self):
+        # The code spans carry the same pipes on both sides, verbatim, the way
+        # a real translation must: this test is about pipe escaping and
+        # column counting, not span parity, and the span rule now runs
+        # unconditionally over every chapter.
         self._replace_chapter_tables(
             """Name \\| alias | `Value | type`
 --- | ---
 escaped \\| label | `code | value`""",
-            """Localized \\| name \\| alias | `Localized | value | type`
+            """Localized \\| name \\| alias | `Value | type`
 --- | ---
-translated \\| label \\| extra | `localized | value | extra`""",
+translated \\| label \\| extra | `code | value`""",
         )
         self.assertEqual(self._problems(), [])
 

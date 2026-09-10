@@ -703,7 +703,7 @@ kollidieren.
 - [Migrationen](migrations.md) - `Migrator`, `make:migration` und der
   `db:sync`-Workflow
 - [Datenbank-Tests](database-testing.md) - `TestDatabase`,
-  Fixture-Laden und die `serial-test`-Annotationen
+  Fixture-Laden und die serial-test-Annotationen
 - [Ereignisse](events.md) - der Dispatcher hinter den Listenern für
   `QueryExecuted` / `TransactionCommitted`
 - [Konfiguration](configuration.md) - `DatabaseConfig` neben dem Rest

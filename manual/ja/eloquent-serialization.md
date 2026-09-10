@@ -296,7 +296,7 @@ json_response!(user.to_array_only(&["id", "name"])))
 
 ### なぜこれが起きるのか
 
-serdeの `Vec<T>`（および他のあらゆるコンテナ）に対する全面的な `Serialize` は、`T::serialize` を直接呼び出します。Suprnovaのフィルタパイプラインは、`Serialize` の中にではなく、`Model::to_array` というトレイトメソッドの中に存在します。そのトレイトメソッドは、あなたが呼び出さない限り呼び出されません。
+serdeの `Serialize for Vec<T>`（および他のあらゆるコンテナに対する全面的な実装）は、`T::serialize` を直接呼び出します。Suprnovaのフィルタパイプラインは、`Serialize` の中にではなく、`Model::to_array` というトレイトメソッドの中に存在します。そのトレイトメソッドは、あなたが呼び出さない限り呼び出されません。
 
 フレームワークは、*内部の*フットガンに対しては保護機構を持っています（`__eager` / `__pivot` のスクラッチフィールドは `#[serde(skip)]` とマークされているため、どちらの経路からも漏れません）。しかし、マクロは、隠しフィールドに対して `#[serde(skip_serializing)]` を発行することを意図的に**しません** - そうすると、呼び出し元が行全体を必要とする場合（例えば内部RPC、永続化層、診断、テスト）における、内部のSeaORMモデルに対するserdeの正当な使い方を壊してしまうからです。
 
@@ -335,7 +335,7 @@ pub fn to_array(&self) -> Value {
 }
 ```
 
-ページネーターの場合、包まれたデータは `LengthAwarePaginator::data` / `CursorPaginator::data` に存在し、`Vec<M>` です - ページネーターのレスポンスを組み立てる前に各項目へ `.to_array()` を呼び出すか、あるいは、リソースパイプラインの一部として行ごとのフィルタリングを処理する[JSON:APIのページネーション形式](eloquent-resources.md#pagination)を使ってください。
+ページネーターの場合、包まれたデータは `LengthAwarePaginator::data / CursorPaginator::data` に存在し、`Vec<M>` です - ページネーターのレスポンスを組み立てる前に各項目へ `.to_array()` を呼び出すか、あるいは、リソースパイプラインの一部として行ごとのフィルタリングを処理する[JSON:APIのページネーション形式](eloquent-resources.md#pagination)を使ってください。
 
 ## イーガーロードされたリレーションとシリアライゼーション
 

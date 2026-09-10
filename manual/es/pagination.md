@@ -260,7 +260,7 @@ está establecido.
 ### Cómo funcionan los cursores en el wire
 
 El cliente pasa el cursor de la página anterior a través de
-`?cursor=<opaco>`:
+`?cursor=<opaque>`:
 
 ```
 GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...

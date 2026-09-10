@@ -308,7 +308,7 @@ users.load_missing(["posts.comments"]).await?;
 let json: String = serde_json::to_string(&users)?;
 ```
 
-但是 - serde 那个对 `Vec<T>` 的兜底 `Serialize` 实现，会直接对每一个元素调用 `T::serialize`。这会**绕开** `#[suprnova::model]` 宏发出的 `Model::to_array()` 覆盖实现。也就是说，它会绕开您的 `hidden = ["password"]`、`visible = [...]`，以及 `appends = [...]` 这些模型属性。
+但是 - serde 那个 `Serialize for Vec<T>` 的兜底实现，会直接对每一个元素调用 `T::serialize`。这会**绕开** `#[suprnova::model]` 宏发出的 `Model::to_array()` 覆盖实现。也就是说，它会绕开您的 `hidden = ["password"]`、`visible = [...]`，以及 `appends = [...]` 这些模型属性。
 
 如果您的模型有隐藏字段，**不要**通过 serde 序列化这个集合。请用 `to_array()` 或 `to_json()`：
 
@@ -456,7 +456,7 @@ Rust 是有所有权的，装作没有，会让这个集合表面显得不诚实
 
 - **是 `Deref<Target = [T]>`，不是 `Deref<Target = Vec<T>>`。** 从概念上说，一个 `Collection` 是“若干行的一份快照”，不是一个可变的缓冲区。切片方法是通过 `Deref` 拿到的；如果您想要 `push`/`pop`，`into_vec()` 会给您那个原始的 `Vec`，不再装模作样。
 
-- **序列化上的分歧，是为了服务于正确性。** `to_array` 和 `to_json` 会经过 `Model::to_array()`，所以逐模型的 hidden/visible/appends 会生效；serde 那个对 `Vec` 的兜底 `Serialize` 绕过，被明明白白记录成了它本来就是的那个[陷阱](#序列化-to-array-对比-serde)。Laravel 的 `toArray()` 做的是同样的路由；我们只是必须把这个缺口明说出来，因为 Rust 用户会条件反射式地伸手去用 `serde_json::to_string`。
+- **序列化上的分歧，是为了服务于正确性。** `to_array` 和 `to_json` 会经过 `Model::to_array()`，所以逐模型的 hidden/visible/appends 会生效；serde 那个 `Serialize for Vec` 的兜底绕过，被明明白白记录成了它本来就是的那个[陷阱](#序列化-to-array-对比-serde)。Laravel 的 `toArray()` 做的是同样的路由；我们只是必须把这个缺口明说出来，因为 Rust 用户会条件反射式地伸手去用 `serde_json::to_string`。
 
 这个权衡，正是 Suprnova 到处都在做的那一个：Laravel 的表面形状，Rust 的值语义。
 

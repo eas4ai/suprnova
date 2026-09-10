@@ -19,7 +19,7 @@ d'enregistrement typé `Config::*`.
 ## Conventions
 
 - **Défaut** - la valeur que le framework utilise quand la variable
-  n'est pas définie. `aucun` signifie qu'il n'y a pas de défaut ; le
+  n'est pas définie. `none` signifie qu'il n'y a pas de défaut ; le
   framework échoue soit à l'amorçage, soit retombe sur un défaut de
   feature (par ex. le driver `Memory`), soit traite la valeur comme
   `None`.
@@ -183,7 +183,7 @@ pas de l'env. Voir [Localisation](localization.md).
 |---|---|---|---|
 | `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale utilisée quand la chaîne de détection (session → cookie → `Accept-Language`) ne trouve rien. Aussi la locale depuis laquelle `suprnova generate-types` extrait les clés de message pour `lang-keys.ts`. Une valeur qui n'est pas un identifiant BCP-47 valide fait échouer l'amorçage plutôt que de retomber silencieusement sur un défaut. |
 | `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consultée quand une clé manque dans le catalogue de la locale courante. Une clé manquante des deux se rend comme la clé elle-même plus un `warn!` unique ; `Lang::try_get` retourne `Err` à la place. Même analyse stricte qu'`APP_LOCALE`. |
-| `APP_LOCALE_PARENTS` | aucun - map vide | `String` (paires `enfant=parent` séparées par des virgules, BCP-47 de chaque côté) | Parents de repli par locale consultés avant `APP_FALLBACK_LOCALE`, par ex. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. La chaîne de repli de `Lang` les parcourt transitivement, et `FluentTranslator` aplatit la chaîne de parents configurée de chaque locale dans son catalogue servi. Une paire malformée, une locale invalide, un enfant nommé plus d'une fois, ou un cycle (y compris une locale se nommant comme son propre parent) fait échouer l'amorçage plutôt que de se dégrader à l'exécution. Voir [Chaînes de repli](localization.md#fallback-chains). |
+| `APP_LOCALE_PARENTS` | aucun - map vide | `String` (paires `child=parent` séparées par des virgules, BCP-47 de chaque côté) | Parents de repli par locale consultés avant `APP_FALLBACK_LOCALE`, par ex. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. La chaîne de repli de `Lang` les parcourt transitivement, et `FluentTranslator` aplatit la chaîne de parents configurée de chaque locale dans son catalogue servi. Une paire malformée, une locale invalide, un enfant nommé plus d'une fois, ou un cycle (y compris une locale se nommant comme son propre parent) fait échouer l'amorçage plutôt que de se dégrader à l'exécution. Voir [Chaînes de repli](localization.md#fallback-chains). |
 
 Les catalogues eux-mêmes sont des fichiers, pas de l'env :
 `lang/<locale>/*.ftl` sous `APP_BASE_PATH`. Un répertoire `lang/`

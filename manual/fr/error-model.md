@@ -81,7 +81,7 @@ pub enum FrameworkError {
 }
 ```
 
-Vous faites rarement un `match` sur la variante. Vous en construisez une via un constructeur de commodité et laissez `?` faire le reste :
+Vous faites rarement un match sur la variante. Vous en construisez une via un constructeur de commodité et laissez `?` faire le reste :
 
 ```rust
 use suprnova::FrameworkError;

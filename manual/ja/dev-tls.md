@@ -119,7 +119,7 @@ suprnova dev:tls --name app-two --port 8766
 | Fedora/RHEL | `sudo dnf install nss-tools` |
 | Arch | `sudo pacman -S nss` |
 
-**`~/.portless/ca.pem` に `portless CA not found`。** portlessは、プロキシが最初に実行されたときにCAを生成します。一度起動してください（`systemctl start portless`、または `portless proxy start`）。その後、`suprnova dev:tls` を再実行してください。
+**`portless CA not found at ~/.portless/ca.pem`。** portlessは、プロキシが最初に実行されたときにCAを生成します。一度起動してください（`systemctl start portless`、または `portless proxy start`）。その後、`suprnova dev:tls` を再実行してください。
 
 ## プラットフォームに関する注意
 

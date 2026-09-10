@@ -101,7 +101,7 @@ sélecteurs admin et les shared-data Inertia.
 Appeler `allows` / `denies` / `authorize` sur une action qui n'a
 jamais été enregistrée **refuse par défaut**. Idem pour appeler l'API
 sync sur un gate enregistré en async (le chemin sync ne peut pas
-`await` - refuser par défaut fait remonter le bug dans les logs via
+await - refuser par défaut fait remonter le bug dans les logs via
 `tracing::warn!` plutôt que de le laisser passer silencieusement).
 Les gates enregistrés en async répondent correctement depuis les
 chemins `_async`.

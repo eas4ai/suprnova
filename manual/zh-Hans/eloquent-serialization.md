@@ -119,7 +119,7 @@ pub struct User {
 pub struct PublicUserView { /* ... */ }
 ```
 
-对于那种专门存在、只是为了充当一个精简的公开投影的模型（想想 Laravel 的 `Profile` / `PublicUser` 这类类型），这很有用。当一张表持有几十个内部列，而只有少数几个需要发给客户端时，`visible` 同样是正确的工具 - 列出要保留的那一小撮，比列出要剔除的一大堆更短。
+对于那种专门存在、只是为了充当一个精简的公开投影的模型（想想 Laravel 的 “Profile” / “PublicUser” 这类类型），这很有用。当一张表持有几十个内部列，而只有少数几个需要发给客户端时，`visible` 同样是正确的工具 - 列出要保留的那一小撮，比列出要剔除的一大堆更短。
 
 `hidden` 和 `visible` 在**编译期是互斥的**。如果您两个都设置了，宏会报错：
 
@@ -296,7 +296,7 @@ json_response!(user.to_array_only(&["id", "name"])))
 
 ### 为什么会这样
 
-serde 那个对 `Vec<T>`（以及任何其他容器）的兜底 `Serialize` 实现，会直接调用 `T::serialize`。Suprnova 的过滤管道活在 `Model::to_array` 这个 trait 方法里，不在 `Serialize` 里。除非您调用它，这个 trait 方法不会被触发。
+serde 那个 `Serialize for Vec<T>`（以及任何其他容器）的兜底实现，会直接调用 `T::serialize`。Suprnova 的过滤管道活在 `Model::to_array` 这个 trait 方法里，不在 `Serialize` 里。除非您调用它，这个 trait 方法不会被触发。
 
 框架会防范这个*内部*陷阱（`__eager` / `__pivot` 这两个暂存字段被标了 `#[serde(skip)]`，所以它们不会从任何一条路径泄漏出去），但这个宏刻意**不会**在隐藏字段上发出 `#[serde(skip_serializing)]` - 这样做会破坏那些合理地在内部 SeaORM 模型上使用 serde、且调用者想要完整一行的场景（例如内部 RPC、持久化层、诊断、测试）。
 
@@ -335,7 +335,7 @@ pub fn to_array(&self) -> Value {
 }
 ```
 
-对于一个分页器，被包装的数据活在 `LengthAwarePaginator::data` / `CursorPaginator::data` 里，是一个 `Vec<M>` - 在组装分页器响应之前，对每一项调用 `.to_array()`，或者使用 [JSON:API 分页形态](eloquent-resources.md#pagination)，它会把逐行过滤当作资源管道的一部分来处理。
+对于一个分页器，被包装的数据活在 `LengthAwarePaginator::data / CursorPaginator::data` 里，是一个 `Vec<M>` - 在组装分页器响应之前，对每一项调用 `.to_array()`，或者使用 [JSON:API 分页形态](eloquent-resources.md#pagination)，它会把逐行过滤当作资源管道的一部分来处理。
 
 ## 预加载的关系与序列化
 

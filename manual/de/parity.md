@@ -199,7 +199,7 @@ Frameworks.
 | Soft Deletes | `#[model(soft_deletes)]` fügt automatisch `deleted_at` + das `SoftDeletes`-Trait ein | ausgeliefert | `with_trashed()`, `only_trashed()`, `restore()`, `force_delete()` |
 | Prunable / MassPrunable | `#[prunable] impl Prunable for User { ... }` + Worker `model:prune` | ausgeliefert | Per Cascade an Relationen gebunden |
 | Timestamps | Automatisches `created_at`/`updated_at`, wenn die Spalten vorhanden sind | ausgeliefert | Abschaltbar über `#[model(timestamps = false)]` |
-| Primärschlüsseltypen | `i64` als Standard; UUID / ULID über `#[model(unique_id = "uuid")]` oder `unique_id = "ulid"` | ausgeliefert | Erzeugt die ID beim Insert automatisch |
+| Primärschlüsseltypen | i64 als Standard; UUID / ULID über `#[model(unique_id = "uuid")]` oder `unique_id = "ulid"` | ausgeliefert | Erzeugt die ID beim Insert automatisch |
 | Lokale Scopes | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | ausgeliefert | Methoden-Dispatch auf `Builder<M>` |
 | Globale Scopes | `impl GlobalScope for ActiveOnly { ... }` + Registrierung | ausgeliefert | Entfernbar über `Builder::without_global_scope` |
 | Relationen (11 Arten) | `HasOne`, `HasMany`, `BelongsTo`, `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`, `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany` | ausgeliefert | Morph-Enum pro Familie. [Relationships](eloquent-relationships.md) |

@@ -289,7 +289,7 @@ racine propre.
 injecte le contexte de trace actif comme `traceparent` sur chaque
 appel sortant, si bien que le service en aval continue la même trace.
 
-Ensemble : `service amont → votre handler → service en aval` forme une
+Ensemble : `upstream service → your handler → downstream service` forme une
 seule trace connectée, sans plomberie de span manuelle dans vos
 handlers.
 

@@ -17,7 +17,7 @@ routes! {
 }
 ```
 
-このマクロは `pub fn register() -> Router { ... }` に展開されます。あなたの `bootstrap` からこれを呼び出し、その結果をサーバーに渡してください。
+このマクロは `pub fn register() -> Router { ... }` に展開されます。あなたの bootstrap からこれを呼び出し、その結果をサーバーに渡してください。
 
 ## HTTP メソッド
 

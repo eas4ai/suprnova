@@ -112,10 +112,10 @@ Las reglas:
   nombrando el archivo y lo que objetó el parser, porque un catálogo
   cargado a medias en silencio es peor que un proceso detenido.
 - **En `local` y `development`, los catálogos tienen recarga en
-  caliente.** Cada solicitud hace `stat` sobre `lang/` y solo vuelve a
+  caliente.** Cada solicitud hace stat sobre `lang/` y solo vuelve a
   parsear cuando algo realmente cambió, así que editar un `.ftl` se ve
   reflejado en el siguiente refresco. Producción nunca vuelve a hacer
-  `stat`; los catálogos se leen una sola vez al arrancar.
+  stat; los catálogos se leen una sola vez al arrancar.
 
 ## FTL en cinco minutos
 
@@ -199,10 +199,10 @@ Marcar `*[many]` (o cualquier otra categoría) como el valor por
 defecto envía las fracciones a un texto escrito para números enteros.
 
 > **Pasa los counts como números.** `__!("unread-messages", count: 3)`
-> envía un número JSON y selecciona una categoría de plural. `count:
-> "3"` envía un string, que solo puede coincidir con una clave de
-> variante literal - caerá en tu valor por defecto `*[other]`. Esta es
-> la trampa de FTL que más vale memorizar.
+> envía un número JSON y selecciona una categoría de plural.
+> `count: "3"` envía un string, que solo puede coincidir con una
+> clave de variante literal - caerá en tu valor por defecto
+> `*[other]`. Esta es la trampa de FTL que más vale memorizar.
 
 **Las funciones** se llaman dentro de los placeables. Se registran
 dos: `NUMBER()` (integrada en Fluent) y `DATETIME()` (de Suprnova):
@@ -704,7 +704,7 @@ pub fn register_all() {
   `Detect::Header` significa que la preferencia del navegador se
   ignora por completo.
 - `session_key` / `cookie_name` - renombra las dos búsquedas.
-- `parents` - padres de fallback por locale (`hijo -> padre`),
+- `parents` - padres de fallback por locale (`child -> parent`),
   recorridos antes de `fallback_locale` cuando falta una clave en el
   catálogo del hijo; misma forma que `APP_LOCALE_PARENTS`. Añade uno
   con `.parent(child, parent)` - encadenable, gana la última escritura
@@ -958,7 +958,7 @@ integrado del navegador - no se envían datos de ICU al navegador.
 
 ### Claves de mensaje tipadas
 
-`suprnova generate-types` parsea `lang/<locale por defecto>/*.ftl` y
+`suprnova generate-types` parsea `lang/<default locale>/*.ftl` y
 emite una unión de cada id de mensaje junto a los tipos de props de
 página:
 

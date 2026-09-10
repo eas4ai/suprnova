@@ -411,7 +411,7 @@ let published = action.execute(post.id).await?;
 assert!(published.is_public);
 ```
 
-只要测试不关心这一行是否真的存在，就用 `make`。当您会把这一行查回来、当一个外键需要一个真实的 id，或者当您在为一个会读数据库的子系统填充夹具时，就用 `create`。请注意，`create_many` 是顺序持久化的 - 如果后面某次插入失败，前面的插入**不会**被回滚。`create` / `create_many` 走的是 `Persistable` 那个兜底实现，它直接对话框架绑定的 `DB::connection()` - 它们**不会**加入一个环境里的 `DB::transaction(...)` 作用域。如果您需要一批插入具备原子性，就在闭包内部落到 `Model` trait 的 `Model::create(attrs!{...})` 上（那条路径会经过同一个遵从 `CURRENT_TX` 的执行器）：
+只要测试不关心这一行是否真的存在，就用 `make`。当您会把这一行查回来、当一个外键需要一个真实的 id，或者当您在为一个会读数据库的子系统填充夹具时，就用 `create`。请注意，`create_many` 是顺序持久化的 - 如果后面某次插入失败，前面的插入**不会**被回滚。`create` / `create_many` 走的是 `Persistable` 那个兜底实现，它直接对话框架绑定的 `DB::connection()` - 它们**不会**加入一个环境里的 `DB::transaction(...)` 作用域。如果您需要一批插入具备原子性，就在闭包内部落到 Model trait 的 `Model::create(attrs!{...})` 上（那条路径会经过同一个遵从 `CURRENT_TX` 的执行器）：
 
 ```rust
 use suprnova::{DB, Model, attrs};

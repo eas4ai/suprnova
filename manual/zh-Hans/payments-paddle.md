@@ -419,7 +419,7 @@ async fn checkout_flow() {
 
 ## 生产环境检查清单
 
-在把 `PADDLE_ENVIRONMENT` 翻转成 `production` 之前：
+在把 `PADDLE_ENVIRONMENT=production` 翻转过去之前：
 
 - [ ] 全部四个环境变量都设置在生产环境的密钥里，而不是提交进代码库
 - [ ] 这个 webhook 端点 URL，已经在 Paddle 仪表盘的*Notifications*设置里注册好了，并且您在那里生成的目标密钥，和 `PADDLE_WEBHOOK_KEY` 是匹配的

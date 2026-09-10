@@ -378,7 +378,7 @@ Os métodos `extract_payload_ids`, `extract_payment_snapshot`, e
 da Paddle para que o framework possa hidratar as tabelas espelho.
 Mapeamento rápido:
 
-| `event_type` do webhook | `NeutralEventKind` | Efeito no espelho |
+| event_type do webhook | `NeutralEventKind` | Efeito no espelho |
 |---|---|---|
 | `transaction.completed`, `transaction.paid` | `PaymentSucceeded` | Faz upsert de `payments_transactions` |
 | `transaction.payment_failed` | `PaymentFailed` | Faz upsert de `payments_transactions` (falhado) |

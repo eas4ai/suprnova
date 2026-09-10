@@ -47,7 +47,7 @@ Esto importa porque:
   seguido de `TestContainer::bind(...)` vincula dentro de un hilo sin
   tocar el contenedor global, de modo que los tests en paralelo no
   contaminan servicios entre sí. La guarda limpia el contenedor de
-  pruebas cuando se descarta (`drop`).
+  pruebas cuando se descarta.
 - **Los servicios de toda la aplicación pasan por global** -
   vinculados una vez en el arranque, resueltos en todas partes.
 

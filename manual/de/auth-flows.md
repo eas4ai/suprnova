@@ -147,7 +147,13 @@ abgelehnt, ohne verbraucht zu werden.
 
 ### Passwort-Reset und Sperrung
 
-`BruteForce` erfordert die installierte Magnetar-Passwort-Engine. Die Passwortzurücksetzung bevorzugt diese Engine, aber `EloquentUserProvider<M>` unterstützt das Zurücksetzen für bereits verifizierte Benutzer, wenn `M` die Schnittstellen `MustVerifyEmail + CanResetPassword` implementiert. Nicht verifizierte Benutzer erhalten keinen Provider-gestützten Link zum Zurücksetzen. Installieren Sie Magnetar, um das Zurücksetzen als atomaren erstmaligen Postfachnachweis zu verwenden.
+`BruteForce` erfordert die installierte Magnetar-Passwort-Engine. Die Passwortzurücksetzung bevorzugt diese Engine, aber eine providergestützte Anwendung kann bereits verifizierte Benutzer zurücksetzen, ohne Magnetar zu installieren, wenn ihr `UserProvider` das Zurücksetzen ausdrücklich unterstützt. `EloquentUserProvider<M>` optiert automatisch ein, wenn `M` die Schnittstellen `MustVerifyEmail + CanResetPassword` implementiert. Nicht verifizierte Benutzer erhalten keinen Provider-gestützten Link zum Zurücksetzen. Installieren Sie Magnetar, um das Zurücksetzen als atomaren erstmaligen Postfachnachweis zu verwenden.
+
+`MagnetarConfig::lockout_config` akzeptiert
+`magnetar::password::lockout::LockoutConfig`. Die Standardrichtlinie
+aktiviert die Sperrung nach fünf fehlgeschlagenen Versuchen für 15
+Minuten, bewahrt Audit-Zeilen sieben Tage lang auf und schlägt
+fail-closed fehl, wenn das Lockout-Backend nicht verfügbar ist.
 
 Der Passwort-Reset normalisiert eine unbekannte Adresse nur dann zu `Ok(())`,
 wenn Abuse-Limiter, Mail-Konfiguration, Engine und Speicherprüfungen erfolgreich
@@ -256,7 +262,10 @@ die Benutzer-ID des Providers.
 den Benutzer über den aktiven Provider nach und prägt, wenn ein
 Konto vorliegt, einen Token und versendet die Mail; eine unbekannte
 E-Mail-Adresse ist ein stilles No-op, das trotzdem `Ok(())`
-liefert. Der Handler verzweigt nie selbst über die Existenz, sodass
+liefert. `EmailVerification::resend` normalisiert ein unbekanntes
+Provider-Ergebnis ebenso zu `Ok(())`; das garantiert kein identisches
+Timing oder Verhalten, wenn Token-Speicherung oder Mail-Zustellung
+fehlschlägt. Der Handler verzweigt nie selbst über die Existenz, sodass
 ein sondierender Aufrufer nicht zwischen "gesendet" und "kein
 solches Konto" unterscheiden kann:
 

@@ -91,9 +91,13 @@ impl MustVerifyEmail for User {
 
 ### 密码重置和锁定
 
-`BruteForce` 需要已安装的 Magnetar 密码引擎。密码重置优先使用该引擎，但当 `M` 实现 `MustVerifyEmail + CanResetPassword` 时，`EloquentUserProvider<M>` 支持已验证用户重置密码。未验证用户不会收到由提供程序支持的重置链接。要将重置用作首次邮箱原子化证明，请安装 Magnetar。
+`BruteForce` 需要已安装的 Magnetar 密码引擎。密码重置优先使用该引擎，但当某个提供程序支撑的应用的 `UserProvider` 显式支持密码重置时，它无需安装 Magnetar 就能为已验证用户重置密码。当 `M` 实现 `MustVerifyEmail + CanResetPassword` 时，`EloquentUserProvider<M>` 会自动选择加入。未验证用户不会收到由提供程序支持的重置链接。要将重置用作首次邮箱原子化证明，请安装 Magnetar。
 
-密码重置在发送时防枚举。完成会使用原子首次电子邮件证明存储，并为需要显式会话或 remember 吊销状态的调用方返回 `PasswordResetOutcome`。
+`MagnetarConfig::lockout_config` 接受
+`magnetar::password::lockout::LockoutConfig`。默认策略在五次失败尝试
+后锁定 15 分钟，保留审计记录七天，并在锁定后端不可用时失败关闭。
+
+密码重置只会在滥用限流器、邮件配置、提供程序或引擎，以及存储检查都成功之后，才会把未知或提供程序支撑的未验证地址规范化为 `Ok(())`。配置和存储失败仍然会出现。完成会使用原子首次电子邮件证明存储，并为需要显式会话或 remember 吊销状态的调用方返回 `PasswordResetOutcome`。
 
 ### 注册 2FA 迁移
 
@@ -146,7 +150,7 @@ URL；框架的门面本身，是把这个基础 URL 当作一个参数接收的
 | 方法 | 签名 | 说明 |
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | 已经拿到一个用户在手时，铸造并寄出邮件。 |
-| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | 防枚举：按邮箱查找用户；一个未知的地址会静默返回 `Ok(())`。 |
+| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | 防枚举：按邮箱查找用户；一个未知的地址会静默返回 `Ok(())`；令牌存储和邮件发送失败仍然返回 `Err`，且执行时间不相等。 |
 | `check` | `check(token: &str) -> Result<bool>` | 不消费令牌 - 在一个落地页上调用是安全的。 |
 | `verify` | `verify(token: &str) -> Result<String>` | 绑定 actor 且一次性：已认证用户必须拥有令牌；成功会消费它、将用户标记为已验证，并返回该用户 ID。 |
 

@@ -191,7 +191,7 @@ avec une erreur de compilation claire. Les enums et les unions n'ont
 pas de représentation par défaut qui ait du sens. Les génériques
 forceraient une décision sur la façon dont le type fabrique
 paramétrise son modèle - et il n'y a pas de bon défaut, donc le derive
-refuse de deviner. Écrivez l'impl `Factory` à la main pour ces cas.
+refuse de deviner. Écrivez l'`impl Factory` à la main pour ces cas.
 
 ## Le builder fluide
 
@@ -548,7 +548,7 @@ ultérieure échoue, les insertions précédentes ne sont PAS annulées.
 qui parle directement au `DB::connection()` lié du framework - ils ne
 rejoignent **pas** une portée `DB::transaction(...)` ambiante. Si vous
 avez besoin d'atomicité à travers un lot d'insertions, redescendez
-vers le `Model::create(attrs!{...})` du trait `Model` à l'intérieur de
+vers le `Model::create(attrs!{...})` du trait Model à l'intérieur de
 la closure (ce chemin route à travers le même exécuteur qui honore
 `CURRENT_TX`) :
 

@@ -34,7 +34,7 @@ cuando embebes Suprnova en tu propio runtime.
 
 | Capa | Siempre activa | Qué te da |
 |---|---|---|
-| Registro estructurado (`tracing`) | Sí | Registros por `stdout` en formato `pretty` (dev) o `json` (producción), según el entorno |
+| Registro estructurado (`tracing`) | Sí | Registros por stdout en formato `pretty` (dev) o `json` (producción), según el entorno |
 | Correlación por id de solicitud | Sí | Id por solicitud acotado con un `tokio::task_local!`, repetido en `X-Request-Id`, se propaga a las tareas de `spawn_with_request_id` |
 | Exportación de OpenTelemetry | feature `otel` + endpoint de recolector | Exportación OTLP HTTP/proto de trazas, métricas y registros; propagación `traceparent` de W3C en ambos sentidos |
 
@@ -75,7 +75,7 @@ por defecto una salida de un objeto JSON por línea para los
 agregadores de registros, y las ejecuciones locales/de desarrollo
 obtienen una salida multilínea legible para humanos. Un
 `LOG_FORMAT=pretty` explícito anula el valor por defecto de
-producción si quieres `stdout` en crudo en producción.
+producción si quieres stdout en crudo en producción.
 
 ```bash
 # Desarrollo local - los overrides explícitos ganan
@@ -86,7 +86,7 @@ APP_ENV=production LOG_LEVEL=info cargo run --release
 ```
 
 Una directiva `LOG_LEVEL` mal formada no tumba el arranque - recae en
-`"info"` e imprime una advertencia de una línea en `stderr` para que
+`"info"` e imprime una advertencia de una línea en stderr para que
 la mala configuración sea visible para el operador.
 
 ### Contexto de span en cada línea
@@ -283,7 +283,7 @@ inyecta el contexto de traza activo como `traceparent` en cada
 llamada saliente, de modo que el servicio corriente abajo continúa
 la misma traza.
 
-En conjunto: `servicio de origen → tu handler → servicio de destino`
+En conjunto: `upstream service → your handler → downstream service`
 es una única traza conectada, sin plomería de spans manual en tus
 handlers.
 

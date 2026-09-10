@@ -1128,7 +1128,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 - **`match_on` von `MergeStrategy` trägt jetzt mehr als einen Feldnamen.** `Append`, `Prepend` und `Deep` weiten jeweils von `match_on: Option<String>` auf `match_on: Option<Vec<String>>`, sodass `InertiaResponse::merge_with` / `merge_lazy_with` auf mehreren Feldern deduplizieren können, wie `.prop(key, Prop::eager(v).match_on([...]))` es bereits konnte - zuvor waren die Abkürzungen des Response-Builders weniger ausdrucksstark als das direkte Bauen einer `Prop`. Siehe Upgrade.
 
-- **Scroll-Props geben jetzt Laravel-identisches `reset`- und Merge-Verhalten aus.** `scrollProps[key].reset` ist genau dann `true`, wenn der Client `key` in `X-Inertia-Reset` nannte, entsprechend Laravels `resolveScrollProps` - nicht wie zuvor bei jedem Visit ohne Header `X-Inertia-Infinite-Scroll-Merge-Intent`. Eine Scroll-Prop trägt jetzt außerdem unbedingt Merge-Metadaten, standardmäßig append: Ein frischer Visit (gar keine Header) gibt `reset: false` plus einen Eintrag in `mergeProps` aus, während er zuvor `reset: true` und keine Merge-Metadaten ausgab. Ein Schlüssel in `X-Inertia-Reset` wird für diese Response aus `mergeProps` / `prependProps` ausgeschlossen, dieselbe Ausnahme, die eine reguläre Merge-Prop bereits hatte.
+- **Scroll-Props geben jetzt Laravel-identisches `reset`- und Merge-Verhalten aus.** `scrollProps[key].reset` ist genau dann `true`, wenn der Client `key` in `X-Inertia-Reset` nannte, entsprechend Laravels `resolveScrollProps` - nicht `true` wie zuvor bei jedem Visit ohne Header `X-Inertia-Infinite-Scroll-Merge-Intent`. Eine Scroll-Prop trägt jetzt außerdem unbedingt Merge-Metadaten, standardmäßig append: Ein frischer Visit (gar keine Header) gibt `reset: false` plus einen Eintrag in `mergeProps` aus, während er zuvor `reset: true` und keine Merge-Metadaten ausgab. Ein Schlüssel in `X-Inertia-Reset` wird für diese Response aus `mergeProps` / `prependProps` ausgeschlossen, dieselbe Ausnahme, die eine reguläre Merge-Prop bereits hatte.
 
 - **`ssr:check` prüft jetzt, dass die Route `GET /health` des SSR-Workers 2xx antwortet**, statt nur zu bestätigen, dass etwas eine TCP-Verbindung annahm. Jeder `@inertiajs/{vue3,react,svelte}/server`-Worker antwortet standardmäßig auf `/health`, daher erforderte dies keine Änderung auf Worker-Seite - entspricht Laravels `Inertia\Ssr\HttpGateway::isHealthy()`.
 
@@ -1279,19 +1279,19 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   übersprungen: Ein explizites `router.reload({ only: ['stats'] })` löst
   sie erneut auf, statt nichts zurückzugeben.
 
-- **Der SES-Transport sendet jetzt eigene Message-Header.** `Mail::to(..)
-  .header("List-Unsubscribe", ...)` und `Mailable::headers()` wurden unter
-  `MAIL_DRIVER=ses` still verworfen: Der `Content.Simple`-Request-Body
-  hatte kein `Headers`-Feld, und der Raw-MIME-Builder las
-  `OutgoingMessage::headers` nie, obwohl jeder andere Transport sie
-  weiterreicht. Beide SES-Pfade tragen sie jetzt - `Headers` als
-  `{Name, Value}`-Liste von SES v2, Raw-MIME als echte Header-Zeilen -,
-  sodass Abmeldelinks, Threading-Header und Routing-Hinweise einen
-  Treiberwechsel überleben. Header-Namen werden auf beiden Pfaden vorab
-  validiert - CR, LF und NUL (die Injection-Bytes, die der
-  Mailgun-Transport bereits ablehnt) und alles, was kein gültiger
-  RFC-5322-Feldname ist (Leerzeichen, Doppelpunkte, Nicht-ASCII) -, sodass
-  das Anhängen einer Datei nie ändert, ob eine Nachricht akzeptiert wird.
+- **Der SES-Transport sendet jetzt eigene Message-Header.**
+  `Mail::to(..).header("List-Unsubscribe", ...)` und `Mailable::headers()`
+  wurden unter `MAIL_DRIVER=ses` still verworfen: Der
+  `Content.Simple`-Request-Body hatte kein `Headers`-Feld, und der
+  Raw-MIME-Builder las `OutgoingMessage::headers` nie, obwohl jeder andere
+  Transport sie weiterreicht. Beide SES-Pfade tragen sie jetzt - `Headers` als
+  `{Name, Value}`-Liste von SES v2, Raw-MIME als echte Header-Zeilen -, sodass
+  Abmeldelinks, Threading-Header und Routing-Hinweise einen Treiberwechsel
+  überleben. Header-Namen werden auf beiden Pfaden vorab validiert - CR, LF und
+  NUL (die Injection-Bytes, die der Mailgun-Transport bereits ablehnt) und
+  alles, was kein gültiger RFC-5322-Feldname ist (Leerzeichen, Doppelpunkte,
+  Nicht-ASCII) -, sodass das Anhängen einer Datei nie ändert, ob eine Nachricht
+  akzeptiert wird.
 
 ### Behoben
 
@@ -1442,7 +1442,7 @@ Ihrer Seite Code ändern.
 
 ### Geändert
 
-- **Suprnova ist von der GitHub-Organisation `entrepeneur4lyf` zu `eas4ai`
+- **Suprnova ist von der GitHub-Organisation entrepeneur4lyf zu `eas4ai`
   umgezogen.** Repository-URLs
   in Paketmetadaten, Dokumentation, Abhängigkeitsbeispielen und
   Scaffold-Vorlagen verwenden jetzt `github.com/eas4ai`. Neue Projekte verwenden
@@ -2578,7 +2578,7 @@ solche, die `--queue` nutzen. 0.7.1 selbst braucht keine Migration.
   `X-Inertia-*`-Header, den der 3.6.1-Client sendet, wurde bereits
   behandelt.
 - `scripts/release.sh` veröffentlicht das GitHub-Release jetzt
-  selbst, mit Notizen aus dem Abschnitt des Änderungsprotokolls der
+  selbst, mit Notizen aus dem `CHANGELOG.md`-Abschnitt der
   Version. Vorher war das ein manueller „nächster Schritt“, der
   übersprungen wurde, weshalb v0.5.10 und v0.6.1-v0.6.3 nur getaggt
   sind und die Releases-Seite auf einer veralteten Version saß.

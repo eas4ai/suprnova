@@ -1,6 +1,6 @@
 # 总线
 
-总线是 Suprnova **同步**的命令分发器。您定义一个类型化的 `Command`（`{ 输入，Output 类型 }`），在启动时为它注册一个 `Handler`，然后进程里的任何代码都可以调用 `Bus::dispatch(cmd).await`，拿回一个携带处理程序类型化结果的 `Dispatched<T>`。
+总线是 Suprnova **同步**的命令分发器。您定义一个类型化的 `Command`（`{ input, Output type }`），在启动时为它注册一个 `Handler`，然后进程里的任何代码都可以调用 `Bus::dispatch(cmd).await`，拿回一个携带处理程序类型化结果的 `Dispatched<T>`。
 
 总线与[`Queue`](queues.md)配对 - 后者是它异步的兄弟。它们是两个刻意分开的门面，而不是一个统一路由的分发器：
 

@@ -137,7 +137,7 @@ Dos cosas a notar:
   checkout recién clonado que todavía no tiene `DATABASE_URL`
   establecida.
 - **`main` no imprime errores.** `dispatch_argv_with_init` posee todo
-  el stderr de cara al usuario - hace `eprintln` del mensaje de error
+  el stderr de cara al usuario - hace eprintln del mensaje de error
   del handler (a menos que el error sea silencioso, como un fallo de
   análisis de clap que clap ya imprimió) e imprime la propia salida de
   ayuda / versión / error de análisis de clap. `main` es pura

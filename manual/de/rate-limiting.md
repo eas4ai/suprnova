@@ -390,7 +390,7 @@ let l = Limit::per_minute(5)
   wenn das Limit auslöst; der Default ist ein einfaches 429 „Too
   Many Attempts.“.
 - `.after(callback)` - verbraucht den Versuch nur, wenn
-  `callback(response)` `true` liefert. Kanonische Verwendung: nur
+  `callback(response)` true liefert. Kanonische Verwendung: nur
   fehlgeschlagene Logins zählen (`after(|r| r.status_code() >= 400)`).
 
 `Limit::none()` liefert ein `Unlimited` (ein `GlobalLimit` mit

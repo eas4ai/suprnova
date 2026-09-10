@@ -121,7 +121,7 @@ verrou se rende sur un échec pour qu'un réessai puisse réentrer.
 Le contrat pour lequel l'en-tête HTTP `Idempotency-Key` a été
 inventé. Le premier appelant exécute le corps, stocke la valeur de
 succès, et obtient `Replay::Fresh`. Un appelant ultérieur dans la
-fenêtre obtient `Replay::Replayed(<valeur d'origine>)` - la valeur de
+fenêtre obtient `Replay::Replayed(<original value>)` - la valeur de
 retour enregistrée, pas un marqueur. Un appelant concurrent qui
 arrive *pendant* que le premier tourne encore obtient
 `Replay::InProgress`.
@@ -279,8 +279,8 @@ stop-the-world plus longue que le TTL. C'est rare. Ce n'est pas
 impossible, et c'était invisible avant.
 
 En pratique : choisissez un TTL basé sur votre fenêtre de
-déduplication (`combien de temps une requête dupliquée devrait-elle
-être dédupliquée ?`), pas sur la durée du corps dans le pire cas. Un
+déduplication (`how long should a duplicate request be deduped?`),
+pas sur la durée du corps dans le pire cas. Un
 corps de 30 minutes avec un TTL d'1 minute convient très bien - le
 verrou sera rafraîchi environ quatre-vingt-dix fois pendant
 l'exécution du corps.

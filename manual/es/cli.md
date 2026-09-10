@@ -147,7 +147,7 @@ Consulta [CLI de programación](cli-scheduling.md) y el capítulo de
 | Comando | Descripción |
 |---|---|
 | `suprnova workflow:work` | Inicia el demonio worker de flujos de trabajo. Extrae los pasos del flujo de trabajo del registro y los ejecuta con el mismo límite de pánico que los handlers HTTP. |
-| `suprnova workflow:install` | Coloca las migraciones de `workflow` + `workflow_steps` en `src/migrations/`. Ya está presente en los proyectos recién generados con andamiaje. |
+| `suprnova workflow:install` | Coloca las migraciones de workflow + workflow_steps en `src/migrations/`. Ya está presente en los proyectos recién generados con andamiaje. |
 
 Consulta [Flujos de trabajo](workflows.md).
 

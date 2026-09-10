@@ -150,7 +150,7 @@ if is_authenticated() {
 | `previous_url()` / `set_previous_url(url)` | `Redirect::back` 读取的东西 |
 | `password_confirmed()` / `password_confirmed_at()` | “用户刚刚确认过密码”的时间戳 |
 
-修改类操作请在 `session_mut` 内部使用，读取则用 `session()`。中间件会在成功的 HTML `GET` 响应中自动填充 `previous_url` 槽位，所以 `redirect()->back()` 无需额外操作即可工作。中间件仅记录根相对且同源的 URL：以 `//` 或 `/\` 开头的请求路径（浏览器会将两者都视作 protocol-relative），或在任意位置携带 ASCII 控制字节的路径（`TAB` 或换行能令仅看似根相对的值在浏览器 URL 解析器剥离它后变成上述两种形式），永远不会被存储。`previous_url()` 也会在每次读取时重新检查相同规则，因此在此写入时防护措施出现前由旧版本写入的值会读作不存在，而不会被信任。无论如何，`Redirect::back()`、`Redirect::refresh()` 和 `url::previous()` 都不能将该槽位存过的值解析为应用外的 `Location`。
+修改类操作请在 `session_mut` 内部使用，读取则用 `session()`。中间件会在成功的 HTML GET 响应中自动填充 `previous_url` 槽位，所以 `redirect()->back()` 无需额外操作即可工作。中间件仅记录根相对且同源的 URL：以 `//` 或 `/\` 开头的请求路径（浏览器会将两者都视作 protocol-relative），或在任意位置携带 ASCII 控制字节的路径（`TAB` 或换行能令仅看似根相对的值在浏览器 URL 解析器剥离它后变成上述两种形式），永远不会被存储。`previous_url()` 也会在每次读取时重新检查相同规则，因此在此写入时防护措施出现前由旧版本写入的值会读作不存在，而不会被信任。无论如何，`Redirect::back()`、`Redirect::refresh()` 和 `url::previous()` 都不能将该槽位存过的值解析为应用外的 `Location`。
 
 ## 配置
 

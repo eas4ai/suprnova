@@ -341,7 +341,7 @@ Web-Push-API. Der Ablauf, den Ihr Frontend implementieren muss:
 1. Einen Service Worker registrieren.
 2. Den Nutzer um Erlaubnis bitten.
 3. Über `pushManager.subscribe({ userVisibleOnly: true,
-   applicationServerKey: <Ihr öffentlicher VAPID-Schlüssel> })`
+   applicationServerKey: <your VAPID public key> })`
    abonnieren.
 4. `subscription.toJSON()` an einen Suprnova-Endpunkt POSTen, der es
    auf der Nutzerzeile speichert.

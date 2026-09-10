@@ -55,7 +55,7 @@ pub fn register_http_stack() {
 
 ## bootstrap 里放什么
 
-一个真正的 `bootstrap` 函数只做少数几件不同的事。下面的每个小节对应其中一件。示例应用的 `app/src/bootstrap.rs` 把它们全都用上了，是可用的参考实现。
+一个真正的 `bootstrap` 函数只做少数几件不同的事。下面的小节描述了应用可用的 bootstrap 职责；示例应用实践了其中大部分，但不是全部。要进行当前默认的 Magnetar 初始化，请把 API 脚手架的 `src/bootstrap.rs` 模板当作可用的参考。
 
 ### 数据库连接
 
@@ -93,6 +93,8 @@ pub async fn register() {
 ```
 
 默认的 `MagnetarConfig` 会把应用身份绑定到规范的 `app_users` 表。生成的全栈脚手架使用 `users` 模型，并不会初始化 Magnetar，因此不要把上面的默认初始化器原样添加到那个脚手架中。请使用 API 脚手架的 `app_users` 模型，或者为现有的 `users` 表构造自定义的 `MagnetarHostEngine` 和 `AuthSchema` 绑定。框架的 `UserProvider` 与 Magnetar 主机绑定必须指向同一个应用身份。当前默认 `MagnetarConfig` 初始化的可用参考是 API 脚手架，而不是 `app/src/bootstrap.rs`。
+
+Magnetar 是进程级的，因为队列工作进程、调度器、HTTP 处理程序和会话中间件都使用相同的凭据和会话存储。把 `init_magnetar` 放在 `register` 里，而不是 `register_http_stack`。安装器是一次性的，如果另一个引擎已经安装，就会失败。
 
 API 脚手架在应用 bootstrap 中读取 `PASSKEY_RP_ID` 和 `PASSKEY_RP_ORIGIN`。这些名称是脚手架约定，而非框架拥有的环境变量。
 

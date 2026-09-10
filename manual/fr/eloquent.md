@@ -999,8 +999,8 @@ DB::transaction(|_tx| {
 - La closure retourne `Err` → **rollback** (l'erreur d'origine se
   propage).
 - La closure panique → rollback (la transaction en cours est
-  droppée au déroulement de la pile ; le `drop` de
-  `DatabaseTransaction` de SeaORM fait le rollback).
+  droppée au déroulement de la pile ; `DatabaseTransaction::drop` de
+  SeaORM fait le rollback).
 
 Les lectures à l'intérieur de la closure voient les écritures de la
 même transaction (via une consultation de `CURRENT_TX` à chaque
@@ -3042,7 +3042,7 @@ touchée. Utilisez un observateur lorsque vous avez besoin d'avancer le
 grand-parent ou de l'événement.
 
 `restore()` sur un enfant supprimé logiquement ne touche pas ses propriétaires.
-La restauration de Laravel passe par `save` ; celle de Suprnova est un
+Le `restore` de Laravel passe par `save` ; celui de Suprnova est un
 `UPDATE deleted_at = NULL` direct.
 
 ### Format

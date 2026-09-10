@@ -15,7 +15,7 @@ HTTPS en un host con nombre:
   rechazar hosts con IP/puerto sin nombre.
 
 [portless](https://portless.sh) le da a cada app local una URL
-`https://<nombre>.localhost` estable, detrás de un único proxy TLS en
+`https://<name>.localhost` estable, detrás de un único proxy TLS en
 el puerto 443. `suprnova dev:tls` conecta Suprnova con portless y -
 la parte fácil de hacer mal - confía en la CA local de portless en
 **todos los almacenes de certificados de los navegadores de tu
@@ -23,7 +23,7 @@ máquina**, sin sudo en Linux.
 
 > **Estrictamente opcional.** portless nunca es obligatorio.
 > `suprnova serve` funciona sin portless instalado. Te sumas a él al
-> generar el andamiaje (`suprnova new <nombre> --with-portless`) o
+> generar el andamiaje (`suprnova new <name> --with-portless`) o
 > añadiendo `portless.json` después. Si nunca ejecutas `dev:tls`,
 > nunca tocas portless.
 
@@ -83,8 +83,8 @@ suprnova dev:tls
 Esto:
 
 1. Comprueba que `portless` esté en tu PATH.
-2. Resuelve el nombre (`--name`, si no el `name` de
-   `[package]` en `Cargo.toml`) y el puerto (`--port`, si no
+2. Resuelve el nombre (`--name`, si no `[package].name` de
+   `Cargo.toml`) y el puerto (`--port`, si no
    `SERVER_PORT`, si no `8765`).
 3. Registra la ruta `myapp.localhost → 127.0.0.1:8765` (omítelo con
    `--no-alias`).
@@ -96,8 +96,8 @@ Flags:
 
 | Flag | Efecto |
 |---|---|
-| `--name <nombre>` | Sobrescribe el nombre de la URL. Por defecto: el nombre del paquete en `Cargo.toml`. |
-| `--port <puerto>` / `-p` | Sobrescribe el puerto enrutado. Por defecto: `SERVER_PORT`, si no `8765`. |
+| `--name <name>` | Sobrescribe el nombre de la URL. Por defecto: el nombre del paquete en `Cargo.toml`. |
+| `--port <port>` / `-p` | Sobrescribe el puerto enrutado. Por defecto: `SERVER_PORT`, si no `8765`. |
 | `--no-alias` | Solo confía en la CA; no toca la ruta de portless. |
 | `--yes` | Omite la confirmación antes de modificar tus almacenes de certificados. Se ignora cuando la huella de la CA cambió desde la última ejecución - eso siempre pregunta. |
 

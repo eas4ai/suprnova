@@ -92,7 +92,7 @@ data: tick 0
 | `.retry()` | `Option<Duration>` - 設定されていれば再接続の遅延 |
 | `.payload()` | `&str` - `data:` ペイロード（`Comment` の場合は `""`） |
 | `.is_comment()` | `bool` |
-| `.comment_text()` | `Option<&str>` - Commentであれば、そのコメントテキスト |
+| `.comment_text()` | `Option<&str>` - `Comment`であれば、そのコメントテキスト |
 
 ### 通信上の形式へのエンコード
 

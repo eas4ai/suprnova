@@ -222,7 +222,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` valida las credenciales mediante el guard con estado predeterminado y su `UserProvider` configurado; este es el camino que usa el andamiaje generado de pila completa. El restablecimiento de contraseña admite usuarios ya verificados mediante un proveedor con capacidad de restablecimiento explícita, como `EloquentUserProvider`. Instale Magnetar cuando el restablecimiento deba servir como primera prueba atómica del buzón. `Auth::password()`, `BruteForce`, las claves de acceso, los enlaces mágicos, OAuth, las sesiones con token de portador y la gestión de sesiones de Magnetar requieren el motor Magnetar instalado. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
+`Auth::attempt` valida las credenciales mediante el guard con estado predeterminado y su `UserProvider` configurado; este es el camino que usa el andamiaje generado de pila completa. El restablecimiento de contraseña admite usuarios ya verificados mediante un proveedor con capacidad de restablecimiento explícita, como `EloquentUserProvider`. Instale Magnetar cuando el restablecimiento deba servir como primera prueba atómica del buzón. `Auth::password()`, `BruteForce`, las claves de acceso, los enlaces mágicos, OAuth, las sesiones con token de portador y la gestión de sesiones de Magnetar requieren el motor Magnetar instalado. La verificación de correo y la facade de compatibilidad `TwoFactor` siguen perteneciendo al framework. Ver [Autenticación](authentication.md), [Flujos de autenticación](auth-flows.md) y [OAuth e inicio de sesión sin contraseña](oauth.md).
 
 ### Migraciones
 
@@ -514,4 +514,4 @@ Cosas que Laravel tiene que Suprnova no tiene (todavía):
 - [Inicio rápido](quickstart.md) - construir una pequeña app en 5 minutos
 - [Enrutamiento](routing.md) - el siguiente capítulo natural desde aquí
 
-O salta a cualquier lugar vía [`documentación.md`](documentation.md).
+O salta a cualquier lugar vía [`documentation.md`](documentation.md).

@@ -69,10 +69,15 @@ Für `serve` geschieht dann Folgendes:
 8. Der Router wird an `Server::from_config(...)` übergeben
 9. `server.run()` wird aufgerufen
 
-Worker (`queue:work`, `workflow:work`, `schedule:run`) verwenden denselben
-Boot-Pfad bis einschließlich `bootstrap_fn`; `http_bootstrap_fn` rufen sie
-nicht auf. Nur `serve` / `web:run` tut dies. [Application Bootstrap](bootstrap.md)
-erläutert, warum ein Worker-Image ohne gebautes Frontend-Manifest booten kann.
+Worker (`queue:work`, `workflow:work`, `schedule:run`) und die
+Konsolen-Binary verwenden denselben Boot-Pfad bis einschließlich
+`bootstrap_fn`, sodass sie dieselben konfigurierten Dienste und
+gebundenen Container-Werte sehen - aber sie rufen `http_bootstrap_fn`
+nie auf. Nur `serve` / `web:run` tut dies. Siehe [Application
+Bootstrap](bootstrap.md) dafür, warum: `Inertia::install` schlägt
+geschlossen fehl, wenn das gebaute Frontend-Manifest fehlt, und von
+einem Worker- oder Konsolen-Image wird erwartet, dass es ohne eines
+ausgeliefert wird.
 
 ## 2. Server-Boot - `server.rs`
 
@@ -293,7 +298,7 @@ Eine kurze Liste von Invarianten, die der Lifecycle sicherstellt:
   Accept-Loop zu blockieren - ein Server, dessen Slots vollständig von
   langlebigen WebSocket-Sessions belegt sind, leert sich also weiterhin
   bei `SIGTERM`, statt am Ende der Grace-Zeit des Orchestrators per
-  `SIGKILL` beendet zu werden.
+  SIGKILL beendet zu werden.
 - **Jedes Leeren bricht ab, was es zurücklässt.** HTTP-Verbindungen,
   WebSocket-Handler und Supervisoren erhalten jeweils ein begrenztes
   Grace-Fenster und werden anschließend abgebrochen und abgewartet -

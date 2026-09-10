@@ -133,10 +133,21 @@ autenticada. Un token válido de otro usuario se rechaza sin consumirse.
 
 ### Restablecimiento de contraseña y bloqueo
 
-`BruteForce` requiere el motor de contraseñas Magnetar instalado. El restablecimiento de contraseña prefiere ese motor, pero `EloquentUserProvider<M>` permite restablecerla para usuarios ya verificados cuando `M` implementa `MustVerifyEmail + CanResetPassword`. Los usuarios no verificados no reciben ningún enlace de restablecimiento respaldado por el proveedor. Instale Magnetar para usar el restablecimiento como primera prueba atómica del buzón.
+`BruteForce` requiere el motor de contraseñas Magnetar instalado. El restablecimiento de contraseña prefiere ese motor, pero una aplicación respaldada por un proveedor puede restablecerla para usuarios ya verificados sin instalar Magnetar cuando su `UserProvider` admite explícitamente el restablecimiento de contraseña. `EloquentUserProvider<M>` opta automáticamente cuando `M` implementa `MustVerifyEmail + CanResetPassword`. Los usuarios no verificados no reciben ningún enlace de restablecimiento respaldado por el proveedor. Instale Magnetar para usar el restablecimiento como primera prueba atómica del buzón.
 
-El restablecimiento de contraseña aplica antienumeración al enviar. La
-finalización usa el almacén atómico de primera prueba de email y devuelve un
+`MagnetarConfig::lockout_config` acepta un
+`magnetar::password::lockout::LockoutConfig`. La política
+predeterminada activa el bloqueo tras cinco intentos fallidos durante
+15 minutos, conserva los registros de auditoría durante siete días y
+falla de forma cerrada durante una interrupción del backend de
+bloqueo.
+
+El restablecimiento de contraseña normaliza a `Ok(())` una dirección
+desconocida o no verificada respaldada por proveedor solo después de
+que tengan éxito las comprobaciones del limitador de abuso, la
+configuración de correo, el proveedor o motor y el almacenamiento. Los
+fallos de configuración y almacenamiento igualmente salen a la
+superficie. La finalización usa el almacén atómico de primera prueba de email y devuelve un
 `PasswordResetOutcome` a los llamadores que necesitan conocer explícitamente
 el estado de revocación de la sesión o de remember.
 
@@ -381,7 +392,7 @@ al motor.
 
 ### Anti-enumeración
 
-`send_link` devuelve `Ok(())` para una dirección desconocida solo después de
+`PasswordReset::send_link` devuelve `Ok(())` para una dirección desconocida solo después de
 que tienen éxito las comprobaciones del limitador de abuso, la configuración
 de correo, el motor y el almacenamiento. Los fallos de configuración,
 limitador, almacenamiento y correo siguen devolviendo `Err`. El controlador

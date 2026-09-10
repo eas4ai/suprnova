@@ -1641,7 +1641,7 @@ Ambas señales viven en `Cache`, junto a la señal de reinicio de arriba:
 | `suprnova:queue:paused:{connection}:{queue}` | interruptor de una cola, establecido por `pause` |
 
 Consulta el estado con `Queue::is_paused(&connection, "billing").await?`
-(es `true` si cualquiera de las claves está establecida) o con
+(es true si cualquiera de las claves está establecida) o con
 `Queue::paused_queues(&connection, &queues).await?` (cuáles de `queues`
 están pausadas actualmente).
 

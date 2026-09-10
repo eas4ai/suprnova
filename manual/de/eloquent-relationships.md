@@ -463,7 +463,7 @@ sollten den polymorphen Schlüssel nicht brechen.
 ### `MorphTo` und das familienspezifische Enum
 
 `MorphTo` lebt auf der Morph-Tabellen-Seite. Der Nutzer deklariert
-die *`targets`-Liste* im Voraus:
+die *targets-Liste* im Voraus:
 
 ```rust
 #[model(table = "comments", relations = {
@@ -514,7 +514,7 @@ schlagen die Typisierungskosten:
 - **`Unknown(String, id)` ist typsicher** - verwaiste Zeilen von
   einer entfernten Eltern-Modellklasse werden als Variante
   sichtbar, nicht wegpanickt.
-- **Die `targets`-Liste dokumentiert das Schema** - das Lesen der
+- **Die targets-Liste dokumentiert das Schema** - das Lesen der
   `MorphTo`-Deklaration sagt Ihnen jeden Typ, der am anderen Ende
   sitzen kann. Keine Datenbankabfrage nötig, um sie aufzuzählen.
 

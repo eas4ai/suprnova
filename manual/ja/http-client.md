@@ -140,7 +140,7 @@ if (300..400).contains(&resp.status()) {
 
 ## リトライ
 
-`Http` は、フルジッターを伴う指数バックオフのリトライを出荷しています - AWSのレシピであり、Laravelが使っているのと同じものです。両方のリトライモードはすべてのHTTPメソッドのトランスポート障害を処理します。どの方法が受信した5xxレスポンスをPOSTとPATCHで再生できるかどうかで異なります。
+`Http` は、フルジッターを伴う指数バックオフのリトライを出荷しています - AWSのレシピであり、Laravelが使っているのと同じものです。両方のリトライモードはすべてのHTTPメソッドのトランスポート障害を処理します。どの方法が受信した5xxレスポンスを`POST`と`PATCH`で再生できるかどうかで異なります。
 
 ### `.retry(max_attempts, base_backoff)` - すべてのメソッドのトランスポートリトライ
 
@@ -168,7 +168,7 @@ Http::post("https://api.example.com/charges")
     .await?;
 ```
 
-アップストリームが尊重するべき等性キーを渡していたり、あるいはそれ以外の方法でリクエストを再生しても安全にしていたりする場合は、`.retry_non_idempotent(...)` に切り替えて、POSTとPATCHを同じリトライの挙動へオプトインさせてください。リトライのルールは同一です - コネクションエラーと5xxのレスポンスはリトライされ、4xxと2xx/3xxはそのまま通過します。
+アップストリームが尊重するべき等性キーを渡していたり、あるいはそれ以外の方法でリクエストを再生しても安全にしていたりする場合は、`.retry_non_idempotent(...)` に切り替えてください。これはすべてのメソッドのトランスポートエラーによるリトライを維持したうえで、`POST` と `PATCH` の5xxレスポンスのリトライをさらに許可します。4xxと2xx/3xxのレスポンスは、それでもそのまま返されます。
 
 ### 503では`Retry-After`が尊重される
 
@@ -186,9 +186,9 @@ let resp = Http::get("https://flaky.example.com/health")
     .await?;
 ```
 
-`retry_when` は、上のポリシーが本来行う各リトライの前に参照されるpredicateを登録します。ポリシーを狭めるだけです。`false` はリトライを拒否できますが、作り出すことはできません。4xxまたは2xx/3xxレスポンス、あるいは `max_attempts` に到達した後には決して参照されません。`POST` または `PATCH` のトランスポート障害については、`.retry_non_idempotent(...)` がなくても参照されます。`.retry(...)` / `.retry_non_idempotent(...)` ポリシーなしでは、リトライがないためpredicateも呼ばれません。
+`retry_when` は、上のポリシーが本来行う各リトライの前に参照されるpredicateを登録します。すでにリトライ資格のある試行を拒否できますが、リトライを作り出すことはできません。特に、2xx、3xx、4xxレスポンスをリトライへ変えることはできず、`.retry_non_idempotent(...)` なしに `POST` または `PATCH` の受け取った5xxレスポンスをリトライ可能にすることもできません。`retry_when` は、素の `.retry()` で設定された `POST` や `PATCH` を含む、すべてのメソッドのトランスポートエラーによるリトライの前に参照されます。`.retry(...)` も `.retry_non_idempotent(...)` ポリシーもなければ、単独の `retry_when` には拒否するものが何もありません。
 
-predicateは `RetryContext { attempt, method, url, outcome }` を受け取ります。`outcome` は `RetryOutcome::TransportError`（レスポンスが到着する前に送信が失敗）または `RetryOutcome::Status(n)`（5xxレスポンス）です。これは `.retry(...)` がすでにリトライする二つの条件と同じです。
+predicateは `RetryContext { attempt, method, url, outcome }` を受け取ります。`outcome` は `RetryOutcome::TransportError`（レスポンスが到着する前に送信が失敗）または `RetryOutcome::Status(n)`（リトライ対象となる5xxレスポンス）です。
 
 ## レスポンスを読み取る
 

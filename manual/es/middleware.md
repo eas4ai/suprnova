@@ -248,7 +248,7 @@ necesita un struct de configuración, ninguno necesita andamiaje.
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Comprobaciones de pertenencia al guard; consulta [Autenticación](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Compuertas de los flujos de auth; consulta [Flujos de autenticación](auth-flows.md) |
 | `MaintenanceMiddleware` | Devuelve 503 cuando está puesto el flag de mantenimiento en la caché o en el sistema de archivos |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Protocolo de Inertia: `Vary: X-Inertia` en todas las respuestas y redirección de vuelta ante un 200 vacío; rebote 409 de versión de assets; 302→303 en redirecciones que no son GET; `422`→`303` con errores en flash; cifrado del historial. Los cuatro primeros los registra `Inertia::install`; consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Protocolo de Inertia: `Vary: X-Inertia` en todas las respuestas y redirección de vuelta ante un 200 vacío; rebote 409 de versión de assets; 302→303 en redirecciones que no son GET; 422→303 con errores en flash; cifrado del historial. Los cuatro primeros los registra `Inertia::install`; `EncryptHistoryMiddleware` es opt-in por separado. Consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
 | `IncludeMiddleware` | Conjuntos de include por campo para las recargas parciales de `#[derive(Data)]` |
 
 ### Tiempos de espera de solicitudes
@@ -368,9 +368,9 @@ que se lea mejor en tu código.
 |---|---|---|---|
 | `send(request)` | `send($passable)` | `with_request(request)` | Fija la solicitud que se pasa a través de la cadena |
 | `through(iter)` | `through($pipes)` | `with_middleware(iter)` | Reemplaza la lista de pipes |
-| `through_boxed(iter)` | - | - | Reemplaza la lista de pipes con middleware ya envuelto en `Box` |
+| `through_boxed(iter)` | - | - | Reemplaza la lista de pipes con middleware ya envuelto en Box |
 | `pipe(M)` | `pipe($pipes)` | `push(M)` | Agrega un único middleware |
-| `pipe_boxed(M)` | - | - | Agrega un middleware ya envuelto en `Box` |
+| `pipe_boxed(M)` | - | - | Agrega un middleware ya envuelto en Box |
 | `then(destination)` | `then($destination)` | `execute(destination)` | Ejecuta la cadena con el handler de destino |
 | `then_with(req, dst)` | - | - | Sobrescribe el passable en línea |
 | `then_return()` | `thenReturn()` | - | Ejecuta la cadena y devuelve un 204 No Content |
@@ -410,7 +410,7 @@ register_terminable(AuditLogTerminator);
 ```
 
 El servidor itera los terminables registrados en orden de registro
-después de cada respuesta (4xx y 5xx incluidos) y espera (`await`) cada
+después de cada respuesta (4xx y 5xx incluidos) y espera cada
 uno. Los errores se registran vía `tracing::error!` y se descartan - la
 respuesta ya salió por la puerta, así que ya no queda nadie a quien
 mostrárselos.
@@ -490,8 +490,8 @@ Más allá de `register_global_middleware`, el registro expone:
 | `global_middleware_count()` | - | Cantidad de globales registrados actualmente |
 | `MiddlewareRegistry::from_global()` | - | Toma una instantánea del registro global hacia un registro por servidor |
 | `MiddlewareRegistry::prepend(M)` | - | Inserta al frente, al estilo builder, sobre una instancia de registro |
-| `MiddlewareRegistry::append_boxed(M)` | - | Agrega un middleware ya envuelto en `Box` |
-| `MiddlewareRegistry::prepend_boxed(M)` | - | Inserta al frente un middleware ya envuelto en `Box` |
+| `MiddlewareRegistry::append_boxed(M)` | - | Agrega un middleware ya envuelto en Box |
+| `MiddlewareRegistry::prepend_boxed(M)` | - | Inserta al frente un middleware ya envuelto en Box |
 | `MiddlewareRegistry::len()` / `is_empty()` | - | Introspección del builder |
 
 `MiddlewareRegistry::from_global()` toma una instantánea del registro

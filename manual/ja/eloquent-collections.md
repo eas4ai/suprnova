@@ -308,7 +308,7 @@ users.load_missing(["posts.comments"]).await?;
 let json: String = serde_json::to_string(&users)?;
 ```
 
-しかし - serdeの `Vec<T>` に対する全面的な `Serialize` の実装は、すべての要素に対して `T::serialize` を直接呼び出します。これは、`#[suprnova::model]` マクロが発行する `Model::to_array()` のオーバーライドを**バイパスします**。つまり、あなたの `hidden = ["password"]`、`visible = [...]`、`appends = [...]` というモデルの属性をバイパスしてしまうのです。
+しかし - serdeの `Serialize for Vec<T>` という全面的な実装は、すべての要素に対して `T::serialize` を直接呼び出します。これは、`#[suprnova::model]` マクロが発行する `Model::to_array()` のオーバーライドを**バイパスします**。つまり、あなたの `hidden = ["password"]`、`visible = [...]`、`appends = [...]` というモデルの属性をバイパスしてしまうのです。
 
 モデルに隠しフィールドがある場合、コレクションをserde経由でシリアライズしては**いけません**。`to_array()` か `to_json()` を使ってください:
 
@@ -321,7 +321,7 @@ let body:  String            = users.to_json();
 
 同じ注意点は、内部で `serde_json::to_value(&collection)` を呼び出すあらゆるものに当てはまります: コレクションをpropsに詰め込むときの `Inertia::render`、リソース構造体の代わりに生のモデルを手渡す場合の `JsonApi`/`Resource`、ペイロードをserdeでエンコードするログの発送者、などです。安全なパターンは、値がどんなserdeの経路にも触れる前に、リソース型（[JSON:API リソース](eloquent-resources.md)）を経由するか、`to_array()` を経由して変換することです。
 
-モデルでない型のコレクション（`Collection<MyDto>`、`Collection<String>`）については、serde経路で問題ありません - この問題が当てはまるのは、`T` が、`hidden`/`visible`/`appends` を宣言した `#[suprnova::model]` 構造体である場合だけです。
+モデルでない型のコレクション（`Collection<MyDto>`、`Collection<String>`）については、serde経路で問題ありません - この問題が当てはまるのは、`T` が、hidden/visible/appends を宣言した `#[suprnova::model]` 構造体である場合だけです。
 
 ## 借用と消費
 
@@ -456,7 +456,7 @@ Rustには所有権があり、それがないふりをすることは、コレ�
 
 - **`Deref<Target = Vec<T>>` ではなく、`Deref<Target = [T]>`。** `Collection` は、概念的には「行のスナップショット」であり、可変なバッファではありません。スライスメソッドは `Deref` を通じてやってきます。`push`/`pop` が欲しければ、`into_vec()` が生の `Vec` を与え、あらゆる見せかけを取り除きます。
 
-- **シリアライゼーションは、正しさに奉仕するために異なる設計をしています。** `to_array` と `to_json` は `Model::to_array()` を経由するため、モデルごとのhidden/visible/appendsが適用されます。serdeの `Vec` に対する全面的な `Serialize` によるバイパスは、まさにその通りの[フットガン](#シリアライゼーション-to-array-対-serde)として文書化されています。Laravelの `toArray()` も同じルーティングを行います。Rustのユーザーは反射的に `serde_json::to_string` に手を伸ばしてしまうため、私たちはただ、そのギャップに明示的に名前を付けなければならないだけです。
+- **シリアライゼーションは、正しさに奉仕するために異なる設計をしています。** `to_array` と `to_json` は `Model::to_array()` を経由するため、モデルごとのhidden/visible/appendsが適用されます。serdeの `Serialize for Vec` による全面的なバイパスは、まさにその通りの[フットガン](#シリアライゼーション-to-array-対-serde)として文書化されています。Laravelの `toArray()` も同じルーティングを行います。Rustのユーザーは反射的に `serde_json::to_string` に手を伸ばしてしまうため、私たちはただ、そのギャップに明示的に名前を付けなければならないだけです。
 
 このトレードオフは、まさにSuprnovaがあらゆる場所で行っているものです: Laravelの表面の形と、Rustの値セマンティクスです。
 

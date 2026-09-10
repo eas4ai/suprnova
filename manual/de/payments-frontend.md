@@ -505,7 +505,7 @@ Das JSON sieht so aus:
 
 `client_secret` und `publishable_key` sind auf der Rust-Seite
 `Option<String>` und fehlen im JSON, wenn eine Aktion sie nicht
-braucht. Prüfen Sie beide immer auf `null`, bevor Sie sie an ein
+braucht. Prüfen Sie beide immer auf null, bevor Sie sie an ein
 Provider-SDK übergeben, und lassen Sie `action_kind` den Dispatch
 steuern - dieses Feld ist immer vorhanden.
 

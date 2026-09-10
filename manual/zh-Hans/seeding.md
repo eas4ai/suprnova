@@ -162,7 +162,7 @@ suprnova::seed::run_all().await?;
 suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
-查不到时会返回 `FrameworkError::not_found("no seeder registered for \`X\`")`。这个控制台命令会把它传播成一个非零的退出码和一行 stderr 输出 - 不会悄无声息地什么都不做。
+查不到时会返回 ``FrameworkError::not_found("no seeder registered for `X`")``。这个控制台命令会把它传播成一个非零的退出码和一行 stderr 输出 - 不会悄无声息地什么都不做。
 
 ### `count()` 和 `is_registered(name)`
 

@@ -201,7 +201,7 @@ docker build -t myapp .
 当本地构建成功，但 App Platform 的构建失败时，常见的原因是：
 
 - **缺失构建上下文文件**：检查 `.dockerignore` 有没有把 `Cargo.lock` 或者 `migrations/` 目录排除在外。
-- **`cargo build` 期间内存不足**：在 App Settings -> Resources -> Build 里调高构建实例的规格。Rust 的 release 构建很吃内存。
+- **cargo build 期间内存不足**：在 App Settings -> Resources -> Build 里调高构建实例的规格。Rust 的 release 构建很吃内存。
 
 ### 应用启动后随即崩溃
 

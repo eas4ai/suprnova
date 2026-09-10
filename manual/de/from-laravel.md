@@ -221,7 +221,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` validiert Anmeldedaten über den zustandsbehafteten Standard-Guard und dessen konfigurierten `UserProvider`; dies ist der Pfad, den das generierte Full-Stack-Scaffold verwendet. Die Passwortzurücksetzung unterstützt bereits verifizierte Benutzer über einen explizit zum Zurücksetzen befähigten Provider wie `EloquentUserProvider`. Installieren Sie Magnetar, wenn das Zurücksetzen als atomarer erstmaliger Postfachnachweis dienen muss. `Auth::password()`, `BruteForce`, Passkeys, Magic Links, OAuth, Bearer-Sitzungen und die Magnetar-Sitzungsverwaltung erfordern die installierte Magnetar-Engine. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
+`Auth::attempt` validiert Anmeldedaten über den zustandsbehafteten Standard-Guard und dessen konfigurierten `UserProvider`; dies ist der Pfad, den das generierte Full-Stack-Scaffold verwendet. Die Passwortzurücksetzung unterstützt bereits verifizierte Benutzer über einen explizit zum Zurücksetzen befähigten Provider wie `EloquentUserProvider`. Installieren Sie Magnetar, wenn das Zurücksetzen als atomarer erstmaliger Postfachnachweis dienen muss. `Auth::password()`, `BruteForce`, Passkeys, Magic Links, OAuth, Bearer-Sitzungen und die Magnetar-Sitzungsverwaltung erfordern die installierte Magnetar-Engine. Die E-Mail-Verifizierung und die Kompatibilitäts-Facade `TwoFactor` bleiben framework-eigen. Siehe [Authentifizierung](authentication.md), [Auth-Flows](auth-flows.md) und [OAuth und passwortloser Login](oauth.md).
 
 ### Migrationen
 

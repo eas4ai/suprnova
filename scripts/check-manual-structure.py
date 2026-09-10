@@ -9,35 +9,13 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 LOCALES = ("de", "es", "fr", "ja", "pt-BR", "zh-Hans")
 
-# Sources whose mirrors are held to the inline code span rule below.
-#
-# This list is a ratchet, not an inventory. The span rule compares the code
-# spans of an English chapter against each mirror, and the manual predates it:
-# most chapters carry differences that are a translation audit of their own, not
-# something this gate can act on. So the rule binds only where a chapter has
-# already been shown clean. A chapter joins this list on the day its six mirrors
-# pass, and from then on the docs tier refuses a regression in it. Chapters
-# absent from the list are checked for every other shape - headings, fences,
-# tables, lists, links - exactly as before; only their spans go unexamined.
-#
-# Never add a chapter to buy silence. Run the checker first; if it reports
-# spans for the chapter, the mirrors are wrong and the fix belongs in the
-# translation, not here.
-SPAN_CHECKED_SOURCES = (
-    "render-cache.md",
-    "render-cache-representations.md",
-    "render-cache-generations.md",
-    "render-cache-deployment.md",
-    "render-cache-operations.md",
-    "documentation.md",
-    "live.md",
-)
 _HEADING = re.compile(r"^(?: {0,3}|\s*(?:[-+*]|\d+[.)])\s+)(#{1,6})(?:\s+|$)")
 _LIST_ITEM = re.compile(r"^(\s*)([-+*]|\d+[.)])\s+")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -252,6 +230,13 @@ def _table_cells(line: str) -> tuple[str, ...] | None:
     return tuple(cells) if len(cells) >= 2 else None
 
 
+# A block quote marker is structure, not content: CommonMark strips it before
+# the quoted block is parsed. Leaving it in place lets it land inside a code
+# span whose backticks sit on two quoted lines, which reports drift that the
+# rendered page does not have.
+_BLOCKQUOTE_MARKER = re.compile(r"^ {0,3}(?:> ?)+")
+
+
 def _is_table_delimiter(cells: tuple[str, ...] | None) -> bool:
     return cells is not None and all(
         _TABLE_DELIMITER_CELL.fullmatch(cell) is not None for cell in cells
@@ -263,12 +248,26 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
     fences: list[str] = []
     lists: list[tuple[int, str]] = []
     links: list[str] = []
-    prose: list[str] = []
     table_groups: list[list[int]] = []
     active_table: list[int] = []
     previous_table_cells: tuple[str, ...] | None = None
     closing_marker: str | None = None
     closing_length = 0
+
+    # Span extraction is bounded to one paragraph, not the whole document: a
+    # code span cannot cross a blank line in CommonMark, so a mis-nested span
+    # must not be allowed to swallow prose past the next boundary. `blocks`
+    # holds each finished paragraph's text (already whitespace-joined);
+    # `current_block` accumulates the lines of the paragraph still open. A
+    # mirror that wraps a span across two lines of the *same* paragraph still
+    # yields one span, because those lines land in the same block.
+    blocks: list[str] = []
+    current_block: list[str] = []
+
+    def _flush_block() -> None:
+        if current_block:
+            blocks.append(" ".join(current_block))
+            current_block.clear()
 
     for line in text.splitlines():
         fence = _FENCE.match(line)
@@ -286,15 +285,11 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
                 table_groups.append(active_table)
                 active_table = []
             previous_table_cells = None
+            _flush_block()
             continue
         if closing_marker is not None:
             previous_table_cells = None
             continue
-
-        # Prose only. Inline code spans are collected from the joined text
-        # below so a mirror that wraps its lines differently is not penalized
-        # for a span whose backticks land on two different lines.
-        prose.append(line)
 
         heading = _HEADING.match(line)
         if heading is not None:
@@ -306,6 +301,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
             lists.append((len(item.group(1).expandtabs(4)), kind))
 
         cells = _table_cells(line)
+        table_started_here = False
         if active_table:
             if cells is None:
                 table_groups.append(active_table)
@@ -318,7 +314,37 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
             and len(previous_table_cells) == len(cells)
         ):
             active_table = [len(previous_table_cells), len(cells)]
+            table_started_here = True
         previous_table_cells = cells
+
+        # A heading, a confirmed table row, and the start of a list item each
+        # begin a fresh block, mirroring the shape tracking above rather than
+        # re-deriving it with a second parser. A blank line only closes
+        # whatever block is open; everything else is paragraph continuation.
+        # A stray pipe in ordinary prose (`"ack"` | `"nack"`) never sets
+        # `active_table`, so it stays plain paragraph text, not a table row.
+        if not line.strip() or not _BLOCKQUOTE_MARKER.sub("", line).strip():
+            _flush_block()
+        elif heading is not None:
+            _flush_block()
+            blocks.append(line)
+        elif table_started_here:
+            # The header row already sits at the end of `current_block`, put
+            # there a line ago by the plain paragraph path below, because it
+            # was not yet known to start a table. Pull it out on its own.
+            if current_block:
+                header_line = current_block.pop()
+                _flush_block()
+                blocks.append(header_line)
+            blocks.append(line)
+        elif active_table:
+            _flush_block()
+            blocks.append(line)
+        elif item is not None:
+            _flush_block()
+            current_block.append(_BLOCKQUOTE_MARKER.sub("", line))
+        else:
+            current_block.append(_BLOCKQUOTE_MARKER.sub("", line))
 
         reference = _REFERENCE_LINK.match(line)
         if reference is not None:
@@ -334,6 +360,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
 
     if active_table:
         table_groups.append(active_table)
+    _flush_block()
     tables = tuple((len(group), tuple(group)) for group in table_groups)
     return _MarkdownShape(
         headings=tuple(headings),
@@ -341,7 +368,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
         tables=tables,
         lists=tuple(lists),
         links=tuple(links),
-        spans=tuple(_code_spans(" ".join(prose))),
+        spans=tuple(chain.from_iterable(_code_spans(block) for block in blocks)),
         unclosed_fence=closing_marker is not None,
     )
 
@@ -353,7 +380,6 @@ def _compare_shapes(
     locale: str,
     file: str,
     problems: list[Problem],
-    compare_spans: bool,
 ) -> None:
     comparisons = (
         ("headings", english.headings, localized.headings),
@@ -375,32 +401,32 @@ def _compare_shapes(
     # mirror repeating an English span more often than the English is fine -
     # splitting one sentence into two legitimately repeats the identifier.
     #
-    # Only for sources on the SPAN_CHECKED_SOURCES ratchet; see that list.
-    if compare_spans:
-        english_spans = Counter(english.spans)
-        localized_spans = Counter(localized.spans)
-        for span, missing in sorted((english_spans - localized_spans).items()):
-            problems.append(
-                Problem(
-                    locale,
-                    file,
-                    "spans",
-                    f"mirror drops the inline code span `{span}` "
-                    f"({missing} of {english_spans[span]} occurrence(s) missing)",
-                )
+    # Code-span parity holds for every chapter and every mirror. A reported
+    # defect is fixed in the translation, never by narrowing this rule.
+    english_spans = Counter(english.spans)
+    localized_spans = Counter(localized.spans)
+    for span, missing in sorted((english_spans - localized_spans).items()):
+        problems.append(
+            Problem(
+                locale,
+                file,
+                "spans",
+                f"mirror drops the inline code span `{span}` "
+                f"({missing} of {english_spans[span]} occurrence(s) missing)",
             )
-        for span, added in sorted((localized_spans - english_spans).items()):
-            if span in english_spans:
-                continue
-            problems.append(
-                Problem(
-                    locale,
-                    file,
-                    "spans",
-                    f"mirror adds the inline code span `{span}` "
-                    f"({added} occurrence(s)); the English source has no such span",
-                )
+        )
+    for span, added in sorted((localized_spans - english_spans).items()):
+        if span in english_spans:
+            continue
+        problems.append(
+            Problem(
+                locale,
+                file,
+                "spans",
+                f"mirror adds the inline code span `{span}` "
+                f"({added} occurrence(s)); the English source has no such span",
             )
+        )
     if localized.unclosed_fence:
         problems.append(Problem(locale, file, "fences", "unclosed fenced code block"))
 
@@ -514,7 +540,6 @@ def _validate_manual_structure(root: Path) -> tuple[list[Problem], int]:
                 locale=locale,
                 file=locale_name,
                 problems=problems,
-                compare_spans=source_name in SPAN_CHECKED_SOURCES,
             )
 
     return sorted(problems), len(sources)

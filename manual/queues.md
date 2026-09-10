@@ -822,10 +822,11 @@ worker is reached through its source name, not the rewritten one. The
 `WorkerQueuePaused` event this transition raises carries `queue: default`,
 the configured name, never `high` - Laravel orders and reports it the same way.
 
-The inspection calls are deliberately not forwarded: `Queue::pending_jobs(
-Some("default"))` lists what is literally on `default`, not what is on `high`,
-which is how you see the backlog stranded on a source queue you have just
-forwarded. Laravel resolves the forward there too; see the divergence note below.
+The inspection calls are deliberately not forwarded:
+`Queue::pending_jobs(Some("default"))` lists what is literally on `default`,
+not what is on `high`, which is how you see the backlog stranded on a source
+queue you have just forwarded. Laravel resolves the forward there too; see
+the divergence note below.
 
 Read a registered forward back with `Queue::forward_for("default")`, which
 returns the destination in `queue` and the connection gate in `connection`.

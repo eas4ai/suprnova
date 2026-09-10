@@ -145,7 +145,13 @@ consumido.
 
 ### Redefinição de senha e lockout
 
-`BruteForce` requer o mecanismo de senhas Magnetar instalado. A redefinição de senha prioriza esse mecanismo, mas `EloquentUserProvider<M>` permite redefini-la para usuários já verificados quando `M` implementa `MustVerifyEmail + CanResetPassword`. Usuários não verificados não recebem links de redefinição fornecidos pelo provedor. Instale o Magnetar para usar a redefinição como primeira comprovação atômica da caixa de e-mail.
+`BruteForce` requer o mecanismo de senhas Magnetar instalado. A redefinição de senha prioriza esse mecanismo, mas uma aplicação apoiada em provedor pode redefinir usuários já verificados sem instalar o Magnetar quando seu `UserProvider` suporta explicitamente a redefinição de senha. `EloquentUserProvider<M>` opta automaticamente quando `M` implementa `MustVerifyEmail + CanResetPassword`. Usuários não verificados não recebem links de redefinição fornecidos pelo provedor. Instale o Magnetar para usar a redefinição como primeira comprovação atômica da caixa de e-mail.
+
+`MagnetarConfig::lockout_config` aceita uma
+`magnetar::password::lockout::LockoutConfig`. A política padrão ativa
+o lockout após cinco tentativas falhas por 15 minutos, retém registros
+de auditoria por sete dias e falha fechada durante a indisponibilidade
+do backend de lockout.
 
 Uma redefinição de senha normaliza um endereço desconhecido para `Ok(())`
 somente depois que as verificações do limitador de abuso, da configuração de

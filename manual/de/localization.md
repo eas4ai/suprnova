@@ -121,7 +121,7 @@ Die Regeln:
   und woran der Parser sich gestört hat, weil ein stillschweigend
   halb geladener Katalog schlimmer ist als ein gestoppter Prozess.
 - **In `local` und `development` machen Kataloge Hot-Reload.**
-  Jede Anfrage prüft `lang/` per `stat` und parst nur neu, wenn
+  Jede Anfrage prüft `lang/` per stat und parst nur neu, wenn
   sich tatsächlich etwas geändert hat, sodass das Bearbeiten einer
   `.ftl`-Datei beim nächsten Refresh sichtbar wird. Produktion
   prüft nie erneut; Kataloge werden einmal beim Boot gelesen.

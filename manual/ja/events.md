@@ -287,10 +287,10 @@ async fn registration_dispatches_welcome_event() {
 
 | ヘルパー | アサートすること |
 |---|---|
-| `assert_dispatched::<E>(pred)` | `pred` に一致する `E` が少なくとも1つディスパッチされた |
+| `assert_dispatched::<E>(pred)` | pred に一致する `E` が少なくとも1つディスパッチされた |
 | `assert_dispatched_once::<E>()` | `E` がちょうど1つディスパッチされた |
 | `assert_dispatched_times::<E>(n)` | `E` がちょうど `n` 個ディスパッチされた |
-| `assert_not_dispatched::<E>(pred)` | `pred` に一致する `E` がディスパッチされなかった |
+| `assert_not_dispatched::<E>(pred)` | pred に一致する `E` がディスパッチされなかった |
 | `assert_nothing_dispatched()` | どの型のイベントもディスパッチされ**なかった** |
 | `assert_listening::<E, L>()` | リスナー `L` が `E` に対して登録されていた |
 | `has_dispatched::<E>()` | bool: 何らかの `E` が記録されている |

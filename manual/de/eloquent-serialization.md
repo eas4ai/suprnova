@@ -468,7 +468,7 @@ pub fn to_array(&self) -> Value {
 ```
 
 Bei einem Paginator lebt die eingepackte Datenmenge in
-`LengthAwarePaginator::data` / `CursorPaginator::data` und ist ein
+`LengthAwarePaginator::data / CursorPaginator::data` und ist ein
 `Vec<M>` - rufen Sie `.to_array()` auf jedem Element auf, bevor Sie
 die Paginator-Response zusammensetzen, oder verwenden Sie die
 [paginierte JSON:API-Form](eloquent-resources.md#pagination), die

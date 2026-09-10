@@ -664,8 +664,13 @@ async fn login_flow_issues_session_cookie() {
 }
 ```
 
-Le routeur abrégé sans ces middlewares démontre qu'injecter un cookie ne suffit pas. Gardez le middleware de session monté dans le registre et la porte d'authentification comme ci-dessus.
-
+Le routeur abrégé sans ces middlewares démontre uniquement le câblage
+des cookies ; ce n'est pas un test de flux d'authentification.
+`framework/tests/auth/http_middleware.rs` teste le comportement du
+middleware d'authentification avec des registres explicites, mais
+n'installe pas de vrai `SessionMiddleware`. Un test de flux de
+connexion avec état doit installer à la fois le middleware de
+session et la porte d'authentification comme montré ci-dessus.
 
 ## Tester la limite de panique
 

@@ -5,7 +5,7 @@
 要记住的形态是：
 
 - 处理程序返回 `Response = Result<HttpResponse, HttpResponse>`。
-- `?` 运算符每次只执行一次直接的 `From<E> for HttpResponse` 转换。框架为面向处理程序的错误类型提供直接转换；Rust 不会串联多次 `From` 实现。对于没有直接转换到 `HttpResponse` 的中间错误，请显式转换。
+- `?` 会对处理程序的错误类型执行一次直接的 `From<E>` 转换；Rust 不会把 `DbErr -> FrameworkError -> HttpResponse` 串联起来。在 `Response` 处理程序里，请显式转换 SeaORM 错误。已经返回 `Result<_, FrameworkError>` 的代码可以直接使用 `.await?`。
 - 三个自由辅助函数（`abort_with`、`abort_if`、`abort_unless`）让您可以在某个状态码上短路，而不必点名任何错误类型。
 
 ```rust

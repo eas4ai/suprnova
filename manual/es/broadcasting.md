@@ -600,7 +600,7 @@ Los cinco campos configurables y dónde importa cada uno:
 | Campo | Por defecto | Caso de uso |
 |-------|---------|----------|
 | `ping_interval` | 30s | Chat / presencia: acórtalo a 5-10s para detectar rápido conexiones móviles muertas. Streaming de datos masivos: alárgalo para reducir el overhead. |
-| `max_missed_pings` | 2 | Ponlo en `1` para chat, donde un Pong perdido debería cerrar de inmediato. Ponlo en `3` o más para redes móviles inestables. Ponlo en `usize::MAX` para desactivar el cierre sin pong. |
+| `max_missed_pings` | 2 | Ponlo en `1` para chat, donde un Pong perdido debería cerrar de inmediato. Ponlo en `3+` para redes móviles inestables. Ponlo en `usize::MAX` para desactivar el cierre sin pong. |
 | `max_message_size` | 1 MiB | Valor por defecto seguro para endpoints públicos. Parte de `WsConfig::generous()` (64 MiB) para feeds internos de confianza. |
 | `max_frame_size` | 64 KiB | Dimensionado para frames de chat / notificación con margen. Parte de `WsConfig::generous()` (16 MiB) para frames grandes sin fragmentar. |
 | `origin_policy` | `SameOrigin` | Por defecto rechaza las actualizaciones cross-origin - la única protección CSRF que tiene un handshake de WS de navegador. Usa `AllowList(vec![...])` para frontends cross-origin explícitos, o `AllowAny` solo para endpoints que no son de navegador. |

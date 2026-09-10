@@ -79,7 +79,7 @@ El navegador analiza esto y dispara un evento `tick` con
   [`SseEvent::data`](#constructores), `SseEvent::json`, o
   `SseEvent::error`.
 * **Comment** - un keep-alive que solo existe en la red (`:\n\n` o
-  `: <texto>\n\n`). Se construye mediante `SseEvent::comment(text)` o
+  `: <text>\n\n`). Se construye mediante `SseEvent::comment(text)` o
   `SseEvent::keep_alive()`. El navegador ignora los comments según la
   especificación; son los bytes que atraviesan la conexión los que
   evitan que proxies y balanceadores de carga inactivos la cierren.

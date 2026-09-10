@@ -267,9 +267,8 @@ Le cast eloquent `#[cast(AsHashed)]` hache un champ en clair à
 l'écriture en utilisant le driver actif, et il est **idempotent à
 travers tous les drivers** - sauvegarder un modèle dont la colonne
 `password` contient déjà un hash reconnu (bcrypt ou argon) laisse la
-valeur passer inchangée. Sans ce garde-fou, `User::find(id).await?
-.save().await?` hacherait le hash existant à chaque sauvegarde,
-cassant l'authentification.
+valeur passer inchangée. Sans ce garde-fou, `User::find(id).await?.save().await?` hacherait
+le hash existant à chaque sauvegarde, cassant l'authentification.
 
 ```rust
 use suprnova::eloquent::casts::AsHashed;

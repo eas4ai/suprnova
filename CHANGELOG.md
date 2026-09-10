@@ -1171,15 +1171,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `router.reload({ only: ['stats'] })` re-resolves it instead of returning
   nothing.
 
-- **The SES transport now sends custom message headers.** `Mail::to(..)
-  .header("List-Unsubscribe", ...)` and `Mailable::headers()` were dropped
-  silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body had no
-  `Headers` field and the raw-MIME builder never read `OutgoingMessage::
-  headers`, even though every other transport forwards them. Both SES paths
-  now carry them - `Headers` as SES v2's `{Name, Value}` list, raw MIME as
-  real header lines - so unsubscribe links, threading headers and routing
-  hints survive a driver swap. Header names are validated up front on both
-  paths - CR, LF and NUL (the injection bytes, as the Mailgun transport
+- **The SES transport now sends custom message headers.**
+  `Mail::to(..).header("List-Unsubscribe", ...)` and `Mailable::headers()` were
+  dropped silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body
+  had no `Headers` field and the raw-MIME builder never read
+  `OutgoingMessage::headers`, even though every other transport forwards them.
+  Both SES paths now carry them - `Headers` as SES v2's `{Name, Value}` list,
+  raw MIME as real header lines - so unsubscribe links, threading headers and
+  routing hints survive a driver swap. Header names are validated up front on
+  both paths - CR, LF and NUL (the injection bytes, as the Mailgun transport
   already refuses) and anything that is not a valid RFC 5322 field name
   (spaces, colons, non-ASCII) - so attaching a file never changes whether a
   message is accepted.

@@ -67,7 +67,7 @@ GET、HEAD、OPTIONSは決してトークンチェックの対象になりませ
 
 ## フロントエンド側
 
-スキャフォルドされたSvelte、React、Vueのエントリーポイントは、Axiosではなく、Inertia 3のネイティブなvisitパイプラインを使用します。それぞれのエントリーポイントは、InertiaアダプターからRouterをインポートし、metaタグからトークンを読み取り、ルーターのフックで付属させます:
+スキャフォルドされたSvelte、React、Vueのエントリーポイントは、Axiosではなく、Inertia 3のネイティブなvisitパイプラインを使用します。それぞれのエントリーポイントは、Inertiaアダプターから `router` をインポートし、metaタグからトークンを読み取り、ルーターのフックで付属させます:
 
 ```ts
 const csrfToken = document
@@ -80,7 +80,12 @@ if (csrfToken) {
 }
 ```
 
-InertiaのuseFormは、同じvisitパイプラインを使用するため、このフックからヘッダーを受け取ります:
+`<meta name="csrf-token">` タグは、`framework/src/inertia/response.rs`
+によって Inertia のベースビューに自動的に注入されます - 生成されたプロジェクトで
+自分で追加する必要はありません。あらゆる Inertia レスポンスは、ページシェルの中に
+現在のセッションのトークンを運びます。
+
+Inertiaの `useForm` は、同じvisitパイプラインを使用するため、このフックからヘッダーを受け取ります:
 ```tsx
 import { useForm } from '@inertiajs/react';
 

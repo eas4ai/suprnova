@@ -244,7 +244,7 @@ quando não deveriam ter terminado.
 Supervisores não recebem um tracing span automático em torno de
 `run()` - o registry cria um span em torno do ciclo de vida (start,
 restart), mas não do interior da task. Emita seu próprio `info_span!`
-ou instrumente o corpo do seu loop se você quiser contexto de span
+ou instrumente (`instrument`) o corpo do seu loop se você quiser contexto de span
 sobre o trabalho feito dentro do supervisor:
 
 ```rust

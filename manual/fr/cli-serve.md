@@ -211,8 +211,8 @@ reste en vie 30 s remet la montée à zéro) au lieu de fermer la session. Passe
 processus enfant ferme immédiatement toute la session.
 
 Un processus qui boucle sur des crashs ne sera pas relancé indéfiniment :
-`--restart-tries` (par défaut `5`) limite le nombre de crashs consécutifs qu'il
-essaie avant d'abandonner ce processus - une nouvelle fenêtre de 30 s de
+`--restart-tries` (par défaut `5`) limite le nombre de crashs consécutifs que
+`serve` retente avant d'abandonner ce processus - une nouvelle fenêtre de 30 s de
 stabilité remet le compteur à zéro, comme le délai de backoff. L'abandon affiche
 un message actionnable et cesse de réessayer *uniquement* ce processus ; les
 autres (et la session elle-même) continuent de tourner, ce qui correspond au

@@ -417,7 +417,7 @@ assert_eq!(App::inertia_shared("user.name"), None);
 
 ### 逐请求的共享数据
 
-这个 trait 会在每个 Inertia 响应上运行一次，能访问到这个请求。实现需要 `async_trait`（重导出为 `suprnova::__async_trait`）和 `IndexMap`（重导出为 `suprnova::indexmap`）：
+这个 trait 会在每个 Inertia 响应上运行一次，能访问到这个请求，**以及**页面组件的名称 - Laravel 的 `RenderContext`（`component`、`request`），以普通参数的形式传入而非包装结构体，因为请求已经覆盖了另一半。实现需要 `async_trait`（重导出为 `suprnova::__async_trait`）和 `IndexMap`（重导出为 `suprnova::indexmap`）：
 
 ```rust
 use suprnova::{
@@ -503,10 +503,6 @@ Redirect::to("/posts/42").preserve_fragment()    // 跨访问保留 #frag
 ### 验证失败
 
 处理程序在 Inertia 访问中验证失败时，框架会带着 flash 的错误，以 `303 See Other` 回到表单页，而不是返回 REST 客户端获得的 `422` JSON。这并非表面差异：Inertia 客户端会将任何没有 `X-Inertia` 响应头的响应视为非 Inertia，并在全屏错误模态框中渲染它，因此 `422` 永远到不了 `form.errors`。处理程序不需要改变 - 此桥接是 `Inertia::install` 注册的中间件之一。
-
-所有四个分支共享**同一个**动作：删除原有的 `errors` flash，写入新错误，然后把原来的响应替换成一个 `303` 重定向。不会保留原有响应体、它的响应头或其中任何 `Set-Cookie` - 若一个自定义中间件在生成 `422` 后排队 cookie，它必须在验证桥接前运行，或者在 `303` 之后自己重新排队。框架不自动移动这些 cookie，正如 Laravel 的 `HandleInertiaRequests` 不会移走 controller 的 `422` 头。
-
-标准错误对象仍显示为 `page.props.errors`：框架在下一次 Inertia 渲染时从 session flash 水合它。将验证器指向的每个 named bag（`validator.error_bag = Some("createUser")`）也会发为 `page.props.errors.createUser`，与 Laravel 的 `X-Inertia-Error-Bag` 行为对齐。没有 bag 的错误保留在顶层。一个消费 session flash 的非 Inertia 请求仍会消费同一份数据；不要假设它只会由 Inertia 使用。
 
 目标依次是同源请求 `Referer`、会话记录的 previous URL，最后是失败请求自身的 URL。跨源 `Referer` 会被忽略；仅看似同源的也会被忽略：前导 `//` 或 `/\`（浏览器会在把反斜杠折叠为斜杠后将两者解析为 protocol-relative）以及值中任意位置的 ASCII 控制字节（URL 解析器会在比较源前从整个字符串剥离 tab 和换行，因此控制字节可将看似安全的路径在浏览器导航时变成另一源）均以相同方式回退。相同检查也用于最终 URL 回退，因此异常请求路径同样不能变成异源重定向。
 

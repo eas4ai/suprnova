@@ -1864,20 +1864,19 @@ são enviados atomicamente. Mais recentes primeiro.
   Inertia completa: um `router.reload({ only: ['stats'] })` explícito a
   resolve de novo em vez de não retornar nada.
 
-- **O transporte SES agora envia headers de mensagem customizados.** `Mail::to(..)
-  .header("List-Unsubscribe", ...)` e `Mailable::headers()` eram
-  descartados silenciosamente sob `MAIL_DRIVER=ses`: o corpo de
-  solicitação `Content.Simple` não tinha campo `Headers` e o builder de
-  MIME bruto nunca lia `OutgoingMessage::
-  headers`, ainda que todo outro transporte os encaminhe. Os dois
-  caminhos do SES agora os carregam - `Headers` como a lista
-  `{Name, Value}` do SES v2, MIME bruto como linhas de header reais -
-  para que links de descadastro, headers de threading e dicas de
-  roteamento sobrevivam a uma troca de driver. Nomes de header são
-  validados de antemão nos dois caminhos - CR, LF e NUL (os bytes de
-  injeção, como o transporte do Mailgun já recusa) e qualquer coisa que
-  não seja um nome de campo RFC 5322 válido (espaços, dois-pontos, não
-  ASCII) - então anexar um arquivo nunca muda se uma mensagem é aceita.
+- **O transporte SES agora envia headers de mensagem customizados.**
+  `Mail::to(..).header("List-Unsubscribe", ...)` e `Mailable::headers()` eram
+  descartados silenciosamente sob `MAIL_DRIVER=ses`: o corpo de solicitação
+  `Content.Simple` não tinha campo `Headers` e o builder de MIME bruto nunca
+  lia `OutgoingMessage::headers`, ainda que todo outro transporte os encaminhe.
+  Os dois caminhos do SES agora os carregam - `Headers` como a lista
+  `{Name, Value}` do SES v2, MIME bruto como linhas de header reais - para que
+  links de descadastro, headers de threading e dicas de roteamento sobrevivam a
+  uma troca de driver. Nomes de header são validados de antemão nos dois
+  caminhos - CR, LF e NUL (os bytes de injeção, como o transporte do Mailgun já
+  recusa) e qualquer coisa que não seja um nome de campo RFC 5322 válido
+  (espaços, dois-pontos, não ASCII) - então anexar um arquivo nunca muda se uma
+  mensagem é aceita.
 
 ### Corrigido
 
@@ -1957,7 +1956,7 @@ são enviados atomicamente. Mais recentes primeiro.
   de lançamento 13.23.0, 13.24.0 e 13.25.0 foram rastreadas item a item
   contra a própria superfície do framework. Tudo o que alcançou um
   caminho de código do Suprnova ou está corrigido nesta versão ou tem uma
-  linha em [`parity.md`](parity.md) marcada como `not yet`
+  linha em [`manual/parity.md`](parity.md) marcada como `not yet`
   ou `by design no`.
 
 ### Atualizando
@@ -2021,7 +2020,7 @@ código do seu lado.
 
 ### Alterado
 
-- **O Suprnova mudou da organização `entrepeneur4lyf` para `eas4ai` no
+- **O Suprnova mudou da organização entrepeneur4lyf para `eas4ai` no
   GitHub.** URLs do
   repositório em metadados de pacotes, documentação, exemplos de dependências e
   templates de scaffold agora usam `github.com/eas4ai`. Projetos novos também
@@ -2089,7 +2088,7 @@ código do seu lado.
   merge que torna isso possível funciona no nível da AST do Fluent - o
   valor do filho substitui o do pai, os atributos são mesclados por
   nome (um override que não menciona um atributo deixa de perdê-lo),
-  expressões `select` são substituídas por inteiro (as categorias
+  expressões select são substituídas por inteiro (as categorias
   plurais do CLDR dependem do locale, então mesclar variante por
   variante não seria coerente), e entradas exclusivas do filho são
   anexadas. Veja a nova seção "Fallback chains" de
@@ -2495,7 +2494,7 @@ revelou oito defeitos, todos corrigidos no fork fixado
   com as features padrão.
 - **Uma migração do Torii que falhava abortava o processo em vez de
   retornar um erro.** `SeaORMStorage::migrate` desembrulhava
-  (`unwrap`) o migrador e retornava `Ok(())` incondicionalmente,
+  (unwrap) o migrador e retornava `Ok(())` incondicionalmente,
   então o mapeamento que `init_torii` fazia da falha para um
   `FrameworkError` era código inalcançável.
 - **A própria tabela `users` de um app suprimia silenciosamente a do
