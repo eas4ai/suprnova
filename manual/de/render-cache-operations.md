@@ -187,11 +187,12 @@ verwendet, wenn `outcome="resolved"`), `fetch_failed`, `version_mismatch`,
 `length_mismatch`, `depth_exceeded`, `cycle` und `unauthorized` an. Keines
 der beiden Attribute führt je einen Schlüssel, einen Routennamen oder einen
 Identitätsdigest mit sich. Ein fehlgeschlagenes oder degradiertes Segment
-wird immer über die Richtlinie behandelt, die der einschließende Graph dafür
-erklärt hat (`FailDocument`/`Omit`/`Fallback`), genau wie das Fehlschlagen
-eines Insel-Slots selbst; `outcome="failed"` (aus einer `FailDocument`-
-Richtlinie) bricht die Zusammensetzung für das ganze Dokument ab und fällt
-zurück auf den eigenen ungecachten Handler der Route.
+wird immer über die Richtlinie behandelt, die der einschließende Graph
+dafür erklärt hat (`FailDocument`/`Omit`/`Fallback`), genau wie das
+Fehlschlagen eines Insel-Slots selbst; `outcome="failed"` (aus einer
+`FailDocument`-Richtlinie) bricht die Zusammensetzung für das ganze
+Dokument ab und fällt zurück auf den eigenen ungecachten Handler der
+Route.
 
 `epoch_rewinds` zählt Erkennungen, nicht Einträge: eine Erhöhung jedes Mal,
 wenn ein Knoten auf einen Eintrag oder eine verleaste Epoche trifft, die
