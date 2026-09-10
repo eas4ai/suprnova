@@ -48,9 +48,11 @@
 //!
 //! - One message carries at most [`MAX_HINT_DIGESTS`] digests. A message
 //!   over that bound is dropped whole, never truncated.
-//! - The publish queue and the inbound queue are both bounded, and a
+//! - The publish queue and the inbound queue are both bounded. A
 //!   subscriber that fills its inbound queue is dropped and resubscribes
-//!   rather than queued without limit.
+//!   rather than queued without limit, and it lengthens its own pause
+//!   before it does, because a queue that is full because the applier is
+//!   behind is not drained by reconnecting sooner.
 //! - Neither publishing nor subscribing runs on a request's own task.
 
 use std::collections::BTreeMap;
@@ -109,6 +111,13 @@ const MAX_PENDING_HINTS: usize = 256;
 /// cost to hold, since the lease it would have shortened is closer to
 /// expiring on its own with every millisecond that passes.
 ///
+/// A subscription dropped for this reason lengthens the pause before the
+/// next one, exactly as a failed one does. It is not a healthy subscription
+/// that happened to end: the applier is behind, and resubscribing in fifty
+/// milliseconds would only fill the same queue again, spending a `SUBSCRIBE`
+/// and an `UNSUBSCRIBE` against the endpoint at that rate for as long as the
+/// load lasted.
+///
 /// Public because the conformance test that proves the drop has to fill
 /// this queue exactly - one message past what the applier and the queue can
 /// hold between them - rather than flooding the channel and hoping.
@@ -127,6 +136,48 @@ pub const MAX_INBOUND_HINTS: usize = 64;
 const RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(50);
 /// The ceiling [`RESUBSCRIBE_BACKOFF`] doubles up to.
 const MAX_RESUBSCRIBE_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How a held subscription ended, which is the whole of what decides the
+/// pause before the next one.
+///
+/// Three endings need three answers, and a boolean can carry only two. The
+/// ending this node chooses for itself is the one that makes the difference:
+/// from the outside it looks exactly like a healthy subscription - it ran,
+/// it carried traffic, it ended - and reading it as healthy is what turns a
+/// saturated applier into a reconnect storm against the endpoint, under
+/// precisely the load this channel exists to carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubscriptionEnding {
+    /// The stream ended after delivering at least one message: a working
+    /// subscription that ended, so the next one starts from the shortest
+    /// pause.
+    CarriedTraffic,
+    /// The stream ended having delivered nothing - a refusal, a socket that
+    /// closed before a single message, or an endpoint that is simply not
+    /// there - so the next one waits longer.
+    CarriedNothing,
+    /// This node ended the subscription itself, because a received message
+    /// met a full inbound queue. The applier is behind, and a queue full for
+    /// that reason is not drained by reconnecting instantly, so the next one
+    /// waits longer too.
+    FellBehind,
+}
+
+/// The pause before the next subscription attempt, from how the last one
+/// ended and how long the last pause was.
+///
+/// A pure function of those two, so what a given ending decides is provable
+/// without a Redis, a socket, or a wait. Only a subscription that carried
+/// traffic resets; every other ending doubles, to a ceiling of
+/// [`MAX_RESUBSCRIBE_BACKOFF`].
+fn next_backoff(ending: SubscriptionEnding, previous: Duration) -> Duration {
+    match ending {
+        SubscriptionEnding::CarriedTraffic => RESUBSCRIBE_BACKOFF,
+        SubscriptionEnding::CarriedNothing | SubscriptionEnding::FellBehind => {
+            (previous * 2).min(MAX_RESUBSCRIBE_BACKOFF)
+        }
+    }
+}
 
 /// The message named at least one digest a lease on this node observes, and
 /// every such lease was shortened.
@@ -503,6 +554,15 @@ async fn publish_loop(
 /// operator needs from this counter. It is recorded once per drop and never
 /// once per retry, so a hint endpoint that is simply absent contributes a
 /// slow trickle rather than a meaningless rate.
+///
+/// How long it waits before the next attempt is [`next_backoff`]'s decision
+/// from how the last one ended, and only a subscription that carried
+/// traffic resets to the shortest pause. A subscription this node dropped
+/// because its applier was behind doubles like a failure does: it carried
+/// traffic, but it is not a working subscription, and treating it as one
+/// would cost a `SUBSCRIBE` and an `UNSUBSCRIBE` every fifty milliseconds
+/// for as long as the load lasted - and would report that storm on
+/// `subscriber_dropped`, where the truth is one node that cannot keep up.
 async fn subscribe_loop(
     client: redis::Client,
     channel: String,
@@ -510,21 +570,18 @@ async fn subscribe_loop(
 ) {
     let mut backoff = RESUBSCRIBE_BACKOFF;
     loop {
-        match hold_subscription(&client, &channel, &inbound).await {
-            // A subscription that carried traffic before it ended was a
-            // working one, so the next attempt starts from the shortest
-            // pause. Every other ending - a refusal, a socket that closed
-            // before a single message, an endpoint that is simply not
-            // there - doubles, which is what keeps an absent hint endpoint
-            // from costing this node a reconnection every fifty
-            // milliseconds for the life of the process.
-            Ok(true) => backoff = RESUBSCRIBE_BACKOFF,
-            Ok(false) => backoff = (backoff * 2).min(MAX_RESUBSCRIBE_BACKOFF),
+        let ending = match hold_subscription(&client, &channel, &inbound).await {
+            Ok(ending) => ending,
             Err(error) => {
                 let _ = super::providers::redis::provider_error(&error);
-                backoff = (backoff * 2).min(MAX_RESUBSCRIBE_BACKOFF);
+                // An error can only come from establishing the subscription:
+                // both fallible steps in `hold_subscription` are above its
+                // message loop. So it is an ending that carried nothing,
+                // and it lengthens the pause exactly as one does.
+                SubscriptionEnding::CarriedNothing
             }
-        }
+        };
+        backoff = next_backoff(ending, backoff);
         count(SUBSCRIBER_DROPPED);
         // A courtesy pause before reconnecting, never a synchronization
         // device: nothing anywhere waits on this loop, and no test observes
@@ -533,18 +590,46 @@ async fn subscribe_loop(
     }
 }
 
-/// Subscribes and forwards messages until the subscription ends.
+/// Hands one received body to the applier, reporting the ending when the
+/// bounded inbound queue is full.
 ///
-/// Returns `Ok(true)` when the subscription carried at least one message
-/// before it ended - including the ending this node chooses itself, when
-/// its bounded inbound queue is full, which is spec 18's answer to a
-/// subscriber that falls behind: dropped and resubscribed, never queued
+/// `None` while the subscription may continue. Separated from the socket
+/// loop above all so that what a full queue means is one step a test can
+/// take with neither a Redis nor a wait.
+fn offer_to_applier(
+    inbound: &tokio::sync::mpsc::Sender<String>,
+    body: String,
+) -> Option<SubscriptionEnding> {
+    match inbound.try_send(body) {
+        Ok(()) => None,
+        // Full is this node failing to keep up, which is what the ending
+        // says. Closed means the applier task is already gone, which
+        // happens only while the runtime that owns all three tasks is being
+        // dropped and this one aborted with it, so the pause the ending
+        // decides is never reached; ending the subscription is right for
+        // both.
+        Err(_) => Some(SubscriptionEnding::FellBehind),
+    }
+}
+
+/// Subscribes and forwards messages until the subscription ends, reporting
+/// how it ended so [`next_backoff`] can decide the pause that follows.
+///
+/// The ending this node chooses for itself - [`SubscriptionEnding::FellBehind`],
+/// when a received message meets a full inbound queue - is spec 18's answer
+/// to a subscriber that falls behind: dropped and resubscribed, never queued
 /// without limit.
+///
+/// # Errors
+///
+/// Returns the Redis error when the subscription could not be established at
+/// all. Both fallible steps are above the message loop, so an error here
+/// always means nothing was delivered.
 async fn hold_subscription(
     client: &redis::Client,
     channel: &str,
     inbound: &tokio::sync::mpsc::Sender<String>,
-) -> Result<bool, redis::RedisError> {
+) -> Result<SubscriptionEnding, redis::RedisError> {
     let mut pubsub = client.get_async_pubsub().await?;
     pubsub.subscribe(channel).await?;
     #[cfg(any(test, feature = "testing"))]
@@ -560,11 +645,15 @@ async fn hold_subscription(
             count(IGNORED_UNKNOWN_KEY);
             continue;
         };
-        if inbound.try_send(body).is_err() {
-            return Ok(true);
+        if let Some(ending) = offer_to_applier(inbound, body) {
+            return Ok(ending);
         }
     }
-    Ok(delivered)
+    if delivered {
+        Ok(SubscriptionEnding::CarriedTraffic)
+    } else {
+        Ok(SubscriptionEnding::CarriedNothing)
+    }
 }
 
 /// Applies received messages, one at a time, off every request's task.
@@ -782,5 +871,56 @@ mod tests {
         assert_eq!(table.apply_hint(&[digest(7)], 2_000), 0);
         assert_eq!(table.len(), 0, "an empty table stays empty");
         assert!(!table.valid_at(&fixture_key(), 2_000));
+    }
+
+    #[test]
+    fn only_a_subscription_that_carried_traffic_resets_the_backoff() {
+        assert_eq!(
+            next_backoff(SubscriptionEnding::CarriedTraffic, Duration::from_secs(8)),
+            RESUBSCRIBE_BACKOFF,
+            "a working subscription that ended starts the next one from the shortest pause"
+        );
+        assert_eq!(
+            next_backoff(SubscriptionEnding::CarriedNothing, RESUBSCRIBE_BACKOFF),
+            RESUBSCRIBE_BACKOFF * 2,
+            "an endpoint that delivered nothing is waited on longer each time"
+        );
+        assert_eq!(
+            next_backoff(SubscriptionEnding::FellBehind, RESUBSCRIBE_BACKOFF),
+            RESUBSCRIBE_BACKOFF * 2,
+            "a node that could not keep up waits longer too, rather than \
+             resubscribing into the same full queue fifty milliseconds later"
+        );
+        assert_eq!(
+            next_backoff(SubscriptionEnding::FellBehind, MAX_RESUBSCRIBE_BACKOFF),
+            MAX_RESUBSCRIBE_BACKOFF,
+            "and never past the ceiling"
+        );
+    }
+
+    #[test]
+    fn a_message_meeting_a_full_inbound_queue_ends_the_subscription_as_fell_behind() {
+        // Capacity one, so the second message is the one that meets a full
+        // queue: the fall-behind path exactly, with no Redis and no wait.
+        let (inbound, _applier) = tokio::sync::mpsc::channel(1);
+        assert_eq!(
+            offer_to_applier(&inbound, encode(&[digest(1)])),
+            None,
+            "the first message fits, so the subscription continues"
+        );
+        let ending = offer_to_applier(&inbound, encode(&[digest(2)]));
+        assert_eq!(
+            ending,
+            Some(SubscriptionEnding::FellBehind),
+            "the message that meets a full queue ends the subscription"
+        );
+        assert_eq!(
+            next_backoff(
+                ending.expect("a full queue reports an ending"),
+                RESUBSCRIBE_BACKOFF
+            ),
+            RESUBSCRIBE_BACKOFF * 2,
+            "and that ending backs off rather than resetting"
+        );
     }
 }
