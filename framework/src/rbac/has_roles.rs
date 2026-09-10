@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use sea_orm::{DatabaseBackend, Value};
 
-use crate::{Authenticatable, DB, FrameworkError};
+use crate::{AppError, Authenticatable, DB, FrameworkError};
 
 const DEFAULT_GUARD: &str = "web";
 
@@ -142,6 +142,20 @@ const INSERT_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
     tables: &["model_permissions"],
 };
 
+const DELETE_ROLE_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "DELETE FROM role_permissions WHERE role_id = ? AND permission_id = ?",
+    tables: &["role_permissions"],
+};
+const DELETE_MODEL_ROLE: ObservedStatement = ObservedStatement {
+    sql: "DELETE FROM model_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
+    tables: &["model_roles"],
+};
+const DELETE_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
+    sql: "DELETE FROM model_permissions WHERE model_type = ? AND model_id = ? AND \
+          permission_id = ?",
+    tables: &["model_permissions"],
+};
+
 /// Every read statement this module issues, for the table-list contract.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) const READ_STATEMENTS: &[ObservedStatement] = &[
@@ -163,6 +177,9 @@ pub(crate) const WRITE_STATEMENTS: &[ObservedStatement] = &[
     INSERT_ROLE_PERMISSION,
     INSERT_MODEL_ROLE,
     INSERT_MODEL_PERMISSION,
+    DELETE_ROLE_PERMISSION,
+    DELETE_MODEL_ROLE,
+    DELETE_MODEL_PERMISSION,
 ];
 
 /// `DB::select_one_observing` with this module's placeholders rendered
@@ -195,6 +212,31 @@ async fn insert(statement: ObservedStatement, values: Vec<Value>) -> Result<bool
     Ok(rows > 0)
 }
 
+/// [`insert`]'s mirror for this module's deletes, advancing the one table
+/// the statement writes.
+///
+/// Deliberately unconditional, where every granting helper checks for an
+/// existing row and returns early. A revocation that read "no such row"
+/// and skipped the `DELETE` would leave behind a row inserted between that
+/// read and the skip - a revocation that silently failed, which is the one
+/// outcome worse than no helper at all. Deleting on the exact unique key is
+/// already idempotent, so dropping the check closes the window and costs
+/// only a redundant statement when there was nothing to remove.
+///
+/// The affected-row count is deliberately discarded: zero rows means the
+/// assignment was already absent, which is the same post-condition as one
+/// row removed, and the caller is promised the post-condition rather than
+/// the row count.
+async fn delete(statement: ObservedStatement, values: Vec<Value>) -> Result<(), FrameworkError> {
+    let table = statement
+        .tables
+        .first()
+        .copied()
+        .ok_or_else(|| FrameworkError::internal("rbac delete statement names no table"))?;
+    DB::affecting_statement_on_table(&render(statement.sql, backend()?), values, table).await?;
+    Ok(())
+}
+
 async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
     let row = select_one(FIND_ROLE_ID, vec![value(name), value(guard_name)]).await?;
     row.map(|row| row.get_int("id")).transpose()
@@ -203,6 +245,30 @@ async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, Frame
 async fn find_permission_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
     let row = select_one(FIND_PERMISSION_ID, vec![value(name), value(guard_name)]).await?;
     row.map(|row| row.get_int("id")).transpose()
+}
+
+/// [`find_role_id`] for a revocation: an unknown name is refused instead of
+/// created, and the message names no role, guard, or model.
+async fn require_role_id(name: &str, guard_name: &str) -> Result<i64, FrameworkError> {
+    match find_role_id(name, guard_name).await? {
+        Some(id) => Ok(id),
+        None => Err(AppError::unprocessable(
+            "rbac: no role of that name exists on that guard; nothing was revoked",
+        )
+        .into()),
+    }
+}
+
+/// [`find_permission_id`] for a revocation, on the same terms as
+/// [`require_role_id`].
+async fn require_permission_id(name: &str, guard_name: &str) -> Result<i64, FrameworkError> {
+    match find_permission_id(name, guard_name).await? {
+        Some(id) => Ok(id),
+        None => Err(AppError::unprocessable(
+            "rbac: no permission of that name exists on that guard; nothing was revoked",
+        )
+        .into()),
+    }
 }
 
 /// Create a role on the default `"web"` guard, returning its id.
@@ -296,6 +362,53 @@ pub async fn give_permission_to_role_on_guard(
     Ok(())
 }
 
+/// Remove a permission from a role on the default `"web"` guard.
+///
+/// The counterpart of [`give_permission_to_role`]. Only the named grant
+/// goes: the role, the permission, and every other permission the role
+/// carries are left exactly as they were.
+///
+/// # Errors
+///
+/// Nothing is created here, which is the one way this differs from its
+/// counterpart, so a role or permission name that exists on no such guard
+/// is an error rather than a quiet success - the case that catches a typo
+/// and a call aimed at the wrong guard. Removing a permission the role does
+/// not carry is *not* an error: the call already converges on the state it
+/// promises, so a retry is safe. A database failure is reported as well,
+/// and every error path leaves the existing grants untouched.
+pub async fn remove_permission_from_role(
+    role_name: &str,
+    permission_name: &str,
+) -> Result<(), FrameworkError> {
+    remove_permission_from_role_on_guard(role_name, permission_name, DEFAULT_GUARD).await
+}
+
+/// Remove a permission from a role for a named guard.
+///
+/// Scoped to the guard: the same role and permission names on another guard
+/// keep their grant. Every model that held this permission only through
+/// this role stops having it; a model that also holds it directly, or
+/// through a second role, keeps it, which is the resolution
+/// [`has_permission_for_model`] already defines.
+///
+/// # Errors
+///
+/// As [`remove_permission_from_role`].
+pub async fn remove_permission_from_role_on_guard(
+    role_name: &str,
+    permission_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
+    let role_id = require_role_id(role_name, guard_name).await?;
+    let permission_id = require_permission_id(permission_name, guard_name).await?;
+    delete(
+        DELETE_ROLE_PERMISSION,
+        vec![int_value(role_id), int_value(permission_id)],
+    )
+    .await
+}
+
 /// Assign a role to a model on the default `"web"` guard.
 ///
 /// `model_type` is the model discriminator - for [`HasRoles`] implementors
@@ -336,6 +449,60 @@ pub async fn assign_role_to_model_on_guard(
     Ok(())
 }
 
+/// Remove a role from a model on the default `"web"` guard.
+///
+/// The counterpart of [`assign_role_to_model`]. Only this one membership
+/// goes: the role itself, the permissions it carries, and the model's other
+/// roles and direct permissions all stay.
+///
+/// # Errors
+///
+/// Nothing is created here, so a role name that exists on no such guard is
+/// an error rather than a quiet success - the case that catches a typo and
+/// a call aimed at the wrong guard. Removing a role the model does not hold
+/// is *not* an error: the call already converges on the state it promises,
+/// so a retry is safe. A database failure is reported as well, and every
+/// error path leaves the model's roles untouched.
+pub async fn remove_role_from_model(
+    model_type: &str,
+    model_id: &str,
+    role_name: &str,
+) -> Result<(), FrameworkError> {
+    remove_role_from_model_on_guard(model_type, model_id, role_name, DEFAULT_GUARD).await
+}
+
+/// Remove a role from a model for a named guard.
+///
+/// Scoped to the guard and to the one `(model_type, model_id)` pair: a role
+/// of the same name on another guard, and the same role on another model,
+/// are untouched.
+///
+/// Taking a role away is not the same as taking away what it conferred.
+/// [`has_permission_for_model`] answers a direct grant first and only then
+/// looks through assigned roles, so a permission this model was *also*
+/// given directly still resolves once its last role source is gone - by
+/// design, and unchanged by this call. Ending effective access to such a
+/// permission takes this call **and** [`remove_permission_from_model`];
+/// removing more than the membership named here would be the blunt delete
+/// that takes away grants nobody asked to revoke.
+///
+/// # Errors
+///
+/// As [`remove_role_from_model`].
+pub async fn remove_role_from_model_on_guard(
+    model_type: &str,
+    model_id: &str,
+    role_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
+    let role_id = require_role_id(role_name, guard_name).await?;
+    delete(
+        DELETE_MODEL_ROLE,
+        vec![value(model_type), value(model_id), int_value(role_id)],
+    )
+    .await
+}
+
 /// Give a direct permission to a model on the default `"web"` guard.
 ///
 /// Direct permissions are checked in addition to permissions inherited from
@@ -372,6 +539,54 @@ pub async fn give_permission_to_model_on_guard(
     )
     .await?;
     Ok(())
+}
+
+/// Remove a direct permission from a model on the default `"web"` guard.
+///
+/// The counterpart of [`give_permission_to_model`]. Only the direct grant
+/// goes: a role this model holds that carries the same permission still
+/// confers it, and [`has_permission_for_model`] still reports it.
+/// [`remove_role_from_model`] is the call that takes that source away.
+///
+/// # Errors
+///
+/// Nothing is created here, so a permission name that exists on no such
+/// guard is an error rather than a quiet success - the case that catches a
+/// typo and a call aimed at the wrong guard. Removing a permission the
+/// model was never given directly is *not* an error: the call already
+/// converges on the state it promises, so a retry is safe. A database
+/// failure is reported as well, and every error path leaves the model's
+/// permissions untouched.
+pub async fn remove_permission_from_model(
+    model_type: &str,
+    model_id: &str,
+    permission_name: &str,
+) -> Result<(), FrameworkError> {
+    remove_permission_from_model_on_guard(model_type, model_id, permission_name, DEFAULT_GUARD)
+        .await
+}
+
+/// Remove a direct permission from a model for a named guard.
+///
+/// Scoped to the guard and to the one `(model_type, model_id)` pair: the
+/// same permission name on another guard, and the same grant on another
+/// model, are untouched.
+///
+/// # Errors
+///
+/// As [`remove_permission_from_model`].
+pub async fn remove_permission_from_model_on_guard(
+    model_type: &str,
+    model_id: &str,
+    permission_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
+    let permission_id = require_permission_id(permission_name, guard_name).await?;
+    delete(
+        DELETE_MODEL_PERMISSION,
+        vec![value(model_type), value(model_id), int_value(permission_id)],
+    )
+    .await
 }
 
 /// Check whether a model has a role on the default `"web"` guard.
@@ -493,6 +708,41 @@ pub trait HasRoles: Authenticatable {
     /// Give this model a direct permission on the default `"web"` guard.
     async fn give_permission_to(&self, permission_name: &str) -> Result<(), FrameworkError> {
         give_permission_to_model(
+            &self.rbac_model_type(),
+            &self.rbac_model_id(),
+            permission_name,
+        )
+        .await
+    }
+
+    /// Remove a role from this model on the default `"web"` guard.
+    ///
+    /// Only the membership goes. A permission this model also holds
+    /// directly survives and [`Self::has_permission_to`] still reports it;
+    /// [`Self::remove_permission_to`] is the call that takes that away.
+    ///
+    /// # Errors
+    ///
+    /// A role name that exists on no such guard is an error; a role this
+    /// model does not hold is not. See [`remove_role_from_model`].
+    async fn remove_role(&self, role_name: &str) -> Result<(), FrameworkError> {
+        remove_role_from_model(&self.rbac_model_type(), &self.rbac_model_id(), role_name).await
+    }
+
+    /// Remove a direct permission from this model on the default `"web"`
+    /// guard.
+    ///
+    /// Only the direct grant goes. A role this model holds that carries the
+    /// same permission still confers it, and [`Self::has_permission_to`]
+    /// still reports it.
+    ///
+    /// # Errors
+    ///
+    /// A permission name that exists on no such guard is an error; a
+    /// permission this model was never given directly is not. See
+    /// [`remove_permission_from_model`].
+    async fn remove_permission_to(&self, permission_name: &str) -> Result<(), FrameworkError> {
+        remove_permission_from_model(
             &self.rbac_model_type(),
             &self.rbac_model_id(),
             permission_name,

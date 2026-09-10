@@ -20,8 +20,9 @@
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, Statement};
 use std::time::Duration;
 use suprnova::rbac::{
-    assign_role_to_model, create_role, give_permission_to_role, has_permission_for_model,
-    has_role_for_model,
+    assign_role_to_model, create_role, give_permission_to_model, give_permission_to_role,
+    has_permission_for_model, has_role_for_model, remove_permission_from_model,
+    remove_role_from_model,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{DB, DbConnection};
@@ -145,4 +146,64 @@ async fn postgres_rbac_assignment_is_idempotent() {
         assignments, 1,
         "repeated assignment must not insert duplicates"
     );
+}
+
+/// The revoking half carries `?` placeholders too, in `DELETE` statements
+/// nothing above exercises. Bind order matters more here than anywhere
+/// else in the module: a `DELETE` whose ordinals slipped would remove a row
+/// nobody named, and on Postgres an unrendered `?` would make the whole
+/// revocation fail while reporting nothing.
+#[tokio::test]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_rbac_revocation_removes_only_what_it_names() {
+    let _guard = connect_and_install().await;
+
+    give_permission_to_role("editor", "articles.publish")
+        .await
+        .expect("give_permission_to_role");
+    for id in ["42", "43"] {
+        assign_role_to_model("App::User", id, "editor")
+            .await
+            .expect("assign_role_to_model");
+    }
+    give_permission_to_model("App::User", "42", "articles.publish")
+        .await
+        .expect("give_permission_to_model");
+
+    remove_role_from_model("App::User", "42", "editor")
+        .await
+        .expect("remove_role_from_model");
+
+    assert!(
+        !has_role_for_model("App::User", "42", "editor")
+            .await
+            .expect("has_role_for_model"),
+        "the named membership is gone"
+    );
+    assert!(
+        has_role_for_model("App::User", "43", "editor")
+            .await
+            .expect("has_role_for_model"),
+        "another model's membership is a different row and must survive"
+    );
+    assert!(
+        has_permission_for_model("App::User", "42", "articles.publish")
+            .await
+            .expect("has_permission_for_model"),
+        "the direct grant outlives the role that also conferred it"
+    );
+
+    remove_permission_from_model("App::User", "42", "articles.publish")
+        .await
+        .expect("remove_permission_from_model");
+    assert!(
+        !has_permission_for_model("App::User", "42", "articles.publish")
+            .await
+            .expect("has_permission_for_model"),
+        "with both sources gone the permission no longer resolves"
+    );
+
+    remove_role_from_model("App::User", "42", "nosuchrole")
+        .await
+        .expect_err("an unknown role name must not report a successful revocation");
 }

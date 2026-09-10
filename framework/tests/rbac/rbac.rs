@@ -11,8 +11,8 @@ use suprnova::auth::request_state::request_state_scope_for_test;
 use suprnova::rbac::migrations::CreateRbacTables;
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    Auth, Authenticatable, HasRoles, HttpResponse, Middleware, Next, PermissionMiddleware, Request,
-    RoleMiddleware,
+    Auth, Authenticatable, DB, FrameworkError, HasRoles, HttpResponse, Middleware, Next,
+    PermissionMiddleware, Request, RoleMiddleware,
 };
 
 #[derive(Clone)]
@@ -156,6 +156,319 @@ async fn missing_roles_and_permissions_deny_by_default() {
 
     assert!(!user.has_role("author").await.unwrap());
     assert!(!user.has_permission_to("articles.create").await.unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn removing_a_role_takes_that_role_and_nothing_else() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let model_type = user.rbac_model_type();
+
+    suprnova::rbac::give_permission_to_role("reviewer", "articles.review")
+        .await
+        .unwrap();
+    suprnova::rbac::assign_role_to_model(&model_type, "7", "reviewer")
+        .await
+        .unwrap();
+    user.give_permission_to("articles.publish").await.unwrap();
+
+    suprnova::rbac::remove_role_from_model(&model_type, "7", "author")
+        .await
+        .unwrap();
+
+    assert!(!user.has_role("author").await.unwrap());
+    assert!(
+        !user.has_permission_to("articles.create").await.unwrap(),
+        "the removed role was this model's only source of that permission"
+    );
+    assert!(
+        user.has_role("reviewer").await.unwrap(),
+        "the model's other role is not named by this call and must survive"
+    );
+    assert!(user.has_permission_to("articles.review").await.unwrap());
+    assert!(
+        user.has_permission_to("articles.publish").await.unwrap(),
+        "the model's direct grant is not named by this call either"
+    );
+}
+
+/// The case that catches a revocation implemented as a blunt delete.
+/// `has_permission_for_model` resolves a direct grant *or* a role-inherited
+/// one, so taking the role away must leave the direct grant answering.
+#[tokio::test]
+#[serial]
+async fn removing_a_role_leaves_a_permission_the_model_also_holds_directly() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let model_type = user.rbac_model_type();
+
+    user.give_permission_to("articles.create").await.unwrap();
+
+    suprnova::rbac::remove_role_from_model(&model_type, "7", "author")
+        .await
+        .unwrap();
+
+    assert!(!user.has_role("author").await.unwrap());
+    assert!(
+        user.has_permission_to("articles.create").await.unwrap(),
+        "the direct grant is a second, independent source and must survive"
+    );
+
+    // Ending effective access takes both calls, which is what the docs say.
+    user.remove_permission_to("articles.create").await.unwrap();
+    assert!(!user.has_permission_to("articles.create").await.unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn removing_a_permission_from_a_role_spares_other_sources_and_other_permissions() {
+    let _db = setup().await;
+    let through_role = User { id: 7 };
+    let directly = User { id: 8 };
+
+    suprnova::rbac::give_permission_to_role("author", "articles.publish")
+        .await
+        .unwrap();
+    directly
+        .give_permission_to("articles.create")
+        .await
+        .unwrap();
+
+    suprnova::rbac::remove_permission_from_role("author", "articles.create")
+        .await
+        .unwrap();
+
+    assert!(
+        through_role.has_role("author").await.unwrap(),
+        "the role itself is not named by this call"
+    );
+    assert!(
+        !through_role
+            .has_permission_to("articles.create")
+            .await
+            .unwrap()
+    );
+    assert!(
+        through_role
+            .has_permission_to("articles.publish")
+            .await
+            .unwrap(),
+        "the role's other permission is not named by this call"
+    );
+    assert!(
+        directly.has_permission_to("articles.create").await.unwrap(),
+        "a direct grant of the same permission is a separate source"
+    );
+}
+
+/// Both guards hold the same role name assigned to the same model, so what
+/// is under test is the delete's guard scoping rather than the lookup's.
+#[tokio::test]
+#[serial]
+async fn removing_a_role_on_one_guard_leaves_the_same_name_on_the_other() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let model_type = user.rbac_model_type();
+
+    for guard in ["web", "api"] {
+        suprnova::rbac::give_permission_to_role_on_guard("admin", "users.manage", guard)
+            .await
+            .unwrap();
+        suprnova::rbac::assign_role_to_model_on_guard(&model_type, "7", "admin", guard)
+            .await
+            .unwrap();
+        assert!(
+            suprnova::rbac::has_role_for_model_on_guard(&model_type, "7", "admin", guard)
+                .await
+                .unwrap(),
+            "both guards must start from the same state for this test to mean anything"
+        );
+    }
+
+    suprnova::rbac::remove_role_from_model_on_guard(&model_type, "7", "admin", "api")
+        .await
+        .unwrap();
+
+    assert!(
+        !suprnova::rbac::has_role_for_model_on_guard(&model_type, "7", "admin", "api")
+            .await
+            .unwrap()
+    );
+    assert!(
+        suprnova::rbac::has_role_for_model_on_guard(&model_type, "7", "admin", "web")
+            .await
+            .unwrap(),
+        "the web guard's membership is a different row and must survive"
+    );
+    assert!(
+        suprnova::rbac::has_permission_for_model_on_guard(&model_type, "7", "users.manage", "web")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !suprnova::rbac::has_permission_for_model_on_guard(&model_type, "7", "users.manage", "api")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn removing_a_role_permission_on_one_guard_leaves_the_same_pair_on_the_other() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let model_type = user.rbac_model_type();
+
+    for guard in ["web", "api"] {
+        suprnova::rbac::give_permission_to_role_on_guard("admin", "users.manage", guard)
+            .await
+            .unwrap();
+    }
+    suprnova::rbac::assign_role_to_model_on_guard(&model_type, "7", "admin", "api")
+        .await
+        .unwrap();
+
+    suprnova::rbac::remove_permission_from_role_on_guard("admin", "users.manage", "web")
+        .await
+        .unwrap();
+
+    assert!(
+        suprnova::rbac::has_permission_for_model_on_guard(&model_type, "7", "users.manage", "api")
+            .await
+            .unwrap(),
+        "the api guard's grant is a different row and must survive"
+    );
+}
+
+/// The decision: a name that exists, held by nobody, converges rather than
+/// failing, so an incident responder's retry is safe.
+#[tokio::test]
+#[serial]
+async fn removing_what_was_never_granted_succeeds_and_repeats_safely() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let other = User { id: 8 };
+    let model_type = user.rbac_model_type();
+
+    suprnova::rbac::assign_role_to_model(&model_type, "8", "author")
+        .await
+        .unwrap();
+    suprnova::rbac::create_role("reviewer").await.unwrap();
+
+    // The role exists; this model never held it.
+    suprnova::rbac::remove_role_from_model(&model_type, "7", "reviewer")
+        .await
+        .unwrap();
+    // The permission exists; this model was never given it directly.
+    user.remove_permission_to("articles.publish").await.unwrap();
+    // And the same revocation twice, which is what a retry looks like.
+    user.remove_role("author").await.unwrap();
+    user.remove_role("author").await.unwrap();
+
+    assert!(!user.has_role("author").await.unwrap());
+    assert!(
+        other.has_role("author").await.unwrap(),
+        "another model's membership is not named by any of those calls"
+    );
+}
+
+/// The other half of the decision: a name that exists on no such guard is a
+/// caller mistake - a typo, or a call aimed at the wrong guard - and is
+/// refused rather than reported as a successful revocation.
+#[tokio::test]
+#[serial]
+async fn a_name_that_exists_on_no_such_guard_is_refused_and_changes_nothing() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let model_type = user.rbac_model_type();
+
+    let error = suprnova::rbac::remove_role_from_model(&model_type, "7", "nosuchrole")
+        .await
+        .expect_err("a role name that names nothing must not report success");
+    let message = error.to_string();
+    assert!(
+        !message.contains("nosuchrole"),
+        "an error never carries a role name: {message}"
+    );
+    assert!(
+        !message.contains(&model_type),
+        "an error never carries a model identity: {message}"
+    );
+
+    // "author" exists on "web" only, so this is the wrong-guard mistake.
+    suprnova::rbac::remove_role_from_model_on_guard(&model_type, "7", "author", "api")
+        .await
+        .expect_err("a call aimed at the wrong guard must not report success");
+
+    let error = suprnova::rbac::remove_permission_from_role("author", "nosuchpermission")
+        .await
+        .expect_err("a permission name that names nothing must not report success");
+    assert!(
+        !error.to_string().contains("nosuchpermission"),
+        "an error never carries a permission name"
+    );
+
+    let error = user
+        .remove_permission_to("nosuchpermission")
+        .await
+        .expect_err("the trait method refuses on the same terms");
+    assert!(!error.to_string().contains("nosuchpermission"));
+
+    // Access after four refusals is exactly what it was before them.
+    assert!(user.has_role("author").await.unwrap());
+    assert!(user.has_permission_to("articles.create").await.unwrap());
+}
+
+/// A revocation that fails leaves access exactly as it was, on the path
+/// where the failure comes after the delete already landed.
+#[tokio::test]
+#[serial]
+async fn a_revocation_rolled_back_with_its_transaction_leaves_access_intact() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let inside = user.clone();
+
+    let outcome: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            inside.remove_role("author").await?;
+            Err(FrameworkError::internal(
+                "the bundle failed after the revocation landed",
+            ))
+        })
+    })
+    .await;
+
+    assert!(outcome.is_err(), "the transaction must surface the failure");
+    assert!(
+        user.has_role("author").await.unwrap(),
+        "a rolled-back revocation leaves the membership exactly where it was"
+    );
+    assert!(user.has_permission_to("articles.create").await.unwrap());
+}
+
+/// The application team's case: one role granted and another taken away in
+/// the same step. The helpers resolve their executor through the
+/// transaction in scope, so the bundle commits as one unit.
+#[tokio::test]
+#[serial]
+async fn a_grant_and_a_revocation_commit_together_in_one_transaction() {
+    let _db = setup().await;
+    let user = User { id: 7 };
+    let inside = user.clone();
+
+    DB::transaction(move |_tx| {
+        Box::pin(async move {
+            inside.assign_role("reviewer").await?;
+            inside.remove_role("author").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .unwrap();
+
+    assert!(user.has_role("reviewer").await.unwrap());
+    assert!(!user.has_role("author").await.unwrap());
 }
 
 #[tokio::test]
