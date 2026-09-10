@@ -568,7 +568,7 @@ stockée, et quelle taille elle fait, sans qu'on lui montre jamais son
 contenu. L'invalidation est un incrément d'epoch qui ne coûte rien à
 appliquer et ne touche que ce cache - vos sessions et votre file d'attente
 ne sont pas dans le périmètre d'impact. La télémétrie est un ensemble fermé
-de sept compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
+de huit compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
 tableau de bord bâti dessus stable d'une version à l'autre plutôt qu'un jeu
 de chaînes qui dérivent. Le marché, c'est qu'il n'y a aucune commande
 « supprime cette clé-ci » : les leviers sont en lecture seule par entrée, ou

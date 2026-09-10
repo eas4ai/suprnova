@@ -578,7 +578,7 @@ kann, dass ein Eintrag existiert, unter welcher Klasse er gespeichert ist und
 wie groß er ist, ohne je seinen Inhalt gezeigt zu bekommen. Die
 Invalidierung ist ein Epochensprung, der nichts kostet und nur diesen Cache
 berührt: Ihre Sitzungen und Ihre Queue liegen nicht im Wirkungsradius. Die
-Telemetrie ist eine geschlossene Menge von sieben Zählern mit geschlossenen
+Telemetrie ist eine geschlossene Menge von acht Zählern mit geschlossenen
 Attributmengen, und das macht ein Dashboard darüber über Releases hinweg
 stabil statt zu einem Satz driftender Zeichenketten. Der Preis ist, dass es
 keinen Befehl „lösche genau diesen einen Schlüssel“ gibt: Die Hebel sind pro

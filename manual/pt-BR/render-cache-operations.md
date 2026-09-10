@@ -551,7 +551,7 @@ confirmar que uma entrada existe, sob que classe ela está armazenada e qual é
 o tamanho dela, sem jamais ver o seu conteúdo. A invalidação é um incremento
 de epoch que não custa nada para aplicar e toca apenas neste cache - as suas
 sessões e a sua fila não estão no raio da explosão. A telemetria é um
-conjunto fechado de sete contadores com conjuntos fechados de atributos, que
+conjunto fechado de oito contadores com conjuntos fechados de atributos, que
 é o que torna um dashboard sobre eles estável entre releases em vez de um
 punhado de strings que derivam. A troca é que não existe comando de "apague
 esta chave": as alavancas são por entrada e somente de leitura, ou de epoch

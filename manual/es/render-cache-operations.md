@@ -559,7 +559,7 @@ operador puede confirmar que una entrada existe, bajo qué clase está
 almacenada y cuán grande es, sin que se le muestre nunca su contenido. La
 invalidación es una subida de epoch que no cuesta nada aplicar y que toca
 solo esta caché: tus sesiones y tu cola no están en el radio de la
-explosión. La telemetría es un conjunto cerrado de siete contadores con
+explosión. La telemetría es un conjunto cerrado de ocho contadores con
 conjuntos de atributos cerrados, que es lo que hace que un panel sobre
 ellos sea estable entre versiones en lugar de un conjunto de cadenas que se
 va a la deriva. El intercambio es que no hay comando de «borra esta clave»:

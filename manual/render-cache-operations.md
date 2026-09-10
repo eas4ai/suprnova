@@ -517,7 +517,7 @@ Inspection is body-free by construction, so an operator can confirm an entry
 exists, what class it is stored under, and how large it is, without ever
 being shown its contents. Invalidation is an epoch bump that costs nothing
 to apply and touches only this cache - your sessions and your queue are not
-in the blast radius. Telemetry is a closed set of seven counters with closed
+in the blast radius. Telemetry is a closed set of eight counters with closed
 attribute sets, which is what makes a dashboard over them stable across
 releases rather than a set of strings that drift. The trade is that there is
 no "delete this one key" command: the levers are per entry read-only, or

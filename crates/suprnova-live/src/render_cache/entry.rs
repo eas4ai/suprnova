@@ -15,6 +15,14 @@ use super::{RenderCacheError, RenderCacheErrorKind};
 use crate::crypto::SnapshotKeyRing;
 
 /// Entry format version.
+///
+/// Bump this whenever ANY stored shape changes, including adding a field to a
+/// segment kind or to a header. `decode` refuses an entry whose version is not
+/// this one, so the bump is what makes an older build reject a newer entry
+/// outright instead of understanding half of it. The segment types are serde
+/// enums without `deny_unknown_fields`, so a field added without a bump is
+/// silently dropped by an older build, which is exactly the half-understood
+/// entry this version gate exists to prevent.
 pub const ENTRY_FORMAT_VERSION: u16 = 1;
 const MAGIC: &[u8; 4] = b"SNRC";
 
