@@ -1854,6 +1854,82 @@ async fn an_rbac_gated_route_is_stored_and_a_permission_grant_rebuilds_it() {
     );
 }
 
+/// The revoking direction of the test above, and the one that matters for
+/// access: a stored page that says `allowed=true` has to stop saying it the
+/// moment the permission behind it is taken away. The revocation's `DELETE`
+/// advances `model_permissions` exactly as the grant's `INSERT` did, so the
+/// entry is rebuilt rather than served on from the store - a revocation
+/// that left a cached page allowing the action would be a revocation that
+/// silently failed.
+#[tokio::test]
+#[serial_test::serial]
+async fn revoking_a_permission_rebuilds_the_rbac_gated_page_it_had_allowed() {
+    let harness = boot_with_render_cache().await;
+    assert!(
+        route_is_under_a_policy(&harness, RBAC_GATED_ROUTE),
+        "the route under test must be attached to a policy"
+    );
+
+    suprnova::rbac::give_permission_to_model(
+        "privacy_suite::Principal",
+        "alice",
+        "articles.publish",
+    )
+    .await
+    .expect("grant the permission");
+
+    let granted = dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(granted.status, StatusCode::OK);
+    assert!(
+        granted.text().contains("allowed=true"),
+        "alice holds the permission - got {}",
+        granted.text()
+    );
+    let after_grant = counting_route::renders();
+
+    dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        after_grant,
+        "the allowing page is stored, so there is something that could go stale"
+    );
+
+    suprnova::rbac::remove_permission_from_model(
+        "privacy_suite::Principal",
+        "alice",
+        "articles.publish",
+    )
+    .await
+    .expect("revoke the permission");
+
+    let revoked = dispatch_get(
+        &harness,
+        "/privacy/rbac-gated/1",
+        &[("x-test-login", "alice")],
+    )
+    .await;
+    assert!(
+        revoked.text().contains("allowed=false"),
+        "the revocation must reach the cached page - got {}",
+        revoked.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        after_grant + 1,
+        "the delete from model_permissions moved the generation the render observed"
+    );
+}
+
 /// Every RBAC statement's table list is the list its own SQL reads. A
 /// statement that grows a `JOIN` without naming the joined table would
 /// otherwise observe less than it read, and the entry it allowed to be
@@ -1863,7 +1939,7 @@ async fn an_rbac_gated_route_is_stored_and_a_permission_grant_rebuilds_it() {
 fn rbac_statements_name_every_table_they_read() {
     let (reads, writes) = suprnova::rbac::observed_rbac_statements_for_test();
     assert!(reads.len() >= 8, "every read statement is listed");
-    assert!(writes.len() >= 5, "every write statement is listed");
+    assert!(writes.len() >= 8, "every write statement is listed");
 
     for (sql, declared) in reads {
         let mut tokens = sql.split_whitespace();
@@ -1895,8 +1971,9 @@ fn rbac_statements_name_every_table_they_read() {
         );
         let table = declared[0];
         assert!(
-            sql.contains(&format!("INSERT INTO {table} ")),
-            "{sql:?} must insert into its declared table {table}"
+            sql.contains(&format!("INSERT INTO {table} "))
+                || sql.contains(&format!("DELETE FROM {table} ")),
+            "{sql:?} must write its declared table {table}"
         );
     }
 }
