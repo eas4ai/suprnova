@@ -7,13 +7,13 @@ use std::sync::Once;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest as _, Sha256};
+use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::live::assets::live_asset_catalog;
 use suprnova::live::tooling::{ToolRequest, ToolingErrorKind, execute};
 use suprnova::live::tooling_protocol::{
     AssetKind, Body, COMMAND_NAME, Envelope, MAX_LINE_BYTES, MAX_TEMPLATE_FILE_BYTES,
     MAX_TEMPLATE_ROOTS, MAX_TEXT_BYTES, Operation, Outcome, PROTOCOL_VERSION, Severity,
 };
-use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::live::{LiveComponent, LiveConfig, LiveRegistry, live};
 use suprnova::{App, Crypt, EncryptionKey, console};
 
