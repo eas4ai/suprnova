@@ -252,7 +252,7 @@ aufzuspüren, die sauber beendet wurden, obwohl sie es nicht sollten.
 Supervisoren erhalten keinen automatischen Tracing-Span um `run()`
 herum - die Registry umspannt den Lebenszyklus (Start, Neustart), aber
 nicht das Innere der Task. Emittieren Sie Ihren eigenen `info_span!`
-oder instrumentieren Sie Ihren Schleifenkörper, wenn Sie Span-Kontext
+oder instrumentieren Sie (`instrument`) Ihren Schleifenkörper, wenn Sie Span-Kontext
 für Arbeit innerhalb des Supervisors möchten:
 
 ```rust

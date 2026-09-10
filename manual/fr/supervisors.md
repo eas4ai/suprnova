@@ -181,7 +181,7 @@ async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
 }
 ```
 
-Le framework vide le `JoinSet` des superviseurs avec une fenêtre de grâce
+Le framework vide le JoinSet des superviseurs avec une fenêtre de grâce
 de 5 secondes après l'annulation. Les superviseurs qui n'honorent pas le
 jeton dans cette fenêtre sont interrompus via `JoinSet::abort_all`. Ce
 vidage s'exécute après le vidage des handlers WebSocket (pour que les
@@ -245,10 +245,10 @@ ERROR suprnova::supervisor: supervisor errored; restarting after backoff supervi
 repérer les boucles de daemon qui se sont terminées proprement alors
 qu'elles n'auraient pas dû.
 
-Les superviseurs n'obtiennent pas de span `tracing` automatique autour de
+Les superviseurs n'obtiennent pas de span tracing automatique autour de
 `run()` - le registre couvre le cycle de vie (démarrage, redémarrage) mais
 pas l'intérieur de la tâche. Émettez votre propre `info_span!` ou
-instrumentez le corps de votre boucle si vous voulez un contexte de span
+instrumentez (`instrument`) le corps de votre boucle si vous voulez un contexte de span
 sur le travail effectué à l'intérieur du superviseur :
 
 ```rust
