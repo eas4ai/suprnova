@@ -224,12 +224,17 @@ initially 3, where depth is the length of the ownership chain and an unnested
 composite is depth 1; the existing `MAX_SEGMENTS`, 193, continues to bound
 the segments of each individual graph, and `MAX_NESTED_SEGMENTS`, initially
 16, separately bounds how many of one graph's segments MAY be `Nested`, so
-one document cannot fan out into hundreds of store reads. Acyclicity is
-enforced by construction and checked at assembly: the assembler SHALL carry
-the chain of ancestor keys as it descends, and resolving a segment whose
-key already appears in that chain SHALL be a cycle failure rather than a
-recursion; the depth bound alone is not sufficient, because it would still
-terminate a cycle but report the wrong cause.
+one document cannot fan out into hundreds of store reads. Both bounds SHALL be enforced
+at publication and again at assembly. Publication SHALL refuse to store a
+composite whose graph would exceed the depth bound, or would include itself
+directly or transitively, so a graph that is already bad when it is built is
+never stored. Assembly SHALL check both again, because an inner segment MAY be
+republished after an including entry was published, which can create a cycle
+or exceed the depth bound that neither publication could have seen: the
+assembler SHALL carry the chain of ancestor keys as it descends, and resolving
+a segment whose key already appears in that chain SHALL be a cycle failure
+rather than a recursion. The depth bound alone is not sufficient at assembly,
+because it would still terminate a cycle but report the wrong cause.
 
 A failure inside an inner segment SHALL resolve through the same closed set an
 island slot uses today, with no additions: `SlotFailurePolicy::{FailDocument,
@@ -257,9 +262,14 @@ this rule.
 Telemetry SHALL distinguish an inner segment's outcomes from an island slot's
 under one closed, low-cardinality metric, `suprnova.render_cache.stitch.nested`,
 whose `outcome` attribute takes exactly one value from the closed set
-`resolved`, `omitted`, `fallback`, `failed`, `depth_exceeded`, `cycle`,
-and `version_mismatch`; no label carries a key, a route name, or an identity
-digest. The framework SHALL offer one typed way to declare an inner cached
+`resolved`, `omitted`, `fallback`, and `failed`, and whose `cause` attribute
+takes exactly one value from the closed set `none`, `fetch_failed`,
+`version_mismatch`, `length_mismatch`, `depth_exceeded`, `cycle`, and
+`unauthorized`, with `none` used exactly when `outcome` is `resolved`. Two
+closed attributes keep why a segment failed separable from what the document
+did about it, which a single attribute cannot express, because every cause
+resolves through the declared policy. No label carries a key, a route name, or
+an identity digest. The framework SHALL offer one typed way to declare an inner cached
 segment and its policy, and a declaration naming a segment the running build
 no longer has SHALL fail that segment rather than substitute another. The
 conformance corpus SHALL carry a nested case whose unknown depth or unknown
@@ -318,12 +328,14 @@ prose.
   naming through a recursive `Segment::Nested { key: RenderKey, version: u64,
   assembled_len: u32 }` variant rather than a byte-recursive graph,
   `MAX_NESTING_DEPTH` (3) and `MAX_NESTED_SEGMENTS` (16) as the new bounds
-  beside the existing `MAX_SEGMENTS`, ancestor-chain cycle detection at assembly
-  distinguished from a plain depth-exceeded outcome, publish-time refusal
-  reserved for privacy narrowing, per-request reauthorization reusing the slot
-  mechanism with an identity-free escape, and the closed
-  `suprnova.render_cache.stitch.nested` telemetry outcome set, recorded under
-  Segment boundaries and composition safety.
+  beside the existing `MAX_SEGMENTS`, depth and cycle enforced at publication and
+  again at assembly because an inner segment may be republished under an
+  including entry, ancestor-chain cycle detection distinguished from a plain
+  depth-exceeded outcome, publish-time refusal also covering privacy narrowing,
+  per-request reauthorization reusing the slot mechanism with an identity-free
+  escape, and the closed `suprnova.render_cache.stitch.nested` telemetry with
+  separate `outcome` and `cause` attributes, recorded under Segment boundaries
+  and composition safety.
 - 2026-09-09 -- Delivered the declined-lookup reason set: `LookupDeclineReason`
   (32 variants, `framework/src/render_cache/decline.rs`) types the `reason`
   attribute `LookupOutcome::record` emits beside `outcome="declined"`,
