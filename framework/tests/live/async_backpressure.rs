@@ -5,7 +5,6 @@
 #[path = "../support/live_async_support/mod.rs"]
 mod live_async_support;
 
-
 use hyper::StatusCode;
 use live_async_support::*;
 use serde_json::Value;
