@@ -683,8 +683,10 @@ Sollte `AlreadyReported` jemals einen HTTP-Response-Konverter
 erreichen, zeigt das an, dass ein Request-Handler versehentlich
 `silent()` zurückgegeben hat. Der Konverter protokolliert sichtbar ein
 `tracing::error!`, das die Quelle des Lecks identifiziert, und gibt
-einen generischen 500 zurück - die Variante hat im Request-Pfad nichts
-zu suchen, und das Log macht den Bug sichtbar statt still.
+einen generischen 500 zurück, der nur
+`{"message": "Internal Server Error"}` enthält. Die Variante hat im
+Request-Pfad nichts zu suchen, und das Log macht den Bug sichtbar
+statt still.
 
 Normalerweise bekommen Sie diese Variante nicht zu Gesicht; sie wird
 hier dokumentiert, weil das Enum `HTTP-flavoured` ist und die sonst
@@ -697,17 +699,21 @@ Der Vertrag, den Suprnova Ihnen gibt:
 - **Totale Konvertierung**. Jeder `FrameworkError` erzeugt eine
   `HttpResponse`. Es gibt keinen Fehlerpfad, der den Server abstürzen
   lässt oder die Verbindung stillschweigend fallen lässt.
-- **Bereinigte 5xx**. Der Response-Body für jeden 5xx-Fehler ist der
-  generische `{"message": "Internal Server Error", "request_id":
-  "..."}`. Details fließen in die Logs + `ErrorOccurred`.
-- **Optionale Debug-Sichtbarkeit**. `APP_DEBUG=true` fügt bei 5xx
-  ein `debug_message`-Feld hinzu, niemals `message`.
-  Produktions-Clients können sich nicht versehentlich an
+- **Bereinigte 5xx**. Der gemeinsame Renderer ersetzt die `message`
+  auf der Leitung für jeden 5xx durch `Internal Server Error`; die
+  rohen Details fließen in die Logs und zu `ErrorOccurred`. Ein
+  versehentlich HTTP-gerendertes `AlreadyReported`-Sentinel liefert
+  dieselbe generische Nachricht ohne `request_id`.
+- **Optionale Debug-Sichtbarkeit**. `APP_DEBUG=true` fügt bei
+  gewöhnlichen 5xx-Responses ein `debug_message`-Feld hinzu, niemals
+  `message`. Produktions-Clients können sich nicht versehentlich an
   Dev-only-Daten koppeln.
-- **Korrelierbare Request-IDs**. Jeder Fehler-Body trägt die
-  Request-ID (oder `null`, wenn kein Request-Scope existiert);
-  dieselbe ID erscheint in der Log-Zeile und im
-  `ErrorOccurred`-Event.
+- **Korrelierbare Request-IDs**. Jeder gewöhnliche Fehler-Body, der
+  den gemeinsamen Renderer erreicht, trägt die Request-ID (oder
+  `null`, wenn kein Request-Scope existiert); dieselbe ID erscheint in
+  der Log-Zeile und im `ErrorOccurred`-Event. Die drei oben
+  beschriebenen Sonderfall-Varianten mit vorzeitiger Rückgabe umgehen
+  dieses Feld.
 - **Panic-Recovery**. Panics in Handlern und Middleware werden
   abgefangen, protokolliert und über dieselbe `From`-Implementierung
   geroutet wie zurückgegebene Fehler. Kein Verbindungsabbruch, keine

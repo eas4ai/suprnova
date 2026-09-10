@@ -662,9 +662,10 @@ para el mismo fallo.
 Si `AlreadyReported` llega alguna vez a un conversor de respuesta
 HTTP, indica que un handler de solicitud devolvió `silent()` por
 accidente. El conversor registra un `tracing::error!` llamativo
-identificando la fuga y devuelve un 500 genérico - la variante no
-tiene nada que hacer en la ruta de solicitud, y el registro llamativo
-hace observable el bug en lugar de silencioso.
+identificando la fuga y devuelve un 500 genérico que contiene solo
+`{"message": "Internal Server Error"}`. La variante no tiene nada que
+hacer en la ruta de solicitud, y el registro llamativo hace observable
+el bug en lugar de silencioso.
 
 Normalmente no ves esta variante; está documentada aquí porque el enum
 es `HTTP-flavoured` y la variante, de otro modo inexplicada, dejaría

@@ -392,7 +392,7 @@ errs.add_to_bag("billing", "card", "expired");
 - リクエストIDとステータスを伴う `tracing::error!` のログエントリ
 - 任意のリスナーが受け取れる `ErrorOccurred` イベント
 
-`APP_DEBUG=true` の場合（`local`/`dev`/`test` 以外ではデフォルトで `false` です）、レスポンスには生の詳細を持つ `debug_message` フィールドも付与されます - ですが `message` はどちらのモードでも汎用的なままなので、フロントエンドやクライアントが、開発専用のデータに誤って依存してしまうことはありません。
+`APP_DEBUG=true` の場合（`local`/`dev`/`test` 以外ではデフォルトでfalseです）、レスポンスには生の詳細を持つ `debug_message` フィールドも付与されます - ですが `message` はどちらのモードでも汎用的なままなので、フロントエンドやクライアントが、開発専用のデータに誤って依存してしまうことはありません。
 
 この契約があるからこそ、`FrameworkError::internal("db connection refused: password mismatch on user 'app_rw'")` のように呼び出しても、パスワードがレスポンスに漏れることはありません。あなたが渡す `message` はログを読むオペレーター向けのものであり、クライアントが目にする `message` は `"Internal Server Error"` です。
 
@@ -494,7 +494,7 @@ pub async fn show(req: Request) -> Response {
 
 `AlreadyReported` がHTTPレスポンスコンバータに到達してしまった場合、それはリクエストハンドラが誤って `silent()` を返したことを示しています。コンバータは、この漏れを特定する大きな `tracing::error!` のログを記録し、`{"message": "Internal Server Error"}` だけを含む汎用的な500を返します。このバリアントはリクエスト経路には本来関係がなく、大きなログによって、このバグは沈黙したままにならず、観測可能になります。
 
-通常、このバリアントを目にすることはありません。ここで文書化しているのは、この列挙型が「HTTP寄り」の性格を持つため、説明のないこのバリアントが、ソースを読む人を戸惑わせてしまうからです。
+通常、このバリアントを目にすることはありません。ここで文書化しているのは、この列挙型が `HTTP-flavoured` であるため、説明のないこのバリアントが、ソースを読む人を戸惑わせてしまうからです。
 
 ## 安全性の保証 - まとめ
 
