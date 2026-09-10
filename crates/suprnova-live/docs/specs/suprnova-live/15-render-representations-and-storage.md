@@ -81,6 +81,10 @@ Acceptance criteria:
 - A Composite entry includes segment/slot identities, assembly policy,
   provisional safe metadata, and a structural validator that is never replayed
   as the final assembled HTTP validator.
+- A Composite entry's segment list MAY name an inner cached segment through
+  a `Nested` variant carrying its key, stored version, and assembled length;
+  the inner segment itself is stored as an ordinary entry under its own key,
+  owned by no including document.
 - Hop-by-hop, per-connection, transient tracing, and unsafe per-request headers
   are never replayed from storage.
 - A stored header value SHALL be a valid HTTP header value, and the rule the
@@ -170,8 +174,9 @@ UX flow:
 
 The externally accelerated tier MAY carry credible generation hints beside the
 entry bytes and instance records it already stores, and such a hint SHALL never
-be entry bytes, an instance record, or generation truth; the coherence rule
-that bounds what a hint can do is owned by
+be entry bytes, an instance record, or generation truth. A hint is a transient
+message on a channel and SHALL never be stored as a representation; the
+coherence rule that bounds what a hint can do is owned by
 `18-cache-coherence-and-rebuilding.md`.
 
 ### HTTP caching and conditional requests
@@ -245,6 +250,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Recorded the nested-segment entry shape and the generation-hint
+  storage note ahead of code, matching the mechanism decided in
+  `16-cache-variance-privacy-and-stitching.md` and
+  `18-cache-coherence-and-rebuilding.md`: a Composite entry's segment list gains
+  a `Nested` variant naming an inner entry by key, version, and assembled
+  length, and a generation hint is a transient channel message that is never
+  stored as a representation, recorded under Complete and Composite
+  representation models and Provider-backed L0 and L1 storage.
 - 2026-09-09 -- Delivered the application build id: `#[suprnova::main]`'s
   expansion calls `suprnova::boot::set_default_build_id` with the
   application crate's own `CARGO_PKG_VERSION` immediately after loading

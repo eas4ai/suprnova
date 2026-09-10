@@ -202,36 +202,71 @@ UX flow:
 #### Nested cached segments
 
 A cached segment MAY contain cached segments. An inner cached segment SHALL
-have an identity and a stored version that no including document owns, so one
-stored copy is included from several documents and invalidated once rather than
-once per including route. Ownership SHALL be acyclic and depth-bounded by a
-named constant, and a graph that would exceed the depth bound, or include
-itself directly or transitively, SHALL be declined at publication rather than
-at assembly. The exact assembled length of a nested graph SHALL be computable
-from typed facts before any byte is copied, so the body bound is enforced
-before allocation exactly as it is for a flat graph. An inner segment SHALL NOT
-be served under a representation class wider, or a freshness window longer,
-than the document including it, and a policy that would relax its parent SHALL
-be refused where it is declared. Every inner segment SHALL be reauthorized per
-request in the same way an island slot is, or SHALL be provably identity-free,
-so a nested inclusion never skips a check the same content would have had at
-the top level. A failure inside an inner segment SHALL resolve through a
-declared policy over the same closed set of outcomes a slot has today,
-`fail_document`, `omit`, or `fallback`, and a failure that reaches the
-outermost document SHALL leave the route serving its own uncached render. The
-framework SHALL offer one typed way to declare an inner cached segment and its
-policy, and a declaration naming a segment the running build no longer has
-SHALL fail that segment rather than substitute another. Telemetry SHALL
-distinguish an inner segment's outcomes from an island slot's under closed
-low-cardinality labels, and the conformance corpus SHALL carry a nested case
-whose unknown depth or unknown segment kind is rejected rather than ignored.
-The mechanism that produces these outcomes, whether a second entry kind, a
-recursive segment variant, or an entry the assembler resolves through the
-store, SHALL be decided and recorded in this specification before the first
-code commit, so this domain binds outcomes rather than a mechanism. Until
-iteration 006 delivers this, server stitching caches exactly one level: every
-slot is re-rendered on every hit, and a slot's island cannot itself be a shell
-with slots of its own.
+have an identity and a stored version that no including document owns, so
+one stored copy is included from several documents and invalidated once
+rather than once per including route: it is named, not recursed into. The
+graph's segment list gains a recursive variant, `Segment::Nested { key:
+RenderKey, version: u64, assembled_len: u32 }`, that carries the three
+typed facts needed to reason about the inner segment without fetching it.
+Carrying `assembled_len` in the naming variant preserves the safety property
+assembly already relies on: the exact assembled length of a nested graph
+SHALL be computable from the typed facts of every level before any byte is
+copied, so the body bound is enforced before allocation exactly as it is
+for a flat graph; a byte-recursive inner graph would not know its own length
+until fetched and walked, which would destroy that property. The named facts
+are a claim rather than a trust anchor: on resolution the fetched entry's
+actual version and length SHALL be compared against what the graph named,
+and a mismatch SHALL resolve through the declared policy below rather than
+a silent substitution.
+
+Ownership SHALL be acyclic and bounded in depth by `MAX_NESTING_DEPTH`,
+initially 3, where depth is the length of the ownership chain and an unnested
+composite is depth 1; the existing `MAX_SEGMENTS`, 193, continues to bound
+the segments of each individual graph, and `MAX_NESTED_SEGMENTS`, initially
+16, separately bounds how many of one graph's segments MAY be `Nested`, so
+one document cannot fan out into hundreds of store reads. Acyclicity is
+enforced by construction and checked at assembly: the assembler SHALL carry
+the chain of ancestor keys as it descends, and resolving a segment whose
+key already appears in that chain SHALL be a cycle failure rather than a
+recursion; the depth bound alone is not sufficient, because it would still
+terminate a cycle but report the wrong cause.
+
+A failure inside an inner segment SHALL resolve through the same closed set an
+island slot uses today, with no additions: `SlotFailurePolicy::{FailDocument,
+Omit, Fallback { html }}`. An inner segment that cannot be fetched, whose
+version or length does not match what the graph named, that exceeds the
+depth bound, that forms a cycle, or that fails reauthorization, SHALL resolve
+through the policy its including graph declared for it; a `FailDocument`
+outcome SHALL abandon assembly for the whole document and fall through to
+the uncached handler, exactly as it does for a slot today.
+
+Privacy SHALL compose by narrowing only, enforced at publish rather than at
+assembly: building a composite that names an inner segment whose representation
+class is wider, or whose freshness window is longer, than the including
+document's SHALL be refused at publish, reusing `RepresentationClass::narrowest`
+as the existing comparison, so a bad composition can never be stored and the
+hit path has one less way to fail.
+
+Every inner segment SHALL be reauthorized per request and never cached,
+reusing the slot mechanism: identity match against what the entry stored,
+then `live.validate_request_context`, inside a slot scope. An inner segment
+that is provably identity-free, meaning it declares no identity binding at
+all, SHALL skip reauthorization; that is the contract's only escape from
+this rule.
+
+Telemetry SHALL distinguish an inner segment's outcomes from an island slot's
+under one closed, low-cardinality metric, `suprnova.render_cache.stitch.nested`,
+whose `outcome` attribute takes exactly one value from the closed set
+`resolved`, `omitted`, `fallback`, `failed`, `depth_exceeded`, `cycle`,
+and `version_mismatch`; no label carries a key, a route name, or an identity
+digest. The framework SHALL offer one typed way to declare an inner cached
+segment and its policy, and a declaration naming a segment the running build
+no longer has SHALL fail that segment rather than substitute another. The
+conformance corpus SHALL carry a nested case whose unknown depth or unknown
+segment kind is rejected rather than ignored. Until iteration 006 delivers
+this, server stitching caches exactly one level: every slot is re-rendered
+on every hit, and a slot's island cannot itself be a shell with slots of
+its own.
 
 ### Privacy and variance verification
 
@@ -279,6 +314,16 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Recorded the nested cached segment mechanism ahead of code:
+  naming through a recursive `Segment::Nested { key: RenderKey, version: u64,
+  assembled_len: u32 }` variant rather than a byte-recursive graph,
+  `MAX_NESTING_DEPTH` (3) and `MAX_NESTED_SEGMENTS` (16) as the new bounds
+  beside the existing `MAX_SEGMENTS`, ancestor-chain cycle detection at assembly
+  distinguished from a plain depth-exceeded outcome, publish-time refusal
+  reserved for privacy narrowing, per-request reauthorization reusing the slot
+  mechanism with an identity-free escape, and the closed
+  `suprnova.render_cache.stitch.nested` telemetry outcome set, recorded under
+  Segment boundaries and composition safety.
 - 2026-09-09 -- Delivered the declined-lookup reason set: `LookupDeclineReason`
   (32 variants, `framework/src/render_cache/decline.rs`) types the `reason`
   attribute `LookupOutcome::record` emits beside `outcome="declined"`,
