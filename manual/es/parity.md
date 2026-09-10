@@ -90,7 +90,7 @@ reales y actuales del framework tal como está publicado hoy.
 
 | Laravel | Suprnova | Estado | Notas / enlace |
 |---|---|---|---|
-| Consola Artisan | Binario `console` por aplicación, construido a partir de `#[command]` + `#[derive(Command)]` | disponible | [Consola](console.md). `cargo run --bin console <subcomando>` |
+| Consola Artisan | Binario `console` por aplicación, construido a partir de `#[command]` + `#[derive(Command)]` | disponible | [Consola](console.md). `cargo run --bin console <subcommand>` |
 | Tinker (REPL) | Sin REPL | no, por diseño | Escribe un script puntual `cargo run --bin xxx` o un `#[suprnova_test]` |
 | Difusión | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | disponible | Dispersión con sea-streamer para varios nodos. [Difusión](broadcasting.md) |
 | Caché | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache` | disponible | Operaciones atómicas + caché con etiquetas + bloqueos de caché (`LockGuard`). [Caché](cache.md) |

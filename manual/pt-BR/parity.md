@@ -150,7 +150,7 @@ lacunas reais e atuais do framework tal como foi lançado.
 
 | Laravel | Suprnova | Status | Notas / link |
 |---|---|---|---|
-| Autenticação | Guards, middleware, provedores e sessões de navegador do framework; mecanismos Magnetar | disponível | [Autenticação](authentication.md) |
+| Autenticação | `Auth::user/check/login/logout/attempt`, trait `Authenticatable`, `Guard` por nome | disponível | [Autenticação](authentication.md) |
 | Múltiplos guards | `Guard` registrado por nome (`web`, `api`, …) via `AuthManager` | disponível | `SessionGuard`, `TokenGuard`, impls customizadas |
 | Provedores de usuário | `EloquentUserProvider<U>`, `DatabaseUserProvider`, ou implementação customizada da trait `UserProvider` | disponível | [Fluxos de autenticação](auth-flows.md) |
 | Verificação de email | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; contrato `MustVerifyEmail` | disponível | Apoiada em provedor e vinculada ao ator  -  [Fluxos de autenticação](auth-flows.md) |
