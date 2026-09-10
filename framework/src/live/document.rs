@@ -487,8 +487,8 @@ impl LiveNestedSegment {
     }
 
     /// Converts this declaration and the facts a resolution step already
-    /// fetched into the engine's typed graph fact,
-    /// `suprnova_live::render_cache::composite::Segment::Nested`.
+    /// fetched into the engine's typed graph fact, the [`Segment::Nested`]
+    /// variant.
     ///
     /// `includer_path` MUST be the *actual* resolved path of the document
     /// being built right now. For an identity-bound declaration this checks
