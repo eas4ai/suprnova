@@ -41,8 +41,9 @@ fn to_json(&self) -> String;
 ```
 
 `to_array` produces a `serde_json::Value` for use in handler responses
-and tests. `to_json` is a thin wrapper - `serde_json::to_string(&self
-.to_array())` - so a single filter pipeline owns both shapes.
+and tests. `to_json` is a thin wrapper -
+`serde_json::to_string(&self.to_array())` - so a single filter
+pipeline owns both shapes.
 
 The output is a JSON object keyed by struct field name (or whatever
 serde rename you've applied), filtered through three optional knobs

@@ -446,7 +446,7 @@ pub fn to_array(&self) -> Value {
 ```
 
 Para um paginador, os dados envolvidos vivem em
-`LengthAwarePaginator::data` / `CursorPaginator::data` e são um
+`LengthAwarePaginator::data / CursorPaginator::data` e são um
 `Vec<M>` - chame `.to_array()` em cada item antes de montar a
 resposta do paginador, ou use a [forma paginada do
 JSON:API](eloquent-resources.md#pagination), que cuida da filtragem

@@ -459,7 +459,7 @@ pub fn to_array(&self) -> Value {
 ```
 
 Pour un paginateur, les données enveloppées vivent dans
-`LengthAwarePaginator::data` / `CursorPaginator::data` et forment un
+`LengthAwarePaginator::data / CursorPaginator::data` et forment un
 `Vec<M>` - appelez `.to_array()` sur chaque élément avant d'assembler
 la réponse du paginateur, ou utilisez la
 [forme paginée JSON:API](eloquent-resources.md#pagination) qui gère le
@@ -540,7 +540,7 @@ Le contrat est explicite : oubliez le `.with(["posts"])`, et
 l'accesseur panique dès l'appel `posts_loaded()` de la première ligne
 (le cache hâtif panique à la lecture quand la relation n'a pas été
 chargée, par conception - un tableau vide silencieux cacherait le
-bug). Pour un chargement hâtif optionnel, utilisez la forme `HasOne`
+bug). Pour un chargement hâtif optionnel, utilisez la forme HasOne
 qui retourne `Option<&T>` et vous donne un `match` :
 
 ```rust
