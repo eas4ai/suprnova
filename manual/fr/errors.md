@@ -155,7 +155,7 @@ FrameworkError::model_not_found("Post");              // 404
 L'ensemble complet des variantes, avec ses implications sur la forme de
 la réponse, se trouve dans [Modèle d'erreur](error-model.md). Les
 constructeurs ci-dessus couvrent tous les cas courants ; vous ne recourez
-directement aux variantes que pour faire un `match` sur une erreur que
+directement aux variantes que pour faire un match sur une erreur que
 vous avez reçue.
 
 ### Conversions automatiques
@@ -504,7 +504,7 @@ pub async fn after_validation(payload: &Signup) -> Result<(), FrameworkError> {
 
 `add_to_bag` cantonne un champ sous un sac nommé (la forme
 `withErrors($errors, 'profile')` de Laravel) en préposant le nom du sac
-au champ, séparés par un point. Utile quand une même réponse porte les
+au champ avec un séparateur `.`. Utile quand une même réponse porte les
 erreurs de plusieurs sous-formulaires qui ne peuvent pas partager un
 espace de noms plat :
 
