@@ -57,8 +57,8 @@ GET、HEAD、OPTIONSは決してトークンチェックの対象になりませ
 
 ミドルウェアは、次の順序（Laravelと一致します）で、3つの場所のいずれかからトークンを読み取ります:
 
-1. **`X-CSRF-TOKEN` ヘッダー** - InertiaとスキャフォルドされたSPAテンプレートが送るものです。
-2. **`X-XSRF-TOKEN` ヘッダー** - Laravel / Axios / Angularの規約です。JavaScriptが `XSRF-TOKEN` クッキーを読み取り、その値をここにエコーします。
+1. **`X-CSRF-TOKEN` ヘッダー** - `<meta name="csrf-token">` タグを読み取った、手書きのリクエストが送るものです。
+2. **`X-XSRF-TOKEN` ヘッダー** - Laravel / Axios / Angularの規約です。JavaScriptが `XSRF-TOKEN` クッキーを読み取り、その値をここにエコーします。スキャフォルドされたSPAのエントリーポイントが使うのは、こちらです。
 3. **`_token` フォームフィールド** - 従来のHTMLフォームからの `application/x-www-form-urlencoded` なPOST用です。
 
 ヘッダーが存在するのに間違っている場合、ミドルウェアはボディをパースすることなく即座に拒否します。正しいクライアントはトークンの置き場所を一つに定めます。複数の取得元を組み合わせることは、トークンを分裂させかねない危険な設計です。
@@ -67,33 +67,24 @@ GET、HEAD、OPTIONSは決してトークンチェックの対象になりませ
 
 ## フロントエンド側
 
-スキャフォルドされたSvelte、React、Vueのエントリーポイントは、Axiosではなく、Inertia 3のネイティブなvisitパイプラインを使用します。それぞれのエントリーポイントは、Inertiaアダプターから `router` をインポートし、metaタグからトークンを読み取り、ルーターのフックで付属させます:
+スキャフォルドされたSvelte、React、VueのエントリーポイントにCSRFの配線は一切ありません。これは意図的なものです。スキャフォルドがインストールするInertiaクライアント（`@inertiajs/svelte`、`@inertiajs/react`、`@inertiajs/vue3`。いずれも `^3.6.1` にピン留めされています）は、`CsrfMiddleware` が直前のレスポンスに付けた `XSRF-TOKEN` クッキーを読み取り、visitごとに `X-XSRF-TOKEN` ヘッダーを自分で設定します。運ばれるのは、その時点でブラウザーが保持している値です。ですから、セッションのトークンをローテーションするログインやログアウトのあとには、新しい値を運ぶvisitが続きます。
 
-```ts
-const csrfToken = document
-  .querySelector('meta[name="csrf-token"]')
-  ?.getAttribute('content');
-if (csrfToken) {
-  router.on('before', (event) => {
-    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
-  });
-}
-```
+`<meta name="csrf-token">` をモジュールの読み込み時に一度だけ読み取り、その値を `router.on('before', ...)` フックに固定してはいけません。それは、ページの起動時点のトークンを凍結してしまいます。最初のローテーションで凍結されたコピーは取り残され、次の状態変更のvisitは419で拒否されます。
 
 `<meta name="csrf-token">` タグは、`framework/src/inertia/response.rs`
 によって Inertia のベースビューに自動的に注入されます - 生成されたプロジェクトで
 自分で追加する必要はありません。あらゆる Inertia レスポンスは、ページシェルの中に
-現在のセッションのトークンを運びます。
+現在のセッションのトークンを運びます。手書きのリクエストは、そこからトークンを読み取ります。
 
-Inertiaの `useForm` は、同じvisitパイプラインを使用するため、このフックからヘッダーを受け取ります:
+Inertiaの `useForm` は同じvisitパイプラインを通るため、クライアントはその送信にも同じヘッダーを設定します:
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN はルーターのフックから来る
+form.post('/posts');
 ```
 
-生の `fetch` 呼び出しの場合は、同じようにmeta タグからトークンを読み取ってください:
+生の `fetch` 呼び出しの場合は、自分でmeta タグからトークンを読み取ってください:
 
 ```ts
 const token = document

@@ -57,8 +57,8 @@ GET、HEAD 和 OPTIONS 永远不会被做令牌检查，但它们仍然会走到
 
 中间件会按下面的顺序，从三个位置之一读取令牌（和 Laravel 一致）：
 
-1. **`X-CSRF-TOKEN` 请求头** - Inertia 和脚手架生成的 SPA 模板发送的就是这个。
-2. **`X-XSRF-TOKEN` 请求头** - Laravel / Axios / Angular 的约定：JavaScript 读取 `XSRF-TOKEN` cookie，并在这里把它的值回显出来。
+1. **`X-CSRF-TOKEN` 请求头** - 手写的请求在读取 `<meta name="csrf-token">` 标签之后发送的就是这个。
+2. **`X-XSRF-TOKEN` 请求头** - Laravel / Axios / Angular 的约定：JavaScript 读取 `XSRF-TOKEN` cookie，并在这里把它的值回显出来。脚手架生成的 SPA 入口点用的就是这一个。
 3. **`_token` 表单字段** - 用于来自传统 HTML 表单的 `application/x-www-form-urlencoded` 提交。
 
 如果一个请求头存在但错误，中间件会立即拒绝，不会解析请求体。一个正确的客户端只会为令牌选定一个位置；混用多个来源本身就是一个陷阱，会把令牌拆得支离破碎。
@@ -67,32 +67,22 @@ GET、HEAD 和 OPTIONS 永远不会被做令牌检查，但它们仍然会走到
 
 ## 前端那一侧
 
-脚手架生成的 Svelte、React 和 Vue 入口点使用 Inertia 3 的原生 visit 流程，而不是 Axios。每个入口点都会从自己的 Inertia 适配器导入 `router`，读取 meta 令牌，并在 router hook 中附加它：
+脚手架生成的 Svelte、React 和 Vue 入口点里没有任何 CSRF 接线，这是有意为之。脚手架安装的 Inertia 客户端（`@inertiajs/svelte`、`@inertiajs/react`、`@inertiajs/vue3`，都锁定在 `^3.6.1`）会读取 `CsrfMiddleware` 附加到上一个响应里的 `XSRF-TOKEN` cookie，并自己在每一次 visit 上设置 `X-XSRF-TOKEN` 请求头。传出去的始终是浏览器此刻持有的那个值，所以在轮换会话令牌的登录或者登出之后，紧接着的那一次 visit 带的就是新值。
 
-```ts
-const csrfToken = document
-  .querySelector('meta[name="csrf-token"]')
-  ?.getAttribute('content');
+不要在模块加载时把 `<meta name="csrf-token">` 读取一次，再把这个值钉进一个 `router.on('before', ...)` hook 里。那样会把令牌冻结在页面启动的那一刻；第一次轮换就会让这份冻结的副本失效，下一个状态变更的 visit 会被以 419 拒绝。
 
-if (csrfToken) {
-  router.on('before', (event) => {
-    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
-  });
-}
-```
+`<meta name="csrf-token">` 标签会由 `framework/src/inertia/response.rs` 自动注入到 Inertia 的基础视图里 - 在一个生成的项目里，您不需要自己添加它。每一个 Inertia 响应都会在页面外壳里携带当前会话的令牌，手写的请求就是从那里读取它的。
 
-`<meta name="csrf-token">` 标签会由 `framework/src/inertia/response.rs` 自动注入到 Inertia 的基础视图里 - 在一个生成的项目里，您不需要自己添加它。每一个 Inertia 响应都会在页面外壳里携带当前会话的令牌。
-
-Inertia 的 `useForm` 使用同一个 visit 流程，因此会从这个 hook 获得请求头：
+Inertia 的 `useForm` 走的是同一个 visit 流程，因此客户端也会为它的提交设置同样的请求头：
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN 来自 router hook
+form.post('/posts');
 ```
 
-对于一次原始的 `fetch` 调用，用同样的方式从 meta 标签里读取令牌：
+对于一次原始的 `fetch` 调用，请您自己从 meta 标签里读取令牌：
 
 ```ts
 const token = document
