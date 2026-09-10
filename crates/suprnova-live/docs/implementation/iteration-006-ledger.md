@@ -288,7 +288,9 @@ final.
 
 `python3 .superpowers/sdd/plan-i/census.py` (a throwaway, gitignored harness)
 and `python3 scripts/check-manual-structure.py` both report zero span
-problems over the real tree, independently of each other. `python3 -m
+problems over the real tree; both now call the same unconditional
+`_compare_shapes`, so this is two invocations of one code path rather than
+two independent checks. `python3 -m
 unittest discover -s scripts/tests -p 'test_*.py'` passes at 144 of 144.
 `scripts/check-manual-translations.sh`, `scripts/check-prose-dashes.sh`, and
 `scripts/check-live-contracts.sh` (which runs the spec, implementation-doc,
