@@ -12,7 +12,7 @@ La lista también cubre las variables que lee el binario de la CLI
 el `.env` inicial y quien lea la documentación las buscará aquí.
 
 Consulta [Configuración](configuration.md) para las reglas de carga
-(`.env` → `.env.<entorno>` → env del proceso), los ayudantes `env*`
+(`.env` → `.env.<environment>` → env del proceso), los ayudantes `env*`
 (`env`, `env_required`, `env_optional`), y el patrón de registro
 tipado `Config::*`.
 
@@ -50,7 +50,7 @@ subsistemas.
 | Var | Por defecto | Tipo | Propósito |
 |---|---|---|---|
 | `APP_NAME` | `"Suprnova Application"` | `String` | Nombre de la aplicación. Se usa como emisor de TOTP (2FA), como realm de `WWW-Authenticate` en HTTP Basic, en el branding del asunto del correo, y en campos del registro estructurado. |
-| `APP_ENV` | `local` | `String` | Impulsa `Environment::detect()` y la búsqueda de `.env.<sufijo>`. Alias reconocidos (sin distinguir mayúsculas de minúsculas): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Cualquier otro valor se conserva como `Environment::Custom(...)` con su capitalización original. |
+| `APP_ENV` | `local` | `String` | Impulsa `Environment::detect()` y la búsqueda de `.env.<suffix>`. Alias reconocidos (sin distinguir mayúsculas de minúsculas): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Cualquier otro valor se conserva como `Environment::Custom(...)` con su capitalización original. |
 | `APP_DEBUG` | según el entorno (ver Obligatoria) | `bool` | Páginas de error detalladas + registros adicionales. Por defecto es `true` en `local`/`development`/`testing` y `false` en todo lo demás (incluidos `staging`, `production`, y cualquier entorno personalizado no reconocido). Un valor explícito siempre gana; un valor no analizable recae en el valor por defecto según el entorno con un `warn!`. La variante estricta `try_from_env` aborta el arranque ante un fallo de análisis. |
 | `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (fallback de URL) | `String` | URL base para la generación de URLs absolutas, las URLs firmadas y las redirecciones de Inertia. Las barras finales se recortan al leer. |
 | `APP_KEY` | ninguno - obligatoria fuera de dev | `String` (base64-url sin padding, 32 bytes) | Clave AES-256-GCM para `Crypt`, sesiones cifradas, cursores de paginación, URLs firmadas y cualquier otra ruta de cifrado en reposo. El arranque **falla cerrado** cuando falta o está malformada fuera de `local`/`development`/`testing`. Genérala con `suprnova key:generate`. |
@@ -183,7 +183,7 @@ Consulta [Localización](localization.md).
 |---|---|---|---|
 | `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale usado cuando la cadena de detección (sesión → cookie → `Accept-Language`) no encuentra nada. También es el locale del que `suprnova generate-types` extrae las claves de mensaje para `lang-keys.ts`. Un valor que no sea un identificador BCP-47 válido hace fallar el arranque en lugar de recaer en silencio en el valor por defecto. |
 | `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consultado cuando falta una clave en el catálogo del locale actual. Una clave que falta en ambos se renderiza como la clave misma más un `warn!` de una sola vez; `Lang::try_get` devuelve `Err` en su lugar. Mismo análisis estricto que `APP_LOCALE`. |
-| `APP_LOCALE_PARENTS` | ninguno - mapa vacío | `String` (pares `hijo=padre` separados por comas, BCP-47 en cada lado) | Padres de fallback por locale, consultados antes de `APP_FALLBACK_LOCALE`, p. ej. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. La cadena de fallback de `Lang` los recorre de forma transitiva, y `FluentTranslator` aplana la cadena de padres configurada de cada locale en su catálogo servido. Un par mal formado, un locale inválido, un hijo nombrado más de una vez, o un ciclo (incluido un locale que se nombra a sí mismo como su propio padre) hace fallar el arranque en lugar de degradarse en tiempo de solicitud. Consulta [Cadenas de fallback](localization.md#fallback-chains). |
+| `APP_LOCALE_PARENTS` | ninguno - mapa vacío | `String` (pares `child=parent` separados por comas, BCP-47 en cada lado) | Padres de fallback por locale, consultados antes de `APP_FALLBACK_LOCALE`, p. ej. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. La cadena de fallback de `Lang` los recorre de forma transitiva, y `FluentTranslator` aplana la cadena de padres configurada de cada locale en su catálogo servido. Un par mal formado, un locale inválido, un hijo nombrado más de una vez, o un ciclo (incluido un locale que se nombra a sí mismo como su propio padre) hace fallar el arranque en lugar de degradarse en tiempo de solicitud. Consulta [Cadenas de fallback](localization.md#fallback-chains). |
 
 Los catálogos en sí son archivos, no env: `lang/<locale>/*.ftl` bajo
 `APP_BASE_PATH`. Un directorio `lang/` ausente no es un error - la
@@ -486,8 +486,8 @@ El cargador lee los archivos en este orden, cada uno anulando al
 anterior:
 
 1. `.env`
-2. `.env.<entorno>` (p. ej. `.env.production`, `.env.staging`,
-   `.env.testing`, `.env.<personalizado>` para `APP_ENV=<personalizado>`)
+2. `.env.<environment>` (p. ej. `.env.production`, `.env.staging`,
+   `.env.testing`, `.env.<custom>` para `APP_ENV=<custom>`)
 3. Env del proceso
 
 Eso significa que un despliegue de producción en contenedores puede

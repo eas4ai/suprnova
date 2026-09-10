@@ -244,7 +244,7 @@ para `log`.
 |---|---|---|---|
 | `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Seleciona o alvo de inicialização. |
 | `MAIL_FROM` | nenhum - obrigatório pelas facades de auth-flow | `String` | Endereço de remetente padrão para as facades de auth-flow (`EmailVerification`, `PasswordReset`, `TwoFactor`). Obrigatório para esses caminhos; se estiver ausente, dá erro no call site em vez de recair silenciosamente para um placeholder que quebraria DMARC/SPF. |
-| `MAIL_FROM_NAME` | não definido | `String` | Nome de exibição opcional para o `From` do auth-flow (desde a **0.5.9**). Quando definido, o header renderiza `Nome <MAIL_FROM>`; `MAIL_FROM` permanece um endereço puro. Lido no momento do envio, então também se aplica a mail de auth-flow enfileirado. |
+| `MAIL_FROM_NAME` | não definido | `String` | Nome de exibição opcional para o `From` do auth-flow (desde a **0.5.9**). Quando definido, o header renderiza `Name <MAIL_FROM>`; `MAIL_FROM` permanece um endereço puro. Lido no momento do envio, então também se aplica a mail de auth-flow enfileirado. |
 
 ### File (`MAIL_DRIVER=file`)
 

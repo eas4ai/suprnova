@@ -326,7 +326,7 @@ HTTP 监听器和请求体的限制。
 - **文件系统 / 存储。** 磁盘是在 `bootstrap()` 里用 `FilesystemRegistry::add_disk(name, driver)` 注册的。没有 `FILESYSTEM_DISK` 这个环境变量（这个名字出现在一些起始 `.env` 文件里，但框架并不会查阅它 - 见下面的“框架不读取的变量”）。
 - **广播和 WebSocket。** 通道是用 `ws!()` 这个宏，以及代码里的 `BroadcastHub` 配置注册的。驱动程序本身搭在已配置的 `CACHE_DRIVER` 所选中的那个东西上。
 - **CORS、CSRF、幂等性、超时。** 通过传给 `bootstrap()` 里中间件构造函数的构建器结构体来配置。默认值足够保守，一个典型的应用永远不需要去动它们。
-- **Magnetar 和 OAuth。** `MagnetarConfig` 在应用 bootstrap 中构建。其 `session`、`lockout`、`passkey`、`two_factor` 和 OAuth 提供商策略，来自应用代码传给构建器的值。OAuth 客户端 ID 和密钥（`GITHUB_CLIENT_ID`、`GOOGLE_CLIENT_ID` 等）仍是*用户*配置 - 您的 bootstrap 通过 `std::env::var(...)` 读取它们，并交给已安装的 Magnetar OAuth 注册表。框架本身不会猜测或读取一组固定的 OAuth 密钥。
+- **Magnetar 和 OAuth。** `MagnetarConfig` 在应用 bootstrap 中构建。API 脚手架会读取 `PASSKEY_RP_ID` 和 `PASSKEY_RP_ORIGIN`，但框架本身不会。OAuth 提供商 ID、密钥、回调 URL、作用域、传输方式和策略值，都是通过 Magnetar 提供商注册表以编程方式提供的。应用可以从环境变量或密钥管理器中获取这些值。
 - **向量搜索、通知、支付、功能标志。** 每一个都在 `bootstrap()` 里通过 `App::bind` 注册具体的驱动程序。在 Rust 里选择您的驱动程序；把它需要的任何 URL/密钥，当作您自己的环境变量传进去。
 
 ## 框架不读取的变量
