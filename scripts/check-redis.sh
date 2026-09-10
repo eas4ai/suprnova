@@ -108,7 +108,9 @@ for redis_test in \
     live_redis_publish_fences_and_eviction_is_a_miss \
     live_redis_two_coordinators_lead_once_and_bypass_once \
     live_redis_a_lease_is_taken_over_by_store_time_and_the_former_leader_is_fenced \
-    live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it; do
+    live_redis_the_redis_profile_publishes_to_the_redis_l1_and_serves_from_it \
+    live_redis_a_published_hint_shortens_a_subscribing_nodes_lease \
+    live_redis_a_subscriber_that_falls_behind_is_dropped_and_resubscribes; do
     if ! grep -qE "^test tiers::redis::${redis_test} \.\.\. ok" <<<"$redis_out"; then
         echo "check-redis: ${redis_test} did not report ok (filter may have matched nothing)" >&2
         exit 1
@@ -119,8 +121,8 @@ done
 # the prefix, or its `#[ignore]` dropped - fails here instead of shrinking
 # the run in silence. Update this number when a live_redis test is added or
 # removed.
-if ! grep -qE "^test result: ok\. 16 passed" <<<"$redis_out"; then
-    echo "check-redis: the summary line does not report exactly 16 passed" >&2
+if ! grep -qE "^test result: ok\. 18 passed" <<<"$redis_out"; then
+    echo "check-redis: the summary line does not report exactly 18 passed" >&2
     exit 1
 fi
 
