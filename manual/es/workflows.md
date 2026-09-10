@@ -119,7 +119,7 @@ El worker ejecuta el mismo bootstrap que tu servidor HTTP, así que los
 observadores, los oyentes, y las vinculaciones del contenedor registradas
 en `bootstrap()` son visibles para los pasos del flujo de trabajo. Ante
 `SIGINT` / `SIGTERM` el worker deja de extraer nuevos reclamos y espera
-(`await`) cada flujo de trabajo en vuelo antes de salir - ningún flujo de
+cada flujo de trabajo en vuelo antes de salir - ningún flujo de
 trabajo queda huérfano a mitad de un paso en un apagado limpio.
 
 La ruta de reclamo (`claim_next_workflow`) usa `FOR UPDATE SKIP LOCKED`
@@ -163,8 +163,8 @@ límite, un pánico se saltaría la ruta de resolución y dejaría la fila en
 `WORKFLOW_LOCK_TIMEOUT_SECS` podría, si no fuera por esto, ver cómo su
 propio lease expira mientras todavía está en marcha. El worker lanza una
 tarea de heartbeat que refresca `locked_until` a la mitad del intervalo
-de lock-timeout hasta que el cuerpo se resuelve. El heartbeat se aborta al
-descartarse (`drop`), así que un `?` devuelto no puede provocar una fuga
+de lock-timeout hasta que el cuerpo se resuelve. El heartbeat se aborta al descartarse (drop), así que un `?` devuelto no
+puede provocar una fuga
 de la tarea de renovación y congelar el lease de un flujo de trabajo que
 nadie está ejecutando.
 
