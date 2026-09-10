@@ -121,7 +121,7 @@ ante un fallo para que un reintento pueda volver a entrar.
 El contrato para el que se inventó el encabezado HTTP
 `Idempotency-Key`. El primer llamador corre el cuerpo, guarda el
 valor de éxito, y obtiene `Replay::Fresh`. Un llamador posterior
-dentro de la ventana obtiene `Replay::Replayed(<valor original>)` -
+dentro de la ventana obtiene `Replay::Replayed(<original value>)` -
 el valor de retorno registrado, no un marcador. Un llamador
 concurrente que llega *mientras* el primero todavía está corriendo
 obtiene `Replay::InProgress`.
@@ -278,8 +278,8 @@ varios intervalos de refresco, o una pausa stop-the-world más larga
 que el TTL. Es raro. No es imposible, y antes era invisible.
 
 La conclusión práctica: elige un TTL según tu ventana de
-deduplicación (`¿cuánto tiempo debería deduplicarse una solicitud
-duplicada?`), no según la duración de tu cuerpo en el peor caso. Un
+deduplicación (`how long should a duplicate request be deduped?`),
+no según la duración de tu cuerpo en el peor caso. Un
 cuerpo de 30 minutos con un TTL de 1 minuto está bien - el bloqueo se
 refrescará unas noventa veces durante la ejecución del cuerpo.
 
