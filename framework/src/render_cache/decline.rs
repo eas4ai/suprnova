@@ -90,6 +90,24 @@ pub(crate) enum LookupDeclineReason {
     /// A captured slot's markup, or its placement, could not be
     /// unambiguously resolved in the body.
     CompositeSlotAmbiguous,
+    /// A named nested segment's representation class is `PrivateCached`,
+    /// which no reauthorization mechanism can ever authorize from a named
+    /// reference, so it could never resolve.
+    CompositeNestedUnauthorizable,
+    /// A named nested segment's representation class is wider than the
+    /// including document's.
+    CompositeNestedWiderClass,
+    /// A named nested segment's freshness window is longer than the
+    /// including document's.
+    CompositeNestedLongerFreshness,
+    /// A named nested segment would exceed `MAX_NESTING_DEPTH` once resolved.
+    CompositeNestedDepthExceeded,
+    /// A named nested segment would include the publishing entry, directly
+    /// or transitively.
+    CompositeNestedCycle,
+    /// A named nested segment could not be resolved from the store to
+    /// prove the narrowing rule holds.
+    CompositeNestedUnresolvable,
 }
 
 impl LookupDeclineReason {
@@ -128,6 +146,12 @@ impl LookupDeclineReason {
             Self::CompositeEmptySlot => "composite_empty_slot",
             Self::CompositeSlotNotFound => "composite_slot_not_found",
             Self::CompositeSlotAmbiguous => "composite_slot_ambiguous",
+            Self::CompositeNestedUnauthorizable => "composite_nested_unauthorizable",
+            Self::CompositeNestedWiderClass => "composite_nested_wider_class",
+            Self::CompositeNestedLongerFreshness => "composite_nested_longer_freshness",
+            Self::CompositeNestedDepthExceeded => "composite_nested_depth_exceeded",
+            Self::CompositeNestedCycle => "composite_nested_cycle",
+            Self::CompositeNestedUnresolvable => "composite_nested_unresolvable",
         }
     }
 
@@ -166,6 +190,12 @@ impl LookupDeclineReason {
         Self::CompositeEmptySlot,
         Self::CompositeSlotNotFound,
         Self::CompositeSlotAmbiguous,
+        Self::CompositeNestedUnauthorizable,
+        Self::CompositeNestedWiderClass,
+        Self::CompositeNestedLongerFreshness,
+        Self::CompositeNestedDepthExceeded,
+        Self::CompositeNestedCycle,
+        Self::CompositeNestedUnresolvable,
     ];
 }
 

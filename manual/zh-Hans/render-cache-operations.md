@@ -4,7 +4,7 @@
 问题，而且从不打印一个已存储的页面：**这个节点在这个键下持有什么，它还是最新的
 吗？**以及**我怎么让一切停下来？**它还回答第三个问题 - “这个路由到底有没有在从
 一份已存储的副本被服务？” - 但那是通过遥测和 `Age` 头，而不是通过一条命令，因为
-那个问题问的是流量，而不是某一个条目。这里有两条控制台命令、七个遥测计数器、
+那个问题问的是流量，而不是某一个条目。这里有两条控制台命令、九个遥测计数器、
 一次有界的磁盘清扫，以及一根紧急拉杆。
 
 本章讲的是这套运维界面：那些命令、它们究竟打印什么又能看见什么；那些计数器和
@@ -74,7 +74,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 
 ## 遥测
 
-七个封闭的计数器名称，而且它们当中没有任何一个会点名某个层级、某个提供者或某个
+九个封闭的计数器名称，而且它们当中没有任何一个会点名某个层级、某个提供者或某个
 后端：
 
 | 计数器 | 属性 |
@@ -85,6 +85,8 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 | `suprnova.render_cache.rebuilds` | 无 |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`、`cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | 无 |
 
 `lookups` 和 `hits` 携带同一个封闭的八种结果集合：
@@ -97,7 +99,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 - `bypass` - 一个未声明的查询参数、一个无法解析的已声明差异化维度，或者一份已
   耗尽的等待者名单。
 - `moved` - 渲染之后的那次重读发现某项依赖或纪元变过了；候选被丢弃，从未发布。
-- `declined` - 这次渲染不可存储，属于下面三十二个理由中的一个，携带在
+- `declined` - 这次渲染不可存储，属于下面三十八个理由中的一个，携带在
   `outcome` 旁边的 `reason` 属性里。`reason` 只在 `outcome="declined"` 时才
   会给出；其他任何结果都不携带它。这个理由是在真正做出拒绝的那个分支上，从
   一个类型化的值计算出来的，而绝不是事后从响应反推出来的，所以它点名的正是
@@ -121,20 +123,56 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
     `composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
-    `composite_slot_ambiguous`。
+    `composite_slot_ambiguous`、`composite_nested_unauthorizable`、
+    `composite_nested_wider_class`、`composite_nested_longer_freshness`、
+    `composite_nested_depth_exceeded`、`composite_nested_cycle`、
+    `composite_nested_unresolvable`。
 
 `hits` 只在 `l0`、`l1`、`conditional` 和 `stale` 上递增。`publications` 只统计
 一个存储回答了“已发布”的情况，绝不统计被栅栏挡下或被拒绝的尝试。`rebuilds` 每
 派生一次后台重建统计一次。
 
-那两个缝合计数器携带它们自己的集合：组装是 `assembled` 和 `fail_document`；
-槽位是 `rendered`、`omitted`、`fallback` 和 `failed`。
+那两个岛屿缝合计数器携带它们自己的集合：组装是 `assembled` 和
+`fail_document`；槽位是 `rendered`、`omitted`、`fallback` 和 `failed`。
+
+`suprnova.render_cache.stitch.nested` 把一个具名内部缓存分段自身的结果，
+与一个岛屿槽位的结果区分开来，每尝试解析一次 `Segment::Nested` 就加一次。
+它的 `outcome` 属性只会取 `resolved`、`omitted`、`fallback`、`failed` 之一；
+它的 `cause` 属性只会取 `none`（仅在 `outcome="resolved"` 时使用）、
+`fetch_failed`、`version_mismatch`、`length_mismatch`、`depth_exceeded`、
+`cycle`、`unauthorized` 之一。这两个属性都绝不会携带键、路由名或身份摘要。
+一个失败或降级的分段，总是通过包含它的图为它声明的策略
+（`FailDocument`/`Omit`/`Fallback`）来解决，跟一个岛屿槽位自身的失败一模
+一样；`outcome="failed"`（来自 `FailDocument` 策略）会放弃整个文档的组装，
+转而落到该路由自己那个不缓存的处理程序上。
 
 `epoch_rewinds` 数的是检测次数，不是条目数：每当一个节点遇到一个盖着高于
 权威自身纪元戳记的条目或租来的纪元，它就加一次，然后把账本的纪元推进到超过
 那个戳记，并清空自己的 L0。数据库恢复之后出现一个非零值，是恢复被察觉到的
 信号。在其他任何时候出现一个非零值，则意味着权威因为某个谁都没打算的理由
 往回退了。
+
+`hints` 数的是这个节点在第 2 层级的 pub/sub 频道上处理过的可信世代提示：每
+收到一条消息加一次，每结束一次订阅加一次，每有一条通告因为发布队列满了而没
+能发出去也加一次。它是这里唯一一个部署可以按自己的选择永久保持为零的计数
+器：除非 Redis 配置档，或者 `RENDER_CACHE_HINTS=redis`，把提示打开，否则提
+示是关闭的，而关闭提示的节点所提供的东西，跟打开提示的节点完全一样。它的
+`outcome`
+属性恰好取 `applied`（这条消息点名了这个节点上某个验证租约所观测的摘要，而
+每一个这样的租约都被缩短了）、`ignored_unknown_key`（它没有点名任何这个节点
+持有租约的东西，其中也包括这个节点根本读不懂的消息）、`dropped_over_bound`
+（它携带了超过 64 个摘要，于是被整条丢弃而不是被截断，因为一条被截断的提示
+就是一条悄悄出错的提示）、`subscriber_dropped`（这个节点的订阅结束了，或是
+因为它跟不上，或是因为连接失败，现在正在重新建立）、
+`dropped_publish_queue_full`（这个节点有一次推进要通告，而它自己的发布队列
+满了，于是这条消息被丢弃，而不是让产生它的那次写入等下去；每有一条消息没能
+通告出去就计一次）当中的一个。任何一个属性都绝不会携带路由、键或依赖身份。
+
+一条提示只能缩短这个节点已经持有的验证租约。它绝不能延长一个、创建一个，也
+不能代替世代账本，而且每一次命中仍然会读那个账本。所以 `subscriber_dropped`
+上升，意味着这个节点重新验证的时机比它本可以的更晚 - 最坏也就晚到租约自己的
+`max_age_ms`，而那正是这条路由已经声明的陈旧上限 - 而绝不意味着有什么本该被
+一致性检查拒绝的东西被提供了出去。
 
 **一个偏高的 `declined` 比率，才是值得告警的信号。** 它意味着你接入的那些路由
 在正确地渲染和服务，却从来没有被存储过，而响应两种情况下看起来一模一样。最快
@@ -414,7 +452,7 @@ Laravel 的响应缓存包把运维留给底下那个缓存存储。检视一个
 Suprnova 给这个缓存自己的一套运维界面，而且刻意做得很窄。检视在构造上就是不含
 正文的，所以一个运维人员可以确认一个条目存在、它存在哪个类别之下、它有多大，
 而完全不会被展示它的内容。失效是一次纪元推进，施加起来不花什么代价，而且只触及
-这个缓存 - 你的会话和你的队列不在爆炸半径里。遥测是一个由七个计数器构成的封闭
+这个缓存 - 你的会话和你的队列不在爆炸半径里。遥测是一个由九个计数器构成的封闭
 集合，属性集合也是封闭的，而这正是让一块建在它们之上的看板能跨版本保持稳定、
 而不是变成一堆会漂移的字符串的原因。这笔交易的代价是没有一条“删掉这一个键”的
 命令：这些拉杆要么是按条目只读的，要么是整个纪元范围的。

@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -14,8 +15,9 @@ use suprnova_live::host::{
 use suprnova_live::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
 use suprnova_live::mount::{DocumentMountKey, DocumentMountScope, MountFlags, PrivateMountRequest};
 use suprnova_live::render_cache::composite::{
-    MAX_FALLBACK_BYTES, MAX_SLOT_PARAMETER_BYTES, SlotFailurePolicy,
+    MAX_FALLBACK_BYTES, MAX_SLOT_PARAMETER_BYTES, Segment, SlotFailurePolicy,
 };
+use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::snapshot::{
     ComponentContract as SnapshotContract, ExpectedSeedV1, MountedDocumentPath,
 };
@@ -246,13 +248,7 @@ impl<C: ComponentContract> LiveMount<C> {
         mut self,
         policy: StitchFailurePolicy,
     ) -> Result<Self, LiveDocumentError> {
-        if let StitchFailurePolicy::Fallback(html) = &policy
-            && html.as_str().len() > MAX_FALLBACK_BYTES
-        {
-            return Err(LiveDocumentError::new(
-                LiveDocumentErrorKind::StitchFallbackTooLarge,
-            ));
-        }
+        validate_stitch_failure_policy(&policy)?;
         self.stitch_failure = policy;
         Ok(self)
     }
@@ -335,6 +331,256 @@ impl<C: ComponentContract> LiveMount<C> {
                 ScopeRequirement::Optional,
             ),
         }
+    }
+}
+
+/// Whether a [`LiveNestedSegment`] declares a per-request identity binding,
+/// and, if it does, the one includer path length every declaration naming
+/// the same inner route MUST agree on.
+///
+/// Carried separately from [`LiveNestedSegment`] itself so
+/// [`Router::try_live_nested_segment`] can compare two declarations for the
+/// same inner route without needing the rest of either one: `on_failure` is
+/// a per-including-document choice (see [`LiveNestedSegment`]'s own doc)
+/// and never participates in this comparison.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NestedSegmentIdentity {
+    /// Declares no identity binding at all: nothing in the segment varies
+    /// by includer, reauthorization is skipped at resolution, and the
+    /// entry may be shared by any including document unconditionally.
+    Free,
+    /// Declares a per-request identity binding: the segment may be shared
+    /// only among includers whose own resolved document path is exactly
+    /// `includer_path_len` bytes (see [`LiveNestedSegment::identity_bound`]
+    /// for why).
+    Bound {
+        /// The one includer path length every declaration naming this
+        /// inner route under this binding MUST share.
+        includer_path_len: NonZeroU32,
+    },
+}
+
+/// One nested cached segment declaration: the typed way an author marks a
+/// route's own cached representation as includable, by name, from another
+/// cached document's graph, and carries the failure policy that inclusion
+/// uses when it cannot be resolved - [`LiveMount`]'s counterpart for
+/// something that is not an island.
+///
+/// `route_pattern` names which route's cached representation this
+/// declaration is about, the same way [`LiveMount`]'s own declared route
+/// pattern names the route an island mount belongs to; a later resolution
+/// step (not built by this declaration) derives the engine's actual
+/// `RenderKey` and the entry's current stored version and length, and hands
+/// them to [`Self::into_segment`] to produce the typed graph fact the
+/// engine's `Segment::Nested` variant needs.
+///
+/// Whether the segment [`Self::is_identity_bound`] governs a length
+/// constraint on sharing, never a security decision: at resolution,
+/// `resolve_nested_segment` decides reauthorization from the fetched
+/// inner entry's own structure, not from what any declaration claims, so a
+/// wrong flag here can only ever turn into a resolution failure through
+/// this declaration's own policy - never a leak. See
+/// [`Self::identity_bound`] for the constraint this exists to make loud.
+#[derive(Clone, Debug)]
+pub struct LiveNestedSegment {
+    route_pattern: String,
+    identity: NestedSegmentIdentity,
+    on_failure: StitchFailurePolicy,
+}
+
+impl LiveNestedSegment {
+    /// Declares `route_pattern`'s own cached representation as an
+    /// identity-free nested segment: it declares no identity binding at
+    /// all, so resolution skips reauthorization and the entry may be
+    /// shared by any including document unconditionally.
+    pub fn identity_free(route_pattern: &str) -> Result<Self, LiveDocumentError> {
+        Ok(Self {
+            route_pattern: validated_nested_pattern(route_pattern)?,
+            identity: NestedSegmentIdentity::Free,
+            on_failure: StitchFailurePolicy::FailDocument,
+        })
+    }
+
+    /// Declares `route_pattern`'s own cached representation as an
+    /// identity-bound nested segment, shareable only by includers whose own
+    /// resolved document path is exactly as long as
+    /// `includer_route_pattern`'s.
+    ///
+    /// # The length-stability constraint
+    ///
+    /// An identity-bound inner segment's re-mount embeds the *including*
+    /// document's own resolved path into its signed snapshot (spec 16,
+    /// "Nested cached segments"), so the inner entry's actual assembled
+    /// length depends on that path's byte length. The engine stores one
+    /// `assembled_len` per graph segment, so one inner entry cannot match
+    /// two includers whose resolved paths differ in length: the mismatch
+    /// is always caught safely (`verify_nested` resolves it through this
+    /// declaration's own [`Self::on_failure`] policy, never a wrong
+    /// document), but the sharing this segment exists to provide is lost
+    /// silently, and a real deployment reads a segment that never resolves
+    /// as a bug rather than a declaration error.
+    ///
+    /// `includer_route_pattern` closes that gap by requiring the includer's
+    /// own *literal* route pattern - not a general pattern that could match
+    /// several paths - up front: a pattern naming a `{parameter}` is
+    /// refused outright, because such a route resolves to a different path
+    /// length on almost every request, so not even one such includer could
+    /// promise the constant length this segment's re-mount needs. A
+    /// literal pattern's resolved path is always the pattern text itself,
+    /// so its byte length is knowable, and checked, right here.
+    ///
+    /// A second includer of the same inner segment whose own literal path
+    /// differs in length needs its own, separate `LiveNestedSegment` value,
+    /// never this one reused for both, and
+    /// [`Router::try_live_nested_segment`] refuses at router construction,
+    /// not at a request, when two declarations naming the same inner route
+    /// disagree about this.
+    pub fn identity_bound(
+        route_pattern: &str,
+        includer_route_pattern: &str,
+    ) -> Result<Self, LiveDocumentError> {
+        let route_pattern = validated_nested_pattern(route_pattern)?;
+        let includer_route_pattern = validated_nested_pattern(includer_route_pattern)?;
+        if includer_route_pattern.contains('{') {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::DynamicIncluderPath,
+            ));
+        }
+        let includer_path_len = u32::try_from(includer_route_pattern.len())
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
+        Ok(Self {
+            route_pattern,
+            identity: NestedSegmentIdentity::Bound { includer_path_len },
+            on_failure: StitchFailurePolicy::FailDocument,
+        })
+    }
+
+    /// Declares what a resolution attempt does when this segment cannot be
+    /// resolved for a request, including a mismatch against
+    /// [`Self::identity_bound`]'s own declared includer path length. The
+    /// default is [`StitchFailurePolicy::FailDocument`].
+    ///
+    /// A fallback fragment is limited to `MAX_FALLBACK_BYTES`, checked here
+    /// rather than silently at resolution, exactly as
+    /// [`LiveMount::on_stitch_failure`] checks it for an island.
+    pub fn on_failure(mut self, policy: StitchFailurePolicy) -> Result<Self, LiveDocumentError> {
+        validate_stitch_failure_policy(&policy)?;
+        self.on_failure = policy;
+        Ok(self)
+    }
+
+    /// Whether this declaration binds a per-request identity, and so
+    /// constrains sharing to includers of one exact resolved path length
+    /// (see [`Self::identity_bound`]). Never a security decision on its
+    /// own; see this type's own doc.
+    #[must_use]
+    pub const fn is_identity_bound(&self) -> bool {
+        matches!(self.identity, NestedSegmentIdentity::Bound { .. })
+    }
+
+    /// The nested route's own declared pattern.
+    #[must_use]
+    pub fn route_pattern(&self) -> &str {
+        &self.route_pattern
+    }
+
+    /// Converts this declaration and the facts a resolution step already
+    /// fetched into the engine's typed graph fact,
+    /// `suprnova_live::render_cache::composite::Segment::Nested`.
+    ///
+    /// `includer_path` MUST be the *actual* resolved path of the document
+    /// being built right now. For an identity-bound declaration this checks
+    /// it against [`Self::identity_bound`]'s own declared length - the
+    /// constraint this type exists to make loud rather than silent - right
+    /// here, in the one place every future caller has to pass through to
+    /// produce a segment at all, so the check cannot be skipped by a caller
+    /// that forgets a separate step. A mismatch is a declaration error, not
+    /// a trust decision: resolution itself decides reauthorization from the
+    /// fetched inner entry's own structure, never from this check, so a
+    /// wrong length here can only turn into a resolution failure through
+    /// this declaration's own policy - never a leak.
+    ///
+    /// `key`, `version`, and `assembled_len` are the exact facts the
+    /// engine's own [`Segment::Nested`] documents: a `RenderKey` derived for
+    /// the named route, the inner entry's stored version at the moment it
+    /// was fetched, and its own assembled length.
+    pub fn into_segment(
+        &self,
+        key: RenderKey,
+        version: u64,
+        assembled_len: u32,
+        includer_path: &MountedDocumentPath,
+    ) -> Result<Segment, LiveDocumentError> {
+        if let NestedSegmentIdentity::Bound { includer_path_len } = self.identity {
+            let matches = u32::try_from(includer_path.as_str().len())
+                .is_ok_and(|actual| actual == includer_path_len.get());
+            // An error channel, not a `debug_assert!`: unlike the
+            // structurally-impossible cases elsewhere in this module, the
+            // includer path is per-request data crossing this API boundary
+            // on every call, so a mismatch here is an ordinary, expected,
+            // and testable failure mode - the very thing this fallible
+            // conversion exists to report - never an invariant a panic
+            // would be answering.
+            if !matches {
+                return Err(LiveDocumentError::new(
+                    LiveDocumentErrorKind::NestedSegmentLengthMismatch,
+                ));
+            }
+        }
+        Ok(Segment::Nested {
+            key,
+            version,
+            assembled_len,
+            on_failure: match &self.on_failure {
+                StitchFailurePolicy::FailDocument => SlotFailurePolicy::FailDocument,
+                StitchFailurePolicy::Omit => SlotFailurePolicy::Omit,
+                StitchFailurePolicy::Fallback(html) => SlotFailurePolicy::Fallback {
+                    html: html.as_str().to_owned(),
+                },
+            },
+        })
+    }
+}
+
+/// Validates a nested segment's own route pattern, or an
+/// [`LiveNestedSegment::identity_bound`] includer pattern before its own
+/// dynamic-segment check: the same application-path shape `LiveMount::new`
+/// requires.
+fn validated_nested_pattern(pattern: &str) -> Result<String, LiveDocumentError> {
+    if !pattern.starts_with('/') || pattern.starts_with("/__live/") {
+        return Err(LiveDocumentError::new(
+            LiveDocumentErrorKind::InvalidDeclaration,
+        ));
+    }
+    Ok(pattern.to_owned())
+}
+
+impl Router {
+    /// Registers one nested cached segment declaration, checked against
+    /// every earlier declaration naming the same inner route pattern.
+    ///
+    /// This is where the length-stability trap
+    /// [`LiveNestedSegment::identity_bound`]'s own doc describes is made
+    /// loud rather than silent: two includers naming the same inner route
+    /// MUST agree on whether it is identity-bound and, if so, on the
+    /// includer path length it was bound to. Disagreement is refused here,
+    /// at router construction - before any request is ever served - rather
+    /// than discovered later as a resolution failure that reads like a bug
+    /// at the point of use. A different [`StitchFailurePolicy`] across
+    /// includers is not a conflict: it is a per-including-document
+    /// decision (see [`LiveNestedSegment`]'s own doc), so it never
+    /// participates in this check.
+    pub fn try_live_nested_segment(
+        mut self,
+        segment: &LiveNestedSegment,
+    ) -> Result<Self, FrameworkError> {
+        self.register_live_nested_segment_entry(
+            segment.route_pattern.clone(),
+            segment.identity.clone(),
+        )?;
+        Ok(self)
     }
 }
 
@@ -668,6 +914,23 @@ impl<'a> LiveDocument<'a> {
     }
 }
 
+/// Rejects a [`StitchFailurePolicy::Fallback`] fragment larger than
+/// `MAX_FALLBACK_BYTES`, the bound the stored entry itself applies -
+/// checked here, where the declaration is written, rather than silently at
+/// publication time. Shared by [`LiveMount::on_stitch_failure`] and
+/// [`LiveNestedSegment::on_failure`], the two declarations that carry a
+/// [`StitchFailurePolicy`].
+fn validate_stitch_failure_policy(policy: &StitchFailurePolicy) -> Result<(), LiveDocumentError> {
+    if let StitchFailurePolicy::Fallback(html) = policy
+        && html.as_str().len() > MAX_FALLBACK_BYTES
+    {
+        return Err(LiveDocumentError::new(
+            LiveDocumentErrorKind::StitchFallbackTooLarge,
+        ));
+    }
+    Ok(())
+}
+
 fn route_identity(pattern: &str) -> Result<RouteIdentity, LiveDocumentError> {
     let mut digest = Sha256::new();
     digest.update(b"suprnova-live/route-identity/v1\0");
@@ -705,6 +968,12 @@ pub enum LiveDocumentErrorKind {
     MountAfterBootstrap,
     /// A declared stitch fallback fragment exceeded the stored entry's bound.
     StitchFallbackTooLarge,
+    /// An identity-bound nested segment's declared includer route pattern
+    /// names a path parameter, so its resolved path length is not constant.
+    DynamicIncluderPath,
+    /// An identity-bound nested segment's actual includer path did not
+    /// match the length its declaration was bound to.
+    NestedSegmentLengthMismatch,
 }
 
 /// Redacted Live document failure.
@@ -740,6 +1009,12 @@ impl fmt::Display for LiveDocumentError {
             LiveDocumentErrorKind::BootstrapRepeated => "live_bootstrap_repeated",
             LiveDocumentErrorKind::MountAfterBootstrap => "live_mount_after_bootstrap",
             LiveDocumentErrorKind::StitchFallbackTooLarge => "live_stitch_fallback_too_large",
+            LiveDocumentErrorKind::DynamicIncluderPath => {
+                "live_nested_segment_dynamic_includer_path"
+            }
+            LiveDocumentErrorKind::NestedSegmentLengthMismatch => {
+                "live_nested_segment_length_mismatch"
+            }
         })
     }
 }

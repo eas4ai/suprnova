@@ -7,7 +7,7 @@ Schlüssel, und ist es noch aktuell?** und **Wie bringe ich alles zum
 Stillstand?** Eine dritte, „Wird diese Route überhaupt aus einer
 gespeicherten Kopie bedient?“, beantwortet er über Telemetrie und über den
 `Age`-Header statt über einen Befehl, denn diese Frage handelt vom Verkehr
-und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, sieben
+und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, neun
 Telemetriezähler, einen begrenzten Bereinigungslauf auf der Festplatte und
 einen Notfallhebel.
 
@@ -106,7 +106,7 @@ unter seinem vorherigen Berechtigungssatz gecacht wurde.
 
 ## Telemetrie
 
-Sieben geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
+Neun geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
 Provider oder ein Backend benannt:
 
 | Zähler | Attribut |
@@ -117,6 +117,8 @@ Provider oder ein Backend benannt:
 | `suprnova.render_cache.rebuilds` | keines |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | keines |
 
 `lookups` und `hits` tragen dieselbe geschlossene Menge von acht Ergebnissen:
@@ -136,7 +138,7 @@ Provider oder ein Backend benannt:
   eine Abhängigkeit oder die Epoche geändert hatte; der Kandidat wurde
   verworfen und nie veröffentlicht.
 - `declined` - das Rendering war nicht speicherbar, aus einem von
-  zweiunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
+  achtunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
   `outcome`. `reason` wird nur zusammen mit `outcome="declined"`
   ausgegeben; jedes andere Ergebnis führt keinen. Der Grund wird aus einem
   typisierten Wert an genau der Verzweigung berechnet, die abgelehnt hat,
@@ -163,16 +165,35 @@ Provider oder ein Backend benannt:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` zählt nur für `l0`, `l1`, `conditional` und `stale` hoch.
 `publications` zählt nur einen Store, der mit „veröffentlicht“ antwortet, nie
 einen mit einem Fence abgewiesenen oder abgelehnten Versuch. `rebuilds` zählt
 einen pro angestoßenem Neuaufbau im Hintergrund.
 
-Die beiden Stitch-Zähler tragen ihre eigenen Mengen: `assembled` und
+Die beiden Insel-Stitch-Zähler tragen ihre eigenen Mengen: `assembled` und
 `fail_document` für Zusammensetzungen; `rendered`, `omitted`, `fallback` und
 `failed` für Slots.
+
+`suprnova.render_cache.stitch.nested` unterscheidet das eigene Ergebnis
+eines benannten, gecachten inneren Segments von dem eines Insel-Slots, mit
+einer Erhöhung pro Auflösungsversuch eines `Segment::Nested`. Sein Attribut
+`outcome` nimmt genau einen von `resolved`, `omitted`, `fallback` und
+`failed` an; sein Attribut `cause` nimmt genau einen von `none` (nur
+verwendet, wenn `outcome="resolved"`), `fetch_failed`, `version_mismatch`,
+`length_mismatch`, `depth_exceeded`, `cycle` und `unauthorized` an. Keines
+der beiden Attribute führt je einen Schlüssel, einen Routennamen oder einen
+Identitätsdigest mit sich. Ein fehlgeschlagenes oder degradiertes Segment
+wird immer über die Richtlinie behandelt, die der einschließende Graph
+dafür erklärt hat (`FailDocument`/`Omit`/`Fallback`), genau wie das
+Fehlschlagen eines Insel-Slots selbst; `outcome="failed"` (aus einer
+`FailDocument`-Richtlinie) bricht die Zusammensetzung für das ganze
+Dokument ab und fällt zurück auf den eigenen ungecachten Handler der
+Route.
 
 `epoch_rewinds` zählt Erkennungen, nicht Einträge: eine Erhöhung jedes Mal,
 wenn ein Knoten auf einen Eintrag oder eine verleaste Epoche trifft, die
@@ -182,6 +203,39 @@ von null verschiedener Wert nach einer Wiederherstellung der Datenbank ist
 das Signal, dass die Wiederherstellung bemerkt wurde. Ein von null
 verschiedener Wert zu jedem anderen Zeitpunkt bedeutet, dass eine Autorität
 aus einem von niemandem beabsichtigten Grund rückwärtsgelaufen ist.
+
+`hints` zählt glaubwürdige Generationshinweise, die dieser Knoten auf dem
+Pub/Sub-Kanal der Ebene 2 behandelt hat: eine Erhöhung je empfangener
+Nachricht, eine je beendetem Abonnement und eine je Ankündigung, die eine
+volle Veröffentlichungswarteschlange diesen Knoten nicht senden ließ. Er ist
+der eine Zähler hier, den eine Bereitstellung durch eigene Wahl dauerhaft auf
+null lassen kann: Hinweise sind aus, sofern nicht das Redis-Profil oder
+`RENDER_CACHE_HINTS=redis` sie einschaltet, und ein Knoten mit
+ausgeschalteten Hinweisen liefert genau das aus, was ein Knoten mit
+eingeschalteten Hinweisen ausliefert. Sein Attribut `outcome` nimmt genau
+einen der Werte `applied` (die Nachricht benannte einen Digest, den ein
+Validierungs-Lease auf diesem Knoten beobachtet, und jedes solche Lease wurde
+verkürzt), `ignored_unknown_key` (sie benannte nichts, wogegen dieser Knoten
+ein Lease hält, wozu auch eine Nachricht gehört, die dieser Knoten überhaupt
+nicht lesen kann), `dropped_over_bound` (sie trug mehr als 64 Digests und
+wurde ganz verworfen statt abgeschnitten, denn ein abgeschnittener Hinweis
+ist ein stillschweigend falscher Hinweis), `subscriber_dropped` (das
+Abonnement dieses Knotens endete, weil er zurückfiel oder die Verbindung
+ausfiel, und wird neu aufgebaut) und `dropped_publish_queue_full` (dieser
+Knoten hatte einen Fortschritt anzukündigen, und seine eigene
+Veröffentlichungswarteschlange war voll, sodass die Nachricht verworfen
+wurde, statt den Schreibvorgang warten zu lassen, der sie erzeugt hat, eine
+Zählung je Nachricht, die unangekündigt blieb). Kein Attribut führt jemals
+eine Route, einen Schlüssel oder eine Abhängigkeitsidentität mit.
+
+Ein Hinweis kann ein Validierungs-Lease, das dieser Knoten bereits hält, nur
+verkürzen. Er kann eines niemals verlängern, eines anlegen oder für das
+Generationen-Ledger einstehen, und jeder Treffer liest dieses Ledger
+weiterhin. Ein steigendes `subscriber_dropped` bedeutet also, dass dieser
+Knoten später neu validiert, als er könnte - schlimmstenfalls so spät wie das
+eigene `max_age_ms` des Lease, was genau die Veraltungsgrenze ist, die die
+Route bereits deklariert hat - und niemals, dass etwas ausgeliefert wird, was
+die Kohärenzprüfung abgelehnt hätte.
 
 **Eine hohe `declined`-Rate ist das Signal, auf das zu alarmieren sich
 lohnt.** Sie bedeutet, dass Routen, die Sie aufgenommen haben, korrekt
@@ -558,7 +612,7 @@ kann, dass ein Eintrag existiert, unter welcher Klasse er gespeichert ist und
 wie groß er ist, ohne je seinen Inhalt gezeigt zu bekommen. Die
 Invalidierung ist ein Epochensprung, der nichts kostet und nur diesen Cache
 berührt: Ihre Sitzungen und Ihre Queue liegen nicht im Wirkungsradius. Die
-Telemetrie ist eine geschlossene Menge von sieben Zählern mit geschlossenen
+Telemetrie ist eine geschlossene Menge von neun Zählern mit geschlossenen
 Attributmengen, und das macht ein Dashboard darüber über Releases hinweg
 stabil statt zu einem Satz driftender Zeichenketten. Der Preis ist, dass es
 keinen Befehl „lösche genau diesen einen Schlüssel“ gibt: Die Hebel sind pro

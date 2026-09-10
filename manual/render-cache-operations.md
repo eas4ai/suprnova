@@ -6,7 +6,7 @@ is this node holding under this key, and is it still current?** and **how do
 I make everything stop?** It answers a third - "is this route being served
 from a stored copy at all?" - through telemetry and through the `Age` header
 rather than through a command, because that question is about traffic rather
-than about one entry. There are two console commands, seven telemetry
+than about one entry. There are two console commands, nine telemetry
 counters, one bounded disk sweep, and one emergency lever.
 
 This chapter is the operating surface: the commands, exactly what they print
@@ -97,7 +97,7 @@ changed keeps matching whatever was cached under their prior permission set.
 
 ## Telemetry
 
-Seven closed counter names, and nothing in any of them names a tier, a
+Nine closed counter names, and nothing in any of them names a tier, a
 provider, or a backend:
 
 | Counter | Attribute |
@@ -108,6 +108,8 @@ provider, or a backend:
 | `suprnova.render_cache.rebuilds` | none |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | none |
 
 `lookups` and `hits` carry the same closed set of eight outcomes:
@@ -122,7 +124,7 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable, for one of the thirty-two
+- `declined` - the render was not storable, for one of the thirty-eight
   reasons below, carried in the `reason` attribute beside `outcome`.
   `reason` is emitted only alongside `outcome="declined"`; every other
   outcome carries none. The reason is computed from a typed value at the
@@ -149,15 +151,32 @@ provider, or a backend:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` increments only for `l0`, `l1`, `conditional`, and `stale`.
 `publications` counts only a store answering "published", never a fenced or
 rejected attempt. `rebuilds` counts one per spawned background rebuild.
 
-The two stitch counters carry their own sets: `assembled` and
+The two island-stitch counters carry their own sets: `assembled` and
 `fail_document` for assemblies; `rendered`, `omitted`, `fallback`, and
 `failed` for slots.
+
+`suprnova.render_cache.stitch.nested` distinguishes a named inner cached
+segment's own outcome from an island slot's, one increment per
+`Segment::Nested` resolution attempt. Its `outcome` attribute takes exactly
+one of `resolved`, `omitted`, `fallback`, and `failed`; its `cause`
+attribute takes exactly one of `none` (used only when `outcome="resolved"`),
+`fetch_failed`, `version_mismatch`, `length_mismatch`, `depth_exceeded`,
+`cycle`, and `unauthorized`. Neither attribute ever carries a key, a route
+name, or an identity digest. A failed or degraded segment always resolves
+through the policy the including graph declared for it
+(`FailDocument`/`Omit`/`Fallback`), exactly as an island slot's own failure
+does; `outcome="failed"` (from a `FailDocument` policy) abandons assembly
+for the whole document and falls through to the route's own uncached
+handler.
 
 `epoch_rewinds` counts detections, not entries: one increment each time a
 node meets an entry or a leased epoch stamped above the authority's own,
@@ -165,6 +184,35 @@ lifts the ledger's epoch past that stamp, and clears its own L0. A non-zero
 value after a database restore is the signal that the restore was noticed. A
 non-zero value at any other time means an authority moved backwards for a
 reason nobody intended.
+
+`hints` counts credible generation hints this node handled on the Tier 2
+pub/sub channel: one increment per message received, one per subscription
+ending, and one per announcement a full publish queue kept this node from
+sending. It is the one counter here a deployment can leave permanently at
+zero by choice: hints are off unless the Redis profile, or
+`RENDER_CACHE_HINTS=redis`, turns them on, and a node with them off serves
+exactly what a node with them on serves. Its `outcome` attribute takes
+exactly one of `applied` (the message named a digest a validation lease on
+this node observes, and every such lease was shortened),
+`ignored_unknown_key` (it named nothing this node holds a lease against,
+which includes a message this node cannot read at all), `dropped_over_bound`
+(it carried more than 64 digests and was dropped whole rather than
+truncated, because a truncated hint is a silently wrong hint),
+`subscriber_dropped` (this node's subscription ended, because it fell behind
+or the connection failed, and is being re-established), and
+`dropped_publish_queue_full` (this node had an advance to announce and its
+own publish queue was full, so the message was dropped rather than made to
+wait on the write that produced it, one count for every message that went
+unannounced). No attribute ever carries a route, a key, or a dependency
+identity.
+
+A hint can only shorten a validation lease this node already holds. It can
+never extend one, create one, or stand in for the generation ledger, and
+every hit still reads that ledger. So a rising `subscriber_dropped` means
+this node is revalidating later than it could - at worst as late as the
+lease's own `max_age_ms`, which is the staleness bound the route already
+declared - and never that anything is being served that the coherence check
+would have refused.
 
 **A high `declined` rate is the signal worth alerting on.** It means routes
 you opted in are rendering and serving correctly while never being stored,
@@ -499,7 +547,7 @@ Inspection is body-free by construction, so an operator can confirm an entry
 exists, what class it is stored under, and how large it is, without ever
 being shown its contents. Invalidation is an epoch bump that costs nothing
 to apply and touches only this cache - your sessions and your queue are not
-in the blast radius. Telemetry is a closed set of seven counters with closed
+in the blast radius. Telemetry is a closed set of nine counters with closed
 attribute sets, which is what makes a dashboard over them stable across
 releases rather than a set of strings that drift. The trade is that there is
 no "delete this one key" command: the levers are per entry read-only, or

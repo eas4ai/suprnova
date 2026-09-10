@@ -7,7 +7,7 @@
 保存済みコピーから配信されているのか」には、コマンドではなくテレメトリと `Age`
 ヘッダーを通じて答えます。その問いは 1 つのエントリについてではなく、トラフィック
 についてのものだからです。コンソールコマンドが 2 つ、テレメトリのカウンターが
-7 つ、境界付きのディスクスイープが 1 つ、そして緊急のレバーが 1 つあります。
+9 つ、境界付きのディスクスイープが 1 つ、そして緊急のレバーが 1 つあります。
 
 この章は、その運用の表面です。コマンドと、それが正確に何を印字し、何を見られる
 のか。カウンターと、その閉じた結果の集合。ファイル階層がどうディスクを回収する
@@ -93,7 +93,7 @@ cargo run --bin console -- render-cache:epoch-advance
 
 ## テレメトリ
 
-閉じた 7 つのカウンター名があり、そのどれもが階層、プロバイダー、バックエンドを
+閉じた 9 つのカウンター名があり、そのどれもが階層、プロバイダー、バックエンドを
 名指ししません:
 
 | カウンター | 属性 |
@@ -104,6 +104,8 @@ cargo run --bin console -- render-cache:epoch-advance
 | `suprnova.render_cache.rebuilds` | なし |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`、`cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | なし |
 
 `lookups` と `hits` は、8 つの結果からなる同じ閉じた集合を運びます:
@@ -118,7 +120,7 @@ cargo run --bin console -- render-cache:epoch-advance
   ディメンション、または使い切られた待機者の一覧。
 - `moved`: レンダリング後の読み直しで、依存かエポックが変わっていたことが
   判明した。候補は破棄され、公開はされなかった。
-- `declined`: レンダリングが保存できませんでした。理由は下記 32 個のうちの
+- `declined`: レンダリングが保存できませんでした。理由は下記 38 個のうちの
   いずれかで、`outcome` の隣にある `reason` 属性に載って運ばれます。
   `reason` が出るのは `outcome="declined"` のときだけで、それ以外の結果には
   一切運ばれません。この理由は、実際に却下したその分岐において型付きの値から
@@ -144,16 +146,33 @@ cargo run --bin console -- render-cache:epoch-advance
     `composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
-    `composite_slot_ambiguous`。
+    `composite_slot_ambiguous`、`composite_nested_unauthorizable`、
+    `composite_nested_wider_class`、`composite_nested_longer_freshness`、
+    `composite_nested_depth_exceeded`、`composite_nested_cycle`、
+    `composite_nested_unresolvable`。
 
 `hits` が増えるのは `l0`、`l1`、`conditional`、`stale` のときだけです。
 `publications` が数えるのは、ストアが「公開した」と答えたときだけで、
 フェンスされた試みや拒否された試みは決して数えません。`rebuilds` は、起動された
 バックグラウンド再構築 1 つにつき 1 を数えます。
 
-ステッチの 2 つのカウンターは、それぞれ独自の集合を運びます。組み立てについては
-`assembled` と `fail_document`、スロットについては `rendered`、`omitted`、
-`fallback`、`failed` です。
+アイランドステッチの 2 つのカウンターは、それぞれ独自の集合を運びます。
+組み立てについては `assembled` と `fail_document`、スロットについては
+`rendered`、`omitted`、`fallback`、`failed` です。
+
+`suprnova.render_cache.stitch.nested` は、名前付きの内側のキャッシュ済み
+セグメント自身の結果を、アイランドのスロットの結果とは区別します。
+`Segment::Nested` の解決を試みるたびに 1 増えます。`outcome` 属性が
+取り得るのは `resolved`、`omitted`、`fallback`、`failed` のいずれか 1 つ
+だけです。`cause` 属性が取り得るのは `none`（`outcome="resolved"` のとき
+だけ使われます）、`fetch_failed`、`version_mismatch`、`length_mismatch`、
+`depth_exceeded`、`cycle`、`unauthorized` のいずれか 1 つだけです。
+どちらの属性も、キーやルート名、アイデンティティダイジェストを運ぶことは
+決してありません。失敗した、または劣化したセグメントは、それを含むグラフが
+宣言したポリシー（`FailDocument`/`Omit`/`Fallback`）を通じて必ず解決され、
+これはアイランドのスロット自身の失敗とまったく同じです。`outcome="failed"`
+（`FailDocument` ポリシーによるもの）はドキュメント全体の組み立てを放棄し、
+ルート自身の未キャッシュのハンドラへフォールバックします。
 
 `epoch_rewinds` が数えるのは検出であって、エントリではありません。ノードが、
 権威自身のエポックより上に刻印されたエントリまたはリース済みエポックに出会う
@@ -161,6 +180,34 @@ cargo run --bin console -- render-cache:epoch-advance
 L0 をクリアします。データベースの復元のあとに 0 でない値が出ることは、復元が
 気づかれたというシグナルです。それ以外のときに 0 でない値が出ることは、誰も
 意図していない理由で権威が後退したことを意味します。
+
+`hints` は、このノードが階層 2 の Pub/Sub チャネルで扱った信頼できる世代
+ヒントを数え、受け取ったメッセージごとに 1、購読が終わるごとに 1、そして
+発行キューが満杯で送れなかった通知ごとに 1 増えます。ここで唯一、デプロイが
+自分の選択で恒久的にゼロのままにできるカウンターです。ヒントは Redis
+プロファイル、または `RENDER_CACHE_HINTS=redis` が有効にしないかぎりオフで
+あり、オフのノードはオンのノードとまったく同じものを配信します。その
+`outcome` 属性は、`applied`
+（メッセージが、このノードの検証リースが観測しているダイジェストを名指し、
+該当するリースがすべて短縮された）、`ignored_unknown_key`（このノードがリースを
+持っているものを何も名指さなかった。このノードがまったく読めないメッセージも
+ここに含まれます）、`dropped_over_bound`（64 個を超えるダイジェストを運んで
+いたため、切り詰めではなく丸ごと破棄された。切り詰められたヒントは、黙って
+間違っているヒントだからです）、`subscriber_dropped`（このノードの購読が、
+遅れを取ったか接続が失敗したために終了し、再確立中である）、
+`dropped_publish_queue_full`（このノードに通知すべき前進があったのに、自身の
+発行キューが満杯だったため、そのメッセージは、それを生んだ書き込みを待たせる
+代わりに破棄された。通知できなかったメッセージ 1 件につき 1 回）のうち、
+ちょうど 1 つの値を取ります。どの属性も、ルート、キー、依存関係の識別子を
+運ぶことは決してありません。
+
+ヒントにできるのは、このノードがすでに保持している検証リースを短くすることだけ
+です。リースを延長することも、作り出すことも、世代台帳の代わりを務めることも
+できず、ヒットは今も必ずその台帳を読みます。したがって `subscriber_dropped` の
+上昇が意味するのは、このノードが可能な時期よりも遅く再検証しているということ -
+最悪でもリース自身の `max_age_ms` と同じ遅さであり、それはそのルートがすでに
+宣言している陳腐化の上限です - であって、整合性チェックが拒否したはずのものが
+配信されているということでは決してありません。
 
 **`declined` の割合が高いことが、アラートを立てる価値のあるシグナルです。**
 それは、あなたが組み込んだルートが、正しくレンダリングして配信しながら、決して
@@ -506,7 +553,7 @@ Suprnova は、キャッシュに自分自身の運用の表面を、意図的�
 クラスのもとで保存されているか、どれくらいの大きさかを、その中身を一度も見せ
 られることなく確かめられます。無効化は、適用に何の費用もかからず、このキャッシュ
 だけに触れるエポックの前進です。あなたのセッションとキューは、その影響範囲に
-入りません。テレメトリは、閉じた属性集合を持つ閉じた 7 つのカウンターであり、
+入りません。テレメトリは、閉じた属性集合を持つ閉じた 9 つのカウンターであり、
 それが、それらの上のダッシュボードを、ずれていく文字列の集合ではなく、リリースを
 またいで安定したものにしています。その取り引きの代償は、「このキーを 1 つ削除
 する」というコマンドが存在しないことです。レバーは、エントリごとで読み取り専用

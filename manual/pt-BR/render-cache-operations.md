@@ -7,7 +7,7 @@ sob esta chave, e isso ainda está atual?** e **como eu faço tudo parar?**
 Ele responde a uma terceira - "esta rota está sendo servida a partir de uma
 cópia armazenada, afinal?" - por telemetria e pelo cabeçalho `Age` em vez de
 por um comando, porque essa pergunta é sobre tráfego e não sobre uma
-entrada. Há dois comandos de console, sete contadores de telemetria, uma
+entrada. Há dois comandos de console, nove contadores de telemetria, uma
 varredura de disco limitada e uma alavanca de emergência.
 
 Este capítulo é a superfície operacional: os comandos, exatamente o que eles
@@ -100,7 +100,7 @@ estava em cache sob o seu conjunto de permissões anterior.
 
 ## Telemetria
 
-Sete nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
+Nove nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
 um provedor ou um backend:
 
 | Contador | Atributo |
@@ -111,6 +111,8 @@ um provedor ou um backend:
 | `suprnova.render_cache.rebuilds` | nenhum |
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
+| `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | nenhum |
 
 `lookups` e `hits` carregam o mesmo conjunto fechado de oito desfechos:
@@ -130,7 +132,7 @@ um provedor ou um backend:
 - `moved` - a releitura depois de renderizar encontrou uma dependência ou o
   epoch alterados; o candidato foi descartado, nunca publicado.
 - `declined` - a renderização não era armazenável, por uma de trinta e
-  duas razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
+  oito razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
   `reason` só é emitido junto de `outcome="declined"`; qualquer outro
   desfecho não carrega nenhum. A razão é calculada a partir de um valor
   tipado no ramo exato que recusou, nunca reconstruída depois a partir da
@@ -157,16 +159,34 @@ um provedor ou um backend:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` incrementa apenas para `l0`, `l1`, `conditional` e `stale`.
 `publications` conta apenas um armazenamento respondendo "publicado", nunca
 uma tentativa barrada por fence ou rejeitada. `rebuilds` conta uma por
 reconstrução em segundo plano disparada.
 
-Os dois contadores de costura carregam os seus próprios conjuntos:
+Os dois contadores de costura de ilha carregam os seus próprios conjuntos:
 `assembled` e `fail_document` para montagens; `rendered`, `omitted`,
 `fallback` e `failed` para slots.
+
+`suprnova.render_cache.stitch.nested` distingue o próprio desfecho de um
+segmento interno em cache e nomeado do de um slot de ilha, com um
+incremento por tentativa de resolução de um `Segment::Nested`. O seu
+atributo `outcome` assume exatamente um de `resolved`, `omitted`,
+`fallback` e `failed`; o seu atributo `cause` assume exatamente um de
+`none` (usado apenas quando `outcome="resolved"`), `fetch_failed`,
+`version_mismatch`, `length_mismatch`, `depth_exceeded`, `cycle` e
+`unauthorized`. Nenhum dos dois atributos carrega alguma vez uma chave, um
+nome de rota ou um digest de identidade. Um segmento falho ou degradado
+sempre se resolve através da política que o grafo que o inclui declarou
+para ele (`FailDocument`/`Omit`/`Fallback`), exatamente como acontece com a
+própria falha de um slot de ilha; `outcome="failed"` (proveniente de uma
+política `FailDocument`) abandona a montagem do documento inteiro e recai
+no próprio handler sem cache da rota.
 
 `epoch_rewinds` conta detecções, não entradas: um incremento a cada vez
 que um nó encontra uma entrada ou um epoch em lease carimbado acima do
@@ -175,6 +195,35 @@ carimbo, e limpa a sua própria L0. Um valor diferente de zero depois de
 uma restauração de banco de dados é o sinal de que a restauração foi
 percebida. Um valor diferente de zero em qualquer outro momento significa
 que uma autoridade andou para trás por um motivo que ninguém pretendia.
+
+`hints` conta as dicas de geração credíveis que este nó tratou no canal
+pub/sub da camada 2: um incremento por mensagem recebida, um por assinatura
+encerrada e um por anúncio que uma fila de publicação cheia impediu este nó
+de enviar. É o único contador aqui que uma implantação pode deixar
+permanentemente em zero por escolha própria: as dicas ficam desligadas a
+menos que o perfil Redis, ou `RENDER_CACHE_HINTS=redis`, as ligue, e um nó
+com elas desligadas serve exatamente o que um nó com elas ligadas serve. O
+seu atributo `outcome` assume exatamente um de `applied` (a mensagem nomeou
+um digest que um lease de validação deste nó observa, e todos esses leases
+foram encurtados), `ignored_unknown_key` (não nomeou nada contra o que este
+nó tenha um lease, o que inclui uma mensagem que este nó não consegue ler de
+jeito nenhum), `dropped_over_bound` (carregava mais de 64 digests e foi
+descartada inteira em vez de truncada, porque uma dica truncada é uma dica
+silenciosamente errada), `subscriber_dropped` (a assinatura deste nó
+terminou, porque ficou para trás ou porque a conexão falhou, e está sendo
+restabelecida) e `dropped_publish_queue_full` (este nó tinha um avanço a
+anunciar e a sua própria fila de publicação estava cheia, de modo que a
+mensagem foi descartada em vez de fazer esperar a escrita que a produziu, uma
+contagem para cada mensagem que ficou sem anúncio). Nenhum atributo carrega
+jamais uma rota, uma chave ou uma identidade de dependência.
+
+Uma dica só pode encurtar um lease de validação que este nó já detém. Nunca
+pode estender um, criar um, nem fazer as vezes do ledger de gerações, e todo
+hit continua lendo esse ledger. Portanto um `subscriber_dropped` em alta
+significa que este nó revalida mais tarde do que poderia - no pior caso tão
+tarde quanto o próprio `max_age_ms` do lease, que é o limite de obsolescência
+que a rota já declarou - e nunca que algo está sendo servido que a
+verificação de coerência teria recusado.
 
 **Uma taxa alta de `declined` é o sinal que vale um alerta.** Ela significa
 que rotas que você incluiu estão renderizando e servindo corretamente sem
@@ -532,7 +581,7 @@ confirmar que uma entrada existe, sob que classe ela está armazenada e qual é
 o tamanho dela, sem jamais ver o seu conteúdo. A invalidação é um incremento
 de epoch que não custa nada para aplicar e toca apenas neste cache - as suas
 sessões e a sua fila não estão no raio da explosão. A telemetria é um
-conjunto fechado de sete contadores com conjuntos fechados de atributos, que
+conjunto fechado de nove contadores com conjuntos fechados de atributos, que
 é o que torna um dashboard sobre eles estável entre releases em vez de um
 punhado de strings que derivam. A troca é que não existe comando de "apague
 esta chave": as alavancas são por entrada e somente de leitura, ou de epoch

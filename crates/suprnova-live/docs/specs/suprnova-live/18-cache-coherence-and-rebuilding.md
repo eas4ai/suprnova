@@ -1,7 +1,7 @@
 # Suprnova Live -- 18 Cache Coherence and Rebuilding
 
 Status: Normative design specification
-Last revised: 2026-09-08
+Last revised: 2026-09-10
 
 ## Scope
 
@@ -147,25 +147,52 @@ UX flow:
 A credible generation hint MAY shorten a validation lease a node already holds,
 and SHALL NOT extend a lease, create one, or stand in for the generation ledger
 as authority. A test SHALL prove that a hint naming an observed digest makes
-the next lookup re-validate earlier, and that no hint causes an entry to be
-served that the coherence check would have refused. A hit SHALL still read the
-database generation ledger, and a deployment receiving forged, duplicated,
-reordered, or stale hints SHALL serve exactly what the same deployment serves
-with hints disabled. Losing the hint channel entirely, or running with hints
-turned off, SHALL leave behavior identical to a deployment built without them:
-the same entries served, the same rebuilds admitted, and only the moment of
-re-validation different. Publication and subscription SHALL be bounded, so that
-one hint message carries a bounded number of digests, a subscriber that falls
-behind is dropped rather than queued without limit, and neither the publisher
-nor the subscriber blocks a request that is not waiting on it. The Embedded and
-Database-coordinated tiers SHALL be unaffected, no new external daemon SHALL
-become required at any tier, and any telemetry added SHALL keep the closed
-low-cardinality label rule and SHALL never name a route, a key, or a dependency
-identity. The bounds this leaves open, the digest count per message, the
-subscriber drop rule, the interaction with an entry rebuilding under a fenced
-lease, and whether a hint's own authenticity is checked at all, SHALL be
-settled and recorded in this specification before the first code commit, so
-this domain binds outcomes rather than a mechanism.
+the next lookup re-validate earlier, and that no hint causes an entry to
+be served that the coherence check would have refused. A hit SHALL still
+read the database generation ledger, and a deployment receiving forged,
+duplicated, reordered, or stale hints SHALL serve exactly what the same
+deployment serves with hints disabled: hint authenticity is NOT checked,
+because such a hint can only shorten a lease, whose sole cost is one extra
+ledger read that returns the truth, so a signature would buy nothing and
+would put key material on a channel that does not need it. Losing the hint
+channel entirely, or running with hints turned off, SHALL leave behavior
+identical to a deployment built without them: the same entries served, the
+same rebuilds admitted, and only the moment of re-validation different,
+because a hint's only effect is to make a node do earlier what lease expiry
+would make it do anyway. Publication and subscription SHALL be bounded: one
+hint message carries at most `MAX_HINT_DIGESTS`, initially 64, digests, and a
+message over that bound SHALL be dropped whole rather than truncated, because
+a truncated hint is a silently wrong hint; a subscriber that falls behind
+SHALL be dropped and SHALL resubscribe rather than be queued without limit;
+and neither publishing nor subscribing SHALL block a request that is not
+waiting on it.
+
+Generation truth SHALL remain in the database: no Redis-backed generation
+ledger exists and none SHALL be introduced, and a hint SHALL never bypass the
+ledger read or touch the epoch cache. The Embedded and Database-coordinated
+tiers SHALL be unaffected, and no new external daemon SHALL become required
+at any tier. An entry rebuilding under a fenced lease is unaffected by a
+hint: the fence lives in the store and governs publication, while a hint
+governs only when this node next revalidates. A hint-channel failure SHALL
+NOT be a request failure; it SHALL degrade silently to today's behavior
+and SHALL be visible only in telemetry, and a backend error SHALL collapse
+into the existing closed `ProviderUnavailable` kind. Telemetry SHALL gain
+one closed, low-cardinality metric whose `outcome` attribute takes exactly
+one value from `applied`, `ignored_unknown_key`, `dropped_over_bound`,
+`subscriber_dropped`, and `dropped_publish_queue_full`, keeping the closed
+low-cardinality label rule and never naming a route, a key, or a dependency
+identity. `dropped_publish_queue_full` is the publish side of that metric,
+and it is what makes a publish-side drop meet the requirement above: this
+node had an advance to announce and its own bounded publish queue was full,
+so the message was dropped rather than made to wait on the write that
+produced it - silent in the request path, and visible in telemetry. It SHALL
+be recorded once per abandoned message, so that an advance wide enough to
+need several messages reports how much announcement was lost rather than
+that one queue was full once; and it SHALL NOT be reported as
+`dropped_over_bound`, which names a received message carrying more than
+`MAX_HINT_DIGESTS` digests. That is a peer sending something malformed and
+this is a local publisher outrunning its own queue, and an operator answers
+the two differently.
 
 ### Singleflight and fenced publication
 
@@ -310,6 +337,25 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-10 -- Widened the hint telemetry outcome set from four values to
+  five. The set recorded on 2026-09-09 had no publish-side value, so a
+  message dropped because this node's own bounded publish queue was full was
+  silent in the request path and invisible in telemetry, which this
+  subsection's own requirement that a hint-channel failure be visible in
+  telemetry does not permit. `dropped_publish_queue_full` is recorded once
+  per abandoned message and is deliberately not `dropped_over_bound`, which
+  names a peer's over-wide received message rather than a local publisher
+  outrunning its queue.
+- 2026-09-09 -- Recorded the credible generation hint mechanism ahead of code:
+  `MAX_HINT_DIGESTS` (64) with an over-bound message dropped whole rather than
+  truncated, a subscriber that falls behind dropped and resubscribing rather
+  than queued, hint authenticity deliberately left unchecked because a hint can
+  only shorten a lease that a ledger read would correct anyway, identical
+  behavior with hints lost or turned off, no Redis-backed generation ledger, a
+  fenced rebuild unaffected because the fence governs publication while a hint
+  governs only the next revalidation, hint-channel failure collapsing into the
+  existing `ProviderUnavailable` kind, and the closed telemetry outcome set,
+  recorded under Local validation leases and invalidation hints.
 - 2026-09-08 -- Delivered the promoted rewind-detection requirement. An
   observation stamped above the authority epoch is a rewind, reported before
   any dependency comparison, and an entry so stamped SHALL NOT be served at

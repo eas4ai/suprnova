@@ -15,9 +15,11 @@ use render_cache_live_support::{
     unreasoned_renders,
 };
 use sha2::Digest as _;
+use suprnova::Router;
 use suprnova::StatusCode;
 use suprnova::live::{
-    LiveDocumentErrorKind, LiveMount, LiveMountKind, StitchFailurePolicy, StitchSlotDescriptor,
+    LiveDocumentErrorKind, LiveMount, LiveMountKind, LiveNestedSegment, StitchFailurePolicy,
+    StitchSlotDescriptor,
 };
 use suprnova::render_cache::collector::{self, Collector, current_report};
 use suprnova::render_cache::live::{
@@ -32,8 +34,10 @@ use suprnova::view::{
 use suprnova_live::identity::{BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity};
 use suprnova_live::mount::{DocumentMountKey, MountFlags};
 use suprnova_live::render_cache::composite::{
-    MAX_FALLBACK_BYTES, MAX_STITCH_SLOTS, SlotFailurePolicy,
+    MAX_FALLBACK_BYTES, MAX_STITCH_SLOTS, Segment, SlotFailurePolicy,
 };
+use suprnova_live::render_cache::key::RenderKey;
+use suprnova_live::snapshot::MountedDocumentPath;
 
 /// One recorded slot with every identity valid and nothing else varying but
 /// the island slot and the document mount key.
@@ -170,6 +174,172 @@ fn a_stitch_fallback_is_bounded_at_declaration_and_never_printed() {
     assert_eq!(
         format!("{:?}", StitchFailurePolicy::FailDocument),
         "fail_document"
+    );
+}
+
+/// A dummy `RenderKey` for tests that only exercise
+/// `LiveNestedSegment::into_segment`'s own logic, never a real lookup: any
+/// validly-shaped digest does, since nothing here stores or fetches it.
+fn dummy_render_key() -> RenderKey {
+    RenderKey::from_base64url(&format!("rk1.{}", "A".repeat(43))).expect("valid digest shape")
+}
+
+#[test]
+fn identity_free_and_identity_bound_nested_segments_report_their_own_binding() {
+    let free = LiveNestedSegment::identity_free("/pricing").expect("declare");
+    assert!(!free.is_identity_bound());
+    assert_eq!(free.route_pattern(), "/pricing");
+
+    let bound = LiveNestedSegment::identity_bound("/pricing", "/dashboard").expect("declare");
+    assert!(bound.is_identity_bound());
+    assert_eq!(bound.route_pattern(), "/pricing");
+}
+
+#[test]
+fn identity_bound_nested_segment_refuses_a_dynamic_includer_pattern() {
+    let Err(error) = LiveNestedSegment::identity_bound("/pricing", "/dashboard/{id}") else {
+        panic!("an includer pattern naming a path parameter cannot promise a constant length");
+    };
+    assert_eq!(error.kind(), LiveDocumentErrorKind::DynamicIncluderPath);
+}
+
+#[test]
+fn a_nested_segment_fallback_is_bounded_at_declaration_and_never_printed() {
+    let declaration = LiveNestedSegment::identity_free("/pricing").expect("declare");
+    let reason = TrustedMarkupReason::new("nested segment fallback test").expect("reason");
+    let largest = TrustedHtml::framework_generated("x".repeat(MAX_FALLBACK_BYTES), reason.clone())
+        .expect("fallback markup");
+    assert!(
+        declaration
+            .clone()
+            .on_failure(StitchFailurePolicy::Fallback(largest))
+            .is_ok(),
+        "a fallback exactly at the stored entry's bound is accepted"
+    );
+    let oversized = TrustedHtml::framework_generated("x".repeat(MAX_FALLBACK_BYTES + 1), reason)
+        .expect("fallback markup");
+    let Err(error) = declaration.on_failure(StitchFailurePolicy::Fallback(oversized)) else {
+        panic!("one byte past the bound is refused where it is declared");
+    };
+    assert_eq!(error.kind(), LiveDocumentErrorKind::StitchFallbackTooLarge);
+}
+
+#[test]
+fn into_segment_accepts_a_matching_includer_path_and_refuses_a_mismatched_one() {
+    let declaration = LiveNestedSegment::identity_bound("/pricing", "/dashboard")
+        .expect("declare")
+        .on_failure(StitchFailurePolicy::Omit)
+        .expect("declare policy");
+    let key = dummy_render_key();
+
+    let matching_path = MountedDocumentPath::parse("/dashboard").expect("literal path");
+    let segment = declaration
+        .into_segment(key.clone(), 7, 42, &matching_path)
+        .expect("an includer path of the declared length resolves");
+    let Segment::Nested {
+        key: segment_key,
+        version,
+        assembled_len,
+        on_failure,
+    } = segment
+    else {
+        panic!("into_segment always produces a Nested segment");
+    };
+    assert_eq!(segment_key.to_base64url(), key.to_base64url());
+    assert_eq!(version, 7);
+    assert_eq!(assembled_len, 42);
+    assert_eq!(on_failure, SlotFailurePolicy::Omit);
+
+    // "/settings" is nine bytes; the declaration above was bound to
+    // "/dashboard"'s ten. This is exactly the silent length-stability trap
+    // spec 16 describes, made loud here instead: a mismatch is refused
+    // rather than silently producing a segment nothing can ever resolve.
+    let mismatched_path = MountedDocumentPath::parse("/settings").expect("literal path");
+    let Err(error) = declaration.into_segment(key, 7, 42, &mismatched_path) else {
+        panic!("an includer path of a different length must be refused, not silently accepted");
+    };
+    assert_eq!(
+        error.kind(),
+        LiveDocumentErrorKind::NestedSegmentLengthMismatch
+    );
+}
+
+#[test]
+fn identity_free_nested_segments_accept_any_includer_path_length() {
+    let declaration = LiveNestedSegment::identity_free("/pricing").expect("declare");
+    let key = dummy_render_key();
+    for path in ["/a", "/dashboard", "/a/very/long/settings/page"] {
+        assert!(
+            declaration
+                .clone()
+                .into_segment(
+                    key.clone(),
+                    1,
+                    1,
+                    &MountedDocumentPath::parse(path).expect("literal path")
+                )
+                .is_ok(),
+            "an identity-free segment carries no length constraint at all"
+        );
+    }
+}
+
+#[test]
+fn router_refuses_a_conflicting_identity_binding_for_the_same_inner_route() {
+    // Two includers of the same identity-free inner segment: no constraint
+    // to disagree about, so both register cleanly.
+    let _router = Router::new()
+        .try_live_nested_segment(&LiveNestedSegment::identity_free("/pricing").expect("declare"))
+        .expect("first identity-free registration")
+        .try_live_nested_segment(&LiveNestedSegment::identity_free("/pricing").expect("declare"))
+        .expect("a second identity-free includer of the same segment agrees trivially");
+
+    // Two identity-bound includers whose literal paths share one length:
+    // "/dashboard" and "/analytics" are both ten bytes, so the segment they
+    // both name is still safely shareable, and registration agrees.
+    assert_eq!("/dashboard".len(), "/analytics".len());
+    let _router = Router::new()
+        .try_live_nested_segment(
+            &LiveNestedSegment::identity_bound("/pricing", "/dashboard").expect("declare"),
+        )
+        .expect("first identity-bound registration")
+        .try_live_nested_segment(
+            &LiveNestedSegment::identity_bound("/pricing", "/analytics").expect("declare"),
+        )
+        .expect("a same-length includer of the same segment agrees");
+
+    // The length-stability trap itself: "/dashboard" (ten bytes) and
+    // "/settings" (nine) cannot share one stored `assembled_len`, so a
+    // second includer at a different length is refused here, at router
+    // construction, rather than left to fail silently at resolution.
+    let router = Router::new()
+        .try_live_nested_segment(
+            &LiveNestedSegment::identity_bound("/pricing", "/dashboard").expect("declare"),
+        )
+        .expect("first identity-bound registration");
+    let Err(error) = router.try_live_nested_segment(
+        &LiveNestedSegment::identity_bound("/pricing", "/settings").expect("declare"),
+    ) else {
+        panic!("a different includer path length for the same inner route is refused");
+    };
+    assert!(
+        error.to_string().contains("conflicting identity binding"),
+        "the error names the violated contract: {error}"
+    );
+
+    // An identity-free declaration and an identity-bound one for the same
+    // inner route disagree about the segment's own nature, not just a
+    // length, and are refused the same way.
+    let router = Router::new()
+        .try_live_nested_segment(&LiveNestedSegment::identity_free("/pricing").expect("declare"))
+        .expect("first identity-free registration");
+    assert!(
+        router
+            .try_live_nested_segment(
+                &LiveNestedSegment::identity_bound("/pricing", "/dashboard").expect("declare"),
+            )
+            .is_err(),
+        "identity-free and identity-bound declarations for the same route disagree"
     );
 }
 

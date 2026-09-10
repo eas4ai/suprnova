@@ -72,8 +72,21 @@ Wählen Sie danach, was Sie tatsächlich teilen müssen:
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | der Schlüsselnamensraum, unter dem beide Redis-Cache-Ebenen schreiben |
 | `RENDER_CACHE_LEASE_MS` | 30.000 | Lebensdauer der Neuaufbau-Lease |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | Obergrenze für Wartende im Prozess |
+| `RENDER_CACHE_HINTS` | die des Profils | `disabled` oder `redis`; glaubwürdige Generationshinweise auf `<prefix>hints`, über den Endpunkt oben |
 | `RENDER_CACHE_FAILURE` | `open` | `open` bedient die Route bei einem Provider-Fehler ungecacht, `closed` antwortet mit `503` |
 | `APP_BUILD_ID` | die Paketversion der Anwendung (siehe unten) | ordnet jeden Eintrag dem Build zu, der ihn erzeugt hat |
+
+`RENDER_CACHE_HINTS` ist der eine Regler hier, der keine Antwort ändert. Er
+steht unter dem Profil `redis` standardmäßig auf `redis` und unter den
+beiden anderen auf `disabled`, und er hat keinen eigenen Endpunkt - er nutzt
+`RENDER_CACHE_REDIS_URL` und `RENDER_CACHE_REDIS_PREFIX` von oben. Ein
+Hinweis kann eine Validierungs-Lease, die ein Knoten bereits hält, nur
+verkürzen; deshalb liefern eine Bereitstellung mit ausgeschalteten
+Hinweisen, eine mit totem Kanal und eine ohne das Feature dieselben Einträge
+aus und lassen dieselben Neuaufbauten zu - nur der Zeitpunkt der erneuten
+Validierung unterscheidet sich. Das ist auch der Grund, warum ein
+unerreichbarer Hinweis-Endpunkt den Start nicht stoppt, wie es eine
+unerreichbare Cache-Ebene tut.
 
 Das Profil ist eine Kurzschreibweise, keine Festlegung. `RENDER_CACHE_L1`
 und `RENDER_CACHE_COORDINATOR` überschreiben jeweils ihre eigene Hälfte,

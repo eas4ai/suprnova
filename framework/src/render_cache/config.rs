@@ -216,6 +216,49 @@ impl std::fmt::Debug for CoordinatorConfig {
     }
 }
 
+/// Whether this node announces and listens for credible generation hints.
+///
+/// A hint can shorten a validation lease this node already holds and can do
+/// nothing else, so this switch changes only *when* a lease-mode route
+/// revalidates, never what it serves. [`Self::Disabled`] and a
+/// [`Self::Redis`] channel that is unreachable are indistinguishable from
+/// the outside: the same entries are served and the same rebuilds are
+/// admitted either way.
+///
+/// Only ever meaningful on the Tier 2 profile. The Embedded and
+/// Database-coordinated tiers need no pub/sub and default to
+/// [`Self::Disabled`], which is what keeps this from making a new external
+/// daemon a requirement at any tier.
+#[derive(Clone, Eq, PartialEq)]
+pub enum HintsConfig {
+    /// No hint is published and none is listened for.
+    Disabled,
+    /// Hints are published to, and read from, `<prefix>hints` on this Redis.
+    Redis {
+        /// Where the channel lives. It can carry a password, so it is never
+        /// printed: see this type's [`std::fmt::Debug`] implementation.
+        url: String,
+        /// The literal string the channel name begins with, shared with
+        /// every other key this deployment writes.
+        prefix: String,
+    },
+}
+
+/// Manual, not derived, for the reason [`L1Config`]'s own is: the
+/// [`Self::Redis`] endpoint can carry a password.
+impl std::fmt::Debug for HintsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::Redis { url: _, prefix } => formatter
+                .debug_struct("Redis")
+                .field("url", &crate::render_cache::providers::redis::REDACTED_URL)
+                .field("prefix", prefix)
+                .finish(),
+        }
+    }
+}
+
 /// Configuration read once at install.
 #[derive(Clone)]
 pub struct RenderCacheConfig {
@@ -234,6 +277,8 @@ pub struct RenderCacheConfig {
     pub coordinator: CoordinatorConfig,
     /// Provider failure behavior.
     pub failure: FailurePolicy,
+    /// Whether credible generation hints are published and listened for.
+    pub hints: HintsConfig,
     /// Application and view build identity namespace.
     ///
     /// [`Self::from_env`] resolves this through three sources, in order:
@@ -272,6 +317,7 @@ impl PartialEq for RenderCacheConfig {
             && self.l1 == other.l1
             && self.coordinator == other.coordinator
             && self.failure == other.failure
+            && self.hints == other.hints
             && self.build_id == other.build_id
     }
 }
@@ -291,6 +337,7 @@ impl std::fmt::Debug for RenderCacheConfig {
             .field("l1", &self.l1)
             .field("coordinator", &self.coordinator)
             .field("failure", &self.failure)
+            .field("hints", &self.hints)
             .field("build_id", &self.build_id)
             .field("clock_override", &self.clock_override.is_some())
             .field("coordinator_override", &self.coordinator_override.is_some())
@@ -389,6 +436,16 @@ impl RenderCacheConfig {
     /// to `redis://127.0.0.1:6379`), `RENDER_CACHE_REDIS_PREFIX` (default
     /// `suprnova_render:`), `RENDER_CACHE_LEASE_MS` (default 30000), and
     /// `RENDER_CACHE_MAX_WAITERS` (default 128).
+    ///
+    /// `RENDER_CACHE_HINTS` (`disabled` or `redis`) says whether this node
+    /// announces and listens for credible generation hints. It defaults to
+    /// `redis` under the Redis profile and to `disabled` under the other
+    /// two, and it has no endpoint of its own: it rides the same
+    /// `RENDER_CACHE_REDIS_URL` and `RENDER_CACHE_REDIS_PREFIX` the Tier 2
+    /// tiers use. A hint only ever shortens a validation lease this node
+    /// already holds, so turning this off, or pointing it at a Redis that
+    /// is not there, changes when a lease-mode route revalidates and
+    /// nothing else - see [`super::hints`].
     ///
     /// # Errors
     ///
@@ -535,6 +592,28 @@ impl RenderCacheConfig {
             },
         };
 
+        // Hints accelerate a lease; they never hold authority, and only the
+        // Tier 2 profile has a Redis to carry them, so they default on
+        // there and off everywhere else. An explicit `redis` turns them on
+        // whatever the profile, pointed at the same endpoint and prefix
+        // every other Tier 2 name uses - the channel has no endpoint of its
+        // own, deliberately: see `redis_endpoints`.
+        let hints_redis = || HintsConfig::Redis {
+            url: url.clone(),
+            prefix: prefix.clone(),
+        };
+        let hints = match non_empty("RENDER_CACHE_HINTS").as_deref() {
+            Some("disabled") => HintsConfig::Disabled,
+            Some("redis") => hints_redis(),
+            Some(_) => {
+                return Err(unknown_value("RENDER_CACHE_HINTS", "disabled or redis"));
+            }
+            None => match profile {
+                Profile::Embedded | Profile::Database => HintsConfig::Disabled,
+                Profile::Redis => hints_redis(),
+            },
+        };
+
         Ok(Self {
             enabled: read("RENDER_CACHE_ENABLED").is_none_or(|v| v != "false" && v != "0"),
             profile,
@@ -544,6 +623,7 @@ impl RenderCacheConfig {
             },
             l1,
             coordinator,
+            hints,
             failure: if read("RENDER_CACHE_FAILURE").as_deref() == Some("closed") {
                 FailurePolicy::Closed
             } else {
@@ -792,6 +872,10 @@ mod tests {
                 "RENDER_CACHE_COORDINATOR",
                 vec![("RENDER_CACHE_COORDINATOR", "zookeeper")],
             ),
+            (
+                "RENDER_CACHE_HINTS",
+                vec![("RENDER_CACHE_HINTS", "carrier-pigeon")],
+            ),
         ] {
             let message = refusal(&pairs);
             assert!(message.contains(variable), "{message}");
@@ -800,6 +884,65 @@ mod tests {
                 "the rejected value is never repeated: {message}"
             );
         }
+    }
+
+    /// Hints follow the profile: on where there is a Redis to carry them,
+    /// off where a tier needs no pub/sub at all. That default is what keeps
+    /// the Embedded and Database-coordinated tiers unaffected by this
+    /// feature, and it is the half of "no new external daemon is required
+    /// at any tier" that configuration owns.
+    #[test]
+    fn hints_default_to_the_profile_and_ride_the_shared_redis_endpoint() {
+        assert_eq!(
+            parsed(&[]).hints,
+            HintsConfig::Disabled,
+            "the embedded profile needs no pub/sub"
+        );
+        assert_eq!(
+            parsed(&[("RENDER_CACHE_PROFILE", "database")]).hints,
+            HintsConfig::Disabled,
+            "and neither does the database-coordinated one"
+        );
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_PROFILE", "redis"),
+                ("RENDER_CACHE_REDIS_URL", "redis://10.0.0.1:6379"),
+                ("RENDER_CACHE_REDIS_PREFIX", "acme:"),
+            ])
+            .hints,
+            HintsConfig::Redis {
+                url: "redis://10.0.0.1:6379".to_owned(),
+                prefix: "acme:".to_owned(),
+            },
+            "the Redis profile carries them on the endpoint its tiers already use"
+        );
+    }
+
+    /// And the knob overrides the profile in both directions, like every
+    /// other knob in this table.
+    #[test]
+    fn hints_can_be_turned_on_and_off_against_the_profile() {
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_HINTS", "redis"),
+                ("RENDER_CACHE_REDIS_URL", "redis://10.0.0.2:6379"),
+            ])
+            .hints,
+            HintsConfig::Redis {
+                url: "redis://10.0.0.2:6379".to_owned(),
+                prefix: DEFAULT_REDIS_PREFIX.to_owned(),
+            },
+            "an embedded deployment may still accelerate its leases"
+        );
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_PROFILE", "redis"),
+                ("RENDER_CACHE_HINTS", "disabled"),
+            ])
+            .hints,
+            HintsConfig::Disabled,
+            "and a Tier 2 deployment may decline them"
+        );
     }
 
     #[test]

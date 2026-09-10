@@ -27,6 +27,7 @@ mod render_cache_tiers_support;
 pub mod bypass;
 pub mod collector;
 pub mod file_store;
+pub mod hints;
 pub mod ledger;
 pub mod live;
 pub mod middleware;

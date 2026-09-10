@@ -70,8 +70,20 @@ Escolha pelo que você de fato precisa compartilhar:
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | o namespace de chaves sob o qual as duas camadas de cache Redis escrevem |
 | `RENDER_CACHE_LEASE_MS` | 30.000 | tempo de vida do lease de reconstrução |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | teto de waiters em processo |
+| `RENDER_CACHE_HINTS` | o do perfil | `disabled` ou `redis`; dicas de geração credíveis em `<prefix>hints`, sobre o endpoint acima |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serve a rota sem cache em uma falha de provedor, `closed` responde `503` |
 | `APP_BUILD_ID` | a versão do pacote da aplicação (veja abaixo) | isola cada entrada no namespace do build que a produziu |
+
+`RENDER_CACHE_HINTS` é o único botão aqui que não muda resposta nenhuma. Sob
+o perfil `redis` ele vale `redis` por padrão, e sob os outros dois
+`disabled`, e ele não tem endpoint próprio: pega carona no
+`RENDER_CACHE_REDIS_URL` e no `RENDER_CACHE_REDIS_PREFIX` acima. Uma dica só
+pode encurtar um lease de validação que um nó já detém, então uma
+implantação com elas desligadas, uma cujo canal está morto e uma construída
+sem o recurso servem as mesmas entradas e admitem as mesmas reconstruções;
+só muda o momento da revalidação. É por isso também que um endpoint de dicas
+inalcançável não impede o boot, como impede uma camada de cache
+inalcançável.
 
 O perfil é um atalho, não uma trava. `RENDER_CACHE_L1` e
 `RENDER_CACHE_COORDINATOR` sobrescrevem cada um a sua metade, de modo que

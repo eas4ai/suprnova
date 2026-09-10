@@ -45,11 +45,14 @@ use sha2::{Digest as _, Sha256};
 use suprnova_live::mount::{DocumentMountKey, DocumentMountScope, PrivateMountRequest};
 use suprnova_live::render_cache::composite::{
     AssembledDocument, AssemblyInput, CheckedIsland, CompositeEntry, HeaderPiece, HeaderTemplate,
-    MAX_NONCE_HEADERS, MAX_NONCE_HOLES, MAX_STITCH_SLOTS, ParsedSlot, Segment, SegmentGraph,
-    SlotFailurePolicy, SlotOutcome, StitchSlot, assemble, fresh_nonce, surrounding_digest,
+    MAX_NONCE_HEADERS, MAX_NONCE_HOLES, MAX_STITCH_SLOTS, NestedFailureCause, NestedOutcome,
+    ParsedSlot, Segment, SegmentGraph, SlotFailurePolicy, SlotOutcome, StitchSlot, assemble_nested,
+    descend_nested, fresh_nonce, surrounding_digest, verify_nested,
 };
-use suprnova_live::render_cache::entry::{CompleteEntry, DecodedEntry, EntryHeader};
+use suprnova_live::render_cache::entry::{CompleteEntry, DecodedEntry, EntryHeader, decode};
 use suprnova_live::render_cache::hot::{HotRequest, ResponseParts, respond as respond_with_engine};
+use suprnova_live::render_cache::key::RenderKey;
+use suprnova_live::render_cache::store::RenderStore as _;
 use suprnova_live::snapshot::MountedDocumentPath;
 
 use crate::http::{HttpResponse, Request, Response};
@@ -57,9 +60,14 @@ use crate::live::{LiveMountKind, LiveRuntime, StitchSlotDescriptor};
 use crate::middleware::Next;
 use crate::telemetry::metrics::Metrics;
 
-use super::middleware::{FoundEntry, LookupOutcome, complete_response, hot_response};
+use super::decline::LookupDeclineReason;
+use super::middleware::{
+    FoundEntry, LookupOutcome, RenderCacheRuntime, complete_response, hot_response,
+};
 use super::telemetry as render_cache_telemetry;
-use super::{RenderCache, RenderCachePolicy, collector, live::LiveDocumentFacts};
+use super::{
+    RenderCache, RenderCachePolicy, RepresentationClass, collector, live::LiveDocumentFacts,
+};
 
 /// A hit the RenderCache middleware decoded, checked, and handed to the
 /// route chain instead of serving itself.
@@ -209,46 +217,29 @@ async fn assemble_hit(
     // document keys, so the scope has to know about them before a single
     // slot is mounted: without this a stitched slot could re-mount under a
     // key the assembled document already contains and the browser would see
-    // two islands claiming one identity.
+    // two islands claiming one identity. The same scope is threaded through
+    // every nested entry resolved below, so a duplicate introduced by a
+    // nested entry's own shell islands or slots is caught exactly as one
+    // introduced by this document's own would be.
     let mut scope = DocumentMountScope::new();
-    for island in &graph.shell_islands {
-        let Ok(key) = DocumentMountKey::parse(&island.document_key) else {
-            return fail_document(request, next).await;
-        };
-        if scope.reserve_existing(key).is_err() {
-            return fail_document(request, next).await;
-        }
+    if reserve_shell_islands(&mut scope, graph).is_err() {
+        return fail_document(request, next).await;
     }
-    let mut outcomes = Vec::with_capacity(graph.slots.len());
-    for slot in &graph.slots {
-        let Ok(parsed) = slot.parse() else {
-            return fail_document(request, next).await;
-        };
-        match render_slot(&request, &live, &mut scope, &parsed, &path).await {
-            Ok(island) => {
-                count_slot("rendered");
-                outcomes.push(SlotOutcome::Rendered(island));
-            }
-            Err(()) => match &parsed.on_failure {
-                SlotFailurePolicy::Omit => {
-                    count_slot("omitted");
-                    outcomes.push(SlotOutcome::Omitted);
-                }
-                SlotFailurePolicy::Fallback { .. } => {
-                    count_slot("fallback");
-                    outcomes.push(SlotOutcome::Fallback);
-                }
-                SlotFailurePolicy::FailDocument => {
-                    count_slot("failed");
-                    return fail_document(request, next).await;
-                }
-            },
-        }
-    }
-    // A graph needs a nonce when the shell has a hole where one was, or when
-    // a stored header's value carried one; either way it is minted here, per
-    // request, so no two visitors are ever sent the same one.
-    let nonce = if entry.needs_nonce() {
+    let outcomes = match resolve_slots(&request, &live, &mut scope, graph, &path).await {
+        Ok(outcomes) => outcomes,
+        Err(()) => return fail_document(request, next).await,
+    };
+    // A graph needs a nonce when the shell has a hole where one was, when a
+    // stored header's value carried one, or when this graph names any
+    // nested segment that might need one of its own: minting is cheap and
+    // unconditional the instant nesting is possible, so one nonce is
+    // decided per request and threaded to whichever depth actually needs
+    // it, rather than decided level by level.
+    let has_nested = graph
+        .segments
+        .iter()
+        .any(|segment| matches!(segment, Segment::Nested { .. }));
+    let nonce = if entry.needs_nonce() || has_nested {
         match fresh_nonce() {
             Ok(nonce) => Some(nonce),
             Err(_) => return fail_document(request, next).await,
@@ -256,9 +247,60 @@ async fn assemble_hit(
     } else {
         None
     };
-    let Ok(document) = assemble(
+    // The chain this document's own `Segment::Nested` occurrences are
+    // resolved against: root first, including this entry's own key, exactly
+    // as `assemble_nested` builds it internally from an empty `ancestors`.
+    let chain = [entry.header().key.clone()];
+    let nested_ctx = NestedResolutionContext {
+        runtime: &runtime,
+        request: &request,
+        live: &live,
+        path: &path,
+        nonce: nonce.as_deref(),
+    };
+    let mut nested_outcomes = Vec::with_capacity(graph.segments.len());
+    for segment in &graph.segments {
+        let Segment::Nested {
+            key,
+            version,
+            assembled_len,
+            on_failure,
+        } = segment
+        else {
+            continue;
+        };
+        match resolve_nested_segment(
+            &nested_ctx,
+            &mut scope,
+            &chain,
+            key,
+            *version,
+            *assembled_len,
+            on_failure,
+        )
+        .await
+        {
+            Ok(outcome) => nested_outcomes.push(outcome),
+            Err(()) => return fail_document(request, next).await,
+        }
+    }
+    // `assemble_nested` (like `assemble`) rejects a nonce that isn't paired
+    // with `entry.needs_nonce()`: the two states are `(Some, true)` and
+    // `(None, false)` only. `nonce` above is minted whenever this graph
+    // merely *might* need one at some depth (this entry's own hole, or any
+    // nested segment's), so it must be re-gated on this entry's own need
+    // before it reaches the top-level `AssemblyInput` - the minted value
+    // itself (`nonce.as_deref()` via `nested_ctx.nonce`) still reaches every
+    // nested resolution, each of which does its own gating on the way in.
+    let outer_nonce = if entry.needs_nonce() { nonce } else { None };
+    let Ok(document) = assemble_nested(
         &entry,
-        AssemblyInput { outcomes, nonce },
+        AssemblyInput {
+            outcomes,
+            nonce: outer_nonce,
+        },
+        nested_outcomes,
+        &[],
         runtime.limits.max_body_bytes,
     ) else {
         return fail_document(request, next).await;
@@ -355,6 +397,308 @@ async fn render_slot(
         metadata.slot().clone(),
         slot.document_key.clone(),
     ))
+}
+
+/// Reserves every shell island's document key in `scope` before any slot in
+/// the same graph is mounted, exactly as [`assemble_hit`] did inline before
+/// nested segments existed - factored out so a nested Composite entry's own
+/// shell islands are reserved into the *same* shared scope, catching a
+/// duplicate island or DOM identity introduced anywhere in the assembled
+/// tree, not only one introduced by the top-level document.
+fn reserve_shell_islands(scope: &mut DocumentMountScope, graph: &SegmentGraph) -> Result<(), ()> {
+    for island in &graph.shell_islands {
+        let key = DocumentMountKey::parse(&island.document_key).map_err(|_| ())?;
+        scope.reserve_existing(key).map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// Resolves every [`StitchSlot`] in `graph`, in order, against the shared
+/// `scope` - the per-slot loop [`assemble_hit`] ran directly before nested
+/// segments existed, factored out so a nested Composite entry's own slots
+/// are re-mounted through exactly this and nothing else.
+///
+/// `Err(())` means this graph's own document cannot be built for this
+/// request: a slot could not even be parsed, or one whose declared policy
+/// is `FailDocument` could not be resolved. For the top-level document that
+/// means abandoning assembly entirely; for a nested entry, the caller
+/// treats it as one more way the *segment naming it* could not be resolved,
+/// which that segment's own `on_failure` then decides, exactly as an
+/// unfetchable inner entry is decided.
+async fn resolve_slots(
+    request: &Request,
+    live: &LiveRuntime,
+    scope: &mut DocumentMountScope,
+    graph: &SegmentGraph,
+    path: &MountedDocumentPath,
+) -> Result<Vec<SlotOutcome>, ()> {
+    let mut outcomes = Vec::with_capacity(graph.slots.len());
+    for slot in &graph.slots {
+        let parsed = slot.parse().map_err(|_| ())?;
+        match render_slot(request, live, scope, &parsed, path).await {
+            Ok(island) => {
+                count_slot("rendered");
+                outcomes.push(SlotOutcome::Rendered(island));
+            }
+            Err(()) => match &parsed.on_failure {
+                SlotFailurePolicy::Omit => {
+                    count_slot("omitted");
+                    outcomes.push(SlotOutcome::Omitted);
+                }
+                SlotFailurePolicy::Fallback { .. } => {
+                    count_slot("fallback");
+                    outcomes.push(SlotOutcome::Fallback);
+                }
+                SlotFailurePolicy::FailDocument => {
+                    count_slot("failed");
+                    return Err(());
+                }
+            },
+        }
+    }
+    Ok(outcomes)
+}
+
+/// The label [`NestedFailureCause`] maps to under the closed `cause`
+/// attribute of `suprnova.render_cache.stitch.nested` (see
+/// [`render_cache_telemetry::STITCH_NESTED`]).
+const fn nested_failure_cause_label(cause: NestedFailureCause) -> &'static str {
+    match cause {
+        NestedFailureCause::Cycle => "cycle",
+        NestedFailureCause::DepthExceeded => "depth_exceeded",
+        NestedFailureCause::VersionMismatch => "version_mismatch",
+        NestedFailureCause::LengthMismatch => "length_mismatch",
+    }
+}
+
+/// Counts one nested-segment resolution outcome under the closed
+/// `suprnova.render_cache.stitch.nested` metric.
+fn count_nested(outcome: &'static str, cause: &'static str) {
+    Metrics::counter(render_cache_telemetry::STITCH_NESTED).inc_with(&[
+        (render_cache_telemetry::OUTCOME, outcome),
+        (render_cache_telemetry::CAUSE, cause),
+    ]);
+}
+
+/// Resolves one [`Segment::Nested`] occurrence that could not be resolved
+/// through its own declared `on_failure`, counting the outcome under the
+/// same closed metric [`resolve_nested_segment`] otherwise counts a success
+/// under. `Err(())` for `FailDocument`: the caller abandons assembly for
+/// whatever document names this segment, exactly as an island slot's own
+/// `FailDocument` does.
+fn nested_failure(
+    cause: &'static str,
+    on_failure: &SlotFailurePolicy,
+) -> Result<NestedOutcome, ()> {
+    match on_failure {
+        SlotFailurePolicy::Omit => {
+            count_nested("omitted", cause);
+            Ok(NestedOutcome::Omitted)
+        }
+        SlotFailurePolicy::Fallback { .. } => {
+            count_nested("fallback", cause);
+            Ok(NestedOutcome::Fallback)
+        }
+        SlotFailurePolicy::FailDocument => {
+            count_nested("failed", cause);
+            Err(())
+        }
+    }
+}
+
+/// Fetches and decodes the entry stored under `key` from L0, then L1 - the
+/// same tiers and the same defect handling [`super::middleware::lookup`]
+/// applies to the request's own top-level key, without its hot fast path or
+/// L0 promotion, which belong to a fresh top-level lookup and not to a name
+/// a graph carries by reference. Returns `None` on a miss in every tier, a
+/// decode failure, a store error, or a *misplaced* entry: one that decoded
+/// successfully but is stored under a key other than `key`. For a name a
+/// graph trusts by reference that last case is a leak vector, not merely a
+/// defect, so it is never treated as a hit.
+///
+/// Acquires at most one pooled database connection at a time and never a
+/// transaction of its own: L0 is consulted, then - only on an L0 miss - L1,
+/// each call fully acquiring, using, and releasing its own connection (or
+/// joining an ambient one, when there is one) before the next tier is ever
+/// asked. Every caller in this module resolves nested segments one at a
+/// time in the same sequential chain, so two fetches are never in flight
+/// together and this never stacks a second connection on top of a caller's.
+async fn fetch_decoded_entry(
+    runtime: &RenderCacheRuntime,
+    key: &RenderKey,
+) -> Option<(DecodedEntry, u64)> {
+    let stored = match runtime.l0.get(key).await {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            let l1 = runtime.l1.as_ref()?;
+            match l1.get(key).await {
+                Ok(Some(stored)) => stored,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+        Err(_) => return None,
+    };
+    let decoded = decode(&stored.bytes, &runtime.keys, &runtime.limits).ok()?;
+    if decoded.header().key != *key {
+        return None;
+    }
+    Some((decoded, stored.fence.token))
+}
+
+/// Resolves one [`Segment::Nested`] segment into its outcome for this
+/// request: a cycle or depth check against `chain`, a fetch, a version
+/// check, reauthorization (reusing [`render_slot`] over the resolved
+/// entry's own slots when it declares any), a recursive assembly when the
+/// resolved entry nests further, and finally a length check - version
+/// before length, matching [`verify_nested`]'s own order, and cycle before
+/// depth, matching [`descend_nested`]'s.
+///
+/// An inner entry that declares no [`StitchSlot`] at all, and is not
+/// [`RepresentationClass::PrivateCached`], is provably identity-free and is
+/// spliced in without reauthorization - the contract's only escape from it.
+/// A `PrivateCached` entry is never identity-free even though it is always
+/// `Complete`: its class alone proves it is bound to whatever key material
+/// produced it, and unlike a `StitchSlot` it carries no declared identity a
+/// fresh request can be checked against, so there is nothing to positively
+/// authorize it against; it fails closed under `unauthorized` rather than
+/// being trusted merely because it has no slot to fail. A Composite entry
+/// with any slot is reauthorized slot by slot, through the same
+/// [`render_slot`] and the same shared `scope` an outer document's own
+/// slots go through, so a duplicate identity between an outer document and
+/// a nested one is caught the same way.
+///
+/// `Err(())` means the segment's own declared policy is `FailDocument` and
+/// it could not be resolved: the caller abandons assembly for the whole
+/// document, exactly as an island slot's own `FailDocument` does. Every
+/// other resolution, success or a failure whose policy is `Omit` or
+/// `Fallback`, is `Ok`.
+/// The parts of one request's nested resolution that stay the same at
+/// every depth: bundled so [`resolve_nested_segment`] takes one reference
+/// instead of four separate arguments for them.
+struct NestedResolutionContext<'a> {
+    runtime: &'a RenderCacheRuntime,
+    request: &'a Request,
+    live: &'a LiveRuntime,
+    path: &'a MountedDocumentPath,
+    /// The one nonce minted for this request, present exactly when
+    /// [`assemble_hit`] decided one might be needed anywhere in the tree.
+    nonce: Option<&'a str>,
+}
+
+fn resolve_nested_segment<'a>(
+    ctx: &'a NestedResolutionContext<'a>,
+    scope: &'a mut DocumentMountScope,
+    chain: &'a [RenderKey],
+    key: &'a RenderKey,
+    named_version: u64,
+    named_len: u32,
+    on_failure: &'a SlotFailurePolicy,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<NestedOutcome, ()>> + Send + 'a>> {
+    Box::pin(async move {
+        if let Err(cause) = descend_nested(chain, key) {
+            return nested_failure(nested_failure_cause_label(cause), on_failure);
+        }
+        let Some((entry, actual_version)) = fetch_decoded_entry(ctx.runtime, key).await else {
+            return nested_failure("fetch_failed", on_failure);
+        };
+        if actual_version != named_version {
+            return nested_failure(
+                nested_failure_cause_label(NestedFailureCause::VersionMismatch),
+                on_failure,
+            );
+        }
+        let mut child_chain = Vec::with_capacity(chain.len() + 1);
+        child_chain.extend_from_slice(chain);
+        child_chain.push(key.clone());
+        let body = match &entry {
+            DecodedEntry::Complete(complete) => {
+                if complete.header().class == RepresentationClass::PrivateCached {
+                    return nested_failure("unauthorized", on_failure);
+                }
+                complete.body().clone()
+            }
+            DecodedEntry::Composite(composite) => {
+                let graph = composite.graph();
+                if reserve_shell_islands(scope, graph).is_err() {
+                    return Err(());
+                }
+                // The entry itself was fetched successfully; `resolve_slots`
+                // failing here means one of its own `FailDocument` slots
+                // could not be reauthorized for this request (or, more
+                // rarely, no longer parses against the catalog) - either
+                // way this is the segment's own reauthorization failing,
+                // not a fetch failure, so it counts under the closed set's
+                // `unauthorized` cause rather than `fetch_failed`.
+                let outcomes =
+                    match resolve_slots(ctx.request, ctx.live, scope, graph, ctx.path).await {
+                        Ok(outcomes) => outcomes,
+                        Err(()) => return nested_failure("unauthorized", on_failure),
+                    };
+                let mut nested_outcomes = Vec::with_capacity(graph.segments.len());
+                for segment in &graph.segments {
+                    let Segment::Nested {
+                        key: inner_key,
+                        version: inner_version,
+                        assembled_len: inner_len,
+                        on_failure: inner_on_failure,
+                    } = segment
+                    else {
+                        continue;
+                    };
+                    let outcome = resolve_nested_segment(
+                        ctx,
+                        scope,
+                        &child_chain,
+                        inner_key,
+                        *inner_version,
+                        *inner_len,
+                        inner_on_failure,
+                    )
+                    .await?;
+                    nested_outcomes.push(outcome);
+                }
+                let inner_nonce = if composite.needs_nonce() {
+                    ctx.nonce.map(str::to_owned)
+                } else {
+                    None
+                };
+                match assemble_nested(
+                    composite,
+                    AssemblyInput {
+                        outcomes,
+                        nonce: inner_nonce,
+                    },
+                    nested_outcomes,
+                    chain,
+                    ctx.runtime.limits.max_body_bytes,
+                ) {
+                    Ok(document) => document.body().clone(),
+                    // The closed `cause` set (spec 16) has no dedicated value
+                    // for "this entry's own recursive assembly failed" (a
+                    // body-bound or structural violation once every slot and
+                    // deeper nested segment already resolved); `fetch_failed`
+                    // is the closest fit - this entry could not be turned
+                    // into a usable body - rather than inventing a value the
+                    // spec does not list.
+                    Err(_) => return nested_failure("fetch_failed", on_failure),
+                }
+            }
+        };
+        let Ok(actual_len) = u32::try_from(body.len()) else {
+            return nested_failure(
+                nested_failure_cause_label(NestedFailureCause::LengthMismatch),
+                on_failure,
+            );
+        };
+        if let Err(cause) = verify_nested(named_version, named_len, actual_version, actual_len) {
+            return nested_failure(nested_failure_cause_label(cause), on_failure);
+        }
+        count_nested("resolved", "none");
+        Ok(NestedOutcome::Resolved {
+            version: actual_version,
+            body,
+        })
+    })
 }
 
 /// Abandons assembly and lets the route's own handler answer, uncached.
@@ -598,13 +942,172 @@ pub(crate) enum CompositeBuildError {
     /// A captured slot's markup, or its placement among the others,
     /// could not be unambiguously resolved in the body.
     SlotAmbiguous,
+    /// A named nested segment's representation class is `PrivateCached`:
+    /// its privacy comes from per-principal key derivation at top-level
+    /// lookup, which a named reference to a fixed key bypasses entirely, so
+    /// no reauthorization mechanism can ever authorize it and resolution
+    /// would fail closed as `unauthorized` on every single hit. A
+    /// composition that can never resolve is refused here, at publish,
+    /// rather than stored - the same reason this design enforces privacy
+    /// narrowing at publish at all.
+    NestedUnauthorizable,
+    /// A named nested segment's representation class is wider than the
+    /// entry that names it.
+    NestedWiderClass,
+    /// A named nested segment's freshness window is longer than the
+    /// entry that names it.
+    NestedLongerFreshness,
+    /// A named nested segment would exceed `MAX_NESTING_DEPTH` once
+    /// resolved.
+    NestedDepthExceeded,
+    /// A named nested segment would include the publishing entry, directly
+    /// or transitively.
+    NestedCycle,
+    /// A named nested segment could not be resolved from the store to
+    /// prove the narrowing rule holds against it.
+    NestedUnresolvable,
+}
+
+/// The [`super::decline::LookupDeclineReason`] naming why
+/// [`build_composite_entry`] refused a composite, one to one with
+/// [`CompositeBuildError`] - never a default arm, so a new build error
+/// forces a matching reason before this compiles, per that type's own
+/// compile-time closure requirement. Shared by `lead_render`'s real decline
+/// site and the `testing`-gated seam that drives [`refuse_unsafe_nesting`]
+/// directly, so the two can never name a different reason for the same
+/// error.
+pub(crate) const fn composite_build_error_reason(
+    error: CompositeBuildError,
+) -> LookupDeclineReason {
+    match error {
+        CompositeBuildError::CaptureInvalid => LookupDeclineReason::CompositeCaptureInvalid,
+        CompositeBuildError::SlotCountMismatch => LookupDeclineReason::CompositeSlotCountMismatch,
+        CompositeBuildError::TooManySlots => LookupDeclineReason::CompositeTooManySlots,
+        CompositeBuildError::DigestMismatch => LookupDeclineReason::CompositeDigestMismatch,
+        CompositeBuildError::EmptySlot => LookupDeclineReason::CompositeEmptySlot,
+        CompositeBuildError::SlotNotFound => LookupDeclineReason::CompositeSlotNotFound,
+        CompositeBuildError::SlotAmbiguous => LookupDeclineReason::CompositeSlotAmbiguous,
+        CompositeBuildError::NestedUnauthorizable => {
+            LookupDeclineReason::CompositeNestedUnauthorizable
+        }
+        CompositeBuildError::NestedWiderClass => LookupDeclineReason::CompositeNestedWiderClass,
+        CompositeBuildError::NestedLongerFreshness => {
+            LookupDeclineReason::CompositeNestedLongerFreshness
+        }
+        CompositeBuildError::NestedDepthExceeded => {
+            LookupDeclineReason::CompositeNestedDepthExceeded
+        }
+        CompositeBuildError::NestedCycle => LookupDeclineReason::CompositeNestedCycle,
+        CompositeBuildError::NestedUnresolvable => LookupDeclineReason::CompositeNestedUnresolvable,
+    }
+}
+
+/// The [`NestedFailureCause`] a bound violation inside
+/// [`check_nested_composition`] maps to. [`descend_nested`] only ever
+/// returns [`NestedFailureCause::Cycle`] or
+/// [`NestedFailureCause::DepthExceeded`]; the other two arms are
+/// unreachable in practice (`verify_nested` is a hit-time check this
+/// publish-time walk never calls) and degrade to the cycle refusal - the
+/// stricter of the two publish-time reasons - rather than panic on a
+/// violated invariant in a publish path.
+fn nested_bound_error(cause: NestedFailureCause) -> CompositeBuildError {
+    match cause {
+        NestedFailureCause::Cycle => CompositeBuildError::NestedCycle,
+        NestedFailureCause::DepthExceeded => CompositeBuildError::NestedDepthExceeded,
+        NestedFailureCause::VersionMismatch | NestedFailureCause::LengthMismatch => {
+            debug_assert!(
+                false,
+                "descend_nested only ever returns Cycle or DepthExceeded, got {cause:?}"
+            );
+            CompositeBuildError::NestedCycle
+        }
+    }
+}
+
+/// Refuses to publish `graph` when it names a [`Segment::Nested`] segment
+/// whose representation class is `PrivateCached` (it could never be
+/// reauthorized, so it could never resolve), or is wider, or whose
+/// freshness window is longer, than the entry that names it - checked at
+/// each level against its own direct parent (the entry naming *it*), which
+/// composes: an entry that already satisfied this rule against its own
+/// nested segments when it was published cannot make a deeper level fail
+/// here, so re-checking every level is redundant for anything below the
+/// first but never wrong. Also refuses a graph that would exceed
+/// `MAX_NESTING_DEPTH`, or would include
+/// the publishing entry directly or transitively, once every currently
+/// stored named entry is resolved - `graph`'s own direct self-reference is
+/// already refused by [`CompositeEntry::new`] before this ever runs; this
+/// is the transitive and depth cases that need the store to see. A named
+/// entry this cannot resolve is refused rather than assumed safe:
+/// publication can only prove narrowing holds against what it can actually
+/// read, never against what it cannot.
+///
+/// `header` is the header about to be published, not yet a stored entry, so
+/// its own key is used only to seed the ancestor chain
+/// [`descend_nested`] checks against; nothing here stores or fetches it.
+pub(crate) async fn refuse_unsafe_nesting(
+    runtime: &RenderCacheRuntime,
+    header: &EntryHeader,
+    graph: &SegmentGraph,
+) -> Result<(), CompositeBuildError> {
+    let chain = [header.key.clone()];
+    check_nested_composition(runtime, header, graph, &chain).await
+}
+
+fn check_nested_composition<'a>(
+    runtime: &'a RenderCacheRuntime,
+    including: &'a EntryHeader,
+    graph: &'a SegmentGraph,
+    chain: &'a [RenderKey],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), CompositeBuildError>> + Send + 'a>>
+{
+    Box::pin(async move {
+        for segment in &graph.segments {
+            let Segment::Nested { key, .. } = segment else {
+                continue;
+            };
+            descend_nested(chain, key).map_err(nested_bound_error)?;
+            let Some((inner, _version)) = fetch_decoded_entry(runtime, key).await else {
+                return Err(CompositeBuildError::NestedUnresolvable);
+            };
+            let inner_header = inner.header();
+            // Checked before narrowing: a `PrivateCached` inner segment can
+            // never resolve at all (no reauthorization mechanism exists for
+            // it, per `resolve_nested_segment`'s own hit-time handling), so
+            // that is a more fundamental reason to refuse than a class that
+            // merely happens to be wider than this document's own.
+            if inner_header.class == RepresentationClass::PrivateCached {
+                return Err(CompositeBuildError::NestedUnauthorizable);
+            }
+            if including.class.narrowest(inner_header.class) != inner_header.class {
+                return Err(CompositeBuildError::NestedWiderClass);
+            }
+            if inner_header.fresh_ms > including.fresh_ms {
+                return Err(CompositeBuildError::NestedLongerFreshness);
+            }
+            if let DecodedEntry::Composite(inner_composite) = &inner {
+                let mut child_chain = Vec::with_capacity(chain.len() + 1);
+                child_chain.extend_from_slice(chain);
+                child_chain.push(key.clone());
+                check_nested_composition(
+                    runtime,
+                    inner_header,
+                    inner_composite.graph(),
+                    &child_chain,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Nothing here is fallible in the error sense a caller propagates: every
 /// [`CompositeBuildError`] is a decline, and `lead_render` records it under
 /// the existing declined outcome with the matching
 /// [`super::decline::LookupDeclineReason`].
-pub(crate) fn build_composite_entry(
+pub(crate) async fn build_composite_entry(
+    runtime: &RenderCacheRuntime,
     header: EntryHeader,
     body: &[u8],
     facts: &LiveDocumentFacts,
@@ -767,6 +1270,12 @@ pub(crate) fn build_composite_entry(
         graph.slots[index].surrounding = surrounding_digest(&graph, &shell, index)
             .map_err(|_| CompositeBuildError::TooManySlots)?;
     }
+    // Refused here, before the graph is ever turned into a `CompositeEntry`
+    // or stored: a composition that names an inner segment wider, longer,
+    // deeper, or more cyclic than this document may declare is bad the
+    // moment it is built, exactly as `CompositeEntry::new`'s own direct
+    // self-inclusion check already refuses the store-free case.
+    refuse_unsafe_nesting(runtime, &header, &graph).await?;
     CompositeEntry::new(header, graph, shell)
         .map(DecodedEntry::Composite)
         .map_err(|_| CompositeBuildError::TooManySlots)
