@@ -1,7 +1,7 @@
 # URL-Generierung
 
 Über URLs verweist Ihre App auf sich selbst - jeder Redirect, jeder
-E-Mail-Link, jedes `href` eines Inertia-`<Link>`, jeder signierte
+E-Mail-Link, jedes href eines Inertia-`<Link>`, jeder signierte
 Download muss irgendwoher kommen. Fest verdrahtete Pfade machen
 Refactorings schmerzhaft und das Umbenennen von Routen unsicher.
 Suprnova bringt einen kleinen `url::`-Namensraum mit und daneben den
