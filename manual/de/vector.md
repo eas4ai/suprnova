@@ -415,7 +415,7 @@ Pinecone.
 In beiden Fällen bleibt das Ranking erhalten (bestes Ergebnis
 zuerst), aber die absoluten Score-Werte sind zwischen Treibern NICHT
 vergleichbar - nur die Reihenfolge ist es. Jedes Backend landet auf
-der Konvention `höher = besser`, aber die Bereiche unterscheiden
+der Konvention `higher = better`, aber die Bereiche unterscheiden
 sich: Memorys Cosine liefert `[-1, 1]`, MariaDBs normalisiertes
 Cosine liefert `[0, 1]`, Qdrant gibt seine native Cosine-Ähnlichkeit
 in `[-1, 1]` aus, und Pinecone liefert die rohe Ähnlichkeit für die

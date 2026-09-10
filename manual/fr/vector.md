@@ -419,7 +419,7 @@ haut = plus similaire) - le driver convertit selon la métrique :
 Dans les deux cas, le classement est préservé (meilleur résultat en
 premier), mais les valeurs absolues de score ne sont PAS comparables
 entre drivers - seul l'ordre l'est. Chaque backend retombe sur une
-convention « plus haut = meilleur », mais les plages diffèrent : le
+convention `higher = better`, mais les plages diffèrent : le
 cosinus de Memory renvoie `[-1, 1]`, le cosinus normalisé de MariaDB
 renvoie `[0, 1]`, Qdrant émet sa similarité cosinus native en `[-1,
 1]`, et Pinecone renvoie la similarité brute pour la métrique avec

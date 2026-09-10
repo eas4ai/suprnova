@@ -74,7 +74,7 @@ In-process driver backed by `HashMap`. Cosine similarity, dimension-mismatch poi
 Vector::register("docs", Arc::new(MemoryVectorDriver::new()));
 ```
 
-Use in tests and dev. Each `MemoryVectorDriver::new()` instance is hermetic - no shared state between two new()s.
+Use in tests and dev. Each `MemoryVectorDriver::new()` instance is hermetic - no shared state between two `new()`s.
 
 ### Qdrant - `QdrantVectorDriver`
 
