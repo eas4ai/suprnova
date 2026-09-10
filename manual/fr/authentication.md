@@ -32,14 +32,6 @@ côté dans `framework/src/auth_flows/` et ont leur propre chapitre :
 [Flux d'authentification](auth-flows.md). L'OAuth, Apple, et la connexion par
 lien magique sont couverts par [OAuth et connexion sans mot de passe](oauth.md).
 
-La piste dans les sources est courte :
-`framework/src/auth/{guard,manager,contract,
-authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`. Les flux de plus haut niveau - vérification
-d'e-mail, réinitialisation de mot de passe, limitation par force
-brute, 2FA TOTP - vivent à côté dans `framework/src/auth_flows/` et
-ont leur propre chapitre : Flux d'authentification.
-
 ## Modèle d'identifiant
 
 L'id de l'utilisateur authentifié circule à travers Suprnova comme
@@ -135,8 +127,8 @@ let config = AuthConfig::new("web")
 ```
 ## Initialiser le moteur Magnetar
 
-Le starter API initialise Magnetar après la base de données et après que
-`APP_KEY` a mis `Crypt` en place :
+Le starter API initialise Magnetar après que la base de données et
+`APP_KEY` sont prêts :
 
 ```rust
 use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
@@ -159,8 +151,8 @@ atomiquement les adaptateurs password/session et passkey. Une nouvelle
 initialisation renvoie une erreur au lieu de remplacer un adaptateur alors
 qu'une autre requête utilise encore l'ancien magasin.
 
-`MagnetarConfig` accepte aussi les valeurs de politique `session_config`,
-`lockout_config`, `two_factor_config`, et `passkey_config` :
+`MagnetarConfig` accepte aussi des valeurs de politique de session, de
+verrouillage et de second facteur :
 
 ```rust,ignore
 let magnetar = MagnetarConfig::from_sea_orm(database)
@@ -780,9 +772,8 @@ adossés à la session.
 ## Suivant
 
 - [Flux d'authentification](auth-flows.md) - vérification d'e-mail,
-  réinitialisation de mot de passe, limitation par force brute avec
-  `LoginThrottleMiddleware`, 2FA TOTP, la suite d'événements
-  `auth_flows`
+  réinitialisation de mot de passe, verrouillage de compte propulsé par
+  Magnetar, 2FA TOTP du framework, et événements de flux d'authentification
 - [OAuth et connexion sans mot de passe](oauth.md) - OAuth Magnetar, Apple, liens magiques, politique de fournisseur, et migration des données d'authentification
 - [Autorisation](authorization.md) - `Gate`, policies, `Authorizable`
   pour « ce que cet utilisateur est autorisé à faire »
@@ -790,5 +781,4 @@ adossés à la session.
   guards de style `web`
 - [Protection CSRF](csrf.md) - comment les requêtes qui modifient
   l'état sont filtrées
-- [Hachage](hashing.md) - les helpers bcrypt + argon2 derrière
-  `verify_password`
+- [Hachage](hashing.md) - les helpers bcrypt et Argon2

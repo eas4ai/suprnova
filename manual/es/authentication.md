@@ -739,9 +739,8 @@ cookies (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
 ## Siguiente
 
 - [Flujos de autenticación](auth-flows.md) - verificación de correo,
-  restablecimiento de contraseña, limitación de fuerza bruta con
-  `LoginThrottleMiddleware`, 2FA TOTP, la suite de eventos de
-  `auth_flows`
+  restablecimiento de contraseña, bloqueo de cuenta respaldado por
+  Magnetar, 2FA TOTP del framework, y eventos de flujo de autenticación
 - [OAuth e inicio de sesión sin contraseña](oauth.md) - OAuth de Magnetar, Apple, enlaces mágicos, política de proveedor y migración de datos de autenticación
 - [Autorización](authorization.md) - `Gate`, políticas,
   `Authorizable` para "qué puede hacer este usuario"
@@ -749,5 +748,4 @@ cookies (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
   los guards de estilo `web`
 - [CSRF](csrf.md) - cómo se les pone una compuerta a las solicitudes
   que cambian estado
-- [Hashing](hashing.md) - los ayudantes de bcrypt + argon2 detrás de
-  `verify_password`
+- [Hashing](hashing.md) - los ayudantes de bcrypt y Argon2
