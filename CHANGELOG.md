@@ -995,8 +995,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   for the rest of the request, so a handler that already called `Auth::user()`
   pays nothing extra and the lookup has simply moved from the handler to the
   middleware. Only a guarded request whose handler never resolved the user
-  gains a provider lookup it did not make before. An application with no user provider bound keeps the
-  identifier-only path unchanged. `BasicAuthMiddleware` in its non-stateless
+  gains a provider lookup it did not make before. An application with no user
+  provider bound keeps the identifier-only path unchanged.
+  `BasicAuthMiddleware` in its non-stateless
   form now requires the guard it names to exist and to be a stateful guard.
 
 - **`destroy_all_for_user` costs more and revokes more.** It now reads the
