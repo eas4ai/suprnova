@@ -1909,6 +1909,49 @@ async fn a_two_level_nested_document_assembles_and_serves() {
     );
 }
 
+/// Publish-time refusal: a composite naming an inner segment whose
+/// representation class is `PrivateCached` is refused, because such a
+/// segment can never be reauthorized from a named reference and would
+/// always fail closed as `unauthorized` on every single hit - a composition
+/// that can never resolve is refused at publish rather than stored, the
+/// same reason narrowing itself is enforced at publish.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(feature = "testing")]
+async fn publishing_a_composite_naming_a_private_cached_inner_segment_is_refused() {
+    let harness = boot().await;
+    let outer = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(outer.status, StatusCode::OK, "{}", outer.text());
+
+    let unauthorizable_key = publish_bare_entry_for_test(
+        "plan-h-fixture-unauthorizable",
+        RepresentationClass::PrivateCached,
+        60_000,
+    )
+    .await;
+
+    let reason = nested_publish_check_for_test(STITCHED_PATH, |graph| {
+        graph.segments.push(Segment::Nested {
+            key: unauthorizable_key,
+            version: 0,
+            assembled_len: u32::try_from("nested fixture".len()).expect("fits"),
+            on_failure: SlotFailurePolicy::Omit,
+        });
+    })
+    .await;
+    assert_eq!(
+        reason,
+        Some("composite_nested_unauthorizable"),
+        "a PrivateCached inner segment can never resolve and is refused at publish"
+    );
+}
+
 /// Publish-time refusal, per the spec's narrowing rule: a composite naming
 /// an inner segment whose representation class is wider than the including
 /// document's is refused, and nothing declared it can name is stored under

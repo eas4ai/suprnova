@@ -123,7 +123,7 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable, for one of the thirty-seven
+- `declined` - the render was not storable, for one of the thirty-eight
   reasons below, carried in the `reason` attribute beside `outcome`.
   `reason` is emitted only alongside `outcome="declined"`; every other
   outcome carries none. The reason is computed from a typed value at the
@@ -150,9 +150,10 @@ provider, or a backend:
     `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
-    `composite_slot_ambiguous`, `composite_nested_wider_class`,
-    `composite_nested_longer_freshness`, `composite_nested_depth_exceeded`,
-    `composite_nested_cycle`, `composite_nested_unresolvable`.
+    `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+    `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+    `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+    `composite_nested_unresolvable`.
 
 `hits` increments only for `l0`, `l1`, `conditional`, and `stale`.
 `publications` counts only a store answering "published", never a fenced or

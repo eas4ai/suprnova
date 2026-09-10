@@ -942,6 +942,15 @@ pub(crate) enum CompositeBuildError {
     /// A captured slot's markup, or its placement among the others,
     /// could not be unambiguously resolved in the body.
     SlotAmbiguous,
+    /// A named nested segment's representation class is `PrivateCached`:
+    /// its privacy comes from per-principal key derivation at top-level
+    /// lookup, which a named reference to a fixed key bypasses entirely, so
+    /// no reauthorization mechanism can ever authorize it and resolution
+    /// would fail closed as `unauthorized` on every single hit. A
+    /// composition that can never resolve is refused here, at publish,
+    /// rather than stored - the same reason this design enforces privacy
+    /// narrowing at publish at all.
+    NestedUnauthorizable,
     /// A named nested segment's representation class is wider than the
     /// entry that names it.
     NestedWiderClass,
@@ -978,6 +987,9 @@ pub(crate) const fn composite_build_error_reason(
         CompositeBuildError::EmptySlot => LookupDeclineReason::CompositeEmptySlot,
         CompositeBuildError::SlotNotFound => LookupDeclineReason::CompositeSlotNotFound,
         CompositeBuildError::SlotAmbiguous => LookupDeclineReason::CompositeSlotAmbiguous,
+        CompositeBuildError::NestedUnauthorizable => {
+            LookupDeclineReason::CompositeNestedUnauthorizable
+        }
         CompositeBuildError::NestedWiderClass => LookupDeclineReason::CompositeNestedWiderClass,
         CompositeBuildError::NestedLongerFreshness => {
             LookupDeclineReason::CompositeNestedLongerFreshness
@@ -1013,13 +1025,15 @@ fn nested_bound_error(cause: NestedFailureCause) -> CompositeBuildError {
 }
 
 /// Refuses to publish `graph` when it names a [`Segment::Nested`] segment
-/// whose representation class is wider, or whose freshness window is
-/// longer, than the entry that names it - checked at each level against its
-/// own direct parent (the entry naming *it*), which composes: an entry that
-/// already satisfied this rule against its own nested segments when it was
-/// published cannot make a deeper level fail here, so re-checking every
-/// level is redundant for anything below the first but never wrong. Also
-/// refuses a graph that would exceed `MAX_NESTING_DEPTH`, or would include
+/// whose representation class is `PrivateCached` (it could never be
+/// reauthorized, so it could never resolve), or is wider, or whose
+/// freshness window is longer, than the entry that names it - checked at
+/// each level against its own direct parent (the entry naming *it*), which
+/// composes: an entry that already satisfied this rule against its own
+/// nested segments when it was published cannot make a deeper level fail
+/// here, so re-checking every level is redundant for anything below the
+/// first but never wrong. Also refuses a graph that would exceed
+/// `MAX_NESTING_DEPTH`, or would include
 /// the publishing entry directly or transitively, once every currently
 /// stored named entry is resolved - `graph`'s own direct self-reference is
 /// already refused by [`CompositeEntry::new`] before this ever runs; this
@@ -1057,6 +1071,14 @@ fn check_nested_composition<'a>(
                 return Err(CompositeBuildError::NestedUnresolvable);
             };
             let inner_header = inner.header();
+            // Checked before narrowing: a `PrivateCached` inner segment can
+            // never resolve at all (no reauthorization mechanism exists for
+            // it, per `resolve_nested_segment`'s own hit-time handling), so
+            // that is a more fundamental reason to refuse than a class that
+            // merely happens to be wider than this document's own.
+            if inner_header.class == RepresentationClass::PrivateCached {
+                return Err(CompositeBuildError::NestedUnauthorizable);
+            }
             if including.class.narrowest(inner_header.class) != inner_header.class {
                 return Err(CompositeBuildError::NestedWiderClass);
             }

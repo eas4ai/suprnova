@@ -92,9 +92,10 @@ pub const OUTCOME: &str = "outcome";
 ///   `composite_capture_invalid`, `composite_slot_count_mismatch`,
 ///   `composite_too_many_slots`, `composite_digest_mismatch`,
 ///   `composite_empty_slot`, `composite_slot_not_found`,
-///   `composite_slot_ambiguous`, `composite_nested_wider_class`,
-///   `composite_nested_longer_freshness`, `composite_nested_depth_exceeded`,
-///   `composite_nested_cycle`, `composite_nested_unresolvable`.
+///   `composite_slot_ambiguous`, `composite_nested_unauthorizable`,
+///   `composite_nested_wider_class`, `composite_nested_longer_freshness`,
+///   `composite_nested_depth_exceeded`, `composite_nested_cycle`,
+///   `composite_nested_unresolvable`.
 pub const REASON: &str = "reason";
 
 /// One lookup recorded for a test: the `outcome` label, and, for a decline,
