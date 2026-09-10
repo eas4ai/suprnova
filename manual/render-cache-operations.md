@@ -185,20 +185,26 @@ value after a database restore is the signal that the restore was noticed. A
 non-zero value at any other time means an authority moved backwards for a
 reason nobody intended.
 
-`hints` counts credible generation hints this node received on the Tier 2
-pub/sub channel, one increment per message. It is the one counter here a
-deployment can leave permanently at zero by choice: hints are off unless the
-Redis profile, or `RENDER_CACHE_HINTS=redis`, turns them on, and a node with
-them off serves exactly what a node with them on serves. Its `outcome`
-attribute takes exactly one of `applied` (the message named a digest a
-validation lease on this node observes, and every such lease was shortened),
+`hints` counts credible generation hints this node handled on the Tier 2
+pub/sub channel: one increment per message received, one per subscription
+ending, and one per announcement a full publish queue kept this node from
+sending. It is the one counter here a deployment can leave permanently at
+zero by choice: hints are off unless the Redis profile, or
+`RENDER_CACHE_HINTS=redis`, turns them on, and a node with them off serves
+exactly what a node with them on serves. Its `outcome` attribute takes
+exactly one of `applied` (the message named a digest a validation lease on
+this node observes, and every such lease was shortened),
 `ignored_unknown_key` (it named nothing this node holds a lease against,
 which includes a message this node cannot read at all), `dropped_over_bound`
 (it carried more than 64 digests and was dropped whole rather than
-truncated, because a truncated hint is a silently wrong hint), and
+truncated, because a truncated hint is a silently wrong hint),
 `subscriber_dropped` (this node's subscription ended, because it fell behind
-or the connection failed, and is being re-established). No attribute ever
-carries a route, a key, or a dependency identity.
+or the connection failed, and is being re-established), and
+`dropped_publish_queue_full` (this node had an advance to announce and its
+own publish queue was full, so the message was dropped rather than made to
+wait on the write that produced it, one count for every message that went
+unannounced). No attribute ever carries a route, a key, or a dependency
+identity.
 
 A hint can only shorten a validation lease this node already holds. It can
 never extend one, create one, or stand in for the generation ledger, and

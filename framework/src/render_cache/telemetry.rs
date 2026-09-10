@@ -46,10 +46,11 @@ pub const STITCH_NESTED: &str = "suprnova.render_cache.stitch.nested";
 /// Attribute `cause`, emitted only on [`STITCH_NESTED`] beside `outcome`;
 /// see that constant's own doc for the closed value set.
 pub const CAUSE: &str = "cause";
-/// Counter: credible generation hints this node received on the pub/sub
-/// channel, one increment per message.
+/// Counter: credible generation hints this node handled on the pub/sub
+/// channel - one increment per message received, per subscription ending,
+/// and per message a full publish queue kept this node from sending.
 ///
-/// Attribute `outcome` values, exactly one per message: `applied` (the
+/// Attribute `outcome` values, exactly one per increment: `applied` (the
 /// message named at least one digest a validation lease on this node
 /// observes, and every such lease was shortened), `ignored_unknown_key`
 /// (nothing this node holds a lease against, which includes a message
@@ -58,7 +59,12 @@ pub const CAUSE: &str = "cause";
 /// `MAX_HINT_DIGESTS` digests and was dropped whole rather than
 /// truncated), `subscriber_dropped` (this node's subscription ended - it
 /// fell behind its own bounded queue, or the connection failed - and is
-/// being re-established).
+/// being re-established), `dropped_publish_queue_full` (this node had an
+/// advance to announce and its own bounded publish queue was full, so the
+/// message was dropped rather than made to wait on the write that produced
+/// it; one per abandoned message, and never confused with
+/// `dropped_over_bound`, which is a peer sending more digests than the
+/// bound allows).
 ///
 /// Never names a route, a key, a digest, or a dependency identity: the
 /// whole point of a hint is that its contents are unauthenticated, and a

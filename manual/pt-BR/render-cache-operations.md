@@ -196,21 +196,26 @@ uma restauração de banco de dados é o sinal de que a restauração foi
 percebida. Um valor diferente de zero em qualquer outro momento significa
 que uma autoridade andou para trás por um motivo que ninguém pretendia.
 
-`hints` conta as dicas de geração credíveis que este nó recebeu no canal
-pub/sub da camada 2, um incremento por mensagem. É o único contador aqui que
-uma implantação pode deixar permanentemente em zero por escolha própria: as
-dicas ficam desligadas a menos que o perfil Redis, ou
-`RENDER_CACHE_HINTS=redis`, as ligue, e um nó com elas desligadas serve
-exatamente o que um nó com elas ligadas serve. O seu atributo `outcome`
-assume exatamente um de `applied` (a mensagem nomeou um digest que um lease
-de validação deste nó observa, e todos esses leases foram encurtados),
-`ignored_unknown_key` (não nomeou nada contra o que este nó tenha um lease, o
-que inclui uma mensagem que este nó não consegue ler de jeito nenhum),
-`dropped_over_bound` (carregava mais de 64 digests e foi descartada inteira
-em vez de truncada, porque uma dica truncada é uma dica silenciosamente
-errada) e `subscriber_dropped` (a assinatura deste nó terminou, porque ficou
-para trás ou porque a conexão falhou, e está sendo restabelecida). Nenhum
-atributo carrega jamais uma rota, uma chave ou uma identidade de dependência.
+`hints` conta as dicas de geração credíveis que este nó tratou no canal
+pub/sub da camada 2: um incremento por mensagem recebida, um por assinatura
+encerrada e um por anúncio que uma fila de publicação cheia impediu este nó
+de enviar. É o único contador aqui que uma implantação pode deixar
+permanentemente em zero por escolha própria: as dicas ficam desligadas a
+menos que o perfil Redis, ou `RENDER_CACHE_HINTS=redis`, as ligue, e um nó
+com elas desligadas serve exatamente o que um nó com elas ligadas serve. O
+seu atributo `outcome` assume exatamente um de `applied` (a mensagem nomeou
+um digest que um lease de validação deste nó observa, e todos esses leases
+foram encurtados), `ignored_unknown_key` (não nomeou nada contra o que este
+nó tenha um lease, o que inclui uma mensagem que este nó não consegue ler de
+jeito nenhum), `dropped_over_bound` (carregava mais de 64 digests e foi
+descartada inteira em vez de truncada, porque uma dica truncada é uma dica
+silenciosamente errada), `subscriber_dropped` (a assinatura deste nó
+terminou, porque ficou para trás ou porque a conexão falhou, e está sendo
+restabelecida) e `dropped_publish_queue_full` (este nó tinha um avanço a
+anunciar e a sua própria fila de publicação estava cheia, de modo que a
+mensagem foi descartada em vez de fazer esperar a escrita que a produziu, uma
+contagem para cada mensagem que ficou sem anúncio). Nenhum atributo carrega
+jamais uma rota, uma chave ou uma identidade de dependência.
 
 Uma dica só pode encurtar um lease de validação que este nó já detém. Nunca
 pode estender um, criar um, nem fazer as vezes do ledger de gerações, e todo

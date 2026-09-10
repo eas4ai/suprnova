@@ -196,22 +196,27 @@ después de restaurar la base de datos es la señal de que se notó la
 restauración. Un valor distinto de cero en cualquier otro momento
 significa que una autoridad retrocedió por una razón que nadie pretendía.
 
-`hints` cuenta las pistas creíbles de generación que este nodo recibió en el
-canal pub/sub del nivel 2, un incremento por mensaje. Es el único contador
-aquí que un despliegue puede dejar permanentemente en cero por elección
-propia: las pistas están apagadas salvo que el perfil Redis, o
-`RENDER_CACHE_HINTS=redis`, las encienda, y un nodo con ellas apagadas sirve
-exactamente lo que sirve un nodo con ellas encendidas. Su atributo `outcome`
-toma exactamente uno de `applied` (el mensaje nombró un digest que un
-arrendamiento de validación de este nodo observa, y todos esos arrendamientos
-se acortaron), `ignored_unknown_key` (no nombró nada contra lo que este nodo
-tenga un arrendamiento, lo que incluye un mensaje que este nodo no puede leer
-en absoluto), `dropped_over_bound` (llevaba más de 64 digests y se descartó
+`hints` cuenta las pistas creíbles de generación que este nodo manejó en el
+canal pub/sub del nivel 2: un incremento por mensaje recibido, uno por
+suscripción terminada y uno por cada anuncio que una cola de publicación
+llena impidió enviar a este nodo. Es el único contador aquí que un despliegue
+puede dejar permanentemente en cero por elección propia: las pistas están
+apagadas salvo que el perfil Redis, o `RENDER_CACHE_HINTS=redis`, las
+encienda, y un nodo con ellas apagadas sirve exactamente lo que sirve un nodo
+con ellas encendidas. Su atributo `outcome` toma exactamente uno de
+`applied` (el mensaje nombró un digest que un arrendamiento de validación de
+este nodo observa, y todos esos arrendamientos se acortaron),
+`ignored_unknown_key` (no nombró nada contra lo que este nodo tenga un
+arrendamiento, lo que incluye un mensaje que este nodo no puede leer en
+absoluto), `dropped_over_bound` (llevaba más de 64 digests y se descartó
 entero en lugar de truncarse, porque una pista truncada es una pista
-silenciosamente equivocada) y `subscriber_dropped` (la suscripción de este
+silenciosamente equivocada), `subscriber_dropped` (la suscripción de este
 nodo terminó, porque se quedó atrás o porque falló la conexión, y se está
-restableciendo). Ningún atributo lleva jamás una ruta, una clave ni una
-identidad de dependencia.
+restableciendo) y `dropped_publish_queue_full` (este nodo tenía un avance que
+anunciar y su propia cola de publicación estaba llena, así que el mensaje se
+descartó en lugar de hacer esperar a la escritura que lo produjo, un conteo
+por cada mensaje que quedó sin anunciar). Ningún atributo lleva jamás una
+ruta, una clave ni una identidad de dependencia.
 
 Una pista solo puede acortar un arrendamiento de validación que este nodo ya
 tiene. Nunca puede extender uno, crear uno ni sustituir al libro mayor de

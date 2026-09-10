@@ -94,11 +94,14 @@ const VERSION_TAG: &str = "srh1";
 /// dropped.
 ///
 /// The queue exists so that no request ever waits on Redis to announce what
-/// it just wrote. Overflow drops the message silently: the closed outcome
-/// set spec 18 fixes has no publish-side value, adding a fifth would break
-/// the closed set, and the consequence of a dropped announcement is exactly
-/// the consequence of running with hints off - peers revalidate when their
-/// own leases expire.
+/// it just wrote. Overflow drops the message and counts it under
+/// [`DROPPED_PUBLISH_QUEUE_FULL`]: silent in the request path, which is what
+/// spec 18 requires of a hint-channel failure, and visible in telemetry,
+/// which the same sentence requires just as plainly. The consequence of a
+/// dropped announcement is exactly the consequence of running with hints
+/// off - peers revalidate when their own leases expire - but an operator who
+/// cannot see it happening cannot tell a channel nobody publishes on from a
+/// publisher that has been outrunning this queue all day.
 const MAX_PENDING_HINTS: usize = 256;
 
 /// How many received messages may wait to be applied before this node drops
@@ -191,6 +194,16 @@ pub(crate) const IGNORED_UNKNOWN_KEY: &str = "ignored_unknown_key";
 pub(crate) const DROPPED_OVER_BOUND: &str = "dropped_over_bound";
 /// This node's subscription ended and is being re-established.
 pub(crate) const SUBSCRIBER_DROPPED: &str = "subscriber_dropped";
+/// This node had an advance to announce and its own publish queue was full,
+/// so the message was dropped rather than made to wait on the write that
+/// produced it.
+///
+/// Deliberately not [`DROPPED_OVER_BOUND`]. That one names a *received*
+/// message carrying more digests than the bound allows, which is a peer
+/// sending something malformed; this one is a local publisher outrunning its
+/// own queue. An operator answers those two differently, so one label for
+/// both would be worse than no label at all.
+pub(crate) const DROPPED_PUBLISH_QUEUE_FULL: &str = "dropped_publish_queue_full";
 
 /// Counts one hint outcome under the closed
 /// `suprnova.render_cache.hints` metric, and records it for a test
@@ -506,12 +519,24 @@ impl HintChannel {
     /// queue and dropped if that queue is full. Splitting an advance wider
     /// than [`MAX_HINT_DIGESTS`] into several messages is not truncation -
     /// every digest is announced, each in a message within the bound.
+    ///
+    /// A full queue abandons this message *and every message left in the
+    /// advance*, and counts one [`DROPPED_PUBLISH_QUEUE_FULL`] for each of
+    /// them. Per message rather than per call, because the message is the
+    /// unit every other value on this metric uses, and because the count an
+    /// operator is reading is how much announcement was lost: a wide advance
+    /// abandoned whole lost more than a narrow one and cannot honestly
+    /// report the same number.
     pub(crate) fn publish(&self, digests: &[[u8; 32]]) {
-        for chunk in digests.chunks(MAX_HINT_DIGESTS) {
+        let messages = digests.len().div_ceil(MAX_HINT_DIGESTS);
+        for (sent, chunk) in digests.chunks(MAX_HINT_DIGESTS).enumerate() {
             // `try_send`, never `send`: this runs on the task that just
             // wrote to the application database, and that task must not
             // wait on an accelerator's queue for any length of time at all.
             if self.outbound.try_send(encode(chunk)).is_err() {
+                for _ in sent..messages {
+                    count(DROPPED_PUBLISH_QUEUE_FULL);
+                }
                 return;
             }
         }
@@ -895,6 +920,34 @@ mod tests {
             next_backoff(SubscriptionEnding::FellBehind, MAX_RESUBSCRIBE_BACKOFF),
             MAX_RESUBSCRIBE_BACKOFF,
             "and never past the ceiling"
+        );
+    }
+
+    #[test]
+    fn a_full_publish_queue_counts_every_message_it_abandons() {
+        // Capacity one and three messages' worth of digests: the first fits,
+        // and the second meets a full queue and takes the third down with
+        // it, because the loop abandons the rest of the advance.
+        let (outbound, _drain) = tokio::sync::mpsc::channel(1);
+        let channel = HintChannel {
+            outbound,
+            tasks: Vec::new(),
+        };
+        let advance: Vec<[u8; 32]> = (0..MAX_HINT_DIGESTS * 2 + 1)
+            .map(|index| digest(u8::try_from(index % 251).expect("a byte")))
+            .collect();
+
+        telemetry::reset_recorded_hints_for_test();
+        channel.publish(&advance);
+
+        assert_eq!(
+            telemetry::recorded_hints_for_test()
+                .into_iter()
+                .filter(|outcome| *outcome == DROPPED_PUBLISH_QUEUE_FULL)
+                .count(),
+            2,
+            "the message that did not fit and the one the loop never tried \
+             are both counted, because both went unannounced"
         );
     }
 

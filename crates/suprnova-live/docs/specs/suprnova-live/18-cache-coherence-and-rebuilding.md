@@ -1,7 +1,7 @@
 # Suprnova Live -- 18 Cache Coherence and Rebuilding
 
 Status: Normative design specification
-Last revised: 2026-09-09
+Last revised: 2026-09-10
 
 ## Scope
 
@@ -178,9 +178,21 @@ NOT be a request failure; it SHALL degrade silently to today's behavior
 and SHALL be visible only in telemetry, and a backend error SHALL collapse
 into the existing closed `ProviderUnavailable` kind. Telemetry SHALL gain
 one closed, low-cardinality metric whose `outcome` attribute takes exactly
-one value from `applied`, `ignored_unknown_key`, `dropped_over_bound`, and
-`subscriber_dropped`, keeping the closed low-cardinality label rule and
-never naming a route, a key, or a dependency identity.
+one value from `applied`, `ignored_unknown_key`, `dropped_over_bound`,
+`subscriber_dropped`, and `dropped_publish_queue_full`, keeping the closed
+low-cardinality label rule and never naming a route, a key, or a dependency
+identity. `dropped_publish_queue_full` is the publish side of that metric,
+and it is what makes a publish-side drop meet the requirement above: this
+node had an advance to announce and its own bounded publish queue was full,
+so the message was dropped rather than made to wait on the write that
+produced it - silent in the request path, and visible in telemetry. It SHALL
+be recorded once per abandoned message, so that an advance wide enough to
+need several messages reports how much announcement was lost rather than
+that one queue was full once; and it SHALL NOT be reported as
+`dropped_over_bound`, which names a received message carrying more than
+`MAX_HINT_DIGESTS` digests. That is a peer sending something malformed and
+this is a local publisher outrunning its own queue, and an operator answers
+the two differently.
 
 ### Singleflight and fenced publication
 
@@ -325,6 +337,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-10 -- Widened the hint telemetry outcome set from four values to
+  five. The set recorded on 2026-09-09 had no publish-side value, so a
+  message dropped because this node's own bounded publish queue was full was
+  silent in the request path and invisible in telemetry, which this
+  subsection's own requirement that a hint-channel failure be visible in
+  telemetry does not permit. `dropped_publish_queue_full` is recorded once
+  per abandoned message and is deliberately not `dropped_over_bound`, which
+  names a peer's over-wide received message rather than a local publisher
+  outrunning its queue.
 - 2026-09-09 -- Recorded the credible generation hint mechanism ahead of code:
   `MAX_HINT_DIGESTS` (64) with an over-bound message dropped whole rather than
   truncated, a subscriber that falls behind dropped and resubscribing rather

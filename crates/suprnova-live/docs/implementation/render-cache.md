@@ -1794,9 +1794,11 @@ own closed `outcome` sets: `assembled` and `fail_document` for assemblies,
 `rendered`, `omitted`, `fallback`, and `failed` for slots, and `resolved`,
 `omitted`, `fallback`, and `failed` for nested segments, which alone also
 carry a closed `cause` beside `outcome`. `hints` carries `applied`,
-`ignored_unknown_key`, `dropped_over_bound`, and `subscriber_dropped`, one
-per received message; a deployment that never configures the channel never
-increments it. `publications`, `rebuilds`, and `epoch_rewinds` are plain
+`ignored_unknown_key`, `dropped_over_bound`, `subscriber_dropped`, and
+`dropped_publish_queue_full`: the first three one per received message, the
+fourth one per subscription ending, and the fifth one per message a full
+publish queue kept this node from sending. A deployment that never
+configures the channel never increments it. `publications`, `rebuilds`, and `epoch_rewinds` are plain
 counts with no `outcome` attribute in this build.
 
 ### Console commands

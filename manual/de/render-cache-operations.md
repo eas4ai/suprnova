@@ -205,7 +205,9 @@ verschiedener Wert zu jedem anderen Zeitpunkt bedeutet, dass eine Autorität
 aus einem von niemandem beabsichtigten Grund rückwärtsgelaufen ist.
 
 `hints` zählt glaubwürdige Generationshinweise, die dieser Knoten auf dem
-Pub/Sub-Kanal der Ebene 2 empfangen hat, eine Erhöhung pro Nachricht. Er ist
+Pub/Sub-Kanal der Ebene 2 behandelt hat: eine Erhöhung je empfangener
+Nachricht, eine je beendetem Abonnement und eine je Ankündigung, die eine
+volle Veröffentlichungswarteschlange diesen Knoten nicht senden ließ. Er ist
 der eine Zähler hier, den eine Bereitstellung durch eigene Wahl dauerhaft auf
 null lassen kann: Hinweise sind aus, sofern nicht das Redis-Profil oder
 `RENDER_CACHE_HINTS=redis` sie einschaltet, und ein Knoten mit
@@ -217,10 +219,14 @@ verkürzt), `ignored_unknown_key` (sie benannte nichts, wogegen dieser Knoten
 ein Lease hält, wozu auch eine Nachricht gehört, die dieser Knoten überhaupt
 nicht lesen kann), `dropped_over_bound` (sie trug mehr als 64 Digests und
 wurde ganz verworfen statt abgeschnitten, denn ein abgeschnittener Hinweis
-ist ein stillschweigend falscher Hinweis) und `subscriber_dropped` (das
+ist ein stillschweigend falscher Hinweis), `subscriber_dropped` (das
 Abonnement dieses Knotens endete, weil er zurückfiel oder die Verbindung
-ausfiel, und wird neu aufgebaut). Kein Attribut führt jemals eine Route,
-einen Schlüssel oder eine Abhängigkeitsidentität mit.
+ausfiel, und wird neu aufgebaut) und `dropped_publish_queue_full` (dieser
+Knoten hatte einen Fortschritt anzukündigen, und seine eigene
+Veröffentlichungswarteschlange war voll, sodass die Nachricht verworfen
+wurde, statt den Schreibvorgang warten zu lassen, der sie erzeugt hat, eine
+Zählung je Nachricht, die unangekündigt blieb). Kein Attribut führt jemals
+eine Route, einen Schlüssel oder eine Abhängigkeitsidentität mit.
 
 Ein Hinweis kann ein Validierungs-Lease, das dieser Knoten bereits hält, nur
 verkürzen. Er kann eines niemals verlängern, eines anlegen oder für das
