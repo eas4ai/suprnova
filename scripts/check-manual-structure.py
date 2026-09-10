@@ -9,6 +9,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -263,12 +264,26 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
     fences: list[str] = []
     lists: list[tuple[int, str]] = []
     links: list[str] = []
-    prose: list[str] = []
     table_groups: list[list[int]] = []
     active_table: list[int] = []
     previous_table_cells: tuple[str, ...] | None = None
     closing_marker: str | None = None
     closing_length = 0
+
+    # Span extraction is bounded to one paragraph, not the whole document: a
+    # code span cannot cross a blank line in CommonMark, so a mis-nested span
+    # must not be allowed to swallow prose past the next boundary. `blocks`
+    # holds each finished paragraph's text (already whitespace-joined);
+    # `current_block` accumulates the lines of the paragraph still open. A
+    # mirror that wraps a span across two lines of the *same* paragraph still
+    # yields one span, because those lines land in the same block.
+    blocks: list[str] = []
+    current_block: list[str] = []
+
+    def _flush_block() -> None:
+        if current_block:
+            blocks.append(" ".join(current_block))
+            current_block.clear()
 
     for line in text.splitlines():
         fence = _FENCE.match(line)
@@ -286,15 +301,11 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
                 table_groups.append(active_table)
                 active_table = []
             previous_table_cells = None
+            _flush_block()
             continue
         if closing_marker is not None:
             previous_table_cells = None
             continue
-
-        # Prose only. Inline code spans are collected from the joined text
-        # below so a mirror that wraps its lines differently is not penalized
-        # for a span whose backticks land on two different lines.
-        prose.append(line)
 
         heading = _HEADING.match(line)
         if heading is not None:
@@ -306,6 +317,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
             lists.append((len(item.group(1).expandtabs(4)), kind))
 
         cells = _table_cells(line)
+        table_started_here = False
         if active_table:
             if cells is None:
                 table_groups.append(active_table)
@@ -318,7 +330,37 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
             and len(previous_table_cells) == len(cells)
         ):
             active_table = [len(previous_table_cells), len(cells)]
+            table_started_here = True
         previous_table_cells = cells
+
+        # A heading, a confirmed table row, and the start of a list item each
+        # begin a fresh block, mirroring the shape tracking above rather than
+        # re-deriving it with a second parser. A blank line only closes
+        # whatever block is open; everything else is paragraph continuation.
+        # A stray pipe in ordinary prose (`"ack"` | `"nack"`) never sets
+        # `active_table`, so it stays plain paragraph text, not a table row.
+        if not line.strip():
+            _flush_block()
+        elif heading is not None:
+            _flush_block()
+            blocks.append(line)
+        elif table_started_here:
+            # The header row already sits at the end of `current_block`, put
+            # there a line ago by the plain paragraph path below, because it
+            # was not yet known to start a table. Pull it out on its own.
+            if current_block:
+                header_line = current_block.pop()
+                _flush_block()
+                blocks.append(header_line)
+            blocks.append(line)
+        elif active_table:
+            _flush_block()
+            blocks.append(line)
+        elif item is not None:
+            _flush_block()
+            current_block.append(line)
+        else:
+            current_block.append(line)
 
         reference = _REFERENCE_LINK.match(line)
         if reference is not None:
@@ -334,6 +376,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
 
     if active_table:
         table_groups.append(active_table)
+    _flush_block()
     tables = tuple((len(group), tuple(group)) for group in table_groups)
     return _MarkdownShape(
         headings=tuple(headings),
@@ -341,7 +384,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
         tables=tables,
         lists=tuple(lists),
         links=tuple(links),
-        spans=tuple(_code_spans(" ".join(prose))),
+        spans=tuple(chain.from_iterable(_code_spans(block) for block in blocks)),
         unclosed_fence=closing_marker is not None,
     )
 

@@ -171,6 +171,56 @@ class ManualCodeSpanTests(unittest.TestCase):
         self.assertEqual(len(problems), len(self.checker.LOCALES))
         self.assertEqual({problem.kind for problem in problems}, {"lists"})
 
+    def test_a_mis_nested_span_in_one_paragraph_does_not_taint_later_ones(self):
+        # The stray backtick never finds a match within its own paragraph, so
+        # a naive whole-document scan would keep hunting past the blank line
+        # and pair it with the next opening backtick it finds, inventing a
+        # bogus span out of everything in between and losing the real spans
+        # entirely. Bounding extraction to one paragraph must confine the
+        # damage there: the later paragraph's real spans are still found, and
+        # a genuine drop in that paragraph is still reported, on its own.
+        english = (
+            "# Guide\n"
+            "\n"
+            "A stray backtick ` never closes in this paragraph.\n"
+            "\n"
+            "The `RenderCache` stores a `Representation`.\n"
+        )
+        mirror = (
+            "# Guide\n"
+            "\n"
+            "A stray backtick ` never closes in this paragraph.\n"
+            "\n"
+            "The `RenderCache` stores something.\n"
+        )
+
+        problems = self._one(english, mirror)
+        messages = self._span_messages(problems)
+
+        self.assertEqual(len(problems), len(self.checker.LOCALES))
+        self.assertEqual(len(messages), len(self.checker.LOCALES))
+        for message in messages:
+            self.assertIn("drops", message)
+            self.assertIn("`Representation`", message)
+            self.assertNotIn("stores a", message)
+            self.assertNotIn("never closes", message)
+
+    def test_a_span_wrapped_across_two_lines_of_one_paragraph_is_one_span(self):
+        # The delimiters land on different physical lines of the same
+        # paragraph, with no blank line, heading, table row, or list item
+        # boundary between them. They must still be read as one span with
+        # the line break collapsed to a single space, matching a mirror that
+        # happens to wrap the same content onto a single line.
+        english = (
+            "# Guide\n"
+            "\n"
+            "The `long identifier that\n"
+            "wraps` stays one span.\n"
+        )
+        mirror = "# Guide\n\nDer `long identifier that wraps` bleibt eine Spanne.\n"
+
+        self.assertEqual(self._one(english, mirror), [])
+
 
 if __name__ == "__main__":
     unittest.main()
