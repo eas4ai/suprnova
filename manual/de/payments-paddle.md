@@ -390,7 +390,7 @@ Die Methoden `extract_payload_ids`, `extract_payment_snapshot` und
 von Paddle, damit das Framework Mirror-Tabellen hydrieren kann.
 Kurze Zuordnung:
 
-| Webhook `event_type` | `NeutralEventKind` | Mirror-Effekt |
+| Webhook event_type | `NeutralEventKind` | Mirror-Effekt |
 |---|---|---|
 | `transaction.completed`, `transaction.paid` | `PaymentSucceeded` | Upsert von `payments_transactions` |
 | `transaction.payment_failed` | `PaymentFailed` | Upsert von `payments_transactions` (fehlgeschlagen) |
