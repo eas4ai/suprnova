@@ -22,6 +22,12 @@
 //! `runtime_is_bound_before_fallible_routes_and_reused_on_reentry` does, so
 //! it does not depend on the invoking shell.
 
+// Its own test binary. These tests bind the process-global Live runtime
+// and mount catalog, and a second binding in one process is rejected, so
+// this file may not be folded into `tests/live/main.rs`.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+
 use std::sync::{Arc, Mutex};
 
 use suprnova::live::LiveRuntime;

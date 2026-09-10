@@ -2,7 +2,13 @@
 //!
 //! `Server::run` binds the process-wide Live runtime, so this test owns its
 //! process; the in-process suite lives in `live_dogfood.rs`.
-use crate::live_dogfood_support;
+// Its own test binary. These tests bind the process-global Live runtime
+// and mount catalog, and a second binding in one process is rejected, so
+// this file may not be folded into `tests/live/main.rs`.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/live_dogfood_support/mod.rs"]
+mod live_dogfood_support;
 
 use std::sync::Arc;
 use std::time::Duration;

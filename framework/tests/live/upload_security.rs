@@ -1,5 +1,7 @@
 use std::sync::Once;
 
+use suprnova::Router;
+use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::crypto::{Crypt, EncryptionKey};
 use suprnova::live::testing::{
     inspect_deterministic_upload_handle_for_test, inspect_upload_mount_authority_for_test,
@@ -7,7 +9,6 @@ use suprnova::live::testing::{
     resolve_upload_mount_authority_for_test, select_upload_mount_for_test,
 };
 use suprnova::live::{LiveComponent, LiveRegistry, live};
-use suprnova::{App, Router};
 
 #[derive(LiveComponent)]
 #[live(
@@ -20,7 +21,7 @@ pub struct UploadSecurityComponent {
 
 #[test]
 fn deterministic_upload_handles_are_keyed_mount_bound_and_rotation_aware() {
-    init_runtime_dependencies();
+    let _guard = init_runtime_dependencies();
 
     let mut router = Router::new();
     register_live_mount_for_test::<UploadSecurityComponent>(&mut router, "/uploads-a", "first")
@@ -160,22 +161,35 @@ fn deterministic_upload_handles_are_keyed_mount_bound_and_rotation_aware() {
 #[live]
 impl UploadSecurityComponent {}
 
-fn init_runtime_dependencies() {
+/// Prepares crypto (once) and this test's own `LiveRegistry` binding (every
+/// call).
+///
+/// `App::singleton` writes to the process-global container shared by every
+/// other test file in this binary; `prepare_live_router_for_test` resolves
+/// through `App::resolve`, which checks the thread-local test container
+/// before the global one, so binding through `TestContainer::singleton`
+/// under a `TestContainer::fake()` guard keeps this file's registry from
+/// racing with (and losing to) any other test's own global binding. The
+/// guard must outlive every `prepare_live_router_for_test` call in the
+/// calling test, so the caller holds it.
+fn init_runtime_dependencies() -> TestContainerGuard {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         Crypt::init(EncryptionKey::generate());
-        App::singleton(
-            LiveRegistry::builder()
-                .register::<UploadSecurityComponent>()
-                .expect("register upload security component")
-                .build(),
-        );
     });
+    let guard = TestContainer::fake();
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .register::<UploadSecurityComponent>()
+            .expect("register upload security component")
+            .build(),
+    );
+    guard
 }
 
 #[test]
 fn upload_mount_selection_is_finalized_unique_and_server_owned() {
-    init_runtime_dependencies();
+    let _guard = init_runtime_dependencies();
 
     let mut unique = Router::new();
     register_live_mount_for_test::<UploadSecurityComponent>(&mut unique, "/uploads-a", "primary")
@@ -250,7 +264,7 @@ fn upload_mount_selection_is_finalized_unique_and_server_owned() {
 
 #[test]
 fn upload_authority_is_bound_to_one_finalized_mount_and_current_host_scope() {
-    init_runtime_dependencies();
+    let _guard = init_runtime_dependencies();
 
     let mut router = Router::new();
     register_live_mount_for_test::<UploadSecurityComponent>(&mut router, "/uploads-a", "first")

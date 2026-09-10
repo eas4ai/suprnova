@@ -1,3 +1,9 @@
+// Its own test binary. These tests bind the process-global Live runtime
+// and mount catalog, and a second binding in one process is rejected, so
+// this file may not be folded into `tests/live/main.rs`.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+
 use std::sync::{Arc, Mutex};
 
 use http_body_util::BodyExt;
@@ -524,14 +530,25 @@ async fn nested_list_validation_collapses_and_deduplicates_stable_model_paths() 
     );
 }
 
+/// The name libtest gives a sibling test in this same module, derived from
+/// `module_path!()` instead of a literal so it tracks whichever crate this
+/// file is compiled as. Folded under a parent module it is
+/// `crate_name::boot::name`; compiled as its own `[[test]]` crate root (as
+/// now) `module_path!()` is just the crate name and libtest reports the
+/// item as bare `name`, with no module prefix at all.
+fn sibling_test_filter(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 #[test]
 fn server_new_prepares_live_before_attempting_to_bind_a_socket() {
+    let filter =
+        sibling_test_filter("server_new_child_rejects_invalid_live_mount_before_socket_binding");
     let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
-        .args([
-            "--ignored",
-            "--exact",
-            "boot::server_new_child_rejects_invalid_live_mount_before_socket_binding",
-        ])
+        .args(["--ignored", "--exact", &filter])
         .output()
         .expect("run isolated Server::new lifecycle proof");
     assert!(

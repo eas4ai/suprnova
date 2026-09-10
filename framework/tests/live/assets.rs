@@ -1,5 +1,9 @@
 //! Suprnova serves the exact reviewed Live artifacts and emits typed bootstrap markup.
 
+// Its own test binary. It installs process-global Live state (the mount
+// catalog, and for assets the asset catalog OnceLock) that a second
+// installation in one process rejects.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -381,7 +385,12 @@ fn tag_order(html: &str, needles: &[&str]) {
 }
 
 fn shop_router(counter_twice: bool, options: LiveBootstrapOptions) -> Router {
-    App::singleton(
+    // Bind through the test container the caller already opened with
+    // `TestContainer::fake()`, not the process-global `App::singleton`: the
+    // global is shared by every concurrently running test in this binary,
+    // so a global write here would race with (and sometimes lose to)
+    // whichever other test last replaced it.
+    TestContainer::singleton(
         LiveRegistry::builder()
             .register::<BootstrapCounter>()
             .expect("register counter")
@@ -656,7 +665,9 @@ async fn bootstrap_fails_closed_on_repetition_and_late_mounts() {
     ensure_crypt();
     let _container = TestContainer::fake();
     App::init();
-    App::singleton(
+    // Bind through the test container, not the process-global `App::singleton`
+    // (see `shop_router`'s comment for why).
+    TestContainer::singleton(
         LiveRegistry::builder()
             .register::<BootstrapCounter>()
             .expect("register counter")
@@ -734,7 +745,9 @@ async fn a_document_without_islands_still_boots_only_the_core() {
     ensure_crypt();
     let _container = TestContainer::fake();
     App::init();
-    App::singleton(LiveRegistry::builder().build());
+    // Bind through the test container, not the process-global `App::singleton`
+    // (see `shop_router`'s comment for why).
+    TestContainer::singleton(LiveRegistry::builder().build());
     let router: Router = Router::new()
         .get("/empty", move |request: Request| async move {
             let mut document = LiveDocument::from_request(&request)
