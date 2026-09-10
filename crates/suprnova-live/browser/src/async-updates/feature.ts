@@ -625,29 +625,29 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       value.events.every((event) => {
         const cycle = event.cycle;
         const cycleKind: unknown = Reflect.get(cycle, "kind");
-        const maximumHops: unknown = Reflect.get(cycle, "maximumHops");
+        const maximum_hops: unknown = Reflect.get(cycle, "maximum_hops");
         const order: unknown = Reflect.get(event, "order");
         const source: unknown = Reflect.get(event, "source");
         return (
           OPERATION_NAME.test(event.name) &&
-          PAYLOAD_CONTRACT.test(event.payloadContract) &&
+          PAYLOAD_CONTRACT.test(event.payload_contract) &&
           source === "stream" &&
           order === "per_source_sequence" &&
           Number.isSafeInteger(event.version) &&
           event.version >= 1 &&
           event.version <= 65_535 &&
-          Number.isSafeInteger(event.maximumFanout) &&
-          event.maximumFanout >= event.targets.length &&
-          event.maximumFanout <= 256 &&
+          Number.isSafeInteger(event.maximum_fanout) &&
+          event.maximum_fanout >= event.targets.length &&
+          event.maximum_fanout <= 256 &&
           event.targets.length >= 1 &&
           event.targets.length <= MAX_EVENT_TARGETS &&
           new Set(event.targets).size === event.targets.length &&
           (cycleKind === "forbid_repeated_island" ||
             (cycleKind === "maximum_hops" &&
-              Number.isSafeInteger(maximumHops) &&
-              typeof maximumHops === "number" &&
-              maximumHops >= 1 &&
-              maximumHops <= 255))
+              Number.isSafeInteger(maximum_hops) &&
+              typeof maximum_hops === "number" &&
+              maximum_hops >= 1 &&
+              maximum_hops <= 255))
         );
       }) &&
       Number.isSafeInteger(value.expiresAt) &&

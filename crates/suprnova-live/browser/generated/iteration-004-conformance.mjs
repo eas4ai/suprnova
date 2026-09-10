@@ -315,7 +315,7 @@ function payload(value, membership2) {
       const target = string(fields["target"], "async_payload_unregistered");
       const event = membership2.events.find((candidate) => candidate.name === name);
       const eventPayload = fields["payload"] ?? null;
-      if (event === void 0 || !OPERATION_NAME.test(name) || !Number.isSafeInteger(event.maximumFanout) || event.maximumFanout < 1 || event.maximumFanout > 256 || event.version !== schemaVersion || !targetValid(target) || !event.targets.includes(target) || !schemaMatches(event.schema, eventPayload)) {
+      if (event === void 0 || !OPERATION_NAME.test(name) || !Number.isSafeInteger(event.maximum_fanout) || event.maximum_fanout < 1 || event.maximum_fanout > 256 || event.version !== schemaVersion || !targetValid(target) || !event.targets.includes(target) || !schemaMatches(event.schema, eventPayload)) {
         fail("async_payload_unregistered");
       }
       return Object.freeze({
@@ -2265,10 +2265,10 @@ function membership(signalName = "completion_percent") {
     events: Object.freeze([
       Object.freeze({
         cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-        maximumFanout: 1,
+        maximum_fanout: 1,
         name: "orders.updated",
         order: "per_source_sequence",
-        payloadContract: "orders.updated.payload",
+        payload_contract: "orders.updated.payload",
         schema: "json",
         source: "stream",
         targets: Object.freeze(["self"]),

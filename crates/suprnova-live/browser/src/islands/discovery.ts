@@ -928,8 +928,8 @@ export class DocumentRuntime {
               detail,
             });
           },
-          targets: (target, maximumFanout) =>
-            this.#registeredEventTargets(record, target, maximumFanout),
+          targets: (target, maximum_fanout) =>
+            this.#registeredEventTargets(record, target, maximum_fanout),
         }),
       captureAsyncStatusBaseline: () => {
         if (!current()) return;
@@ -1014,7 +1014,7 @@ export class DocumentRuntime {
   #registeredEventTargets(
     record: IslandRecord,
     target: string,
-    maximumFanout: number,
+    maximum_fanout: number,
   ): readonly GuardedRegisteredEventTarget[] | "fanout_exceeded" {
     const targets: GuardedRegisteredEventTarget[] = [];
     const guard = (
@@ -1060,7 +1060,7 @@ export class DocumentRuntime {
             ),
           );
         }
-        if (targets.length > maximumFanout) return "fanout_exceeded";
+        if (targets.length > maximum_fanout) return "fanout_exceeded";
       }
     } else if (target === "document") {
       targets.push(guard(this.#document, currentIsland(record)));
@@ -1073,7 +1073,7 @@ export class DocumentRuntime {
             guard(candidate.element, () => candidateCurrent() && candidate.metadata.slot === slot),
           );
         }
-        if (targets.length > maximumFanout) return "fanout_exceeded";
+        if (targets.length > maximum_fanout) return "fanout_exceeded";
       }
     } else if (target.startsWith("browser:")) {
       const window = this.#document.defaultView;

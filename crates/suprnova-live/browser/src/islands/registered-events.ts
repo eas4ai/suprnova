@@ -22,7 +22,7 @@ export interface RegisteredEventTargetResolver {
   event(type: string, detail: JsonValue): Event;
   targets(
     target: string,
-    maximumFanout: number,
+    maximum_fanout: number,
   ): readonly GuardedRegisteredEventTarget[] | "fanout_exceeded";
 }
 
@@ -228,30 +228,30 @@ function snapshotCycle(input: unknown): AsyncRegisteredEventContract["cycle"] | 
       ["kind", "forbid_repeated_island"],
     ]) as unknown as AsyncRegisteredEventContract["cycle"];
   }
-  const bounded = ownDataValues(input, ["kind", "maximumHops"]);
-  const maximumHops = bounded?.[1];
+  const bounded = ownDataValues(input, ["kind", "maximum_hops"]);
+  const maximum_hops = bounded?.[1];
   if (
     bounded?.[0] !== "maximum_hops" ||
-    typeof maximumHops !== "number" ||
-    !Number.isSafeInteger(maximumHops) ||
-    maximumHops < 1 ||
-    maximumHops > 255
+    typeof maximum_hops !== "number" ||
+    !Number.isSafeInteger(maximum_hops) ||
+    maximum_hops < 1 ||
+    maximum_hops > 255
   ) {
     return null;
   }
   return immutableRecord([
     ["kind", "maximum_hops"],
-    ["maximumHops", maximumHops],
+    ["maximum_hops", maximum_hops],
   ]) as unknown as AsyncRegisteredEventContract["cycle"];
 }
 
 function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
   const values = ownDataValues(input, [
     "cycle",
-    "maximumFanout",
+    "maximum_fanout",
     "name",
     "order",
-    "payloadContract",
+    "payload_contract",
     "schema",
     "source",
     "targets",
@@ -260,10 +260,10 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
   if (values === null) return null;
   const [
     cycleInput,
-    maximumFanout,
+    maximum_fanout,
     name,
     order,
-    payloadContract,
+    payload_contract,
     schema,
     source,
     targetsInput,
@@ -286,8 +286,8 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
     !Number.isSafeInteger(version) ||
     version < 1 ||
     version > 65_535 ||
-    typeof payloadContract !== "string" ||
-    !PAYLOAD_CONTRACT.test(payloadContract) ||
+    typeof payload_contract !== "string" ||
+    !PAYLOAD_CONTRACT.test(payload_contract) ||
     source !== "stream" ||
     order !== "per_source_sequence" ||
     (schema !== "json" &&
@@ -298,19 +298,19 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
       schema !== "f64" &&
       schema !== "string") ||
     new Set(targetValues).size !== targetValues.length ||
-    typeof maximumFanout !== "number" ||
-    !Number.isSafeInteger(maximumFanout) ||
-    maximumFanout < targetValues.length ||
-    maximumFanout > 256
+    typeof maximum_fanout !== "number" ||
+    !Number.isSafeInteger(maximum_fanout) ||
+    maximum_fanout < targetValues.length ||
+    maximum_fanout > 256
   ) {
     return null;
   }
   return immutableRecord([
     ["cycle", cycle],
-    ["maximumFanout", maximumFanout],
+    ["maximum_fanout", maximum_fanout],
     ["name", name],
     ["order", "per_source_sequence"],
-    ["payloadContract", payloadContract],
+    ["payload_contract", payload_contract],
     ["schema", schema],
     ["source", "stream"],
     ["targets", Object.freeze([...targetValues])],
@@ -414,16 +414,16 @@ export class RegisteredEventAuthority {
     const depth = authority.activeDepth.get(contract.name) ?? 0;
     if (
       (contract.cycle.kind === "forbid_repeated_island" && depth !== 0) ||
-      (contract.cycle.kind === "maximum_hops" && depth >= contract.cycle.maximumHops)
+      (contract.cycle.kind === "maximum_hops" && depth >= contract.cycle.maximum_hops)
     ) {
       return "rejected";
     }
-    const targets = authority.resolver.targets(candidate.target, contract.maximumFanout);
+    const targets = authority.resolver.targets(candidate.target, contract.maximum_fanout);
     if (!authority.resolver.current()) return "retired";
     if (this.#current.get(authority.owner) !== token) return "rejected";
     if (targets === "fanout_exceeded") return "fanout_exceeded";
     if (targets.length === 0) return "no_target";
-    if (targets.length > contract.maximumFanout) return "fanout_exceeded";
+    if (targets.length > contract.maximum_fanout) return "fanout_exceeded";
     authority.activeDepth.set(contract.name, depth + 1);
     let dispatched = 0;
     let skipped = 0;

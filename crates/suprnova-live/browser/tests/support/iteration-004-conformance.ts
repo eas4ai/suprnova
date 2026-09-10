@@ -255,10 +255,10 @@ function membership(signalName = "completion_percent"): AuthorizedLogicalSubscri
     events: Object.freeze([
       Object.freeze({
         cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-        maximumFanout: 1,
+        maximum_fanout: 1,
         name: "orders.updated",
         order: "per_source_sequence" as const,
-        payloadContract: "orders.updated.payload",
+        payload_contract: "orders.updated.payload",
         schema: "json" as const,
         source: "stream" as const,
         targets: Object.freeze(["self"]),

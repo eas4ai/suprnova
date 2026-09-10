@@ -219,15 +219,15 @@ function eventContract(value: unknown): AsyncRegisteredEventContract {
         ? Object.freeze({ kind: "forbid_repeated_island" as const })
         : Object.freeze({
             kind: "maximum_hops" as const,
-            maximumHops: integer(cycle["maximumHops"]),
+            maximum_hops: integer(cycle["maximum_hops"]),
           }),
-    // `maximumHops`, `maximumFanout`, and `payloadContract` are the registered
+    // `maximum_hops`, `maximum_fanout`, and `payload_contract` are the registered
     // event fields of the runtime's inherited descriptor contract; an absent
     // field is a foreign descriptor, never a default.
-    maximumFanout: integer(fields["maximumFanout"]),
+    maximum_fanout: integer(fields["maximum_fanout"]),
     name: text(fields["name"]),
     order: "per_source_sequence" as const,
-    payloadContract: text(fields["payloadContract"]),
+    payload_contract: text(fields["payload_contract"]),
     schema,
     source: "stream" as const,
     targets,

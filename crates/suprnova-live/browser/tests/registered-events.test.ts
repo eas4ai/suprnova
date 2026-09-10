@@ -12,10 +12,10 @@ function contract(
 ): AsyncRegisteredEventContract {
   return Object.freeze({
     cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-    maximumFanout: 1,
+    maximum_fanout: 1,
     name: "orders.updated",
     order: "per_source_sequence" as const,
-    payloadContract: "orders.updated.v1",
+    payload_contract: "orders.updated.v1",
     schema: "json" as const,
     source: "stream" as const,
     targets: Object.freeze(["self"]),
@@ -135,7 +135,7 @@ describe("core registered-event authority", () => {
     expect(() =>
       authority.replace(
         {},
-        registration([contract({ maximumFanout: 1, targets: ["self", "document"] })]),
+        registration([contract({ maximum_fanout: 1, targets: ["self", "document"] })]),
         resolver(target),
       ),
     ).toThrow("registered_event_authority_invalid");
@@ -447,7 +447,7 @@ describe("core registered-event authority", () => {
       },
     } as unknown as EventTarget;
     const second = { dispatchEvent: secondDispatch } as unknown as EventTarget;
-    const capability = authority.replace(owner, registration([contract({ maximumFanout: 2 })]), {
+    const capability = authority.replace(owner, registration([contract({ maximum_fanout: 2 })]), {
       ...resolver(first),
       targets: () => [guarded(first), guarded(second)],
     });
@@ -477,7 +477,7 @@ describe("core registered-event authority", () => {
       return true;
     });
     const secondDispatch = vi.fn(() => true);
-    const capability = authority.replace(owner, registration([contract({ maximumFanout: 2 })]), {
+    const capability = authority.replace(owner, registration([contract({ maximum_fanout: 2 })]), {
       current: () => true,
       event: (type) => ({ type }) as Event,
       targets: () =>

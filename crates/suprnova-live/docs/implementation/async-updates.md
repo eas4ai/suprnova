@@ -361,8 +361,8 @@ emit. A component with
 several streams gets no island-owned directive, because the root carries one,
 and subscribes each stream through the runtime's registered calls; nothing
 is chosen silently. The registered-event fields of the issued descriptor
-(`maximumHops`, `maximumFanout`, `payloadContract`) keep the camel-case names
-the runtime's iteration 004 descriptor contract fixed, unlike every other
-public JSON field; the framework emits them as the runtime reads them, the
-browser host fails closed when any is absent, and the naming is recorded for
-a future contract revision rather than changed under the runtime.
+(`maximum_hops`, `maximum_fanout`, `payload_contract`) use the same
+snake_case convention as every other public JSON field; descriptor schema
+version 2 retired the camel-case names the runtime's iteration 004 descriptor
+contract had fixed. The framework emits them as the runtime reads them, and
+the browser host fails closed when any is absent.

@@ -97,8 +97,8 @@ async fn issuance_returns_a_document_scoped_bearer_subscription() {
     assert_eq!(events[0]["source"], "stream");
     assert_eq!(events[0]["order"], "per_source_sequence");
     assert_eq!(events[0]["schema"], "json");
-    assert_eq!(events[0]["payloadContract"], "orders.updated");
-    assert_eq!(events[0]["maximumFanout"], 4);
+    assert_eq!(events[0]["payload_contract"], "orders.updated");
+    assert_eq!(events[0]["maximum_fanout"], 4);
     assert_eq!(
         events[0]["cycle"],
         json!({ "kind": "forbid_repeated_island" })
