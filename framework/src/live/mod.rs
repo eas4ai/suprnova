@@ -48,9 +48,10 @@ pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
 pub use config::{
     LedgerDriver, LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind,
 };
+pub(crate) use document::NestedSegmentIdentity;
 pub use document::{
     LiveDocument, LiveDocumentError, LiveDocumentErrorKind, LiveMount, LiveMountKind,
-    MountedIsland, StitchFailurePolicy, StitchSlotDescriptor,
+    LiveNestedSegment, MountedIsland, StitchFailurePolicy, StitchSlotDescriptor,
 };
 pub use registry::{
     ComponentContract, LiveRegistry, LiveRegistryBuilder, RegistryError, RegistryErrorKind,

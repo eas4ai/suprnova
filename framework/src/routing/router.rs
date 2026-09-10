@@ -599,6 +599,11 @@ pub struct Router {
     live_routes: HashMap<(Method, String), crate::live::context::LiveRouteMetadata>,
     /// Startup declarations consumed into the immutable Live mount catalog.
     live_mounts: Mutex<Option<Vec<crate::live::LiveMountRegistration>>>,
+    /// Every registered [`crate::live::LiveNestedSegment`] declaration's
+    /// identity binding, keyed by its own route pattern, checked at each
+    /// registration against every earlier one naming the same inner route.
+    /// See `crate::live::document::Router::try_live_nested_segment`.
+    live_nested_segments: HashMap<String, crate::live::NestedSegmentIdentity>,
     /// Every normalized application route pattern, independent of method.
     /// Live uses this startup-only ledger to reserve its namespace before
     /// mutating any method router.
@@ -636,6 +641,7 @@ impl Router {
             route_middleware: HashMap::new(),
             live_routes: HashMap::new(),
             live_mounts: Mutex::new(Some(Vec::new())),
+            live_nested_segments: HashMap::new(),
             registered_patterns: Vec::new(),
             render_cache_policies: crate::render_cache::registry::RenderCachePolicyTable::default(),
             live_installation_version: None,
@@ -720,6 +726,27 @@ impl Router {
             })?;
         declarations.push(registration);
         Ok(())
+    }
+
+    /// Records one [`crate::live::LiveNestedSegment`] declaration's identity
+    /// binding under its own route pattern, refusing a second declaration
+    /// for the same inner route whose identity binding disagrees with the
+    /// first - see `crate::live::document::Router::try_live_nested_segment`,
+    /// the only caller, for why this check exists and what it refuses.
+    pub(crate) fn register_live_nested_segment_entry(
+        &mut self,
+        route_pattern: String,
+        identity: crate::live::NestedSegmentIdentity,
+    ) -> Result<(), FrameworkError> {
+        match self.live_nested_segments.get(&route_pattern) {
+            Some(existing) if *existing != identity => Err(FrameworkError::internal(
+                "A nested cached segment was declared with a conflicting identity binding",
+            )),
+            _ => {
+                self.live_nested_segments.insert(route_pattern, identity);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn take_live_mount_entries(

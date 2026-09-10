@@ -102,15 +102,17 @@ where
 /// nested-composition check `build_composite_entry` runs before a real
 /// composite is ever stored (`stitch::refuse_unsafe_nesting`). `None` means
 /// the check would have allowed it; `Some(reason)` is the closed decline
-/// reason label ([`super::decline::LookupDeclineReason::as_str`]) the real
+/// reason label (`super::decline::LookupDeclineReason::as_str`) the real
 /// publish path would have declined with.
 ///
-/// Nothing in the current capture path can produce a [`Segment::Nested`]
-/// from a real render - there is no typed authoring surface for one yet -
-/// so this is how a test drives the check with a hand-built graph instead:
-/// the same shape [`rewrite_composite_for_test`] uses to reach a hit-time
-/// case a redeploy alone could otherwise produce, applied here to a
-/// publish-time one nothing can produce yet at all.
+/// `crate::live::LiveNestedSegment` is the typed way an author declares a
+/// nested segment, but nothing yet drives a real render through the
+/// body-cutting capture that would turn one into a stored `Segment::Nested`
+/// (a later task), so this remains how a test drives the publish-time check
+/// itself with a hand-built graph instead: the same shape
+/// [`rewrite_composite_for_test`] uses to reach a hit-time case a redeploy
+/// alone could otherwise produce, applied here to a publish-time one
+/// nothing can produce through a real render yet.
 ///
 /// # Panics
 ///
@@ -161,8 +163,8 @@ where
 /// freshness genuinely differs from an entry a real dispatch through this
 /// harness would ever produce (every route this harness registers is
 /// `PublicShellStitched`): [`nested_publish_check_for_test`] and
-/// [`refuse_unsafe_nesting`](super::stitch::refuse_unsafe_nesting) need a
-/// *stored*, decodable entry to compare against, and forging one that
+/// `stitch::refuse_unsafe_nesting` need a *stored*, decodable entry to
+/// compare against, and forging one that
 /// [`suprnova_live::render_cache::entry::decode`] will still accept needs
 /// this runtime's own key ring, which an external test cannot reach any
 /// other way.
