@@ -403,7 +403,7 @@ appelle directement `T::serialize` sur chaque élément. Cela
 attributs de modèle `hidden = ["password"]`, `visible = [...]`, et
 `appends = [...]`.
 
-Si votre modèle a des champs `hidden`, **ne** sérialisez **pas** la
+Si votre modèle a des champs hidden, **ne** sérialisez **pas** la
 collection via serde. Utilisez `to_array()` ou `to_json()` :
 
 ```rust
@@ -413,7 +413,7 @@ let body:  String            = users.to_json();
 
 Les deux méthodes routent à travers `Model::to_array()` pour chaque
 ligne, si bien que le pipeline de filtres par modèle s'applique - les
-champs `hidden` restent masqués, les listes blanches `visible` sont
+champs hidden restent masqués, les listes blanches visible sont
 imposées, et les `appends` pilotés par accesseur apparaissent.
 
 La même mise en garde s'applique à tout ce qui appelle
@@ -428,7 +428,7 @@ avant que la valeur n'atteigne un quelconque chemin de code serde.
 Pour des collections de types non-modèles (`Collection<MyDto>`,
 `Collection<String>`), le chemin serde est sans problème - le souci ne
 s'applique que quand `T` est une struct `#[suprnova::model]` avec des
-`hidden`/`visible`/`appends` déclarés.
+hidden/visible/appends déclarés.
 
 ## Emprunter vs consommer
 
@@ -621,7 +621,7 @@ Ce choix se répercute sur le reste de la surface :
 
 - **La sérialisation diverge au service de la correction.**
   `to_array` et `to_json` routent à travers `Model::to_array()` pour
-  que les `hidden`/`visible`/`appends` par modèle s'appliquent ; le
+  que les hidden/visible/appends par modèle s'appliquent ; le
   contournement par le `Serialize for Vec` générique de serde est
   documenté comme le [piège](#sérialisation-to-array-vs-serde) qu'il
   est. Le `toArray()` de Laravel fait le même routage ; nous devons

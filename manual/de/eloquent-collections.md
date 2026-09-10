@@ -19,7 +19,7 @@ wechselt.
 ## Inhaltsverzeichnis
 
 - [Woher Collections kommen](#woher-collections-kommen)
-- [Die zwei `impl`-Blöcke](#die-zwei-impl-blöcke)
+- [Die zwei impl-Blöcke](#die-zwei-impl-blöcke)
 - [Generische Oberfläche - funktioniert mit jedem `Collection<T>`](#generische-oberfläche-funktioniert-mit-jedem-collection-t)
 - [Modellbewusste Oberfläche - `Collection<M>`, wobei `M: Model`](#modellbewusste-oberfläche-collection-m-wobei-m-model)
 - [Eager Loading auf einer Collection](#eager-loading-auf-einer-collection)
@@ -62,7 +62,7 @@ let empty: Collection<User> = Collection::new();
 `Deserialize`, `PartialEq` und `IntoIterator` (sowohl per Wert als
 auch per `&`). Es ist `Send`, wenn `T: Send`.
 
-## Die zwei `impl`-Blöcke
+## Die zwei impl-Blöcke
 
 Die Methoden auf `Collection` teilen sich in zwei Familien, je nach
 Typparameter.

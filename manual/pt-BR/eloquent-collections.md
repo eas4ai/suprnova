@@ -6,7 +6,7 @@ terminal de carregamento de relação que produz mais de uma linha. É
 um wrapper fino em torno de `Vec<T>` que faz deref para `&[T]`, então
 todo método de slice já existente (`.len()`, `.iter()`, indexação,
 `.contains(&v)`) funciona sem alteração. Por cima está a superfície
-do Laravel: map, filter, pluck, group_by, sort_by, where_eq, sum, avg,
+do Laravel: `map`, `filter`, `pluck`, `group_by`, `sort_by`, `where_eq`, `sum`, `avg`,
 entre outros.
 
 Este capítulo é a referência independente da superfície de coleção.
