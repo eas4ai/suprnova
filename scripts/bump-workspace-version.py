@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Atomically bump workspace version metadata, internal path requirements,
-and the version references README.md carries in prose."""
+the first-party entries in every nested workspace's lockfile, and the
+version references README.md carries in prose."""
 
 from __future__ import annotations
 
@@ -447,6 +448,89 @@ def assert_all_versioned_readmes_listed(root: Path) -> None:
         )
 
 
+#: Directories a lockfile sweep never descends into: build output,
+#: installed packages, vendored upstream sources, and git's own metadata.
+#: None of them holds a lockfile this repository ships, and `target` alone
+#: can hold millions of files.
+LOCKFILE_SWEEP_PRUNED = frozenset({".git", "target", "node_modules", "reference"})
+
+_LOCKFILE_NAME = re.compile(r'^name = "(?P<name>[^"]+)"$')
+_LOCKFILE_VERSION = re.compile(r'^version = "[^"]*"$')
+
+
+def nested_lockfiles(root: Path) -> list[Path]:
+    """Every shipped `Cargo.lock` below the root, each its own workspace.
+
+    `crates/suprnova-live/fuzz`, `crates/suprnova-live/tests/fixtures/compile`
+    and `framework/tests/fixtures/testing-off-probe` resolve separately from
+    the root workspace, so each keeps a lockfile of its own, and each pins by
+    path the first-party crates it depends on - at the version those crates
+    carried when that lockfile was last written. The release refreshes the
+    root `Cargo.lock` with `cargo check --workspace` and nothing else, so the
+    first release after these workspaces arrived bumped every manifest, left
+    all three lockfiles at the previous version, and the full gate's
+    `cargo metadata --locked` refused the release commit.
+
+    Discovery rather than a list, for the reason `discover_tag_pinned_files`
+    gives: a fourth nested workspace must not depend on someone remembering
+    it. A lockfile git ignores never ships, and is filtered out exactly as
+    the tag sweep filters its files.
+    """
+    found: list[Path] = []
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = sorted(
+            name for name in subdirectories if name not in LOCKFILE_SWEEP_PRUNED
+        )
+        if "Cargo.lock" in files and Path(directory) != root:
+            found.append(Path(directory) / "Cargo.lock")
+    ignored = ignored_by_git(root, found)
+    return sorted(path for path in found if path not in ignored)
+
+
+def replace_lockfile_versions(
+    source: str, members: frozenset[str], version: str
+) -> str:
+    """Set every first-party path package in a `Cargo.lock` to `version`.
+
+    A `[[package]]` entry is rewritten only when its name is a root
+    workspace member and it carries no `source` - that is, cargo resolved it
+    by path. A registry crate that happens to share a first-party name keeps
+    its version, and so does the nested workspace's own member.
+
+    Every other byte is left as it was, which is exactly what
+    `cargo metadata --offline` writes when a path crate's version moves:
+    nothing references a path package's version except its own entry,
+    because a path crate is never locked at two versions at once.
+    """
+    lines = source.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        if lines[index].rstrip("\r\n") != "[[package]]":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("["):
+            end += 1
+        name: str | None = None
+        version_line: int | None = None
+        resolved_by_path = True
+        for position in range(index + 1, end):
+            text = lines[position].rstrip("\r\n")
+            match = _LOCKFILE_NAME.match(text)
+            if match:
+                name = match.group("name")
+            elif _LOCKFILE_VERSION.match(text):
+                version_line = position
+            elif text.startswith("source = "):
+                resolved_by_path = False
+        if name in members and resolved_by_path and version_line is not None:
+            original = lines[version_line]
+            ending = original[len(original.rstrip("\r\n")):]
+            lines[version_line] = f'version = "{version}"{ending}'
+        index = end
+    return "".join(lines)
+
+
 def inline_dependency(line: str, key: str) -> dict[str, object] | None:
     if not re.match(rf'^\s*{re.escape(key)}\s*=\s*\{{', line):
         return None
@@ -532,6 +616,29 @@ def verify(root: Path, version: str) -> list[PathRequirement]:
             + ", ".join(mismatched_requirements)
         )
 
+    members = frozenset(item["name"] for item in metadata["packages"])
+    stale_lockfiles: list[str] = []
+    for lockfile in nested_lockfiles(root):
+        packages = load_toml(lockfile).get("package", [])
+        if not isinstance(packages, list):
+            continue
+        for package in packages:
+            if (
+                isinstance(package, dict)
+                and package.get("name") in members
+                and "source" not in package
+                and package.get("version") != version
+            ):
+                stale_lockfiles.append(
+                    f"{lockfile.relative_to(root)}:{package['name']}="
+                    f"{package.get('version')}"
+                )
+    if stale_lockfiles:
+        raise ValueError(
+            "nested lockfiles pin a first-party package at another version: "
+            + ", ".join(stale_lockfiles)
+        )
+
     # The rewrite is idempotent at the target version, so "applying it
     # changes nothing" is exactly "this file already carries this version".
     assert_all_versioned_readmes_listed(root)
@@ -580,10 +687,15 @@ def bump(root: Path, version: str) -> list[Path]:
 
     assert_all_versioned_readmes_listed(root)
     tag_pinned = discover_tag_pinned_files(root)
+    lockfiles = nested_lockfiles(root)
+    members = frozenset(
+        package["name"] for package in cargo_metadata(root)["packages"]
+    )
     paths = {
         root / "Cargo.toml",
         *tag_pinned,
         *(item.manifest for item in requirements),
+        *lockfiles,
     }
     originals = {path: path.read_text(encoding="utf-8") for path in paths}
     updated = dict(originals)
@@ -600,6 +712,10 @@ def bump(root: Path, version: str) -> list[Path]:
     for requirement in requirements:
         updated[requirement.manifest] = replace_path_requirement(
             updated[requirement.manifest], requirement, version
+        )
+    for lockfile in lockfiles:
+        updated[lockfile] = replace_lockfile_versions(
+            updated[lockfile], members, version
         )
 
     try:

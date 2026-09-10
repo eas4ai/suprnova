@@ -221,6 +221,57 @@ echo "==> verifying workspace and internal path-dependency versions"
 python3 "$TMP_DIR/scripts/bump-workspace-version.py" \
     --root "$TMP_DIR" --verify "$NEW_VERSION"
 
+# Nested workspaces, checked independently of the bumper for the same reason
+# the tag sweep below is: `--verify` and the bump share one discovery, so a
+# lockfile that discovery cannot see would pass both. Each workspace below
+# the root resolves on its own and pins by path, in a lockfile of its own,
+# every first-party crate it depends on. One left at the old version is
+# refused by `cargo metadata --locked` in the full gate on the release
+# commit, which is how the first 2.0.0 attempt failed.
+echo "==> asserting every nested lockfile pins first-party crates at $NEW_VERSION"
+python3 - "$TMP_DIR" "$NEW_VERSION" <<'PY'
+import os
+from pathlib import Path
+import sys
+import tomllib
+
+root = Path(sys.argv[1]).resolve()
+release = sys.argv[2]
+workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
+members = {
+    tomllib.loads((root / member / "Cargo.toml").read_text())["package"]["name"]
+    for member in workspace["members"]
+}
+
+checked = 0
+stale = []
+for directory, subdirectories, files in os.walk(root):
+    subdirectories[:] = [
+        name
+        for name in subdirectories
+        if name not in {".git", "target", "node_modules", "reference"}
+    ]
+    if "Cargo.lock" not in files or Path(directory) == root:
+        continue
+    lockfile = Path(directory) / "Cargo.lock"
+    for package in tomllib.loads(lockfile.read_text()).get("package", []):
+        if package["name"] not in members or "source" in package:
+            continue
+        checked += 1
+        if package["version"] != release:
+            stale.append(
+                f"{lockfile.relative_to(root)}: {package['name']} {package['version']}"
+            )
+if stale:
+    raise SystemExit(
+        f"nested lockfiles still pin a version other than {release}:\n"
+        + "\n".join(stale)
+    )
+if checked == 0:
+    raise SystemExit("no nested lockfile pins a first-party crate, so this proved nothing")
+print(f"nested lockfiles: {checked} first-party path packages at {release}")
+PY
+
 # Coverage, not just execution. `--verify` asks the bumper whether it is
 # happy, using the same discovery the bump used - so a file class the
 # discovery does not scan passes both steps while staying stale. That is
