@@ -189,7 +189,10 @@ Quelques points clés pour l'écriture quotidienne de handlers :
 - **Implémentez `HttpError` sur vos types d'erreur de domaine.** Ils se convertiront automatiquement. Voir [Gestion des erreurs](errors.md).
 - **Ne vous fiez pas à la limite de panique.** Elle capture les vrais bugs et prévient les crashs de processus ; le code de bibliothèque devrait quand même retourner `Result`.
 - **L'ordre du middleware est important et est fixé en trois couches** - request-id le plus à l'extérieur, middleware globaux ensuite, middleware de route le plus à l'intérieur avant le handler.
-- **Les workers et handlers partagent l'amorçage.** Tout ce que vous enregistrez à l'amorçage est visible pour les deux.
+- **Les workers et handlers partagent `bootstrap`, pas `http_bootstrap`.**
+  Tout ce que vous enregistrez dans `bootstrap` est visible pour les deux ;
+  le middleware global et `Inertia::install` appartiennent à
+  `http_bootstrap` et ne s'exécutent que sur le serveur.
 
 ## Où réside chaque étape
 
