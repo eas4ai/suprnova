@@ -99,6 +99,7 @@
     - [Overview](payments.md)
     - [Stripe](payments-stripe.md)
     - [Paddle](payments-paddle.md)
+    - [NOWPayments](payments-nowpayments.md)
     - [Frontend](payments-frontend.md)
     - [Provider Guide](payments-provider-guide.md)
 - ## Frontend

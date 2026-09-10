@@ -57,8 +57,9 @@ pub struct WebhookEvent {
 /// the raw bytes plus the HTTP envelope the framework received.
 #[derive(Debug, Clone)]
 pub struct WebhookContext<'a> {
-    /// Raw request body. Verification implementations sign or HMAC over
-    /// these exact bytes - do not pre-normalise.
+    /// Raw request body, unchanged by the caller. Each provider's verifier
+    /// applies its own signing contract: exact bytes for signed envelopes,
+    /// or provider-specified canonical JSON for schemes such as NOWPayments.
     pub body: &'a [u8],
     /// Full inbound header map; verification reads provider-specific
     /// signature headers from here (e.g. `Stripe-Signature`).

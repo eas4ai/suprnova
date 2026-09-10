@@ -1,8 +1,8 @@
 # Payments
 
-Suprnova's payments surface is provider-neutral. You pick an adapter crate - Stripe, Paddle, or one you write yourself - register it at boot, and your domain code calls the same four core traits (plus an optional fifth for server-side capture) regardless of which provider is behind it. Mirror tables in your database are kept in sync by webhooks, so your domain code reads from your own DB rather than hitting the provider API for every query.
+Suprnova's payments surface is provider-neutral. Register an adapter at boot and call its supported operations through the common payment traits. Stripe and Paddle hydrate customer-linked mirror tables from webhooks. The NOWPayments invoice adapter records verified notifications in the audit log; applications reconcile their own orders using authenticated payment lookup.
 
-No feature is gated to a single provider. Stripe's direct-capture model and Paddle's Merchant-of-Record model both fit into the same trait contract. The only surface that differs is `Payment` (server-side capture), which is optional - Paddle doesn't need it, so Paddle doesn't implement it. Providers advertise their capability by overriding `PaymentProvider::as_payment()` to return `Some(&dyn Payment)`; callers query at runtime.
+Providers expose the same trait contract, but their capabilities differ. Unsupported operations return `PaymentError::NotSupported`. Server-side capture and promotions are optional capabilities, queried through `PaymentProvider::as_payment()` and `PaymentProvider::as_promotions()`.
 
 ## Why Suprnova diverges
 
@@ -162,6 +162,14 @@ PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
 Paddle is a Merchant of Record - it manages tax, dunning, and the full subscription lifecycle. It does not expose server-side capture, so `Payment` is not implemented. Calling `provider.as_payment()` returns `None`. Subscriptions are created indirectly: call `Checkout::start_session`, complete the Paddle widget, and the `SubscriptionCreated` webhook arrives to confirm the subscription ID.
+
+### NOWPayments
+
+The `suprnova-payments-nowpayments` adapter supports hosted one-off invoices and
+verified IPNs. It uses explicit unsupported-operation errors for customer and
+subscription operations. Customerless invoice events are audited without
+fabricating customer-linked transaction mirrors. See the
+[NOWPayments guide](payments-nowpayments.md) for configuration and reconciliation.
 
 ## The trait split
 

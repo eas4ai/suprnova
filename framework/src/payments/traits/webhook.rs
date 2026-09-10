@@ -47,10 +47,23 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// route calls [`Self::parse_event`] and dispatches downstream.
 #[async_trait]
 pub trait WebhookHandler: Send + Sync {
+    /// Whether payment events can hydrate customer-linked transaction mirrors.
+    ///
+    /// Providers without customer records may return `false`: verified events
+    /// are still persisted and deduplicated in the webhook audit log, including
+    /// refunds, but no transaction mirror is fabricated. Application-owned
+    /// orders must reconcile those events using authenticated provider state.
+    /// The default preserves transaction hydration for existing providers.
+    fn mirrors_payment_transactions(&self) -> bool {
+        true
+    }
+
     /// Verify the inbound webhook against the provider's signing scheme.
     /// Must reject (return [`super::super::PaymentError::WebhookSignature`])
-    /// on any tampering, replay outside the allowed window, or missing
-    /// signature header.
+    /// on tampering or a missing signature header. Providers with signed
+    /// delivery timestamps must also reject replay outside their allowed
+    /// window. Schemes without a signed timestamp rely on persisted event
+    /// deduplication and application reconciliation instead.
     ///
     /// Implementations that compare an HMAC / digest against a
     /// header-supplied signature MUST use [`constant_time_eq`] (or another

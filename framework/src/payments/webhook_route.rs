@@ -509,6 +509,9 @@ where
         | NeutralEventKind::PaymentDisputed
         | NeutralEventKind::InvoicePaid
         | NeutralEventKind::InvoiceFailed => {
+            if !provider.mirrors_payment_transactions() {
+                return Ok(());
+            }
             let Some(snapshot) = provider.try_extract_payment_snapshot(event)? else {
                 if matches!(
                     neutral,

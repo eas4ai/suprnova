@@ -1,0 +1,29 @@
+[package]
+name = "suprnova-payments-nowpayments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "NOWPayments invoice and IPN adapter for Suprnova"
+
+[dependencies]
+suprnova = { path = "../../framework", version = "1.3.7" }
+async-trait = "0.1"
+hmac = "0.13"
+sha2 = "0.11"
+http = "1.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+ryu-js = "1"
+url = "2"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+sea-orm-migration = "2.0"

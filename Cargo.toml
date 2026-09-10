@@ -8,6 +8,7 @@ members = [
     "crates/suprnova-web-push",
     "crates/suprnova-payments-stripe",
     "crates/suprnova-payments-paddle",
+    "crates/suprnova-payments-nowpayments",
     "crates/suprnova-magnetar",
     "crates/suprnova-live",
     "crates/suprnova-live/crates/suprnova-live-macro-fixture",
