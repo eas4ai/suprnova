@@ -90,9 +90,11 @@ pub fn register_http_stack() {
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 
-    // Session middleware (required for authentication)
+    // Session middleware (required for authentication). The config is
+    // cloned because the CSRF middleware below reads the same values, so
+    // the session cookie and the XSRF cookie cannot drift apart.
     let session_config = SessionConfig::from_env();
-    global_middleware!(SessionMiddleware::new(session_config));
+    global_middleware!(SessionMiddleware::new(session_config.clone()));
 
     // Locale detection - after SessionMiddleware, since its detection
     // chain checks the session first (then cookie, then Accept-Language).
@@ -183,7 +185,16 @@ pub fn register_http_stack() {
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Live
     // requests verify the browser's `Sec-Fetch-Site` proof on their own, so
     // ordinary routes keep token validation under the default policy.
-    global_middleware!(CsrfMiddleware::new());
+    //
+    // `with_session_config` copies the session cookie's `Secure`,
+    // `SameSite`, `Domain`, `Path` and lifetime onto the JS-readable
+    // `XSRF-TOKEN` cookie. Without it that cookie is always `Secure`, a
+    // browser refuses to store or return it over `http://localhost`, and
+    // the Inertia client (which echoes the cookie back in `X-XSRF-TOKEN`)
+    // has no token to send: with `SESSION_SECURE=false` set for local HTTP
+    // development, every state-changing visit is refused with a
+    // `419 CSRF token mismatch`.
+    global_middleware!(CsrfMiddleware::new().with_session_config(&session_config));
 
     // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
     // into the per-request task-local so `#[derive(Data)]` responses,

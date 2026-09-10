@@ -82,9 +82,13 @@ fn a_generated_application_is_live_ready() {
     let bootstrap = read(project.join("src/bootstrap.rs"));
     assert!(bootstrap.contains("crate::live::registry()"), "{bootstrap}");
     // Live verifies the browser's origin proof on its own; the scaffold keeps
-    // the default policy so ordinary routes keep token validation.
+    // the default policy so ordinary routes keep token validation. The XSRF
+    // cookie's attributes are taken from the session config, or it ships
+    // `Secure` and never comes back over local HTTP.
     assert!(
-        bootstrap.contains("global_middleware!(CsrfMiddleware::new());"),
+        bootstrap.contains(
+            "global_middleware!(CsrfMiddleware::new().with_session_config(&session_config));"
+        ),
         "{bootstrap}"
     );
     assert!(!bootstrap.contains("with_origin_policy"), "{bootstrap}");
