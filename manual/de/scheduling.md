@@ -892,7 +892,7 @@ als Workaround für Sites ohne Crontab-Zugriff ausgeliefert.
 In Suprnova ist der Daemon erstklassig. `schedule:work` läuft
 innerhalb einer Tokio-Runtime, die bereits langlebig ist, daher:
 
-- **Hintergrund-Tasks (`run_in_background`) lassen sich mit der Tick-Schleife kombinieren.** Laravel spawnt einen Kindprozess pro Hintergrund-Task; wir spawnen in ein JoinSet und lassen Abschlüsse beim nächsten Tick oder beim Shutdown zutage treten.
+- **Hintergrund-Tasks (`run_in_background`) lassen sich mit der Tick-Schleife kombinieren.** Laravel spawnt einen Kindprozess pro Hintergrund-Task; wir spawnen in ein `JoinSet` und lassen Abschlüsse beim nächsten Tick oder beim Shutdown zutage treten.
 - **Graceful Shutdown ist ein `tokio::select!`-Arm.** Ctrl-C / SIGTERM leert in-flight Hintergrund-Tasks vor dem Beenden; In-Process-Tasks schließen ihren aktuellen Aufruf ab.
 - **Dedup innerhalb derselben Minute ist In-Process-Zustand.** Ein `last_run_minute`-Atomic pro Task garantiert, dass ein einzelner Prozess einen minutenausgerichteten Task nicht doppelt feuern kann, selbst wenn die Schleife schnell tickt. PHP kann das nicht - jeder Cron-Tick ist ein frischer Prozess -, weshalb Laravel Dateisystem-Sperren als einzige Verteidigungslinie verwendet.
 
