@@ -188,7 +188,7 @@ let resp = Http::get("https://flaky.example.com/health")
 
 `retry_when` は、上のポリシーが本来行う各リトライの前に参照されるpredicateを登録します。すでにリトライ資格のある試行を拒否できますが、リトライを作り出すことはできません。特に、2xx、3xx、4xxレスポンスをリトライへ変えることはできず、`.retry_non_idempotent(...)` なしに `POST` または `PATCH` の受け取った5xxレスポンスをリトライ可能にすることもできません。`retry_when` は、素の `.retry()` で設定された `POST` や `PATCH` を含む、すべてのメソッドのトランスポートエラーによるリトライの前に参照されます。`.retry(...)` も `.retry_non_idempotent(...)` ポリシーもなければ、単独の `retry_when` には拒否するものが何もありません。
 
-predicateは `RetryContext { attempt, method, url, outcome }` を受け取ります。`outcome` は `RetryOutcome::TransportError`（レスポンスが到着する前に送信が失敗）または `RetryOutcome::Status(n)`（5xxレスポンス）です。これは `.retry(...)` がすでにリトライする二つの条件と同じです。
+predicateは `RetryContext { attempt, method, url, outcome }` を受け取ります。`outcome` は `RetryOutcome::TransportError`（レスポンスが到着する前に送信が失敗）または `RetryOutcome::Status(n)`（リトライ対象となる5xxレスポンス）です。
 
 ## レスポンスを読み取る
 
