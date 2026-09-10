@@ -298,6 +298,12 @@ O lado de dados retorna os próprios jobs tipados:
 - `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - o mesmo,
   com as substituições por push declaradas de cada job
 
+Todo `Queue::push`, `Queue::push_later`, `Queue::later`,
+`Queue::push_unique*`, e os dispatchers de chain/batch, todos
+convergem para o mesmo recorder. Veja [Filas](queues.md) para a
+semântica de `push_unique` sob o fake (ele sempre registra e relata
+"pushed").
+
 Somente `Queue::push_with` e `Queue::later_with` carregam um
 `EnvelopeOverrides`, portanto `pushed_with_overrides` registra
 `EnvelopeOverrides::default()` para todas as outras formas de push - um
@@ -313,12 +319,6 @@ produção aparece aqui sem nenhuma substituição. Use
 `pushed_with_overrides` diretamente para verificar qualquer outra coisa
 que o overlay carrega - `timeout`, `fail_on_timeout`, `max_tries`,
 `backoff`.
-
-Todo `Queue::push`, `Queue::push_later`, `Queue::later`,
-`Queue::push_unique*`, e os dispatchers de chain/batch, todos
-convergem para o mesmo recorder. Veja [Filas](queues.md) para a
-semântica de `push_unique` sob o fake (ele sempre registra e relata
-"pushed").
 
 ## Barramento - `bus::testing::install_fake()`
 
