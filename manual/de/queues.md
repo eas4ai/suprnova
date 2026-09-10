@@ -1812,8 +1812,8 @@ Paar kann in keiner Umgebung Bestand haben, der Push gibt unter
 
 ## Idempotenz ist der Vertrag des Workers mit Ihnen
 
-Redis-gestützte Queue-Treiber können das Ablehnen einer Nachricht
-nicht atomar machen - `XADD` und `XACK` sind getrennte Befehle. Ein
+Redis-gestützte Queue-Treiber können `nack` nicht atomar machen -
+`XADD` und `XACK` sind getrennte Befehle. Ein
 Absturz zwischen ihnen stellt die Nachricht über `XAUTOCLAIM` erneut
 zu. In-Memory- und Database-Treiber sind **Exactly-once-pro-Versuch**,
 aber die Worker-Schleife unterscheidet nicht zwischen Treibern, daher
