@@ -325,7 +325,10 @@ pub fn inertia_version() -> String {
 ///    resolver - a hash of the Vite build manifest - so the version
 ///    string tracks the built frontend rather than a literal that
 ///    someone has to remember to bump.
-/// 7. `CsrfMiddleware` - immediately after the session it depends on.
+/// 7. `CsrfMiddleware` - immediately after the session it depends on,
+///    and holding the same `SessionConfig` the session middleware got so
+///    the JS-readable `XSRF-TOKEN` cookie carries the session cookie's
+///    attributes rather than the CSRF constructor's own defaults.
 ///    `/api/ping`, `/api/welcome` and `/lang-demo` are excepted as
 ///    stateless demo endpoints with nothing ambient for a cross-site
 ///    POST to abuse. Every cookie-authenticated state change stays
@@ -339,7 +342,11 @@ pub fn register_http_stack() {
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(IncludeMiddleware);
 
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    // The session config is bound once and cloned because the CSRF
+    // middleware below reads the same values, so the session cookie and
+    // the XSRF cookie cannot drift apart.
+    let session_config = SessionConfig::from_env();
+    global_middleware!(SessionMiddleware::new(session_config.clone()));
 
     global_middleware!(
         LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
@@ -350,11 +357,23 @@ pub fn register_http_stack() {
 
     // Live requests verify the browser's `Sec-Fetch-Site` proof on their
     // own; every other state change keeps token validation.
-    global_middleware!(CsrfMiddleware::new().except(vec![
-        "/api/ping",
-        "/api/welcome",
-        "/lang-demo"
-    ]));
+    //
+    // `with_session_config` copies the session cookie's `Secure`,
+    // `SameSite`, `Domain`, `Path` and lifetime onto the JS-readable
+    // `XSRF-TOKEN` cookie. Without it that cookie keeps the CSRF
+    // constructor's own defaults, which include a hard-coded `Secure`:
+    // set `SESSION_SECURE=false` to serve this app over plain HTTP and
+    // the session cookie follows while the XSRF cookie does not, so the
+    // browser refuses to store or return it, the Inertia client (which
+    // echoes that cookie back in `X-XSRF-TOKEN`) has no token to send,
+    // and every state-changing visit is refused with a
+    // `419 CSRF token mismatch`. The same silent divergence applies to
+    // `SESSION_DOMAIN`, `SESSION_SAME_SITE` and `SESSION_LIFETIME`.
+    global_middleware!(
+        CsrfMiddleware::new()
+            .with_session_config(&session_config)
+            .except(vec!["/api/ping", "/api/welcome", "/lang-demo"])
+    );
 
     global_middleware!(FeatureMiddleware::new());
 }
