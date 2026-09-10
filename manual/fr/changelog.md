@@ -579,8 +579,9 @@ en premier.
   réarme, si bien qu'une panne produit un événement et non un par dispatch.
   `QUEUE_FAILOVER_CONNECTIONS` est requis quand ce driver est sélectionné, ne
   peut pas contenir `failover` lui-même, et fait échouer l'amorçage sur une
-  entrée inconnue plutôt que de retomber sur la mémoire, si bien qu'une faute
-  de frappe ne peut pas glisser un backend éphémère dans une chaîne durable.
+  entrée inconnue plutôt que de retomber sur la mémoire - ce repli restant
+  réservé à `QUEUE_DRIVER` lui-même -, si bien qu'une faute de frappe ne peut
+  pas glisser un backend éphémère dans une chaîne durable.
 - **API d'inspection de file.** `Queue::pending_jobs(queue)` / `delayed_jobs` /
   `reserved_jobs` listent les enveloppes réelles derrière les compteurs
   existants `pending_size`/`delayed_size`/`reserved_size`, sous forme de DTO
@@ -1850,7 +1851,7 @@ en premier.
 - **`Queue::push_unique` n'indique plus qu'un job en file a été omis.** La valeur de retour était calculée avec `matches!(outcome, Idempotent::Fresh(()))`, ce qui réduisait `Idempotent::FreshUnfenced` à `false` - le cas où l'enveloppe *avait* bien été poussée, mais où le bail de déduplication était perdu en plein push. Les appelants qui bifurquaient sur ce booléen se voyaient dire qu'un job sur le point de s'exécuter avait été supprimé comme doublon. Les trois issues sont maintenant matchées de façon exhaustive : un bail perdu renvoie `true` avec un `warn` nommant le job et sa clé unique, et seul un vrai doublon renvoie `false`. `push_unique_later` et `later_unique` partagent le chemin et sont corrigés avec lui.
 ### Modifié
 
-- **La base de parité passe à Laravel 13.25.0.** Les notes de version 13.23.0, 13.24.0 et 13.25.0 ont été retracées point par point jusqu'à la surface du framework. Tout ce qui atteignait un chemin de code Suprnova est soit corrigé dans cette version, soit indiqué dans [`parity.md`](parity.md) avec `not yet` ou `by design no`.
+- **La base de parité passe à Laravel 13.25.0.** Les notes de version 13.23.0, 13.24.0 et 13.25.0 ont été retracées point par point jusqu'à la surface du framework. Tout ce qui atteignait un chemin de code Suprnova est soit corrigé dans cette version, soit indiqué dans [`manual/parity.md`](parity.md) avec `not yet` ou `by design no`.
 
 ### Mise à niveau
 
@@ -1903,7 +1904,7 @@ Deux changements peuvent altérer une application en service sans aucune modific
 
 ### Modifié
 
-- **Suprnova a quitté l'organisation GitHub `entrepeneur4lyf` pour
+- **Suprnova a quitté l'organisation GitHub entrepeneur4lyf pour
   `eas4ai`.** Les URL du dépôt dans
   les métadonnées des paquets, la documentation, les exemples de dépendances et
   les modèles de scaffold utilisent désormais `github.com/eas4ai`. Les nouveaux
@@ -2408,7 +2409,7 @@ Torii a mis au jour huit défauts, tous corrigés dans le fork épinglé
   abandonne silencieusement pour MySQL - le correctif syntaxique
   aurait laissé cassé un build aux features par défaut.
 - **Une migration Torii échouée interrompait le processus au lieu de
-  renvoyer une erreur.** `SeaORMStorage::migrate` faisait un `unwrap`
+  renvoyer une erreur.** `SeaORMStorage::migrate` faisait un unwrap
   sur le migrateur et renvoyait `Ok(())` inconditionnellement, si bien
   que le mappage par `init_torii` de l'échec vers une `FrameworkError`
   était du code inatteignable.
@@ -2688,7 +2689,7 @@ Deux ajouts qui ne vous concernent que si vous choisissez d'y opter :
   construire son image (REL-01b).** Aucun des deux scaffolds ne
   déclarait `default-run`, si bien que les neuf wrappers CLI qui
   shellent vers `cargo run` échouaient sur un projet fraîchement créé.
-  Le Dockerfile généré avait cinq défauts indépendants - un `COPY` de
+  Le Dockerfile généré avait cinq défauts indépendants - un COPY de
   lockfile manquant, `npm ci` sans lock, une étape de cache qui ne
   construisait qu'un binaire factice pour l'un des deux binaires
   déclarés, un build frontend copié depuis un chemin que vite ne crée
@@ -3091,7 +3092,7 @@ déploiements non filtrés n'avaient besoin d'aucune migration.)*
   `CheckoutSessionState` (`Open` /
   `Complete { paid, payment_ref, amount_total }` / `Expired`). L'impl
   Stripe mappe `GET /v1/checkout/sessions/{id}` ; `payment_ref` porte
-  l'id `PaymentIntent` de la session pour la corrélation avec la
+  l'id PaymentIntent de la session pour la corrélation avec la
   table miroir. C'est la primitive de vérification côté serveur pour
   les pages de retour de redirection et les passes de réconciliation.
 - **Trait de capacité `Promotions`.** `create_promotion_code` émet un
@@ -3261,7 +3262,7 @@ déploiements non filtrés n'avaient besoin d'aucune migration.)*
   session.** Les writers, listers, et copiers du système de fichiers
   local résolvent et confinent leurs chemins une fois avant le
   premier I/O plutôt qu'une fois par chunk/élément, tandis que les
-  opérations `close`/`abort` activées atteignent toujours le backend
+  opérations close/`abort` activées atteignent toujours le backend
   pour le nettoyage. Le confinement de traversée et de symlink
   existant reste appliqué pour un système de fichiers de confiance ;
   les vérifications canonicalize-puis-open n'éliminent pas les
@@ -3486,14 +3487,14 @@ déploiements non filtrés n'avaient besoin d'aucune migration.)*
   seau est désormais au-dessus de sa limite (`i64::MAX` signifie
   illimité).
 - **Helper de comparaison en temps constant** - `constant_time_eq(a, b)`
-  (adossé à `subtle`) pour la vérification de signature de webhook ;
+  (adossé à subtle) pour la vérification de signature de webhook ;
   la doc de `WebhookHandler::verify` impose désormais une comparaison
   de digest en temps constant.
 - **Client Inertia vers 3.4.0** - les scaffolds Svelte/React/Vue
   épinglent désormais `@inertiajs/{svelte,react,vue3}` à `^3.4.0`
   (depuis `3.1.1`), récupérant les modes `router.poll`, `usePoll`
   dynamique, `Inertia.once`, le correctif d'annulation
-  d'`InfiniteScroll`, et l'`onSuccess` de `Form` attendu. Le serveur
+  d'InfiniteScroll, et l'`onSuccess` de Form attendu. Le serveur
   émet déjà l'objet de page et la surface d'en-têtes complets de la
   3.4.0 (once-props, la famille de scroll prepend/deep-merge,
   `matchPropsOn`, props rescued/shared), il s'agit donc d'un bump de
@@ -3605,7 +3606,7 @@ déploiements non filtrés n'avaient besoin d'aucune migration.)*
 
 - **L'eager loading imbriqué** (`with(["posts.comments"])`) est
   désormais un nombre constant de requêtes - le segment final se
-  charge en une seule requête `IN` groupée à travers tous les
+  charge en une seule requête IN groupée à travers tous les
   parents plutôt qu'une requête par parent (N+1).
 - **`where_has`/`where_doesnt_have`** qualifient les colonnes de la
   closure avec la table cible, si bien qu'une colonne présente à la
@@ -3729,7 +3730,7 @@ et le CLI s'installe avec `cargo install --git`.
 - Helpers de redirection - `Redirect::to`, `Redirect::back`,
   `Redirect::route`, `Redirect::with_input`, `Redirect::with_errors`,
   `with_flash`
-- Trait `Middleware` avec des couches globale, de groupe, et par route
+- Trait Middleware avec des couches globale, de groupe, et par route
 - Middleware intégrés - CORS, CSRF, session, timeout de requête, ID de
   requête, throttle / throttle de connexion, vérification d'URL
   signée, authenticated, email-verified, brute-force
@@ -3775,10 +3776,10 @@ et le CLI s'installe avec `cargo install --git`.
 - Eager loading via `.with(...)`, `.with_count(...)`,
   `.load_missing(...)`
 - Moteur EXISTS corrélé pour `has` / `where_has`
-- Seize événements de cycle de vie (`retrieving`, `retrieved`,
-  `creating`, `created`, `updating`, `updated`, `saving`, `saved`,
-  `deleting`, `deleted`, `restoring`, `restored`, `force-deleting`,
-  `force-deleted`, `replicating`, `trashed`)
+- Seize événements de cycle de vie (retrieving, retrieved,
+  creating, created, updating, updated, saving, saved,
+  deleting, deleted, restoring, restored, force-deleting,
+  force-deleted, replicating, `trashed`)
 - Trait `Observer<M>` avec auto-enregistrement par méthode via
   inventory
 - Scopes locaux via `#[scopes(M)]`, scopes globaux via `GlobalScope`
@@ -3872,7 +3873,7 @@ et le CLI s'installe avec `cargo install --git`.
 - Protocole d'enveloppe JSON, presence join/leave/here, TTL de
   presence configurable avec récupération après crash
 - Pont `Broadcastable` vers `EventDispatcher`
-- Battement de cœur close-on-no-pong avec vidage `WS_TASKS`
+- Battement de cœur close-on-no-pong avec vidage WS_TASKS
   configurable
 - Middleware WebSocket par route
 - Défauts plus sûrs de 1 MiB / 64 KiB + factory `WsConfig::generous()`
@@ -3888,13 +3889,13 @@ et le CLI s'installe avec `cargo install --git`.
   `suprnova-web-push`)
 - Validation de subject VAPID, parsing de retry-after, plafond de
   corps de rejet à 8 KiB
-- Trait `Notifiable` pour le typage de destinataire
+- Trait Notifiable pour le typage de destinataire
 
 #### Événements
 
 - Dispatcher d'événements typé - `EventFacade::dispatch`,
   `EventFacade::listen<E, L>`, `EventFacade::forget`
-- Événements `saving`/`updating` annulables (renvoient
+- Événements saving/updating annulables (renvoient
   `EventResult::cancel`)
 - Écouteurs queueable
 
