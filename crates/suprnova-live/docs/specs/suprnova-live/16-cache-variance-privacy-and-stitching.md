@@ -206,8 +206,11 @@ have an identity and a stored version that no including document owns, so
 one stored copy is included from several documents and invalidated once
 rather than once per including route: it is named, not recursed into. The
 graph's segment list gains a recursive variant, `Segment::Nested { key:
-RenderKey, version: u64, assembled_len: u32 }`, that carries the three
-typed facts needed to reason about the inner segment without fetching it.
+RenderKey, version: u64, assembled_len: u32, on_failure: SlotFailurePolicy }`.
+The first three are the typed facts needed to reason about the inner segment
+without fetching it; the fourth is the policy the including graph declares for
+this segment, which SHALL be stored on the segment itself, because it is a
+per-segment decision that has nowhere else to live.
 Carrying `assembled_len` in the naming variant preserves the safety property
 assembly already relies on: the exact assembled length of a nested graph
 SHALL be computable from the typed facts of every level before any byte is
@@ -326,7 +329,8 @@ prose.
 
 - 2026-09-09 -- Recorded the nested cached segment mechanism ahead of code:
   naming through a recursive `Segment::Nested { key: RenderKey, version: u64,
-  assembled_len: u32 }` variant rather than a byte-recursive graph,
+  assembled_len: u32, on_failure: SlotFailurePolicy }` variant rather than a
+  byte-recursive graph,
   `MAX_NESTING_DEPTH` (3) and `MAX_NESTED_SEGMENTS` (16) as the new bounds
   beside the existing `MAX_SEGMENTS`, depth and cycle enforced at publication and
   again at assembly because an inner segment may be republished under an

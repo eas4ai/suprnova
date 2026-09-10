@@ -82,7 +82,8 @@ Acceptance criteria:
   provisional safe metadata, and a structural validator that is never replayed
   as the final assembled HTTP validator.
 - A Composite entry's segment list MAY name an inner cached segment through
-  a `Nested` variant carrying its key, stored version, and assembled length;
+  a `Nested` variant carrying its key, stored version, assembled length, and
+the failure policy its including graph declares for it;
   the inner segment itself is stored as an ordinary entry under its own key,
   owned by no including document.
 - Hop-by-hop, per-connection, transient tracing, and unsafe per-request headers
@@ -254,9 +255,10 @@ UX flow:
   storage note ahead of code, matching the mechanism decided in
   `16-cache-variance-privacy-and-stitching.md` and
   `18-cache-coherence-and-rebuilding.md`: a Composite entry's segment list gains
-  a `Nested` variant naming an inner entry by key, version, and assembled
-  length, and a generation hint is a transient channel message that is never
-  stored as a representation, recorded under Complete and Composite
+  a `Nested` variant naming an inner entry by key, version, assembled length
+  and declared failure policy, and a generation hint is a transient channel
+  message that is never stored as a representation, recorded under Complete
+  and Composite
   representation models and Provider-backed L0 and L1 storage.
 - 2026-09-09 -- Delivered the application build id: `#[suprnova::main]`'s
   expansion calls `suprnova::boot::set_default_build_id` with the
