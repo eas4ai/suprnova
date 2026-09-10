@@ -137,7 +137,7 @@ Deux choses à remarquer :
   `DATABASE_URL` défini.
 - **`main` n'imprime pas les erreurs.** `dispatch_argv_with_init`
   possède tout le stderr visible par l'utilisateur - elle fait un
-  `eprintln` du message d'erreur du handler (sauf si l'erreur est
+  eprintln du message d'erreur du handler (sauf si l'erreur est
   silencieuse, comme un échec d'analyse clap que clap a déjà imprimé)
   et imprime la sortie help / version / erreur d'analyse propre à
   clap. `main` est une pure traduction `Result → ExitCode` ; ajouter

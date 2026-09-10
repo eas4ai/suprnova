@@ -133,7 +133,7 @@ Duas coisas a notar:
   etapa - então `console --help` funciona em um checkout novo que
   ainda não tem `DATABASE_URL` definida.
 - **`main` não imprime erros.** `dispatch_argv_with_init` possui todo
-  o stderr voltado ao usuário - ela faz `eprintln` da mensagem de erro
+  o stderr voltado ao usuário - ela faz eprintln da mensagem de erro
   do handler (a menos que o erro seja silencioso, como uma falha de
   parse do clap que o próprio clap já imprimiu) e imprime a própria
   saída de help / version / parse-error do clap. `main` é tradução
