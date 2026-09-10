@@ -1,7 +1,7 @@
 # Suprnova Live -- 16 Cache Variance, Privacy, and Stitching
 
 Status: Normative design specification
-Last revised: 2026-09-09
+Last revised: 2026-09-10
 
 ## Scope
 
@@ -222,6 +222,23 @@ actual version and length SHALL be compared against what the graph named,
 and a mismatch SHALL resolve through the declared policy below rather than
 a silent substitution.
 
+An identity-bound inner segment's re-mount SHALL bind the including
+document's own resolved path, because that path SHALL be embedded in the
+signed snapshot the re-mount produces; the inner segment's actual assembled
+length therefore depends on the byte length of whichever including
+document's path is currently naming it. `assembled_len` is a single fact
+stored on one graph's own segment, so one inner entry named from two
+including documents whose resolved paths differ in length cannot match
+both. The version and length check above is what keeps this safe: a
+mismatch is caught and resolved through the segment's declared policy
+exactly as any other mismatch is, never served as a wrong or substituted
+document. What is lost is sharing, silently, unless the declaration surface
+that names a nested segment also makes this constraint visible where an
+author declares one, which is why `LiveNestedSegment::identity_bound`
+requires the including route's own literal path up front rather than
+discovering the mismatch later as a resolution failure that reads like a
+bug.
+
 Ownership SHALL be acyclic and bounded in depth by `MAX_NESTING_DEPTH`,
 initially 3, where depth is the length of the ownership chain and an unnested
 composite is depth 1; the existing `MAX_SEGMENTS`, 193, continues to bound
@@ -327,6 +344,20 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-10 -- Recorded the length-stability constraint on a shared
+  identity-bound nested segment: its re-mount binds the including
+  document's own resolved path, embedded in the signed snapshot, so its
+  actual assembled length depends on that path's byte length and one
+  stored `assembled_len` cannot match two includers whose paths differ in
+  length; the version and length check keeps this safe (a resolution
+  failure through the declared policy, never a wrong document), and the
+  loss is silently reduced sharing rather than a fault, recorded under
+  Segment boundaries and composition safety beside the `assembled_len`
+  rule. Also refused publishing a composite naming a `PrivateCached` inner
+  segment: it can never be reauthorized from a named reference and would
+  always fail closed as `unauthorized`, so a composition that can never
+  resolve is refused at publish rather than stored, the same reason
+  narrowing itself is enforced at publish, recorded beside the same rule.
 - 2026-09-09 -- Recorded the nested cached segment mechanism ahead of code:
   naming through a recursive `Segment::Nested { key: RenderKey, version: u64,
   assembled_len: u32, on_failure: SlotFailurePolicy }` variant rather than a
