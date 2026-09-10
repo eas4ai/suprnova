@@ -223,7 +223,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` valida credenciais pelo guard stateful padrão e seu `UserProvider` configurado; este é o caminho usado pelo scaffold full-stack gerado. A redefinição de senha é compatível com usuários já verificados por meio de um provedor explicitamente habilitado para redefinição, como `EloquentUserProvider`. Instale o Magnetar quando a redefinição precisar funcionar como primeira comprovação atômica da caixa de e-mail. `Auth::password()`, `BruteForce`, chaves de acesso, links mágicos, OAuth, sessões com token ao portador e o gerenciamento de sessões do Magnetar requerem o mecanismo Magnetar instalado. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
+`Auth::attempt` valida credenciais pelo guard stateful padrão e seu `UserProvider` configurado; este é o caminho usado pelo scaffold full-stack gerado. A redefinição de senha é compatível com usuários já verificados por meio de um provedor explicitamente habilitado para redefinição, como `EloquentUserProvider`. Instale o Magnetar quando a redefinição precisar funcionar como primeira comprovação atômica da caixa de e-mail. `Auth::password()`, `BruteForce`, chaves de acesso, links mágicos, OAuth, sessões com token ao portador e o gerenciamento de sessões do Magnetar requerem o mecanismo Magnetar instalado. A verificação de email e a facade de compatibilidade `TwoFactor` continuam pertencentes ao framework. Veja [Autenticação](authentication.md), [Fluxos de autenticação](auth-flows.md) e [OAuth e login sem senha](oauth.md).
 
 ### Migrações
 
@@ -516,4 +516,4 @@ Coisas que o Laravel tem que o Suprnova não tem (ainda):
 - [Início rápido](quickstart.md) - construa um pequeno app em 5 minutos
 - [Roteamento](routing.md) - o próximo capítulo natural daqui
 
-Ou vá para qualquer lugar via [`documentação.md`](documentation.md).
+Ou vá para qualquer lugar via [`documentation.md`](documentation.md).

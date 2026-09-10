@@ -180,7 +180,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` は、デフォルトのステートフルガードとその設定済みの `UserProvider` を通じて認証情報を検証します。これは生成されたフルスタックスキャフォルドが使う経路です。 パスワードリセットでは、`EloquentUserProvider` など、リセット機能が明示されたプロバイダーを介して検証済みユーザーをサポートします。リセットを最初のメールボックスのアトミックな証明として使用する必要がある場合は、Magnetar をインストールしてください。`Auth::password()`、`BruteForce`、パスキー、マジックリンク、OAuth、Bearer セッション、Magnetar のセッション管理には、インストール済みの Magnetar エンジンが必要です。 See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
+`Auth::attempt` は、デフォルトのステートフルガードとその設定済みの `UserProvider` を通じて認証情報を検証します。これは生成されたフルスタックスキャフォルドが使う経路です。 パスワードリセットでは、`EloquentUserProvider` など、リセット機能が明示されたプロバイダーを介して検証済みユーザーをサポートします。リセットを最初のメールボックスのアトミックな証明として使用する必要がある場合は、Magnetar をインストールしてください。`Auth::password()`、`BruteForce`、パスキー、マジックリンク、OAuth、Bearer セッション、Magnetar のセッション管理には、インストール済みの Magnetar エンジンが必要です。 メール確認と互換性のための `TwoFactor` ファサードは、引き続きフレームワーク所有です。[認証](authentication.md)、[認証フロー](auth-flows.md)、および [OAuthとパスワードレスログイン](oauth.md) を参照してください。
 
 ### マイグレーション
 
@@ -250,7 +250,7 @@ Queue::later(
 ).await?;
 ```
 
-ワーカーは `cargo run -- queue:work` で実行されます。ドライバーには、`memory` と `sync`（プロセス内、テスト用）、`database`、`redis`、`null` があります。バッチ、チェーン、ユニークジョブ、リトライ、バックオフ、ミドルウェア、失敗したジョブストアもすべて揃っています。[キュー](queues.md)を参照してください。
+ワーカーは `cargo run -- queue:work` で実行されます。ドライバーには、memory と sync（プロセス内、テスト用）、database、redis、null があります。バッチ、チェーン、ユニークジョブ、リトライ、バックオフ、ミドルウェア、失敗したジョブストアもすべて揃っています。[キュー](queues.md)を参照してください。
 
 スケジューリングは `Task` トレイトとプロジェクトごとのスケジューラーバイナリを使用します。
 
