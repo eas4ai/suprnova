@@ -1091,7 +1091,7 @@ pub struct User {
 
 ### `HasOne<R>` と `BelongsTo<R>`
 
-両方向の1対1です。`HasOne` は親側に存在し、`R::query().filter(<fk>,<self.id>).first()` を呼びます。`BelongsTo` は子側に存在し、`self` からFKを読み取り、それから `R::query().filter(<owner_key>, <fk_value>).first()` を呼びます。
+両方向の1対1です。`HasOne` は親側に存在し、`R::query().filter(<fk>, <self.id>).first()` を呼びます。`BelongsTo` は子側に存在し、`self` からFKを読み取り、それから `R::query().filter(<owner_key>, <fk_value>).first()` を呼びます。
 
 ```rust
 #[model(table = "users", relations = {
@@ -1558,7 +1558,7 @@ INTEGERカラムに対するSUMは、キャッシュの中で `f64` として収
 
 `User::with_where_posts(|q| q.filter("published", true))` は、`filter_in(<fk>, parent_ids)` のINクエリが発行される**前**に、内側の `Builder<Post>` にクロージャを適用します。そのため、マッチする子の行だけがキャッシュに到達します。マクロは、宣言されたリレーションごとに、型付けされた `with_where_<rel>` という静的なヘルパーを1つ発行するため、クロージャの引数の型は、メソッドのシグネチャから推論されます。
 
-ジェネリックな `with_where(("posts", |q: Builder<Post>| q.filter("published",true)))` も、それでも利用できます - リレーション名が実行時に計算される場合、あるいは、すでに `Builder<User>` を持っていて述語を付け加えたい場合に便利です。述語は `Box<dyn Any>` を経由し、Rustはリレーション名だけから型を推論できないため、クロージャの上でターゲットの型に名前を付けることが必要です。（Rustのorphanルールは、マクロが `Builder<User>` に直接型付けされたメソッドを追加することを禁じているため、型付けされた短縮形は、モデルの上でだけ提供されます - `User::with_where_<rel>` - ビルダー連鎖のメソッドとしてではありません。）
+ジェネリックな `with_where(("posts", |q: Builder<Post>| q.filter("published", true)))` も、それでも利用できます - リレーション名が実行時に計算される場合、あるいは、すでに `Builder<User>` を持っていて述語を付け加えたい場合に便利です。述語は `Box<dyn Any>` を経由し、Rustはリレーション名だけから型を推論できないため、クロージャの上でターゲットの型に名前を付けることが必要です。（Rustのorphanルールは、マクロが `Builder<User>` に直接型付けされたメソッドを追加することを禁じているため、型付けされた短縮形は、モデルの上でだけ提供されます - `User::with_where_<rel>` - ビルダー連鎖のメソッドとしてではありません。）
 
 多態的な種類については、述語は関連テーブルのクエリに対して実行されます - ピボットの走査に対してではありません。
 
@@ -1820,7 +1820,7 @@ while let Some(row) = stream.next().await {
 }
 ```
 
-`lazy()` は `LazyCollection<M>` を返します - 行ごとに `Result<M,FrameworkError>` を生成する `Send` なストリームのラッパーです。バックプレッシャーは自然に働きます: 遅い消費者は `await` の地点で待機し、次のバッチは、メモリ上のバッファが空になったときにだけ取得されます。
+`lazy()` は `LazyCollection<M>` を返します - 行ごとに `Result<M, FrameworkError>` を生成する `Send` なストリームのラッパーです。バックプレッシャーは自然に働きます: 遅い消費者は `await` の地点で待機し、次のバッチは、メモリ上のバッファが空になったときにだけ取得されます。
 
 `lazy()` は、デフォルトサイズ1000行のPKカーソルを介してバッチ処理します。バッチサイズは `lazy_by_id(500)` で上書きしてください。`cursor()` はLaravelの名前であり、`lazy()` のゼロコストなエイリアスです。
 
@@ -2245,7 +2245,7 @@ pub struct Comment {
 }
 ```
 
-commentが作成、保存、更新、削除された後、そのpostの `updated_at` が更新されます。`UPDATE posts SET updated_at = ? WHERE id = ?` 1回であり、`SELECT` はありません。これは子だけが変更されたときにも、`post.updated_at` に紐づくキャッシュキーが正直なままであるために必要なものです。
+commentが作成、保存、更新、削除された後、そのpostの `updated_at` が更新されます。`UPDATE posts SET updated_at = ? WHERE id = ?` 1回であり、SELECT はありません。これは子だけが変更されたときにも、`post.updated_at` に紐づくキャッシュキーが正直なままであるために必要なものです。
 
 `touches` 内のすべての名前は、同じ `relations = { ... }` ブロックで宣言された `BelongsTo` リレーションでなければなりません。解決しない名前や、別種のリレーションへ解決される名前は、最初の保存時の驚きではなくコンパイルエラーになります。多態の（`MorphTo`）オーナーはまだtouchできません。
 
@@ -2255,7 +2255,7 @@ touchは、それをトリガーした書き込みと同じexecutorで実行さ�
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelの `touchOwners` は各親モデルをロードして再帰するため、commentの保存はpost自身のオーナーも更新し、各親の `saved` イベントを発火します。Suprnovaはリレーションレジストリを通じて親を解決し、カラムを直接書き込みます。touchされたリレーションごとに1ステートメントであり、hydrateはありません。したがってカスケードは1階層だけで、親イベントは発火しません。これはtouchされたリレーションごとに `SELECT` を発行しない保存とのトレードオフです。祖父母の更新またはイベントが必要な場合はオブザーバーを使ってください。
+Laravelの `touchOwners` は各親モデルをロードして再帰するため、commentの保存はpost自身のオーナーも更新し、各親の `saved` イベントを発火します。Suprnovaはリレーションレジストリを通じて親を解決し、カラムを直接書き込みます。touchされたリレーションごとに1ステートメントであり、hydrateはありません。したがってカスケードは1階層だけで、親イベントは発火しません。これはtouchされたリレーションごとに SELECT を発行しない保存とのトレードオフです。祖父母の更新またはイベントが必要な場合はオブザーバーを使ってください。
 
 ソフトデリートされた子に対する `restore()` は、そのオーナーをtouchしません。Laravelの `restore` は `save` を経由しますが、Suprnovaのものは直接の `UPDATE deleted_at = NULL` です。
 
@@ -2305,7 +2305,7 @@ Laravelの `touchOwners` は各親モデルをロードして再帰するため�
 
 ライフサイクルイベントにフックする方法は、2つあります:
 
-1. **素のリスナー** - 望む各イベントについて、`EventFacade::listen::<Created,_>(Arc::new(MyListener))` を呼びます。イベントごとに1つのimplです。これが基盤となる仕組みであり、オブザーバーはその上に乗っています。
+1. **素のリスナー** - 望む各イベントについて、`EventFacade::listen::<Created, _>(Arc::new(MyListener))` を呼びます。イベントごとに1つのimplです。これが基盤となる仕組みであり、オブザーバーはその上に乗っています。
 
 2. **オブザーバー** - すべての16個のフックを、1つのトレイトの下に束ねます。マクロは、ユーザーがどのメソッドをオーバーライドしたかを見て、まさにそれらだけを登録します。フックの集合が自明でない場合は、これが推奨される経路です。
 
@@ -2492,7 +2492,7 @@ suprnova model:prune --model=ExpiredSession   # 1つのモデルへ絞り込む
 suprnova model:prune --pretend                # ドライラン。削除されるはずのものをログに記録する
 ```
 
-プログラムからは、ランナーは `suprnova::eloquent::{prune_all, prune_all_dry,prune_one}` にあります。
+プログラムからは、ランナーは `suprnova::eloquent::{prune_all, prune_all_dry, prune_one}` にあります。
 
 ### プルーニングフック
 
@@ -2884,7 +2884,7 @@ let rows = DB::affecting_statement(
 
 これらのエスケープハッチは、控えめに使ってください - 型付けされたビルダーは、コンパイル時により多くのエラーを捕まえ、ビジネスロジックの中でよりすっきりと読めます。しかし、それらが必要なときは、ここにあります。
 
-**集計カラムの落とし穴。** `SELECT COUNT(*) AS n FROM t` のような型を持たない集計は、ビルダーの `.count()` ヘルパーを通じては機能しますが、SQLite上での生の `DB::select` の行からは、サイレントに脱落することがあります - 基盤となる `JsonValue::from_query_result` はsqlxのカラムごとの型情報をたどりますが、裸の集計はそれを何も運びません。集計を伴う生のselectの経路が必要な場合は、式に型付けされたコンテキストを与えてください: `CAST(...AS BIGINT)` というラッパーを使うか、裏側で `query_one` + `try_get` を使う、型付けされた `DB::table(...).count()` / `.max(...)` ヘルパーでカラムを読み取ってください。
+**集計カラムの落とし穴。** `SELECT COUNT(*) AS n FROM t` のような型を持たない集計は、ビルダーの `.count()` ヘルパーを通じては機能しますが、SQLite上での生の `DB::select` の行からは、サイレントに脱落することがあります - 基盤となる `JsonValue::from_query_result` はsqlxのカラムごとの型情報をたどりますが、裸の集計はそれを何も運びません。集計を伴う生のselectの経路が必要な場合は、式に型付けされたコンテキストを与えてください: `CAST(... AS BIGINT)` というラッパーを使うか、裏側で `query_one` + `try_get` を使う、型付けされた `DB::table(...).count()` / `.max(...)` ヘルパーでカラムを読み取ってください。
 
 ## リレーション存在 + 手軽な近道
 

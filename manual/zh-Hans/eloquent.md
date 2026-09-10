@@ -2220,7 +2220,7 @@ let err = user.fill(attrs! { age: "not a number" }).unwrap_err();
 
 数值的放宽转换不是一个类型错误：一个 JSON 整数，正常就能解码进一个 `f64` 字段。
 
-> 在 v0.8.0 之前，一个格式错误的值会被静默替换成这个字段的 `Default`，并且这次调用会返回 `Ok` - `fill(attrs!{ age: "abc" })` 会把 `age` 设成 `0`，并报告成功。如果您依赖过这种强转，请在调用 `fill` 之前先做验证或转换。
+> 在 v0.8.0 之前，一个格式错误的值会被静默替换成这个字段的 `Default`，并且这次调用会返回 `Ok` - `fill(attrs!{ age: "abc" })` 会让 `age = 0`，并报告成功。如果您依赖过这种强转，请在调用 `fill` 之前先做验证或转换。
 
 ### Hidden / visible
 
@@ -2281,7 +2281,7 @@ pub struct Comment {
 }
 ```
 
-在创建、保存、更新或删除 comment 后，它的 post 的 `updated_at` 会提升 - 一条 `UPDATE posts SET updated_at = ? WHERE id = ?`，无 `SELECT`。这正是一个挂在 `post.updated_at` 上的缓存键在只有子项变化时保持诚实所需的行为。
+在创建、保存、更新或删除 comment 后，它的 post 的 `updated_at` 会提升 - 一条 `UPDATE posts SET updated_at = ? WHERE id = ?`，无 SELECT。这正是一个挂在 `post.updated_at` 上的缓存键在只有子项变化时保持诚实所需的行为。
 
 `touches` 中的每个名称，都必须是同一个 `relations = { ... }` 块中声明的 `BelongsTo` 关系。无法解析的名称，或者解析为其他关系种类的名称，都会是编译错误，而不是第一次保存时的意外。多态（`MorphTo`）所有者尚不可 touch。
 
@@ -2291,7 +2291,7 @@ touch 在触发它的写入使用的同一执行器上运行，所以在 `DB::tr
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 的 `touchOwners` 会加载每个父模型并递归，所以一次 comment 保存也会提升 post 自己的所有者，并触发每个父项的 `saved` 事件。Suprnova 通过关系注册表解析父项并直接写入该列 - 每个被 touch 的关系一条语句，不水合。因此级联只有一层深，且不会触发父项事件。这是一次保存不为每个被 touch 的关系发出一条 `SELECT` 所作的取舍。需要提升祖父项或需要事件时，请使用观察者。
+Laravel 的 `touchOwners` 会加载每个父模型并递归，所以一次 comment 保存也会提升 post 自己的所有者，并触发每个父项的 `saved` 事件。Suprnova 通过关系注册表解析父项并直接写入该列 - 每个被 touch 的关系一条语句，不水合。因此级联只有一层深，且不会触发父项事件。这是一次保存不为每个被 touch 的关系发出一条 SELECT 所作的取舍。需要提升祖父项或需要事件时，请使用观察者。
 
 对一个软删除子项的 `restore()` 不会 touch 其所有者。Laravel 的 `restore` 会经过 `save`；Suprnova 的则是直接的 `UPDATE deleted_at = NULL`。
 

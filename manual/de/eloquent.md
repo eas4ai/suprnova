@@ -2995,7 +2995,7 @@ pub struct Comment {
 }
 ```
 
-Nachdem ein Kommentar erstellt, gespeichert, aktualisiert oder gelöscht wurde, wird das `updated_at` seines Beitrags erhöht - ein `UPDATE posts SET updated_at = ? WHERE id = ?`, kein `SELECT`. Genau das braucht ein an `post.updated_at` hängender Cache-Schlüssel, um korrekt zu bleiben, wenn sich nur ein untergeordnetes Modell geändert hat.
+Nachdem ein Kommentar erstellt, gespeichert, aktualisiert oder gelöscht wurde, wird das `updated_at` seines Beitrags erhöht - ein `UPDATE posts SET updated_at = ? WHERE id = ?`, kein SELECT. Genau das braucht ein an `post.updated_at` hängender Cache-Schlüssel, um korrekt zu bleiben, wenn sich nur ein untergeordnetes Modell geändert hat.
 
 Jeder Name in `touches` muss eine `BelongsTo`-Relation sein, die im selben Block `relations = { ... }` deklariert ist. Ein Name, der sich nicht auflösen lässt oder zu einer anderen Relationsart auflöst, ist ein Kompilierungsfehler statt einer Überraschung beim ersten Speichern. Polymorphe (`MorphTo`) übergeordnete Modelle können noch nicht berührt werden.
 
@@ -3005,7 +3005,7 @@ Das Berühren läuft auf demselben Executor wie der auslösende Schreibvorgang; 
 
 ### Warum Suprnova abweicht
 
-Laravels `touchOwners` lädt jedes übergeordnete Modell und steigt rekursiv auf, sodass das Speichern eines Kommentars auch die eigenen übergeordneten Modelle des Beitrags aktualisiert und das `saved`-Event jedes übergeordneten Modells auslöst. Suprnova löst das übergeordnete Modell über das Relationsregister auf und schreibt die Spalte direkt - eine Anweisung pro berührter Relation, keine Hydratisierung. Die Kaskade ist daher nur eine Ebene tief und löst keine Events auf übergeordneten Modellen aus. Das ist der Preis für ein Speichern, das pro berührter Relation keinen `SELECT` ausführt. Verwenden Sie einen Observer, wenn Sie die Aktualisierung des Großelternmodells oder das Event benötigen.
+Laravels `touchOwners` lädt jedes übergeordnete Modell und steigt rekursiv auf, sodass das Speichern eines Kommentars auch die eigenen übergeordneten Modelle des Beitrags aktualisiert und das `saved`-Event jedes übergeordneten Modells auslöst. Suprnova löst das übergeordnete Modell über das Relationsregister auf und schreibt die Spalte direkt - eine Anweisung pro berührter Relation, keine Hydratisierung. Die Kaskade ist daher nur eine Ebene tief und löst keine Events auf übergeordneten Modellen aus. Das ist der Preis für ein Speichern, das pro berührter Relation keinen SELECT ausführt. Verwenden Sie einen Observer, wenn Sie die Aktualisierung des Großelternmodells oder das Event benötigen.
 
 `restore()` eines soft-gelöschten untergeordneten Modells berührt seine übergeordneten Modelle nicht. Laravels `restore` läuft über `save`; Suprnovas ist ein direktes `UPDATE deleted_at = NULL`.
 

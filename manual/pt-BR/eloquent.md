@@ -2196,7 +2196,7 @@ GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 ```
 
 A paginação por cursor **substitui** qualquer `ORDER BY` já
-existente no builder - uma ordem `PK ASC` estável é necessária para
+existente no builder - uma ordem PK ASC estável é necessária para
 que `gt(boundary)` corte deterministicamente.
 
 **Formato JSON:**
@@ -2377,7 +2377,7 @@ Todos os sete pontos de entrada **rejeitam `.with(...)`
 antecipadamente**, de forma explícita, com um
 `FrameworkError::internal`. O clone entre batches do Builder
 descarta o plano de eager-load com tipo erased (seu predicado
-`Box<dyn Any>` não é clonável sem afrouxar a API pública), então
+`dyn Any` boxeado não é clonável sem afrouxar a API pública), então
 respeitar o plano seria inconsistente silenciosamente entre batches.
 Reaplique `.with(...)` dentro da closure por chunk quando
 necessário - o `Collection<M>` de cada batch compõe com
