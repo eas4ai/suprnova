@@ -148,11 +148,18 @@ sans être consommé.
 
 ### Configuration de la réinitialisation de mot de passe et du verrouillage
 
-`BruteForce` nécessite le moteur de mots de passe Magnetar installé. La réinitialisation du mot de passe privilégie ce moteur, mais `EloquentUserProvider<M>` prend en charge la réinitialisation pour les utilisateurs déjà vérifiés lorsque `M` implémente `MustVerifyEmail + CanResetPassword`. Les utilisateurs non vérifiés ne reçoivent aucun lien de réinitialisation fourni par le fournisseur. Installez Magnetar pour utiliser la réinitialisation comme première preuve atomique de la boîte aux lettres.
+`BruteForce` nécessite le moteur de mots de passe Magnetar installé. La réinitialisation du mot de passe privilégie ce moteur, mais une application reposant sur un fournisseur peut réinitialiser les utilisateurs déjà vérifiés sans installer Magnetar lorsque son `UserProvider` prend explicitement en charge la réinitialisation. `EloquentUserProvider<M>` opte automatiquement lorsque `M` implémente `MustVerifyEmail + CanResetPassword`. Les utilisateurs non vérifiés ne reçoivent aucun lien de réinitialisation fourni par le fournisseur. Installez Magnetar pour utiliser la réinitialisation comme première preuve atomique de la boîte aux lettres.
 
-La réinitialisation de mot de passe normalise une adresse inconnue en `Ok(())` seulement après réussite des vérifications de limiteur d'abus, de configuration mail, de moteur et de stockage. Les chemins compte connu/inconnu peuvent encore différer dans les échecs et dans le temps d'exécution.
+`MagnetarConfig::lockout_config` accepte un
+`magnetar::password::lockout::LockoutConfig`. La politique par défaut
+active le verrouillage après cinq tentatives échouées pendant 15
+minutes, conserve les journaux d'audit pendant sept jours, et échoue
+de façon fermée lors d'une panne du backend de verrouillage.
 
-de révocation de session ou de remember.
+La réinitialisation de mot de passe normalise une adresse inconnue en `Ok(())` seulement après réussite des vérifications de limiteur d'abus, de configuration mail, de moteur et de stockage. Les chemins compte connu/inconnu peuvent encore différer dans les échecs et dans le temps d'exécution. La complétion Magnetar utilise le
+stockage atomique de première preuve d'e-mail. La complétion de repli
+via le fournisseur retourne un `PasswordResetOutcome` avec un état
+explicite de révocation de session ou de remember.
 
 ### Enregistrer les migrations 2FA
 
@@ -249,7 +256,11 @@ vérification. L'événement porte l'id utilisateur du fournisseur.
 
 ### Le point de terminaison resend (anti-énumération)
 
-`resend` ne prend que l'e-mail - la façade recherche l'utilisateur via le fournisseur actif et, quand un compte est enregistré, produit un token et envoie le mail. Une adresse inconnue est normalisée en `Ok(())` seulement après les mêmes vérifications en amont ; les échecs de stockage ou de distribution continuent de remonter en `Err`, et le temps d'exécution n'est pas égalisé :
+`resend` ne prend que l'e-mail - la façade recherche l'utilisateur via le fournisseur actif et, quand un compte est enregistré, produit un token et envoie le mail. Une adresse inconnue est normalisée en
+`Ok(())`. `EmailVerification::resend` normalise de même un résultat de
+fournisseur inconnu en `Ok(())` ; les échecs de stockage ou de
+distribution continuent de remonter en `Err`, et le temps d'exécution
+n'est pas égalisé :
 ```rust
 
 use std::collections::HashMap;
