@@ -393,6 +393,12 @@ impl AsyncReferenceAuthority {
             .range(observed.saturating_add(1)..)
             .map(|(_, envelope)| envelope.clone())
             .collect::<Vec<_>>();
+        let events = claims
+            .events()
+            .as_slice()
+            .iter()
+            .map(event_contract_json)
+            .collect::<Vec<_>>();
         Ok(json!({
             "proof": if replay.is_empty() { "authoritative_no_tail" } else { "complete_replay" },
             "replay": replay,
@@ -406,7 +412,7 @@ impl AsyncReferenceAuthority {
                     "origin": "http://127.0.0.1:4174",
                     "transport": "sse"
                 },
-                "events": [],
+                "events": events,
                 "expires_at": expires_at,
                 "fallback_poll": {
                     "initial": "wait",
@@ -698,6 +704,57 @@ fn parse_position(position: &AsyncReferencePosition) -> Result<u64, &'static str
         .sequence
         .parse::<u64>()
         .map_err(|_| "sequence_invalid")
+}
+
+/// Projects one registered event contract onto the browser adapter shape.
+///
+/// Mirrors `framework`'s `IssuedView::new` exactly, so this reference host cross-checks
+/// that projection instead of leaving the descriptor's registered events unverified.
+fn event_contract_json(event: &SubscriptionEventContract) -> Value {
+    json!({
+        "cycle": match event.cycle() {
+            EventCyclePolicy::ForbidRepeatedIsland => json!({ "kind": "forbid_repeated_island" }),
+            EventCyclePolicy::MaximumHops(hops) => {
+                json!({ "kind": "maximum_hops", "maximum_hops": hops.get() })
+            }
+        },
+        "maximum_fanout": event.maximum_fanout().get(),
+        "name": event.name().as_str(),
+        "order": "per_source_sequence",
+        "payload_contract": event.payload_contract().as_str(),
+        "schema": schema_name(event.schema()),
+        "source": "stream",
+        "targets": event
+            .targets()
+            .as_slice()
+            .iter()
+            .map(target_name)
+            .collect::<Vec<_>>(),
+        "version": event.version(),
+    })
+}
+
+fn schema_name(schema: BrowserPayloadSchema) -> &'static str {
+    match schema {
+        BrowserPayloadSchema::Json => "json",
+        BrowserPayloadSchema::Null => "null",
+        BrowserPayloadSchema::Boolean => "boolean",
+        BrowserPayloadSchema::I64 => "i64",
+        BrowserPayloadSchema::U64 => "u64",
+        BrowserPayloadSchema::F64 => "f64",
+        BrowserPayloadSchema::String => "string",
+    }
+}
+
+fn target_name(target: &EventTarget) -> String {
+    match target {
+        EventTarget::SelfIsland => "self".to_owned(),
+        EventTarget::Parent => "parent".to_owned(),
+        EventTarget::Child => "child".to_owned(),
+        EventTarget::NamedIsland(slot) => format!("named_island:{}", slot.as_str()),
+        EventTarget::Document => "document".to_owned(),
+        EventTarget::Browser(listener) => format!("browser:{}", listener.as_str()),
+    }
 }
 
 fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static str> {
