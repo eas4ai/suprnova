@@ -1,6 +1,8 @@
 //! Real Suprnova routes for Live subscriptions, SSE, WebSocket, and fallback polling.
 use crate::live_async_support;
 
+use std::collections::BTreeSet;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -8,6 +10,7 @@ use hyper::{Method, StatusCode};
 use live_async_support::*;
 use serde_json::{Value, json};
 use suprnova::live::{CanonicalValue, LiveEventTarget, LiveStreams};
+use suprnova_live::conformance::{FixtureVersion, fixture_directory};
 
 fn now_ms() -> u64 {
     u64::try_from(
@@ -97,13 +100,45 @@ async fn issuance_returns_a_document_scoped_bearer_subscription() {
     assert_eq!(events[0]["source"], "stream");
     assert_eq!(events[0]["order"], "per_source_sequence");
     assert_eq!(events[0]["schema"], "json");
-    assert_eq!(events[0]["payloadContract"], "orders.updated");
-    assert_eq!(events[0]["maximumFanout"], 4);
+    assert_eq!(events[0]["payload_contract"], "orders.updated");
+    assert_eq!(events[0]["maximum_fanout"], 4);
     assert_eq!(
         events[0]["cycle"],
         json!({ "kind": "forbid_repeated_island" })
     );
     assert_eq!(events[0]["targets"], json!(["self", "document"]));
+
+    // Cross-checks the live-issued registered-event descriptor's field names against the
+    // reviewed conformance fixture, so a future casing regression in `IssuedView::new` (the
+    // one site that projects a registered event contract onto browser-visible JSON) fails
+    // here rather than only in a hand-read diff.
+    let descriptor_fixture: Value = serde_json::from_slice(
+        &fs::read(fixture_directory(FixtureVersion::V4).join("async-envelope.json"))
+            .expect("descriptor fixture is readable"),
+    )
+    .expect("descriptor fixture is valid JSON");
+    let well_formed = descriptor_fixture["descriptor_cases"]
+        .as_array()
+        .expect("descriptor_cases is an array")
+        .iter()
+        .find(|case| case["id"] == "well-formed-registered-event")
+        .expect("well-formed descriptor fixture case exists");
+    let fixture_event_keys: BTreeSet<&str> = well_formed["subscription"]["events"][0]
+        .as_object()
+        .expect("fixture event is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let real_event_keys: BTreeSet<&str> = events[0]
+        .as_object()
+        .expect("real event is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        real_event_keys, fixture_event_keys,
+        "the live-issued registered event must use exactly the reviewed fixture's field names"
+    );
 
     assert_eq!(subscription["fallback_poll"]["interval_ms"], 30_000);
     assert_eq!(subscription["fallback_poll"]["initial"], "wait");

@@ -72,9 +72,9 @@ pub use http::{
 pub use key::{RenderKey, RenderKeyDimensions, RenderKeyInput};
 pub use lease::{FencedLeaseCoordinator, LeaseAttempt, LeaseStore, MemoryLeaseStore};
 pub use policy::{
-    CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, PolicyPatch,
-    QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
-    ResponseSignals, SharedCachePolicy, StorageLayers,
+    CoherenceMode, DeclineReason, Eligibility, FailurePolicy, FreshnessPolicy, NegotiatedPolicy,
+    PolicyPatch, QueryPolicy, QueryUnknown, RenderCachePolicy, RenderCachePolicyBuilder,
+    RepresentationClass, ResponseSignals, SharedCachePolicy, StorageLayers,
 };
 pub use singleflight::{
     LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildAdmission, RebuildCoordinator,

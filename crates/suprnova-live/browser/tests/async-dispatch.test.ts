@@ -26,10 +26,10 @@ function eventContract(
 ): AsyncRegisteredEventContract {
   return Object.freeze({
     cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-    maximumFanout: 1,
+    maximum_fanout: 1,
     name: "orders.updated",
     order: "per_source_sequence" as const,
-    payloadContract: "orders.updated.v1",
+    payload_contract: "orders.updated.v1",
     schema: "json" as const,
     source: "stream" as const,
     targets: Object.freeze(["self"]),
@@ -295,7 +295,7 @@ describe("closed asynchronous presentation dispatcher", () => {
     expect(corePort(owner, () => fanoutCapability).dispatch(registeredEvent)).toBe("rejected");
 
     const scopeMembership = authorization({
-      events: Object.freeze([eventContract({ maximumFanout: 2, targets: ["self", "document"] })]),
+      events: Object.freeze([eventContract({ maximum_fanout: 2, targets: ["self", "document"] })]),
     });
     const wrongScope = envelope(
       {
@@ -403,7 +403,7 @@ describe("closed asynchronous presentation dispatcher", () => {
       owner,
       Object.freeze({
         descriptorBinding: "signed-binding-v1",
-        events: Object.freeze([eventContract({ maximumFanout: 2 })]),
+        events: Object.freeze([eventContract({ maximum_fanout: 2 })]),
       }),
       {
         current: () => true,
@@ -420,7 +420,7 @@ describe("closed asynchronous presentation dispatcher", () => {
     });
     const lifecycle = vi.fn();
     const subscription = new AsyncSubscription(
-      authorization({ events: Object.freeze([eventContract({ maximumFanout: 2 })]) }),
+      authorization({ events: Object.freeze([eventContract({ maximum_fanout: 2 })]) }),
       new AsyncDispatcher(port, () => capability),
       { now: () => 1_000 },
       undefined,

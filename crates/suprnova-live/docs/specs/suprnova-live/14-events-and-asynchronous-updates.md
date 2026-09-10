@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-09-08
+Last revised: 2026-09-09
 
 ## Scope
 
@@ -99,10 +99,7 @@ the conformance fixtures with their manifest digests, framework issuance, and
 the browser host move together, and a generated contract, never a second
 handwritten schema, SHALL mirror the names into TypeScript. Iteration 004
 browser evidence SHALL be regenerated against the new descriptor under its
-existing unqualified label rather than relabelled. Until iteration 006 delivers
-this, the descriptor carries `maximumHops`, `maximumFanout`, and
-`payloadContract`, the names the iteration 004 browser runtime contract fixed,
-while every other public JSON field of the protocol is `snake_case`.
+existing unqualified label rather than relabelled.
 
 ### Push-triggered refresh and presentation
 
@@ -629,6 +626,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Delivered the descriptor casing rename: the registered-event
+  fields are `maximum_hops`, `maximum_fanout` and `payload_contract`,
+  `DESCRIPTOR_SCHEMA_VERSION` is 2 so a descriptor at version 1 is refused
+  rather than read as absent fields, and
+  `browser/src/generated/descriptor-contract.ts` is generated from the proven
+  conformance fixture rather than handwritten. The caveat naming the camel-case
+  names as current is removed, recorded under Registered-event descriptor field
+  casing.
 - 2026-09-08 -- Promoted `registered-event-descriptor-casing.md` from
   `iterations/next/` into iteration 006: the issued subscription descriptor's
   registered-event fields become `maximum_hops`, `maximum_fanout`, and

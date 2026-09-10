@@ -134,10 +134,6 @@ actually depends on needs to be declared, with two mechanisms:
   rather than being silently ignored.
 - **Variance dimensions**, added one at a time with `.vary(dimension)`:
   - `VarianceDimension::Locale` partitions by the negotiated locale.
-  - `VarianceDimension::Media` partitions by the negotiated media type, and
-    adds `Accept` to `Vary`.
-  - `VarianceDimension::Encoding` partitions by the negotiated content
-    encoding, and adds `Accept-Encoding` to `Vary`.
   - `VarianceDimension::Host` partitions by the request's host, where your
     deployment makes more than one host meaningful.
   - `VarianceDimension::Tenant` partitions by the current tenant as opaque
@@ -147,14 +143,28 @@ actually depends on needs to be declared, with two mechanisms:
     opaque key material, bound to a permission version (see "Epoch,
     permissions, and inspection" below); a `PrivateCached` route must
     declare `Principal` or `Tenant` (or both) or it fails to build at all.
+- **`Media` and `Encoding`**, declared together with their own closed set:
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"],
+  "text/html")?)` and `.vary_encoding(NegotiatedPolicy::declared(["identity",
+  "gzip"], "identity")?)`. The bare `.vary(VarianceDimension::Media)` (or
+  `::Encoding`) is rejected at `build`/`apply`: unlike every other
+  dimension, these two negotiate against a set only the route can name, so
+  there is nothing to key by without it.
 
-`Media` and `Encoding` are declarable and keyed, but this release resolves
-each to a constant: every request is `text/html` and `identity`
-respectively. Declaring them is therefore a forward-compatibility move -
-they widen `Vary` correctly and reserve the key space, so a later
-content-negotiation or compression layer cannot collide with entries
-published before it existed - rather than something that partitions traffic
-today.
+  Negotiation reads the request's `Accept` (for `Media`) or
+  `Accept-Encoding` (for `Encoding`) header, matches it against the
+  declared set, and adds the matching request header to `Vary`. It is
+  `q`-weighted: the declared member with the highest quality wins, and
+  equal quality keeps the header's own left-to-right order, so the
+  candidate listed first wins a tie. A wildcard (`*/*`, `type/*`, a bare
+  `*`) is compared as a literal token, not expanded against the set, so it
+  practically never matches a real declared value. An absent header, a
+  value naming nothing in the declared set, or a header this cannot make
+  sense of - a `q=0`, an out-of-range or unparsable quality, garbage syntax -
+  resolves to the declared default rather than creating a variant or
+  failing the request. Two different negotiated values are two different
+  keys; the same negotiated value, however it was spelled or weighted on
+  the wire, is always the one stored representation for it.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion`, and
 a custom `VarianceDimension::Application(name)` exist on the type but have

@@ -64,10 +64,10 @@ async function dispatchAfterSourceMutation(page: Page, mutation: SourceMutation)
       events: Object.freeze([
         Object.freeze({
           cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-          maximumFanout: 1,
+          maximum_fanout: 1,
           name: "orders.updated",
           order: "per_source_sequence",
-          payloadContract: "orders.updated.v1",
+          payload_contract: "orders.updated.v1",
           schema: "json",
           source: "stream",
           targets: Object.freeze(["document"]),
@@ -158,10 +158,10 @@ async function dispatchAfterNamedTargetMutation(page: Page, mutation: TargetMuta
       events: Object.freeze([
         Object.freeze({
           cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-          maximumFanout: 1,
+          maximum_fanout: 1,
           name: "orders.updated",
           order: "per_source_sequence",
-          payloadContract: "orders.updated.v1",
+          payload_contract: "orders.updated.v1",
           schema: "json",
           source: "stream",
           targets: Object.freeze(["named_island:second-scheduler-slot"]),
@@ -250,10 +250,10 @@ async function dispatchAfterRelationshipTargetMutation(
         events: Object.freeze([
           Object.freeze({
             cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-            maximumFanout: 1,
+            maximum_fanout: 1,
             name: "orders.updated",
             order: "per_source_sequence",
-            payloadContract: "orders.updated.v1",
+            payload_contract: "orders.updated.v1",
             schema: "json",
             source: "stream",
             targets: Object.freeze([targetKind]),
@@ -348,10 +348,10 @@ async function dispatchNamedFanoutAfterFirstDelivery(
       events: Object.freeze([
         Object.freeze({
           cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-          maximumFanout: 2,
+          maximum_fanout: 2,
           name: "orders.updated",
           order: "per_source_sequence",
-          payloadContract: "orders.updated.v1",
+          payload_contract: "orders.updated.v1",
           schema: "json",
           source: "stream",
           targets: Object.freeze(["named_island:second-scheduler-slot"]),

@@ -60,11 +60,19 @@ representations by the negotiated media type or content coding, drawn from a
 closed set the route declares. The key, the `Vary` header, and the stored
 representation SHALL agree on that value, and a negotiation result outside the
 declared set SHALL fall back to the declared default rather than create a
-variant. Tests SHALL prove that two negotiations yield two representations and
-that a variant is never served to a request that did not negotiate it. Until
-iteration 006 delivers this, the middleware resolves both dimensions to
-constants before keying, so declaring either partitions nothing; that statement
-of present behavior stands as the behavior iteration 006 replaces.
+variant. Negotiation SHALL be `q`-weighted: the declared-set member with the
+highest quality value wins, and equal quality SHALL keep the header's own
+left-to-right order, so the candidate listed first wins a tie. A header token
+SHALL be matched case-insensitively against the declared lower-case set as a
+literal value rather than a range; a wildcard (`*/*`, `type/*`, or a bare `*`)
+SHALL therefore be compared as a literal token like any other, so it
+practically never matches a real declared value. A `q=0`, an out-of-range, or
+an unparsable quality SHALL exclude that entry from consideration rather than
+default it to `1.0`. An absent header, a header naming nothing in the
+declared set, or a header negotiation cannot make sense of SHALL resolve to
+the declared default. Tests SHALL prove that two negotiations yield two
+representations and that a variant is never served to a request that did not
+negotiate it.
 
 ### Automatic privacy classification
 
@@ -279,6 +287,26 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-09 -- Delivered Media and Encoding negotiation:
+  `NegotiatedPolicy` (`crates/suprnova-live/src/render_cache/policy.rs`)
+  types a route's closed accepted set and default for one of the two
+  dimensions, declared through `RenderCachePolicyBuilder::vary_media`/
+  `vary_encoding` (or a `PolicyPatch`'s matching setters) rather than the
+  bare `.vary(dimension)` every other dimension uses;
+  `RenderCachePolicy::validate` refuses a policy that varies one without
+  also declaring its set. `variance_descriptor`
+  (`framework/src/render_cache/middleware.rs`) negotiates the request's
+  `Accept` or `Accept-Encoding` header against that set with
+  `NegotiatedPolicy::negotiate`, reading each header only inside the arm
+  for the dimension it declares, and returns the resolved value alongside
+  the descriptor; `key_input` (and the test-only `key_input_for_test`)
+  take `media`/`encoding` from that one resolution rather than a second,
+  separately hardcoded value, so the two can never disagree. The
+  negotiation rule adopted is `q`-weighted with ties kept in header order,
+  stated above; every failure mode - absent, unmatched, or hostile input -
+  degrades to the declared default through a pure function that never
+  panics. Recorded under Explicit variance model, replacing the caveat
+  that iteration 006 would deliver this.
 - 2026-09-09 -- Delivered the declined-lookup reason set: `LookupDeclineReason`
   (32 variants, `framework/src/render_cache/decline.rs`) types the `reason`
   attribute `LookupOutcome::record` emits beside `outcome="declined"`,

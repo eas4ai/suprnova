@@ -299,6 +299,39 @@ impl AsyncReferenceAuthority {
         self.current_sequence
     }
 
+    /// Projects this reference host's own registered event contracts onto the
+    /// browser adapter shape.
+    ///
+    /// This is the same independent projection `authorize` uses for its signed
+    /// claims, exposed here so a caller holding only the authority (such as the
+    /// transport path, which never signs its own claims) can serialise the exact
+    /// same registered events instead of hardcoding an empty list.
+    /// Projects the registered events of the descriptor a response actually
+    /// carries, by verifying that descriptor and reading its own claims.
+    ///
+    /// A response that advertises events from anywhere else can disagree with
+    /// the descriptor beside it, which is the one thing a reference host must
+    /// never do: reading them back out of the signed bytes makes the two
+    /// agree by construction.
+    pub(crate) fn events_from_descriptor(
+        &self,
+        descriptor: &str,
+        now: UnixMillis,
+    ) -> Result<Vec<Value>, &'static str> {
+        let parsed = SubscriptionDescriptor::parse(descriptor).map_err(|_| "descriptor_invalid")?;
+        let verified = self
+            .codec
+            .verify(&parsed, now)
+            .map_err(|_| "descriptor_invalid")?;
+        Ok(verified
+            .claims()
+            .events()
+            .as_slice()
+            .iter()
+            .map(event_contract_json)
+            .collect())
+    }
+
     /// Registers one exact open physical transport before membership may commit.
     pub fn open_transport(
         &mut self,
@@ -393,6 +426,12 @@ impl AsyncReferenceAuthority {
             .range(observed.saturating_add(1)..)
             .map(|(_, envelope)| envelope.clone())
             .collect::<Vec<_>>();
+        let events = claims
+            .events()
+            .as_slice()
+            .iter()
+            .map(event_contract_json)
+            .collect::<Vec<_>>();
         Ok(json!({
             "proof": if replay.is_empty() { "authoritative_no_tail" } else { "complete_replay" },
             "replay": replay,
@@ -406,7 +445,7 @@ impl AsyncReferenceAuthority {
                     "origin": "http://127.0.0.1:4174",
                     "transport": "sse"
                 },
-                "events": [],
+                "events": events,
                 "expires_at": expires_at,
                 "fallback_poll": {
                     "initial": "wait",
@@ -700,7 +739,65 @@ fn parse_position(position: &AsyncReferencePosition) -> Result<u64, &'static str
         .map_err(|_| "sequence_invalid")
 }
 
-fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static str> {
+/// Projects one registered event contract onto the browser adapter shape.
+///
+/// Mirrors `framework`'s `IssuedView::new` exactly, so this reference host cross-checks
+/// that projection instead of leaving the descriptor's registered events unverified.
+fn event_contract_json(event: &SubscriptionEventContract) -> Value {
+    json!({
+        "cycle": match event.cycle() {
+            EventCyclePolicy::ForbidRepeatedIsland => json!({ "kind": "forbid_repeated_island" }),
+            EventCyclePolicy::MaximumHops(hops) => {
+                json!({ "kind": "maximum_hops", "maximum_hops": hops.get() })
+            }
+        },
+        "maximum_fanout": event.maximum_fanout().get(),
+        "name": event.name().as_str(),
+        "order": "per_source_sequence",
+        "payload_contract": event.payload_contract().as_str(),
+        "schema": schema_name(event.schema()),
+        "source": "stream",
+        "targets": event
+            .targets()
+            .as_slice()
+            .iter()
+            .map(target_name)
+            .collect::<Vec<_>>(),
+        "version": event.version(),
+    })
+}
+
+fn schema_name(schema: BrowserPayloadSchema) -> &'static str {
+    match schema {
+        BrowserPayloadSchema::Json => "json",
+        BrowserPayloadSchema::Null => "null",
+        BrowserPayloadSchema::Boolean => "boolean",
+        BrowserPayloadSchema::I64 => "i64",
+        BrowserPayloadSchema::U64 => "u64",
+        BrowserPayloadSchema::F64 => "f64",
+        BrowserPayloadSchema::String => "string",
+    }
+}
+
+fn target_name(target: &EventTarget) -> String {
+    match target {
+        EventTarget::SelfIsland => "self".to_owned(),
+        EventTarget::Parent => "parent".to_owned(),
+        EventTarget::Child => "child".to_owned(),
+        EventTarget::NamedIsland(slot) => format!("named_island:{}", slot.as_str()),
+        EventTarget::Document => "document".to_owned(),
+        EventTarget::Browser(listener) => format!("browser:{}", listener.as_str()),
+    }
+}
+
+/// Builds this reference host's own registered event contracts for the `orders`
+/// stream, independent of whatever the framework fixture registers.
+///
+/// `claims` builds from this single definition, so a descriptor this host signs
+/// carries exactly these contracts. Both response paths then project the events
+/// back out of the descriptor they carry, never from here directly, so what a
+/// response advertises always matches the descriptor beside it.
+fn registered_event_contracts() -> Result<BoundedEventContracts, &'static str> {
     struct OrderUpdated;
     impl EventPayloadMetadata for OrderUpdated {
         const NAME: &'static str = "orders.updated";
@@ -717,6 +814,10 @@ fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static
     .map_err(|_| "event_contract_invalid")?;
     let event = SubscriptionEventContract::from_registered(&metadata)
         .map_err(|_| "event_contract_invalid")?;
+    BoundedEventContracts::new(vec![event]).map_err(|_| "events_invalid")
+}
+
+fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static str> {
     SubscriptionClaims::new(
         StreamName::parse(AsyncReferenceScenario::lifecycle().stream)
             .map_err(|_| "stream_invalid")?,
@@ -726,7 +827,7 @@ fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static
             TopicName::parse("orders").map_err(|_| "topic_invalid")?,
         ])
         .map_err(|_| "topics_invalid")?,
-        BoundedEventContracts::new(vec![event]).map_err(|_| "events_invalid")?,
+        registered_event_contracts()?,
         AuthorizationMemo::parse("task9-reference-memo").map_err(|_| "memo_invalid")?,
         StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(baseline)),
         UnixMillis::new(expires_at),

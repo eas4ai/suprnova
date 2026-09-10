@@ -441,10 +441,10 @@ export async function measureAsyncWorkloads(
       events: Object.freeze([
         Object.freeze({
           cycle: Object.freeze({ kind: "forbid_repeated_island" }),
-          maximumFanout: 1,
+          maximum_fanout: 1,
           name: "benchmark.presented",
           order: "per_source_sequence",
-          payloadContract: "benchmark.presented.v1",
+          payload_contract: "benchmark.presented.v1",
           schema: "json",
           source: "stream",
           targets: Object.freeze(["self"]),

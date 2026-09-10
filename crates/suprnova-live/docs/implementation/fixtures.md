@@ -47,6 +47,18 @@ the generator emits `browser/src/generated/directive-contract.ts`; browser
 generation check rejects any byte drift. v3 is a contract layer, not a new
 snapshot or wire-protocol version.
 
+`async-envelope.json`'s `descriptor_cases` are the registered-event descriptor's
+conformance vectors: a well-formed event at the current `descriptor_schema_version`,
+the same event under its refused pre-rename camelCase names, and the internal
+signed-claims schema-version gate accepting only that current version. Rust proves
+every case against the real signed-descriptor codec; TypeScript proves the
+`event_naming` cases against the real `decodeAuthorizedSubscription` decoder and
+cross-checks the `schema_version` cases against the generated
+`DESCRIPTOR_SCHEMA_VERSION` constant. The generator reads the one case that proves
+a well-formed, currently accepted event and emits
+`browser/src/generated/descriptor-contract.ts`, so the browser-visible field names
+are a build output rather than a second hand-written list.
+
 ## Parser, property, and fuzz regressions
 
 Typed state, proposal, snapshot, child-envelope, protocol, checker, endpoint,

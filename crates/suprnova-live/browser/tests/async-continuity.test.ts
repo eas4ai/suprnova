@@ -29,10 +29,10 @@ function authorized(baseline: StreamPosition = position(4n, 40n)): AuthorizedLog
     events: Object.freeze([
       Object.freeze({
         cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-        maximumFanout: 8,
+        maximum_fanout: 8,
         name: "orders.updated",
         order: "per_source_sequence" as const,
-        payloadContract: "orders.updated.v1",
+        payload_contract: "orders.updated.v1",
         schema: "json" as const,
         source: "stream" as const,
         targets: Object.freeze(["self"]),

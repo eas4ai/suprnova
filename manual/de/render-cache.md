@@ -145,10 +145,6 @@ Mechanismen:
 - **Varianzdimensionen**, einzeln hinzugefügt mit `.vary(dimension)`:
   - `VarianceDimension::Locale` partitioniert nach der ausgehandelten
     Locale.
-  - `VarianceDimension::Media` partitioniert nach dem ausgehandelten
-    Medientyp und fügt `Accept` zu `Vary` hinzu.
-  - `VarianceDimension::Encoding` partitioniert nach der ausgehandelten
-    Inhaltskodierung und fügt `Accept-Encoding` zu `Vary` hinzu.
   - `VarianceDimension::Host` partitioniert nach dem Host der Anfrage, dort
     wo Ihr Deployment mehr als einen Host sinnvoll macht.
   - `VarianceDimension::Tenant` partitioniert nach dem aktuellen Mandanten
@@ -159,15 +155,33 @@ Mechanismen:
     Berechtigungsversion (siehe „Epoche, Berechtigungen und Inspektion“
     unten); eine `PrivateCached`-Route muss `Principal` oder `Tenant` (oder
     beides) deklarieren, sonst lässt sie sich überhaupt nicht bauen.
+- **`Media` und `Encoding`**, gemeinsam deklariert mit einer eigenen
+  geschlossenen Menge:
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  und
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`.
+  Das bloße `.vary(VarianceDimension::Media)` (oder `::Encoding`) wird bei
+  `build`/`apply` abgelehnt: Anders als jede andere Dimension handeln diese
+  beiden gegen eine Menge aus, die nur die Route benennen kann, sodass es ohne
+  sie nichts gibt, wonach sich schlüsseln ließe.
 
-`Media` und `Encoding` sind deklarierbar und gehen in den Schlüssel ein,
-doch dieses Release löst beide jeweils zu einer Konstante auf: Jede Anfrage
-ist `text/html` beziehungsweise `identity`. Sie zu deklarieren ist deshalb
-ein Schritt zur Vorwärtskompatibilität - sie erweitern `Vary` korrekt und
-reservieren den Schlüsselraum, sodass eine spätere Schicht für
-Inhaltsaushandlung oder Kompression nicht mit Einträgen kollidieren kann,
-die vor ihrem Bestehen veröffentlicht wurden - und nicht etwas, das den
-Verkehr heute schon partitioniert.
+  Die Aushandlung liest den `Accept`-Header der Anfrage (für `Media`) oder den
+  `Accept-Encoding`-Header (für `Encoding`), gleicht ihn gegen die deklarierte
+  Menge ab und fügt den passenden Anfrage-Header zu `Vary` hinzu. Sie ist
+  `q`-gewichtet: Das deklarierte Mitglied mit der höchsten Qualität gewinnt,
+  und bei gleicher Qualität behält die im Header vorliegende Reihenfolge von
+  links nach rechts die Oberhand, sodass bei einem Gleichstand der zuerst
+  aufgeführte Kandidat gewinnt. Eine Wildcard (`*/*`, `type/*`, ein bloßes
+  `*`) wird als wörtliches Token verglichen, nicht gegen die Menge expandiert,
+  sodass sie praktisch nie einen tatsächlich deklarierten Wert trifft. Ein
+  fehlender Header, ein Wert, der nichts in der deklarierten Menge benennt,
+  oder ein Header, aus dem sich keine Bedeutung ziehen lässt - ein `q=0`, eine
+  außerhalb des gültigen Bereichs liegende oder nicht parsbare Qualität,
+  kaputte Syntax - löst zum deklarierten Standard auf, statt eine Variante zu
+  erzeugen oder die Anfrage scheitern zu lassen. Zwei unterschiedliche
+  ausgehandelte Werte sind zwei unterschiedliche Schlüssel; derselbe
+  ausgehandelte Wert ist, egal wie er auf der Leitung geschrieben oder
+  gewichtet war, immer dieselbe gespeicherte Repräsentation dafür.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion` und
 ein benutzerdefiniertes `VarianceDimension::Application(name)` existieren auf

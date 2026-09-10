@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "descriptor_schema_version": 2,
   "protocol_versions": [1],
   "live_protocol_versions": [1, 2],
   "payload_kinds": ["refresh", "browser_event", "presentation_signal", "heartbeat", "complete", "error"],
@@ -34,5 +35,11 @@
     {"id":"epoch-change-without-proof","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"5","sequence":"1"},"expected":"degrade","state":"degraded"},
     {"id":"trusted-replay-transcript","baseline":{"epoch":"4","sequence":"41"},"observed_gap":{"epoch":"4","sequence":"43"},"recovery":{"kind":"replay","transcript":[{"epoch":"4","sequence":"42"},{"epoch":"4","sequence":"43"}]},"expected":"adopt_baseline","state":"current"},
     {"id":"authoritative-refresh-baseline","baseline":{"epoch":"4","sequence":"41"},"observed_gap":{"epoch":"5","sequence":"1"},"recovery":{"baseline":{"epoch":"5","sequence":"7"},"kind":"authoritative_refresh"},"expected":"adopt_baseline","state":"current"}
+  ],
+  "descriptor_cases": [
+    {"id":"well-formed-registered-event","kind":"event_naming","expected":"accepted","subscription":{"authorization":{"kind":"bearer","credential":"cred-1"},"baseline":{"epoch":"1788401008023","sequence":"0"},"descriptor_binding":"binding-1","document":{"authorization_scope":"scope-1","origin":"http://127.0.0.1:4178","transport":"sse"},"events":[{"cycle":{"kind":"maximum_hops","maximum_hops":3},"maximum_fanout":2,"name":"presence.changed","order":"per_source_sequence","payload_contract":"presence.member-changed","schema":"boolean","source":"stream","targets":["parent"],"version":2}],"expires_at":1788401068023,"fallback_poll":{"initial":"wait","interval_ms":30000,"jitter_ratio":0.2,"visibility":"visible"},"heartbeat_timeout_ms":15000,"presentation_signals":[],"reconnect":{"kind":"refresh_on_reconnect","maximum_attempts":8,"maximum_delay_ms":30000,"minimum_delay_ms":500},"stream":"tenant.presence","subscription_id":"sub-1"}},
+    {"id":"legacy-camel-case-registered-event","kind":"event_naming","expected":"rejected","subscription":{"authorization":{"kind":"bearer","credential":"cred-1"},"baseline":{"epoch":"1788401008023","sequence":"0"},"descriptor_binding":"binding-1","document":{"authorization_scope":"scope-1","origin":"http://127.0.0.1:4178","transport":"sse"},"events":[{"cycle":{"kind":"maximum_hops","maximumHops":3},"maximumFanout":2,"name":"presence.changed","order":"per_source_sequence","payloadContract":"presence.member-changed","schema":"boolean","source":"stream","targets":["parent"],"version":2}],"expires_at":1788401068023,"fallback_poll":{"initial":"wait","interval_ms":30000,"jitter_ratio":0.2,"visibility":"visible"},"heartbeat_timeout_ms":15000,"presentation_signals":[],"reconnect":{"kind":"refresh_on_reconnect","maximum_attempts":8,"maximum_delay_ms":30000,"minimum_delay_ms":500},"stream":"tenant.presence","subscription_id":"sub-1"}},
+    {"id":"schema-version-two-accepted","kind":"schema_version","expected":"accepted","schema_version":2},
+    {"id":"schema-version-one-refused","kind":"schema_version","expected":"rejected","schema_version":1,"expected_error":"invalid_subscription_descriptor"}
   ]
 }

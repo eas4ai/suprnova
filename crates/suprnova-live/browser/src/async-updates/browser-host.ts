@@ -13,6 +13,10 @@
 
 import { BrowserAsyncTransportPorts } from "./connections.js";
 import type { SseMembershipControlRequest, SseMembershipOutcome } from "./connections.js";
+import {
+  DESCRIPTOR_CYCLE_FIELDS,
+  DESCRIPTOR_EVENT_FIELDS,
+} from "../generated/descriptor-contract.js";
 import type {
   AsyncAuthorityPort,
   AsyncAuthorizationRequest,
@@ -194,14 +198,15 @@ function reconnect(value: unknown): AsyncReconnectPolicy {
 
 function eventContract(value: unknown): AsyncRegisteredEventContract {
   const fields = record(value);
-  const cycle = record(fields["cycle"]);
-  const cycleKind = cycle["kind"];
-  const schema = fields["schema"];
+  const cycle = record(fields[DESCRIPTOR_EVENT_FIELDS.cycle]);
+  const cycleKind = cycle[DESCRIPTOR_CYCLE_FIELDS.kind];
+  const schema = fields[DESCRIPTOR_EVENT_FIELDS.schema];
+  const targetsInput = fields[DESCRIPTOR_EVENT_FIELDS.targets];
   if (
     (cycleKind !== "forbid_repeated_island" && cycleKind !== "maximum_hops") ||
-    fields["order"] !== "per_source_sequence" ||
-    fields["source"] !== "stream" ||
-    !Array.isArray(fields["targets"]) ||
+    fields[DESCRIPTOR_EVENT_FIELDS.order] !== "per_source_sequence" ||
+    fields[DESCRIPTOR_EVENT_FIELDS.source] !== "stream" ||
+    !Array.isArray(targetsInput) ||
     (schema !== "json" &&
       schema !== "null" &&
       schema !== "boolean" &&
@@ -212,26 +217,26 @@ function eventContract(value: unknown): AsyncRegisteredEventContract {
   ) {
     throw new Error("async_authority_invalid");
   }
-  const targets = Object.freeze(fields["targets"].map(text));
+  const targets = Object.freeze(targetsInput.map(text));
   return Object.freeze({
     cycle:
       cycleKind === "forbid_repeated_island"
         ? Object.freeze({ kind: "forbid_repeated_island" as const })
         : Object.freeze({
             kind: "maximum_hops" as const,
-            maximumHops: integer(cycle["maximumHops"]),
+            maximum_hops: integer(cycle[DESCRIPTOR_CYCLE_FIELDS.maximumHops]),
           }),
-    // `maximumHops`, `maximumFanout`, and `payloadContract` are the registered
-    // event fields of the runtime's inherited descriptor contract; an absent
-    // field is a foreign descriptor, never a default.
-    maximumFanout: integer(fields["maximumFanout"]),
-    name: text(fields["name"]),
+    // `maximum_hops`, `maximum_fanout`, and `payload_contract` are generated from the
+    // reviewed conformance fixture (see ../generated/descriptor-contract.ts) rather than
+    // repeated here; an absent field is a foreign descriptor, never a default.
+    maximum_fanout: integer(fields[DESCRIPTOR_EVENT_FIELDS.maximumFanout]),
+    name: text(fields[DESCRIPTOR_EVENT_FIELDS.name]),
     order: "per_source_sequence" as const,
-    payloadContract: text(fields["payloadContract"]),
+    payload_contract: text(fields[DESCRIPTOR_EVENT_FIELDS.payloadContract]),
     schema,
     source: "stream" as const,
     targets,
-    version: integer(fields["version"]),
+    version: integer(fields[DESCRIPTOR_EVENT_FIELDS.version]),
   });
 }
 

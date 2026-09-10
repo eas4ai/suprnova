@@ -1,5 +1,6 @@
 //! Shared Rust-side golden fixture conformance.
 
+mod descriptor_support;
 mod protocol_support;
 
 use std::collections::HashSet;
@@ -7,6 +8,7 @@ use std::fs;
 
 use serde_json::Value;
 use suprnova_live::SUPPORTED_PROTOCOL_VERSIONS;
+use suprnova_live::async_updates::SubscriptionErrorKind;
 use suprnova_live::canonical::{parse_canonical_value, to_canonical_bytes};
 use suprnova_live::conformance::{
     FIXTURE_FILES_V4, FIXTURE_VERSIONS, FixtureVersion, expected_fixture_manifest_sha256_version,
@@ -227,7 +229,7 @@ fn version_four_case_ids_and_hard_bounds_are_closed() {
         ),
         (
             "async-envelope.json",
-            &["envelope_cases", "continuity_cases"][..],
+            &["envelope_cases", "continuity_cases", "descriptor_cases"][..],
         ),
     ] {
         let root = fixture_version(FixtureVersion::V4, name);
@@ -303,6 +305,80 @@ fn version_four_encoded_cases_are_canonical_and_within_exact_limits() {
         [65_536, 8, 1_024, 4_096],
         Some(32_768),
     );
+}
+
+#[test]
+fn descriptor_fixtures_prove_snake_case_naming_and_the_schema_version_gate() {
+    let asynchronous = fixture_version(FixtureVersion::V4, "async-envelope.json");
+    // The fixture's declared version is proven against the engine's private
+    // `DESCRIPTOR_SCHEMA_VERSION`, not asserted as a literal here: the "accepted"
+    // schema_version case below only verifies if its `schema_version` matches the
+    // engine's real constant, and the "rejected" case only verifies if it does not.
+    let descriptor_schema_version = number(&asynchronous, "descriptor_schema_version");
+    let real_event = descriptor_support::real_event_zero();
+    let real_keys = descriptor_support::key_set(&real_event);
+    assert!(
+        real_keys.contains("maximum_fanout")
+            && real_keys.contains("payload_contract")
+            && real_keys.contains("maximum_hops"),
+        "the real engine-signed event must carry every renamed field"
+    );
+
+    for case in array(&asynchronous, "descriptor_cases") {
+        let id = string(case, "id");
+        let expected = string(case, "expected");
+        match string(case, "kind") {
+            "event_naming" => {
+                let fixture_event = &case["subscription"]["events"][0];
+                let fixture_keys = descriptor_support::key_set(fixture_event);
+                match expected {
+                    "accepted" => assert_eq!(
+                        fixture_keys, real_keys,
+                        "fixture {id} must use exactly the real engine's field names"
+                    ),
+                    "rejected" => assert_ne!(
+                        fixture_keys, real_keys,
+                        "fixture {id} is expected to diverge from the real engine's field names"
+                    ),
+                    other => panic!("unknown descriptor fixture expectation: {other}"),
+                }
+            }
+            "schema_version" => {
+                let schema_version = number(case, "schema_version");
+                let descriptor = descriptor_support::resign_with_mutation(|claims| {
+                    claims["v"] = Value::from(schema_version);
+                });
+                let result =
+                    descriptor_support::codec().verify(&descriptor, UnixMillis::new(1_001));
+                match expected {
+                    "accepted" => {
+                        assert_eq!(
+                            schema_version, descriptor_schema_version,
+                            "fixture {id} must accept only the current descriptor schema version"
+                        );
+                        result
+                            .unwrap_or_else(|error| panic!("fixture {id} must verify: {error:?}"));
+                    }
+                    "rejected" => {
+                        assert_ne!(
+                            schema_version, descriptor_schema_version,
+                            "fixture {id} must reject a version other than the current one"
+                        );
+                        let error = result.expect_err(&format!("fixture {id} must be rejected"));
+                        assert_eq!(
+                            error.kind(),
+                            SubscriptionErrorKind::InvalidDescriptor,
+                            "fixture {id} declared expected_error {}",
+                            string(case, "expected_error")
+                        );
+                        assert_eq!(string(case, "expected_error"), error.kind().as_str());
+                    }
+                    other => panic!("unknown descriptor fixture expectation: {other}"),
+                }
+            }
+            other => panic!("unknown descriptor fixture kind: {other}"),
+        }
+    }
 }
 
 #[test]

@@ -161,9 +161,9 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
       if (
         event === undefined ||
         !OPERATION_NAME.test(name) ||
-        !Number.isSafeInteger(event.maximumFanout) ||
-        event.maximumFanout < 1 ||
-        event.maximumFanout > 256 ||
+        !Number.isSafeInteger(event.maximum_fanout) ||
+        event.maximum_fanout < 1 ||
+        event.maximum_fanout > 256 ||
         event.version !== schemaVersion ||
         !targetValid(target) ||
         !event.targets.includes(target) ||

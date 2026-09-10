@@ -640,11 +640,13 @@ accepted with the reason recorded here:
   refresh count so the browser suite asserts the delivered refresh in the
   markup, not only in the request log.
 - The browser host defaulted missing registered-event fields; it now fails
-  closed on `maximumHops`, `maximumFanout`, and `payloadContract`, which keep
-  the runtime's iteration 004 descriptor names. Renaming them to snake case
-  is a versioned contract change captured in
-  `iterations/next/registered-event-descriptor-casing.md`. The host's bounded
-  JSON reader now counts bytes as it reads instead of after.
+  closed on `maximum_hops`, `maximum_fanout`, and `payload_contract`. At the
+  time this iteration shipped, those fields still kept the runtime's
+  iteration 004 camel-case descriptor names, with the snake_case rename
+  captured as a versioned contract change in
+  `iterations/next/registered-event-descriptor-casing.md`; iteration 006's
+  descriptor schema version 2 later carried out that rename. The host's
+  bounded JSON reader now counts bytes as it reads instead of after.
 - A component that declares several streams gets no island-owned
   `live:stream` directive instead of silently getting its first stream;
   `live_multi_stream_root.rs` proves both cases. The classic boot script

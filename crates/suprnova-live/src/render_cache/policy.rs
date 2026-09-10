@@ -235,6 +235,135 @@ impl QueryPolicy {
     }
 }
 
+/// Upper bound on entries in one [`NegotiatedPolicy`]'s declared closed set.
+pub const MAX_NEGOTIATED_VALUES: usize = 16;
+/// Upper bound on one declared closed-set value's length in bytes.
+pub const MAX_NEGOTIATED_VALUE_BYTES: usize = 128;
+/// Upper bound on header entries [`NegotiatedPolicy::negotiate`] considers;
+/// further comma-separated entries are ignored, bounding a hostile header's
+/// parsing cost.
+pub const MAX_NEGOTIATION_ENTRIES: usize = 64;
+
+/// The closed set a route negotiates `Media` or `Encoding` variance
+/// against, and the default value served when a request negotiates nothing
+/// that matches it. See [`RenderCachePolicyBuilder::vary_media`] and
+/// [`RenderCachePolicyBuilder::vary_encoding`].
+///
+/// # Negotiation rule
+///
+/// [`Self::negotiate`] is `q`-weighted (RFC 9110 quality values): the
+/// accepted-set member with the highest quality wins, and when two
+/// candidates tie on quality, the one listed first in the header wins. A
+/// header token is matched case-insensitively against the declared
+/// (lower-case) set; a wildcard (`*/*`, `type/*`, or a bare `*`) is compared
+/// as a literal token like any other rather than expanded against the set,
+/// so it practically never matches a real declared value. A `q=0`,
+/// out-of-range (outside `0.0..=1.0`), or unparsable quality excludes that
+/// entry rather than defaulting it to `1.0`. An absent header, a header
+/// naming nothing in the declared set, or a header this parser cannot make
+/// sense of resolves to [`Self::default_value`] - never panics, and never
+/// treats a header value as anything other than data to compare.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NegotiatedPolicy {
+    accepted: BTreeSet<String>,
+    default: String,
+}
+
+impl NegotiatedPolicy {
+    /// Declares the closed accepted set and its default, which must itself
+    /// be a member of the set. Bounded: at most [`MAX_NEGOTIATED_VALUES`]
+    /// entries, each non-empty, at most [`MAX_NEGOTIATED_VALUE_BYTES`]
+    /// bytes, ASCII with no control bytes, and lower case - the canonical
+    /// form a request's header is matched against (see [`Self::negotiate`]).
+    pub fn declared<I, S>(accepted: I, default: S) -> Result<Self, RenderCacheError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let invalid = || RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid);
+        let accepted: BTreeSet<String> = accepted.into_iter().map(Into::into).collect();
+        let default = default.into();
+        if accepted.is_empty() || accepted.len() > MAX_NEGOTIATED_VALUES {
+            return Err(invalid());
+        }
+        if accepted.iter().any(|value| {
+            value.is_empty()
+                || value.len() > MAX_NEGOTIATED_VALUE_BYTES
+                || value
+                    .bytes()
+                    .any(|b| !b.is_ascii() || b.is_ascii_control() || b.is_ascii_uppercase())
+        }) {
+            return Err(invalid());
+        }
+        if !accepted.contains(&default) {
+            return Err(invalid());
+        }
+        Ok(Self { accepted, default })
+    }
+
+    /// The declared closed set.
+    #[must_use]
+    pub fn accepted(&self) -> &BTreeSet<String> {
+        &self.accepted
+    }
+
+    /// The declared default, served when negotiation matches nothing in the
+    /// closed set.
+    #[must_use]
+    pub fn default_value(&self) -> &str {
+        &self.default
+    }
+
+    /// Negotiates a raw `Accept`- or `Accept-Encoding`-shaped header value
+    /// against the declared closed set. See the type's own doc for the
+    /// exact rule. Never panics, and never echoes the header value back
+    /// into its result unless it is exactly one of the declared members.
+    #[must_use]
+    pub fn negotiate(&self, header: Option<&str>) -> String {
+        let Some(header) = header else {
+            return self.default.clone();
+        };
+        let mut best: Option<(f32, &str)> = None;
+        for entry in header.split(',').take(MAX_NEGOTIATION_ENTRIES) {
+            let mut parts = entry.split(';');
+            let Some(token) = parts.next() else {
+                continue;
+            };
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let quality = parts
+                .filter_map(|param| {
+                    let param = param.trim();
+                    param
+                        .strip_prefix("q=")
+                        .or_else(|| param.strip_prefix("Q="))
+                })
+                .next()
+                .map_or(1.0, |value| value.trim().parse::<f32>().unwrap_or(0.0));
+            if !quality.is_finite() || quality <= 0.0 || quality > 1.0 {
+                continue;
+            }
+            let Some(matched) = self
+                .accepted
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(token))
+            else {
+                continue;
+            };
+            let better = match best {
+                None => true,
+                Some((best_quality, _)) => quality > best_quality,
+            };
+            if better {
+                best = Some((quality, matched.as_str()));
+            }
+        }
+        best.map_or_else(|| self.default.clone(), |(_, value)| value.to_owned())
+    }
+}
+
 /// The effective RenderCache policy of one route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderCachePolicy {
@@ -246,6 +375,8 @@ pub struct RenderCachePolicy {
     failure: FailurePolicy,
     query: QueryPolicy,
     vary: BTreeSet<VarianceDimension>,
+    media: Option<NegotiatedPolicy>,
+    encoding: Option<NegotiatedPolicy>,
 }
 
 impl RenderCachePolicy {
@@ -268,6 +399,8 @@ impl RenderCachePolicy {
                 failure: FailurePolicy::Open,
                 query: QueryPolicy::none(),
                 vary: BTreeSet::new(),
+                media: None,
+                encoding: None,
             },
         }
     }
@@ -320,6 +453,21 @@ impl RenderCachePolicy {
         &self.vary
     }
 
+    /// The declared `Media` closed set and default, when the route declared
+    /// `Media` variance via [`RenderCachePolicyBuilder::vary_media`].
+    #[must_use]
+    pub fn media(&self) -> Option<&NegotiatedPolicy> {
+        self.media.as_ref()
+    }
+
+    /// The declared `Encoding` closed set and default, when the route
+    /// declared `Encoding` variance via
+    /// [`RenderCachePolicyBuilder::vary_encoding`].
+    #[must_use]
+    pub fn encoding(&self) -> Option<&NegotiatedPolicy> {
+        self.encoding.as_ref()
+    }
+
     /// Applies a route patch to a group policy. Every field the patch names
     /// replaces the group's; a class may only narrow. Deterministic.
     pub fn apply(&self, patch: &PolicyPatch) -> Result<Self, RenderCacheError> {
@@ -350,6 +498,23 @@ impl RenderCachePolicy {
         }
         if let Some(vary) = &patch.vary {
             next.vary = vary.clone();
+            // A patch's `vary` fully replaces the declared set (like every
+            // other field here), so a patch that narrows Media or Encoding
+            // out of it must not leave the old closed set behind - doing so
+            // would fail `validate`'s consistency check below for a patch
+            // that only meant to drop the dimension, not replace its set.
+            if !next.vary.contains(&VarianceDimension::Media) {
+                next.media = None;
+            }
+            if !next.vary.contains(&VarianceDimension::Encoding) {
+                next.encoding = None;
+            }
+        }
+        if let Some(media) = &patch.media {
+            next.media = Some(media.clone());
+        }
+        if let Some(encoding) = &patch.encoding {
+            next.encoding = Some(encoding.clone());
         }
         next.validate()?;
         Ok(next)
@@ -402,6 +567,22 @@ impl RenderCachePolicy {
         if self.class == RepresentationClass::PublicShellStitched
             && matches!(self.shared, SharedCachePolicy::SMaxAge { .. })
         {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
+        // `Media` and `Encoding` negotiate against a closed declared set
+        // (`NegotiatedPolicy`), not a bare presence flag: a policy that
+        // varies one of them with no declared set would have nothing to
+        // negotiate against, and a policy that carries a declared set for a
+        // dimension it does not vary is dead data a caller could mistake
+        // for effective. `RenderCachePolicyBuilder::vary_media` and
+        // `::vary_encoding` always set both together, so this only ever
+        // rejects a caller that bypassed them - a bare `.vary(Media)` with
+        // no matching `.vary_media(..)` call, or a `PolicyPatch` whose
+        // `vary` and `media`/`encoding` fields disagree.
+        if self.vary.contains(&VarianceDimension::Media) != self.media.is_some() {
+            return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
+        }
+        if self.vary.contains(&VarianceDimension::Encoding) != self.encoding.is_some() {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
         Ok(())
@@ -506,9 +687,38 @@ impl RenderCachePolicyBuilder {
     }
 
     /// Adds one variance dimension.
+    ///
+    /// `Media` and `Encoding` also need their closed accepted set and
+    /// default declared - use [`Self::vary_media`] or
+    /// [`Self::vary_encoding`] for those two instead of this method, or
+    /// `build` rejects the policy: there is nothing here for them to
+    /// negotiate against.
     #[must_use]
     pub fn vary(mut self, dimension: VarianceDimension) -> Self {
         self.policy.vary.insert(dimension);
+        self
+    }
+
+    /// Declares `Media` variance together with the closed set it negotiates
+    /// against and the default it falls back to. The route's stored
+    /// representations partition by the value [`NegotiatedPolicy::negotiate`]
+    /// resolves from the request's `Accept` header.
+    #[must_use]
+    pub fn vary_media(mut self, media: NegotiatedPolicy) -> Self {
+        self.policy.vary.insert(VarianceDimension::Media);
+        self.policy.media = Some(media);
+        self
+    }
+
+    /// Declares `Encoding` variance together with the closed set it
+    /// negotiates against and the default it falls back to. The route's
+    /// stored representations partition by the value
+    /// [`NegotiatedPolicy::negotiate`] resolves from the request's
+    /// `Accept-Encoding` header.
+    #[must_use]
+    pub fn vary_encoding(mut self, encoding: NegotiatedPolicy) -> Self {
+        self.policy.vary.insert(VarianceDimension::Encoding);
+        self.policy.encoding = Some(encoding);
         self
     }
 
@@ -530,6 +740,8 @@ pub struct PolicyPatch {
     failure: Option<FailurePolicy>,
     query: Option<QueryPolicy>,
     vary: Option<BTreeSet<VarianceDimension>>,
+    media: Option<NegotiatedPolicy>,
+    encoding: Option<NegotiatedPolicy>,
 }
 
 impl PolicyPatch {
@@ -582,10 +794,32 @@ impl PolicyPatch {
         self
     }
 
-    /// Replaces the variance set.
+    /// Replaces the variance set. When the replacement drops `Media` or
+    /// `Encoding`, `RenderCachePolicy::apply` also drops the matching
+    /// declared closed set rather than leaving it behind as dead data; pass
+    /// [`Self::media`] or [`Self::encoding`] alongside this to declare or
+    /// replace a closed set for a dimension the replacement adds.
     #[must_use]
     pub fn vary(mut self, vary: BTreeSet<VarianceDimension>) -> Self {
         self.vary = Some(vary);
+        self
+    }
+
+    /// Declares or replaces the `Media` closed set and default. Does not by
+    /// itself add `Media` to the vary set - pair with [`Self::vary`] when
+    /// the base policy does not already declare it.
+    #[must_use]
+    pub fn media(mut self, media: NegotiatedPolicy) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    /// Declares or replaces the `Encoding` closed set and default. Does not
+    /// by itself add `Encoding` to the vary set - pair with [`Self::vary`]
+    /// when the base policy does not already declare it.
+    #[must_use]
+    pub fn encoding(mut self, encoding: NegotiatedPolicy) -> Self {
+        self.encoding = Some(encoding);
         self
     }
 }

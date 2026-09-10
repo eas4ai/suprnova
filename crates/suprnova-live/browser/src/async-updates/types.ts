@@ -13,14 +13,14 @@ export type PresentationSignalSchema = "null" | "boolean" | "i64" | "u64" | "str
 
 export type AsyncEventCycle =
   | Readonly<{ kind: "forbid_repeated_island" }>
-  | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
+  | Readonly<{ kind: "maximum_hops"; maximum_hops: number }>;
 
 export interface AsyncRegisteredEventContract {
   readonly cycle: AsyncEventCycle;
-  readonly maximumFanout: number;
+  readonly maximum_fanout: number;
   readonly name: string;
   readonly order: "per_source_sequence";
-  readonly payloadContract: string;
+  readonly payload_contract: string;
   readonly schema: AsyncPayloadSchema;
   readonly source: "stream";
   readonly targets: readonly string[];

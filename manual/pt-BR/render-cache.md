@@ -141,10 +141,6 @@ dois mecanismos:
 - **Dimensões de variância**, adicionadas uma de cada vez com
   `.vary(dimension)`:
   - `VarianceDimension::Locale` particiona pela localidade negociada.
-  - `VarianceDimension::Media` particiona pelo tipo de mídia negociado e
-    adiciona `Accept` ao `Vary`.
-  - `VarianceDimension::Encoding` particiona pela codificação de conteúdo
-    negociada e adiciona `Accept-Encoding` ao `Vary`.
   - `VarianceDimension::Host` particiona pelo host da requisição, quando
     sua implantação torna mais de um host significativo.
   - `VarianceDimension::Tenant` particiona pelo tenant atual como material
@@ -155,14 +151,32 @@ dois mecanismos:
     "Epoch, permissões e inspeção" abaixo); uma rota `PrivateCached`
     precisa declarar `Principal` ou `Tenant` (ou ambos), ou ela simplesmente
     falha ao ser construída.
+- **`Media` e `Encoding`**, declarados juntos com seu próprio conjunto
+  fechado:
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  e
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`.
+  O `.vary(VarianceDimension::Media)` nu (ou `::Encoding`) é rejeitado em
+  `build`/`apply`: diferente de qualquer outra dimensão, essas duas negociam
+  contra um conjunto que só a rota pode nomear, então não há nada para usar
+  como chave sem ele.
 
-`Media` e `Encoding` são declaráveis e entram na chave, mas esta versão
-resolve cada uma delas para uma constante: toda requisição é `text/html` e
-`identity`, respectivamente. Declará-las é, portanto, um movimento de
-compatibilidade futura - elas ampliam o `Vary` corretamente e reservam o
-espaço de chaves, de modo que uma camada posterior de negociação de conteúdo
-ou de compressão não possa colidir com entradas publicadas antes de ela
-existir - em vez de algo que particione o tráfego hoje.
+  A negociação lê o cabeçalho `Accept` da requisição (para `Media`) ou
+  `Accept-Encoding` (para `Encoding`), compara com o conjunto declarado, e
+  adiciona o cabeçalho de requisição correspondente ao `Vary`. Ela é ponderada
+  por `q`: o membro declarado com a maior qualidade vence, e em caso de
+  qualidade igual mantém-se a própria ordem da esquerda para a direita do
+  cabeçalho, de modo que o candidato listado primeiro vence o empate. Um
+  wildcard (`*/*`, `type/*`, um `*` isolado) é comparado como um token
+  literal, não expandido contra o conjunto, então praticamente nunca
+  corresponde a um valor realmente declarado. Um cabeçalho ausente, um valor
+  que não nomeia nada no conjunto declarado, ou um cabeçalho do qual isso não
+  consegue extrair sentido - um `q=0`, uma qualidade fora da faixa ou
+  impossível de analisar, sintaxe malformada - resolve para o padrão declarado
+  em vez de criar uma variante ou falhar a requisição. Dois valores negociados
+  diferentes são duas chaves diferentes; o mesmo valor negociado, não importa
+  como foi escrito ou ponderado no fio, é sempre a única representação
+  armazenada para ele.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion` e
 uma `VarianceDimension::Application(name)` personalizada existem no tipo,

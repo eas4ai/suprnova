@@ -1,5 +1,9 @@
 import { canonicalize, type JsonValue } from "../canonical.js";
 import type { AsyncPayloadSchema, AsyncRegisteredEventContract } from "../async-updates/types.js";
+import {
+  DESCRIPTOR_CYCLE_FIELDS,
+  DESCRIPTOR_EVENT_FIELDS,
+} from "../generated/descriptor-contract.js";
 import type {
   RegisteredBrowserEventCapability,
   RegisteredBrowserEventDispatch,
@@ -22,7 +26,7 @@ export interface RegisteredEventTargetResolver {
   event(type: string, detail: JsonValue): Event;
   targets(
     target: string,
-    maximumFanout: number,
+    maximum_fanout: number,
   ): readonly GuardedRegisteredEventTarget[] | "fanout_exceeded";
 }
 
@@ -222,48 +226,51 @@ function snapshotDispatch(input: unknown): RegisteredBrowserEventDispatch | null
 }
 
 function snapshotCycle(input: unknown): AsyncRegisteredEventContract["cycle"] | null {
-  const forbid = ownDataValues(input, ["kind"]);
+  const forbid = ownDataValues(input, [DESCRIPTOR_CYCLE_FIELDS.kind]);
   if (forbid?.[0] === "forbid_repeated_island") {
     return immutableRecord([
-      ["kind", "forbid_repeated_island"],
+      [DESCRIPTOR_CYCLE_FIELDS.kind, "forbid_repeated_island"],
     ]) as unknown as AsyncRegisteredEventContract["cycle"];
   }
-  const bounded = ownDataValues(input, ["kind", "maximumHops"]);
-  const maximumHops = bounded?.[1];
+  const bounded = ownDataValues(input, [
+    DESCRIPTOR_CYCLE_FIELDS.kind,
+    DESCRIPTOR_CYCLE_FIELDS.maximumHops,
+  ]);
+  const maximum_hops = bounded?.[1];
   if (
     bounded?.[0] !== "maximum_hops" ||
-    typeof maximumHops !== "number" ||
-    !Number.isSafeInteger(maximumHops) ||
-    maximumHops < 1 ||
-    maximumHops > 255
+    typeof maximum_hops !== "number" ||
+    !Number.isSafeInteger(maximum_hops) ||
+    maximum_hops < 1 ||
+    maximum_hops > 255
   ) {
     return null;
   }
   return immutableRecord([
-    ["kind", "maximum_hops"],
-    ["maximumHops", maximumHops],
+    [DESCRIPTOR_CYCLE_FIELDS.kind, "maximum_hops"],
+    [DESCRIPTOR_CYCLE_FIELDS.maximumHops, maximum_hops],
   ]) as unknown as AsyncRegisteredEventContract["cycle"];
 }
 
 function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
   const values = ownDataValues(input, [
-    "cycle",
-    "maximumFanout",
-    "name",
-    "order",
-    "payloadContract",
-    "schema",
-    "source",
-    "targets",
-    "version",
+    DESCRIPTOR_EVENT_FIELDS.cycle,
+    DESCRIPTOR_EVENT_FIELDS.maximumFanout,
+    DESCRIPTOR_EVENT_FIELDS.name,
+    DESCRIPTOR_EVENT_FIELDS.order,
+    DESCRIPTOR_EVENT_FIELDS.payloadContract,
+    DESCRIPTOR_EVENT_FIELDS.schema,
+    DESCRIPTOR_EVENT_FIELDS.source,
+    DESCRIPTOR_EVENT_FIELDS.targets,
+    DESCRIPTOR_EVENT_FIELDS.version,
   ]);
   if (values === null) return null;
   const [
     cycleInput,
-    maximumFanout,
+    maximum_fanout,
     name,
     order,
-    payloadContract,
+    payload_contract,
     schema,
     source,
     targetsInput,
@@ -286,8 +293,8 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
     !Number.isSafeInteger(version) ||
     version < 1 ||
     version > 65_535 ||
-    typeof payloadContract !== "string" ||
-    !PAYLOAD_CONTRACT.test(payloadContract) ||
+    typeof payload_contract !== "string" ||
+    !PAYLOAD_CONTRACT.test(payload_contract) ||
     source !== "stream" ||
     order !== "per_source_sequence" ||
     (schema !== "json" &&
@@ -298,23 +305,23 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
       schema !== "f64" &&
       schema !== "string") ||
     new Set(targetValues).size !== targetValues.length ||
-    typeof maximumFanout !== "number" ||
-    !Number.isSafeInteger(maximumFanout) ||
-    maximumFanout < targetValues.length ||
-    maximumFanout > 256
+    typeof maximum_fanout !== "number" ||
+    !Number.isSafeInteger(maximum_fanout) ||
+    maximum_fanout < targetValues.length ||
+    maximum_fanout > 256
   ) {
     return null;
   }
   return immutableRecord([
-    ["cycle", cycle],
-    ["maximumFanout", maximumFanout],
-    ["name", name],
-    ["order", "per_source_sequence"],
-    ["payloadContract", payloadContract],
-    ["schema", schema],
-    ["source", "stream"],
-    ["targets", Object.freeze([...targetValues])],
-    ["version", version],
+    [DESCRIPTOR_EVENT_FIELDS.cycle, cycle],
+    [DESCRIPTOR_EVENT_FIELDS.maximumFanout, maximum_fanout],
+    [DESCRIPTOR_EVENT_FIELDS.name, name],
+    [DESCRIPTOR_EVENT_FIELDS.order, "per_source_sequence"],
+    [DESCRIPTOR_EVENT_FIELDS.payloadContract, payload_contract],
+    [DESCRIPTOR_EVENT_FIELDS.schema, schema],
+    [DESCRIPTOR_EVENT_FIELDS.source, "stream"],
+    [DESCRIPTOR_EVENT_FIELDS.targets, Object.freeze([...targetValues])],
+    [DESCRIPTOR_EVENT_FIELDS.version, version],
   ]) as unknown as AsyncRegisteredEventContract;
 }
 
@@ -414,16 +421,16 @@ export class RegisteredEventAuthority {
     const depth = authority.activeDepth.get(contract.name) ?? 0;
     if (
       (contract.cycle.kind === "forbid_repeated_island" && depth !== 0) ||
-      (contract.cycle.kind === "maximum_hops" && depth >= contract.cycle.maximumHops)
+      (contract.cycle.kind === "maximum_hops" && depth >= contract.cycle.maximum_hops)
     ) {
       return "rejected";
     }
-    const targets = authority.resolver.targets(candidate.target, contract.maximumFanout);
+    const targets = authority.resolver.targets(candidate.target, contract.maximum_fanout);
     if (!authority.resolver.current()) return "retired";
     if (this.#current.get(authority.owner) !== token) return "rejected";
     if (targets === "fanout_exceeded") return "fanout_exceeded";
     if (targets.length === 0) return "no_target";
-    if (targets.length > contract.maximumFanout) return "fanout_exceeded";
+    if (targets.length > contract.maximum_fanout) return "fanout_exceeded";
     authority.activeDepth.set(contract.name, depth + 1);
     let dispatched = 0;
     let skipped = 0;

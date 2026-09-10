@@ -12,6 +12,8 @@ import { FIXTURE_FILES_V4 as PACKAGE_FIXTURE_FILES_V4 } from "../src/index.js";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "../src/version.js";
 import { CanonicalError, canonicalize, parseCanonicalJson } from "../src/canonical.js";
 import { verifySnapshotFixture } from "../src/crypto.js";
+import { decodeAuthorizedSubscription } from "../src/async-updates/browser-host.js";
+import { DESCRIPTOR_SCHEMA_VERSION } from "../src/generated/descriptor-contract.js";
 import { applicationPlan, applicationPlanV2, type ApplicationPlanInput } from "../src/ordering.js";
 import {
   ProtocolValidationError,
@@ -276,7 +278,7 @@ describe("shared versioned Live fixtures", () => {
       ["diagnostics.json", ["redaction_cases"]],
       ["resource-lifecycle.json", ["cases"]],
       ["upload-protocol.json", ["codec_cases", "transition_cases"]],
-      ["async-envelope.json", ["envelope_cases", "continuity_cases"]],
+      ["async-envelope.json", ["envelope_cases", "continuity_cases", "descriptor_cases"]],
     ] as const) {
       const root = asRecord(required(fixtures, name));
       for (const collection of collections) assertUniqueCaseIds(root, collection);
@@ -370,6 +372,47 @@ describe("shared versioned Live fixtures", () => {
     const grammar = /^[a-z][a-z0-9._-]{0,63}$/u;
     for (const fixture of asArray(asynchronous["signal_name_cases"]).map(asRecord)) {
       expect(grammar.test(asString(fixture["value"]))).toBe(fixture["expected"] === "accepted");
+    }
+  });
+
+  it("proves the registered-event descriptor's snake_case naming and schema-version gate", async () => {
+    const fixtures = await loadFixtureSet(4);
+    const asynchronous = asRecord(required(fixtures, "async-envelope.json"));
+    const descriptorSchemaVersion = asNumber(asynchronous["descriptor_schema_version"]);
+    expect(descriptorSchemaVersion).toBe(DESCRIPTOR_SCHEMA_VERSION);
+
+    for (const value of asArray(asynchronous["descriptor_cases"])) {
+      const fixture = asRecord(value);
+      const id = asString(fixture["id"]);
+      const expected = asString(fixture["expected"]);
+      switch (asString(fixture["kind"])) {
+        case "event_naming": {
+          const subscription = fixture["subscription"];
+          if (expected === "accepted") {
+            expect(() => decodeAuthorizedSubscription(subscription)).not.toThrow();
+          } else if (expected === "rejected") {
+            expect(() => decodeAuthorizedSubscription(subscription)).toThrow(
+              "async_authority_invalid",
+            );
+          } else {
+            throw new Error(`unknown descriptor fixture expectation: ${expected}`);
+          }
+          break;
+        }
+        case "schema_version": {
+          const schemaVersion = asNumber(fixture["schema_version"]);
+          if (expected === "accepted") {
+            expect(schemaVersion).toBe(descriptorSchemaVersion);
+          } else if (expected === "rejected") {
+            expect(schemaVersion).not.toBe(descriptorSchemaVersion);
+          } else {
+            throw new Error(`unknown descriptor fixture expectation: ${expected}`);
+          }
+          break;
+        }
+        default:
+          throw new Error(`unknown descriptor fixture kind for ${id}`);
+      }
     }
   });
 

@@ -846,10 +846,10 @@ describe("one driver claim and optional owner per island", () => {
       events: [
         {
           cycle: { kind: "forbid_repeated_island" },
-          maximumFanout: 1,
+          maximum_fanout: 1,
           name: "orders.updated",
           order: "per_source_sequence",
-          payloadContract: "orders.updated.v1",
+          payload_contract: "orders.updated.v1",
           schema: "json",
           source: "stream",
           targets: ["self"],

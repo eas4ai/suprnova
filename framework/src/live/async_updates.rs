@@ -1873,13 +1873,13 @@ impl IssuedView {
                             json!({ "kind": "forbid_repeated_island" })
                         }
                         suprnova_live::async_updates::EventCyclePolicy::MaximumHops(hops) => {
-                            json!({ "kind": "maximum_hops", "maximumHops": hops.get() })
+                            json!({ "kind": "maximum_hops", "maximum_hops": hops.get() })
                         }
                     },
-                    "maximumFanout": event.maximum_fanout().get(),
+                    "maximum_fanout": event.maximum_fanout().get(),
                     "name": event.name().as_str(),
                     "order": "per_source_sequence",
-                    "payloadContract": event.payload_contract().as_str(),
+                    "payload_contract": event.payload_contract().as_str(),
                     "schema": schema_name(event.schema()),
                     "source": "stream",
                     "targets": event

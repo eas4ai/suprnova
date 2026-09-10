@@ -40,10 +40,10 @@ function authorization(
     events: Object.freeze([
       Object.freeze({
         cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-        maximumFanout: 4,
+        maximum_fanout: 4,
         name: "orders.updated",
         order: "per_source_sequence" as const,
-        payloadContract: "orders.updated.v1",
+        payload_contract: "orders.updated.v1",
         schema: "json" as const,
         source: "stream" as const,
         targets: Object.freeze(["self"]),
@@ -1580,7 +1580,7 @@ describe("async feature lifecycle", () => {
     if (initialEvent === undefined) throw new Error("missing_event_fixture");
     const rotated = authorization(0n, {
       descriptorBinding: "binding-rotated",
-      events: Object.freeze([Object.freeze({ ...initialEvent, maximumFanout: 1, version: 2 })]),
+      events: Object.freeze([Object.freeze({ ...initialEvent, maximum_fanout: 1, version: 2 })]),
       heartbeatTimeoutMs: 777,
     });
     let calls = 0;

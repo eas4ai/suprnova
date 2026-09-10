@@ -224,3 +224,167 @@ whole-binary `#![cfg(feature = "testing")]` gate on the render-cache test
 binary; this task did not rerun that profile to confirm the later commit
 resolved it. No benchmark budget, wire format, storage codec, or default
 feature set changed.
+
+## 2026-09-09 -- Contracts and negotiation
+
+Plan G, the third of the sweep's five plans, closed definition-of-done items
+10 and 11 in full.
+
+Item 10's closing clause, that iteration 004 browser evidence is regenerated
+against the new descriptor under its existing unqualified label rather than
+relabelled, is met in the only way it can be. The iteration 004 conformance
+bundle `browser/generated/iteration-004-conformance.mjs` was regenerated from
+its TypeScript source in the rename commit and `npm run generate:check` proves
+it byte-exact. The compatibility receipt set is empty and stays empty:
+`npm run compatibility:check -- --allow-unqualified` reports
+`compatibility qualification: unqualified (0/8)`, so there is no receipt that
+could have been carried forward, and the label is the same `unqualified` it
+was before. Nothing was relabelled because there was nothing to relabel.
+
+### The registered-event descriptor rename
+
+`DESCRIPTOR_SCHEMA_VERSION` moved 1 to 2
+(`crates/suprnova-live/src/async_updates/subscription.rs`), and the issued
+subscription descriptor's registered-event fields are now `maximum_hops`,
+`maximum_fanout`, and `payload_contract` everywhere the field names are
+written by hand: the framework's single projection site, `IssuedView::new`
+(`framework/src/live/async_updates.rs`); the browser runtime's hand-written
+sources (`src/async-updates/types.ts`, `browser-host.ts`, `envelope.ts`,
+`feature.ts`, `src/islands/registered-events.ts`, `src/islands/discovery.ts`,
+and the embedded declaration template in `scripts/build.mjs`); and the
+async reference host, whose `authorize` path and multi-subscription
+`transport_response` path both used to hardcode an empty `"events": []`.
+`authorize` now builds its `events` field from the real signed
+`claims.events()` the same call already produced.
+`transport_response` holds only the descriptor string, not a fresh claims
+value, so it takes the descriptor it carries and reads its events back out
+through a new `AsyncReferenceAuthority::events_from_descriptor`
+(`crates/suprnova-live/crates/suprnova-live-test-support/src/async_reference_host.rs`),
+which parses and verifies that exact descriptor before projecting its
+claims, so what it advertises can never disagree with the descriptor beside
+it. This replaced a first fix, `registered_events_json`, that instead
+projected the reference host's own separately-defined contract (still
+present in the source but no longer called by either path): fine as long as
+that contract matched what a given response's descriptor was signed with,
+which the multi-subscription path's own fixture registration does not
+always do, so it was replaced with the verify-the-actual-bytes approach
+before this plan closed.
+
+Conformance fixtures for the descriptor now exist where there were none:
+`fixtures/v4/async-envelope.json` gained a `descriptor_cases` collection
+(`event_naming`: `well-formed-registered-event`,
+`legacy-camel-case-registered-event`; `schema_version`:
+`schema-version-two-accepted`, `schema-version-one-refused`) and a top-level
+`descriptor_schema_version: 2` field. `browser/src/generated/descriptor-contract.ts`
+is generated from the well-formed fixture case by
+`scripts/generate-browser-contracts.mjs` rather than hand-copied, and
+`npm run generate:check` proves it byte-exact, so Rust and TypeScript cannot
+drift silently.
+
+### Media and Encoding negotiation
+
+Declaring `VarianceDimension::Media` or `::Encoding` used to partition
+nothing: the middleware resolved both to the constants `text/html` and
+`identity` regardless of what a request sent. `NegotiatedPolicy`
+(`crates/suprnova-live/src/render_cache/policy.rs`) now types a route's
+closed, bounded, canonically-lower-case accepted set and its default;
+`RenderCachePolicyBuilder::vary_media`/`vary_encoding` declare the dimension
+and its set together, and `RenderCachePolicy::validate` refuses a policy
+that varies one of these two dimensions without also declaring its set, so
+the bare `.vary(VarianceDimension::Media)` every other dimension accepts is
+rejected at build for these two alone. `variance_descriptor`
+(`framework/src/render_cache/middleware.rs`) negotiates the request's
+`Accept` or `Accept-Encoding` header against the declared set and returns
+the resolved value alongside the descriptor; `key_input` and
+`key_input_for_test` take their `media`/`encoding` fields from that one
+resolution instead of a second, separately hardcoded value, so the render
+key and the descriptor are structurally incapable of disagreeing.
+
+The negotiation rule is `q`-weighted per RFC 9110: the declared-set member
+with the highest quality wins, equal quality keeps the header's own
+left-to-right order, a wildcard is compared as a literal token and never
+expanded against the set, and a `q=0`, an out-of-range, or an unparsable
+quality excludes that candidate rather than defaulting it to `1.0`. An
+absent header, one naming nothing in the declared set, or one negotiation
+cannot make sense of resolves to the declared default, and the resolution
+never panics.
+
+### Manual
+
+`manual/render-cache.md` replaced its "resolves to a constant" statement
+with the `vary_media`/`vary_encoding` API and the negotiation rule, and all
+six mirrors (`de`, `es`, `fr`, `ja`, `pt-BR`, `zh-Hans`) carry a translated
+version of the same change with every inline code span byte-identical to
+English; `.manual-translations.lock` is restamped for `render-cache.md`.
+
+### Evidence
+
+Descriptor rename: `descriptor_fixtures_prove_snake_case_naming_and_the_schema_version_gate`
+(`crates/suprnova-live/tests/golden_fixtures.rs`) proves the real
+engine-signed event carries every renamed field, that the fixture's
+well-formed and camel-case cases respectively match and diverge from it,
+and that a descriptor signed at schema version 1 is refused with
+`SubscriptionErrorKind::InvalidDescriptor`; Task 2's report records
+`cargo test -p suprnova-live --test golden_fixtures` passing this test
+among 12 passed, 0 failed. `issuance_returns_a_document_scoped_bearer_subscription`
+(`framework/tests/live/async_routes.rs`) compares a real live-issued
+subscription's event key set against the same fixture, proving
+`IssuedView::new`'s own projection against it; Task 2's report records
+running that one test filtered, once, passing, and did not rerun the
+whole `tests/live` binary (see the gap noted below). The transport-path
+projection is proven non-empty and exactly snake_case by an assertion
+added to `async_routes_authorize_poll_sse_and_one_bounded_websocket`
+(`crates/suprnova-live/crates/suprnova-live-test-support/tests/reference_host.rs`);
+the controller's own record of that change reports it passing at 28
+passed, 0 failed. The TypeScript side is proven by
+`browser/tests/golden-fixtures.test.ts`'s "proves the registered-event
+descriptor's snake_case naming and schema-version gate", and
+`npm run generate:check` proves the generated TypeScript contract
+byte-exact against the fixture.
+
+Negotiation: six new tests in `crates/suprnova-live/tests/render_cache_policy.rs`
+(`declared_rejects_an_empty_or_oversized_set_and_a_default_outside_it`,
+`negotiate_is_q_weighted_and_ties_keep_header_order`,
+`negotiate_falls_back_to_the_default_and_never_widens_the_set`,
+`negotiate_never_panics_on_hostile_or_malformed_input`,
+`vary_media_and_vary_encoding_require_pairing_with_a_declared_set`,
+`a_vary_patch_dropping_media_also_drops_its_stale_declared_set`), plus one
+existing test, `private_cached_with_no_identity_bearing_dimension_is_rejected`,
+updated to build with `vary_media` so it still fails for the reason its own
+comment states -- all pass among the file's 15 passed, 0 failed. Six
+end-to-end tests in `framework/tests/render_cache/middleware.rs`
+(`two_media_negotiations_on_a_declared_media_route_are_both_cached_and_never_cross`,
+`a_media_declaring_route_falls_back_to_its_default_for_absent_or_unmatched_accept`,
+`a_hostile_accept_header_degrades_to_the_media_default_without_panicking`,
+`a_higher_quality_media_candidate_wins_even_when_listed_second`,
+`two_encoding_negotiations_on_a_declared_encoding_route_are_both_cached_and_never_cross`,
+`an_encoding_declaring_route_falls_back_to_its_default_for_absent_or_hostile_headers`)
+pass among `cargo test -p suprnova --test render_cache`'s reported 342
+passed, 0 failed, 32 ignored (the ignored cases are live MySQL, Postgres,
+and Redis tiers, correctly skipped locally). The two "never cross" tests
+also assert the `Vary` header names `Accept` or `Accept-Encoding`
+respectively, so the key, the header, and the served representation are
+proven to agree rather than merely asserted to. Task 3's report also records
+`cargo fmt --all --check` and `cargo clippy` on the touched crates clean of
+new warnings. Task 2's report records `npm run test:unit` at 861 of 861
+passing on its final clean run (after `dist/` and the reviewed integrity
+digests were refreshed to match the descriptor rename).
+
+This recording task ran no Cargo build and no npm command itself; every
+count above is quoted from the delivering tasks' own reports and the
+plan's progress ledger, not re-verified here. Three gaps neither this task
+nor the delivering tasks closed, recorded rather than hidden: the
+`cargo test -p suprnova --test live` binary reported four to five failures
+when Task 1 ran it, which Task 1's report attributes to in-process
+`LiveRuntime`/mount-catalog state carried over from the 2026-09-05
+test-folding work (none of the failing modules sit in a file this plan's
+descriptor or negotiation commits touch); no run of that binary against
+this branch's own base (`3776cdb0`) is recorded to confirm that reading, so
+"pre-existing" is the delivering task's attribution rather than an
+established baseline, and that binary's own health stays unconfirmed by
+this plan. The bare `npm run lint` invocation resolves to a stale machine-wide
+`eslint` on this workstation rather than the project's own, so the local
+binary (`./node_modules/.bin/eslint . --max-warnings 0`) is what was
+actually run and found clean; and definition-of-done item 10's closing
+clause, regenerating the iteration 004 browser compatibility evidence, was
+not exercised by any command in this plan.

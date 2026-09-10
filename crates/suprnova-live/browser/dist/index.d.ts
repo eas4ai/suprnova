@@ -125,11 +125,11 @@ interface RegisteredBrowserEventDispatch {
 interface RegisteredBrowserEventContract {
   readonly cycle:
     | Readonly<{ kind: "forbid_repeated_island" }>
-    | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
-  readonly maximumFanout: number;
+    | Readonly<{ kind: "maximum_hops"; maximum_hops: number }>;
+  readonly maximum_fanout: number;
   readonly name: string;
   readonly order: "per_source_sequence";
-  readonly payloadContract: string;
+  readonly payload_contract: string;
   readonly schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
   readonly source: "stream";
   readonly targets: readonly string[];
@@ -570,11 +570,11 @@ export type AsyncFreshnessObserver = (observation: AsyncFreshnessObservation) =>
 export interface AsyncRegisteredEventContract {
   readonly cycle:
     | Readonly<{ kind: "forbid_repeated_island" }>
-    | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
-  readonly maximumFanout: number;
+    | Readonly<{ kind: "maximum_hops"; maximum_hops: number }>;
+  readonly maximum_fanout: number;
   readonly name: string;
   readonly order: "per_source_sequence";
-  readonly payloadContract: string;
+  readonly payload_contract: string;
   readonly schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
   readonly source: "stream";
   readonly targets: readonly string[];
