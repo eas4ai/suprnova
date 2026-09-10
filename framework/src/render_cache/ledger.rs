@@ -514,7 +514,9 @@ async fn advance_through(
     let mut ordered: Vec<&DependencyIdentity> = identities.iter().collect();
     ordered.sort_by_key(|identity| identity.digest());
 
+    let mut advanced: Vec<[u8; 32]> = Vec::with_capacity(ordered.len());
     for identity in ordered {
+        advanced.push(identity.digest());
         let digest = identity_column(identity);
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,
@@ -560,7 +562,55 @@ async fn advance_through(
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
     }
+    announce(&advanced);
     Ok(())
+}
+
+/// Announces `digests` on the credible generation hint channel, if this
+/// process has one, so that peers holding a validation lease over an entry
+/// that observes one of them revalidate earlier than their lease alone
+/// would have made them.
+///
+/// # Why here, of the five ways a generation advances
+///
+/// This is the single funnel: `advance_in_current_transaction`,
+/// `advance_in_dedicated_transaction`, `advance_via_tx`,
+/// `advance_via_handle`, and `GenerationLedger::advance` all reach
+/// [`advance_through`], and nothing advances a generation without reaching
+/// it. Publishing at any one of the five would announce that one's writes
+/// and silently miss the others - and a sixth entry point added later would
+/// miss it by default, which is exactly the kind of gap nobody notices,
+/// because a missing hint changes no answer, only a latency.
+///
+/// # Why publishing before the caller's commit is correct
+///
+/// Only one of those five paths owns its own commit. The rest run inside
+/// the caller's ambient transaction, so a hint announced here can precede a
+/// rollback that means the generation never moved at all. That is not a
+/// correctness problem, and spec 18 says so in as many words: a deployment
+/// receiving forged, duplicated, reordered, or stale hints serves exactly
+/// what the same deployment serves with hints disabled, because a hint's
+/// only power is to make a node do earlier what lease expiry would make it
+/// do anyway. The cost of a hint for a rolled-back write is one ledger read
+/// on a peer, which returns the unchanged truth. The alternative - waiting
+/// for a commit this function does not own - would mean either not
+/// announcing four paths out of five or reaching into the caller's
+/// transaction lifecycle, and the first is worse and the second is not this
+/// function's to do.
+///
+/// Never waits and never fails: the digests are handed to a bounded queue a
+/// background task drains, so the write that called this returns without
+/// having touched Redis at all, and a hint channel that is full, dead, or
+/// absent is not an error anyone here can have.
+fn announce(digests: &[[u8; 32]]) {
+    if digests.is_empty() {
+        return;
+    }
+    if let Some(runtime) = super::RenderCache::runtime()
+        && let Some(hints) = runtime.hints.as_ref()
+    {
+        hints.publish(digests);
+    }
 }
 
 /// Advances `identities` through an explicit transaction instead of the

@@ -36,6 +36,7 @@ pub mod console;
 /// `pub(crate)`, reached only from [`middleware`], [`live`], and [`stitch`].
 pub(crate) mod decline;
 pub mod file_store;
+pub mod hints;
 pub mod ledger;
 pub mod live;
 pub mod middleware;
@@ -57,7 +58,7 @@ pub mod write_side;
 pub(crate) use write_side::write_side_open;
 
 pub use config::{
-    CoordinatorConfig, FailurePolicy, L0Limits, L1Config, Profile, RenderCacheConfig,
+    CoordinatorConfig, FailurePolicy, HintsConfig, L0Limits, L1Config, Profile, RenderCacheConfig,
 };
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
@@ -215,6 +216,19 @@ fn redis_endpoints(config: &RenderCacheConfig) -> Vec<providers::RedisProviderCo
     if let CoordinatorConfig::Redis { url, prefix, .. } = &config.coordinator {
         push(url, prefix);
     }
+    // [`HintsConfig::Redis`] is deliberately NOT pushed. This function names
+    // the endpoints whose absence must stop the boot, and the hint channel
+    // is not one of them: spec 18 requires that no new external daemon
+    // become required at any tier and that losing the channel leave
+    // behaviour identical to a build without it, both of which a boot
+    // refusal would break - a node that could serve every request correctly
+    // would refuse to start because an accelerator for an accelerator was
+    // unreachable. The subscriber and publisher reconnect in the background
+    // instead, and the degradation is visible in the `subscriber_dropped`
+    // telemetry outcome and nowhere else. On the Tier 2 profile this changes
+    // nothing anyway: hints share the endpoint the L1 tier or the
+    // coordinator already had pushed here, and this function deduplicates by
+    // URL.
     endpoints
 }
 
@@ -548,6 +562,23 @@ impl RenderCache {
             None => build_coordinator(&config.coordinator).await?,
         };
         let epoch_ledger = ledger::SqlGenerationLedger::new();
+        let leases = Arc::new(hints::LeaseTable::new());
+        // Built after every provider above, and never able to refuse a boot
+        // that those providers accepted: `HintChannel::start` fails only on
+        // an unusable URL, never on an endpoint that is not answering. See
+        // `redis_endpoints` for why the hint channel is not proven with a
+        // `PING` the way the tiers are.
+        let hint_channel = match &config.hints {
+            HintsConfig::Disabled => None,
+            HintsConfig::Redis { url, prefix } => Some(hints::HintChannel::start(
+                &providers::RedisProviderConfig {
+                    url: url.clone(),
+                    prefix: prefix.clone(),
+                },
+                Arc::clone(&leases),
+                Arc::clone(&clock),
+            )?),
+        };
         let runtime = Arc::new(RenderCacheRuntime {
             config,
             build,
@@ -560,7 +591,8 @@ impl RenderCache {
             keys,
             clock,
             limits: EntryLimits::default(),
-            leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            leases,
+            hints: hint_channel,
             epoch_cache: middleware::EpochCache::empty(),
             #[cfg(any(test, feature = "testing"))]
             hot_serves: std::sync::atomic::AtomicU64::new(0),
@@ -1074,11 +1106,72 @@ impl RenderCache {
     #[must_use]
     pub fn lease_count_for_test() -> usize {
         let runtime = Self::runtime().expect("RenderCache installed");
-        runtime
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        runtime.leases.len()
+    }
+
+    /// Test-only: delivers `body` to this node exactly as the hint
+    /// subscriber's own applier would, running the same decode, the same
+    /// bound, the same application, and recording the same single closed
+    /// outcome.
+    ///
+    /// The seam every hint test that needs no live Redis drives, so that
+    /// what those tests assert about a payload is what a subscriber would
+    /// do with it rather than a second implementation that could agree
+    /// today and drift tomorrow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no runtime is installed.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn deliver_hint_for_test(body: &str) {
+        let runtime = Self::runtime().expect("RenderCache installed");
+        hints::deliver_for_test(&runtime.leases, runtime.clock.as_ref(), body);
+    }
+
+    /// Test-only: renders `digests` as a hint message body. Handing it more
+    /// than [`hints::MAX_HINT_DIGESTS`] digests is how a test builds a
+    /// deliberately over-bound message.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn hint_body_for_test(digests: &[[u8; 32]]) -> String {
+        hints::encode_for_test(digests)
+    }
+
+    /// Test-only: holds the hint applier before its next message, so a test
+    /// can fill the bounded inbound queue and observe the drop that
+    /// follows. [`Self::resume_hint_applier_for_test`] releases it.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn pause_hint_applier_for_test() {
+        hints::seams::pause_applier();
+    }
+
+    /// Test-only: releases the hint applier held by
+    /// [`Self::pause_hint_applier_for_test`].
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn resume_hint_applier_for_test() {
+        hints::seams::resume_applier();
+    }
+
+    /// Test-only: how many hint subscriptions this process has established.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn hint_subscriptions_for_test() -> u64 {
+        hints::seams::subscriptions()
+    }
+
+    /// Test-only: resolves once at least `at_least` hint subscriptions have
+    /// been established, so a test publishes into a channel it knows is
+    /// listening rather than one it hopes is. A state barrier, never a
+    /// wait on a clock.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn await_hint_subscriptions_for_test(at_least: u64) {
+        hints::seams::await_subscriptions(at_least).await;
     }
 
     /// Test-only: closes the serving runtime's gate and returns the write
@@ -1246,6 +1339,7 @@ mod tests {
                 max_waiters: 128,
             },
             failure: FailurePolicy::Open,
+            hints: HintsConfig::Disabled,
             build_id: "disabled-install-test".to_owned(),
             clock_override: None,
             coordinator_override: None,

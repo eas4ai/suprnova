@@ -166,9 +166,7 @@ use sha2::{Digest as _, Sha256};
 use suprnova_live::clock::Clock;
 use suprnova_live::crypto::SnapshotKeyRing;
 use suprnova_live::identity::{BuildId, RouteIdentity};
-use suprnova_live::render_cache::coherence::{
-    FreshnessState, ValidationLease, evaluate_freshness, warning_header,
-};
+use suprnova_live::render_cache::coherence::{FreshnessState, evaluate_freshness, warning_header};
 use suprnova_live::render_cache::entry::{
     CompleteEntry, DecodedEntry, EntryHeader, EntryLimits, REPLAYABLE_HEADERS, SafeHeaders,
     Validator, decode, encode, encode_composite,
@@ -389,19 +387,31 @@ pub struct RenderCacheRuntime {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) limits: EntryLimits,
     /// Local validation leases for [`CoherenceMode::Lease`] routes, keyed by
-    /// the entry's lookup key.
+    /// the entry's lookup key, each carrying the dependency digests its
+    /// entry observes so that a credible generation hint naming one of them
+    /// can find it - see [`super::hints::LeaseTable`] for why the digests
+    /// live beside the lease rather than in an index of their own.
     ///
     /// Bounded by opportunistic cleanup, not by a background sweep: every
-    /// [`coherence`] call that inserts a fresh lease first evicts every
-    /// entry whose lease has already expired (see the insert site), so the
-    /// map holds at most one entry per distinct lease-mode key that has been
-    /// requested within the last `max_age_ms` - not, as an earlier version
-    /// of this comment claimed, an unbounded one held for the process
-    /// lifetime (fix round 2, item 6). An entry whose underlying L0/L1 store
-    /// entry was evicted separately is not proactively removed from here;
-    /// it is inert (coherence is only ever consulted after a store hit) and
-    /// is swept the same way once its lease's own timer expires.
-    pub(crate) leases: Mutex<BTreeMap<RenderKey, ValidationLease>>,
+    /// grant first evicts every entry whose lease has already expired, so
+    /// the map holds at most one entry per distinct lease-mode key that has
+    /// been requested within the last `max_age_ms` - not, as an earlier
+    /// version of this comment claimed, an unbounded one held for the
+    /// process lifetime (fix round 2, item 6). Applying a hint sweeps it the
+    /// same way, so the bound holds on a node that receives hints and serves
+    /// nothing at all. An entry whose underlying L0/L1 store entry was
+    /// evicted separately is not proactively removed from here; it is inert
+    /// (coherence is only ever consulted after a store hit) and is swept the
+    /// same way once its lease's own timer expires.
+    ///
+    /// An `Arc` because the hint applier holds the same table from a
+    /// background task. It holds this and never the runtime, so the runtime
+    /// stays droppable and its [`super::hints::HintChannel`] can abort the
+    /// task when it goes.
+    pub(crate) leases: Arc<super::hints::LeaseTable>,
+    /// The credible generation hint channel, or `None` when hints are not
+    /// configured. Dropping it stops the tasks it started.
+    pub(crate) hints: Option<super::hints::HintChannel>,
     /// The leased authority epoch - see [`EpochCache`] for the rule it
     /// enforces and why a hit must not read the epoch on its own.
     pub(super) epoch_cache: EpochCache,
@@ -1323,12 +1333,7 @@ async fn coherence(
 ) -> Result<Coherence, ()> {
     if let CoherenceMode::Lease { max_age_ms } = policy.coherence() {
         let now = runtime.now_ms();
-        let leased = runtime
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .is_some_and(|lease| lease.valid_at(now));
+        let leased = runtime.leases.valid_at(key, now);
         // Fix round 2, item 6, restated for the leased epoch (task 5b). A
         // valid lease reports Coherent without consulting the authority at
         // all: not for the observed generations, and not for the epoch
@@ -1391,13 +1396,16 @@ async fn coherence(
         }
         let result = authority_coherence(runtime, header).await?;
         if result == Coherence::Coherent {
-            let mut leases = runtime.leases.lock().unwrap_or_else(|e| e.into_inner());
-            // Fix round 2, item 6: opportunistic cleanup on every insert
-            // bounds this map to distinct lease-mode keys requested within
+            // The digests travel with the lease because this is the only
+            // moment both are in hand: `header.observed` is what this entry
+            // was built from, and a hint names exactly those digests. Fix
+            // round 2, item 6: the opportunistic cleanup inside `grant`
+            // bounds the map to distinct lease-mode keys requested within
             // the last `max_age_ms`, rather than every key ever seen for
             // the life of the process - see the field's own doc.
-            leases.retain(|_, existing| existing.valid_at(now));
-            leases.insert(key.clone(), ValidationLease::grant(now, max_age_ms));
+            runtime
+                .leases
+                .grant(key, now, max_age_ms, header.observed.digests());
         }
         return Ok(result);
     }
@@ -3602,6 +3610,7 @@ mod tests {
                     max_waiters: 128,
                 },
                 failure: FailurePolicy::Open,
+                hints: super::super::HintsConfig::Disabled,
                 build_id: "test".to_owned(),
                 clock_override: None,
                 coordinator_override: None,
@@ -3622,7 +3631,8 @@ mod tests {
             keys,
             clock: Arc::new(suprnova_live::clock::SystemClock),
             limits: EntryLimits::default(),
-            leases: Mutex::new(BTreeMap::new()),
+            leases: Arc::new(super::super::hints::LeaseTable::new()),
+            hints: None,
             epoch_cache: EpochCache::empty(),
             hot_serves: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "testing"))]

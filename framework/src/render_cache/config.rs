@@ -216,6 +216,49 @@ impl std::fmt::Debug for CoordinatorConfig {
     }
 }
 
+/// Whether this node announces and listens for credible generation hints.
+///
+/// A hint can shorten a validation lease this node already holds and can do
+/// nothing else, so this switch changes only *when* a lease-mode route
+/// revalidates, never what it serves. [`Self::Disabled`] and a
+/// [`Self::Redis`] channel that is unreachable are indistinguishable from
+/// the outside: the same entries are served and the same rebuilds are
+/// admitted either way.
+///
+/// Only ever meaningful on the Tier 2 profile. The Embedded and
+/// Database-coordinated tiers need no pub/sub and default to
+/// [`Self::Disabled`], which is what keeps this from making a new external
+/// daemon a requirement at any tier.
+#[derive(Clone, Eq, PartialEq)]
+pub enum HintsConfig {
+    /// No hint is published and none is listened for.
+    Disabled,
+    /// Hints are published to, and read from, `<prefix>hints` on this Redis.
+    Redis {
+        /// Where the channel lives. It can carry a password, so it is never
+        /// printed: see this type's [`std::fmt::Debug`] implementation.
+        url: String,
+        /// The literal string the channel name begins with, shared with
+        /// every other key this deployment writes.
+        prefix: String,
+    },
+}
+
+/// Manual, not derived, for the reason [`L1Config`]'s own is: the
+/// [`Self::Redis`] endpoint can carry a password.
+impl std::fmt::Debug for HintsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::Redis { url: _, prefix } => formatter
+                .debug_struct("Redis")
+                .field("url", &crate::render_cache::providers::redis::REDACTED_URL)
+                .field("prefix", prefix)
+                .finish(),
+        }
+    }
+}
+
 /// Configuration read once at install.
 #[derive(Clone)]
 pub struct RenderCacheConfig {
@@ -234,6 +277,8 @@ pub struct RenderCacheConfig {
     pub coordinator: CoordinatorConfig,
     /// Provider failure behavior.
     pub failure: FailurePolicy,
+    /// Whether credible generation hints are published and listened for.
+    pub hints: HintsConfig,
     /// Application and view build identity namespace.
     ///
     /// [`Self::from_env`] resolves this through three sources, in order:
@@ -272,6 +317,7 @@ impl PartialEq for RenderCacheConfig {
             && self.l1 == other.l1
             && self.coordinator == other.coordinator
             && self.failure == other.failure
+            && self.hints == other.hints
             && self.build_id == other.build_id
     }
 }
@@ -291,6 +337,7 @@ impl std::fmt::Debug for RenderCacheConfig {
             .field("l1", &self.l1)
             .field("coordinator", &self.coordinator)
             .field("failure", &self.failure)
+            .field("hints", &self.hints)
             .field("build_id", &self.build_id)
             .field("clock_override", &self.clock_override.is_some())
             .field("coordinator_override", &self.coordinator_override.is_some())
@@ -535,6 +582,28 @@ impl RenderCacheConfig {
             },
         };
 
+        // Hints accelerate a lease; they never hold authority, and only the
+        // Tier 2 profile has a Redis to carry them, so they default on
+        // there and off everywhere else. An explicit `redis` turns them on
+        // whatever the profile, pointed at the same endpoint and prefix
+        // every other Tier 2 name uses - the channel has no endpoint of its
+        // own, deliberately: see `redis_endpoints`.
+        let hints_redis = || HintsConfig::Redis {
+            url: url.clone(),
+            prefix: prefix.clone(),
+        };
+        let hints = match non_empty("RENDER_CACHE_HINTS").as_deref() {
+            Some("disabled") => HintsConfig::Disabled,
+            Some("redis") => hints_redis(),
+            Some(_) => {
+                return Err(unknown_value("RENDER_CACHE_HINTS", "disabled or redis"));
+            }
+            None => match profile {
+                Profile::Embedded | Profile::Database => HintsConfig::Disabled,
+                Profile::Redis => hints_redis(),
+            },
+        };
+
         Ok(Self {
             enabled: read("RENDER_CACHE_ENABLED").is_none_or(|v| v != "false" && v != "0"),
             profile,
@@ -544,6 +613,7 @@ impl RenderCacheConfig {
             },
             l1,
             coordinator,
+            hints,
             failure: if read("RENDER_CACHE_FAILURE").as_deref() == Some("closed") {
                 FailurePolicy::Closed
             } else {

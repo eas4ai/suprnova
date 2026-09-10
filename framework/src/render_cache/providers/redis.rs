@@ -19,6 +19,13 @@
 //! | `<prefix>instance:<scope>:<instance>` | hash | [`RedisInstanceRecordStore`](super::RedisInstanceRecordStore) |
 //! | `<prefix>promotion:<scope>:<idempotency>` | hash | [`RedisInstanceRecordStore`](super::RedisInstanceRecordStore) |
 //! | `<prefix>instances` | sorted set | [`RedisInstanceRecordStore`](super::RedisInstanceRecordStore) |
+//! | `<prefix>hints` | pub/sub channel | [`hints`](crate::render_cache::hints) |
+//!
+//! The last row is a channel rather than a key: nothing is stored under it,
+//! and nothing reads it back. It carries credible generation hints, which
+//! are an accelerator for a validation lease and never an authority, so it
+//! is the one name in this table whose disappearance changes no answer this
+//! deployment gives.
 //!
 //! `<render key>` is [`RenderKey::to_base64url`] (`rk1.` plus 43 base64url
 //! characters); `<scope>`, `<instance>`, and `<idempotency>` are lowercase
@@ -389,6 +396,17 @@ pub(crate) fn promotion_key(prefix: &str, key: &PromotionRecordKey) -> String {
         hex::encode(key.scope.as_bytes()),
         hex::encode(key.idempotency_key.as_bytes())
     )
+}
+
+/// The pub/sub channel credible generation hints are announced on.
+///
+/// A channel, not a key: `PUBLISH` reaches whoever is subscribed at that
+/// instant and stores nothing, which is exactly the delivery contract a
+/// hint wants. A node that was not listening has missed nothing it needed -
+/// its leases still expire on their own - so there is no backlog to keep
+/// and none is kept.
+pub(crate) fn hints_channel(prefix: &str) -> String {
+    format!("{prefix}hints")
 }
 
 /// The sorted set indexing every instance record by its deadline.
