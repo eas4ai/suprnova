@@ -1,5 +1,9 @@
 import { canonicalize, type JsonValue } from "../canonical.js";
 import type { AsyncPayloadSchema, AsyncRegisteredEventContract } from "../async-updates/types.js";
+import {
+  DESCRIPTOR_CYCLE_FIELDS,
+  DESCRIPTOR_EVENT_FIELDS,
+} from "../generated/descriptor-contract.js";
 import type {
   RegisteredBrowserEventCapability,
   RegisteredBrowserEventDispatch,
@@ -222,13 +226,16 @@ function snapshotDispatch(input: unknown): RegisteredBrowserEventDispatch | null
 }
 
 function snapshotCycle(input: unknown): AsyncRegisteredEventContract["cycle"] | null {
-  const forbid = ownDataValues(input, ["kind"]);
+  const forbid = ownDataValues(input, [DESCRIPTOR_CYCLE_FIELDS.kind]);
   if (forbid?.[0] === "forbid_repeated_island") {
     return immutableRecord([
-      ["kind", "forbid_repeated_island"],
+      [DESCRIPTOR_CYCLE_FIELDS.kind, "forbid_repeated_island"],
     ]) as unknown as AsyncRegisteredEventContract["cycle"];
   }
-  const bounded = ownDataValues(input, ["kind", "maximum_hops"]);
+  const bounded = ownDataValues(input, [
+    DESCRIPTOR_CYCLE_FIELDS.kind,
+    DESCRIPTOR_CYCLE_FIELDS.maximumHops,
+  ]);
   const maximum_hops = bounded?.[1];
   if (
     bounded?.[0] !== "maximum_hops" ||
@@ -240,22 +247,22 @@ function snapshotCycle(input: unknown): AsyncRegisteredEventContract["cycle"] | 
     return null;
   }
   return immutableRecord([
-    ["kind", "maximum_hops"],
-    ["maximum_hops", maximum_hops],
+    [DESCRIPTOR_CYCLE_FIELDS.kind, "maximum_hops"],
+    [DESCRIPTOR_CYCLE_FIELDS.maximumHops, maximum_hops],
   ]) as unknown as AsyncRegisteredEventContract["cycle"];
 }
 
 function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
   const values = ownDataValues(input, [
-    "cycle",
-    "maximum_fanout",
-    "name",
-    "order",
-    "payload_contract",
-    "schema",
-    "source",
-    "targets",
-    "version",
+    DESCRIPTOR_EVENT_FIELDS.cycle,
+    DESCRIPTOR_EVENT_FIELDS.maximumFanout,
+    DESCRIPTOR_EVENT_FIELDS.name,
+    DESCRIPTOR_EVENT_FIELDS.order,
+    DESCRIPTOR_EVENT_FIELDS.payloadContract,
+    DESCRIPTOR_EVENT_FIELDS.schema,
+    DESCRIPTOR_EVENT_FIELDS.source,
+    DESCRIPTOR_EVENT_FIELDS.targets,
+    DESCRIPTOR_EVENT_FIELDS.version,
   ]);
   if (values === null) return null;
   const [
@@ -306,15 +313,15 @@ function snapshotContract(input: unknown): AsyncRegisteredEventContract | null {
     return null;
   }
   return immutableRecord([
-    ["cycle", cycle],
-    ["maximum_fanout", maximum_fanout],
-    ["name", name],
-    ["order", "per_source_sequence"],
-    ["payload_contract", payload_contract],
-    ["schema", schema],
-    ["source", "stream"],
-    ["targets", Object.freeze([...targetValues])],
-    ["version", version],
+    [DESCRIPTOR_EVENT_FIELDS.cycle, cycle],
+    [DESCRIPTOR_EVENT_FIELDS.maximumFanout, maximum_fanout],
+    [DESCRIPTOR_EVENT_FIELDS.name, name],
+    [DESCRIPTOR_EVENT_FIELDS.order, "per_source_sequence"],
+    [DESCRIPTOR_EVENT_FIELDS.payloadContract, payload_contract],
+    [DESCRIPTOR_EVENT_FIELDS.schema, schema],
+    [DESCRIPTOR_EVENT_FIELDS.source, "stream"],
+    [DESCRIPTOR_EVENT_FIELDS.targets, Object.freeze([...targetValues])],
+    [DESCRIPTOR_EVENT_FIELDS.version, version],
   ]) as unknown as AsyncRegisteredEventContract;
 }
 

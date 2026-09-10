@@ -13,6 +13,7 @@ import { SUPPORTED_PROTOCOL_VERSIONS } from "../src/version.js";
 import { CanonicalError, canonicalize, parseCanonicalJson } from "../src/canonical.js";
 import { verifySnapshotFixture } from "../src/crypto.js";
 import { decodeAuthorizedSubscription } from "../src/async-updates/browser-host.js";
+import { DESCRIPTOR_SCHEMA_VERSION } from "../src/generated/descriptor-contract.js";
 import { applicationPlan, applicationPlanV2, type ApplicationPlanInput } from "../src/ordering.js";
 import {
   ProtocolValidationError,
@@ -378,6 +379,7 @@ describe("shared versioned Live fixtures", () => {
     const fixtures = await loadFixtureSet(4);
     const asynchronous = asRecord(required(fixtures, "async-envelope.json"));
     const descriptorSchemaVersion = asNumber(asynchronous["descriptor_schema_version"]);
+    expect(descriptorSchemaVersion).toBe(DESCRIPTOR_SCHEMA_VERSION);
 
     for (const value of asArray(asynchronous["descriptor_cases"])) {
       const fixture = asRecord(value);
