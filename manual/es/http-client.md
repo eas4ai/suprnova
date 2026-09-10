@@ -23,11 +23,11 @@ let resp = Http::post("https://api.stripe.com/v1/charges")
 let body: serde_json::Value = resp.json().await?;
 ```
 
-Esa es la forma: `Http::<verbo>(url)` devuelve un `RequestBuilder`;
+Esa es la forma: `Http::<verb>(url)` devuelve un `RequestBuilder`;
 encadenas configuración sobre él; `.send().await` devuelve un
 `ClientResponse`. El cliente que hay detrás es un único
 `reqwest::Client` compartido, con TLS de rustls, un timeout por
-defecto de 30 s, y un user agent `suprnova/<versión>` - construido de
+defecto de 30 s, y un user agent `suprnova/<version>` - construido de
 forma perezosa en la primera llamada.
 
 ## Los verbos

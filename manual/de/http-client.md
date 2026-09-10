@@ -618,20 +618,17 @@ dieselbe Garantie "kann Produktion nicht versehentlich treffen", die
 `Http::preventStrayRequests()` in Laravel gibt, mit strikterem
 Scoping.
 
-**Wiederholungen verweigern standardmäßig POST/PATCH.** Laravels
-HTTP-Client wiederholt standardmäßig jede Methode. Suprnovas
-`.retry(...)` ist nur idempotent; nicht-idempotente Methoden
-brauchen ein explizites Opt-in über `.retry_non_idempotent(...)`.
-Die Begründung ist, dass eine 5xx-Response von einem
-Schreib-Endpunkt häufig bedeutet "ich habe das Schreiben committet,
-und dann ging die Response verloren" - das blind zu replayen
-dupliziert eine Belastung, eine Rückerstattung, einen Fan-out. Wir
-zwingen den Aufrufer zu einer Entscheidung: Haben Sie einen
-Idempotency-Key mitgeliefert, den das vorgelagerte System
-respektiert? Falls ja, nehmen Sie POST/PATCH in die Wiederholungen
-auf. Falls nein, akzeptieren Sie das 5xx.
+**Empfangene 5xx-Responses lehnen standardmäßig POST/PATCH ab.**
+Laravels HTTP-Client wiederholt standardmäßig jede Methode.
+Suprnovas `.retry(...)` wiederholt weiterhin Transportfehler für
+`POST` und `PATCH`, wiederholt aber keine empfangene 5xx-Response
+für diese Methoden. Verwenden Sie `.retry_non_idempotent(...)`, um
+sich für 5xx-Response-Wiederholungen zu entscheiden, aber erst
+nachdem Sie den Schreibvorgang sicher wiederholbar gemacht haben,
+typischerweise mit einem Idempotency-Key, den das vorgelagerte
+System respektiert.
 
-**`retry_when` kann nur einschränken, niemals erweitern.** Der Callback `$when` von Laravels `retry()` ersetzt die Entscheidung „Soll wiederholt werden?“ vollständig und kann daher Statuscodes wiederholen, die das Framework sonst nicht berühren würde (etwa einen 404). Suprnovas `retry_when` verhindert nur einen Wiederholungsversuch, den `.retry(...)` / `.retry_non_idempotent(...)` bereits ausführen wollte - dieselbe Überlegung wie bei den standardmäßig nur idempotenten Wiederholungen: Ein Prädikat, das eine 4xx- oder nicht idempotente Response zu einer wiederholten machen könnte, ließe eine einzeilige Closure einen Seiteneffekt duplizieren, den die Standardregeln gerade verhindern sollen.
+**`retry_when` kann nur einschränken, niemals erweitern.** Der Callback `$when` von Laravels `retry()` ersetzt die Entscheidung „Soll wiederholt werden?“ vollständig und kann daher Statuscodes wiederholen, die das Framework sonst nicht berühren würde (etwa einen 404). Suprnovas `retry_when` verhindert nur eine Wiederholung, die `.retry(...)` oder `.retry_non_idempotent(...)` bereits beschlossen hatte. Es wird bei Transportfehler-Wiederholungen für jede Methode konsultiert, einschließlich `POST` und `PATCH`, kann aber weder eine 2xx-, 3xx- oder 4xx-Response in eine Wiederholung verwandeln noch eine `POST`- oder `PATCH`-5xx-Response unter reinem `.retry()` wiederholbar machen.
 
 ## Randfälle und Kleingedrucktes
 

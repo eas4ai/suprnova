@@ -23,7 +23,7 @@ let resp = Http::post("https://api.stripe.com/v1/charges")
 let body: serde_json::Value = resp.json().await?;
 ```
 
-Voilà la forme : `Http::<verbe>(url)` retourne un `RequestBuilder` ;
+Voilà la forme : `Http::<verb>(url)` retourne un `RequestBuilder` ;
 vous chaînez de la configuration par-dessus ; `.send().await` retourne
 une `ClientResponse`. Le client sous-jacent est un unique
 `reqwest::Client` partagé avec TLS rustls, un timeout par défaut de
@@ -569,27 +569,25 @@ Ensemble, ils vous donnent la même garantie « impossible de toucher la
 production par accident » que fournit `Http::preventStrayRequests()`
 sous Laravel, avec un cantonnement plus strict.
 
-**Les réessais refusent POST/PATCH par défaut.** Le client HTTP de
-Laravel réessaie n'importe quelle méthode par défaut. Le `.retry(...)`
-de Suprnova est idempotent uniquement ; les méthodes non idempotentes
-ont besoin d'un opt-in explicite via `.retry_non_idempotent(...)`. Le
-raisonnement est qu'une réponse 5xx d'un point de terminaison
-d'écriture signifie souvent « j'ai commité l'écriture et ensuite la
-réponse s'est perdue » - rejouer cela à l'aveugle duplique une charge,
-un remboursement, un fan-out. Nous forçons l'appelant à décider : avez-
-vous fourni une clé d'idempotence que l'amont honore ? Si oui, faites
-entrer POST/PATCH dans les réessais. Si non, acceptez le 5xx.
+**Les réponses 5xx reçues refusent POST/PATCH par défaut.** Le client
+HTTP de Laravel réessaie n'importe quelle méthode par défaut. Le
+`.retry(...)` de Suprnova réessaie toujours les échecs de transport
+pour `POST` et `PATCH`, mais ne réessaie pas une réponse 5xx reçue
+pour ces méthodes. Utilisez `.retry_non_idempotent(...)` pour activer
+les réessais de réponse 5xx, mais seulement après avoir rendu
+l'écriture sûre à rejouer, typiquement avec une clé d'idempotence que
+l'amont honore.
 
 **`retry_when` ne peut que restreindre, jamais élargir.** Le callback `$when`
 de `retry()` de Laravel remplace entièrement la décision « faut-il
 réessayer ? », il peut donc réessayer des statuts que le framework ne
 toucherait autrement pas (un 404, par exemple). Le `retry_when` de Suprnova
-ne peut opposer son veto qu'à un réessai que `.retry(...)` /
-`.retry_non_idempotent(...)` avait déjà décidé d'effectuer  -  même raisonnement
-que les réessais idempotents seuls par défaut : un prédicat capable de
-transformer une réponse 4xx ou non idempotente en réponse réessayée laisserait
-une closure d'une ligne dupliquer un effet de bord que les règles par défaut
-existent pour empêcher.
+ne peut opposer son veto qu'à un réessai que `.retry(...)` ou
+`.retry_non_idempotent(...)` avait déjà décidé d'effectuer. Il est
+consulté pour les réessais d'erreur de transport sur toutes les
+méthodes, y compris `POST` et `PATCH`, mais il ne peut ni transformer
+une réponse 2xx, 3xx ou 4xx en réessai, ni rendre une réponse 5xx de
+`POST` ou `PATCH` éligible sous un `.retry()` simple.
 
 ## Cas limites et petits caractères
 
