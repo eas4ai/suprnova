@@ -306,9 +306,12 @@ so no `RenderStore` provider can skip them: a well-formed nested graph
 resolves and an excess-depth one is refused from the same two stored
 entries, and a composite naming a segment kind this build does not
 recognize is refused whole rather than assembled around, which is the shape
-an older build meeting a newer build's entry actually has. That suite ran
-nothing before, unlike `ledger_conformance.rs`, so it gained the same
-`#[cfg(test)]` self-test the ledger suite already had.
+an older build meeting a newer build's entry actually has. The suite's
+production consumer,
+`crates/suprnova-live/tests/render_cache_store_conformance.rs`,
+already ran `run_all` before this plan; what it lacked was a self-test under
+`cargo test -p suprnova-live-test-support`, which `ledger_conformance.rs`
+already had, so `render_store_conformance.rs` gained the same one.
 
 ### Credible generation hints
 
