@@ -9,27 +9,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 ### Security
 
 - **A bearer token and a web session are now separate identities.** The
-  request-scoped auth state kept one current-user slot that everything wrote
+  request-scoped user cache kept one current-user slot that everything wrote
   to and everything read from, so a browser session hydrated by
   `SessionMiddleware` satisfied a `TokenGuard` on the same request, and a user
   resolved for the web guard was handed back to code that had asked for the
-  API guard. Bearer credentials now carry their own provenance:
+  API guard. Bearer credentials now carry their own provenance in that cache:
   `BearerTokenMiddleware` records the identifier it validated in a bearer slot
   of its own, `TokenGuard` resolves and caches the full user there, and only
   something that arrived through a bearer credential can satisfy a token
-  guard. Both setters still mirror into the generic slots, so `Auth::id()`,
-  `Auth::check()` and `AuthMiddleware` behave exactly as they did for a
-  token-only request that never installs a session. Session guards continue to
-  share one current-user slot between themselves, which is the Laravel
-  difference this release deliberately keeps; the bearer boundary is the one
-  place a shared slot crossed an authentication boundary.
+  guard. Session guards are cached per guard name in the same place, so
+  `Auth::guard("admin").user()` and `Auth::guard("web").user()` in one request
+  no longer resolve to whichever of them ran first. The generic slots remain
+  as a compatibility view for the static `Auth` facade, mirrored from the
+  configured default guard alone, so `Auth::id()`, `Auth::check()` and
+  `AuthMiddleware` behave exactly as they did for an application with one
+  guard and for a token-only request that never installs a session.
 
 - **A named guard keeps its own principal, its own remember-me credential, and
   its own revocation.** Logging in through `Auth::guard("admin")` wrote the
   identifier into the same session key the default guard uses, so two guards
   in one application shared one principal and signing out of either signed out
-  of both. Each guard now owns its entry under the session's `_auth_guards`
-  map, and the remember-me cookie carries a guard-tagged carrier
+  of both. In the persisted session each guard now owns its entry under the
+  `_auth_guards` map, and the remember-me cookie carries a guard-tagged carrier
   (`suprnova.remember.v1:` followed by the guard name and the credential) so a
   cookie issued for one guard cannot re-authenticate another. A cookie without
   that prefix is read as the default guard's, which is exactly what a cookie
@@ -698,16 +699,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   mixed into every lookup key, and a package version rarely changes when you
   ship a template, a translation, or a handler fix.
 
-- **Paddle checkout correlation survives, and a settlement is verified rather
-  than assumed.** The adapter preserves the merchant correlation it was given
-  through checkout instead of substituting a customer identifier that
-  Paddle.js does not accept as a customer auth token, encodes non-string
-  custom data consistently across customer and checkout requests, and gives
-  its HTTP client a request deadline the pinned SDK does not set. On the
-  webhook side, an issued invoice (`transaction.billed`) is no longer read as
-  collected money, and approved refund and dispute adjustments are classified
-  as adjustments rather than transactions, with the settlement time taken from
-  the latest captured payment attempt when one is available.
 
 ### Changed
 
@@ -998,10 +989,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   by `suprnova new` gets it wired automatically.
 
 - **`AuthMiddleware` now resolves the user on every guarded request.** It used
-  to accept the presence of a persisted identifier. The cost is one provider
-  lookup per guarded request where there was none, and the behaviour change is
+  to accept the presence of a persisted identifier. The behaviour change is
   that a session belonging to a deleted or soft-deleted user stops
-  authorizing. An application with no user provider bound keeps the
+  authorizing. The cost is smaller than it looks: the resolved user is cached
+  for the rest of the request, so a handler that already called `Auth::user()`
+  pays nothing extra and the lookup has simply moved from the handler to the
+  middleware. Only a guarded request whose handler never resolved the user
+  gains a provider lookup it did not make before. An application with no user provider bound keeps the
   identifier-only path unchanged. `BasicAuthMiddleware` in its non-stateless
   form now requires the guard it names to exist and to be a stateful guard.
 
