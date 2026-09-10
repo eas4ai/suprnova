@@ -392,7 +392,7 @@ errs.add_to_bag("billing", "card", "expired");
 - リクエストIDとステータスを伴う `tracing::error!` のログエントリ
 - 任意のリスナーが受け取れる `ErrorOccurred` イベント
 
-`APP_DEBUG=true` の場合（`local`/`dev`/`test` 以外ではデフォルトでfalseです）、レスポンスには生の詳細を持つ `debug_message` フィールドも付与されます - ですが `message` はどちらのモードでも汎用的なままなので、フロントエンドやクライアントが、開発専用のデータに誤って依存してしまうことはありません。
+`APP_DEBUG=true` の場合（`local`/`dev`/`test` 以外ではデフォルトで false です）、レスポンスには生の詳細を持つ `debug_message` フィールドも付与されます - ですが `message` はどちらのモードでも汎用的なままなので、フロントエンドやクライアントが、開発専用のデータに誤って依存してしまうことはありません。
 
 この契約があるからこそ、`FrameworkError::internal("db connection refused: password mismatch on user 'app_rw'")` のように呼び出しても、パスワードがレスポンスに漏れることはありません。あなたが渡す `message` はログを読むオペレーター向けのものであり、クライアントが目にする `message` は `"Internal Server Error"` です。
 
