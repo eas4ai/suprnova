@@ -175,7 +175,12 @@ pub fn br() {
 }
 
 /// The command list the help screen renders, grouped the way it groups them.
-const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+///
+/// Each entry's first whitespace-separated token is the subcommand name;
+/// anything after it is the argument sketch the screen prints. `main`'s
+/// tests read this table back and require it to name every subcommand clap
+/// defines, so a command added without a line here fails the suite.
+pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "CREATE",
         &[
@@ -194,6 +199,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("make:inertia <name>", "Scaffold an Inertia page"),
             ("make:error <name>", "Scaffold a domain error"),
             ("make:task <name>", "Scaffold a scheduled task"),
+            ("make:command <name>", "Scaffold a console command"),
         ],
     ),
     (

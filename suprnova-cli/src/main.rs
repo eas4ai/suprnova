@@ -632,6 +632,60 @@ mod tests {
         }
     }
 
+    /// The command name every curated help line documents, read back from
+    /// the screen's own table so the test cannot drift from what is
+    /// printed. A line reads `make:controller <name>`; the name is the
+    /// first token and the rest is the argument sketch.
+    fn help_screen_commands() -> Vec<String> {
+        ui::HELP_SECTIONS
+            .iter()
+            .flat_map(|(_, commands)| commands.iter())
+            .map(|(command, _)| {
+                command
+                    .split_whitespace()
+                    .next()
+                    .expect("every help line names a command")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The curated help screen lists every subcommand clap defines, and
+    /// nothing that is not one.
+    ///
+    /// Both sides are derived: the commands come from clap through
+    /// `subcommand_names`, the lines from `ui::HELP_SECTIONS`. Neither is a
+    /// hand-written list, so a subcommand added tomorrow fails here until
+    /// someone writes its line, and a line left behind by a removed
+    /// subcommand fails here too.
+    ///
+    /// There is no exception list. Every subcommand this CLI defines is a
+    /// command a user is meant to run - there is no internal or deprecated
+    /// one to hide - so any future exception has to be added here
+    /// deliberately, named, and justified in a comment.
+    #[test]
+    fn the_curated_help_screen_lists_every_subcommand() {
+        let mut screen = help_screen_commands();
+        let mut defined = subcommand_names();
+
+        let missing: Vec<&String> = defined.iter().filter(|n| !screen.contains(n)).collect();
+        let unknown: Vec<&String> = screen.iter().filter(|n| !defined.contains(n)).collect();
+        assert!(
+            missing.is_empty() && unknown.is_empty(),
+            "the curated help screen and clap disagree: \
+             {missing:?} are subcommands with no line on the screen, \
+             {unknown:?} are lines on the screen that name no subcommand"
+        );
+
+        screen.sort();
+        defined.sort();
+        assert_eq!(
+            screen, defined,
+            "the curated help screen names the same commands as clap but not \
+             the same number of times; a duplicated line is the usual cause"
+        );
+    }
+
     /// A subcommand invoked without a help flag still parses, or the
     /// assertions above would pass against a CLI that parses nothing.
     #[test]
