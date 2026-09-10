@@ -103,8 +103,10 @@ refused" na primeira solicitação.
 ## O que vai na inicialização
 
 Uma função `bootstrap` real faz um pequeno número de coisas distintas.
-Cada subseção abaixo é uma delas. O `app/src/bootstrap.rs` da app de exemplo
-exercita todas elas e é a referência funcional.
+As subseções abaixo descrevem as responsabilidades de bootstrap disponíveis
+para uma aplicação; a app de exemplo exercita a maioria delas, mas não todas.
+Para a inicialização padrão atual do Magnetar, use o template
+`src/bootstrap.rs` do scaffold da API como referência funcional.
 
 ### Conexão com o banco de dados
 
@@ -452,8 +454,8 @@ um observer, um mapeamento de queue job, uma camada de middleware global).
 | | Registro de job de worker + mailable |
 
 Você pode misturar livremente. Serviços `#[injectable]` já estão visíveis no
-contêiner no momento em que a inicialização executa, então uma vinculação na
-inicialização pode lê-los.
+contêiner no momento em que `bootstrap` executa, então uma vinculação em
+bootstrap pode lê-los.
 
 ## Onde a inicialização se encaixa na ordem de boot
 
