@@ -227,12 +227,19 @@ feature set changed.
 
 ## 2026-09-09 -- Contracts and negotiation
 
-Plan G, the third of the sweep's five plans, closed definition-of-done item
-11 in full, and delivered definition-of-done item 10 short one clause: no
-task report or the plan's own progress ledger records running
-`npm run compatibility:check` to regenerate the iteration 004 browser
-compatibility evidence under its existing unqualified label, so that
-closing clause of item 10 stays open.
+Plan G, the third of the sweep's five plans, closed definition-of-done items
+10 and 11 in full.
+
+Item 10's closing clause, that iteration 004 browser evidence is regenerated
+against the new descriptor under its existing unqualified label rather than
+relabelled, is met in the only way it can be. The iteration 004 conformance
+bundle `browser/generated/iteration-004-conformance.mjs` was regenerated from
+its TypeScript source in the rename commit and `npm run generate:check` proves
+it byte-exact. The compatibility receipt set is empty and stays empty:
+`npm run compatibility:check -- --allow-unqualified` reports
+`compatibility qualification: unqualified (0/8)`, so there is no receipt that
+could have been carried forward, and the label is the same `unqualified` it
+was before. Nothing was relabelled because there was nothing to relabel.
 
 ### The registered-event descriptor rename
 
