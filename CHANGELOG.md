@@ -923,6 +923,49 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key. Both now share one validated, backend-canonical identity. The accepted
   64-byte API limit is unchanged.
 
+- **`suprnova <command> --help` prints help instead of running the command.**
+  The CLI declared its own `help` flag and consulted it only when no
+  subcommand had been given, so every other `--help` printed the banner and
+  then executed the command anyway. `suprnova migrate:fresh --help` dropped
+  every table in the database, and the guard that would have stopped it
+  refuses only in production while `APP_ENV` defaults to `local`. Clap now
+  owns `-h` and `--help` on the top level and on every subcommand, in either
+  argument order, and the curated banner is still what the top level prints.
+  A test enumerates the subcommands from clap itself, so a subcommand added
+  later is covered without anyone remembering to add it.
+
+- **A scaffolded frontend no longer pins the CSRF token it read at boot.**
+  The generated Vue, Svelte, and React entry points read
+  `<meta name="csrf-token">` once at module load and attached that value to
+  every Inertia visit. Logging in rotates the session, the captured token
+  goes stale, and the next state-changing visit - typically the logout - was
+  refused with `419 CSRF token mismatch`. Every generated application shipped
+  with it. The hook is gone: the Inertia client reads the `XSRF-TOKEN` cookie
+  `CsrfMiddleware` sets and echoes it back in `X-XSRF-TOKEN` itself, once per
+  request, so the value that travels is the one the browser holds at that
+  moment. Server-side verification is unchanged and both header names are
+  still accepted. The manual chapter and the `suprnova::csrf` module
+  documentation named the old hook as the thing to do; both now name it as
+  the thing to avoid.
+
+- **A scaffolded application's XSRF cookie is usable over local HTTP.**
+  `CsrfMiddleware::new()` defaults the JS-readable `XSRF-TOKEN` cookie to
+  `Secure`, while the generated `env.example` sets `SESSION_SECURE=false` for
+  development, so a browser would neither store nor return the cookie over
+  `http://localhost` and every state-changing request in development was
+  refused with `419`. The generated bootstrap now passes its `SessionConfig`
+  to `CsrfMiddleware::with_session_config`, which copies the session cookie's
+  `Secure`, `SameSite`, `Domain`, `Path`, and lifetime onto the XSRF cookie
+  so the two cannot drift apart. Nothing is weakened: token validation, the
+  default origin policy, and the production guards are unchanged.
+
+- **`suprnova make:command` appears on the help screen.** The command
+  scaffolds a console command into `src/commands/` and had no line on the
+  curated screen, so the only way to learn it existed was to read the source.
+  The screen is now checked against the subcommand list clap reports, in both
+  directions, so neither a missing line nor a line naming no command can
+  survive.
+
 ### Upgrading
 
 - **Most applications need no code change.** Live and RenderCache are both
