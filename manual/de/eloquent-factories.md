@@ -555,7 +555,7 @@ NICHT zurückgerollt. `create` / `create_many` laufen durch die
 einem ambienten `DB::transaction(...)`-Scope bei. Wenn Sie
 Atomizität über einen Batch von Inserts brauchen, wechseln Sie
 innerhalb der Closure zur Methode `Model::create(attrs!{...})` des
-Trait `Model` (dieser Pfad läuft durch denselben Executor, der
+Trait Model (dieser Pfad läuft durch denselben Executor, der
 `CURRENT_TX` respektiert):
 
 ```rust
