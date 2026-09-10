@@ -12,7 +12,6 @@ fn cargo_check(target: &str, target_dir: &Path) -> Output {
     Command::new(env!("CARGO"))
         .args(["check", "--quiet", target])
         .env("CARGO_TARGET_DIR", target_dir)
-        .env("CARGO_BUILD_JOBS", "1")
         .env("CARGO_INCREMENTAL", "0")
         .current_dir(fixture())
         .output()
