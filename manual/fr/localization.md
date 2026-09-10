@@ -124,7 +124,7 @@ Les règles :
 Fluent est un petit format. Cette section contient tout ce dont vous avez
 besoin pour une app typique.
 
-Les **messages** sont des paires `id = valeur`. Les ids sont en
+Les **messages** sont des paires `id = value`. Les ids sont en
 kebab-case par convention (ceux du framework le sont), les valeurs
 courent jusqu'à la fin de la ligne, et les lignes de continuation
 indentées sont jointes :
@@ -199,11 +199,12 @@ sélecteur non appariée, y compris tout compte non entier. Marquer
 `*[many]` (ou toute autre catégorie) comme défaut envoie les fractions
 vers un texte écrit pour des nombres entiers.
 
-> **Passez les comptes en tant que nombres.** `__!("unread-messages",
-> count: 3)` envoie un nombre JSON et sélectionne une catégorie de
-> pluriel. `count: "3"` envoie une chaîne, qui ne peut correspondre
-> qu'à une clé de variante littérale - elle atterrira sur votre défaut
-> `*[other]`. C'est le seul piège FTL qui mérite d'être mémorisé.
+> **Passez les comptes en tant que nombres.**
+> `__!("unread-messages", count: 3)` envoie un nombre JSON et
+> sélectionne une catégorie de pluriel. `count: "3"` envoie une
+> chaîne, qui ne peut correspondre qu'à une clé de variante littérale -
+> elle atterrira sur votre défaut `*[other]`. C'est le seul piège FTL
+> qui mérite d'être mémorisé.
 
 Les **fonctions** s'appellent à l'intérieur des placeables. Deux sont
 enregistrées : `NUMBER()` (celle intégrée à Fluent) et `DATETIME()`
@@ -280,7 +281,7 @@ l'ordre :
    par défaut), sauf si elle est déjà apparue plus tôt dans cette
    chaîne.
 4. La **clé elle-même**, plus un `tracing::warn!` par paire `(locale,
-   clé)` manquante - une seule fois, pas une fois par requête, pour
+   key)` manquante - une seule fois, pas une fois par requête, pour
    qu'une clé manquante dans un hot path ne noie pas vos logs.
 
 L'étape 4 est la raison pour laquelle une traduction manquante affiche
@@ -710,7 +711,7 @@ pub fn register_all() {
   `Detect::Header` signifie que la préférence du navigateur est
   entièrement ignorée.
 - `session_key` / `cookie_name` - renomme les deux lookups.
-- `parents` - parents de repli par locale (`enfant -> parent`),
+- `parents` - parents de repli par locale (`child -> parent`),
   parcourus avant `fallback_locale` quand une clé manque dans le
   catalogue de l'enfant ; même forme que `APP_LOCALE_PARENTS`.
   Ajoutez-en un avec `.parent(child, parent)` - chaînable, dernière

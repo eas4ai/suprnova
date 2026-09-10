@@ -620,7 +620,7 @@ const { t, locale } = useLang()
 
 ### 有类型的消息键
 
-`suprnova generate-types` 解析 `lang/<默认语言区域>/*.ftl`，并连同 page-props 类型一起，生成一个涵盖每一个消息 id 的联合类型：
+`suprnova generate-types` 解析 `lang/<default locale>/*.ftl`，并连同 page-props 类型一起，生成一个涵盖每一个消息 id 的联合类型：
 
 ```ts
 // frontend/src/types/lang-keys.ts

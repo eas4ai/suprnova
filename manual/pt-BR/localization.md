@@ -948,7 +948,7 @@ navegador - nenhum dado ICU é enviado ao navegador.
 
 ### Chaves de mensagem tipadas
 
-`suprnova generate-types` faz parse de `lang/<locale padrão>/*.ftl` e
+`suprnova generate-types` faz parse de `lang/<default locale>/*.ftl` e
 emite uma union de todo id de mensagem, ao lado dos tipos de
 page-props:
 
