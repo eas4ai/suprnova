@@ -1,22 +1,19 @@
 # Pagamentos
 
 A superfície de pagamentos do Suprnova é neutra em relação ao
-provedor. Você escolhe um crate adaptador - Stripe, Paddle, ou um que
-você mesmo escreva - registra-o no boot, e seu código de domínio
-chama as mesmas quatro traits centrais (mais uma quinta opcional para
-captura do lado do servidor) independentemente de qual provedor está
-por trás. Tabelas espelho no seu banco de dados são mantidas em
-sincronia por webhooks, então seu código de domínio lê do seu próprio
-banco em vez de acessar a API do provedor a cada consulta.
+provedor. Registre um adaptador no boot e chame as operações que ele
+suporta através das traits de pagamento comuns. Stripe e Paddle
+preenchem, a partir de webhooks, tabelas espelho ligadas ao cliente. O
+adaptador de faturas da NOWPayments registra as notificações
+verificadas no log de auditoria; as aplicações reconciliam seus
+próprios pedidos usando a consulta autenticada de pagamento.
 
-Nenhum recurso está condicionado a um único provedor. O modelo de
-captura direta da Stripe e o modelo de Merchant of Record da Paddle
-cabem ambos no mesmo contrato de trait. A única superfície que
-difere é `Payment` (captura do lado do servidor), que é opcional - a
-Paddle não precisa dela, então a Paddle não a implementa. Provedores
-anunciam sua capacidade sobrescrevendo
-`PaymentProvider::as_payment()` para retornar `Some(&dyn Payment)`;
-quem chama consulta isso em tempo de execução.
+Os provedores expõem o mesmo contrato de traits, mas suas capacidades
+diferem. Operações não suportadas retornam
+`PaymentError::NotSupported`. A captura do lado do servidor e as
+promoções são capacidades opcionais, consultadas através de
+`PaymentProvider::as_payment()` e
+`PaymentProvider::as_promotions()`.
 
 ## Por que Suprnova diverge
 
@@ -208,6 +205,16 @@ servidor, então `Payment` não é implementada. Chamar
 indiretamente: chame `Checkout::start_session`, complete o widget da
 Paddle, e o webhook `SubscriptionCreated` chega para confirmar o ID da
 assinatura.
+
+### NOWPayments
+
+O adaptador `suprnova-payments-nowpayments` suporta faturas hospedadas
+avulsas e IPNs verificados. Ele usa erros explícitos de operação não
+suportada para as operações de cliente e de assinatura. Eventos de fatura
+sem cliente são auditados sem fabricar tabelas espelho de transação
+ligadas ao cliente. Veja o
+[guia da NOWPayments](payments-nowpayments.md) para configuração e
+reconciliação.
 
 ## A divisão de traits
 

@@ -1,23 +1,19 @@
 # Zahlungen
 
-Suprnovas Zahlungs-Oberfläche ist Provider-neutral. Sie wählen eine
-Adapter-Crate - Stripe, Paddle oder eine, die Sie selbst schreiben -,
-registrieren sie beim Boot, und Ihr Domain-Code ruft dieselben vier
-Kern-Traits auf (plus einen optionalen fünften für serverseitige
-Erfassung), unabhängig davon, welcher Provider dahintersteht.
-Mirror-Tabellen in Ihrer Datenbank werden von Webhooks synchron
-gehalten, sodass Ihr Domain-Code aus Ihrer eigenen Datenbank liest,
-statt bei jeder Abfrage die Provider-API anzusprechen.
+Suprnovas Zahlungs-Oberfläche ist Provider-neutral. Registrieren Sie
+einen Adapter beim Boot und rufen Sie seine unterstützten Operationen
+über die gemeinsamen Zahlungs-Traits auf. Stripe und Paddle füllen
+kundengebundene Mirror-Tabellen aus Webhooks. Der
+NOWPayments-Rechnungs-Adapter schreibt verifizierte Benachrichtigungen
+in das Audit-Log; Anwendungen gleichen ihre eigenen Bestellungen über
+eine authentifizierte Zahlungsabfrage ab.
 
-Kein Feature ist an einen einzelnen Provider gebunden. Stripes Modell
-der direkten Erfassung und Paddles Merchant-of-Record-Modell passen
-beide in denselben Trait-Vertrag. Die einzige Oberfläche, die
-abweicht, ist `Payment` (serverseitige Erfassung), und die ist
-optional - Paddle braucht sie nicht, also implementiert Paddle sie
-nicht. Provider melden ihre Fähigkeit, indem sie
-`PaymentProvider::as_payment()` überschreiben, um
-`Some(&dyn Payment)` zurückzugeben; Aufrufer fragen das zur Laufzeit
-ab.
+Provider legen denselben Trait-Vertrag offen, ihre Fähigkeiten
+unterscheiden sich jedoch. Nicht unterstützte Operationen liefern
+`PaymentError::NotSupported`. Serverseitige Erfassung und Promotions
+sind optionale Fähigkeiten; sie werden über
+`PaymentProvider::as_payment()` und
+`PaymentProvider::as_promotions()` abgefragt.
 
 ## Warum Suprnova abweicht
 
@@ -211,6 +207,16 @@ von `provider.as_payment()` liefert `None`. Subscriptions werden
 indirekt angelegt: Rufen Sie `Checkout::start_session` auf, schließen
 Sie das Paddle-Widget ab, und der `SubscriptionCreated`-Webhook trifft
 ein, um die Subscription-ID zu bestätigen.
+
+### NOWPayments
+
+Der Adapter `suprnova-payments-nowpayments` unterstützt gehostete
+Einmal-Rechnungen und verifizierte IPNs. Für Kunden- und
+Subscription-Operationen verwendet er ausdrückliche Fehler für nicht
+unterstützte Operationen. Rechnungs-Events ohne Kunden werden auditiert,
+ohne kundengebundene Transaktions-Mirrors zu erfinden. Siehe den
+[NOWPayments-Leitfaden](payments-nowpayments.md) für Konfiguration und
+Abgleich.
 
 ## Der Trait-Split
 

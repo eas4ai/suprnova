@@ -1,8 +1,8 @@
 # 支付
 
-Suprnova 的支付表面是提供商中立的。您选择一个适配器 crate - Stripe、Paddle，或者您自己编写的 - 在启动时注册它，然后您的领域代码调用同样的四个核心 trait（外加一个用于服务端扣款的可选第五个），不管背后是哪个提供商。您数据库里的镜像表由 webhook 保持同步，所以您的领域代码是从自己的数据库读取的，而不需要为每一次查询都去打提供商的 API。
+Suprnova 的支付表面是提供商中立的。在启动时注册一个适配器，然后通过通用的支付 trait 调用它所支持的操作。Stripe 和 Paddle 从 webhook 填充与客户关联的镜像表。NOWPayments 发票适配器把已验证的通知记录到审计日志里；应用则使用经过认证的支付查询，自己去对账自己的订单。
 
-没有任何功能被锁定在单一提供商上。Stripe 的直接扣款模式和 Paddle 的记录商户（Merchant-of-Record）模式，都能装进同一个 trait 约定里。唯一有区别的表面是 `Payment`（服务端扣款），它是可选的 - Paddle 不需要它，所以 Paddle 没有实现它。提供商通过重写 `PaymentProvider::as_payment()` 来宣告自己的能力，让它返回 `Some(&dyn Payment)`；调用方在运行时查询。
+各家提供商暴露的是同一套 trait 约定，但它们的能力并不相同。不受支持的操作返回 `PaymentError::NotSupported`。服务端扣款和促销是可选能力，通过 `PaymentProvider::as_payment()` 和 `PaymentProvider::as_promotions()` 查询。
 
 ## 为什么 Suprnova 有所不同
 
@@ -162,6 +162,10 @@ PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
 Paddle 是一个记录商户（Merchant of Record） - 它负责税务、催缴，以及完整的订阅生命周期。它不暴露服务端扣款，所以没有实现 `Payment`。调用 `provider.as_payment()` 会返回 `None`。订阅是间接创建的：调用 `Checkout::start_session`，走完 Paddle 的小部件，然后 `SubscriptionCreated` webhook 会到达，确认这个订阅 ID。
+
+### NOWPayments
+
+`suprnova-payments-nowpayments` 适配器支持托管的一次性发票和已验证的 IPN。对于客户操作和订阅操作，它使用明确的“不受支持的操作”错误。没有客户的发票事件会被审计，而不会伪造出与客户关联的交易镜像。配置和对账请看 [NOWPayments 指南](payments-nowpayments.md)。
 
 ## trait 的拆分
 

@@ -1,23 +1,20 @@
 # Paiements
 
 La surface de paiement de Suprnova est neutre du point de vue du
-fournisseur. Vous choisissez une crate d'adaptateur - Stripe, Paddle,
-ou une que vous écrivez vous-même - vous l'enregistrez au démarrage,
-et votre code métier appelle les quatre mêmes traits de base (plus un
-cinquième, optionnel, pour la capture côté serveur), quel que soit le
-fournisseur derrière. Les tables miroir de votre base de données sont
-maintenues synchronisées par les webhooks, si bien que votre code
-métier lit dans votre propre base plutôt que d'interroger l'API du
-fournisseur à chaque requête.
+fournisseur. Enregistrez un adaptateur au démarrage et appelez ses
+opérations supportées à travers les traits de paiement communs. Stripe
+et Paddle alimentent depuis les webhooks des tables miroir liées au
+client. L'adaptateur de facturation NOWPayments consigne les
+notifications vérifiées dans le journal d'audit ; les applications
+rapprochent leurs propres commandes à l'aide de la consultation de
+paiement authentifiée.
 
-Aucune fonctionnalité n'est réservée à un seul fournisseur. Le modèle
-à capture directe de Stripe et le modèle Merchant-of-Record de Paddle
-tiennent tous les deux dans le même contrat de traits. La seule
-surface qui diffère est `Payment` (capture côté serveur), qui est
-optionnelle - Paddle n'en a pas besoin, donc Paddle ne l'implémente
-pas. Les fournisseurs annoncent leur capacité en surchargeant
-`PaymentProvider::as_payment()` pour retourner `Some(&dyn Payment)` ;
-les appelants interrogent au moment de l'exécution.
+Les fournisseurs exposent le même contrat de traits, mais leurs
+capacités diffèrent. Les opérations non supportées retournent
+`PaymentError::NotSupported`. La capture côté serveur et les
+promotions sont des capacités optionnelles, interrogées via
+`PaymentProvider::as_payment()` et
+`PaymentProvider::as_promotions()`.
 
 ## Pourquoi Suprnova diverge
 
@@ -211,6 +208,16 @@ côté serveur, donc `Payment` n'est pas implémenté. Appeler
 indirectement : appelez `Checkout::start_session`, complétez le
 widget Paddle, et le webhook `SubscriptionCreated` arrive pour
 confirmer l'ID d'abonnement.
+
+### NOWPayments
+
+L'adaptateur `suprnova-payments-nowpayments` prend en charge les
+factures hébergées à paiement unique et les IPN vérifiés. Il utilise des
+erreurs explicites d'opération non supportée pour les opérations client
+et abonnement. Les événements de facture sans client sont audités sans
+fabriquer de tables miroir de transactions liées au client. Voir le
+[guide NOWPayments](payments-nowpayments.md) pour la configuration et le
+rapprochement.
 
 ## La séparation des traits
 

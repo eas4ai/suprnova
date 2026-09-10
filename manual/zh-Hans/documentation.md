@@ -99,6 +99,7 @@
     - [概览](payments.md)
     - [Stripe](payments-stripe.md)
     - [Paddle](payments-paddle.md)
+    - [NOWPayments](payments-nowpayments.md)
     - [前端](payments-frontend.md)
     - [提供商指南](payments-provider-guide.md)
 - ## 前端
