@@ -299,6 +299,21 @@ impl AsyncReferenceAuthority {
         self.current_sequence
     }
 
+    /// Projects this reference host's own registered event contracts onto the
+    /// browser adapter shape.
+    ///
+    /// This is the same independent projection `authorize` uses for its signed
+    /// claims, exposed here so a caller holding only the authority (such as the
+    /// transport path, which never signs its own claims) can serialise the exact
+    /// same registered events instead of hardcoding an empty list.
+    pub(crate) fn registered_events_json(&self) -> Result<Vec<Value>, &'static str> {
+        Ok(registered_event_contracts()?
+            .as_slice()
+            .iter()
+            .map(event_contract_json)
+            .collect())
+    }
+
     /// Registers one exact open physical transport before membership may commit.
     pub fn open_transport(
         &mut self,
@@ -757,7 +772,13 @@ fn target_name(target: &EventTarget) -> String {
     }
 }
 
-fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static str> {
+/// Builds this reference host's own registered event contracts for the `orders`
+/// stream, independent of whatever the framework fixture registers.
+///
+/// `claims` and [`AsyncReferenceAuthority::registered_events_json`] both call this
+/// single definition, so the authorize path and the transport path project the
+/// exact same registered events instead of each carrying its own copy.
+fn registered_event_contracts() -> Result<BoundedEventContracts, &'static str> {
     struct OrderUpdated;
     impl EventPayloadMetadata for OrderUpdated {
         const NAME: &'static str = "orders.updated";
@@ -774,6 +795,10 @@ fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static
     .map_err(|_| "event_contract_invalid")?;
     let event = SubscriptionEventContract::from_registered(&metadata)
         .map_err(|_| "event_contract_invalid")?;
+    BoundedEventContracts::new(vec![event]).map_err(|_| "events_invalid")
+}
+
+fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static str> {
     SubscriptionClaims::new(
         StreamName::parse(AsyncReferenceScenario::lifecycle().stream)
             .map_err(|_| "stream_invalid")?,
@@ -783,7 +808,7 @@ fn claims(baseline: u64, expires_at: u64) -> Result<SubscriptionClaims, &'static
             TopicName::parse("orders").map_err(|_| "topic_invalid")?,
         ])
         .map_err(|_| "topics_invalid")?,
-        BoundedEventContracts::new(vec![event]).map_err(|_| "events_invalid")?,
+        registered_event_contracts()?,
         AuthorizationMemo::parse("task9-reference-memo").map_err(|_| "memo_invalid")?,
         StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(baseline)),
         UnixMillis::new(expires_at),

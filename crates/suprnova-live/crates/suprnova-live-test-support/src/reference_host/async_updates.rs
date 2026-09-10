@@ -1596,7 +1596,7 @@ fn transport_response(
                         "authorization_scope": ASYNC_REFERENCE_SCOPE,
                         "transport": transport_kind,
                     },
-                    "events": [],
+                    "events": membership.authority.registered_events_json()?,
                     "expires_at": 60_000,
                     "fallback_poll": {
                         "initial": "wait",
