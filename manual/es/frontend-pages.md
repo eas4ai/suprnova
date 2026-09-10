@@ -356,7 +356,7 @@ form.post('/posts', {
 })
 ```
 
-Desde Inertia 3.4, un `onSuccess` asíncrono se espera (`await`) antes
+Desde Inertia 3.4, un `onSuccess` asíncrono se espera antes
 de que el envío se complete, así que `form.processing` sigue siendo
 `true` hasta que tu callback se resuelve - útil cuando un envío
 exitoso dispara trabajo de seguimiento que no quieres que la UI

@@ -473,7 +473,7 @@ import { Link } from '@inertiajs/vue3'
 
 Laravel 的 Inertia 集成一次只发布一个前端 - 您在安装时选择 React、Vue 或者 Svelte，每个项目一个起步套件。Suprnova 保留了同样的“每个项目一个”规则（您不会混用它们），但 CLI 会从同一个 `inertia_response!` 调用出发，地道地为这三者都生成脚手架。Rust 那一侧永远不知道运行的是哪个前端；生成器和 Vite 解析器会在磁盘上挑出正确的扩展名。
 
-另一处分歧是编译期的组件校验。Laravel 在运行时解析组件名，所以 `Inertia::render('Dahsboard')` 里的一个拼写错误，会变成一个生产环境的错误。Suprnova 的 `inertia_response!` 宏会在展开时遍历 `frontend/src/pages/`，并在 `cargo check` 上失败，给出一条 `Did you mean 'Dashboard'?` 的建议。完整的 TypeScript 类型故事（从 Rust 结构体上的 `#[derive(InertiaProps)]` 生成而来），也意味着这个组件的 props 是端到端类型化的。
+另一处分歧是编译期的组件校验。Laravel 在运行时解析组件名，所以 `Inertia::render('Dahsboard')` 里的一个拼写错误，会变成一个生产环境的错误。Suprnova 的 `inertia_response!` 宏会在展开时遍历 `frontend/src/pages/`，并在 `cargo check` 上失败，给出一条“Did you mean 'Dashboard'?”的建议。完整的 TypeScript 类型故事（从 Rust 结构体上的 `#[derive(InertiaProps)]` 生成而来），也意味着这个组件的 props 是端到端类型化的。
 
 ## 下一步
 
