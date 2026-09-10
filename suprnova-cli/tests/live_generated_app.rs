@@ -52,9 +52,16 @@ fn live_make(project: &Path, name: &str) -> Output {
         .expect("suprnova live:make")
 }
 
+/// A scratch directory under this package's own target directory. A generated
+/// application builds its own `target/` inside it, far too many files for a
+/// tmpfs `/tmp`.
+fn scratch_dir() -> tempfile::TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir")
+}
+
 #[test]
 fn a_generated_application_is_live_ready() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = scratch_dir();
     let project = scaffold(tmp.path(), "live_ready");
 
     let module = read(project.join("src/live/mod.rs"));
@@ -229,7 +236,7 @@ fn patch_local_suprnova(project: &Path) {
 #[test]
 #[ignore = "acceptance: builds a generated application and its console; slow"]
 fn a_generated_live_application_builds_and_passes_the_integrated_checker() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = scratch_dir();
     let project = scaffold(tmp.path(), "live_accept");
     let output = live_make(&project, "Counter");
     assert!(output.status.success(), "{}", combined(&output));
