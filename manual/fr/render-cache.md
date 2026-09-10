@@ -144,10 +144,6 @@ avec deux mécanismes :
   cache pour cette requête au lieu d'être silencieusement ignoré.
 - **Dimensions de variance**, ajoutées une par une avec `.vary(dimension)` :
   - `VarianceDimension::Locale` partitionne par la locale négociée.
-  - `VarianceDimension::Media` partitionne par le type de média négocié, et
-    ajoute `Accept` à `Vary`.
-  - `VarianceDimension::Encoding` partitionne par l'encodage de contenu
-    négocié, et ajoute `Accept-Encoding` à `Vary`.
   - `VarianceDimension::Host` partitionne par l'hôte de la requête, là où
     votre déploiement rend plus d'un hôte significatif.
   - `VarianceDimension::Tenant` partitionne par le tenant courant utilisé
@@ -158,15 +154,31 @@ avec deux mécanismes :
     (voir « Epoch, permissions et inspection » ci-dessous) ; une route
     `PrivateCached` doit déclarer `Principal` ou `Tenant` (ou les deux),
     sinon elle échoue purement et simplement à la construction.
+- **`Media` et `Encoding`**, déclarés ensemble avec leur propre ensemble fermé :
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  et
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`.
+  Le simple `.vary(VarianceDimension::Media)` (ou `::Encoding`) est rejeté à
+  `build`/`apply` : contrairement à toute autre dimension, ces deux-là
+  négocient contre un ensemble que seule la route peut nommer, si bien qu'il
+  n'y a rien à mettre en clé sans lui.
 
-`Media` et `Encoding` sont déclarables et entrent dans la clé, mais cette
-version les résout chacune à une constante : chaque requête est `text/html`
-et `identity` respectivement. Les déclarer est donc un geste de
-compatibilité ascendante - elles élargissent `Vary` correctement et
-réservent l'espace de clés, si bien qu'une future couche de négociation de
-contenu ou de compression ne peut pas entrer en collision avec des entrées
-publiées avant son existence - plutôt que quelque chose qui partitionne le
-trafic aujourd'hui.
+  La négociation lit l'en-tête `Accept` de la requête (pour `Media`) ou
+  `Accept-Encoding` (pour `Encoding`), la compare à l'ensemble déclaré, et
+  ajoute l'en-tête de requête correspondant à `Vary`. Elle est pondérée par
+  `q` : le membre déclaré ayant la plus haute qualité l'emporte, et à qualité
+  égale, l'ordre de gauche à droite propre à l'en-tête est conservé, si bien
+  que le candidat listé en premier gagne en cas d'égalité. Un caractère
+  générique (`*/*`, `type/*`, un simple `*`) est comparé comme un jeton
+  littéral, non développé contre l'ensemble, si bien qu'il ne correspond
+  pratiquement jamais à une valeur réellement déclarée. Un en-tête absent, une
+  valeur ne nommant rien dans l'ensemble déclaré, ou un en-tête dont on ne
+  peut rien tirer de sensé - un `q=0`, une qualité hors limites ou imparsable,
+  une syntaxe invalide - se résout vers la valeur par défaut déclarée plutôt
+  que de créer une variante ou de faire échouer la requête. Deux valeurs
+  négociées différentes sont deux clés différentes ; la même valeur négociée,
+  quelle que soit la façon dont elle a été orthographiée ou pondérée sur le
+  fil, est toujours l'unique représentation stockée pour elle.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion`, et
 un `VarianceDimension::Application(name)` personnalisé existent sur le

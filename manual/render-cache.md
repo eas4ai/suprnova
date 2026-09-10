@@ -160,8 +160,8 @@ actually depends on needs to be declared, with two mechanisms:
   `*`) is compared as a literal token, not expanded against the set, so it
   practically never matches a real declared value. An absent header, a
   value naming nothing in the declared set, or a header this cannot make
-  sense of - a `q=0`, an out-of-range or unparsable quality, garbage syntax
-  - resolves to the declared default rather than creating a variant or
+  sense of - a `q=0`, an out-of-range or unparsable quality, garbage syntax -
+  resolves to the declared default rather than creating a variant or
   failing the request. Two different negotiated values are two different
   keys; the same negotiated value, however it was spelled or weighted on
   the wire, is always the one stored representation for it.

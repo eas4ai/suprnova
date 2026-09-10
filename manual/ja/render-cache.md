@@ -133,10 +133,6 @@ Application::new()
   キャッシュがバイパスされます。
 - **バリエーションディメンション。** `.vary(dimension)` で 1 つずつ追加します:
   - `VarianceDimension::Locale` はネゴシエートされたロケールで分割します。
-  - `VarianceDimension::Media` はネゴシエートされたメディアタイプで分割し、
-    `Vary` に `Accept` を追加します。
-  - `VarianceDimension::Encoding` はネゴシエートされたコンテンツエンコーディング
-    で分割し、`Vary` に `Accept-Encoding` を追加します。
   - `VarianceDimension::Host` はリクエストのホストで分割します。デプロイで
     複数のホストに意味がある場合に使います。
   - `VarianceDimension::Tenant` は不透明なキー素材としての現在のテナントで
@@ -147,13 +143,30 @@ Application::new()
     「エポック、権限、検査」を参照）。`PrivateCached` ルートは `Principal` か
     `Tenant`（あるいは両方）を宣言しなければならず、そうしなければそもそも
     ビルドに失敗します。
+- **`Media` と `Encoding`**は、それぞれの閉じた集合とともに
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  と
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`
+  のかたちで宣言します。素の `.vary(VarianceDimension::Media)`
+  （または `::Encoding`）は `build`/`apply` で拒否されます: 他のどの
+  ディメンションとも違い、この 2 つはルートしか名指しできない集合に対して
+  交渉するので、それがなければ鍵にするものが何もありません。
 
-`Media` と `Encoding` は宣言でき、キーにも含まれますが、このリリースではどちらも
-定数に解決されます。すべてのリクエストがそれぞれ `text/html` と `identity` です。
-したがってこれらを宣言することは、前方互換のための一手です。`Vary` を正しく広げて
-キー空間を予約しておくことで、あとから加わるコンテンツネゴシエーションや圧縮の層
-が、それ以前に公開されたエントリと衝突できなくなります。今日のトラフィックを
-分割するものではありません。
+  交渉は、リクエストの `Accept` ヘッダー（`Media` 用）または
+  `Accept-Encoding` ヘッダー（`Encoding` 用）を読み取り、宣言された集合と
+  照合して、一致したリクエストヘッダーを `Vary` に追加します。これは `q`
+  で重み付けされます: 宣言されたメンバーのうち最も品質の高いものが勝ち、
+  品質が同じ場合はヘッダー自身の左から右への順序が保たれるため、先に
+  列挙された候補が同点を制します。ワイルドカード（`*/*`、`type/*`、素の
+  `*`）は集合に対して展開されるのではなく、そのままのトークンとして
+  比較されるため、実際に宣言された値に一致することは実質的にありません。
+  ヘッダーが存在しない場合、宣言された集合の中の何も指さない値の場合、
+  あるいは意味を汲み取れないヘッダーの場合 - `q=0`、範囲外またはパース
+  できない品質、壊れた構文など - は、バリアントを作ったりリクエストを
+  失敗させたりするのではなく、宣言されたデフォルトに解決されます。
+  異なる交渉結果の値は異なる鍵になります。同じ交渉結果の値は、ワイヤ上で
+  どう綴られていたり重み付けされていたりしても、常に同じ 1 つの保存
+  された表現になります。
 
 `VarianceDimension::FeatureVersion`、`VarianceDimension::ConfigVersion`、
 そして独自の `VarianceDimension::Application(name)` は型として存在しますが、

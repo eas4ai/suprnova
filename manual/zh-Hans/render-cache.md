@@ -113,10 +113,6 @@ Application::new()
   而不是被悄悄忽略。
 - **差异化维度**，通过 `.vary(dimension)` 逐个添加：
   - `VarianceDimension::Locale` 按协商出的语言环境分区。
-  - `VarianceDimension::Media` 按协商出的媒体类型分区，并把 `Accept` 加入
-    `Vary`。
-  - `VarianceDimension::Encoding` 按协商出的内容编码分区，并把
-    `Accept-Encoding` 加入 `Vary`。
   - `VarianceDimension::Host` 按请求的主机分区，适用于你的部署让不止一个主机
     具有意义的情况。
   - `VarianceDimension::Tenant` 把当前租户作为不透明的键材料来分区；任何处理
@@ -124,11 +120,26 @@ Application::new()
   - `VarianceDimension::Principal` 把已登录访客作为不透明的键材料来分区，并
     绑定到一个权限版本（见下文“纪元、权限与检查”）；一个 `PrivateCached` 路由
     必须声明 `Principal` 或 `Tenant`（或两者都声明），否则根本无法构建成功。
+- **`Media` 和 `Encoding`**，与各自专属的封闭集合一起声明：
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  和
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`。
+  裸的 `.vary(VarianceDimension::Media)`（或 `::Encoding`）会在 `build`/
+  `apply` 处被拒绝：和其他每一个维度都不同，这两个维度要对照一个只有
+  路由才能指名的集合来协商，所以没有它就没有可以拿来作键的东西。
 
-`Media` 和 `Encoding` 都可以声明，也都会进入键，但本版本把它们各自解析成一个
-常量：每一个请求分别都是 `text/html` 和 `identity`。因此声明它们是一步面向未来
-的兼容动作 - 它们会正确地扩宽 `Vary` 并预留键空间，好让日后的内容协商层或压缩层
-不会与在它出现之前发布的条目相撞 - 而不是今天就在划分流量的东西。
+  协商会读取请求的 `Accept`（用于 `Media`）或 `Accept-Encoding`（用于
+  `Encoding`）请求头，把它对照声明的集合做匹配，并把匹配到的请求头
+  加入 `Vary`。它按 `q` 加权：声明的成员里质量最高的那个胜出，质量
+  相同时保留请求头自身从左到右的顺序，所以排在前面的候选项赢得平局。
+  通配符（`*/*`、`type/*`、单独的 `*`）会被当作字面 token 来比较，而
+  不会展开去匹配集合，所以它实际上几乎不会命中任何一个真正声明过的值。
+  一个缺失的请求头、一个没有指名声明集合里任何东西的值，或者一个让
+  这套逻辑理解不了的请求头 - 比如 `q=0`、一个超出范围或者无法解析的
+  质量值、乱七八糟的语法 - 都会解析成声明的默认值，而不是创建一个
+  变体或者让请求失败。两个不同的协商结果值就是两个不同的键；同一个
+  协商结果值，不管它在线上是怎么拼写或者加权的，永远都是同一份被
+  存储的表示。
 
 `VarianceDimension::FeatureVersion`、`VarianceDimension::ConfigVersion`，以及
 自定义的 `VarianceDimension::Application(name)` 都存在于这个类型上，但在本

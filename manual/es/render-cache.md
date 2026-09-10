@@ -142,10 +142,6 @@ dos mecanismos:
   petición en lugar de ser ignorado silenciosamente.
 - **Dimensiones de varianza**, añadidas una a una con `.vary(dimension)`:
   - `VarianceDimension::Locale` particiona por el locale negociado.
-  - `VarianceDimension::Media` particiona por el tipo de medio negociado, y
-    añade `Accept` a `Vary`.
-  - `VarianceDimension::Encoding` particiona por la codificación de
-    contenido negociada, y añade `Accept-Encoding` a `Vary`.
   - `VarianceDimension::Host` particiona por el host de la petición, cuando
     tu despliegue hace que más de un host sea relevante.
   - `VarianceDimension::Tenant` particiona por el tenant actual como
@@ -156,14 +152,31 @@ dos mecanismos:
     permisos (ver "Epoch, permisos e inspección" más abajo); una ruta
     `PrivateCached` debe declarar `Principal` o `Tenant` (o ambos), o no
     logra construirse en absoluto.
+- **`Media` y `Encoding`**, declarados juntos con su propio conjunto cerrado:
+  `.vary_media(NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")?)`
+  y
+  `.vary_encoding(NegotiatedPolicy::declared(["identity", "gzip"], "identity")?)`.
+  El `.vary(VarianceDimension::Media)` desnudo (o `::Encoding`) se rechaza en
+  `build`/`apply`: a diferencia de cualquier otra dimensión, estas dos
+  negocian contra un conjunto que solo la ruta puede nombrar, así que no hay
+  nada por lo que indexar sin él.
 
-`Media` y `Encoding` son declarables y entran en la clave, pero esta
-versión resuelve cada uno a una constante: toda petición es `text/html` e
-`identity` respectivamente. Declararlos es, por tanto, un movimiento de
-compatibilidad hacia adelante - amplían `Vary` correctamente y reservan el
-espacio de claves, de modo que una capa posterior de negociación de
-contenido o de compresión no pueda colisionar con entradas publicadas antes
-de que existiera - más que algo que particione el tráfico hoy.
+  La negociación lee la cabecera `Accept` de la petición (para `Media`) o
+  `Accept-Encoding` (para `Encoding`), la compara contra el conjunto
+  declarado, y añade la cabecera de petición correspondiente a `Vary`. Está
+  ponderada por `q`: el miembro declarado con la mayor calidad gana, y en caso
+  de igual calidad se conserva el orden de izquierda a derecha propio de la
+  cabecera, de modo que el candidato listado primero gana el empate. Un
+  wildcard (`*/*`, `type/*`, un `*` a secas) se compara como un token literal,
+  no se expande contra el conjunto, así que prácticamente nunca coincide con
+  un valor declarado real. Una cabecera ausente, un valor que no nombra nada
+  del conjunto declarado, o una cabecera de la que esto no puede sacar sentido -
+  un `q=0`, una calidad fuera de rango o imposible de analizar, sintaxis
+  basura - resuelve al valor por defecto declarado en lugar de crear una
+  variante o hacer fallar la petición. Dos valores negociados distintos son
+  dos claves distintas; el mismo valor negociado, sin importar cómo se haya
+  escrito o ponderado en el cable, es siempre la única representación
+  almacenada para él.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion` y un
 `VarianceDimension::Application(name)` personalizado existen en el tipo
