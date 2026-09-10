@@ -6,7 +6,7 @@ is this node holding under this key, and is it still current?** and **how do
 I make everything stop?** It answers a third - "is this route being served
 from a stored copy at all?" - through telemetry and through the `Age` header
 rather than through a command, because that question is about traffic rather
-than about one entry. There are two console commands, eight telemetry
+than about one entry. There are two console commands, nine telemetry
 counters, one bounded disk sweep, and one emergency lever.
 
 This chapter is the operating surface: the commands, exactly what they print
@@ -97,7 +97,7 @@ changed keeps matching whatever was cached under their prior permission set.
 
 ## Telemetry
 
-Eight closed counter names, and nothing in any of them names a tier, a
+Nine closed counter names, and nothing in any of them names a tier, a
 provider, or a backend:
 
 | Counter | Attribute |
@@ -109,6 +109,7 @@ provider, or a backend:
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
 | `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | none |
 
 `lookups` and `hits` carry the same closed set of eight outcomes:
@@ -183,6 +184,29 @@ lifts the ledger's epoch past that stamp, and clears its own L0. A non-zero
 value after a database restore is the signal that the restore was noticed. A
 non-zero value at any other time means an authority moved backwards for a
 reason nobody intended.
+
+`hints` counts credible generation hints this node received on the Tier 2
+pub/sub channel, one increment per message. It is the one counter here a
+deployment can leave permanently at zero by choice: hints are off unless the
+Redis profile, or `RENDER_CACHE_HINTS=redis`, turns them on, and a node with
+them off serves exactly what a node with them on serves. Its `outcome`
+attribute takes exactly one of `applied` (the message named a digest a
+validation lease on this node observes, and every such lease was shortened),
+`ignored_unknown_key` (it named nothing this node holds a lease against,
+which includes a message this node cannot read at all), `dropped_over_bound`
+(it carried more than 64 digests and was dropped whole rather than
+truncated, because a truncated hint is a silently wrong hint), and
+`subscriber_dropped` (this node's subscription ended, because it fell behind
+or the connection failed, and is being re-established). No attribute ever
+carries a route, a key, or a dependency identity.
+
+A hint can only shorten a validation lease this node already holds. It can
+never extend one, create one, or stand in for the generation ledger, and
+every hit still reads that ledger. So a rising `subscriber_dropped` means
+this node is revalidating later than it could - at worst as late as the
+lease's own `max_age_ms`, which is the staleness bound the route already
+declared - and never that anything is being served that the coherence check
+would have refused.
 
 **A high `declined` rate is the signal worth alerting on.** It means routes
 you opted in are rendering and serving correctly while never being stored,
@@ -517,7 +541,7 @@ Inspection is body-free by construction, so an operator can confirm an entry
 exists, what class it is stored under, and how large it is, without ever
 being shown its contents. Invalidation is an epoch bump that costs nothing
 to apply and touches only this cache - your sessions and your queue are not
-in the blast radius. Telemetry is a closed set of eight counters with closed
+in the blast radius. Telemetry is a closed set of nine counters with closed
 attribute sets, which is what makes a dashboard over them stable across
 releases rather than a set of strings that drift. The trade is that there is
 no "delete this one key" command: the levers are per entry read-only, or

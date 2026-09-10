@@ -7,7 +7,7 @@ Schlüssel, und ist es noch aktuell?** und **Wie bringe ich alles zum
 Stillstand?** Eine dritte, „Wird diese Route überhaupt aus einer
 gespeicherten Kopie bedient?“, beantwortet er über Telemetrie und über den
 `Age`-Header statt über einen Befehl, denn diese Frage handelt vom Verkehr
-und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, acht
+und nicht von einem Eintrag. Es gibt zwei Konsolenbefehle, neun
 Telemetriezähler, einen begrenzten Bereinigungslauf auf der Festplatte und
 einen Notfallhebel.
 
@@ -106,7 +106,7 @@ unter seinem vorherigen Berechtigungssatz gecacht wurde.
 
 ## Telemetrie
 
-Acht geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
+Neun geschlossene Zählernamen, und in keinem davon wird eine Ebene, ein
 Provider oder ein Backend benannt:
 
 | Zähler | Attribut |
@@ -118,6 +118,7 @@ Provider oder ein Backend benannt:
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
 | `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | keines |
 
 `lookups` und `hits` tragen dieselbe geschlossene Menge von acht Ergebnissen:
@@ -202,6 +203,33 @@ von null verschiedener Wert nach einer Wiederherstellung der Datenbank ist
 das Signal, dass die Wiederherstellung bemerkt wurde. Ein von null
 verschiedener Wert zu jedem anderen Zeitpunkt bedeutet, dass eine Autorität
 aus einem von niemandem beabsichtigten Grund rückwärtsgelaufen ist.
+
+`hints` zählt glaubwürdige Generationshinweise, die dieser Knoten auf dem
+Pub/Sub-Kanal der Ebene 2 empfangen hat, eine Erhöhung pro Nachricht. Er ist
+der eine Zähler hier, den eine Bereitstellung durch eigene Wahl dauerhaft auf
+null lassen kann: Hinweise sind aus, sofern nicht das Redis-Profil oder
+`RENDER_CACHE_HINTS=redis` sie einschaltet, und ein Knoten mit
+ausgeschalteten Hinweisen liefert genau das aus, was ein Knoten mit
+eingeschalteten Hinweisen ausliefert. Sein Attribut `outcome` nimmt genau
+einen der Werte `applied` (die Nachricht benannte einen Digest, den ein
+Validierungs-Lease auf diesem Knoten beobachtet, und jedes solche Lease wurde
+verkürzt), `ignored_unknown_key` (sie benannte nichts, wogegen dieser Knoten
+ein Lease hält, wozu auch eine Nachricht gehört, die dieser Knoten überhaupt
+nicht lesen kann), `dropped_over_bound` (sie trug mehr als 64 Digests und
+wurde ganz verworfen statt abgeschnitten, denn ein abgeschnittener Hinweis
+ist ein stillschweigend falscher Hinweis) und `subscriber_dropped` (das
+Abonnement dieses Knotens endete, weil er zurückfiel oder die Verbindung
+ausfiel, und wird neu aufgebaut). Kein Attribut führt jemals eine Route,
+einen Schlüssel oder eine Abhängigkeitsidentität mit.
+
+Ein Hinweis kann ein Validierungs-Lease, das dieser Knoten bereits hält, nur
+verkürzen. Er kann eines niemals verlängern, eines anlegen oder für das
+Generationen-Ledger einstehen, und jeder Treffer liest dieses Ledger
+weiterhin. Ein steigendes `subscriber_dropped` bedeutet also, dass dieser
+Knoten später neu validiert, als er könnte - schlimmstenfalls so spät wie das
+eigene `max_age_ms` des Lease, was genau die Veraltungsgrenze ist, die die
+Route bereits deklariert hat - und niemals, dass etwas ausgeliefert wird, was
+die Kohärenzprüfung abgelehnt hätte.
 
 **Eine hohe `declined`-Rate ist das Signal, auf das zu alarmieren sich
 lohnt.** Sie bedeutet, dass Routen, die Sie aufgenommen haben, korrekt
@@ -578,7 +606,7 @@ kann, dass ein Eintrag existiert, unter welcher Klasse er gespeichert ist und
 wie groß er ist, ohne je seinen Inhalt gezeigt zu bekommen. Die
 Invalidierung ist ein Epochensprung, der nichts kostet und nur diesen Cache
 berührt: Ihre Sitzungen und Ihre Queue liegen nicht im Wirkungsradius. Die
-Telemetrie ist eine geschlossene Menge von acht Zählern mit geschlossenen
+Telemetrie ist eine geschlossene Menge von neun Zählern mit geschlossenen
 Attributmengen, und das macht ein Dashboard darüber über Releases hinweg
 stabil statt zu einem Satz driftender Zeichenketten. Der Preis ist, dass es
 keinen Befehl „lösche genau diesen einen Schlüssel“ gibt: Die Hebel sind pro

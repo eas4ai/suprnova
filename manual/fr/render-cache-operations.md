@@ -7,7 +7,7 @@ clé, et est-ce encore à jour ?** et **comment fait-on tout arrêter ?** Il
 répond à une troisième - « cette route est-elle seulement servie depuis une
 copie stockée ? » - par la télémétrie et par l'en-tête `Age` plutôt que par
 une commande, parce que cette question porte sur le trafic plutôt que sur
-une entrée. Il y a deux commandes console, huit compteurs de télémétrie, un
+une entrée. Il y a deux commandes console, neuf compteurs de télémétrie, un
 balayage disque borné, et un levier d'urgence.
 
 Ce chapitre est la surface d'exploitation : les commandes, exactement ce
@@ -106,7 +106,7 @@ permissions.
 
 ## Télémétrie
 
-Huit noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
+Neuf noms de compteurs fermés, et rien dans aucun d'eux ne nomme un palier,
 un fournisseur, ou un backend :
 
 | Compteur | Attribut |
@@ -118,6 +118,7 @@ un fournisseur, ou un backend :
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
 | `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | aucun |
 
 `lookups` et `hits` portent le même ensemble fermé de huit résultats :
@@ -199,6 +200,30 @@ non nulle après une restauration de base de données est le signal que la
 restauration a été remarquée. Une valeur non nulle à tout autre moment
 signifie qu'une autorité a reculé pour une raison que personne n'avait
 voulue.
+
+`hints` compte les indices de génération crédibles que ce nœud a reçus sur le
+canal pub/sub du palier 2, un incrément par message. C'est le seul compteur
+ici qu'un déploiement peut laisser durablement à zéro par choix : les indices
+sont désactivés sauf si le profil Redis, ou `RENDER_CACHE_HINTS=redis`, les
+active, et un nœud qui les a désactivés sert exactement ce que sert un nœud
+qui les a activés. Son attribut `outcome` prend exactement l'une des valeurs
+`applied` (le message a nommé un digest qu'un bail de validation de ce nœud
+observe, et chacun de ces baux a été raccourci), `ignored_unknown_key` (il
+n'a rien nommé contre quoi ce nœud tienne un bail, ce qui inclut un message
+que ce nœud ne sait pas lire du tout), `dropped_over_bound` (il portait plus
+de 64 digests et a été rejeté en entier plutôt que tronqué, parce qu'un
+indice tronqué est un indice silencieusement faux) et `subscriber_dropped`
+(l'abonnement de ce nœud a pris fin, parce qu'il a pris du retard ou que la
+connexion a échoué, et il est en cours de rétablissement). Aucun attribut ne
+porte jamais une route, une clé, ou une identité de dépendance.
+
+Un indice ne peut que raccourcir un bail de validation que ce nœud détient
+déjà. Il ne peut jamais en prolonger un, en créer un, ou tenir lieu de
+registre des générations, et chaque hit lit toujours ce registre. Un
+`subscriber_dropped` en hausse signifie donc que ce nœud revalide plus tard
+qu'il ne le pourrait - au pire aussi tard que le `max_age_ms` propre du bail,
+qui est la borne d'obsolescence que la route a déjà déclarée - et jamais que
+quelque chose est servi que le contrôle de cohérence aurait refusé.
 
 **Un taux de `declined` élevé est le signal sur lequel il vaut la peine
 d'alerter.** Il signifie que des routes que vous avez activées se rendent et
@@ -568,7 +593,7 @@ stockée, et quelle taille elle fait, sans qu'on lui montre jamais son
 contenu. L'invalidation est un incrément d'epoch qui ne coûte rien à
 appliquer et ne touche que ce cache - vos sessions et votre file d'attente
 ne sont pas dans le périmètre d'impact. La télémétrie est un ensemble fermé
-de huit compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
+de neuf compteurs à ensembles d'attributs fermés, et c'est ce qui rend un
 tableau de bord bâti dessus stable d'une version à l'autre plutôt qu'un jeu
 de chaînes qui dérivent. Le marché, c'est qu'il n'y a aucune commande
 « supprime cette clé-ci » : les leviers sont en lecture seule par entrée, ou

@@ -7,7 +7,7 @@ clave, y sigue vigente?** y **¿cómo hago que todo se detenga?** Responde a
 una tercera, «¿se está sirviendo esta ruta desde una copia almacenada,
 siquiera?», mediante la telemetría y la cabecera `Age` en lugar de mediante
 un comando, porque esa pregunta va de tráfico y no de una entrada. Hay dos
-comandos de consola, ocho contadores de telemetría, un barrido de disco
+comandos de consola, nueve contadores de telemetría, un barrido de disco
 acotado y una palanca de emergencia.
 
 Este capítulo es la superficie operativa: los comandos, exactamente qué
@@ -101,7 +101,7 @@ coincidiendo con lo que se cacheó bajo su anterior conjunto de permisos.
 
 ## Telemetría
 
-Ocho nombres de contador cerrados, y nada en ninguno de ellos nombra un
+Nueve nombres de contador cerrados, y nada en ninguno de ellos nombra un
 nivel, un proveedor o un backend:
 
 | Contador | Atributo |
@@ -113,6 +113,7 @@ nivel, un proveedor o un backend:
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
 | `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | ninguno |
 
 `lookups` y `hits` llevan el mismo conjunto cerrado de ocho desenlaces:
@@ -194,6 +195,32 @@ encima de ese sello y vacía su propia L0. Un valor distinto de cero
 después de restaurar la base de datos es la señal de que se notó la
 restauración. Un valor distinto de cero en cualquier otro momento
 significa que una autoridad retrocedió por una razón que nadie pretendía.
+
+`hints` cuenta las pistas creíbles de generación que este nodo recibió en el
+canal pub/sub del nivel 2, un incremento por mensaje. Es el único contador
+aquí que un despliegue puede dejar permanentemente en cero por elección
+propia: las pistas están apagadas salvo que el perfil Redis, o
+`RENDER_CACHE_HINTS=redis`, las encienda, y un nodo con ellas apagadas sirve
+exactamente lo que sirve un nodo con ellas encendidas. Su atributo `outcome`
+toma exactamente uno de `applied` (el mensaje nombró un digest que un
+arrendamiento de validación de este nodo observa, y todos esos arrendamientos
+se acortaron), `ignored_unknown_key` (no nombró nada contra lo que este nodo
+tenga un arrendamiento, lo que incluye un mensaje que este nodo no puede leer
+en absoluto), `dropped_over_bound` (llevaba más de 64 digests y se descartó
+entero en lugar de truncarse, porque una pista truncada es una pista
+silenciosamente equivocada) y `subscriber_dropped` (la suscripción de este
+nodo terminó, porque se quedó atrás o porque falló la conexión, y se está
+restableciendo). Ningún atributo lleva jamás una ruta, una clave ni una
+identidad de dependencia.
+
+Una pista solo puede acortar un arrendamiento de validación que este nodo ya
+tiene. Nunca puede extender uno, crear uno ni sustituir al libro mayor de
+generaciones, y cada acierto sigue leyendo ese libro mayor. Así que un
+`subscriber_dropped` en aumento significa que este nodo revalida más tarde de
+lo que podría - como mucho tan tarde como el propio `max_age_ms` del
+arrendamiento, que es la cota de obsolescencia que la ruta ya declaró - y
+nunca que se esté sirviendo algo que la comprobación de coherencia habría
+rechazado.
 
 **Una tasa alta de `declined` es la señal por la que vale la pena alertar.**
 Significa que rutas que incluiste están renderizando y sirviendo
@@ -559,7 +586,7 @@ operador puede confirmar que una entrada existe, bajo qué clase está
 almacenada y cuán grande es, sin que se le muestre nunca su contenido. La
 invalidación es una subida de epoch que no cuesta nada aplicar y que toca
 solo esta caché: tus sesiones y tu cola no están en el radio de la
-explosión. La telemetría es un conjunto cerrado de ocho contadores con
+explosión. La telemetría es un conjunto cerrado de nueve contadores con
 conjuntos de atributos cerrados, que es lo que hace que un panel sobre
 ellos sea estable entre versiones en lugar de un conjunto de cadenas que se
 va a la deriva. El intercambio es que no hay comando de «borra esta clave»:

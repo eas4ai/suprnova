@@ -7,7 +7,7 @@ sob esta chave, e isso ainda está atual?** e **como eu faço tudo parar?**
 Ele responde a uma terceira - "esta rota está sendo servida a partir de uma
 cópia armazenada, afinal?" - por telemetria e pelo cabeçalho `Age` em vez de
 por um comando, porque essa pergunta é sobre tráfego e não sobre uma
-entrada. Há dois comandos de console, oito contadores de telemetria, uma
+entrada. Há dois comandos de console, nove contadores de telemetria, uma
 varredura de disco limitada e uma alavanca de emergência.
 
 Este capítulo é a superfície operacional: os comandos, exatamente o que eles
@@ -100,7 +100,7 @@ estava em cache sob o seu conjunto de permissões anterior.
 
 ## Telemetria
 
-Oito nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
+Nove nomes fechados de contador, e nada em nenhum deles nomeia uma camada,
 um provedor ou um backend:
 
 | Contador | Atributo |
@@ -112,6 +112,7 @@ um provedor ou um backend:
 | `suprnova.render_cache.stitch.assemblies` | `outcome` |
 | `suprnova.render_cache.stitch.slots` | `outcome` |
 | `suprnova.render_cache.stitch.nested` | `outcome`, `cause` |
+| `suprnova.render_cache.hints` | `outcome` |
 | `suprnova.render_cache.epoch_rewinds` | nenhum |
 
 `lookups` e `hits` carregam o mesmo conjunto fechado de oito desfechos:
@@ -194,6 +195,30 @@ carimbo, e limpa a sua própria L0. Um valor diferente de zero depois de
 uma restauração de banco de dados é o sinal de que a restauração foi
 percebida. Um valor diferente de zero em qualquer outro momento significa
 que uma autoridade andou para trás por um motivo que ninguém pretendia.
+
+`hints` conta as dicas de geração credíveis que este nó recebeu no canal
+pub/sub da camada 2, um incremento por mensagem. É o único contador aqui que
+uma implantação pode deixar permanentemente em zero por escolha própria: as
+dicas ficam desligadas a menos que o perfil Redis, ou
+`RENDER_CACHE_HINTS=redis`, as ligue, e um nó com elas desligadas serve
+exatamente o que um nó com elas ligadas serve. O seu atributo `outcome`
+assume exatamente um de `applied` (a mensagem nomeou um digest que um lease
+de validação deste nó observa, e todos esses leases foram encurtados),
+`ignored_unknown_key` (não nomeou nada contra o que este nó tenha um lease, o
+que inclui uma mensagem que este nó não consegue ler de jeito nenhum),
+`dropped_over_bound` (carregava mais de 64 digests e foi descartada inteira
+em vez de truncada, porque uma dica truncada é uma dica silenciosamente
+errada) e `subscriber_dropped` (a assinatura deste nó terminou, porque ficou
+para trás ou porque a conexão falhou, e está sendo restabelecida). Nenhum
+atributo carrega jamais uma rota, uma chave ou uma identidade de dependência.
+
+Uma dica só pode encurtar um lease de validação que este nó já detém. Nunca
+pode estender um, criar um, nem fazer as vezes do ledger de gerações, e todo
+hit continua lendo esse ledger. Portanto um `subscriber_dropped` em alta
+significa que este nó revalida mais tarde do que poderia - no pior caso tão
+tarde quanto o próprio `max_age_ms` do lease, que é o limite de obsolescência
+que a rota já declarou - e nunca que algo está sendo servido que a
+verificação de coerência teria recusado.
 
 **Uma taxa alta de `declined` é o sinal que vale um alerta.** Ela significa
 que rotas que você incluiu estão renderizando e servindo corretamente sem
@@ -551,7 +576,7 @@ confirmar que uma entrada existe, sob que classe ela está armazenada e qual é
 o tamanho dela, sem jamais ver o seu conteúdo. A invalidação é um incremento
 de epoch que não custa nada para aplicar e toca apenas neste cache - as suas
 sessões e a sua fila não estão no raio da explosão. A telemetria é um
-conjunto fechado de oito contadores com conjuntos fechados de atributos, que
+conjunto fechado de nove contadores com conjuntos fechados de atributos, que
 é o que torna um dashboard sobre eles estável entre releases em vez de um
 punhado de strings que derivam. A troca é que não existe comando de "apague
 esta chave": as alavancas são por entrada e somente de leitura, ou de epoch
