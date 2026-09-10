@@ -129,7 +129,7 @@ session et l'autorisation dans la pile de middleware :
 SessionMiddleware → IncludeMiddleware → AuthMiddleware → handlers
 ```
 
-### `include`/`exclude`/`only`/`except` programmatiques
+### include/exclude/only/except programmatiques
 
 `RequestIncludeSet` reflète le contrat `IncludeableData` de
 Laravel-Data avec des builders chaînables. Les handlers, les tests, et
