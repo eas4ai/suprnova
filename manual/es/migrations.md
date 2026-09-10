@@ -21,7 +21,7 @@ src/migrations/
 └── m20240115_120000_create_users_table.rs
 ```
 
-El nombre del archivo es `m{AAAAMMDD}_{HHMMSS}_<nombre>.rs`; el orden es por
+El nombre del archivo es `m{YYYYMMDD}_{HHMMSS}_<name>.rs`; el orden es por
 nombre de archivo, así que el prefijo de timestamp es lo que impone un orden de
 aplicación determinista.
 
