@@ -1241,18 +1241,6 @@ async fn reset_admitted_2fa_failure(
     crate::auth_flows::BruteForce::reset_admitted_attempt(email, admission).await
 }
 
-#[cfg(not(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-)))]
-async fn reset_admitted_2fa_failure(
-    _email: &str,
-    _admission: &crate::magnetar_integration::engine::LockoutAdmission,
-) -> Result<(), FrameworkError> {
-    Ok(())
-}
-
 /// Best-effort lockout check. Returns `false` (= not locked) if Magnetar
 /// isn't initialised - same posture as [`record_2fa_failure`]: the
 /// throttling layer is opt-in, so an environment without Magnetar sees
