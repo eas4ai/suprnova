@@ -2351,6 +2351,8 @@ var EXPECTED_V4_INVENTORY = Object.freeze({
   "async-envelope.json": [
     "codec_limits",
     "continuity_cases",
+    "descriptor_cases",
+    "descriptor_schema_version",
     "envelope_cases",
     "live_protocol_versions",
     "payload_kinds",

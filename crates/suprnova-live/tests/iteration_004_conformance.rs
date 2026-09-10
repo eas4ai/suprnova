@@ -321,6 +321,8 @@ fn v4_inventory() -> Value {
             vec![
                 "codec_limits",
                 "continuity_cases",
+                "descriptor_cases",
+                "descriptor_schema_version",
                 "envelope_cases",
                 "live_protocol_versions",
                 "payload_kinds",

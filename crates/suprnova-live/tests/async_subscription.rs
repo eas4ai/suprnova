@@ -371,7 +371,7 @@ fn signed_non_stream_source_and_unknown_order_are_not_event_authority() {
 #[test]
 fn every_security_significant_claim_and_event_field_is_signature_bound() {
     let mutations = vec![
-        ("/v", serde_json::json!(2)),
+        ("/v", serde_json::json!(3)),
         ("/stream", serde_json::json!("orders.other")),
         ("/protocol", serde_json::json!(2)),
         ("/capability", serde_json::json!(4)),
