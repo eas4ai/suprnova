@@ -221,6 +221,25 @@ class ManualCodeSpanTests(unittest.TestCase):
 
         self.assertEqual(self._one(english, mirror), [])
 
+    def test_a_span_wrapped_across_two_quoted_lines_drops_the_quote_marker(self):
+        # A block quote marker is structure, not content: CommonMark strips it
+        # before parsing the quoted block, so a span whose delimiters sit on
+        # two quoted lines must not swallow the marker of the second one. A
+        # mirror that wraps the same content onto one quoted line is not drift.
+        english = (
+            "# Guide\n"
+            "\n"
+            "> The `long identifier that\n"
+            "> wraps` stays one span.\n"
+        )
+        mirror = (
+            "# Guide\n"
+            "\n"
+            "> Der `long identifier that wraps` bleibt eine Spanne.\n"
+        )
+
+        self.assertEqual(self._one(english, mirror), [])
+
 
 if __name__ == "__main__":
     unittest.main()

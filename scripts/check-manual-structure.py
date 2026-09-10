@@ -253,6 +253,13 @@ def _table_cells(line: str) -> tuple[str, ...] | None:
     return tuple(cells) if len(cells) >= 2 else None
 
 
+# A block quote marker is structure, not content: CommonMark strips it before
+# the quoted block is parsed. Leaving it in place lets it land inside a code
+# span whose backticks sit on two quoted lines, which reports drift that the
+# rendered page does not have.
+_BLOCKQUOTE_MARKER = re.compile(r"^ {0,3}(?:> ?)+")
+
+
 def _is_table_delimiter(cells: tuple[str, ...] | None) -> bool:
     return cells is not None and all(
         _TABLE_DELIMITER_CELL.fullmatch(cell) is not None for cell in cells
@@ -339,7 +346,7 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
         # whatever block is open; everything else is paragraph continuation.
         # A stray pipe in ordinary prose (`"ack"` | `"nack"`) never sets
         # `active_table`, so it stays plain paragraph text, not a table row.
-        if not line.strip():
+        if not line.strip() or not _BLOCKQUOTE_MARKER.sub("", line).strip():
             _flush_block()
         elif heading is not None:
             _flush_block()
@@ -358,9 +365,9 @@ def _markdown_shape(text: str, current_file: PurePosixPath) -> _MarkdownShape:
             blocks.append(line)
         elif item is not None:
             _flush_block()
-            current_block.append(line)
+            current_block.append(_BLOCKQUOTE_MARKER.sub("", line))
         else:
-            current_block.append(line)
+            current_block.append(_BLOCKQUOTE_MARKER.sub("", line))
 
         reference = _REFERENCE_LINK.match(line)
         if reference is not None:
