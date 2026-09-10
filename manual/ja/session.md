@@ -109,7 +109,11 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-これは、フレームワークのデフォルトである `DatabaseSessionDriver` に対する `SessionStore::destroy_for_user` を包んだものです。独自のストアを束縛している場合は、そちらの `destroy_for_user` を直接呼んでください。
+`destroy_all_for_user` は、`SessionMiddleware::new` または `with_store` で
+登録された `SessionStore` を解決し、その構成済みストアに対して
+`destroy_for_user` を呼び出します。セッションストアが登録されていない場合
+（テストやミドルウェアを一度も構築しなかった埋め込みシステムなど）のみ、
+新しい `DatabaseSessionDriver` にフォールバックします。
 
 ## 認証のヘルパー
 
@@ -150,7 +154,7 @@ if is_authenticated() {
 | `previous_url()` / `set_previous_url(url)` | `Redirect::back` が読むもの |
 | `password_confirmed()` / `password_confirmed_at()` | 「ユーザーがたった今パスワードを確認した」というタイムスタンプ |
 
-変更を伴う操作では `session_mut` の内部で、読み取りでは `session()` で、これらに手を伸ばしてください。`previous_url` のスロットは、成功したGETのHTMLレスポンスに対してミドルウェアが自動的に埋めます。ミドルウェアは、ルート相対かつ同一オリジンのURLだけを記録します。`//` または `/\` で始まるリクエストパス（どちらもブラウザーではプロトコル相対として読まれます）、または任意の位置にASCII制御バイトを持つパス（`TAB` や改行は、ブラウザーのURLパーサーが取り除くとルート相対に見える値をその2形態のどちらかへ変えられます）は、決して保存されません。`previous_url()` も読み取りごとに同じ規則を再確認するため、この書き込み時ガードより前の古いリリースが書いた値は、信頼されず欠落として読み返されます。どちらの場合も、このスロットが保持した値から `Redirect::back()`、`Redirect::refresh()`、および `url::previous()` がアプリケーション外の `Location` へ解決されることはありません。
+変更を伴う操作では `session_mut` の内部で、読み取りでは `session()` で、これらに手を伸ばしてください。`previous_url` のスロットは、成功したGETのHTMLレスポンスに対してミドルウェアが自動的に埋めるため、`redirect()->back()` は何もしなくても動作します。ミドルウェアは、ルート相対かつ同一オリジンのURLだけを記録します。`//` または `/\` で始まるリクエストパス（どちらもブラウザーではプロトコル相対として読まれます）、または任意の位置にASCII制御バイトを持つパス（`TAB` や改行は、ブラウザーのURLパーサーが取り除くとルート相対に見える値をその2形態のどちらかへ変えられます）は、決して保存されません。`previous_url()` も読み取りごとに同じ規則を再確認するため、この書き込み時ガードより前の古いリリースが書いた値は、信頼されず欠落として読み返されます。どちらの場合も、このスロットが保持した値から `Redirect::back()`、`Redirect::refresh()`、および `url::previous()` がアプリケーション外の `Location` へ解決されることはありません。
 
 ## 設定
 
