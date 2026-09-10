@@ -300,7 +300,19 @@ O lado de dados retorna os próprios jobs tipados:
 
 Somente `Queue::push_with` e `Queue::later_with` carregam um
 `EnvelopeOverrides`, portanto `pushed_with_overrides` registra
-`EnvelopeOverrides::default()` para todas as outras formas de push.
+`EnvelopeOverrides::default()` para todas as outras formas de push - um
+`Queue::push` simples se lê sob o fake exatamente como "nenhuma
+substituição foi declarada", da mesma forma que seria se você tivesse
+verificado `entries[0].1 == EnvelopeOverrides::default()`.
+`assert_pushed_on_queue` / `assert_pushed_on_connection` verificam a
+substituição *declarada*, não um nome de queue ou connection resolvido:
+a resolução de `Queue::route` e `Job::queue`/`Job::connection` nunca
+roda sob o fake (não há push de driver para resolvê-los), então um job
+que cairia de volta para uma rota ou um padrão em nível de job em
+produção aparece aqui sem nenhuma substituição. Use
+`pushed_with_overrides` diretamente para verificar qualquer outra coisa
+que o overlay carrega - `timeout`, `fail_on_timeout`, `max_tries`,
+`backoff`.
 
 Todo `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, e os dispatchers de chain/batch, todos
