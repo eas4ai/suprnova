@@ -71,8 +71,20 @@ Choisissez selon ce que vous avez réellement besoin de partager :
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | l'espace de noms de clés sous lequel écrivent les deux paliers de cache Redis |
 | `RENDER_CACHE_LEASE_MS` | 30 000 | durée de vie d'un bail de reconstruction |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | plafond de requêtes en attente dans le processus |
+| `RENDER_CACHE_HINTS` | celui du profil | `disabled` ou `redis` ; indices de génération crédibles sur `<prefix>hints`, via le point de terminaison ci-dessus |
 | `RENDER_CACHE_FAILURE` | `open` | `open` sert la route sans cache en cas de défaillance d'un fournisseur, `closed` répond `503` |
 | `APP_BUILD_ID` | la version du paquet de l'application (voir ci-dessous) | cantonne chaque entrée au build qui l'a produite |
+
+`RENDER_CACHE_HINTS` est le seul bouton ici qui ne change aucune réponse. Il
+vaut `redis` par défaut sous le profil `redis` et `disabled` sous les deux
+autres, et il n'a pas de point de terminaison propre : il utilise
+`RENDER_CACHE_REDIS_URL` et `RENDER_CACHE_REDIS_PREFIX` ci-dessus. Un indice
+ne peut que raccourcir un bail de validation qu'un nœud détient déjà, si
+bien qu'un déploiement qui les a désactivés, un dont le canal est mort, et
+un construit sans la fonctionnalité servent les mêmes entrées et admettent
+les mêmes reconstructions ; seul le moment de la revalidation diffère. C'est
+aussi pourquoi un point de terminaison d'indices injoignable n'arrête pas le
+démarrage, contrairement à un palier de cache injoignable.
 
 Le profil est un raccourci, pas un verrou. `RENDER_CACHE_L1` et
 `RENDER_CACHE_COORDINATOR` remplacent chacune leur propre moitié, si bien

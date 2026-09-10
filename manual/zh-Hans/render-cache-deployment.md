@@ -57,8 +57,17 @@ RenderCache 用**配置档**来回答这件事：一个配置档指名一个进�
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | 两个 Redis 缓存层级写入时所用的键命名空间 |
 | `RENDER_CACHE_LEASE_MS` | 30,000 | 重建租约的存活时长 |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | 进程内等待者上限 |
+| `RENDER_CACHE_HINTS` | 配置档的那个 | `disabled` 或 `redis`；经由上面那个端点，在 `<prefix>hints` 上传递的可信世代提示 |
 | `RENDER_CACHE_FAILURE` | `open` | `open` 在提供者出故障时以不缓存的方式服务该路由，`closed` 应答 `503` |
 | `APP_BUILD_ID` | 应用自己的包版本（见下文） | 把每一个条目限定在生成它的那次构建的命名空间下 |
+
+`RENDER_CACHE_HINTS` 是这里唯一一个不改变任何答案的旋钮。在 `redis` 配置档
+下它默认是 `redis`，在另外两个配置档下是 `disabled`，而且它没有自己的端点：
+它搭上面那个 `RENDER_CACHE_REDIS_URL` 和 `RENDER_CACHE_REDIS_PREFIX` 的车。
+一条提示只能缩短某个节点已经持有的验证租约，所以一个把它关掉的部署、一个频道已
+经死掉的部署，和一个根本没带这个特性构建的部署，提供的是同样的条目，准许的是同
+样的重建；不同的只是重新验证的时机。这也正是为什么一个连不上的提示端点不会像一
+个连不上的缓存层级那样，把启动拦下来。
 
 配置档是一种简写，不是一把锁。`RENDER_CACHE_L1` 和 `RENDER_CACHE_COORDINATOR`
 各自覆盖自己的那一半，所以一个想把条目放在数据库、却把重建租约留在进程内的部署

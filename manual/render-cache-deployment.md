@@ -66,8 +66,19 @@ Choose by what you actually need to share:
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | the key namespace both Redis cache tiers write under |
 | `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
+| `RENDER_CACHE_HINTS` | the profile's | `disabled` or `redis`; credible generation hints on `<prefix>hints`, over the endpoint above |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serves the route uncached on a provider failure, `closed` answers `503` |
 | `APP_BUILD_ID` | the application's package version (see below) | namespaces every entry to the build that produced it |
+
+`RENDER_CACHE_HINTS` is the one knob here that changes no answer. It defaults
+to `redis` under the `redis` profile and to `disabled` under the other two,
+and it has no endpoint of its own - it rides the `RENDER_CACHE_REDIS_URL` and
+`RENDER_CACHE_REDIS_PREFIX` above. A hint can only shorten a validation lease
+a node already holds, so a deployment with it off, one whose channel is dead,
+and one built without the feature all serve the same entries and admit the
+same rebuilds; only the moment of revalidation differs. That is also why an
+unreachable hint endpoint does not stop the boot the way an unreachable cache
+tier does.
 
 The profile is a shorthand, not a lock. `RENDER_CACHE_L1` and
 `RENDER_CACHE_COORDINATOR` each override their own half, so a deployment

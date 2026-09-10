@@ -437,6 +437,16 @@ impl RenderCacheConfig {
     /// `suprnova_render:`), `RENDER_CACHE_LEASE_MS` (default 30000), and
     /// `RENDER_CACHE_MAX_WAITERS` (default 128).
     ///
+    /// `RENDER_CACHE_HINTS` (`disabled` or `redis`) says whether this node
+    /// announces and listens for credible generation hints. It defaults to
+    /// `redis` under the Redis profile and to `disabled` under the other
+    /// two, and it has no endpoint of its own: it rides the same
+    /// `RENDER_CACHE_REDIS_URL` and `RENDER_CACHE_REDIS_PREFIX` the Tier 2
+    /// tiers use. A hint only ever shortens a validation lease this node
+    /// already holds, so turning this off, or pointing it at a Redis that
+    /// is not there, changes when a lease-mode route revalidates and
+    /// nothing else - see [`super::hints`].
+    ///
     /// # Errors
     ///
     /// Returns [`FrameworkError`] when a variable with a closed set of
@@ -862,6 +872,10 @@ mod tests {
                 "RENDER_CACHE_COORDINATOR",
                 vec![("RENDER_CACHE_COORDINATOR", "zookeeper")],
             ),
+            (
+                "RENDER_CACHE_HINTS",
+                vec![("RENDER_CACHE_HINTS", "carrier-pigeon")],
+            ),
         ] {
             let message = refusal(&pairs);
             assert!(message.contains(variable), "{message}");
@@ -870,6 +884,65 @@ mod tests {
                 "the rejected value is never repeated: {message}"
             );
         }
+    }
+
+    /// Hints follow the profile: on where there is a Redis to carry them,
+    /// off where a tier needs no pub/sub at all. That default is what keeps
+    /// the Embedded and Database-coordinated tiers unaffected by this
+    /// feature, and it is the half of "no new external daemon is required
+    /// at any tier" that configuration owns.
+    #[test]
+    fn hints_default_to_the_profile_and_ride_the_shared_redis_endpoint() {
+        assert_eq!(
+            parsed(&[]).hints,
+            HintsConfig::Disabled,
+            "the embedded profile needs no pub/sub"
+        );
+        assert_eq!(
+            parsed(&[("RENDER_CACHE_PROFILE", "database")]).hints,
+            HintsConfig::Disabled,
+            "and neither does the database-coordinated one"
+        );
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_PROFILE", "redis"),
+                ("RENDER_CACHE_REDIS_URL", "redis://10.0.0.1:6379"),
+                ("RENDER_CACHE_REDIS_PREFIX", "acme:"),
+            ])
+            .hints,
+            HintsConfig::Redis {
+                url: "redis://10.0.0.1:6379".to_owned(),
+                prefix: "acme:".to_owned(),
+            },
+            "the Redis profile carries them on the endpoint its tiers already use"
+        );
+    }
+
+    /// And the knob overrides the profile in both directions, like every
+    /// other knob in this table.
+    #[test]
+    fn hints_can_be_turned_on_and_off_against_the_profile() {
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_HINTS", "redis"),
+                ("RENDER_CACHE_REDIS_URL", "redis://10.0.0.2:6379"),
+            ])
+            .hints,
+            HintsConfig::Redis {
+                url: "redis://10.0.0.2:6379".to_owned(),
+                prefix: DEFAULT_REDIS_PREFIX.to_owned(),
+            },
+            "an embedded deployment may still accelerate its leases"
+        );
+        assert_eq!(
+            parsed(&[
+                ("RENDER_CACHE_PROFILE", "redis"),
+                ("RENDER_CACHE_HINTS", "disabled"),
+            ])
+            .hints,
+            HintsConfig::Disabled,
+            "and a Tier 2 deployment may decline them"
+        );
     }
 
     #[test]

@@ -1167,6 +1167,7 @@ that rather than choosing the nearest whole profile.
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | the key namespace both Redis cache tiers write under |
 | `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
+| `RENDER_CACHE_HINTS` | the profile's (`redis` under the Redis profile, `disabled` otherwise) | `disabled` or `redis`; credible generation hints on `<prefix>hints`, over the same endpoint the Tier 2 tiers use |
 | `LIVE_LEDGER_DRIVER` | `memory` | `memory`, `database`, or `redis` |
 | `LIVE_REDIS_URL` | `REDIS_URL`, then `redis://127.0.0.1:6379` | where the Redis ledger driver connects |
 | `LIVE_REDIS_PREFIX` | `suprnova_live:` | the key namespace the Redis ledger driver writes under |
@@ -1752,8 +1753,9 @@ grammar rather than falling back to one shared namespace.
 
 It also reads the deployment-profile variables (`RENDER_CACHE_PROFILE`,
 `RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`, `RENDER_CACHE_REDIS_URL`,
-`RENDER_CACHE_REDIS_PREFIX`, `RENDER_CACHE_LEASE_MS`, and
-`RENDER_CACHE_MAX_WAITERS`), which are tabled with their defaults under
+`RENDER_CACHE_REDIS_PREFIX`, `RENDER_CACHE_LEASE_MS`,
+`RENDER_CACHE_MAX_WAITERS`, and `RENDER_CACHE_HINTS`), which are tabled with
+their defaults under
 Deployment tiers and providers above, beside the Live instance ledger's own
 `LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL`, and `LIVE_REDIS_PREFIX`.
 
@@ -1766,10 +1768,12 @@ servers.
 
 ### Telemetry
 
-Six closed counter names: `suprnova.render_cache.lookups`,
+Nine closed counter names: `suprnova.render_cache.lookups`,
 `suprnova.render_cache.hits`, `suprnova.render_cache.publications`,
 `suprnova.render_cache.rebuilds`, `suprnova.render_cache.stitch.assemblies`,
-and `suprnova.render_cache.stitch.slots`. `lookups` and `hits` carry the
+`suprnova.render_cache.stitch.slots`, `suprnova.render_cache.stitch.nested`,
+`suprnova.render_cache.hints`, and `suprnova.render_cache.epoch_rewinds`.
+`lookups` and `hits` carry the
 `outcome` attribute with the eight `LookupOutcome` values listed under
 "Framework middleware and policy" above (`l0`, `l1`, `conditional`,
 `stale`, `miss`, `bypass`, `moved`, `declined`); `hits` increments only for
@@ -1785,10 +1789,15 @@ Summing either counter over its `outcome` values therefore over-counts
 requests; read one label at a time, and use a single label such as `l0` for a
 request count.
 
-The two stitch counters carry their
+The three stitch counters carry their
 own closed `outcome` sets: `assembled` and `fail_document` for assemblies,
-`rendered`, `omitted`, `fallback`, and `failed` for slots. `publications`
-and `rebuilds` are plain counts with no `outcome` attribute in this build.
+`rendered`, `omitted`, `fallback`, and `failed` for slots, and `resolved`,
+`omitted`, `fallback`, and `failed` for nested segments, which alone also
+carry a closed `cause` beside `outcome`. `hints` carries `applied`,
+`ignored_unknown_key`, `dropped_over_bound`, and `subscriber_dropped`, one
+per received message; a deployment that never configures the channel never
+increments it. `publications`, `rebuilds`, and `epoch_rewinds` are plain
+counts with no `outcome` attribute in this build.
 
 ### Console commands
 

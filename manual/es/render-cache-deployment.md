@@ -72,8 +72,20 @@ Elige según lo que necesites compartir de verdad:
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | el espacio de nombres de claves bajo el que escriben ambos niveles de caché de Redis |
 | `RENDER_CACHE_LEASE_MS` | 30.000 | vida del lease de reconstrucción |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | techo de peticiones en espera en proceso |
+| `RENDER_CACHE_HINTS` | el del perfil | `disabled` o `redis`; pistas creíbles de generación en `<prefix>hints`, sobre el endpoint de arriba |
 | `RENDER_CACHE_FAILURE` | `open` | `open` sirve la ruta sin cachear ante un fallo de proveedor, `closed` responde `503` |
 | `APP_BUILD_ID` | la versión del paquete de la aplicación (ver abajo) | da a cada entrada el espacio de nombres del build que la produjo |
+
+`RENDER_CACHE_HINTS` es la única perilla aquí que no cambia ninguna
+respuesta. Bajo el perfil `redis` vale `redis` por omisión y bajo los otros
+dos `disabled`, y no tiene endpoint propio: usa `RENDER_CACHE_REDIS_URL` y
+`RENDER_CACHE_REDIS_PREFIX` de arriba. Una pista solo puede acortar un
+arrendamiento de validación que un nodo ya tiene, así que un despliegue con
+ellas apagadas, uno cuyo canal está muerto y uno construido sin la
+funcionalidad sirven las mismas entradas y admiten las mismas
+reconstrucciones; solo cambia el momento de la revalidación. Por eso mismo
+un endpoint de pistas inalcanzable no detiene el arranque como sí lo hace un
+nivel de caché inalcanzable.
 
 El perfil es un atajo, no un candado. `RENDER_CACHE_L1` y
 `RENDER_CACHE_COORDINATOR` sobrescriben cada una su propia mitad, así que
