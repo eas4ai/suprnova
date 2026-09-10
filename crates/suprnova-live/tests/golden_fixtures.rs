@@ -310,11 +310,11 @@ fn version_four_encoded_cases_are_canonical_and_within_exact_limits() {
 #[test]
 fn descriptor_fixtures_prove_snake_case_naming_and_the_schema_version_gate() {
     let asynchronous = fixture_version(FixtureVersion::V4, "async-envelope.json");
+    // The fixture's declared version is proven against the engine's private
+    // `DESCRIPTOR_SCHEMA_VERSION`, not asserted as a literal here: the "accepted"
+    // schema_version case below only verifies if its `schema_version` matches the
+    // engine's real constant, and the "rejected" case only verifies if it does not.
     let descriptor_schema_version = number(&asynchronous, "descriptor_schema_version");
-    assert_eq!(
-        descriptor_schema_version, 2,
-        "the fixture's declared descriptor schema version must match the engine's"
-    );
     let real_event = descriptor_support::real_event_zero();
     let real_keys = descriptor_support::key_set(&real_event);
     assert!(
