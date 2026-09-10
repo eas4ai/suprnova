@@ -39,7 +39,7 @@ REDIS_URL=${{ Redis.REDIS_URL }}
 
 知っておく価値のあることがいくつかあります：
 
-- **`APP_KEY`は、非開発環境では必須です。** `APP_ENV`が`local`/`dev`/`test`以外であり、`APP_KEY`が欠落しているか不正な形式である場合、Suprnovaはブート時に失敗状態になります。サーバーは対処方法を示すメッセージをログに記録し、ゼロ以外で終了します - Railwayはデプロイを失敗としてマークします。`suprnova key:generate --show`でキーを生成してください。
+- **`APP_KEY`は、非開発環境では必須です。** `APP_ENV != local|dev|test` であり、`APP_KEY`が欠落しているか不正な形式である場合、Suprnovaはブート時に失敗状態になります。サーバーは対処方法を示すメッセージをログに記録し、ゼロ以外で終了します - Railwayはデプロイを失敗としてマークします。`suprnova key:generate --show`でキーを生成してください。
 - **`SERVER_HOST=0.0.0.0`が必要です。** Railwayはコンテナのネットワークインターフェースを通じてトラフィックをルーティングします。`127.0.0.1`（ローカルのデフォルト）にバインドすると、接続拒否のように見えます。
 - **`SERVER_PORT`はDockerfileの`EXPOSE`に一致します。** 生成されたDockerfileは8765を公開します。Railwayはそれを自動的に公開URLへとマッピングします。
 
