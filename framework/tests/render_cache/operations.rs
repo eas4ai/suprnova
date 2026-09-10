@@ -656,9 +656,9 @@ async fn a_closed_write_side_is_not_probed_again() {
     );
 }
 
-/// The eight closed telemetry names, each naming its own counter. The
-/// rewind counter joins the others here rather than in its own test,
-/// because what matters is that the set stays closed and distinct.
+/// The nine closed telemetry names, each naming its own counter. The
+/// rewind and hint counters join the others here rather than in their own
+/// tests, because what matters is that the set stays closed and distinct.
 #[test]
 fn the_render_cache_telemetry_names_are_closed_and_distinct() {
     let names = [
@@ -670,6 +670,7 @@ fn the_render_cache_telemetry_names_are_closed_and_distinct() {
         telemetry::STITCH_SLOTS,
         telemetry::STITCH_NESTED,
         telemetry::EPOCH_REWINDS,
+        telemetry::HINTS,
     ];
     let mut sorted = names.to_vec();
     sorted.sort_unstable();
