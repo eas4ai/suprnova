@@ -22,8 +22,8 @@ use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
-    FreshnessPolicy, QueryPolicy, RenderCache, RenderCachePolicy, RepresentationClass,
-    VarianceDimension,
+    FreshnessPolicy, NegotiatedPolicy, QueryPolicy, RenderCache, RenderCachePolicy,
+    RepresentationClass, VarianceDimension,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
@@ -1011,6 +1011,28 @@ async fn boot(
             .vary(VarianceDimension::FeatureVersion)
             .build()
             .expect("a host-neutral policy may declare FeatureVersion; only this host rejects it");
+    // Iteration 006: Media and Encoding now negotiate against a route's own
+    // closed declared set instead of resolving to a constant. Both share
+    // `cached_handler`'s already-established discriminator (fix round 3's
+    // body embeds the monotonic render count, so a wrongly-shared key would
+    // surface as the wrong count coming back on a hit) rather than a
+    // dedicated handler.
+    let media_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary_media(
+            NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")
+                .expect("valid media policy"),
+        )
+        .build()
+        .expect("media declared policy");
+    let encoding_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary_encoding(
+            NegotiatedPolicy::declared(["identity", "gzip"], "identity")
+                .expect("valid encoding policy"),
+        )
+        .build()
+        .expect("encoding declared policy");
     // Fix round 4: one pair of policies per classification reason - the
     // wrong dimension declared for that reason, and the matching one -
     // parameterising the leak shape instead of pinning it to one remembered
@@ -1204,6 +1226,8 @@ async fn boot(
             feature_version_declared_handler,
         )
         .into();
+    let router: Router = router.get("/media-declared/{id}", cached_handler).into();
+    let router: Router = router.get("/encoding-declared/{id}", cached_handler).into();
     // Fix round 7: the feature-flag and per-tenant-authorization routes.
     // `no_variance_policy` is deliberately shared by every flag route -
     // the question each of them asks is whether reading a flag of a given
@@ -1461,7 +1485,17 @@ async fn boot(
             "/tenant-and-principal-declared-reads-per-tenant-authz/{id}",
             GroupPolicy::from(tenant_and_principal_declared_policy),
         )
-        .expect("attach tenant and principal declared reads authz policy");
+        .expect("attach tenant and principal declared reads authz policy")
+        .try_render_cache(
+            "/media-declared/{id}",
+            GroupPolicy::from(media_declared_policy),
+        )
+        .expect("attach media declared policy")
+        .try_render_cache(
+            "/encoding-declared/{id}",
+            GroupPolicy::from(encoding_declared_policy),
+        )
+        .expect("attach encoding declared policy");
 
     let config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")

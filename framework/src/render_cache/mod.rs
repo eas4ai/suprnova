@@ -65,9 +65,9 @@ pub use providers::{RedisRenderStore, SqlRenderStore};
 pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
-    CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, PolicyPatch, QueryPolicy,
-    RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass, SharedCachePolicy,
-    StorageLayers, VarianceDimension,
+    CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, NegotiatedPolicy, PolicyPatch,
+    QueryPolicy, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
+    SharedCachePolicy, StorageLayers, VarianceDimension,
 };
 
 use std::sync::{Arc, OnceLock, RwLock};

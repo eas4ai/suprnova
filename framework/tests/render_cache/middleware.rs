@@ -3132,3 +3132,302 @@ async fn a_rewind_seen_through_the_epoch_lease_alone_lifts_and_clears_l0() {
         "key 1's L0 entry was cleared, so it renders again rather than being served"
     );
 }
+
+// ---------------------------------------------------------------------
+// Iteration 006: Media and Encoding negotiate for real (spec 16, "Media and
+// Encoding negotiation"). Before this, the middleware resolved both to the
+// constants `"text/html"` and `"identity"` regardless of what a request
+// negotiated, so declaring either partitioned nothing. `/media-declared/{id}`
+// and `/encoding-declared/{id}` both use `cached_handler`, whose body embeds
+// the monotonic render count (fix round 3) - a wrongly-shared key surfaces
+// as the wrong count's body coming back on what should have been a fresh
+// render, exactly the discriminator the Principal/Tenant cross-identity
+// tests above rely on.
+// ---------------------------------------------------------------------
+
+/// Two negotiations of the same route yield two representations, both
+/// cached, and - the important guarantee - a representation negotiated for
+/// one media type is never served to a request that negotiated a different
+/// one.
+#[tokio::test]
+#[serial_test::serial]
+async fn two_media_negotiations_on_a_declared_media_route_are_both_cached_and_never_cross() {
+    let harness = boot_with_render_cache().await;
+
+    let json = dispatch_get(
+        &harness,
+        "/media-declared/1",
+        &[("accept", "application/json")],
+    )
+    .await;
+    assert_eq!(json.status, StatusCode::OK);
+    assert_eq!(
+        json.header("vary"),
+        Some("Accept"),
+        "a declared Media dimension keeps naming Accept in Vary"
+    );
+    assert_eq!(counting_route::renders(), 1);
+    let json_body = String::from_utf8_lossy(&json.body).into_owned();
+
+    let html = dispatch_get(&harness, "/media-declared/1", &[("accept", "text/html")]).await;
+    assert_eq!(html.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a distinct negotiated media type is a distinct key, so it misses"
+    );
+    let html_body = String::from_utf8_lossy(&html.body).into_owned();
+    assert_ne!(
+        html_body, json_body,
+        "the two negotiations produced two distinct representations"
+    );
+
+    let json_again = dispatch_get(
+        &harness,
+        "/media-declared/1",
+        &[("accept", "application/json")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the application/json entry is still there: a hit, not a third render"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&json_again.body),
+        json_body,
+        "a representation negotiated for application/json is never served to a \
+         request that negotiated text/html, or vice versa"
+    );
+
+    let html_again = dispatch_get(&harness, "/media-declared/1", &[("accept", "text/html")]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "and the text/html entry is also still there"
+    );
+    assert_eq!(String::from_utf8_lossy(&html_again.body), html_body);
+}
+
+/// A request negotiating nothing, or a media type outside the declared set,
+/// gets the declared default and hits the same entry an explicit request
+/// for the default reaches - neither creates a new key.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_media_declaring_route_falls_back_to_its_default_for_absent_or_unmatched_accept() {
+    let harness = boot_with_render_cache().await;
+
+    let explicit_default =
+        dispatch_get(&harness, "/media-declared/1", &[("accept", "text/html")]).await;
+    assert_eq!(explicit_default.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    let default_body = String::from_utf8_lossy(&explicit_default.body).into_owned();
+
+    let no_header = dispatch_get(&harness, "/media-declared/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "an absent Accept header resolves to the declared default and hits the \
+         same entry an explicit request for it reaches"
+    );
+    assert_eq!(String::from_utf8_lossy(&no_header.body), default_body);
+
+    let outside_set = dispatch_get(
+        &harness,
+        "/media-declared/1",
+        &[("accept", "application/xml")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "a media type outside the declared set falls back to the default rather \
+         than creating a variant for it"
+    );
+    assert_eq!(String::from_utf8_lossy(&outside_set.body), default_body);
+}
+
+/// An unparsable or hostile `Accept` header must never fail the request, and
+/// must degrade to the declared default like any other non-match.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hostile_accept_header_degrades_to_the_media_default_without_panicking() {
+    let harness = boot_with_render_cache().await;
+
+    let baseline = dispatch_get(&harness, "/media-declared/1", &[("accept", "text/html")]).await;
+    assert_eq!(counting_route::renders(), 1);
+    let default_body = String::from_utf8_lossy(&baseline.body).into_owned();
+
+    for hostile in [";;;", "q=", ",,,", "application/json;q=abc", "*/*"] {
+        let response = dispatch_get(&harness, "/media-declared/1", &[("accept", hostile)]).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "a hostile Accept header {hostile:?} must not fail the request"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            default_body,
+            "and must resolve to the declared default rather than create a variant \
+             for {hostile:?}"
+        );
+    }
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "none of the hostile headers created a new key"
+    );
+}
+
+/// The quality-value rule this task chose (spec 16's "Media and Encoding
+/// negotiation": `q`-weighted, equal quality keeps header order) exercised
+/// through the real middleware rather than only `NegotiatedPolicy::negotiate`
+/// in isolation - proving the negotiated value that actually reaches the key
+/// is the one the rule picks, not merely that the rule is correct on its
+/// own.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_higher_quality_media_candidate_wins_even_when_listed_second() {
+    let harness = boot_with_render_cache().await;
+
+    let weighted = dispatch_get(
+        &harness,
+        "/media-declared/1",
+        &[("accept", "text/html;q=0.5, application/json;q=0.9")],
+    )
+    .await;
+    assert_eq!(counting_route::renders(), 1);
+    let weighted_body = String::from_utf8_lossy(&weighted.body).into_owned();
+
+    let explicit_json = dispatch_get(
+        &harness,
+        "/media-declared/1",
+        &[("accept", "application/json")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "the q-weighted request landed on the same application/json entry an \
+         explicit request for it reaches, even though text/html - the lower- \
+         quality candidate - was listed first and is also the declared default"
+    );
+    assert_eq!(String::from_utf8_lossy(&explicit_json.body), weighted_body);
+}
+
+/// The `Encoding` counterpart of the Media partition test above -
+/// `/encoding-declared/{id}` has its own declared closed set and its own
+/// middleware call site (`variance_descriptor`'s `Encoding` arm and
+/// `key_input`'s `encoding` field), so exercising only `Media` would leave
+/// this dimension's wiring unverified.
+#[tokio::test]
+#[serial_test::serial]
+async fn two_encoding_negotiations_on_a_declared_encoding_route_are_both_cached_and_never_cross() {
+    let harness = boot_with_render_cache().await;
+
+    let gzip = dispatch_get(
+        &harness,
+        "/encoding-declared/1",
+        &[("accept-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(gzip.status, StatusCode::OK);
+    assert_eq!(
+        gzip.header("vary"),
+        Some("Accept-Encoding"),
+        "a declared Encoding dimension keeps naming Accept-Encoding in Vary"
+    );
+    assert_eq!(counting_route::renders(), 1);
+    let gzip_body = String::from_utf8_lossy(&gzip.body).into_owned();
+
+    let identity = dispatch_get(
+        &harness,
+        "/encoding-declared/1",
+        &[("accept-encoding", "identity")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a distinct negotiated encoding is a distinct key, so it misses"
+    );
+    let identity_body = String::from_utf8_lossy(&identity.body).into_owned();
+    assert_ne!(identity_body, gzip_body);
+
+    let gzip_again = dispatch_get(
+        &harness,
+        "/encoding-declared/1",
+        &[("accept-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the gzip entry is still there: a hit, not a third render"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&gzip_again.body),
+        gzip_body,
+        "a representation negotiated for gzip is never served to a request that \
+         negotiated identity, or vice versa"
+    );
+}
+
+/// The default-fallback and hostile-header rules, exercised once more for
+/// `Encoding`.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_encoding_declaring_route_falls_back_to_its_default_for_absent_or_hostile_headers() {
+    let harness = boot_with_render_cache().await;
+
+    let explicit_default = dispatch_get(
+        &harness,
+        "/encoding-declared/1",
+        &[("accept-encoding", "identity")],
+    )
+    .await;
+    assert_eq!(counting_route::renders(), 1);
+    let default_body = String::from_utf8_lossy(&explicit_default.body).into_owned();
+
+    let no_header = dispatch_get(&harness, "/encoding-declared/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "an absent Accept-Encoding header resolves to the declared default"
+    );
+    assert_eq!(String::from_utf8_lossy(&no_header.body), default_body);
+
+    let outside_set = dispatch_get(
+        &harness,
+        "/encoding-declared/1",
+        &[("accept-encoding", "br")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "an encoding outside the declared set falls back to the default rather \
+         than creating a variant for it"
+    );
+    assert_eq!(String::from_utf8_lossy(&outside_set.body), default_body);
+
+    for hostile in [";;;", "q=", ",,,"] {
+        let response = dispatch_get(
+            &harness,
+            "/encoding-declared/1",
+            &[("accept-encoding", hostile)],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "a hostile Accept-Encoding header {hostile:?} must not fail the request"
+        );
+        assert_eq!(String::from_utf8_lossy(&response.body), default_body);
+    }
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "none of these created a new key"
+    );
+}

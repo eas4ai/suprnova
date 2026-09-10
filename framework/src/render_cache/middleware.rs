@@ -1070,12 +1070,33 @@ fn route_identity(pattern: &str) -> RouteIdentity {
 /// its own extension point. The same policies are rejected either way; only
 /// where the rejection is noticed moves, from policy construction to the
 /// first request against a route that declares one.
+///
+/// Also returns the resolved `Media` and `Encoding` values alongside the
+/// descriptor - `"text/html"` and `None` when the route does not declare
+/// the matching dimension, exactly [`RenderKeyInput::media`] and
+/// [`RenderKeyInput::encoding`]'s own fallback - so `key_input` builds both
+/// key fields and the declared descriptor entry from the one resolution
+/// this function performs, and the two can never disagree about what a
+/// request negotiated.
+///
+/// A route that declares `Media` or `Encoding` is refused at
+/// `RenderCachePolicy::build`/`apply` unless it also declares that
+/// dimension's closed [`suprnova_live::render_cache::NegotiatedPolicy`] (see
+/// `validate`'s own doc), so `policy.media()`/`policy.encoding()` being
+/// `None` here while the dimension is declared is a policy invariant this
+/// function did not itself construct. It cannot safely proceed - there is
+/// nothing to negotiate against - so it degrades to `VarianceInvalid`
+/// (bypassing this request uncached, like every other error this function
+/// returns) rather than panicking, after a `debug_assert!` that fails loudly
+/// in a debug build if such a policy is ever actually constructed.
 fn variance_descriptor(
     runtime: &RenderCacheRuntime,
     request: &Request,
     policy: &RenderCachePolicy,
-) -> Result<VarianceDescriptor, RenderCacheError> {
+) -> Result<(VarianceDescriptor, String, Option<String>), RenderCacheError> {
     let mut variance = VarianceDescriptor::new();
+    let mut media = "text/html".to_owned();
+    let mut encoding: Option<String> = None;
     for dimension in policy.vary() {
         let value = match dimension {
             VarianceDimension::Locale => {
@@ -1107,16 +1128,42 @@ fn variance_descriptor(
                 None => DimensionValue::Anonymous,
             },
             VarianceDimension::Encoding => {
-                // Identity encoding only in this plan; recorded so a later
-                // encoding layer cannot collide with an entry published
-                // before it existed. See the module doc.
-                DimensionValue::Public("identity".to_owned())
+                let Some(declared) = policy.encoding() else {
+                    debug_assert!(
+                        false,
+                        "a policy declaring Encoding variance must carry a declared \
+                         NegotiatedPolicy - RenderCachePolicy::validate is supposed to \
+                         refuse one that does not"
+                    );
+                    return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
+                };
+                // Only read here, inside the `Encoding` arm - this
+                // function's own doc promises it reads only what the
+                // policy actually declared.
+                let negotiated = declared.negotiate(request.header("accept-encoding"));
+                encoding = Some(negotiated.clone());
+                DimensionValue::Public(negotiated)
             }
             VarianceDimension::Host => match request.http_host() {
                 Some(host) => DimensionValue::Public(host),
                 None => DimensionValue::Anonymous,
             },
-            VarianceDimension::Media => DimensionValue::Public("text/html".to_owned()),
+            VarianceDimension::Media => {
+                let Some(declared) = policy.media() else {
+                    debug_assert!(
+                        false,
+                        "a policy declaring Media variance must carry a declared \
+                         NegotiatedPolicy - RenderCachePolicy::validate is supposed to \
+                         refuse one that does not"
+                    );
+                    return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
+                };
+                // Only read here, inside the `Media` arm - see the note on
+                // the `Encoding` arm above.
+                let negotiated = declared.negotiate(request.header("accept"));
+                media = negotiated.clone();
+                DimensionValue::Public(negotiated)
+            }
             VarianceDimension::FeatureVersion
             | VarianceDimension::ConfigVersion
             | VarianceDimension::Application(_) => {
@@ -1129,11 +1176,16 @@ fn variance_descriptor(
         };
         variance.declare(dimension.clone(), value)?;
     }
-    Ok(variance)
+    Ok((variance, media, encoding))
 }
 
 /// Builds the lookup key input for `request` against `policy`. Callers
 /// must have already confirmed [`declared_query_ok`].
+///
+/// `media` and `encoding` come from the same [`variance_descriptor`] call
+/// that builds `variance`, not a second resolution - the negotiated value a
+/// declared `Media` or `Encoding` dimension carries in the descriptor is
+/// exactly the value this key is built from, so the two can never disagree.
 ///
 /// # Errors
 ///
@@ -1157,17 +1209,18 @@ fn key_input(
     } else {
         None
     };
+    let (variance, media, encoding) = variance_descriptor(runtime, request, policy)?;
     Ok(RenderKeyInput {
         route: route_identity(pattern),
         route_pattern: pattern.to_owned(),
         params,
         query,
         host,
-        media: "text/html".to_owned(),
-        encoding: None,
+        media,
+        encoding,
         build: runtime.build.clone(),
         epoch,
-        variance: variance_descriptor(runtime, request, policy)?,
+        variance,
     })
 }
 
@@ -3352,6 +3405,15 @@ fn response_signals(http: &HttpResponse, method: &str) -> ResponseSignals {
 
 /// Test-only: wraps [`key_input`] with explicit route params and an
 /// optional login instead of a `Request`.
+///
+/// Carries no headers to negotiate against, so a declared `Media` or
+/// `Encoding` dimension resolves to its policy's declared default here -
+/// exactly the value a real request negotiating nothing would resolve to
+/// (see [`variance_descriptor`]) - rather than the plain `"text/html"` /
+/// `None` fallback that only applies when the route declares neither. A
+/// literal fallback here regardless of what the policy declares would let
+/// this test helper and a real request for the same route derive different
+/// keys the moment a route declares a non-`"text/html"` default.
 #[doc(hidden)]
 pub fn key_input_for_test(
     runtime: &RenderCacheRuntime,
@@ -3365,17 +3427,36 @@ pub fn key_input_for_test(
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect();
     let mut variance = VarianceDescriptor::new();
+    let mut media = "text/html".to_owned();
+    let mut encoding: Option<String> = None;
     for dimension in policy.vary() {
-        if *dimension == VarianceDimension::Principal {
-            let value = match login {
-                Some(id) => DimensionValue::Private(PrivateMaterial::principal(
-                    &runtime.keys,
-                    id,
-                    FROZEN_PERMISSION_VERSION,
-                )),
-                None => DimensionValue::Anonymous,
-            };
-            let _ = variance.declare(dimension.clone(), value);
+        match dimension {
+            VarianceDimension::Principal => {
+                let value = match login {
+                    Some(id) => DimensionValue::Private(PrivateMaterial::principal(
+                        &runtime.keys,
+                        id,
+                        FROZEN_PERMISSION_VERSION,
+                    )),
+                    None => DimensionValue::Anonymous,
+                };
+                let _ = variance.declare(dimension.clone(), value);
+            }
+            VarianceDimension::Media => {
+                if let Some(declared) = policy.media() {
+                    media = declared.default_value().to_owned();
+                    let _ =
+                        variance.declare(dimension.clone(), DimensionValue::Public(media.clone()));
+                }
+            }
+            VarianceDimension::Encoding => {
+                if let Some(declared) = policy.encoding() {
+                    let value = declared.default_value().to_owned();
+                    encoding = Some(value.clone());
+                    let _ = variance.declare(dimension.clone(), DimensionValue::Public(value));
+                }
+            }
+            _ => {}
         }
     }
     RenderKeyInput {
@@ -3384,8 +3465,8 @@ pub fn key_input_for_test(
         params,
         query: BTreeMap::new(),
         host: None,
-        media: "text/html".to_owned(),
-        encoding: None,
+        media,
+        encoding,
         build: runtime.build.clone(),
         // A fixed baseline matching the RenderCache migration's seeded
         // epoch: this test helper never advances the epoch, so every call
