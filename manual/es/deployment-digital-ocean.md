@@ -275,7 +275,7 @@ Platform no:
 - **Faltan archivos de contexto de construcción**: comprueba que el
   `.dockerignore` no esté excluyendo `Cargo.lock` ni el directorio
   `migrations/`.
-- **Falta de memoria durante `cargo build`**: sube el tamaño de la
+- **Falta de memoria durante cargo build**: sube el tamaño de la
   instancia de construcción en App Settings -> Resources -> Build.
   Las construcciones de release de Rust consumen mucha memoria.
 
