@@ -244,7 +244,7 @@ impl Mailable for OrderShipped {
 | `html_template_source(&self)` | 可选 | HTML 正文的 Tera 模板。返回 `None` 以跳过 HTML。 |
 | `text_template_source(&self)` | 可选 | 纯文本正文的 Tera 模板。返回 `None` 以跳过文本。 |
 | `from(&self)` | 可选 | 覆盖全局默认值 `noreply@localhost`。 |
-| `attachments(&self)` | 可选 | 要附加的文件。每一个都是 名字 + 字节 + mime。 |
+| `attachments(&self)` | 可选 | 要附加的文件。每一个都是 `name + bytes + mime`。 |
 | `render_subject(&self)` / `render_html(&self)` / `render_text(&self)` | 可选 | 如果您想绕开 Tera（Markdown → HTML、预渲染的内容、自定义的主题逻辑等等），就覆盖它们。 |
 
 `html_template_source` 或者 `text_template_source` 里必须至少有一个返回 `Some`（或者 `render_html`/`render_text` 必须产出内容）。一个空正文的 mailable，在分发时（`Mail::send`）和入队时（`Mail::queue`）都会被拒绝。

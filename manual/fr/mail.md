@@ -246,8 +246,8 @@ MAIL_FROM_NAME=Acme Support           # nom d'affichage optionnel (depuis la 0.5
 ```
 
 - `MAIL_FROM` **doit être une adresse nue.** Elle est reprise telle
-  quelle dans le `From` du message, si bien qu'une valeur `"Nom
-  <adresse>"` serait traitée comme l'adresse entière et rejetée par
+  quelle dans le `From` du message, si bien qu'une valeur `"Name <addr>"` serait traitée comme l'adresse
+  entière et rejetée par
   le transport.
 - `MAIL_FROM_NAME` (optionnel, ajouté en **0.5.9**) attache un nom
   d'affichage, si bien que l'en-tête se rend en `Acme Support
