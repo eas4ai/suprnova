@@ -303,7 +303,7 @@ Um `Err` nem sempre é um rollback. Se um callback
 [pós-commit](queues.md#after-commit-dispatch) falha, o commit já
 aconteceu e é durável; o `DB::transaction` ainda assim retorna `Err`, e a
 mensagem diz `after-commit callback failed (the transaction itself
-committed): <o erro do callback>`. O valor de retorno da closure se perde,
+committed): <the callback's error>`. O valor de retorno da closure se perde,
 as escritas dela não, e só um dispatch adiado falhou. Todo callback
 registrado ainda roda, e o erro que você recebe é o primeiro deles. O
 `DB::transaction_with_attempts` nunca repete esse erro, por mais cara de
