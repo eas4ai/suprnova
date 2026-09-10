@@ -290,15 +290,17 @@ pub struct RenderCacheConfig {
     pub build_id: String,
     /// Test-only clock override; `None` means `install` uses the system
     /// clock. `#[doc(hidden)]`: not part of the public contract, set only
-    /// through [`Self::with_clock_for_test`].
+    /// through `with_clock_for_test`. That method exists only under the
+    /// `testing` feature, so it is named here rather than linked: a link
+    /// breaks every rustdoc build without that feature.
     #[doc(hidden)]
     pub clock_override: Option<Arc<dyn Clock>>,
     /// Test-only rebuild coordinator override; `None` means `install`
     /// builds the one [`Self::coordinator`] describes.
     /// `#[doc(hidden)]`: not part of the public contract, set only through
-    /// [`Self::with_coordinator_for_test`] - needed to observe singleflight
-    /// admission (a waiter actually parked) from a test without a
-    /// timing-based wait.
+    /// `with_coordinator_for_test` (named, not linked, for the same reason
+    /// as `clock_override`) - needed to observe singleflight admission (a
+    /// waiter actually parked) from a test without a timing-based wait.
     #[doc(hidden)]
     pub coordinator_override: Option<Arc<dyn RebuildCoordinator>>,
 }
