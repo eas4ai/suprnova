@@ -2,8 +2,7 @@
 //! cancellation release the lease; fencing is monotonic.
 
 use std::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{KeyId, UnixMillis};
@@ -188,11 +187,6 @@ async fn a_waiter_resolves_only_after_the_leader_releases() {
 
 #[tokio::test]
 async fn a_dropped_waiter_does_not_block_completion_or_panic() {
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     let coordinator = LocalRebuildCoordinator::new(LocalCoordinatorLimits {
         lease_ms: 5_000,
         max_waiters: 4,
@@ -212,8 +206,7 @@ async fn a_dropped_waiter_does_not_block_completion_or_panic() {
     // cancelled request. The leftover, stale waker in the slot must not
     // block or panic the leader's own completion.
     let mut wait = Box::pin(wait);
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
     drop(wait);
 

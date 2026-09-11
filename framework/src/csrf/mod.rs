@@ -48,9 +48,9 @@
 //!
 //! Reading `<meta name="csrf-token">` once at module load and pinning that
 //! value into a header is the pattern to avoid: logging in rotates the
-//! session, the captured token goes stale, and the next visit - the logout
-//! - is refused with a `419`. A form that submits a `_token` field, or any
-//! code that reads the meta tag *per request* rather than once, is
+//! session, the captured token goes stale, and the next visit - the
+//! logout - is refused with a `419`. A form that submits a `_token` field,
+//! or any code that reads the meta tag *per request* rather than once, is
 //! unaffected.
 
 pub mod middleware;
