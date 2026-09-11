@@ -115,10 +115,21 @@ répertoires](structure.md) ; la version courte est :
   générateurs du CLI lui-même.
 - `src/bin/console.rs` - l'équivalent de `php artisan` par projet
 - `frontend/` - Vite 8 + Tailwind v4 + le framework que vous avez
-  choisi, avec les pages Home / Dashboard / Login / Register déjà
-  câblées via Inertia
-- `src/migrations/` - les tables `users`, `sessions` et
-  `remember_tokens` prêtes à l'emploi
+  choisi, avec les pages Home / Dashboard / Login / Register /
+  ForgotPassword / ResetPassword / VerifyEmail déjà câblées via Inertia
+- les flux de compte : l'inscription envoie un lien de vérification et
+  continue vers `/verify-email`, qui le renvoie et le consomme ;
+  `/forgot-password` envoie un lien de réinitialisation à une adresse
+  vérifiée et `/reset-password` reçoit le nouveau mot de passe. Le
+  courrier part via les réglages `MAIL_*` de `.env`, qui pointent vers un
+  collecteur local sur le port 1025 (le Mailpit du fichier compose) ;
+  mettez `MAIL_DRIVER=log` pour écrire chaque message, lien compris, dans
+  le journal du serveur
+- `src/routes.rs` - les routes d'authentification et de compte, et un
+  fallback de fichiers statiques qui sert `public/` (le frontend
+  construit) en production
+- `src/migrations/` - les tables `users`, `sessions`, `remember_tokens`
+  et `auth_flow_tokens` prêtes à l'emploi
 - `.env` - base de données SQLite par défaut, avec une `APP_KEY`
   fraîchement générée pour que l'application démarre sans
   intervention d'un opérateur

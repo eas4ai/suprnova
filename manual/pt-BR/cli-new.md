@@ -114,10 +114,20 @@ diretórios](structure.md); a versão curta é:
   o `SUPRNOVA_FRONTEND` correspondente para os geradores da própria CLI
 - `src/bin/console.rs` - o análogo do `php artisan` por projeto
 - `frontend/` - Vite 8 + Tailwind v4 + o framework que você escolheu,
-  com páginas Home / Dashboard / Login / Register já conectadas via
-  Inertia
-- `src/migrations/` - tabelas `users`, `sessions` e `remember_tokens`
-  prontas para uso
+  com páginas Home / Dashboard / Login / Register / ForgotPassword /
+  ResetPassword / VerifyEmail já conectadas via Inertia
+- os fluxos de conta: o registro envia um link de verificação por e-mail
+  e segue para `/verify-email`, que o reenvia e o consome;
+  `/forgot-password` envia um link de redefinição para um endereço
+  verificado e `/reset-password` recebe a nova senha. O e-mail sai pelas
+  configurações `MAIL_*` do `.env`, que apontam para um capturador local
+  na porta 1025 (o Mailpit do arquivo compose); defina `MAIL_DRIVER=log`
+  para imprimir cada mensagem, link incluído, no log do servidor
+- `src/routes.rs` - as rotas de autenticação e de conta, e um fallback de
+  arquivos estáticos que serve `public/` (o frontend compilado) em
+  produção
+- `src/migrations/` - tabelas `users`, `sessions`, `remember_tokens` e
+  `auth_flow_tokens` prontas para uso
 - `.env` - banco de dados SQLite por padrão, com uma `APP_KEY`
   recém-gerada para que o app inicialize sem intervenção do operador
 - `.gitignore`, `Cargo.toml`

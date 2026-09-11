@@ -2,7 +2,7 @@
 
 Starter-Kits sind einsatzbereite Suprnova-Anwendungen, die Sie forken und einsetzen. Jedes verdrahtet die Controller, Routen, Migrationen, Frontend-Seiten und Tests für eine komplette Produktoberfläche - Sie starten also von einer laufenden App, nicht von einem leeren Scaffold.
 
-Heute werden zwei Kits versendet, modelliert nach Laravels Abstammung. Wählen Sie das Kit aus, das Ihren Anforderungen am nächsten kommt, und passen Sie es anschließend an.
+Heute werden drei Kits versendet, modelliert nach Laravels Abstammung. Wählen Sie das Kit aus, das Ihren Anforderungen am nächsten kommt, und passen Sie es anschließend an.
 
 ## Nebula - Authentifizierung (Breeze-Ebene)
 
@@ -36,19 +36,36 @@ Eine komplette Developer-Tool/SaaS-Unternehmenssite auf Vue 3.5 + Vuetify. Alles
 
 Pulsar ist das Source-Kit für Downstream-Produkte wie `suprnova.app`. Greifen Sie dazu, wenn Sie eine Produktsite mit Docs, einem Blog und einer Member-Community einsetzen - nicht nur Authentifizierung.
 
+## Directory Starter - Einträge, Moderation und bezahlte Veröffentlichung
+
+**Repository: [github.com/eas4ai/suprnova-directory-starter](https://github.com/eas4ai/suprnova-directory-starter)**
+
+Ein kostenloses, MIT-lizenziertes Verzeichnis auf Vue 3.5: Inhaber reichen Einträge ein, Moderatoren prüfen sie, Besucher durchsuchen sie, und die Veröffentlichung ist kostenlos oder über Stripe und Paddle bezahlt. Alles aus Nebulas Auth-Geschichte, plus:
+
+- Verzeichnis-Entdeckung - durchsuchbare Einträge, Kategoriefilter, Paginierung und öffentliche Detailseiten
+- Einreichungen und Moderation - Entwürfe, Revisionshistorie, Freigabe, Ablehnung, erneute Einreichung und Sperrung
+- Kostenlose und bezahlte Veröffentlichung - Stripe und Paddle, konfigurierbare Pläne, getrennte Test- und Live-Einstellungen, authentifizierte Webhooks und Zahlungswiederherstellung
+- Redaktionelles Publizieren - Artikelentwürfe, Vorschauen, Kategorien, Tags und RSS
+- Administration - berechtigungsbasierte Rollen, Kontosperrung, Audit-Historie und eine Admin-Übersicht
+- SEO - Site-Standards und Überschreibungen pro Inhalt, serverseitig gerenderte Metadaten, Sitemaps, Weiterleitungen, ein 404-Bericht und Markdown-Versionen öffentlicher Seiten
+- Medien und Benachrichtigungen, Farbvorgaben mit gemerkter Hell-/Dunkel-Präferenz, Demo-Inhalte und dokumentierte Backup- und Restore-Abläufe
+
+Greifen Sie zum Directory Starter, wenn das Produkt ein Verzeichnis oder ein Marktplatz für Einträge ist - mit oder ohne bezahlte Platzierung.
+
 ## Welches Kit?
 
 | Sie möchten… | Beginnen Sie mit |
 |---|---|
 | Konten und einen Ort zum Bauen | **Nebula** |
 | Eine vollständige Produktsite - Landing, Docs, Blog, Community, RBAC | **Pulsar** |
+| Ein Verzeichnis oder Marktplatz für Einträge, kostenlos oder bezahlt | **Directory Starter** |
 | Ein API-only Backend (Token-Auth, kein Frontend) | `suprnova new my-api --api` |
 
-Beide Kits verfolgen das Framework als Git-Abhängigkeit und laufen auf demselben Stack, den Sie bereits kennen - siehe die README jedes Repos für die Einrichtung. Weitere Kits sind geplant; beobachten Sie die [Releases](https://github.com/eas4ai/suprnova/releases) oder öffnen Sie einen Issue, wenn es eines gibt, das Sie möchten.
+Alle drei Kits verfolgen das Framework als Git-Abhängigkeit und laufen auf demselben Stack, den Sie bereits kennen - siehe die README jedes Repos für die Einrichtung. Weitere Kits sind geplant; beobachten Sie die [Releases](https://github.com/eas4ai/suprnova/releases) oder öffnen Sie einen Issue, wenn es eines gibt, das Sie möchten.
 
 ## Was das Standard-Scaffold bietet
 
-Wenn keines der Kits passt, versendet `suprnova new my-app --frontend svelte` (oder `react`, oder `vue`) bereits einen funktionierenden Authentifizierungsfluss - Anmeldung, Registrierung, Abmeldung, Session-Authentifizierung mit der `authenticate`-Middleware, CSRF-Schutz und eine geschützte `/dashboard`-Route - auf einem der drei Frontends (Svelte 5, React 19, Vue 3.5) mit Tailwind v4 und Inertia v3. Siehe [Installation](installation.md) für die Scaffold-Ausgabe und [Schnellstart](quickstart.md) für die Walkthrough der ersten fünf Minuten.
+Wenn keines der Kits passt, versendet `suprnova new my-app --frontend svelte` (oder `react`, oder `vue`) bereits einen funktionierenden Authentifizierungsfluss - Anmeldung, Registrierung, Abmeldung, E-Mail-Verifizierung, Passwort-Reset, Session-Authentifizierung mit der `authenticate`-Middleware, CSRF-Schutz und eine geschützte `/dashboard`-Route - auf einem der drei Frontends (Svelte 5, React 19, Vue 3.5) mit Tailwind v4 und Inertia v3. Siehe [Installation](installation.md) für die Scaffold-Ausgabe und [Schnellstart](quickstart.md) für die Walkthrough der ersten fünf Minuten.
 
 Für API-only-Services initialisiert `suprnova new my-api --api` Magnetar,
 installiert Bearer-Session-Middleware und legt ohne Frontend die

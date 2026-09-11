@@ -6,6 +6,90 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## 2.0.1 - 2026-09-11
+
+### Corregido
+
+- **`suprnova generate-types` termina su salida con un solo salto de
+  línea.** La línea en blanco que separa una interfaz de la siguiente
+  también se escribía después de la última, así que un proyecto que impone
+  `git diff --check` fallaba con `new blank line at EOF` en un archivo que
+  no podía corregir a mano: la siguiente regeneración volvía a escribir la
+  línea en blanco. Solo cambia el final del archivo; las líneas en blanco
+  entre declaraciones se conservan.
+
+- **Un formulario de inicio de sesión o de registro generado por el
+  andamiaje muestra sus errores de validación.** El controlador de
+  autenticación generado declaraba un prop `errors` en `LoginProps` y
+  `RegisterProps` y lo enviaba como `None`. El framework siembra `errors`
+  en cada página de Inertia a partir de la bolsa de validación guardada en
+  flash en la sesión, y un prop explícito con el mismo nombre reemplaza
+  esa siembra, así que la página recibía `errors: null` y unas credenciales
+  inválidas volvían a un formulario que no mostraba nada. Ambos props ahora
+  están vacíos, las páginas Login y Register de los tres frontends leen
+  `useForm().errors`, y el `inertia-props.ts` del andamiaje es la salida
+  byte a byte de `suprnova generate-types` para los controladores del
+  andamiaje, de modo que la primera regeneración de un proyecto ya no
+  reescribe un archivo que nadie editó.
+
+- **Una aplicación generada por el andamiaje sirve su frontend
+  compilado.** El `routes.rs` generado no registraba ningún fallback de
+  archivos estáticos, así que en cuanto el servidor de desarrollo de Vite
+  no estaba en marcha, cada URL `/assets/*` del shell HTML respondía
+  `404`, incluso dentro de la imagen de producción que construye el
+  `Dockerfile` del andamiaje. `routes.rs` ahora termina con
+  `fallback!(StaticFiles::public().handler())`: las rutas declaradas
+  siguen ganando, los dotfiles como `public/assets/.vite/manifest.json` y
+  el recorrido de rutas se rechazan, y una URL desconocida sigue
+  renderizando la página `Error` de Inertia.
+
+- **Una aplicación generada por el andamiaje verifica direcciones de
+  correo y restablece contraseñas.** El registro creaba e iniciaba la
+  sesión del usuario sin enviar correo de verificación, y ninguna ruta
+  ofrecía verificación de correo ni recuperación de contraseña, aunque el
+  `User` generado ya implementaba `MustVerifyEmail` y `CanResetPassword` y
+  la migración `auth_flow_tokens` ya se incluía. El registro ahora envía un
+  enlace de verificación mediante `EmailVerification::send_link` y
+  continúa a `/verify-email`, que muestra el aviso, reenvía el enlace y lo
+  consume en `/verify-email/verify` solo para el propietario con sesión
+  iniciada. `/forgot-password` envía un enlace de restablecimiento a una
+  dirección verificada (una dirección desconocida o no verificada recibe la
+  misma respuesta y ningún correo) y `/reset-password` rota la contraseña
+  mediante `PasswordReset::complete_with_outcome`, negándose a terminar
+  mientras las otras sesiones o tokens de recordarme de la cuenta no hayan
+  podido revocarse. Los starters de Vue, React y Svelte incluyen las
+  páginas `ForgotPassword`, `ResetPassword` y `VerifyEmail` y un enlace
+  "Forgot your password?" en la página de inicio de sesión. Los enlaces se
+  construyen con `url::to`, así que `APP_URL` debe nombrar la dirección en
+  la que los usuarios llegan a la aplicación, y el registro necesita un
+  transporte de correo que funcione: el `.env` que escribe el andamiaje
+  apunta `MAIL_DRIVER=smtp` a un capturador local en el puerto 1025 (el
+  Mailpit del archivo compose), o pon `MAIL_DRIVER=log` para imprimir cada
+  mensaje, enlace incluido, en el log del servidor.
+
+- **Un andamiaje Svelte recién generado compila contra `@inertiajs/svelte`
+  3.7.** El `main.ts` generado declaraba un `async setup`, y
+  `@inertiajs/svelte` 3.7 tipa `setup` con retorno `SvelteRenderResult |
+  void`, así que un proyecto generado hoy (la plantilla pide `^3.6.1`, que
+  ahora resuelve a 3.7.1) fallaba en `svelte-check` dentro de
+  `npm run build` antes de escribir una sola página. `setup` ahora es
+  síncrono y encadena la carga del catálogo de traducciones al montaje, de
+  modo que el orden que describe la plantilla no cambia.
+
+### Actualización
+
+- **Estas son correcciones del andamiaje; una aplicación generada con
+  2.0.0 conserva sus archivos generados.** Actualizar el crate del
+  framework no cambia nada en `src/` ni en `frontend/`. Para incorporar las
+  correcciones a un proyecto existente, haz las mismas ediciones a mano:
+  elimina el campo `errors` de `LoginProps` y `RegisterProps` y lee
+  `useForm().errors` en las páginas; añade
+  `fallback!(StaticFiles::public().handler())` como última entrada de
+  `routes!`; y copia los controladores `email_verification` y
+  `password_reset`, sus rutas y las tres páginas de auth desde un proyecto
+  generado con 2.0.1. La salida de `generate-types` solo cambia al final
+  del archivo.
+
 ## 2.0.0 - 2026-09-10
 
 ### Seguridad

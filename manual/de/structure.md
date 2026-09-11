@@ -31,7 +31,9 @@ my-app/
 │   ├── controllers/
 │   │   ├── mod.rs
 │   │   ├── home.rs                 # GET /-Handler
-│   │   ├── auth.rs                 # Login / Registrierung / Logout
+│   │   ├── auth.rs                 # Login / Registrierung (verschickt einen Verifizierungslink) / Logout
+│   │   ├── email_verification.rs   # Verify-E-Mail-Hinweis, erneut senden und der verschickte Link
+│   │   ├── password_reset.rs       # forgot-password und reset-password
 │   │   └── dashboard.rs            # Erfordert Auth; Beispiel geschützte Route
 │   ├── middleware/
 │   │   ├── mod.rs
@@ -42,6 +44,7 @@ my-app/
 │   │   ├── m_*_create_users_table.rs
 │   │   ├── m_*_create_sessions_table.rs
 │   │   ├── m_*_create_remember_tokens_table.rs
+│   │   ├── m_*_create_auth_flow_tokens_table.rs
 │   │   ├── m_*_create_workflows_table.rs
 │   │   └── m_*_create_workflow_steps_table.rs
 │   └── models/
@@ -60,7 +63,10 @@ my-app/
 │       │   ├── Dashboard.{tsx,svelte,vue}
 │       │   └── auth/
 │       │       ├── Login.{tsx,svelte,vue}
-│       │       └── Register.{tsx,svelte,vue}
+│       │       ├── Register.{tsx,svelte,vue}
+│       │       ├── ForgotPassword.{tsx,svelte,vue}
+│       │       ├── ResetPassword.{tsx,svelte,vue}
+│       │       └── VerifyEmail.{tsx,svelte,vue}
 │       └── types/
 │           └── inertia-props.ts    # Automatisch generiert aus #[derive(InertiaProps)]
 └── public/
@@ -321,9 +327,11 @@ Siehe [Frontend](frontend.md).
 
 ### `public/assets/`
 
-Wo Vite den Produktions-Build ablegt (`npm run build`). Der
-Suprnova-Server bedient dieses Verzeichnis als statische Assets unter
-`/assets/*` in der Produktion.
+Wo Vite den Produktions-Build ablegt (`npm run build`). Die generierte
+`routes.rs` endet mit `fallback!(StaticFiles::public().handler())`, sodass
+der Suprnova-Server dieses Verzeichnis in der Produktion als statische
+Assets unter `/assets/*` bedient. Dotfiles unter `public/`, etwa
+`.vite/manifest.json`, werden nie ausgeliefert.
 
 ## Verzeichnisse, die Sie hinzufügen, wenn die App wächst
 

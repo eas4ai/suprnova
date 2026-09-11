@@ -4,6 +4,82 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 2.0.1 - 2026-09-11
+
+### Fixed
+
+- **`suprnova generate-types` ends its output with one newline.** The blank
+  line that separates one interface from the next was also written after the
+  last one, so a project that enforces `git diff --check` failed with `new
+  blank line at EOF` on a file it could not correct by hand: the next
+  regeneration wrote the blank line straight back. Only the end of the file
+  changes; the blank lines between declarations stay.
+
+- **A scaffolded login or registration form shows its validation errors.**
+  The generated auth controller declared an `errors` prop on `LoginProps`
+  and `RegisterProps` and sent it as `None`. The framework seeds `errors` on
+  every Inertia page from the session-flashed validation bag, and an
+  explicit prop of the same name replaces that seed, so the page received
+  `errors: null` and invalid credentials returned to a form that displayed
+  nothing. Both props are now empty, the Login and Register pages of all
+  three frontends read `useForm().errors`, and the scaffold's
+  `inertia-props.ts` is the byte-exact output of `suprnova generate-types`
+  for the scaffold's controllers, so a project's first regeneration no
+  longer rewrites a file nobody edited.
+
+- **A scaffolded application serves its built frontend.** The generated
+  `routes.rs` registered no static-file fallback, so once Vite's dev server
+  was not running every `/assets/*` URL in the HTML shell answered `404`,
+  including inside the production image the scaffold's `Dockerfile` builds.
+  `routes.rs` now ends with `fallback!(StaticFiles::public().handler())`:
+  declared routes still win, dotfiles such as
+  `public/assets/.vite/manifest.json` and path traversal are refused, and
+  an unknown URL still renders the Inertia `Error` page.
+
+- **A scaffolded application verifies email addresses and resets
+  passwords.** Registration created and signed in the user without sending
+  verification mail, and no route offered email verification or password
+  recovery, although the generated `User` already implemented
+  `MustVerifyEmail` and `CanResetPassword` and the `auth_flow_tokens`
+  migration already shipped. Registration now mails a verification link
+  through `EmailVerification::send_link` and continues to `/verify-email`,
+  which shows the notice, resends the link, and consumes it on
+  `/verify-email/verify` for the signed-in owner only. `/forgot-password`
+  mails a reset link to a verified address (an unknown or unverified
+  address gets the same answer and no mail) and `/reset-password` rotates
+  the password through `PasswordReset::complete_with_outcome`, refusing to
+  finish while the account's other sessions or remember-me tokens could
+  not be revoked. The Vue, React and Svelte starters ship the
+  `ForgotPassword`, `ResetPassword` and `VerifyEmail` pages and a "Forgot
+  your password?" link on the login page. Links are built with `url::to`,
+  so `APP_URL` must name the address users reach the application at, and
+  registration needs a working mail transport: the `.env` the scaffold
+  writes points `MAIL_DRIVER=smtp` at a local catcher on port 1025 (the
+  compose file's Mailpit), or set `MAIL_DRIVER=log` to print each message,
+  link included, to the server log.
+
+- **A fresh Svelte scaffold builds against `@inertiajs/svelte` 3.7.** The
+  generated `main.ts` declared an `async setup`, and `@inertiajs/svelte` 3.7
+  types `setup` as returning `SvelteRenderResult | void`, so a project
+  scaffolded today (the template asks for `^3.6.1`, which now resolves to
+  3.7.1) failed `svelte-check` inside `npm run build` before a single page
+  had been written. `setup` is synchronous now and chains the translation
+  catalog load onto the mount, so the ordering the template describes is
+  unchanged.
+
+### Upgrading
+
+- **These are scaffold fixes; an application generated with 2.0.0 keeps
+  its generated files.** Upgrading the framework crate changes nothing in
+  `src/` or `frontend/`. To pick the fixes up in an existing project, make
+  the same edits by hand: drop the `errors` field from `LoginProps` and
+  `RegisterProps` and read `useForm().errors` in the pages; add
+  `fallback!(StaticFiles::public().handler())` as the last entry of
+  `routes!`; and copy the `email_verification` and `password_reset`
+  controllers, their routes, and the three auth pages from a project
+  generated with 2.0.1. The `generate-types` output changes only at the
+  end of the file.
+
 ## 2.0.0 - 2026-09-10
 
 ### Security

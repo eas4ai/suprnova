@@ -5,6 +5,91 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 2.0.1 - 2026-09-11
+
+### Behoben
+
+- **`suprnova generate-types` beendet seine Ausgabe mit einem einzigen
+  Zeilenumbruch.** Die Leerzeile, die ein Interface vom nächsten trennt,
+  wurde auch nach dem letzten geschrieben, sodass ein Projekt, das
+  `git diff --check` erzwingt, mit `new blank line at EOF` an einer Datei
+  scheiterte, die es nicht von Hand korrigieren konnte: die nächste
+  Regeneration schrieb die Leerzeile sofort wieder hinein. Nur das Ende der
+  Datei ändert sich; die Leerzeilen zwischen den Deklarationen bleiben.
+
+- **Ein gescaffoldetes Login- oder Registrierungsformular zeigt seine
+  Validierungsfehler an.** Der generierte Auth-Controller deklarierte ein
+  `errors`-Prop auf `LoginProps` und `RegisterProps` und sendete es als
+  `None`. Das Framework setzt `errors` auf jeder Inertia-Seite aus dem in
+  der Session geflashten Validierungs-Bag, und ein explizites Prop
+  desselben Namens ersetzt diesen Wert, sodass die Seite `errors: null`
+  erhielt und ungültige Zugangsdaten zu einem Formular zurückführten, das
+  nichts anzeigte. Beide Props sind jetzt leer, die Login- und
+  Register-Seiten aller drei Frontends lesen `useForm().errors`, und die
+  `inertia-props.ts` des Scaffolds ist die byteidentische Ausgabe von
+  `suprnova generate-types` für die Controller des Scaffolds, sodass die
+  erste Regeneration eines Projekts keine Datei mehr umschreibt, die
+  niemand bearbeitet hat.
+
+- **Eine gescaffoldete Anwendung liefert ihr gebautes Frontend aus.** Die
+  generierte `routes.rs` registrierte keinen Fallback für statische
+  Dateien, sodass jede `/assets/*`-URL in der HTML-Shell mit `404`
+  antwortete, sobald Vites Dev-Server nicht lief - auch im
+  Produktions-Image, das die `Dockerfile` des Scaffolds baut. `routes.rs`
+  endet jetzt mit `fallback!(StaticFiles::public().handler())`: deklarierte
+  Routen gewinnen weiterhin, Dotfiles wie
+  `public/assets/.vite/manifest.json` und Pfad-Traversal werden abgewiesen,
+  und eine unbekannte URL rendert weiterhin die Inertia-`Error`-Seite.
+
+- **Eine gescaffoldete Anwendung verifiziert E-Mail-Adressen und setzt
+  Passwörter zurück.** Die Registrierung legte den Benutzer an und meldete
+  ihn an, ohne eine Verifizierungsmail zu senden, und keine Route bot
+  E-Mail-Verifizierung oder Passwort-Wiederherstellung an, obwohl der
+  generierte `User` bereits `MustVerifyEmail` und `CanResetPassword`
+  implementierte und die Migration `auth_flow_tokens` bereits ausgeliefert
+  wurde. Die Registrierung verschickt jetzt über
+  `EmailVerification::send_link` einen Verifizierungslink und leitet weiter
+  zu `/verify-email`, das den Hinweis anzeigt, den Link erneut sendet und
+  ihn auf `/verify-email/verify` nur für den angemeldeten Eigentümer
+  einlöst. `/forgot-password` schickt einen Reset-Link an eine verifizierte
+  Adresse (eine unbekannte oder unverifizierte Adresse erhält dieselbe
+  Antwort und keine Mail) und `/reset-password` rotiert das Passwort über
+  `PasswordReset::complete_with_outcome` und weigert sich abzuschließen,
+  solange die anderen Sessions oder Remember-me-Tokens des Kontos nicht
+  widerrufen werden konnten. Die Vue-, React- und Svelte-Starter liefern
+  die Seiten `ForgotPassword`, `ResetPassword` und `VerifyEmail` sowie
+  einen Link "Forgot your password?" auf der Login-Seite. Links werden mit
+  `url::to` gebaut, also muss `APP_URL` die Adresse nennen, unter der
+  Benutzer die Anwendung erreichen, und die Registrierung braucht einen
+  funktionierenden Mail-Transport: die `.env`, die das Scaffold schreibt,
+  richtet `MAIL_DRIVER=smtp` auf einen lokalen Catcher an Port 1025 (das
+  Mailpit der Compose-Datei), oder setzen Sie `MAIL_DRIVER=log`, um jede
+  Nachricht samt Link ins Server-Log zu schreiben.
+
+- **Ein frisches Svelte-Scaffold baut gegen `@inertiajs/svelte` 3.7.** Die
+  generierte `main.ts` deklarierte ein `async setup`, und `@inertiajs/svelte`
+  3.7 typisiert `setup` mit dem Rückgabetyp `SvelteRenderResult | void`,
+  sodass ein heute gescaffoldetes Projekt (das Template verlangt `^3.6.1`,
+  was jetzt zu 3.7.1 aufgelöst wird) bei `svelte-check` innerhalb von
+  `npm run build` scheiterte, bevor eine einzige Seite geschrieben war.
+  `setup` ist jetzt synchron und hängt das Laden des Übersetzungskatalogs
+  an das Mounten an, sodass die im Template beschriebene Reihenfolge
+  unverändert bleibt.
+
+### Upgrade
+
+- **Dies sind Scaffold-Korrekturen; eine mit 2.0.0 generierte Anwendung
+  behält ihre generierten Dateien.** Ein Upgrade des Framework-Crates
+  ändert nichts in `src/` oder `frontend/`. Um die Korrekturen in ein
+  bestehendes Projekt zu übernehmen, machen Sie dieselben Änderungen von
+  Hand: entfernen Sie das Feld `errors` aus `LoginProps` und
+  `RegisterProps` und lesen Sie in den Seiten `useForm().errors`; fügen Sie
+  `fallback!(StaticFiles::public().handler())` als letzten Eintrag von
+  `routes!` hinzu; und kopieren Sie die Controller `email_verification` und
+  `password_reset`, ihre Routen und die drei Auth-Seiten aus einem mit
+  2.0.1 generierten Projekt. Die Ausgabe von `generate-types` ändert sich
+  nur am Ende der Datei.
+
 ## 2.0.0 - 2026-09-10
 
 ### Sicherheit
