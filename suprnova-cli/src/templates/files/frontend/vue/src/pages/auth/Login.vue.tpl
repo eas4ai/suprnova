@@ -75,6 +75,12 @@ function submit() {
           <label for="remember" class="ml-2 block text-sm text-gray-900">
             Remember me
           </label>
+          <a
+            href="/forgot-password"
+            class="ml-auto text-sm text-indigo-600 hover:text-indigo-500"
+          >
+            Forgot your password?
+          </a>
         </div>
 
         <div>

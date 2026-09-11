@@ -1522,7 +1522,39 @@ fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
             "dashboard.rs",
             suprnova_cli::templates::dashboard_controller(),
         ),
+        (
+            "email_verification.rs",
+            suprnova_cli::templates::email_verification_controller(),
+        ),
+        (
+            "password_reset.rs",
+            suprnova_cli::templates::password_reset_controller(),
+        ),
     ]
+}
+
+/// Every `pub mod` the scaffold's `controllers/mod.rs` declares has a
+/// controller template behind it, and every controller template is
+/// declared - one list, checked in both directions.
+#[test]
+fn the_controllers_module_declares_exactly_the_scaffolded_controllers() {
+    let declared: std::collections::BTreeSet<String> = suprnova_cli::templates::controllers_mod()
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("pub mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+        })
+        .map(str::to_owned)
+        .collect();
+    let shipped: std::collections::BTreeSet<String> = scaffold_controllers()
+        .into_iter()
+        .map(|(file, _)| file.trim_end_matches(".rs").to_owned())
+        .collect();
+    assert_eq!(
+        declared, shipped,
+        "controllers/mod.rs.tpl and the controller templates `suprnova new` \
+         writes have drifted apart"
+    );
 }
 
 /// Write the scaffold's controllers into `<dir>/src/controllers/` and scan
@@ -1869,5 +1901,129 @@ fn the_scaffold_serves_public_files_through_the_static_fallback() {
     assert!(
         macros.contains("macro_rules! fallback {"),
         "`suprnova::fallback!` is no longer defined under that name"
+    );
+}
+
+/// Every component name a scaffolded controller hands to
+/// `inertia_response!` is a page `suprnova new` writes, for every
+/// frontend.
+///
+/// The macro checks the page exists when the *user's* project compiles,
+/// so a controller template naming a page nobody scaffolded is a build
+/// error on a stock scaffold, and the scaffolder itself never compiles a
+/// project. Reading the names out of the controller templates means a
+/// page added to one controller has to be added to all three frontends,
+/// and a page the frontends ship has to be one some controller renders.
+#[test]
+fn every_page_the_scaffold_controllers_render_is_scaffolded_for_every_frontend() {
+    let mut components = std::collections::BTreeSet::new();
+    for (file, body) in scaffold_controllers() {
+        for (index, _) in body.match_indices("inertia_response!(") {
+            let rest = &body[index..];
+            let quoted = rest
+                .split_once('"')
+                .and_then(|(_, after)| after.split_once('"'))
+                .map(|(name, _)| name.to_owned())
+                .unwrap_or_else(|| panic!("{file}: inertia_response! without a component name"));
+            components.insert(quoted);
+        }
+    }
+    assert!(
+        components.contains("auth/VerifyEmail")
+            && components.contains("auth/ForgotPassword")
+            && components.contains("auth/ResetPassword"),
+        "the scaffold's controllers must render the account-flow pages; got {components:?}"
+    );
+
+    for (frontend, ext) in [
+        (suprnova_cli::templates::Frontend::React, "tsx"),
+        (suprnova_cli::templates::Frontend::Svelte, "svelte"),
+        (suprnova_cli::templates::Frontend::Vue, "vue"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+            .expect("scaffold frontend");
+        let pages = dir.path().join("frontend/src/pages");
+        for component in &components {
+            let page = pages.join(format!("{component}.{ext}"));
+            assert!(
+                page.is_file(),
+                "{frontend:?} must scaffold {} for the `{component}` page a controller renders",
+                page.display()
+            );
+        }
+        // And the other way round: a page under auth/ that no controller
+        // renders is dead weight nobody will notice going stale.
+        for entry in fs::read_dir(pages.join("auth")).expect("read auth pages") {
+            let name = entry.expect("dir entry").file_name();
+            let name = name.to_string_lossy();
+            let component = format!("auth/{}", name.trim_end_matches(&format!(".{ext}")));
+            assert!(
+                components.contains(&component),
+                "{frontend:?} scaffolds auth/{name}, which no controller renders"
+            );
+        }
+    }
+}
+
+/// The scaffold wires the account flows: registration mails a
+/// verification link, the reset routes are reachable to a signed-out
+/// visitor, and the verification routes require the session the framework
+/// binds each token to.
+#[test]
+fn the_scaffold_wires_email_verification_and_password_reset() {
+    let auth = suprnova_cli::templates::auth_controller();
+    assert!(
+        auth.contains("EmailVerification::send_link(&user, ")
+            && auth.contains("redirect!(\"/verify-email\")"),
+        "registration must mail a verification link and continue to the \
+         notice; got:\n{auth}"
+    );
+
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    let guest_end = routes
+        .find(".middleware(middleware::authenticate::guest())")
+        .expect("routes.rs.tpl has a guest group");
+    let auth_end = routes
+        .find(".middleware(middleware::authenticate::auth())")
+        .expect("routes.rs.tpl has an auth group");
+    assert!(guest_end < auth_end, "the guest group comes first");
+    let guest_group = &routes[..guest_end];
+    let auth_group = &routes[guest_end..auth_end];
+
+    for route in [
+        "get!(\"/forgot-password\", controllers::password_reset::forgot)",
+        "post!(\"/forgot-password\", controllers::password_reset::send_link)",
+        "get!(\"/reset-password\", controllers::password_reset::reset_form)",
+        "post!(\"/reset-password\", controllers::password_reset::reset)",
+    ] {
+        assert!(
+            guest_group.contains(route),
+            "`{route}` must sit in the guest group (someone resetting a password \
+             cannot sign in); got:\n{routes}"
+        );
+    }
+    for route in [
+        "get!(\"/verify-email\", controllers::email_verification::notice)",
+        "post!(\"/email/verification-notification\", controllers::email_verification::resend)",
+        "get!(\"/verify-email/verify\", controllers::email_verification::verify)",
+    ] {
+        assert!(
+            auth_group.contains(route),
+            "`{route}` must sit in the auth group (`EmailVerification::verify` is \
+             actor-bound); got:\n{routes}"
+        );
+    }
+
+    // The mailed links must land on the routes above.
+    let verification = suprnova_cli::templates::email_verification_controller();
+    assert!(
+        verification.contains("const VERIFY_PATH: &str = \"/verify-email/verify\";"),
+        "the verification link must land on the verify route; got:\n{verification}"
+    );
+    let reset = suprnova_cli::templates::password_reset_controller();
+    assert!(
+        reset.contains("const RESET_PATH: &str = \"/reset-password\";"),
+        "the reset link must land on the reset form; got:\n{reset}"
     );
 }

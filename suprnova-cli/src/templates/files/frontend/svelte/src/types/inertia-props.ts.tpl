@@ -11,6 +11,9 @@ export interface UserInfo {
   email: string;
 }
 
+export interface ForgotPasswordProps {
+}
+
 export interface HomeProps {
   title: string;
   message: string;
@@ -20,4 +23,12 @@ export interface LoginProps {
 }
 
 export interface RegisterProps {
+}
+
+export interface ResetPasswordProps {
+  token: string;
+}
+
+export interface VerifyEmailProps {
+  email: string;
 }
