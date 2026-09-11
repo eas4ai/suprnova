@@ -20,7 +20,7 @@ createInertiaApp({
     })
     return pages[`./pages/${name}.svelte`]
   },
-  async setup({ el, App, props }) {
+  setup({ el, App, props }) {
     // `el` is `null` when `setup` runs server-side - @inertiajs/svelte's
     // `createInertiaApp` reuses this same callback for both the browser
     // bootstrap and an SSR render pass (see `ssr.ts`, which calls this
@@ -31,7 +31,7 @@ createInertiaApp({
     // `t()`'s documented raw-key fallback covers whatever renders
     // during that pass.
     //
-    // Caution: awaiting `initLang` here, before mount/hydrate, means a
+    // Caution: loading `initLang` before mount/hydrate means a
     // hydrating client's first paint carries real translations while
     // the server-rendered markup it hydrates against still has `t()`'s
     // untranslated fallback (SSR always skips `initLang` - see above) -
@@ -39,14 +39,24 @@ createInertiaApp({
     // scaffold accepts that trade-off (translate before first paint,
     // for the common case) rather than deferring the catalog load until
     // after hydration.
-    if (el) {
-      await initLang(props.initialPage)
+    //
+    // `setup` is synchronous on purpose: `@inertiajs/svelte` types it as
+    // returning `SvelteRenderResult | void`, so an `async setup` (which
+    // returns a `Promise`) fails `svelte-check`. Chaining the catalog
+    // load onto the mount keeps the ordering above without the promise
+    // leaking out of `setup`.
+    const start = () => {
+      if (el?.hasAttribute('data-server-rendered')) {
+        hydrate(App, { target: el, props })
+      } else {
+        mount(App, { target: el!, props })
+      }
     }
 
-    if (el?.hasAttribute('data-server-rendered')) {
-      hydrate(App, { target: el, props })
+    if (el) {
+      void initLang(props.initialPage).then(start)
     } else {
-      mount(App, { target: el!, props })
+      start()
     }
   },
 })
