@@ -913,6 +913,26 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
         output.push_str(&emit_ts_for_struct(s, &known));
     }
 
+    end_with_single_newline(output)
+}
+
+/// Trim a finished emission to exactly one trailing newline.
+///
+/// `emit_ts_for_struct` ends every interface with a blank line, and so do
+/// the header and the `JsonValue` alias: that blank line is the separator
+/// between declarations, and it is right everywhere except after the
+/// last one. There it is a `new blank line at EOF`, which fails every
+/// `git diff --check` in a project that enforces it, on a file the
+/// project cannot correct by hand because the next regeneration writes
+/// the blank line straight back. Only the end of the file is touched; the
+/// separators between declarations are untouched.
+///
+/// An empty emission stays empty. The file-level caller always has at
+/// least the header, so the file itself always ends in one newline.
+fn end_with_single_newline(mut output: String) -> String {
+    while output.ends_with("\n\n") {
+        output.pop();
+    }
     output
 }
 
@@ -961,7 +981,7 @@ pub fn generate_types_string(input: ScanInput) -> String {
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
     }
-    output
+    end_with_single_newline(output)
 }
 
 /// Atomically replace `path` with `contents`, but only when they differ from
@@ -1938,9 +1958,9 @@ mod json_value_tests {
 
     #[test]
     fn an_optional_serde_json_value_emits_the_alias_and_warns_about_nothing() {
-        // The scaffold's own `LoginProps`. Advising the user to "mirror it
-        // as a local struct" is wrong for a JSON value, and there was
-        // nothing wrong to advise about.
+        // The shape the scaffold's `LoginProps` had through v2.0.0.
+        // Advising the user to "mirror it as a local struct" is wrong for
+        // a JSON value, and there was nothing wrong to advise about.
         let structs = parse(
             "#[derive(InertiaProps)]\npub struct LoginProps {\n    \
              pub errors: Option<serde_json::Value>,\n}\n",
@@ -2039,6 +2059,91 @@ mod json_value_tests {
         let ts = generate_typescript(&structs);
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
+    }
+}
+
+#[cfg(test)]
+mod file_shape_tests {
+    //! The emitted file is checked in, so its last bytes are a contract:
+    //! exactly one trailing newline. Two of them fail every `git diff
+    //! --check` (`new blank line at EOF`) in a project that enforces it,
+    //! and the file the generator wrote is not one the user can fix by
+    //! hand - the next regeneration puts the blank line back.
+
+    use super::*;
+
+    fn parse(src: &str) -> Vec<InertiaPropsStruct> {
+        let syntax = syn::parse_file(src).expect("valid Rust");
+        let mut visitor = InertiaPropsVisitor::new();
+        visitor.visit_file(&syntax);
+        resolve_reachable(visitor.structs, visitor.plain_structs)
+    }
+
+    const ONE: &str =
+        "#[derive(InertiaProps)]\npub struct AuditProps {\n    pub title: String,\n}\n";
+    const TWO: &str = "#[derive(InertiaProps)]\npub struct A {\n    pub a: String,\n}\n\
+                       #[derive(InertiaProps)]\npub struct B {\n    pub b: serde_json::Value,\n}\n";
+
+    fn assert_single_trailing_newline(ts: &str) {
+        assert!(
+            ts.ends_with('\n'),
+            "the file must end with a newline:\n{ts:?}"
+        );
+        assert!(
+            !ts.ends_with("\n\n"),
+            "the file must end with exactly one newline, not a blank line:\n{ts:?}"
+        );
+    }
+
+    #[test]
+    fn the_emitted_file_ends_with_exactly_one_newline() {
+        assert_single_trailing_newline(&generate_typescript(&parse(ONE)));
+    }
+
+    #[test]
+    fn an_empty_scan_still_ends_with_exactly_one_newline() {
+        // No structs: the header alone is the file, and the header used to
+        // end in the same blank line a struct did.
+        assert_single_trailing_newline(&generate_typescript(&[]));
+    }
+
+    #[test]
+    fn the_alias_and_every_declaration_keep_their_separating_blank_line() {
+        // Only the end of the file changes. The blank line between the
+        // header, the `JsonValue` alias, and each interface is the
+        // readable shape the issue asked to preserve.
+        let ts = generate_typescript(&parse(TWO));
+        assert_single_trailing_newline(&ts);
+        assert!(
+            ts.contains("regenerate.\n\nexport type JsonValue"),
+            "header and alias stay separated:\n{ts}"
+        );
+        assert!(
+            ts.contains("};\n\nexport interface"),
+            "alias and first interface stay separated:\n{ts}"
+        );
+        assert!(
+            ts.contains("}\n\nexport interface"),
+            "interfaces stay separated:\n{ts}"
+        );
+        assert_eq!(
+            ts.matches("export interface").count(),
+            2,
+            "both structs are still emitted:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn the_header_free_test_emission_has_the_same_shape() {
+        // `generate_types_string` is the emission the integration tests
+        // compare against; it must not disagree with the file about
+        // where the file ends.
+        assert_single_trailing_newline(&generate_types_string(ScanInput::Source(TWO)));
+        assert_eq!(
+            generate_types_string(ScanInput::Source("pub struct Plain;\n")),
+            "",
+            "nothing to emit is an empty string, not a stray newline"
+        );
     }
 }
 
