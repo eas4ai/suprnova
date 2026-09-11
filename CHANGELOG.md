@@ -55,8 +55,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   so `APP_URL` must name the address users reach the application at, and
   registration needs a working mail transport: the `.env` the scaffold
   writes points `MAIL_DRIVER=smtp` at a local catcher on port 1025 (the
-  compose file's Mailpit), or set `MAIL_DRIVER=log` to print each message,
-  link included, to the server log.
+  Mailpit that `suprnova docker:compose --with-mailpit` adds), or set
+  `MAIL_DRIVER=log` to print each message, link included, to the server log.
 
 - **A fresh Svelte scaffold builds against `@inertiajs/svelte` 3.7.** The
   generated `main.ts` declared an `async setup`, and `@inertiajs/svelte` 3.7

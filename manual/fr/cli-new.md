@@ -122,9 +122,9 @@ répertoires](structure.md) ; la version courte est :
   `/forgot-password` envoie un lien de réinitialisation à une adresse
   vérifiée et `/reset-password` reçoit le nouveau mot de passe. Le
   courrier part via les réglages `MAIL_*` de `.env`, qui pointent vers un
-  collecteur local sur le port 1025 (le Mailpit du fichier compose) ;
-  mettez `MAIL_DRIVER=log` pour écrire chaque message, lien compris, dans
-  le journal du serveur
+  collecteur local sur le port 1025 (le Mailpit qu'ajoute
+  `suprnova docker:compose --with-mailpit`) ; mettez `MAIL_DRIVER=log`
+  pour écrire chaque message, lien compris, dans le journal du serveur
 - `src/routes.rs` - les routes d'authentification et de compte, et un
   fallback de fichiers statiques qui sert `public/` (le frontend
   construit) en production

@@ -64,8 +64,9 @@ recientes primero.
   la que los usuarios llegan a la aplicación, y el registro necesita un
   transporte de correo que funcione: el `.env` que escribe el andamiaje
   apunta `MAIL_DRIVER=smtp` a un capturador local en el puerto 1025 (el
-  Mailpit del archivo compose), o pon `MAIL_DRIVER=log` para imprimir cada
-  mensaje, enlace incluido, en el log del servidor.
+  Mailpit que añade `suprnova docker:compose --with-mailpit`), o pon
+  `MAIL_DRIVER=log` para imprimir cada mensaje, enlace incluido, en el log
+  del servidor.
 
 - **Un andamiaje Svelte recién generado compila contra `@inertiajs/svelte`
   3.7.** El `main.ts` generado declaraba un `async setup`, y

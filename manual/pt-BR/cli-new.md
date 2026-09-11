@@ -121,8 +121,9 @@ diretórios](structure.md); a versão curta é:
   `/forgot-password` envia um link de redefinição para um endereço
   verificado e `/reset-password` recebe a nova senha. O e-mail sai pelas
   configurações `MAIL_*` do `.env`, que apontam para um capturador local
-  na porta 1025 (o Mailpit do arquivo compose); defina `MAIL_DRIVER=log`
-  para imprimir cada mensagem, link incluído, no log do servidor
+  na porta 1025 (o Mailpit que `suprnova docker:compose --with-mailpit`
+  adiciona); defina `MAIL_DRIVER=log` para imprimir cada mensagem, link
+  incluído, no log do servidor
 - `src/routes.rs` - as rotas de autenticação e de conta, e um fallback de
   arquivos estáticos que serve `public/` (o frontend compilado) em
   produção

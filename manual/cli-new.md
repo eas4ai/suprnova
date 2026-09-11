@@ -118,8 +118,9 @@ the short version is:
   `/forgot-password` mails a reset link to a verified address and
   `/reset-password` takes the new password. Mail leaves through the
   `MAIL_*` settings in `.env`, which point at a local catcher on port
-  1025 (the compose file's Mailpit); set `MAIL_DRIVER=log` to print each
-  message, link included, to the server log instead
+  1025 (the Mailpit that `suprnova docker:compose --with-mailpit` adds);
+  set `MAIL_DRIVER=log` to print each message, link included, to the
+  server log instead
 - `src/routes.rs` - the auth and account routes, and a static-file
   fallback that serves `public/` (the built frontend) in production
 - `src/migrations/` - `users`, `sessions`, `remember_tokens`, and

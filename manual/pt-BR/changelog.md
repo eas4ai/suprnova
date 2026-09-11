@@ -60,7 +60,8 @@ são enviados atomicamente. Mais recentes primeiro.
   então `APP_URL` precisa nomear o endereço em que os usuários chegam à
   aplicação, e o registro precisa de um transporte de e-mail funcionando:
   o `.env` que o scaffold escreve aponta `MAIL_DRIVER=smtp` para um
-  capturador local na porta 1025 (o Mailpit do arquivo compose), ou defina
+  capturador local na porta 1025 (o Mailpit que
+  `suprnova docker:compose --with-mailpit` adiciona), ou defina
   `MAIL_DRIVER=log` para imprimir cada mensagem, link incluído, no log do
   servidor.
 

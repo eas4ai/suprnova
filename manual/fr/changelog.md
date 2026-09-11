@@ -65,8 +65,9 @@ en premier.
   utilisateurs atteignent l'application, et l'inscription a besoin d'un
   transport de courrier fonctionnel : le `.env` que le scaffold écrit
   pointe `MAIL_DRIVER=smtp` vers un collecteur local sur le port 1025 (le
-  Mailpit du fichier compose), ou mettez `MAIL_DRIVER=log` pour écrire
-  chaque message, lien compris, dans le journal du serveur.
+  Mailpit qu'ajoute `suprnova docker:compose --with-mailpit`), ou mettez
+  `MAIL_DRIVER=log` pour écrire chaque message, lien compris, dans le
+  journal du serveur.
 
 - **Un scaffold Svelte frais se construit avec `@inertiajs/svelte` 3.7.** Le
   `main.ts` généré déclarait un `async setup`, et `@inertiajs/svelte` 3.7

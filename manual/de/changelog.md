@@ -63,8 +63,9 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Benutzer die Anwendung erreichen, und die Registrierung braucht einen
   funktionierenden Mail-Transport: die `.env`, die das Scaffold schreibt,
   richtet `MAIL_DRIVER=smtp` auf einen lokalen Catcher an Port 1025 (das
-  Mailpit der Compose-Datei), oder setzen Sie `MAIL_DRIVER=log`, um jede
-  Nachricht samt Link ins Server-Log zu schreiben.
+  Mailpit, das `suprnova docker:compose --with-mailpit` hinzufügt), oder
+  setzen Sie `MAIL_DRIVER=log`, um jede Nachricht samt Link ins Server-Log
+  zu schreiben.
 
 - **Ein frisches Svelte-Scaffold baut gegen `@inertiajs/svelte` 3.7.** Die
   generierte `main.ts` deklarierte ein `async setup`, und `@inertiajs/svelte`
