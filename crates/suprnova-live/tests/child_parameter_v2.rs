@@ -2,7 +2,6 @@
 
 mod child_parameter_support;
 mod component_support;
-mod snapshot_support;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -12,6 +11,7 @@ use child_parameter_support::{
     EXPIRES, NOW, accepted_parent, instance, issued_child, key_ring, parameter_limits,
     parameter_schema, pending_parameters,
 };
+use component_support::snapshot_support;
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::{
     ChildParameterEligibilityErrorKind, ChildParameterErrorKind, ExpectedChildParametersV2,

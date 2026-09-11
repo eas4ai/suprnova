@@ -649,7 +649,7 @@ fn close_streams(state: &Mutex<HostState>) {
     let mut locked = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let drained = locked.streams.drain(..).collect::<Vec<_>>();
+    let drained = std::mem::take(&mut locked.streams);
     for record in drained {
         locked.authority.close_transport(record.id);
         let _ = record.sender.send(StreamCommand::Close);

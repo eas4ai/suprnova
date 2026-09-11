@@ -403,11 +403,7 @@ fn source_pixel_format(
         .first()
         .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
     let width_px = width as usize;
-    let bytes_per_pixel = if width_px == 0 {
-        0
-    } else {
-        plane.stride / width_px
-    };
+    let bytes_per_pixel = plane.stride.checked_div(width_px).unwrap_or(0);
 
     let unsupported = |detail: &str| {
         FrameworkError::param(format!(
@@ -842,7 +838,7 @@ fn drain(encoder: &mut dyn Encoder, codec: &str) -> Result<Vec<u8>, FrameworkErr
 fn average_color(canvas: &Canvas) -> String {
     let mut totals = [0u64; 3];
     let mut count = 0u64;
-    for pixel in canvas.pixels.chunks_exact(4) {
+    for pixel in canvas.pixels.as_chunks::<4>().0 {
         totals[0] += u64::from(pixel[0]);
         totals[1] += u64::from(pixel[1]);
         totals[2] += u64::from(pixel[2]);

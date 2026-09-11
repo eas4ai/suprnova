@@ -70,7 +70,7 @@ pub(crate) fn explain_helper_failure(kind: &str) -> String {
         }
         other => format!(
             "The application helper failed: {}",
-            super::live_tool::display_text(&other.to_string())
+            super::live_tool::display_text(other)
         ),
     }
 }

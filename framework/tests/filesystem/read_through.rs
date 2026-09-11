@@ -629,7 +629,7 @@ async fn a_promotion_is_never_visible_on_the_primary_at_a_partial_length() {
     assert!(
         partial.is_empty(),
         "the promoted object was visible at a partial length: {:?}",
-        &partial.iter().take(8).collect::<Vec<_>>()
+        partial.iter().take(8).collect::<Vec<_>>()
     );
 
     let listed = primary.files("", true).await.expect("listing succeeds");

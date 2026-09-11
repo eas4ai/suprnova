@@ -251,6 +251,10 @@ pub struct PromotedActionRequest<'a> {
 impl<'a> PromotedActionRequest<'a> {
     /// Binds an internal promotion capability to the current trusted request.
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every trust input a promoted request binds stays explicit where it is bound"
+    )]
     pub fn new(
         descriptor: &'a ComponentDescriptor,
         context: &'a TrustedLiveRequestContext,
@@ -536,7 +540,7 @@ pub enum ExecutionResult {
         successor_revision: Revision,
     },
     /// Browser state must fresh-render without replaying the action.
-    RefreshRequired(RefreshRequiredExecution),
+    RefreshRequired(Box<RefreshRequiredExecution>),
     /// A retry identity was reused for different semantic input.
     IdempotencyConflict,
 }
@@ -1131,13 +1135,13 @@ impl ExecutionService {
             Ok(ClaimOutcome::InProgress { successor_revision }) => {
                 Err(ExecutionResult::InProgress { successor_revision })
             }
-            Ok(ClaimOutcome::Accepted(metadata)) => {
-                Err(ExecutionResult::RefreshRequired(RefreshRequiredExecution {
+            Ok(ClaimOutcome::Accepted(metadata)) => Err(ExecutionResult::RefreshRequired(
+                Box::new(RefreshRequiredExecution {
                     reason: ExecutionRefreshReason::DuplicateResponseUnavailable,
                     retry: RetryLegality::Prohibited,
                     accepted: Some(metadata),
-                }))
-            }
+                }),
+            )),
             Ok(ClaimOutcome::Stale { .. }) => Err(refresh(ExecutionRefreshReason::Stale)),
             Ok(ClaimOutcome::IdempotencyConflict) => Err(ExecutionResult::IdempotencyConflict),
             Ok(ClaimOutcome::RefreshRequired(reason)) => {
@@ -1639,11 +1643,11 @@ async fn rollback(transaction: &mut Option<Box<dyn HostTransaction>>) {
 }
 
 fn refresh(reason: ExecutionRefreshReason) -> ExecutionResult {
-    ExecutionResult::RefreshRequired(RefreshRequiredExecution {
+    ExecutionResult::RefreshRequired(Box::new(RefreshRequiredExecution {
         reason,
         retry: RetryLegality::Prohibited,
         accepted: None,
-    })
+    }))
 }
 
 fn outcome_kind(result: &ActionResult, validation: &ErrorBag) -> AcceptedOutcomeKind {

@@ -235,7 +235,19 @@ const MAX_WAIT_REBUILD_DEPTH: u32 = 8;
 /// middleware always serves it rather than manufacturing a closed
 /// response for a caching problem the visible response has nothing to do
 /// with.
-struct ProviderFailure(Request, Next);
+struct ProviderFailure(Box<(Request, Next)>);
+
+impl ProviderFailure {
+    /// Boxes the request and `next` so only the failure path, not every
+    /// successful return, pays for carrying them.
+    fn new(request: Request, next: Next) -> Self {
+        Self(Box::new((request, next)))
+    }
+
+    fn into_parts(self) -> (Request, Next) {
+        *self.0
+    }
+}
 
 /// The render could not run because the request was no longer available to
 /// hand to it.
@@ -749,8 +761,11 @@ impl Middleware for RenderCacheMiddleware {
         };
         match self.serve(&runtime, request, next, &pattern, &policy).await {
             Ok(response) => response,
-            Err(ProviderFailure(request, next)) => match policy.failure() {
-                FailurePolicy::Open => next(request).await,
+            Err(failure) => match policy.failure() {
+                FailurePolicy::Open => {
+                    let (request, next) = failure.into_parts();
+                    next(request).await
+                }
                 FailurePolicy::Closed => Ok(HttpResponse::text("").status(503)),
             },
         }
@@ -782,7 +797,7 @@ impl RenderCacheMiddleware {
                     }
                     epoch
                 }
-                Err(_) => return Err(ProviderFailure(request, next)),
+                Err(_) => return Err(ProviderFailure::new(request, next)),
             },
         };
         // Test-only race seam (R72/R83): fires right after the epoch this
@@ -813,7 +828,7 @@ impl RenderCacheMiddleware {
 
         let hit = match lookup(runtime, policy, job.key()).await {
             Ok(hit) => hit,
-            Err(()) => return Err(ProviderFailure(request, next)),
+            Err(()) => return Err(ProviderFailure::new(request, next)),
         };
         let Some(found) = hit else {
             LookupOutcome::Miss.record();
@@ -822,7 +837,7 @@ impl RenderCacheMiddleware {
 
         let coherence = match coherence(runtime, job.key(), policy, found.header()).await {
             Ok(coherence) => coherence,
-            Err(()) => return Err(ProviderFailure(request, next)),
+            Err(()) => return Err(ProviderFailure::new(request, next)),
         };
         let now = runtime.now_ms();
         let state = freshness_state(
@@ -1904,7 +1919,7 @@ fn stale_on_error_fallback(
             };
             status >= 500
         }
-        Err(ProviderFailure(..)) => true,
+        Err(ProviderFailure(_)) => true,
     };
     if !rebuild_failed || is_stitched(policy) {
         return None;
@@ -1931,7 +1946,7 @@ async fn render_and_publish(
     let now = runtime.now_ms();
     let admission = match runtime.coordinator.admit(job.key(), job.epoch(), now).await {
         Ok(admission) => admission,
-        Err(_) => return Err(ProviderFailure(request, next)),
+        Err(_) => return Err(ProviderFailure::new(request, next)),
     };
     match admission {
         RebuildAdmission::Lead(lease) => {
@@ -1953,7 +1968,7 @@ async fn render_and_publish(
                     let coherence_result =
                         match coherence(runtime, job.key(), policy, found.header()).await {
                             Ok(coherence) => coherence,
-                            Err(()) => return Err(ProviderFailure(request, next)),
+                            Err(()) => return Err(ProviderFailure::new(request, next)),
                         };
                     let now = runtime.now_ms();
                     let state = freshness_state(
@@ -2030,7 +2045,7 @@ async fn render_and_publish(
                                             runtime.on_epoch_rewind(leased).await;
                                         }
                                     }
-                                    Err(_) => return Err(ProviderFailure(request, next)),
+                                    Err(_) => return Err(ProviderFailure::new(request, next)),
                                 }
                             }
                             if job.restamp(runtime).is_err() {

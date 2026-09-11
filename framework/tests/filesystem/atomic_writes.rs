@@ -96,7 +96,7 @@ async fn an_ordinary_write_is_never_visible_at_a_partial_length() {
     assert!(
         partial.is_empty(),
         "the object was visible at a partial length: {:?}",
-        &partial.iter().take(8).collect::<Vec<_>>()
+        partial.iter().take(8).collect::<Vec<_>>()
     );
     assert!(
         samples > 0,
@@ -712,7 +712,7 @@ async fn a_copy_is_never_visible_at_a_partial_length() {
     assert!(
         partial.is_empty(),
         "the copy destination was visible at a partial length: {:?}",
-        &partial.iter().take(8).collect::<Vec<_>>()
+        partial.iter().take(8).collect::<Vec<_>>()
     );
     assert!(
         samples > 0,
