@@ -1827,3 +1827,47 @@ fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
         }
     }
 }
+
+/// The scaffold serves `public/` through the framework's static-file
+/// fallback.
+///
+/// `npm run build` writes the hashed bundle to `public/assets/` and the
+/// production image copies that directory next to the binary, but through
+/// v2.0.0 nothing served it: the HTML shell referenced `/assets/*` URLs that
+/// answered with the router's `404` the moment Vite's dev server was not
+/// running. `StaticFiles` documents `fallback!` registration as its
+/// integration, and the Inertia error-page middleware recognises the
+/// fallback's `404` body, so an unknown URL still renders the `Error` page.
+/// The behaviour itself is exercised by `scaffold_account_flows.rs`.
+#[test]
+fn the_scaffold_serves_public_files_through_the_static_fallback() {
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    assert!(
+        routes.contains("fallback!(StaticFiles::public().handler())"),
+        "routes.rs.tpl must register the static-file fallback, or a production \
+         server answers every `/assets/*` URL with 404; got:\n{routes}"
+    );
+    let imports = routes
+        .lines()
+        .find(|line| line.starts_with("use suprnova::"))
+        .expect("routes.rs.tpl imports from suprnova");
+    for name in ["StaticFiles", "fallback"] {
+        assert!(
+            imports.contains(name),
+            "routes.rs.tpl must import `{name}`; got: {imports}"
+        );
+    }
+
+    // The template names framework items by their public paths; keep the
+    // two in step so a rename surfaces here rather than in a user's build.
+    let lib = read_from_repo("framework/src/lib.rs");
+    assert!(
+        lib.contains("pub use static_files::StaticFiles;"),
+        "`suprnova::StaticFiles` is no longer exported under that name"
+    );
+    let macros = read_from_repo("framework/src/routing/macros.rs");
+    assert!(
+        macros.contains("macro_rules! fallback {"),
+        "`suprnova::fallback!` is no longer defined under that name"
+    );
+}
