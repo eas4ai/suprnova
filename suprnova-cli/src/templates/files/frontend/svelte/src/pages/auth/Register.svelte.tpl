@@ -1,9 +1,11 @@
 <script lang="ts">
   import { useForm } from '@inertiajs/svelte'
-  import type { RegisterProps } from '../../types/inertia-props'
 
-  let { errors }: RegisterProps = $props()
-
+  // Validation errors arrive through the form: a failed submission is a
+  // `303` back to this page with the errors flashed, and the Inertia
+  // client copies the page's `errors` into `form.errors`. The page itself
+  // takes no props - declaring an `errors` prop would replace the flashed
+  // bag.
   const form = useForm({
     name: '',
     email: '',
@@ -38,8 +40,8 @@
             class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             bind:value={form.name}
           />
-          {#if errors?.name}
-            <p class="mt-1 text-sm text-red-600">{errors.name}</p>
+          {#if form.errors.name}
+            <p class="mt-1 text-sm text-red-600">{form.errors.name}</p>
           {/if}
         </div>
 
@@ -54,8 +56,8 @@
             class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             bind:value={form.email}
           />
-          {#if errors?.email}
-            <p class="mt-1 text-sm text-red-600">{errors.email}</p>
+          {#if form.errors.email}
+            <p class="mt-1 text-sm text-red-600">{form.errors.email}</p>
           {/if}
         </div>
 
@@ -69,8 +71,8 @@
             class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             bind:value={form.password}
           />
-          {#if errors?.password}
-            <p class="mt-1 text-sm text-red-600">{errors.password}</p>
+          {#if form.errors.password}
+            <p class="mt-1 text-sm text-red-600">{form.errors.password}</p>
           {/if}
         </div>
 
@@ -86,8 +88,8 @@
             class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             bind:value={form.password_confirmation}
           />
-          {#if errors?.password_confirmation}
-            <p class="mt-1 text-sm text-red-600">{errors.password_confirmation}</p>
+          {#if form.errors.password_confirmation}
+            <p class="mt-1 text-sm text-red-600">{form.errors.password_confirmation}</p>
           {/if}
         </div>
       </div>

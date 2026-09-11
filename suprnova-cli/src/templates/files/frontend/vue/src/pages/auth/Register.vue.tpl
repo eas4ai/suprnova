@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { useForm } from '@inertiajs/vue3'
-import type { RegisterProps } from '../../types/inertia-props'
 
-const props = defineProps<RegisterProps>()
-
+// Validation errors arrive through the form: a failed submission is a
+// `303` back to this page with the errors flashed, and the Inertia client
+// copies the page's `errors` into `form.errors`. The page itself takes no
+// props - declaring an `errors` prop would replace the flashed bag.
 const form = useForm({
   name: '',
   email: '',
@@ -38,8 +39,8 @@ function submit() {
               required
               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             />
-            <p v-if="props.errors?.name" class="mt-1 text-sm text-red-600">
-              {{ props.errors.name }}
+            <p v-if="form.errors.name" class="mt-1 text-sm text-red-600">
+              {{ form.errors.name }}
             </p>
           </div>
 
@@ -54,8 +55,8 @@ function submit() {
               required
               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             />
-            <p v-if="props.errors?.email" class="mt-1 text-sm text-red-600">
-              {{ props.errors.email }}
+            <p v-if="form.errors.email" class="mt-1 text-sm text-red-600">
+              {{ form.errors.email }}
             </p>
           </div>
 
@@ -69,8 +70,8 @@ function submit() {
               required
               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             />
-            <p v-if="props.errors?.password" class="mt-1 text-sm text-red-600">
-              {{ props.errors.password }}
+            <p v-if="form.errors.password" class="mt-1 text-sm text-red-600">
+              {{ form.errors.password }}
             </p>
           </div>
 
@@ -86,8 +87,8 @@ function submit() {
               required
               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             />
-            <p v-if="props.errors?.password_confirmation" class="mt-1 text-sm text-red-600">
-              {{ props.errors.password_confirmation }}
+            <p v-if="form.errors.password_confirmation" class="mt-1 text-sm text-red-600">
+              {{ form.errors.password_confirmation }}
             </p>
           </div>
         </div>

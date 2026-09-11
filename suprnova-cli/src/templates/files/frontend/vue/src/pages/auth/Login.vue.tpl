@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { useForm } from '@inertiajs/vue3'
-import type { LoginProps } from '../../types/inertia-props'
 
-const props = defineProps<LoginProps>()
-
+// Validation errors arrive through the form: a failed submission is a
+// `303` back to this page with the errors flashed, and the Inertia client
+// copies the page's `errors` into `form.errors`. The page itself takes no
+// props - declaring an `errors` prop would replace the flashed bag.
 const form = useForm({
   email: '',
   password: '',
@@ -55,12 +56,12 @@ function submit() {
           </div>
         </div>
 
-        <div v-if="props.errors?.email" class="text-red-600 text-sm">
-          {{ props.errors.email }}
+        <div v-if="form.errors.email" class="text-red-600 text-sm">
+          {{ form.errors.email }}
         </div>
 
-        <div v-if="props.errors?.password" class="text-red-600 text-sm">
-          {{ props.errors.password }}
+        <div v-if="form.errors.password" class="text-red-600 text-sm">
+          {{ form.errors.password }}
         </div>
 
         <div class="flex items-center">

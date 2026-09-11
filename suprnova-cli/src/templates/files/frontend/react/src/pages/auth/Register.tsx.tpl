@@ -1,8 +1,12 @@
 import { useForm } from '@inertiajs/react'
-import type { RegisterProps } from '../../types/inertia-props'
 
-export default function Register({ errors }: RegisterProps) {
-  const { data, setData, post, processing } = useForm({
+// Validation errors arrive through the form: a failed submission is a
+// `303` back to this page with the errors flashed, and the Inertia client
+// copies the page's `errors` into the form's `errors`. The page itself
+// takes no props - declaring an `errors` prop would replace the flashed
+// bag.
+export default function Register() {
+  const { data, setData, post, processing, errors } = useForm({
     name: '',
     email: '',
     password: '',
@@ -37,7 +41,7 @@ export default function Register({ errors }: RegisterProps) {
                 value={data.name}
                 onChange={(e) => setData('name', e.target.value)}
               />
-              {errors?.name && (
+              {errors.name && (
                 <p className="mt-1 text-sm text-red-600">{errors.name}</p>
               )}
             </div>
@@ -56,7 +60,7 @@ export default function Register({ errors }: RegisterProps) {
                 value={data.email}
                 onChange={(e) => setData('email', e.target.value)}
               />
-              {errors?.email && (
+              {errors.email && (
                 <p className="mt-1 text-sm text-red-600">{errors.email}</p>
               )}
             </div>
@@ -74,7 +78,7 @@ export default function Register({ errors }: RegisterProps) {
                 value={data.password}
                 onChange={(e) => setData('password', e.target.value)}
               />
-              {errors?.password && (
+              {errors.password && (
                 <p className="mt-1 text-sm text-red-600">{errors.password}</p>
               )}
             </div>
@@ -92,7 +96,7 @@ export default function Register({ errors }: RegisterProps) {
                 value={data.password_confirmation}
                 onChange={(e) => setData('password_confirmation', e.target.value)}
               />
-              {errors?.password_confirmation && (
+              {errors.password_confirmation && (
                 <p className="mt-1 text-sm text-red-600">{errors.password_confirmation}</p>
               )}
             </div>
