@@ -76,8 +76,10 @@ APIスターターは、大幅に小さくなります: `frontend/` ディレク
 - `cmd/main.rs` - バイナリのエントリ。`Application::new()…run()` を呼び出す
 - `src/` - コントローラー、アクション、コマンド、設定、ミドルウェア、モデル、マイグレーション、それに `bootstrap.rs` と `routes.rs`。生成された `bootstrap.rs` は、グローバルなミドルウェアのチェーン - ロギング、セッション、ロケール、CSRF、includeのパース - を配線し、[`Inertia::install`](frontend-inertia-responses.md)を呼び出します。これは、Inertiaプロトコルのミドルウェア（アセットバージョンの `409`、非GETのリダイレクトでの `302 → 303`）を追加します。それが広告するアセットバージョンは、Viteビルドマニフェストのハッシュがデフォルトで使われるため、フロントエンドのビルドを出荷すると自動的に変わります - [バージョン検出](frontend-inertia-responses.md)を参照してください。同じ呼び出しが、あなたがスキャフォルドしたフロントエンドをピン留めするため、HTMLシェルはそのフレームワークのViteのエントリポイントをロードします。`.env` は、CLI自身のジェネレーターのために、対応する `SUPRNOVA_FRONTEND` を運びます
 - `src/bin/console.rs` - プロジェクトごとの `php artisan` に相当するもの
-- `frontend/` - Vite 8 + Tailwind v4 + あなたが選んだフレームワーク。Home / Dashboard / Login / Register の各ページが、既にInertiaを通じて配線済み
-- `src/migrations/` - `users`、`sessions`、`remember_tokens` の各テーブルが、すぐに使える状態で
+- `frontend/` - Vite 8 + Tailwind v4 + あなたが選んだフレームワーク。Home / Dashboard / Login / Register / ForgotPassword / ResetPassword / VerifyEmail の各ページが、既にInertiaを通じて配線済み
+- アカウントのフロー: 登録は検証リンクをメールで送り、`/verify-email` へ進みます。そこでリンクの再送と消費ができます。`/forgot-password` は検証済みのアドレスへリセットリンクをメールで送り、`/reset-password` が新しいパスワードを受け取ります。メールは `.env` の `MAIL_*` 設定を通って出ていき、その設定はポート 1025 のローカルのキャッチャー（`suprnova docker:compose --with-mailpit` が追加する Mailpit）を指しています。代わりに各メッセージをリンクごとサーバーログへ出力するには、`MAIL_DRIVER=log` を設定してください
+- `src/routes.rs` - 認証とアカウントのルート、そして本番環境で `public/`（ビルド済みのフロントエンド）を配信する静的ファイルのフォールバック
+- `src/migrations/` - `users`、`sessions`、`remember_tokens`、`auth_flow_tokens` の各テーブルが、すぐに使える状態で
 - `.env` - デフォルトではSQLiteデータベース。オペレーターの介入なしにアプリが起動するよう、新しく生成された `APP_KEY` を伴う
 - `.gitignore`、`Cargo.toml`
 

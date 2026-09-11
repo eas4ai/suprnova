@@ -584,18 +584,19 @@ Unprocessable Entity`-JSON-Envelope:
 ```rust
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, Auth, Credentials, FormRequest,
+    InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
+// Kein `errors`-Prop: das Framework setzt `errors` auf jeder Inertia-Seite
+// aus dem in der Session geflashten Validierungs-Bag, und ein explizites
+// Prop desselben Namens würde ihn ersetzen.
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -636,10 +637,14 @@ pub async fn logout(_req: Request) -> Response {
 }
 ```
 
-Die Registrierung folgt derselben Form: das Formular validieren,
-den Benutzer anlegen, dann meldet
+Die Registrierung folgt derselben Form: das Formular validieren, den
+Benutzer anlegen, mit `EmailVerification::send_link` einen
+Verifizierungslink verschicken, dann meldet
 `Auth::login(Arc::new(user), false).await?` den frisch angelegten
-Benutzer in der Session an und feuert das `Login`-Event.
+Benutzer in der Session an, feuert das `Login`-Event und leitet weiter zu
+`/verify-email`. Die generierten Controller `email_verification` und
+`password_reset` vervollständigen die Kontoabläufe; siehe
+[Auth-Flows](auth-flows.md).
 
 ## Das gescaffoldete `User`-Modell
 

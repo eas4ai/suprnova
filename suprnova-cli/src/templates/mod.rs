@@ -534,6 +534,15 @@ pub mod react {
     pub fn register_page() -> &'static str {
         include_str!("files/frontend/react/src/pages/auth/Register.tsx.tpl")
     }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/ForgotPassword.tsx.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/ResetPassword.tsx.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/VerifyEmail.tsx.tpl")
+    }
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/react/src/types/inertia-props.ts.tpl")
     }
@@ -596,6 +605,15 @@ pub mod svelte {
     pub fn register_page() -> &'static str {
         include_str!("files/frontend/svelte/src/pages/auth/Register.svelte.tpl")
     }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/ForgotPassword.svelte.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/ResetPassword.svelte.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/VerifyEmail.svelte.tpl")
+    }
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/svelte/src/types/inertia-props.ts.tpl")
     }
@@ -645,6 +663,15 @@ pub mod vue {
     pub fn register_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/auth/Register.vue.tpl")
     }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/ForgotPassword.vue.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/ResetPassword.vue.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/VerifyEmail.vue.tpl")
+    }
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/vue/src/types/inertia-props.ts.tpl")
     }
@@ -685,6 +712,26 @@ pub fn scaffold_frontend(
         Frontend::React => react::error_page(),
         Frontend::Svelte => svelte::error_page(),
         Frontend::Vue => vue::error_page(),
+    };
+
+    // The account-flow pages the `password_reset` and `email_verification`
+    // controllers render, kept out of the tuple for the same reason.
+    let (forgot_password_page, reset_password_page, verify_email_page) = match frontend {
+        Frontend::React => (
+            react::forgot_password_page(),
+            react::reset_password_page(),
+            react::verify_email_page(),
+        ),
+        Frontend::Svelte => (
+            svelte::forgot_password_page(),
+            svelte::reset_password_page(),
+            svelte::verify_email_page(),
+        ),
+        Frontend::Vue => (
+            vue::forgot_password_page(),
+            vue::reset_password_page(),
+            vue::verify_email_page(),
+        ),
     };
 
     let (pkg, vite, ts, index, main_src, ssr_src, home, dash, login, reg, props, css) =
@@ -746,6 +793,15 @@ pub fn scaffold_frontend(
         (pages.join(format!("Dashboard.{}", ext)), &dash),
         (auth.join(format!("Login.{}", ext)), &login),
         (auth.join(format!("Register.{}", ext)), &reg),
+        (
+            auth.join(format!("ForgotPassword.{}", ext)),
+            forgot_password_page,
+        ),
+        (
+            auth.join(format!("ResetPassword.{}", ext)),
+            reset_password_page,
+        ),
+        (auth.join(format!("VerifyEmail.{}", ext)), verify_email_page),
         (types.join("inertia-props.ts"), &props),
         (types.join("lang-keys.ts"), lang_keys_starter()),
     ];
@@ -974,6 +1030,14 @@ pub fn auth_controller() -> &'static str {
 
 pub fn dashboard_controller() -> &'static str {
     include_str!("files/backend/controllers/dashboard.rs.tpl")
+}
+
+pub fn email_verification_controller() -> &'static str {
+    include_str!("files/backend/controllers/email_verification.rs.tpl")
+}
+
+pub fn password_reset_controller() -> &'static str {
+    include_str!("files/backend/controllers/password_reset.rs.tpl")
 }
 
 pub fn authenticate_middleware() -> &'static str {

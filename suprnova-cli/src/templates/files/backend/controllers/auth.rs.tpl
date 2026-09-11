@@ -1,18 +1,26 @@
 //! Authentication controller.
 //!
-//! Renders the login/register Inertia pages on GET, validates and
-//! persists credentials on POST, redirects to `/dashboard` on success.
-//! Form bodies are extracted via `FormRequest`. On an Inertia visit a
-//! per-field failure comes back as a `303` to the form page with the
-//! errors flashed, so `useForm().errors` fills in; a plain REST client
-//! still gets the `422` `{ message, errors }` envelope.
+//! Renders the login/register Inertia pages on GET and validates and
+//! persists credentials on POST. A login continues to `/dashboard`; a
+//! registration mails a verification link and continues to
+//! `/verify-email` (see `email_verification`). Form bodies are extracted
+//! via `FormRequest`. On an Inertia visit a per-field failure comes back
+//! as a `303` to the form page with the errors flashed, so
+//! `useForm().errors` fills in; a plain REST client still gets the `422`
+//! `{ message, errors }` envelope.
+//!
+//! Neither page declares an `errors` prop. The framework seeds `errors`
+//! on every Inertia page from the session-flashed validation bag, and an
+//! explicit prop of the same name replaces that seed - `errors: None`
+//! serialised as `errors: null` and hid every flashed message. Leave the
+//! key to the framework.
 
 use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials, FormRequest, InertiaProps,
-    Request, Response, Validate, ValidationErrors,
+    auth_flows::EmailVerification, handler, inertia_response, redirect, Auth, Credentials,
+    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
 use crate::models::user::User;
@@ -22,17 +30,11 @@ use crate::models::user::User;
 // ============================================================================
 
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    /// Errors carried over from the redirect-back flow. The Inertia
-    /// client merges any session-flashed errors into `errors` on its
-    /// own; this prop exists so the page can render before any
-    /// submission too.
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -77,13 +79,11 @@ pub async fn login(form: LoginRequest) -> Response {
 // ============================================================================
 
 #[derive(InertiaProps)]
-pub struct RegisterProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct RegisterProps {}
 
 #[handler]
 pub async fn show_register(req: Request) -> Response {
-    inertia_response!(&req, "auth/Register", RegisterProps { errors: None })
+    inertia_response!(&req, "auth/Register", RegisterProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -120,10 +120,16 @@ pub async fn register(form: RegisterRequest) -> Response {
     }
 
     let user = User::create(&form.name, &form.email, &form.password).await?;
+    // Mail the verification link. This runs before the login below, so a
+    // delivery failure (nothing listening on `MAIL_SMTP_HOST`, `MAIL_FROM`
+    // unset) is reported as the error it is rather than after a session
+    // the user never sees. The account exists by then: the user signs in
+    // with the password they chose and asks `/verify-email` for a new link.
+    EmailVerification::send_link(&user, &super::email_verification::verification_link()).await?;
     // Log the freshly-created user into the session (fires the Login event).
     Auth::login(Arc::new(user), false).await?;
 
-    redirect!("/dashboard").into()
+    redirect!("/verify-email").into()
 }
 
 // ============================================================================

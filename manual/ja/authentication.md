@@ -415,18 +415,19 @@ use suprnova::BasicAuthMiddleware;
 ```rust
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, Auth, Credentials, FormRequest,
+    InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
+// `errors` プロップはありません: フレームワークは、セッションにフラッシュされた
+// バリデーションバッグから、すべてのInertiaページに `errors` を仕込みます。
+// 同じ名前の明示的なプロップは、それを置き換えてしまいます。
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -467,7 +468,7 @@ pub async fn logout(_req: Request) -> Response {
 }
 ```
 
-登録も同じ形に従います: フォームを検証し、ユーザーを作成し、それから `Auth::login(Arc::new(user), false).await?` が、作られたばかりのユーザーをセッションへログインさせ、`Login` イベントを発火します。
+登録も同じ形に従います: フォームを検証し、ユーザーを作成し、`EmailVerification::send_link` で検証リンクをメール送信し、それから `Auth::login(Arc::new(user), false).await?` が、作られたばかりのユーザーをセッションへログインさせ、`Login` イベントを発火して、`/verify-email` へ進みます。生成された `email_verification` と `password_reset` のコントローラーが、アカウントのフローを完成させます。[認証フロー](auth-flows.md) を参照してください。
 
 ## スキャフォルドされた `User` モデル
 

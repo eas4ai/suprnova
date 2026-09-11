@@ -1,9 +1,11 @@
 <script lang="ts">
   import { useForm } from '@inertiajs/svelte'
-  import type { LoginProps } from '../../types/inertia-props'
 
-  let { errors }: LoginProps = $props()
-
+  // Validation errors arrive through the form: a failed submission is a
+  // `303` back to this page with the errors flashed, and the Inertia
+  // client copies the page's `errors` into `form.errors`. The page itself
+  // takes no props - declaring an `errors` prop would replace the flashed
+  // bag.
   const form = useForm({
     email: '',
     password: '',
@@ -55,12 +57,12 @@
         </div>
       </div>
 
-      {#if errors?.email}
-        <div class="text-red-600 text-sm">{errors.email}</div>
+      {#if form.errors.email}
+        <div class="text-red-600 text-sm">{form.errors.email}</div>
       {/if}
 
-      {#if errors?.password}
-        <div class="text-red-600 text-sm">{errors.password}</div>
+      {#if form.errors.password}
+        <div class="text-red-600 text-sm">{form.errors.password}</div>
       {/if}
 
       <div class="flex items-center">
@@ -74,6 +76,9 @@
         <label for="remember" class="ml-2 block text-sm text-gray-900">
           Remember me
         </label>
+        <a href="/forgot-password" class="ml-auto text-sm text-indigo-600 hover:text-indigo-500">
+          Forgot your password?
+        </a>
       </div>
 
       <div>

@@ -1,8 +1,12 @@
 import { useForm } from '@inertiajs/react'
-import type { LoginProps } from '../../types/inertia-props'
 
-export default function Login({ errors }: LoginProps) {
-  const { data, setData, post, processing } = useForm({
+// Validation errors arrive through the form: a failed submission is a
+// `303` back to this page with the errors flashed, and the Inertia client
+// copies the page's `errors` into the form's `errors`. The page itself
+// takes no props - declaring an `errors` prop would replace the flashed
+// bag.
+export default function Login() {
+  const { data, setData, post, processing, errors } = useForm({
     email: '',
     password: '',
     remember: false,
@@ -57,11 +61,11 @@ export default function Login({ errors }: LoginProps) {
             </div>
           </div>
 
-          {errors?.email && (
+          {errors.email && (
             <div className="text-red-600 text-sm">{errors.email}</div>
           )}
 
-          {errors?.password && (
+          {errors.password && (
             <div className="text-red-600 text-sm">{errors.password}</div>
           )}
 
@@ -77,6 +81,12 @@ export default function Login({ errors }: LoginProps) {
             <label htmlFor="remember" className="ml-2 block text-sm text-gray-900">
               Remember me
             </label>
+            <a
+              href="/forgot-password"
+              className="ml-auto text-sm text-indigo-600 hover:text-indigo-500"
+            >
+              Forgot your password?
+            </a>
           </div>
 
           <div>

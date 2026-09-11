@@ -30,7 +30,9 @@ my-app/
 │   ├── controllers/
 │   │   ├── mod.rs
 │   │   ├── home.rs                 # GET / 处理程序
-│   │   ├── auth.rs                 # 登录 / 注册 / 登出
+│   │   ├── auth.rs                 # 登录 / 注册（邮寄一个验证链接） / 登出
+│   │   ├── email_verification.rs   # verify-email 提示、重发以及邮寄出去的那个链接
+│   │   ├── password_reset.rs       # forgot-password 和 reset-password
 │   │   └── dashboard.rs            # 需要认证；示例保护路由
 │   ├── middleware/
 │   │   ├── mod.rs
@@ -41,6 +43,7 @@ my-app/
 │   │   ├── m_*_create_users_table.rs
 │   │   ├── m_*_create_sessions_table.rs
 │   │   ├── m_*_create_remember_tokens_table.rs
+│   │   ├── m_*_create_auth_flow_tokens_table.rs
 │   │   ├── m_*_create_workflows_table.rs
 │   │   └── m_*_create_workflow_steps_table.rs
 │   └── models/
@@ -59,7 +62,10 @@ my-app/
 │       │   ├── Dashboard.{tsx,svelte,vue}
 │       │   └── auth/
 │       │       ├── Login.{tsx,svelte,vue}
-│       │       └── Register.{tsx,svelte,vue}
+│       │       ├── Register.{tsx,svelte,vue}
+│       │       ├── ForgotPassword.{tsx,svelte,vue}
+│       │       ├── ResetPassword.{tsx,svelte,vue}
+│       │       └── VerifyEmail.{tsx,svelte,vue}
 │       └── types/
 │           └── inertia-props.ts    # 从 #[derive(InertiaProps)] 自动生成
 └── public/
@@ -299,8 +305,9 @@ Vite + Inertia SPA。这是一个正常的前端项目 - `package.json`、
 
 ### `public/assets/`
 
-Vite 放置生产构建的地方（`npm run build`）。Suprnova
-服务器在生产中将此目录作为静态资产在 `/assets/*` 处提供。
+Vite 放置生产构建的地方（`npm run build`）。生成出来的 `routes.rs` 以
+`fallback!(StaticFiles::public().handler())` 结尾，所以 Suprnova
+服务器在生产中将此目录作为静态资产在 `/assets/*` 处提供。`public/` 下的点文件（例如 `.vite/manifest.json`）永远不会被提供。
 
 ## 应用增长时添加的目录
 

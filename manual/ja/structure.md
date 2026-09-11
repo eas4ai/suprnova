@@ -30,7 +30,9 @@ my-app/
 │   ├── controllers/
 │   │   ├── mod.rs
 │   │   ├── home.rs                 # GET / ハンドラ
-│   │   ├── auth.rs                 # ログイン / 登録 / ログアウト
+│   │   ├── auth.rs                 # ログイン / 登録（検証リンクをメール送信） / ログアウト
+│   │   ├── email_verification.rs   # verify-email の案内、再送、メールで届いたリンク
+│   │   ├── password_reset.rs       # forgot-password と reset-password
 │   │   └── dashboard.rs            # 認証が必要；保護されたルートの例
 │   ├── middleware/
 │   │   ├── mod.rs
@@ -41,6 +43,7 @@ my-app/
 │   │   ├── m_*_create_users_table.rs
 │   │   ├── m_*_create_sessions_table.rs
 │   │   ├── m_*_create_remember_tokens_table.rs
+│   │   ├── m_*_create_auth_flow_tokens_table.rs
 │   │   ├── m_*_create_workflows_table.rs
 │   │   └── m_*_create_workflow_steps_table.rs
 │   └── models/
@@ -59,7 +62,10 @@ my-app/
 │       │   ├── Dashboard.{tsx,svelte,vue}
 │       │   └── auth/
 │       │       ├── Login.{tsx,svelte,vue}
-│       │       └── Register.{tsx,svelte,vue}
+│       │       ├── Register.{tsx,svelte,vue}
+│       │       ├── ForgotPassword.{tsx,svelte,vue}
+│       │       ├── ResetPassword.{tsx,svelte,vue}
+│       │       └── VerifyEmail.{tsx,svelte,vue}
 │       └── types/
 │           └── inertia-props.ts    # #[derive(InertiaProps)] から自動生成
 └── public/
@@ -289,7 +295,7 @@ Vite + Inertia SPA。これは通常のフロントエンドプロジェクト�
 
 ### `public/assets/`
 
-Vite が本番ビルド（`npm run build`）をドロップする場所。Suprnova サーバーは本番環境でこのディレクトリを `/assets/*` で静的アセットとして提供します。
+Vite が本番ビルド（`npm run build`）をドロップする場所。生成された `routes.rs` は `fallback!(StaticFiles::public().handler())` で終わるため、Suprnova サーバーは本番環境でこのディレクトリを `/assets/*` で静的アセットとして提供します。`public/` 配下のドットファイル（`.vite/manifest.json` など）は決して提供されません。
 
 ## アプリが成長するにつれて追加するディレクトリ
 

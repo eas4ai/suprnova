@@ -547,18 +547,19 @@ envelope:
 ```rust
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, Auth, Credentials, FormRequest,
+    InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
+// No `errors` prop: the framework seeds `errors` on every Inertia page
+// from the session-flashed validation bag, and an explicit prop of the
+// same name would replace it.
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -600,8 +601,11 @@ pub async fn logout(_req: Request) -> Response {
 ```
 
 Registration follows the same shape: validate the form, create the
-user, then `Auth::login(Arc::new(user), false).await?` logs the freshly
-created user into the session and fires the `Login` event.
+user, mail a verification link with `EmailVerification::send_link`, then
+`Auth::login(Arc::new(user), false).await?` logs the freshly created user
+into the session, fires the `Login` event, and continues to
+`/verify-email`. The generated `email_verification` and `password_reset`
+controllers complete the account flows; see [Auth flows](auth-flows.md).
 
 ## The scaffolded `User` model
 

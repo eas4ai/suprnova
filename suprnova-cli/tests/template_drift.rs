@@ -1511,32 +1511,77 @@ fn every_frontend_vite_config_gives_the_ssr_build_its_own_outdir() {
     }
 }
 
-/// A fresh scaffold must generate its TypeScript types without a single
-/// "isn't a struct this project defines" warning.
-///
-/// `LoginProps`/`RegisterProps` carry `Option<serde_json::Value>`, which the
-/// generator degraded to `unknown` and warned about twice on every
-/// regeneration - advising the user to "mirror it as a local struct", which
-/// is not what you do with a JSON document. Rendering the controllers the
-/// scaffolder actually writes is the only way to catch that from here.
-#[test]
-fn scaffolded_controllers_generate_types_without_unresolved_props() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let controllers = dir.path().join("src/controllers");
-    fs::create_dir_all(&controllers).expect("create src/controllers");
-
-    for (name, body) in [
+/// Every controller `suprnova new` writes into `src/controllers/`, by file
+/// name, so a test can render the set the scaffolder actually ships rather
+/// than a hand-picked subset that silently falls behind it.
+fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
+    vec![
         ("home.rs", suprnova_cli::templates::home_controller()),
         ("auth.rs", suprnova_cli::templates::auth_controller()),
         (
             "dashboard.rs",
             suprnova_cli::templates::dashboard_controller(),
         ),
-    ] {
+        (
+            "email_verification.rs",
+            suprnova_cli::templates::email_verification_controller(),
+        ),
+        (
+            "password_reset.rs",
+            suprnova_cli::templates::password_reset_controller(),
+        ),
+    ]
+}
+
+/// Every `pub mod` the scaffold's `controllers/mod.rs` declares has a
+/// controller template behind it, and every controller template is
+/// declared - one list, checked in both directions.
+#[test]
+fn the_controllers_module_declares_exactly_the_scaffolded_controllers() {
+    let declared: std::collections::BTreeSet<String> = suprnova_cli::templates::controllers_mod()
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("pub mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+        })
+        .map(str::to_owned)
+        .collect();
+    let shipped: std::collections::BTreeSet<String> = scaffold_controllers()
+        .into_iter()
+        .map(|(file, _)| file.trim_end_matches(".rs").to_owned())
+        .collect();
+    assert_eq!(
+        declared, shipped,
+        "controllers/mod.rs.tpl and the controller templates `suprnova new` \
+         writes have drifted apart"
+    );
+}
+
+/// Write the scaffold's controllers into `<dir>/src/controllers/` and scan
+/// them the way `suprnova generate-types` would.
+fn scan_scaffold_controllers(
+    dir: &Path,
+) -> Vec<suprnova_cli::commands::generate_types::InertiaPropsStruct> {
+    let controllers = dir.join("src/controllers");
+    fs::create_dir_all(&controllers).expect("create src/controllers");
+    for (name, body) in scaffold_controllers() {
         fs::write(controllers.join(name), body).unwrap_or_else(|e| panic!("write {name}: {e}"));
     }
+    suprnova_cli::commands::generate_types::scan_inertia_props(dir)
+}
 
-    let structs = suprnova_cli::commands::generate_types::scan_inertia_props(dir.path());
+/// A fresh scaffold must generate its TypeScript types without a single
+/// "isn't a struct this project defines" warning.
+///
+/// `LoginProps`/`RegisterProps` once carried `Option<serde_json::Value>`,
+/// which the generator degraded to `unknown` and warned about twice on every
+/// regeneration - advising the user to "mirror it as a local struct", which
+/// is not what you do with a JSON document. Rendering the controllers the
+/// scaffolder actually writes is the only way to catch that from here.
+#[test]
+fn scaffolded_controllers_generate_types_without_unresolved_props() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let structs = scan_scaffold_controllers(dir.path());
     assert!(
         !structs.is_empty(),
         "the scaffolded controllers do define InertiaProps structs"
@@ -1706,4 +1751,279 @@ fn the_starter_lang_keys_match_the_starter_catalog() {
             "the starter catalog must define `{id}`; got {ids:?}"
         );
     }
+}
+
+/// The starter's `inertia-props.ts` is, byte for byte, what
+/// `suprnova generate-types` emits for the starter's own controllers.
+///
+/// `suprnova serve` regenerates the file on the first `.rs` save, so a
+/// template that differs from the generator's output becomes a diff on a
+/// file the user never edited. Through v2.0.0 it did differ: the template
+/// declared an `errors` shape the controllers never send, and the types
+/// went stale the moment the generator first ran. The three frontends
+/// share one file because the generator does not know which frontend it
+/// serves.
+#[test]
+fn the_starter_inertia_props_match_the_starter_controllers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let structs = scan_scaffold_controllers(dir.path());
+    let expected = suprnova_cli::commands::generate_types::generate_typescript(&structs);
+
+    for (frontend, shipped) in [
+        (
+            "react",
+            suprnova_cli::templates::react::inertia_props_types(),
+        ),
+        (
+            "svelte",
+            suprnova_cli::templates::svelte::inertia_props_types(),
+        ),
+        ("vue", suprnova_cli::templates::vue::inertia_props_types()),
+    ] {
+        assert_eq!(
+            shipped, expected,
+            "{frontend}'s inertia-props.ts.tpl has drifted from what `suprnova \
+             generate-types` emits for the scaffold's controllers. Regenerate it \
+             from the controller templates.\nexpected:\n{expected}\nshipped:\n{shipped}"
+        );
+    }
+}
+
+/// Validation errors reach a scaffolded auth page through `useForm().errors`,
+/// never through a page prop.
+///
+/// The framework seeds `errors` on every Inertia page from the
+/// session-flashed validation bag. Through v2.0.0 the auth controller
+/// declared an `errors` prop of its own and sent it as `None`, which the
+/// page object serialised as `errors: null` over the seeded bag - so invalid
+/// credentials returned to a form that displayed nothing. The controller
+/// must not name the key, and the pages must read the form's copy of it.
+#[test]
+fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
+    let auth = suprnova_cli::templates::auth_controller();
+    assert!(
+        !auth.contains("pub errors"),
+        "the auth controller must not declare an `errors` prop - an explicit \
+         prop replaces the session-flashed bag the framework seeds; got:\n{auth}"
+    );
+
+    for (frontend, page, body, reads_form_errors) in [
+        (
+            "react",
+            "Login",
+            suprnova_cli::templates::react::login_page(),
+            "errors } = useForm(",
+        ),
+        (
+            "react",
+            "Register",
+            suprnova_cli::templates::react::register_page(),
+            "errors } = useForm(",
+        ),
+        (
+            "svelte",
+            "Login",
+            suprnova_cli::templates::svelte::login_page(),
+            "form.errors.",
+        ),
+        (
+            "svelte",
+            "Register",
+            suprnova_cli::templates::svelte::register_page(),
+            "form.errors.",
+        ),
+        (
+            "vue",
+            "Login",
+            suprnova_cli::templates::vue::login_page(),
+            "form.errors.",
+        ),
+        (
+            "vue",
+            "Register",
+            suprnova_cli::templates::vue::register_page(),
+            "form.errors.",
+        ),
+    ] {
+        assert!(
+            body.contains(reads_form_errors),
+            "{frontend}'s {page} page must read validation errors from the form \
+             (`{reads_form_errors}`); got:\n{body}"
+        );
+        for props_read in ["props.errors", "{ errors }", "errors?."] {
+            assert!(
+                !body.contains(props_read),
+                "{frontend}'s {page} page reads `errors` from its props \
+                 (`{props_read}`), which the controller no longer sends; got:\n{body}"
+            );
+        }
+    }
+}
+
+/// The scaffold serves `public/` through the framework's static-file
+/// fallback.
+///
+/// `npm run build` writes the hashed bundle to `public/assets/` and the
+/// production image copies that directory next to the binary, but through
+/// v2.0.0 nothing served it: the HTML shell referenced `/assets/*` URLs that
+/// answered with the router's `404` the moment Vite's dev server was not
+/// running. `StaticFiles` documents `fallback!` registration as its
+/// integration, and the Inertia error-page middleware recognises the
+/// fallback's `404` body, so an unknown URL still renders the `Error` page.
+/// The behaviour itself is exercised by `scaffold_account_flows.rs`.
+#[test]
+fn the_scaffold_serves_public_files_through_the_static_fallback() {
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    assert!(
+        routes.contains("fallback!(StaticFiles::public().handler())"),
+        "routes.rs.tpl must register the static-file fallback, or a production \
+         server answers every `/assets/*` URL with 404; got:\n{routes}"
+    );
+    let imports = routes
+        .lines()
+        .find(|line| line.starts_with("use suprnova::"))
+        .expect("routes.rs.tpl imports from suprnova");
+    for name in ["StaticFiles", "fallback"] {
+        assert!(
+            imports.contains(name),
+            "routes.rs.tpl must import `{name}`; got: {imports}"
+        );
+    }
+
+    // The template names framework items by their public paths; keep the
+    // two in step so a rename surfaces here rather than in a user's build.
+    let lib = read_from_repo("framework/src/lib.rs");
+    assert!(
+        lib.contains("pub use static_files::StaticFiles;"),
+        "`suprnova::StaticFiles` is no longer exported under that name"
+    );
+    let macros = read_from_repo("framework/src/routing/macros.rs");
+    assert!(
+        macros.contains("macro_rules! fallback {"),
+        "`suprnova::fallback!` is no longer defined under that name"
+    );
+}
+
+/// Every component name a scaffolded controller hands to
+/// `inertia_response!` is a page `suprnova new` writes, for every
+/// frontend.
+///
+/// The macro checks the page exists when the *user's* project compiles,
+/// so a controller template naming a page nobody scaffolded is a build
+/// error on a stock scaffold, and the scaffolder itself never compiles a
+/// project. Reading the names out of the controller templates means a
+/// page added to one controller has to be added to all three frontends,
+/// and a page the frontends ship has to be one some controller renders.
+#[test]
+fn every_page_the_scaffold_controllers_render_is_scaffolded_for_every_frontend() {
+    let mut components = std::collections::BTreeSet::new();
+    for (file, body) in scaffold_controllers() {
+        for (index, _) in body.match_indices("inertia_response!(") {
+            let rest = &body[index..];
+            let quoted = rest
+                .split_once('"')
+                .and_then(|(_, after)| after.split_once('"'))
+                .map(|(name, _)| name.to_owned())
+                .unwrap_or_else(|| panic!("{file}: inertia_response! without a component name"));
+            components.insert(quoted);
+        }
+    }
+    assert!(
+        components.contains("auth/VerifyEmail")
+            && components.contains("auth/ForgotPassword")
+            && components.contains("auth/ResetPassword"),
+        "the scaffold's controllers must render the account-flow pages; got {components:?}"
+    );
+
+    for (frontend, ext) in [
+        (suprnova_cli::templates::Frontend::React, "tsx"),
+        (suprnova_cli::templates::Frontend::Svelte, "svelte"),
+        (suprnova_cli::templates::Frontend::Vue, "vue"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+            .expect("scaffold frontend");
+        let pages = dir.path().join("frontend/src/pages");
+        for component in &components {
+            let page = pages.join(format!("{component}.{ext}"));
+            assert!(
+                page.is_file(),
+                "{frontend:?} must scaffold {} for the `{component}` page a controller renders",
+                page.display()
+            );
+        }
+        // And the other way round: a page under auth/ that no controller
+        // renders is dead weight nobody will notice going stale.
+        for entry in fs::read_dir(pages.join("auth")).expect("read auth pages") {
+            let name = entry.expect("dir entry").file_name();
+            let name = name.to_string_lossy();
+            let component = format!("auth/{}", name.trim_end_matches(&format!(".{ext}")));
+            assert!(
+                components.contains(&component),
+                "{frontend:?} scaffolds auth/{name}, which no controller renders"
+            );
+        }
+    }
+}
+
+/// The scaffold wires the account flows: registration mails a
+/// verification link, the reset routes are reachable to a signed-out
+/// visitor, and the verification routes require the session the framework
+/// binds each token to.
+#[test]
+fn the_scaffold_wires_email_verification_and_password_reset() {
+    let auth = suprnova_cli::templates::auth_controller();
+    assert!(
+        auth.contains("EmailVerification::send_link(&user, ")
+            && auth.contains("redirect!(\"/verify-email\")"),
+        "registration must mail a verification link and continue to the \
+         notice; got:\n{auth}"
+    );
+
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    let guest_end = routes
+        .find(".middleware(middleware::authenticate::guest())")
+        .expect("routes.rs.tpl has a guest group");
+    let auth_end = routes
+        .find(".middleware(middleware::authenticate::auth())")
+        .expect("routes.rs.tpl has an auth group");
+    assert!(guest_end < auth_end, "the guest group comes first");
+    let guest_group = &routes[..guest_end];
+    let auth_group = &routes[guest_end..auth_end];
+
+    for route in [
+        "get!(\"/forgot-password\", controllers::password_reset::forgot)",
+        "post!(\"/forgot-password\", controllers::password_reset::send_link)",
+        "get!(\"/reset-password\", controllers::password_reset::reset_form)",
+        "post!(\"/reset-password\", controllers::password_reset::reset)",
+    ] {
+        assert!(
+            guest_group.contains(route),
+            "`{route}` must sit in the guest group (someone resetting a password \
+             cannot sign in); got:\n{routes}"
+        );
+    }
+    for route in [
+        "get!(\"/verify-email\", controllers::email_verification::notice)",
+        "post!(\"/email/verification-notification\", controllers::email_verification::resend)",
+        "get!(\"/verify-email/verify\", controllers::email_verification::verify)",
+    ] {
+        assert!(
+            auth_group.contains(route),
+            "`{route}` must sit in the auth group (`EmailVerification::verify` is \
+             actor-bound); got:\n{routes}"
+        );
+    }
+
+    // The mailed links must land on the routes above.
+    let verification = suprnova_cli::templates::email_verification_controller();
+    assert!(
+        verification.contains("const VERIFY_PATH: &str = \"/verify-email/verify\";"),
+        "the verification link must land on the verify route; got:\n{verification}"
+    );
+    let reset = suprnova_cli::templates::password_reset_controller();
+    assert!(
+        reset.contains("const RESET_PATH: &str = \"/reset-password\";"),
+        "the reset link must land on the reset form; got:\n{reset}"
+    );
 }

@@ -76,8 +76,10 @@ API 起步明显更小：没有 `frontend/` 目录，没有 Inertia，没有认�
 - `cmd/main.rs` - 二进制入口；调用 `Application::new()…run()`
 - `src/` - 控制器、操作、命令、配置、中间件、模型、迁移，加上 `bootstrap.rs` 和 `routes.rs`。生成出来的 `bootstrap.rs` 会接好全局中间件链 - 日志、会话、语言区域、CSRF、include 解析 - 并调用 [`Inertia::install`](frontend-inertia-responses.md)，后者会加上 Inertia 的协议中间件（资产版本 `409`，非 GET 重定向上的 `302 → 303`）。它声明的资产版本默认是 Vite 构建清单的哈希值，因此发布前端构建会自动改变它 - 参见[版本检测](frontend-inertia-responses.md)。同一次调用还会钉住您脚手架时选的前端，这样 HTML 外壳加载的就是那个框架的 Vite 入口点；`.env` 里带着相应的 `SUPRNOVA_FRONTEND`，供 CLI 自己的生成器使用
 - `src/bin/console.rs` - 逐项目的 `php artisan` 对应物
-- `frontend/` - Vite 8 + Tailwind v4 + 您选的那个框架，Home / Dashboard / Login / Register 这几个页面已经通过 Inertia 接好
-- `src/migrations/` - `users`、`sessions` 和 `remember_tokens` 这几张表已经就绪
+- `frontend/` - Vite 8 + Tailwind v4 + 您选的那个框架，Home / Dashboard / Login / Register / ForgotPassword / ResetPassword / VerifyEmail 这几个页面已经通过 Inertia 接好
+- 账户流程：注册会邮寄一个验证链接并继续到 `/verify-email`，那里可以重发并消费这个链接；`/forgot-password` 会向已验证的地址邮寄一个重置链接，`/reset-password` 接收新密码。邮件经由 `.env` 里的 `MAIL_*` 设置发出，这些设置指向 1025 端口上的本地捕获器（`suprnova docker:compose --with-mailpit` 添加的 Mailpit）；把 `MAIL_DRIVER=log` 设上，则改为把每封邮件连同链接一起打印到服务器日志
+- `src/routes.rs` - 认证和账户路由，以及一个在生产中提供 `public/`（构建好的前端）的静态文件回退
+- `src/migrations/` - `users`、`sessions`、`remember_tokens` 和 `auth_flow_tokens` 这几张表已经就绪
 - `.env` - 默认是 SQLite 数据库，带一把新生成的 `APP_KEY`，这样应用不需要运维介入就能启动
 - `.gitignore`、`Cargo.toml`
 

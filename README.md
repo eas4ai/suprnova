@@ -122,6 +122,10 @@ Don't start from an empty scaffold (unless you want to o_O) - fork a kit:
   and community on Vue 3.5 + Vuetify: everything in Nebula plus a marketing
   landing, dashboard, a Markdown docs pipeline, a blog with RSS, member
   profiles, taxonomy, role-based access control, and admin/moderation surfaces.
+- **[Directory starter](https://github.com/eas4ai/suprnova-directory-starter)** -
+  listings, moderation, and paid publication on Vue 3.5: owners submit
+  listings, moderators review them, visitors search them, and publication
+  is free or paid through Stripe and Paddle.
 
 See **[Starter Kits](./manual/starter-kits.md)** for the full rundown, or run
 `suprnova new` for the plain scaffold on any of the three frontends.

@@ -5,7 +5,7 @@ forkez et lancez. Chacun câble les contrôleurs, les routes, les migrations, le
 pages frontend et les tests pour une surface produit complète - de sorte que vous
 commencez à partir d'une application fonctionnelle, pas d'un scaffold vide.
 
-Deux kits sont disponibles aujourd'hui, modélisés selon la lignée de Laravel.
+Trois kits sont disponibles aujourd'hui, modélisés selon la lignée de Laravel.
 Choisissez celui qui se rapproche le plus de ce que vous construisez et
 personnalisez-le à partir de là.
 
@@ -52,15 +52,46 @@ Pulsar est le kit source pour les produits en aval tels que `suprnova.app`.
 Optez pour lui quand vous lancez un site produit avec documentation, blog et
 communauté de membres - pas juste l'authentification.
 
+## Directory starter - annonces, modération et publication payante
+
+**Dépôt : [github.com/eas4ai/suprnova-directory-starter](https://github.com/eas4ai/suprnova-directory-starter)**
+
+Un annuaire gratuit sous licence MIT sur Vue 3.5 : les propriétaires soumettent
+des annonces, les modérateurs les examinent, les visiteurs les recherchent, et
+la publication est gratuite ou payante via Stripe et Paddle. Tout ce qui se
+trouve dans l'histoire d'authentification de Nebula, plus :
+
+- Découverte de l'annuaire - annonces consultables, filtres par catégorie,
+  pagination et pages de détail publiques
+- Soumissions des propriétaires et modération - brouillons, historique des
+  révisions, approbation, rejet, nouvelle soumission et suspension
+- Publication gratuite et payante - Stripe et Paddle, plans configurables,
+  réglages test et production séparés, webhooks authentifiés et
+  récupération des paiements
+- Publication éditoriale - brouillons d'articles, aperçus, catégories,
+  balises et RSS
+- Administration - rôles basés sur les permissions, suspension de compte,
+  historique d'audit et une vue d'ensemble d'administration
+- SEO - valeurs par défaut du site et surcharges par contenu, métadonnées
+  rendues côté serveur, sitemaps, redirections, un rapport 404 et des
+  versions Markdown des pages publiques
+- Médias et notifications, préréglages de couleur avec une préférence claire
+  ou sombre mémorisée, contenu de démonstration et procédures documentées de
+  sauvegarde et de restauration
+
+Optez pour le directory starter quand le produit est un annuaire ou une place
+de marché d'annonces, avec ou sans placement payant.
+
 ## Quel kit ?
 
 | Vous voulez… | Commencer par |
 |---|---|
 | Des comptes et un endroit pour construire | **Nebula** |
 | Un site produit complet - accueil, docs, blog, communauté, RBAC | **Pulsar** |
+| Un annuaire ou une place de marché d'annonces, gratuit ou payant | **Directory starter** |
 | Un backend API uniquement (authentification par jeton, pas de frontend) | `suprnova new my-api --api` |
 
-Les deux kits suivent le framework comme une dépendance git et s'exécutent sur
+Les trois kits suivent le framework comme une dépendance git et s'exécutent sur
 la même pile que vous connaissez déjà - consultez le README de chaque dépôt pour
 la configuration. D'autres kits sont prévus ; suivez les
 [versions](https://github.com/eas4ai/suprnova/releases) ou ouvrez une
@@ -70,8 +101,9 @@ issue si vous en voulez un.
 
 Si aucun kit ne vous convient, `suprnova new my-app --frontend svelte` (ou
 `react`, ou `vue`) livre déjà un flux d'authentification fonctionnel - connexion,
-inscription, déconnexion, authentification de session avec le middleware
-`authenticate`, protection CSRF et une route `/dashboard` protégée - sur l'un
+inscription, déconnexion, vérification d'e-mail, réinitialisation du mot de
+passe, authentification de session avec le middleware `authenticate`,
+protection CSRF et une route `/dashboard` protégée - sur l'un
 quelconque des trois frontends (Svelte 5, React 19, Vue 3.5) avec Tailwind v4
 et Inertia v3. Consultez [Installation](installation.md) pour la sortie du
 scaffold et [Démarrage rapide](quickstart.md) pour la présentation des cinq

@@ -2,6 +2,24 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
+## 2.0.1 - 2026-09-11
+
+### 修复
+
+- **`suprnova generate-types` 的输出以一个换行符结尾。** 用来隔开相邻两个接口的那个空行，在最后一个接口之后也被写了出来，于是一个强制执行 `git diff --check` 的项目会在一个自己没法手工修正的文件上以 `new blank line at EOF` 失败：下一次重新生成会把那个空行原样写回去。只有文件末尾发生变化；声明之间的空行保持不变。
+
+- **脚手架生成的登录表单和注册表单会显示它们的校验错误了。** 生成出来的认证控制器在 `LoginProps` 和 `RegisterProps` 上声明了一个 `errors` 属性，并把它作为 `None` 发送。框架会从会话里闪存的校验袋为每个 Inertia 页面预置 `errors`，而一个同名的显式属性会替换掉这个预置值，于是页面收到的是 `errors: null`，无效的凭据会回到一个什么都不显示的表单。现在这两个属性都是空的，三个前端的 Login 和 Register 页面都读取 `useForm().errors`，脚手架的 `inertia-props.ts` 与 `suprnova generate-types` 针对脚手架控制器的输出逐字节一致，所以一个项目的第一次重新生成不会再改写一个没人编辑过的文件。
+
+- **脚手架生成的应用会提供它构建好的前端了。** 生成出来的 `routes.rs` 没有注册任何静态文件回退，所以一旦 Vite 的开发服务器没在运行，HTML 外壳里的每个 `/assets/*` URL 都会回答 `404`，包括在脚手架的 `Dockerfile` 构建出的生产镜像里。`routes.rs` 现在以 `fallback!(StaticFiles::public().handler())` 结尾：声明的路由仍然优先，像 `public/assets/.vite/manifest.json` 这样的点文件和路径穿越会被拒绝，未知的 URL 仍然渲染 Inertia 的 `Error` 页面。
+
+- **脚手架生成的应用会验证邮箱地址并重置密码了。** 注册会创建用户并让其登录，却不发送验证邮件，也没有任何路由提供邮箱验证或密码找回，尽管生成的 `User` 已经实现了 `MustVerifyEmail` 和 `CanResetPassword`，`auth_flow_tokens` 迁移也已经随附。注册现在通过 `EmailVerification::send_link` 邮寄一个验证链接并继续到 `/verify-email`，那里会显示提示、重发链接，并只为已登录的所有者在 `/verify-email/verify` 上消费它。`/forgot-password` 会向已验证的地址邮寄一个重置链接（未知或未验证的地址得到相同的回答且不会收到邮件），`/reset-password` 通过 `PasswordReset::complete_with_outcome` 轮换密码，并且在该账户的其他会话或记住我令牌未能撤销时拒绝完成。Vue、React 和 Svelte 的启动模板都带上了 `ForgotPassword`、`ResetPassword` 和 `VerifyEmail` 页面，以及登录页面上的一个“Forgot your password?”链接。链接由 `url::to` 构建，所以 `APP_URL` 必须指向用户访问应用时使用的地址，而注册需要一个能工作的邮件传输：脚手架写出的 `.env` 把 `MAIL_DRIVER=smtp` 指向 1025 端口上的本地捕获器（`suprnova docker:compose --with-mailpit` 添加的 Mailpit），或者把 `MAIL_DRIVER=log` 设上，把每封邮件连同链接一起打印到服务器日志。
+
+- **新生成的 Svelte 脚手架能针对 `@inertiajs/svelte` 3.7 构建了。** 生成出来的 `main.ts` 声明了一个 `async setup`，而 `@inertiajs/svelte` 3.7 把 `setup` 的返回类型定为 `SvelteRenderResult | void`，于是今天脚手架出来的项目（模板要求 `^3.6.1`，现在会解析到 3.7.1）在 `npm run build` 里的 `svelte-check` 这一步就失败了，一页代码都还没写。`setup` 现在是同步的，并把翻译目录的加载串接到挂载之后，所以模板里描述的顺序没有变化。
+
+### 升级
+
+- **这些是脚手架修复；用 2.0.0 生成的应用会保留它生成出来的文件。** 升级框架 crate 不会改动 `src/` 或 `frontend/` 里的任何东西。要把这些修复带进一个已有项目，请手工做同样的修改：从 `LoginProps` 和 `RegisterProps` 中去掉 `errors` 字段，并在页面里读取 `useForm().errors`；把 `fallback!(StaticFiles::public().handler())` 加为 `routes!` 的最后一项；再从一个用 2.0.1 生成的项目里复制 `email_verification` 和 `password_reset` 控制器、它们的路由以及那三个认证页面。`generate-types` 的输出只在文件末尾有变化。
+
 ## 2.0.0 - 2026-09-10
 
 ### 安全

@@ -446,18 +446,18 @@ use suprnova::BasicAuthMiddleware;
 ```rust
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, Auth, Credentials, FormRequest,
+    InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
+// 没有 `errors` 属性：框架会从会话里闪存的校验袋为每个 Inertia 页面
+// 预置 `errors`，而一个同名的显式属性会把它替换掉。
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -498,8 +498,8 @@ pub async fn logout(_req: Request) -> Response {
 }
 ```
 
-注册遵循同样的形态：校验表单，创建用户，然后
-`Auth::login(Arc::new(user), false).await?` 把这个刚创建出来的用户登录进会话，并触发 `Login` 事件。
+注册遵循同样的形态：校验表单，创建用户，用 `EmailVerification::send_link` 邮寄一个验证链接，然后
+`Auth::login(Arc::new(user), false).await?` 把这个刚创建出来的用户登录进会话，触发 `Login` 事件，并继续到 `/verify-email`。生成的 `email_verification` 和 `password_reset` 控制器补全了账户流程；参见[认证流程](auth-flows.md)。
 
 ## 脚手架生成的 `User` 模型
 

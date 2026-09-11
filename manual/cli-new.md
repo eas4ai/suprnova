@@ -111,10 +111,20 @@ the short version is:
   generators
 - `src/bin/console.rs` - the per-project `php artisan` analogue
 - `frontend/` - Vite 8 + Tailwind v4 + your chosen framework, with
-  Home / Dashboard / Login / Register pages already wired through
-  Inertia
-- `src/migrations/` - `users`, `sessions`, and `remember_tokens`
-  tables ready to go
+  Home / Dashboard / Login / Register / ForgotPassword / ResetPassword /
+  VerifyEmail pages already wired through Inertia
+- the account flows: registration mails a verification link and
+  continues to `/verify-email`, which resends and consumes it;
+  `/forgot-password` mails a reset link to a verified address and
+  `/reset-password` takes the new password. Mail leaves through the
+  `MAIL_*` settings in `.env`, which point at a local catcher on port
+  1025 (the Mailpit that `suprnova docker:compose --with-mailpit` adds);
+  set `MAIL_DRIVER=log` to print each message, link included, to the
+  server log instead
+- `src/routes.rs` - the auth and account routes, and a static-file
+  fallback that serves `public/` (the built frontend) in production
+- `src/migrations/` - `users`, `sessions`, `remember_tokens`, and
+  `auth_flow_tokens` tables ready to go
 - `.env` - SQLite database by default, with a freshly-generated
   `APP_KEY` so the app boots without operator intervention
 - `.gitignore`, `Cargo.toml`

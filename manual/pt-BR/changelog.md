@@ -5,6 +5,88 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 2.0.1 - 2026-09-11
+
+### Corrigido
+
+- **`suprnova generate-types` termina sua saída com uma única quebra de
+  linha.** A linha em branco que separa uma interface da seguinte também
+  era escrita depois da última, então um projeto que impõe
+  `git diff --check` falhava com `new blank line at EOF` em um arquivo que
+  não conseguia corrigir à mão: a regeneração seguinte escrevia a linha em
+  branco de volta. Só o final do arquivo muda; as linhas em branco entre as
+  declarações ficam.
+
+- **Um formulário de login ou de registro gerado pelo scaffold mostra seus
+  erros de validação.** O controlador de autenticação gerado declarava uma
+  prop `errors` em `LoginProps` e `RegisterProps` e a enviava como `None`.
+  O framework semeia `errors` em toda página Inertia a partir da bolsa de
+  validação gravada em flash na sessão, e uma prop explícita com o mesmo
+  nome substitui essa semente, então a página recebia `errors: null` e
+  credenciais inválidas voltavam para um formulário que não mostrava nada.
+  Ambas as props agora estão vazias, as páginas Login e Register dos três
+  frontends leem `useForm().errors`, e o `inertia-props.ts` do scaffold é
+  a saída byte a byte do `suprnova generate-types` para os controladores
+  do scaffold, então a primeira regeneração de um projeto não reescreve
+  mais um arquivo que ninguém editou.
+
+- **Uma aplicação gerada pelo scaffold serve seu frontend compilado.** O
+  `routes.rs` gerado não registrava nenhum fallback de arquivos estáticos,
+  então, assim que o servidor de desenvolvimento do Vite não estava
+  rodando, toda URL `/assets/*` do shell HTML respondia `404`, inclusive
+  dentro da imagem de produção que o `Dockerfile` do scaffold constrói.
+  `routes.rs` agora termina com
+  `fallback!(StaticFiles::public().handler())`: as rotas declaradas
+  continuam vencendo, dotfiles como `public/assets/.vite/manifest.json` e
+  travessia de caminho são recusados, e uma URL desconhecida continua
+  renderizando a página `Error` do Inertia.
+
+- **Uma aplicação gerada pelo scaffold verifica endereços de e-mail e
+  redefine senhas.** O registro criava e logava o usuário sem enviar
+  e-mail de verificação, e nenhuma rota oferecia verificação de e-mail ou
+  recuperação de senha, embora o `User` gerado já implementasse
+  `MustVerifyEmail` e `CanResetPassword` e a migração `auth_flow_tokens`
+  já fosse incluída. O registro agora envia um link de verificação por
+  `EmailVerification::send_link` e segue para `/verify-email`, que mostra
+  o aviso, reenvia o link e o consome em `/verify-email/verify` apenas
+  para o dono logado. `/forgot-password` envia um link de redefinição para
+  um endereço verificado (um endereço desconhecido ou não verificado
+  recebe a mesma resposta e nenhum e-mail) e `/reset-password` rotaciona a
+  senha por `PasswordReset::complete_with_outcome`, recusando-se a
+  terminar enquanto as outras sessões ou tokens de lembrar-me da conta não
+  puderem ser revogados. Os starters Vue, React e Svelte trazem as páginas
+  `ForgotPassword`, `ResetPassword` e `VerifyEmail` e um link "Forgot your
+  password?" na página de login. Os links são construídos com `url::to`,
+  então `APP_URL` precisa nomear o endereço em que os usuários chegam à
+  aplicação, e o registro precisa de um transporte de e-mail funcionando:
+  o `.env` que o scaffold escreve aponta `MAIL_DRIVER=smtp` para um
+  capturador local na porta 1025 (o Mailpit que
+  `suprnova docker:compose --with-mailpit` adiciona), ou defina
+  `MAIL_DRIVER=log` para imprimir cada mensagem, link incluído, no log do
+  servidor.
+
+- **Um scaffold Svelte recém-gerado compila contra `@inertiajs/svelte`
+  3.7.** O `main.ts` gerado declarava um `async setup`, e
+  `@inertiajs/svelte` 3.7 tipa `setup` como retornando
+  `SvelteRenderResult | void`, então um projeto gerado hoje (o template
+  pede `^3.6.1`, que agora resolve para 3.7.1) falhava no `svelte-check`
+  dentro do `npm run build` antes de uma única página ter sido escrita.
+  `setup` agora é síncrono e encadeia o carregamento do catálogo de
+  traduções na montagem, então a ordem que o template descreve não muda.
+
+### Atualizando
+
+- **Estas são correções do scaffold; uma aplicação gerada com 2.0.0
+  mantém seus arquivos gerados.** Atualizar o crate do framework não muda
+  nada em `src/` nem em `frontend/`. Para trazer as correções para um
+  projeto existente, faça as mesmas edições à mão: remova o campo `errors`
+  de `LoginProps` e `RegisterProps` e leia `useForm().errors` nas páginas;
+  adicione `fallback!(StaticFiles::public().handler())` como última
+  entrada do `routes!`; e copie os controladores `email_verification` e
+  `password_reset`, suas rotas e as três páginas de auth de um projeto
+  gerado com 2.0.1. A saída do `generate-types` só muda no final do
+  arquivo.
+
 ## 2.0.0 - 2026-09-10
 
 ### Segurança

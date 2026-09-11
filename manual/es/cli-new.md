@@ -120,10 +120,21 @@ Un recorrido completo por los directorios vive en
   los propios generadores de la CLI
 - `src/bin/console.rs` - el análogo de `php artisan` por proyecto
 - `frontend/` - Vite 8 + Tailwind v4 + el framework que elijas, con las
-  páginas Home / Dashboard / Login / Register ya conectadas a través de
-  Inertia
-- `src/migrations/` - las tablas `users`, `sessions` y
-  `remember_tokens` listas para usar
+  páginas Home / Dashboard / Login / Register / ForgotPassword /
+  ResetPassword / VerifyEmail ya conectadas a través de Inertia
+- los flujos de cuenta: el registro envía un enlace de verificación y
+  continúa a `/verify-email`, que lo reenvía y lo consume;
+  `/forgot-password` envía un enlace de restablecimiento a una dirección
+  verificada y `/reset-password` recibe la nueva contraseña. El correo
+  sale por los ajustes `MAIL_*` de `.env`, que apuntan a un capturador
+  local en el puerto 1025 (el Mailpit que añade
+  `suprnova docker:compose --with-mailpit`); pon `MAIL_DRIVER=log` para
+  imprimir cada mensaje, enlace incluido, en el log del servidor
+- `src/routes.rs` - las rutas de autenticación y de cuenta, y un
+  fallback de archivos estáticos que sirve `public/` (el frontend
+  compilado) en producción
+- `src/migrations/` - las tablas `users`, `sessions`, `remember_tokens` y
+  `auth_flow_tokens` listas para usar
 - `.env` - base de datos SQLite por defecto, con una `APP_KEY` recién
   generada para que la aplicación arranque sin intervención del
   operador

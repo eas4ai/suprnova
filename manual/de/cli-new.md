@@ -99,9 +99,21 @@ Eine vollständige Verzeichnistour steht in
   `php artisan`
 - `frontend/` - Vite 8 + Tailwind v4 + Ihr gewähltes Framework, mit
   bereits über Inertia verdrahteten Seiten Home / Dashboard / Login /
-  Register
-- `src/migrations/` - die Tabellen `users`, `sessions` und
-  `remember_tokens`, startbereit
+  Register / ForgotPassword / ResetPassword / VerifyEmail
+- die Kontoabläufe: die Registrierung verschickt einen Verifizierungslink
+  und leitet weiter zu `/verify-email`, das ihn erneut sendet und einlöst;
+  `/forgot-password` schickt einen Reset-Link an eine verifizierte Adresse
+  und `/reset-password` nimmt das neue Passwort entgegen. Mails gehen über
+  die `MAIL_*`-Einstellungen in `.env` hinaus, die auf einen lokalen
+  Catcher an Port 1025 zeigen (das Mailpit, das
+  `suprnova docker:compose --with-mailpit` hinzufügt); setzen Sie
+  `MAIL_DRIVER=log`, um stattdessen jede Nachricht samt Link ins
+  Server-Log zu schreiben
+- `src/routes.rs` - die Auth- und Konto-Routen sowie ein Fallback für
+  statische Dateien, der `public/` (das gebaute Frontend) in der
+  Produktion ausliefert
+- `src/migrations/` - die Tabellen `users`, `sessions`, `remember_tokens`
+  und `auth_flow_tokens`, startbereit
 - `.env` - standardmäßig SQLite-Datenbank, mit frisch generiertem
   `APP_KEY`, sodass die App ohne Eingriff des Betreibers bootet
 - `.gitignore`, `Cargo.toml`

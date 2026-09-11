@@ -583,18 +583,19 @@ authentifiée.
 ```rust
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, Auth, Credentials, FormRequest,
+    InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
+// Pas de prop `errors` : le framework initialise `errors` sur chaque page
+// Inertia à partir du sac de validation flashé en session, et une prop
+// explicite du même nom la remplacerait.
 #[derive(InertiaProps)]
-pub struct LoginProps {
-    pub errors: Option<serde_json::Value>,
-}
+pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
-    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
+    inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
@@ -636,9 +637,13 @@ pub async fn logout(_req: Request) -> Response {
 ```
 
 L'inscription suit la même forme : validez le formulaire, créez
-l'utilisateur, puis `Auth::login(Arc::new(user), false).await?`
-connecte l'utilisateur fraîchement créé dans la session et déclenche
-l'événement `Login`.
+l'utilisateur, envoyez un lien de vérification avec
+`EmailVerification::send_link`, puis
+`Auth::login(Arc::new(user), false).await?` connecte l'utilisateur
+fraîchement créé dans la session, déclenche l'événement `Login` et
+continue vers `/verify-email`. Les contrôleurs générés
+`email_verification` et `password_reset` complètent les flux de compte ;
+voir [Flux d'authentification](auth-flows.md).
 
 ## Le modèle `User` scaffoldé
 

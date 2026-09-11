@@ -31,7 +31,9 @@ my-app/
 │   ├── controllers/
 │   │   ├── mod.rs
 │   │   ├── home.rs                 # handler GET /
-│   │   ├── auth.rs                 # login / registro / logout
+│   │   ├── auth.rs                 # login / registro (envia um link de verificação) / logout
+│   │   ├── email_verification.rs   # aviso de verify-email, reenvio e o link enviado por e-mail
+│   │   ├── password_reset.rs       # forgot-password e reset-password
 │   │   └── dashboard.rs            # requer autenticação; rota protegida de exemplo
 │   ├── middleware/
 │   │   ├── mod.rs
@@ -42,6 +44,7 @@ my-app/
 │   │   ├── m_*_create_users_table.rs
 │   │   ├── m_*_create_sessions_table.rs
 │   │   ├── m_*_create_remember_tokens_table.rs
+│   │   ├── m_*_create_auth_flow_tokens_table.rs
 │   │   ├── m_*_create_workflows_table.rs
 │   │   └── m_*_create_workflow_steps_table.rs
 │   └── models/
@@ -60,7 +63,10 @@ my-app/
 │       │   ├── Dashboard.{tsx,svelte,vue}
 │       │   └── auth/
 │       │       ├── Login.{tsx,svelte,vue}
-│       │       └── Register.{tsx,svelte,vue}
+│       │       ├── Register.{tsx,svelte,vue}
+│       │       ├── ForgotPassword.{tsx,svelte,vue}
+│       │       ├── ResetPassword.{tsx,svelte,vue}
+│       │       └── VerifyEmail.{tsx,svelte,vue}
 │       └── types/
 │           └── inertia-props.ts    # auto-gerado a partir de #[derive(InertiaProps)]
 └── public/
@@ -320,9 +326,11 @@ Veja [Frontend](frontend.md).
 
 ### `public/assets/`
 
-Onde o Vite coloca o build de produção (`npm run build`). O servidor Suprnova
-serve este diretório como ativos estáticos em `/assets/*` em
-produção.
+Onde o Vite coloca o build de produção (`npm run build`). O `routes.rs`
+gerado termina com `fallback!(StaticFiles::public().handler())`, então o
+servidor Suprnova serve este diretório como ativos estáticos em `/assets/*`
+em produção. Dotfiles sob `public/`, como `.vite/manifest.json`, nunca são
+servidos.
 
 ## Diretórios que você adicionará conforme o app cresce
 

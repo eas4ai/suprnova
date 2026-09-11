@@ -520,6 +520,25 @@ fn create_project(
     )
     .map_err(|e| format!("Failed to write src/controllers/dashboard.rs: {}", e))?;
 
+    // Write src/controllers/email_verification.rs
+    fs::write(
+        project_path.join("src/controllers/email_verification.rs"),
+        templates::email_verification_controller(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to write src/controllers/email_verification.rs: {}",
+            e
+        )
+    })?;
+
+    // Write src/controllers/password_reset.rs
+    fs::write(
+        project_path.join("src/controllers/password_reset.rs"),
+        templates::password_reset_controller(),
+    )
+    .map_err(|e| format!("Failed to write src/controllers/password_reset.rs: {}", e))?;
+
     // Write src/config/mod.rs
     fs::write(
         project_path.join("src/config/mod.rs"),
