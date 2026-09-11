@@ -30,7 +30,7 @@ refunds, so the full `Payment` trait is implemented (unlike Paddle - see
 
 ```toml
 [dependencies]
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0" }
 ```
 
 ## Usage

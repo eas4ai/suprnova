@@ -143,13 +143,13 @@ Suprnova リポジトリ自身のドッグフードアプリ）は、2 つの依
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
 ] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", features = ["testing"] }
 ```
 
 本番用のエントリは既定の機能をオフにし、オンのまま残る 9 個（`testing` を

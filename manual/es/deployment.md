@@ -186,13 +186,13 @@ dependencia:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
 ] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", features = ["testing"] }
 ```
 
 La entrada de producción apaga las características por defecto y lista
