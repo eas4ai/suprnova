@@ -214,6 +214,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as an alias for `APP_KEY_PREVIOUS`; when both are set and disagree, the
   Suprnova name wins and the duplicate is named in a warning.
 
+- **The archived `proc-macro-error2` crate is replaced by its maintained
+  successor.** It was archived on 2026-06-07, is flagged unmaintained in
+  RUSTSEC-2026-0173, and made every build warn that a future Rust release
+  will reject it (E0365). `validator_derive` 0.20.1 moves to
+  `proc-macro-error3` 3.1.1 and `sea-bae` 0.2.2 drops the dependency, so
+  neither the advisory nor the warning appears any more. This landed on
+  main after the `v2.0.0` tag; the tagged `Cargo.lock` still resolves
+  `proc-macro-error2`.
+
 ### Added
 
 - **Suprnova Live is part of the framework.** `suprnova::live` is a

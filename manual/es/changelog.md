@@ -251,6 +251,15 @@ recientes primero.
   puestos y no coinciden, gana el nombre de Suprnova y el duplicado se
   nombra en una advertencia.
 
+- **El crate archivado `proc-macro-error2` se sustituye por su sucesor
+  mantenido.** Se archivó el 2026-06-07, RUSTSEC-2026-0173 lo marca como
+  sin mantenimiento, y hacía que cada compilación avisara de que una
+  versión futura de Rust lo rechazará (E0365). `validator_derive` 0.20.1
+  pasa a `proc-macro-error3` 3.1.1 y `sea-bae` 0.2.2 abandona la
+  dependencia, así que ya no aparecen ni el aviso de seguridad ni la
+  advertencia. Esto llegó a main después de la etiqueta `v2.0.0`; el
+  `Cargo.lock` de la etiqueta sigue resolviendo `proc-macro-error2`.
+
 ### Añadido
 
 - **Suprnova Live forma parte del framework.** `suprnova::live` es un motor

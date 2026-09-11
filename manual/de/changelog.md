@@ -255,6 +255,16 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   beide gesetzt und stimmen nicht überein, gewinnt der Suprnova-Name und das
   Duplikat wird in einer Warnung benannt.
 
+- **Das archivierte Crate `proc-macro-error2` ist durch seinen gepflegten
+  Nachfolger ersetzt.** Es wurde am 2026-06-07 archiviert, ist in
+  RUSTSEC-2026-0173 als nicht mehr gepflegt markiert und ließ jeden Build
+  warnen, dass eine künftige Rust-Version es ablehnen wird (E0365).
+  `validator_derive` 0.20.1 wechselt zu `proc-macro-error3` 3.1.1, und
+  `sea-bae` 0.2.2 lässt die Abhängigkeit fallen, sodass weder der Hinweis
+  noch die Warnung mehr erscheint. Die Änderung kam nach dem Tag `v2.0.0`
+  auf main; die `Cargo.lock` des Tags löst weiterhin
+  `proc-macro-error2` auf.
+
 ### Hinzugefügt
 
 - **Suprnova Live ist Teil des Frameworks.** `suprnova::live` ist eine

@@ -254,6 +254,15 @@ en premier.
   d'`APP_KEY_PREVIOUS` ; quand les deux sont définies et divergent, le nom
   Suprnova l'emporte et le doublon est nommé dans un avertissement.
 
+- **Le crate archivé `proc-macro-error2` est remplacé par son successeur
+  maintenu.** Il a été archivé le 2026-06-07, RUSTSEC-2026-0173 le signale
+  comme non maintenu, et chaque compilation avertissait qu'une future
+  version de Rust le rejettera (E0365). `validator_derive` 0.20.1 passe à
+  `proc-macro-error3` 3.1.1 et `sea-bae` 0.2.2 abandonne la dépendance, si
+  bien que ni l'avis ni l'avertissement n'apparaissent plus. Ce changement
+  est arrivé sur main après le tag `v2.0.0` ; le `Cargo.lock` du tag résout
+  toujours `proc-macro-error2`.
+
 ### Ajouté
 
 - **Suprnova Live fait partie du framework.** `suprnova::live` est un moteur
