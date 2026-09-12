@@ -8,6 +8,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A `redis://` URL with a database index selects that database everywhere.**
+  The queue driver and the fanout broadcast hub each carry a sea-streamer
+  producer beside their direct redis connections, and sea-streamer does not
+  read the logical database from the URL's path - so a queue pointed at
+  `redis://host:6379/3` pushed jobs into database `0` while its consumer half
+  waited on database `3`, and the fanout hub operated on `0` outright. Both
+  now carry the index across explicitly, with the same parsing rule the redis
+  client applies. A URL without a path keeps selecting database `0`, so
+  nothing changes for the common form.
 - **`suprnova generate-types` ends its output with one newline.** The blank
   line that separates one interface from the next was also written after the
   last one, so a project that enforces `git diff --check` failed with `new

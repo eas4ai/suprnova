@@ -376,6 +376,16 @@ impl SeaStreamerBroadcastHub {
         connect_opts.set_stdio_connect_options(|opts| {
             opts.set_loopback(loopback);
         });
+        // Same producer-database rule as the queue driver: sea-streamer does
+        // not take the logical database index from a redis URL's path, so a
+        // hub pointed at `redis://host:6379/3` would silently operate on
+        // database 0. Carry the index across explicitly.
+        if streamer_uri.starts_with("redis://") || streamer_uri.starts_with("rediss://") {
+            let db = crate::queue::redis::redis_db_from_url(streamer_uri)?;
+            connect_opts.set_redis_connect_options(|opts| {
+                opts.set_db(db);
+            });
+        }
 
         let streamer = SeaStreamer::connect(uri, connect_opts).await.map_err(|e| {
             FrameworkError::internal(format!("SeaStreamerBroadcastHub: connect failed: {e}"))

@@ -155,7 +155,7 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply, StreamReadReply};
 use sea_streamer::{Producer, StreamKey, Streamer, StreamerUri};
-use sea_streamer_redis::{RedisProducer, RedisStreamer};
+use sea_streamer_redis::{RedisConnectOptions, RedisProducer, RedisStreamer};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -1562,6 +1562,31 @@ fn validate_redis_server_info(server_info: &str, cluster_info: &str) -> Result<(
     }
 }
 
+/// The logical database index a `redis://` URL selects, by the same rule the
+/// redis client applies: the URL path, `/`-trimmed, empty meaning `0`.
+///
+/// The redis crate parses this itself but keeps the parsed value private, and
+/// sea-streamer ignores the path entirely - so this is how the producer half
+/// learns the index the consumer half is already using. `Client::open` has
+/// validated the URL before this runs, so a path that fails to parse here is
+/// a bug worth surfacing, not a case to paper over with a default.
+pub(crate) fn redis_db_from_url(url: &str) -> Result<u32, FrameworkError> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let without_suffix = after_scheme
+        .split_once(['?', '#'])
+        .map_or(after_scheme, |(head, _)| head);
+    let path = without_suffix
+        .split_once('/')
+        .map_or("", |(_, path)| path)
+        .trim_matches('/');
+    if path.is_empty() {
+        return Ok(0);
+    }
+    path.parse::<u32>().map_err(|_| {
+        FrameworkError::internal(format!("redis URL selects a non-numeric database: {path}"))
+    })
+}
+
 fn validate_redis_visibility_timeout(visibility_timeout: Duration) -> Result<(), FrameworkError> {
     let milliseconds = visibility_timeout.as_millis();
     if milliseconds == 0 {
@@ -1638,6 +1663,7 @@ impl RedisQueueDriver {
         // other remains available for claims, settlement, and inspection.
         let client = redis::Client::open(url)
             .map_err(|e| FrameworkError::internal(format!("redis client open: {e}")))?;
+        let redis_db = redis_db_from_url(url)?;
         let conn = ConnectionManager::new(client.clone())
             .await
             .map_err(|e| FrameworkError::internal(format!("redis command connection: {e}")))?;
@@ -1657,7 +1683,15 @@ impl RedisQueueDriver {
             .map_err(|e| FrameworkError::internal(format!("redis INFO cluster: {e}")))?;
         validate_redis_server_info(&server_info, &cluster_info)?;
 
-        let streamer = RedisStreamer::connect(uri, Default::default())
+        // The producer must land in the same logical database the direct
+        // connections read from. sea-streamer does not take the database
+        // index from the URI's path the way the redis client does - left at
+        // its default it always writes to database 0, so a URL like
+        // `redis://host:6379/3` produced into a database the consumer half
+        // never reads. Carry the index across explicitly.
+        let mut streamer_options = RedisConnectOptions::default();
+        streamer_options.set_db(redis_db);
+        let streamer = RedisStreamer::connect(uri, streamer_options)
             .await
             .map_err(|e| FrameworkError::internal(format!("redis connect error: {e}")))?;
         // The producer is not anchored; push names the stream explicitly.
@@ -2682,6 +2716,19 @@ fn is_busy_group(error: &redis::RedisError) -> bool {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn redis_db_from_url_matches_the_client_rule() {
+        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379").unwrap(), 0);
+        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/").unwrap(), 0);
+        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/9").unwrap(), 9);
+        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/9/").unwrap(), 9);
+        assert_eq!(
+            redis_db_from_url("rediss://user:pw@example.test:6380/3?timeout=1").unwrap(),
+            3
+        );
+        assert!(redis_db_from_url("redis://127.0.0.1:6379/nine").is_err());
+    }
 
     fn lifecycle_envelope() -> Envelope {
         Envelope {
