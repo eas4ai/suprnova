@@ -94,3 +94,10 @@ program live under `.planning/iteration-006/` in the implementation
 worktree. Regeneration must begin at source commit `11af547c`, use the
 manifest-recorded service URLs and commands, and update the fixture,
 catalog digest, and manifest record together.
+
+One deliberate normalization sits on top of the capture: on 2026-09-12 the
+`mysql.sql` fixture's `utf8mb4_0900_ai_ci` collations were rewritten to
+`utf8mb4_unicode_ci` so the gate can load the fixture on MariaDB and
+MySQL 8.4 alike (the `0900` collations are MySQL-only). The manifest
+checksum records the normalized bytes; the raw capture remains under
+`.planning/iteration-006/` in the implementation worktree.
