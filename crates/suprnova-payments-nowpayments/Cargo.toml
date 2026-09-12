@@ -7,7 +7,7 @@ license.workspace = true
 description = "NOWPayments invoice and IPN adapter for Suprnova"
 
 [dependencies]
-suprnova = { path = "../../framework", version = "2.0.0" }
+suprnova = { path = "../../framework", version = "2.0.1" }
 async-trait = "0.1"
 hmac = "0.13"
 sha2 = "0.11"

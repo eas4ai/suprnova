@@ -7,14 +7,14 @@ Suprnova 发布两个各有分工的二进制文件。全局的 `suprnova` - 只
 CLI 通过 `cargo install --git` 分发。Suprnova 目前还不在 crates.io 上 - 原因请参见[安装章节里的发布前说明](installation.md#pre-launch-note)。
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 suprnova --version
 ```
 
 以后要升级时，请传 `--force`：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 ```
 
 ## 两个二进制文件
@@ -143,7 +143,7 @@ JSON 行报告，因此 CLI 自身永远不需要框架依赖。构建输出留�
 
 ```bash
 # 1. 安装 CLI
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 
 # 2. 脚手架出一个项目（交互式 - 默认选 Svelte）
 suprnova new my-app
@@ -202,7 +202,7 @@ cargo run --bin console -- <your-command> --help
 
 ```bash
 suprnova --version
-# suprnova 2.0.0
+# suprnova 2.0.1
 ```
 
 `-v` 和 `-V` 都会被接受。clap 生成的标志只提供 `-V`；这一个是手工声明的，所以小写写法 - 也就是大多数人第一个会试的那个 - 同样管用。版本号也会出现在 `--help` 的横幅里，在这个标志存在之前，它就住在那儿。

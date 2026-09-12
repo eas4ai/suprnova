@@ -17,14 +17,14 @@ está no crates.io - veja a [nota de pré-lançamento em
 Instalação](installation.md#pre-launch-note) para saber por quê.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 suprnova --version
 ```
 
 Para atualizar mais tarde, passe `--force`:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 ```
 
 ## Os dois binários
@@ -183,7 +183,7 @@ O caminho mais comum de "nada instalado" até "app rodando":
 
 ```bash
 # 1. Instale a CLI
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.0.1 suprnova-cli
 
 # 2. Faça scaffold de um projeto (interativo - escolhe Svelte por padrão)
 suprnova new my-app
@@ -246,7 +246,7 @@ quer ao relatar um bug ou verificar se uma instalação pegou:
 
 ```bash
 suprnova --version
-# suprnova 2.0.0
+# suprnova 2.0.1
 ```
 
 Tanto `-v` quanto `-V` são aceitos. A flag gerada pelo clap oferece

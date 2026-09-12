@@ -43,7 +43,7 @@ sont pas. Activez-en une dans votre `Cargo.toml` :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", features = ["filesystem-gcs"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.1", features = ["filesystem-gcs"] }
 ```
 
 Sans la feature, `register_azblob` / `register_gcs` et leurs structs
