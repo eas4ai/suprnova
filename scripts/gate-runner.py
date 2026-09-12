@@ -2022,6 +2022,81 @@ def _print_step_result(result: StepResult) -> None:
             print(f"    leaked {detail}")
 
 
+def _format_duration(seconds: float) -> str:
+    """Render a step duration the way a person reads a clock."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m {rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _last_pass_seconds(
+    runs_root: Path, step_id: str, current_run_id: str
+) -> float | None:
+    """Duration of the step's most recent passing run in this checkout.
+
+    Read from the retained run ledgers, newest run first; run ids sort
+    chronologically. A missing or damaged ledger is skipped, never an error:
+    the history only informs the progress line.
+    """
+    try:
+        run_dirs = sorted(
+            (
+                entry
+                for entry in runs_root.iterdir()
+                if entry.is_dir() and entry.name != current_run_id
+            ),
+            key=lambda entry: entry.name,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for run_dir in run_dirs:
+        try:
+            text = (run_dir / "results.jsonl").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if (
+                isinstance(record, dict)
+                and record.get("step") == step_id
+                and record.get("outcome") == Outcome.PASS.value
+                and isinstance(record.get("seconds"), (int, float))
+            ):
+                return float(record["seconds"])
+    return None
+
+
+def _print_step_start(
+    index: int, total: int, step_id: str, last_pass_seconds: float | None
+) -> None:
+    # Printed before the step runs and flushed, so a terminal (or a captured
+    # log) shows what the gate is doing during a long step instead of nothing
+    # until the summary table. The clock is local time: it is read by a person.
+    history = (
+        "no previous pass"
+        if last_pass_seconds is None
+        else f"last pass {_format_duration(last_pass_seconds)}"
+    )
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{index}/{total}] {step_id} started at {stamp} ({history})", flush=True)
+
+
+def _print_step_finish(index: int, total: int, result: StepResult) -> None:
+    print(
+        f"[{index}/{total}] {result.step} {result.outcome.value} "
+        f"after {_format_duration(result.seconds)}",
+        flush=True,
+    )
+
+
 _EXIT_CODES = {
     Outcome.PASS: 0,
     Outcome.FAIL: 1,
@@ -2193,10 +2268,18 @@ def execute_gate(
                 interrupt_event=interrupted,
                 container_cli=container_cli,
             )
-            for step in selected:
+            total_steps = len(selected)
+            for index, step in enumerate(selected, start=1):
                 raise_if_interrupted("step dispatch")
+                _print_step_start(
+                    index,
+                    total_steps,
+                    step.id,
+                    _last_pass_seconds(runs_root, step.id, run_id),
+                )
                 result = run_step(step, context)
                 results.append(result)
+                _print_step_finish(index, total_steps, result)
                 if result.outcome is not Outcome.PASS:
                     overall = result.outcome
                     terminal_message = result.message

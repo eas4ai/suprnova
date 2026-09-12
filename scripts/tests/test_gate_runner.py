@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -970,6 +971,64 @@ class RunnerCliTests(unittest.TestCase):
             completed.stdout.strip().splitlines()[-1],
             f"GATE GREEN: default, tree {summary['tree']}, run {summary['run_id']}",
         )
+
+    def test_progress_is_reported_as_each_step_starts_and_finishes(self):
+        # The summary table is printed only after the last step, so a release
+        # gate showed nothing for an hour. Every step now announces itself when
+        # it starts, with the duration of its last passing run in this
+        # checkout, and reports its outcome the moment it finishes.
+        registry = self._registry()
+        registry["steps"].append(
+            {
+                "id": "probe-second",
+                "name": "Second probe",
+                "tiers": ["default", "full"],
+                "argv": ["scripts/probe-helper"],
+                "timeout_seconds": 5,
+                "category": "code",
+                "capabilities": [],
+            }
+        )
+        self._replace_registry(registry)
+
+        first = self._run()
+
+        self.assertEqual(first.returncode, 0, msg=first.stderr)
+        lines = first.stdout.splitlines()
+        first_start = self._only_index(lines, r"^\[1/2\] probe started at \d\d:\d\d:\d\d \(no previous pass\)$")
+        first_done = self._only_index(lines, r"^\[1/2\] probe pass after [0-9.]+s$")
+        second_start = self._only_index(lines, r"^\[2/2\] probe-second started at \d\d:\d\d:\d\d \(no previous pass\)$")
+        second_done = self._only_index(lines, r"^\[2/2\] probe-second pass after [0-9.]+s$")
+        header = self._only_index(lines, r"^STEP\s+OUTCOME\s+SECONDS\s+LOG$")
+        self.assertLess(first_start, first_done)
+        self.assertLess(first_done, second_start)
+        self.assertLess(second_start, second_done)
+        self.assertLess(second_done, header, "progress lines come before the summary table")
+        self.assertEqual(
+            lines[-1],
+            f"GATE GREEN: default, tree {self._latest_summary()['tree']}, run {self._latest_summary()['run_id']}",
+        )
+
+        second = self._run()
+
+        self.assertEqual(second.returncode, 0, msg=second.stderr)
+        self.assertRegex(
+            second.stdout,
+            r"(?m)^\[1/2\] probe started at \d\d:\d\d:\d\d \(last pass [0-9.]+s\)$",
+        )
+        self.assertRegex(
+            second.stdout,
+            r"(?m)^\[2/2\] probe-second started at \d\d:\d\d:\d\d \(last pass [0-9.]+s\)$",
+        )
+
+    def _only_index(self, lines, pattern):
+        matches = [index for index, line in enumerate(lines) if re.search(pattern, line)]
+        self.assertEqual(len(matches), 1, f"expected exactly one line matching {pattern!r}, got {matches}: {lines}")
+        return matches[0]
+
+    def _latest_summary(self):
+        run_dirs = sorted(self._run_dirs(), key=lambda directory: directory.name)
+        return json.loads((run_dirs[-1] / "summary.json").read_text(encoding="utf-8"))
 
     def test_direct_named_step_diagnosis_never_writes_stamp(self):
         completed = self._run("--step", "probe")
