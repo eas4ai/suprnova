@@ -10,6 +10,17 @@ en premier.
 
 ### Corrigé
 
+- **Une URL `redis://` avec un index de base de données sélectionne cette
+  base de données partout.** Le driver de files d'attente et le hub de
+  diffusion fanout portent chacun un producteur sea-streamer à côté de
+  leurs connexions redis directes, et sea-streamer ne lit pas la base de
+  données logique dans le chemin de l'URL - une file pointée sur
+  `redis://host:6379/3` poussait donc les jobs dans la base `0` pendant
+  que sa moitié consommatrice attendait sur la base `3`, et le hub fanout
+  opérait tout bonnement sur `0`. Tous deux transmettent maintenant
+  l'index explicitement, avec la même règle d'analyse que le client redis
+  applique. Une URL sans chemin continue de sélectionner la base `0` ;
+  rien ne change donc pour la forme courante.
 - **`suprnova generate-types` termine sa sortie par un seul saut de
   ligne.** La ligne vide qui sépare une interface de la suivante était
   aussi écrite après la dernière, si bien qu'un projet qui impose

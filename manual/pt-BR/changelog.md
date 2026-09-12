@@ -9,6 +9,16 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Corrigido
 
+- **Uma URL `redis://` com índice de banco de dados seleciona esse banco
+  em todo lugar.** O driver de filas e o hub de broadcast fanout carregam
+  cada qual um produtor sea-streamer ao lado de suas conexões redis
+  diretas, e o sea-streamer não lê o banco de dados lógico do caminho da
+  URL - então uma fila apontada para `redis://host:6379/3` empurrava jobs
+  para o banco `0` enquanto sua metade consumidora esperava no banco `3`,
+  e o hub fanout operava direto sobre `0`. Os dois agora repassam o índice
+  explicitamente, com a mesma regra de análise que o cliente redis aplica.
+  Uma URL sem caminho continua selecionando o banco `0`, então nada muda
+  para a forma comum.
 - **`suprnova generate-types` termina sua saída com uma única quebra de
   linha.** A linha em branco que separa uma interface da seguinte também
   era escrita depois da última, então um projeto que impõe

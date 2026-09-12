@@ -10,6 +10,17 @@ recientes primero.
 
 ### Corregido
 
+- **Una URL `redis://` con índice de base de datos selecciona esa base de
+  datos en todas partes.** El driver de colas y el hub de difusión fanout
+  llevan cada uno un productor de sea-streamer junto a sus conexiones
+  redis directas, y sea-streamer no lee la base de datos lógica de la ruta
+  de la URL - así que una cola apuntada a `redis://host:6379/3` empujaba
+  trabajos a la base de datos `0` mientras su mitad consumidora esperaba
+  en la `3`, y el hub fanout operaba directamente sobre `0`. Ambos
+  propagan ahora el índice de forma explícita, con la misma regla de
+  análisis que aplica el cliente redis. Una URL sin ruta sigue
+  seleccionando la base de datos `0`, así que nada cambia para la forma
+  común.
 - **`suprnova generate-types` termina su salida con un solo salto de
   línea.** La línea en blanco que separa una interfaz de la siguiente
   también se escribía después de la última, así que un proyecto que impone

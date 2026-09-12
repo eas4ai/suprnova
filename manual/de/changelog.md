@@ -9,6 +9,16 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Behoben
 
+- **Eine `redis://`-URL mit Datenbankindex wählt diese Datenbank überall
+  aus.** Der Queue-Treiber und der Fanout-Broadcast-Hub führen neben ihren
+  direkten Redis-Verbindungen je einen sea-streamer-Producer, und
+  sea-streamer liest die logische Datenbank nicht aus dem Pfad der URL -
+  eine Queue, die auf `redis://host:6379/3` zeigt, schob Jobs also in
+  Datenbank `0`, während ihre Consumer-Hälfte auf Datenbank `3` wartete,
+  und der Fanout-Hub arbeitete gleich ganz auf `0`. Beide reichen den Index
+  jetzt explizit durch, mit derselben Parsing-Regel, die der Redis-Client
+  anwendet. Eine URL ohne Pfad wählt weiterhin Datenbank `0`, an der
+  üblichen Form ändert sich also nichts.
 - **`suprnova generate-types` beendet seine Ausgabe mit einem einzigen
   Zeilenumbruch.** Die Leerzeile, die ein Interface vom nächsten trennt,
   wurde auch nach dem letzten geschrieben, sodass ein Projekt, das
