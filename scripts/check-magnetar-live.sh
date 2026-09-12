@@ -30,11 +30,10 @@ docker run -d --rm --name "$POSTGRES_CONTAINER" \
 
 docker run -d --rm --name "$MYSQL_CONTAINER" \
     --label "suprnova-gate-run=${SUPRNOVA_GATE_RUN_ID}" \
-    -e MYSQL_ROOT_PASSWORD="$MYSQL_PASSWORD" \
-    -e MYSQL_DATABASE=magnetar_test \
-    -e MYSQL_ROOT_HOST=% \
+    -e MARIADB_ROOT_PASSWORD="$MYSQL_PASSWORD" \
+    -e MARIADB_DATABASE=magnetar_test \
     -p 127.0.0.1::3306 \
-    mysql:8.4 >/dev/null
+    mariadb:11-jammy >/dev/null
 
 POSTGRES_PORT="$(docker port "$POSTGRES_CONTAINER" 5432/tcp | sed -n '1s/.*://p')"
 MYSQL_PORT="$(docker port "$MYSQL_CONTAINER" 3306/tcp | sed -n '1s/.*://p')"
@@ -59,7 +58,7 @@ fi
 
 mysql_ready=0
 for _ in $(seq 1 90); do
-    if docker exec "$MYSQL_CONTAINER" mysqladmin ping \
+    if docker exec "$MYSQL_CONTAINER" mariadb-admin ping \
         --host=127.0.0.1 --user=root --password="$MYSQL_PASSWORD" \
         --silent >/dev/null 2>&1; then
         mysql_ready=1
@@ -69,7 +68,7 @@ for _ in $(seq 1 90); do
 done
 if [[ $mysql_ready -ne 1 ]]; then
     docker logs "$MYSQL_CONTAINER" >&2 || true
-    printf 'check-magnetar-live: MySQL never became ready.\n' >&2
+    printf 'check-magnetar-live: MariaDB never became ready.\n' >&2
     exit 1
 fi
 
