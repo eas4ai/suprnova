@@ -135,10 +135,7 @@ docker run --rm -p 8765:8765 \
 
 ## 生产构建形态
 
-Dockerfile 构建出来的这个二进制文件，从不携带框架的 `testing` 特性 - 一份
-测试套件需要的加密密钥安装器、存储假件，以及 RenderCache 测试钩子，全都被
-排除在编译之外。您那份经脚手架生成的 `Cargo.toml`（以及 Suprnova 仓库自身
-的那个 dogfood 应用）通过构造就采取了这种形态，靠的是两条依赖条目：
+Dockerfile 构建出来的这个二进制文件，从不携带框架的 `testing` 特性 - 一份测试套件需要的加密密钥安装器、存储假件，以及 RenderCache 测试钩子，全都被排除在编译之外。您那份经脚手架生成的 `Cargo.toml`（以及 Suprnova 仓库自身的那个 dogfood 应用）通过构造就采取了这种形态，靠的是两条依赖条目：
 
 ```toml
 [dependencies]
@@ -151,16 +148,11 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", def
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.0", features = ["testing"] }
 ```
 
-生产条目把默认特性关掉，并列出保持开启的那九个（除 `testing` 外的每一个
-默认特性）。开发依赖把 `testing` 重新打开 - Cargo 的特性解析器只会为
+生产条目把默认特性关掉，并列出保持开启的那九个（除 `testing` 外的每一个默认特性）。开发依赖把 `testing` 重新打开 - Cargo 的特性解析器只会为
 `cargo test` 以及其他 `--tests` 构建拉入一份开发依赖的特性，所以
-`cargo build --bin app`（或 `--bin console`）永远看不到它。`testing` 只是
-一个开发依赖特性：您自己的 `src/` 或 `cmd/` 里的任何东西都不应该为一个
-二进制目标把它打开。
+`cargo build --bin app`（或 `--bin console`）永远看不到它。`testing` 只是一个开发依赖特性：您自己的 `src/` 或 `cmd/` 里的任何东西都不应该为一个二进制目标把它打开。
 
-框架仓库用一个小 crate 证明了这一点，它唯一的工作就是编译失败：它按路径
-引用每一个被挡在 `testing` 之后的框架条目，而发布关卡会检查，在没有该
-特性的情况下引用它们是一个编译错误，而带着该特性引用它们则会成功。
+框架仓库用一个小 crate 证明了这一点，它唯一的工作就是编译失败：它按路径引用每一个被挡在 `testing` 之后的框架条目，而发布关卡会检查，在没有该特性的情况下引用它们是一个编译错误，而带着该特性引用它们则会成功。
 
 ## 启动时迁移
 

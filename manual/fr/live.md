@@ -122,7 +122,7 @@ une vue en double, ou un composant dont les actions nécessitent une validation
 sans port de validation, fait échouer l'enregistrement avec un `RegistryError`
 typé.
 
-## Routes
+## Routage
 
 `Router::try_live()` installe l'espace de noms réservé exactement une fois :
 `/__live/v1/action`, `/__live/v1/upload`, les routes de contrôle et la
@@ -388,10 +388,10 @@ streams.refresh("activity").await?;
 ```
 
 Un refresh demande aux îlots abonnés un rendu frais ; un événement est délivré
-aux gestionnaires enregistrés de l'îlot. Le polling est le rendu frais
+aux handlers enregistrés de l'îlot. Le polling est le rendu frais
 ordinaire : l'état de l'îlot se remet à jour lorsqu'un transport est
 indisponible, mais les charges d'événements publiées entre-temps ne sont pas
-rejouées à leurs gestionnaires, ce que le runtime signale comme un flux dégradé
+rejouées à leurs handlers, ce que le runtime signale comme un flux dégradé
 plutôt qu'à jour. Un composant qui déclare exactement un flux voit sa racine
 d'îlot abonnée à celui-ci ; un composant avec plusieurs flux s'abonne à chacun
 par les appels enregistrés du runtime.

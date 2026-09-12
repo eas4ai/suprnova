@@ -150,7 +150,7 @@ pub async fn register() {
 
 Le `MagnetarConfig` par défaut lie les identités applicatives à la table canonique `app_users`. Le scaffold full-stack généré utilise un modèle `users` et n'initialise pas Magnetar ; n'ajoutez donc pas l'initialiseur par défaut tel quel à ce scaffold. Utilisez le modèle `app_users` du scaffold API, ou construisez une liaison personnalisée `MagnetarHostEngine` et `AuthSchema` pour votre table `users` existante. Gardez le `UserProvider` du framework et la liaison d'hôte Magnetar sur la même identité applicative. Le scaffold API, et non `app/src/bootstrap.rs`, est la référence de travail actuelle pour l'initialisation par défaut de `MagnetarConfig`.
 
-Magnetar est global au processus car les workers de file d'attente, les planificateurs, les gestionnaires HTTP et le middleware de session partagent les mêmes stores d'identifiants et de session. Placez `init_magnetar` dans `register`, pas dans `register_http_stack`. L'installateur est à usage unique et échoue si un autre moteur est déjà installé.
+Magnetar est global au processus car les workers de file d'attente, les planificateurs, les handlers HTTP et le middleware de session partagent les mêmes stores d'identifiants et de session. Placez `init_magnetar` dans `register`, pas dans `register_http_stack`. L'installateur est à usage unique et échoue si un autre moteur est déjà installé.
 
 Le scaffold API lit `PASSKEY_RP_ID` et `PASSKEY_RP_ORIGIN` au bootstrap de l'application. Ces noms sont des conventions du scaffold, et non des variables d'environnement possédées par le framework.
 

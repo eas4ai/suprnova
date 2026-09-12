@@ -76,8 +76,7 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 
 `live:check`、`live:inspect` 和 `live:assets` 在你的应用内部运行：
 CLI 启动 `cargo run --bin console`，并从框架隐藏的工具助手读取一份有界、带版本的
-JSON 行报告，因此 CLI 自身永远不需要框架依赖。构建输出留在 stderr；stdout 上任何
-意外内容都会使命令以封闭方式失败。
+JSON 行报告，因此 CLI 自身永远不需要框架依赖。构建输出留在 stderr；stdout 上任何意外内容都会使命令以封闭方式失败。
 
 ### 数据库
 

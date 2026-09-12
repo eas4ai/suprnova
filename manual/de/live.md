@@ -1,7 +1,7 @@
 # Live
 
 Suprnova Live ist die servergesteuerte Interaktions-Engine des Frameworks. Eine
-Live-Komponente ist ein Rust-Struct, dessen Zustand auf dem Server lebt, dessen
+Live-Komponente ist eine Rust-Struktur, deren Zustand auf dem Server lebt, dessen
 View ein Askama-Template ist und dessen Aktionen über ein signiertes Protokoll
 von einer kleinen Browser-Laufzeit ausgeführt werden, die das neu gerenderte
 HTML an Ort und Stelle morpht. Es gibt kein clientseitiges Zustandsmodell, das
@@ -122,7 +122,7 @@ doppelter Komponentenname oder eine doppelte View oder eine Komponente, deren
 Aktionen Validierung ohne Validierungsport benötigen, lässt die Registrierung
 mit einem typisierten `RegistryError` fehlschlagen.
 
-## Routen
+## Routing
 
 `Router::try_live()` installiert den reservierten Namensraum genau einmal:
 `/__live/v1/action`, `/__live/v1/upload`, die Steuerrouten und den
@@ -415,7 +415,7 @@ suprnova live:assets --out public/__live
 Die Veröffentlichung ist atomar und weigert sich, ein Verzeichnis zu ersetzen,
 dessen Bytes abweichen, sofern Sie nicht `--replace` übergeben.
 
-## Tests
+## Testen
 
 `suprnova::live::testing` bereitet die Laufzeit und den Mount-Katalog eines
 Routers für In-Process-Tests vor. Die Anwendungstests in `app/tests/live_*.rs`

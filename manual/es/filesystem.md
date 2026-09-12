@@ -429,7 +429,7 @@ Storage::register_read_through(
 )?;
 ```
 
-La bandera solo gobierna la promoción en el momento de la lectura, y
+El flag solo gobierna la promoción en el momento de la lectura, y
 nada más. Las escrituras, borrados, metadatos, listados, y los destinos
 de `copy` y `rename` se comportan exactamente igual que con la
 promoción activada - así que un disco con `copy: false` sigue

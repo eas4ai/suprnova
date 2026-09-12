@@ -94,8 +94,7 @@ impl MustVerifyEmail for User {
 `BruteForce` 需要已安装的 Magnetar 密码引擎。密码重置优先使用该引擎，但当某个提供程序支撑的应用的 `UserProvider` 显式支持密码重置时，它无需安装 Magnetar 就能为已验证用户重置密码。当 `M` 实现 `MustVerifyEmail + CanResetPassword` 时，`EloquentUserProvider<M>` 会自动选择加入。未验证用户不会收到由提供程序支持的重置链接。要将重置用作首次邮箱原子化证明，请安装 Magnetar。
 
 `MagnetarConfig::lockout_config` 接受
-`magnetar::password::lockout::LockoutConfig`。默认策略在五次失败尝试
-后锁定 15 分钟，保留审计记录七天，并在锁定后端不可用时失败关闭。
+`magnetar::password::lockout::LockoutConfig`。默认策略在五次失败尝试后锁定 15 分钟，保留审计记录七天，并在锁定后端不可用时失败关闭。
 
 密码重置只会在滥用限流器、邮件配置、提供程序或引擎，以及存储检查都成功之后，才会把未知或提供程序支撑的未验证地址规范化为 `Ok(())`。配置和存储失败仍然会出现。完成会使用原子首次电子邮件证明存储，并为需要显式会话或 remember 吊销状态的调用方返回 `PasswordResetOutcome`。
 

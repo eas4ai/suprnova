@@ -1,19 +1,14 @@
 # Live
 
-Suprnova Live 是框架的服务器驱动交互引擎。一个 Live 组件是一个 Rust 结构体：它的
-状态保存在服务器上，它的视图是一个 Askama 模板，它的动作通过签名协议从一个小型
-浏览器运行时执行，该运行时把重新渲染的 HTML 就地变形。没有需要保持同步的客户端
-状态模型，使用随附运行时无需安装任何构建工具，文档中也没有内联 JavaScript。
+Suprnova Live 是框架的服务器驱动交互引擎。一个 Live 组件是一个 Rust 结构体：它的状态保存在服务器上，它的视图是一个 Askama 模板，它的动作通过签名协议从一个小型浏览器运行时执行，该运行时把重新渲染的 HTML 就地变形。没有需要保持同步的客户端状态模型，使用随附运行时无需安装任何构建工具，文档中也没有内联 JavaScript。
 
-本章覆盖面向应用的表面：编写组件、注册组件、提供文档与岛屿、每个 Live 请求穿越的
-安全边界、上传、异步更新、资产、测试、诊断以及恢复。这里的一切只使用
+本章覆盖面向应用的表面：编写组件、注册组件、提供文档与岛屿、每个 Live 请求穿越的安全边界、上传、异步更新、资产、测试、诊断以及恢复。这里的一切只使用
 `suprnova::live` 和 `suprnova::view`。
 
-## 快速开始
+## 快速上手
 
 由 `suprnova new` 创建的项目已经为 Live 做好准备：它附带带有空组件注册表和
-`routes()` 函数的 `src/live/mod.rs`，其引导绑定注册表，`cmd/main.rs` 安装路由。
-生成一个组件，然后检查它：
+`routes()` 函数的 `src/live/mod.rs`，其引导绑定注册表，`cmd/main.rs` 安装路由。生成一个组件，然后检查它：
 
 ```bash
 suprnova live:make Counter
@@ -21,8 +16,7 @@ suprnova live:check
 ```
 
 `live:make` 写入 `src/live/counter.rs` 与 `templates/live/counter.html`，在
-`src/live/mod.rs` 中注册组件，并打印后续步骤。`live:check` 构建你的应用，并用
-集成检查器证明每一个已注册的视图。
+`src/live/mod.rs` 中注册组件，并打印后续步骤。`live:check` 构建你的应用，并用集成检查器证明每一个已注册的视图。
 
 ## 编写组件
 
@@ -53,8 +47,7 @@ impl Counter {
 - `view` 是相对于模板根目录的模板标识。
 - `#[public]` 字段会被渲染并携带在签名快照中。`#[model]` 字段还通过 `live:model`
   接受来自浏览器的提议。
-- `#[action]` 方法是浏览器唯一可以调用的入口。它们接收经过验证的参数，并可返回
-  重定向或 flash 等类型化结果。
+- `#[action]` 方法是浏览器唯一可以调用的入口。它们接收经过验证的参数，并可返回重定向或 flash 等类型化结果。
 
 每个字段类型都必须实现 `Default`；除非挂载钩子另有指定，新岛屿从这些默认值开始。
 
@@ -71,12 +64,9 @@ impl Counter {
 ```
 
 指令使用封闭的 `live:` 语法：`live:click`、`live:submit`、`live:model`、
-`live:upload`、`live:key`、`live:loading` 以及文档记录的其余集合。检查器针对
-组件证明每一条指令：未知的动作、未知的模型字段、原始的 `safe` 过滤器或无障碍
-违规都会使 `live:check` 失败，并给出文件、行和列。
+`live:upload`、`live:key`、`live:loading` 以及文档记录的其余集合。检查器针对组件证明每一条指令：未知的动作、未知的模型字段、原始的 `safe` 过滤器或无障碍违规都会使 `live:check` 失败，并给出文件、行和列。
 
-放置岛屿的文档是用 `#[suprnova::view]` 声明的普通视图；它们接受的唯一未转义值是
-通过 `trusted_html` 过滤器传入的 `TrustedHtml`。
+放置岛屿的文档是用 `#[suprnova::view]` 声明的普通视图；它们接受的唯一未转义值是通过 `trusted_html` 过滤器传入的 `TrustedHtml`。
 
 ## 注册与引导
 
@@ -102,8 +92,7 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
 suprnova::App::singleton(crate::live::registry().expect("Live component registry"));
 ```
 
-运行时组装完成后，注册表即不可变。重复的组件名或视图，或者动作需要验证却没有
-验证端口的组件，都会以类型化的 `RegistryError` 使注册失败。
+运行时组装完成后，注册表即不可变。重复的组件名或视图，或者动作需要验证却没有验证端口的组件，都会以类型化的 `RegistryError` 使注册失败。
 
 ## 路由
 
@@ -111,8 +100,7 @@ suprnova::App::singleton(crate::live::registry().expect("Live component registry
 `/__live/v1/upload`、`/__live/v1/async/*` 的控制路由与 WebSocket 握手，以及不可变的
 `/__live/v1/assets/*` 路由。如果某条应用路由能够占据 `/__live`，启动将失败。
 
-保留的请求路由带有严格策略：每个请求都需要会话、来源、CSRF、主体、租户和限流
-事实。框架记录会话和 CSRF 证明；你的应用通过路由守卫附加其余部分：
+保留的请求路由带有严格策略：每个请求都需要会话、来源、CSRF、主体、租户和限流事实。框架记录会话和 CSRF 证明；你的应用通过路由守卫附加其余部分：
 
 ```rust
 use std::sync::Arc;
@@ -211,14 +199,10 @@ async fn render(request: Request, mount: &LiveMount<Counter>) -> Response {
 }
 ```
 
-- `LiveMount::public_seed` 声明任何访客都可以渲染的岛屿；其状态是一个可复用的种子，
-  在第一次动作时提升为实例。
+- `LiveMount::public_seed` 声明任何访客都可以渲染的岛屿；其状态是一个可复用的种子，在第一次动作时提升为实例。
 - `LiveMount::identity_bound` 声明属于当前会话和主体的岛屿；文档路由必须进行认证。
-- 在 `bootstrap` 之前挂载每个岛屿，并且只调用一次 `bootstrap`。引导输出惰性的配置
-  元素以及 ESM 或经典策略的脚本标签，在挂载的组件需要时添加上传与异步角色，并按需
-  添加 Stimulus 桥接。
-- 文档模板把 `{{ bootstrap|trusted_html }}` 放在 `<head>` 中，并把每个岛屿放在它
-  所属的位置。
+- 在 `bootstrap` 之前挂载每个岛屿，并且只调用一次 `bootstrap`。引导输出惰性的配置元素以及 ESM 或经典策略的脚本标签，在挂载的组件需要时添加上传与异步角色，并按需添加 Stimulus 桥接。
+- 文档模板把 `{{ bootstrap|trusted_html }}` 放在 `<head>` 中，并把每个岛屿放在它所属的位置。
 
 ## 安全边界
 
@@ -232,22 +216,14 @@ Live 从不绕过框架的中间件。每个请求需要的内容：
 | 租户 | 带有你的解析器的 `LiveTenantMiddleware` |
 | 限流 | 处于放行分支的 `RateLimitMiddleware` |
 
-随附的运行时发送 Live 媒体类型和浏览器自身的 `Sec-Fetch-Site` 头；它不携带会话
-令牌。无论你配置了哪种来源策略，CSRF 中间件都会自行为每个 Live 请求验证这一
-证明：同源的 Live 请求以无状态 CSRF 判定通过，而跨站或缺少该头的请求回退到令牌
-验证并被拒绝。普通路由在默认策略下保留令牌验证；使用 Live 不会放松其他任何东西：
+随附的运行时发送 Live 媒体类型和浏览器自身的 `Sec-Fetch-Site` 头；它不携带会话令牌。无论你配置了哪种来源策略，CSRF 中间件都会自行为每个 Live 请求验证这一证明：同源的 Live 请求以无状态 CSRF 判定通过，而跨站或缺少该头的请求回退到令牌验证并被拒绝。普通路由在默认策略下保留令牌验证；使用 Live 不会放松其他任何东西：
 
 ```rust
 global_middleware!(CsrfMiddleware::new());
 ```
 
-匿名访客可以渲染公共种子，并且在守卫使用 `AuthMiddleware::optional()` 时可以对其
-执行动作：已登录的主体会被记录，匿名访客继续通行，由挂载类型决定。公共种子随后在
-首次动作时为访客自己的会话完成晋升，而绑定身份的岛屿仍然拒绝没有主体证据的请求。
-使用 `AuthMiddleware::new()` 时，守卫在任何引擎工作之前就对每个匿名请求以 `401`
-应答。绑定身份的岛屿需要会话和主体；只要你的解析器指定了租户，租户就会绑定到岛屿的
-作用域中，而无法确定租户的解析器必须返回错误而不是 `None`。每一次拒绝都是封闭的：
-对过期或被篡改快照的 `409`
+匿名访客可以渲染公共种子，并且在守卫使用 `AuthMiddleware::optional()` 时可以对其执行动作：已登录的主体会被记录，匿名访客继续通行，由挂载类型决定。公共种子随后在首次动作时为访客自己的会话完成晋升，而绑定身份的岛屿仍然拒绝没有主体证据的请求。使用 `AuthMiddleware::new()` 时，守卫在任何引擎工作之前就对每个匿名请求以 `401`
+应答。绑定身份的岛屿需要会话和主体；只要你的解析器指定了租户，租户就会绑定到岛屿的作用域中，而无法确定租户的解析器必须返回错误而不是 `None`。每一次拒绝都是封闭的：对过期或被篡改快照的 `409`
 不携带正文，生产环境的消息从不包含快照、令牌、Cookie 或渲染后的 HTML。
 
 ## 上传
@@ -284,9 +260,7 @@ impl AvatarUploader {
 ```
 
 视图通过 `<input type="file" live:upload="avatar">` 绑定该字段。运行时通过
-`/__live/v1/upload` 创建、传输并完成上传；文件在隔离区等待，直到声明的最终化动作
-运行，此时框架把它交给你的 `UploadFinalizer`。在运行时组装之前绑定最终化器，
-以及任何扫描器或验证器：
+`/__live/v1/upload` 创建、传输并完成上传；文件在隔离区等待，直到声明的最终化动作运行，此时框架把它交给你的 `UploadFinalizer`。在运行时组装之前绑定最终化器，以及任何扫描器或验证器：
 
 ```rust
 App::singleton(LiveUploadHost::new().with_finalizer(Arc::new(AppUploadFinalizer::default())));
@@ -306,8 +280,7 @@ let router: Router = router
     .into();
 ```
 
-该路由要求与动作相同的事实，只应答创建该上传的会话和主体，并返回带有当前传输
-状态的新授权。
+该路由要求与动作相同的事实，只应答创建该上传的会话和主体，并返回带有当前传输状态的新授权。
 
 ## 异步更新
 
@@ -344,15 +317,11 @@ streams.event::<ActivityPosted>("activity", LiveEventTarget::Island, payload).aw
 streams.refresh("activity").await?;
 ```
 
-刷新告诉已订阅的岛屿重新渲染；事件被投递到岛屿注册的处理器。轮询就是普通的
-重新渲染：传输不可用时岛屿的状态会追平，但其间发布的事件负载不会重放给它们的
-处理器，运行时会把该流报告为降级而非最新。恰好声明一个流的组件会让其岛屿根订阅
-该流；拥有多个流的组件通过运行时的已注册调用逐个订阅。
+刷新告诉已订阅的岛屿重新渲染；事件被投递到岛屿注册的处理程序。轮询就是普通的重新渲染：传输不可用时岛屿的状态会追平，但其间发布的事件负载不会重放给它们的处理程序，运行时会把该流报告为降级而非最新。恰好声明一个流的组件会让其岛屿根订阅该流；拥有多个流的组件通过运行时的已注册调用逐个订阅。
 
 ## 资产与免构建使用
 
-框架在 `/__live/v1/assets/<identity>/<file>` 提供经过审阅的精确运行时工件，带有
-不可变缓存、强验证器以及引导标签中的完整性属性。由于文档不包含内联脚本，严格的
+框架在 `/__live/v1/assets/<identity>/<file>` 提供经过审阅的精确运行时工件，带有不可变缓存、强验证器以及引导标签中的完整性属性。由于文档不包含内联脚本，严格的
 `script-src 'self'` 策略得以成立。要把相同的字节发布到 CDN 或静态目录：
 
 ```bash
@@ -374,17 +343,13 @@ App::singleton(runtime.clone());
 ```
 
 从岛屿的 `data-suprnova-live-snapshot` 属性解码其快照，带上会话 Cookie 和
-`Sec-Fetch-Site: same-origin` 提交一个动作，然后断言被接受的渲染结果。过期快照
-以空正文应答 `409`；缺少主体则应答 `401`。
+`Sec-Fetch-Site: same-origin` 提交一个动作，然后断言被接受的渲染结果。过期快照以空正文应答 `409`；缺少主体则应答 `401`。
 
 ## 诊断与运维
 
-- `suprnova live:check` 证明每一个已注册的视图；`--allow-unproved` 接受检查器
-  刻意不做断言的动态结构。
-- `suprnova live:inspect` 报告已绑定的注册表、配置上限、已安装的上传能力、已组装的
-  运行时服务以及资产标识，而不暴露状态或秘密。
-- `LiveConfig` 限制请求和响应字节数以及受信上下文的生命周期；在运行时组装之前绑定
-  自定义配置。
+- `suprnova live:check` 证明每一个已注册的视图；`--allow-unproved` 接受检查器刻意不做断言的动态结构。
+- `suprnova live:inspect` 报告已绑定的注册表、配置上限、已安装的上传能力、已组装的运行时服务以及资产标识，而不暴露状态或秘密。
+- `LiveConfig` 限制请求和响应字节数以及受信上下文的生命周期；在运行时组装之前绑定自定义配置。
 - 错误携带封闭的种类，例如 `live_document_context_rejected` 和
   `invalid_live_bootstrap`；遥测标签是封闭的枚举。
 
@@ -394,8 +359,7 @@ App::singleton(runtime.clone());
 - 已关闭的异步传输被退役，运行时以新的传输代际重新连接；过期的代际会被拒绝。
 - 过期或轮换的会话使绑定身份的工作失效；应用展示其登录路径，访客从新文档继续。
 
-Live 在没有 RenderCache 的情况下完整运行。缓存 Live 文档是 RenderCache 的职责；
-参见 [RenderCache](render-cache.md)。
+Live 在没有 RenderCache 的情况下完整运行。缓存 Live 文档是 RenderCache 的职责；参见 [RenderCache](render-cache.md)。
 
 ## CLI 参考
 
