@@ -76,6 +76,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   catalog load onto the mount, so the ordering the template describes is
   unchanged.
 
+### Security
+
+- **The lockfile sheds one unsound and three yanked dependency releases.**
+  `event-listener` 5.4.2 replaces 5.4.1, whose stack-allocated listener was
+  unconditionally `Send`/`Sync` and let a `!Send` tag cross threads in safe
+  code (RUSTSEC-2026-0221); Suprnova's dependencies only use untagged
+  events, so the unsound path was never exercised here. `spin` 0.9.9 and
+  0.10.1 and `chacha20` 0.10.2 replace releases their publishers had
+  yanked, and `concurrent-queue` leaves the tree entirely. This landed on
+  main after the `v2.0.1` tag; the tagged `Cargo.lock` still resolves the
+  earlier versions.
+
 ### Documentation
 
 - **The six locale mirrors of the 2.0.0 chapters follow the manual's own

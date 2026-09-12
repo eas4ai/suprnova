@@ -84,6 +84,19 @@ são enviados atomicamente. Mais recentes primeiro.
   `setup` agora é síncrono e encadeia o carregamento do catálogo de
   traduções na montagem, então a ordem que o template descreve não muda.
 
+### Segurança
+
+- **O lockfile se livra de uma versão insegura e três versões retiradas de
+  dependências.** `event-listener` 5.4.2 substitui a 5.4.1, cujo listener
+  alocado na pilha era incondicionalmente `Send`/`Sync` e deixava uma tag
+  `!Send` cruzar threads em código seguro (RUSTSEC-2026-0221); as
+  dependências do Suprnova só usam eventos sem tag, então o caminho
+  inseguro nunca foi exercitado aqui. `spin` 0.9.9 e 0.10.1 e `chacha20`
+  0.10.2 substituem versões que seus publicadores haviam retirado, e
+  `concurrent-queue` sai da árvore por completo. Isto chegou ao main depois
+  da tag `v2.0.1`; o `Cargo.lock` da tag continua resolvendo as versões
+  anteriores.
+
 ### Documentação
 
 - **Os seis espelhos de idioma dos capítulos do 2.0.0 seguem as convenções

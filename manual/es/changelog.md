@@ -88,6 +88,19 @@ recientes primero.
   síncrono y encadena la carga del catálogo de traducciones al montaje, de
   modo que el orden que describe la plantilla no cambia.
 
+### Seguridad
+
+- **El lockfile se desprende de una versión insegura y tres retiradas de
+  dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo listener
+  asignado en la pila era incondicionalmente `Send`/`Sync` y dejaba que una
+  etiqueta `!Send` cruzara hilos en código seguro (RUSTSEC-2026-0221); las
+  dependencias de Suprnova solo usan eventos sin etiqueta, así que la ruta
+  insegura nunca se ejercitó aquí. `spin` 0.9.9 y 0.10.1 y `chacha20`
+  0.10.2 reemplazan versiones que sus editores habían retirado, y
+  `concurrent-queue` sale del árbol por completo. Esto llegó a main después
+  del tag `v2.0.1`; el `Cargo.lock` del tag sigue resolviendo las versiones
+  anteriores.
+
 ### Documentación
 
 - **Los seis espejos de idioma de los capítulos de 2.0.0 siguen las

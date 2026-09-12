@@ -89,6 +89,19 @@ en premier.
   enchaîne le chargement du catalogue de traductions au montage, si bien
   que l'ordre décrit par le template est inchangé.
 
+### Sécurité
+
+- **Le fichier de verrouillage se défait d'une version non sûre et de trois
+  versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont le
+  listener alloué sur la pile était inconditionnellement `Send`/`Sync` et
+  laissait un tag `!Send` traverser les threads en code sûr
+  (RUSTSEC-2026-0221) ; les dépendances de Suprnova n'utilisent que des
+  événements sans tag, le chemin non sûr n'a donc jamais été exercé ici.
+  `spin` 0.9.9 et 0.10.1 et `chacha20` 0.10.2 remplacent des versions que
+  leurs éditeurs avaient retirées, et `concurrent-queue` quitte l'arbre
+  entièrement. Ceci a atterri sur main après le tag `v2.0.1` ; le
+  `Cargo.lock` du tag résout toujours les versions antérieures.
+
 ### Documentation
 
 - **Les six miroirs de langue des chapitres de 2.0.0 suivent les conventions

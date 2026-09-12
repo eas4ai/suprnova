@@ -87,6 +87,19 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   an das Mounten an, sodass die im Template beschriebene Reihenfolge
   unverändert bleibt.
 
+### Sicherheit
+
+- **Die Lockdatei legt eine unsichere und drei zurückgezogene
+  Abhängigkeitsversionen ab.** `event-listener` 5.4.2 ersetzt 5.4.1, dessen
+  stack-allozierter Listener bedingungslos `Send`/`Sync` war und ein
+  `!Send`-Tag in sicherem Code über Threadgrenzen wandern ließ
+  (RUSTSEC-2026-0221); Suprnovas Abhängigkeiten verwenden nur ungetaggte
+  Events, der unsichere Pfad wurde hier also nie ausgeführt. `spin` 0.9.9
+  und 0.10.1 sowie `chacha20` 0.10.2 ersetzen Versionen, die ihre
+  Herausgeber zurückgezogen hatten, und `concurrent-queue` verlässt den
+  Baum vollständig. Dies landete auf main nach dem Tag `v2.0.1`; die
+  getaggte `Cargo.lock` löst weiterhin die früheren Versionen auf.
+
 ### Dokumentation
 
 - **Die sechs Sprachspiegel der 2.0.0-Kapitel folgen den Konventionen des
