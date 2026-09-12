@@ -27,54 +27,39 @@ cd "$(git rev-parse --show-toplevel)"
 
 : "${SUPRNOVA_GATE_RUN_ID:?SUPRNOVA_GATE_RUN_ID must be set by gate-runner.py}"
 
-if ! docker info >/dev/null 2>&1; then
-    echo "check-postgres: the Docker daemon must be reachable." >&2
-    echo "    These tests need a real Postgres; there is no SQLite fallback" >&2
-    echo "    that would prove anything (that is the bug they guard)." >&2
+# Standing service (ruling, Shawn 2026-09-12): the gate provisions nothing.
+# The host's Postgres at 127.0.0.1:5432 answers, with the scoped gate role
+# from scripts/setup-gate-databases.sh; each run works in its own throwaway
+# database (pid-suffixed, so parallel gate runs cannot collide) and drops it
+# on exit. The role owns only what it creates.
+PG_HOST=127.0.0.1
+PG_PORT=5432
+PG_USER=suprnova_gate
+PG_PASSWORD=suprnova-gate
+GATE_DB="suprnova_test_$$"
+
+psql_gate() {
+    PGPASSWORD="$PG_PASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d postgres -v ON_ERROR_STOP=1 -qAtc "$1"
+}
+
+if ! psql_gate 'select 1' >/dev/null 2>&1; then
+    echo "check-postgres: cannot reach Postgres at ${PG_HOST}:${PG_PORT} as ${PG_USER}." >&2
+    echo "    The gate uses the machine's standing Postgres and never provisions" >&2
+    echo "    one mid-run. Start the service and create the gate role:" >&2
+    echo "    sudo -u postgres psql -f scripts/setup/gate-postgres-role.sql" >&2
     exit 1
 fi
 
-CONTAINER="suprnova-gate-pg-${SUPRNOVA_GATE_RUN_ID}-$$"
-PG_PASSWORD="gate-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-
 cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    psql_gate "DROP DATABASE IF EXISTS ${GATE_DB}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
-echo "starting disposable Postgres (${CONTAINER})..."
-docker run -d --rm --name "$CONTAINER" \
-    --label "suprnova-gate-run=${SUPRNOVA_GATE_RUN_ID}" \
-    -e POSTGRES_PASSWORD="$PG_PASSWORD" \
-    -e POSTGRES_DB=suprnova_test \
-    -p 127.0.0.1::5432 \
-    postgres:17-alpine >/dev/null
+psql_gate "DROP DATABASE IF EXISTS ${GATE_DB}" >/dev/null
+psql_gate "CREATE DATABASE ${GATE_DB}" >/dev/null
+echo "using standing Postgres at ${PG_HOST}:${PG_PORT}, database ${GATE_DB}"
 
-# `docker port` reports the host side Docker picked, e.g. "127.0.0.1:49154".
-HOST_PORT="$(docker port "$CONTAINER" 5432/tcp | head -1 | sed 's/.*://')"
-if [[ -z "$HOST_PORT" ]]; then
-    echo "check-postgres: could not determine the mapped host port." >&2
-    exit 1
-fi
-echo "    mapped to 127.0.0.1:${HOST_PORT}"
-
-# Wait for readiness. `pg_isready` runs inside the container, so this is
-# the server's own view rather than a TCP connect that succeeds before
-# Postgres finishes its first-boot initdb.
-for _ in $(seq 1 60); do
-    if docker exec "$CONTAINER" pg_isready -U postgres -d suprnova_test >/dev/null 2>&1; then
-        ready=1
-        break
-    fi
-    sleep 1
-done
-if [[ "${ready:-0}" -ne 1 ]]; then
-    echo "check-postgres: Postgres never became ready. Container log:" >&2
-    docker logs "$CONTAINER" >&2 || true
-    exit 1
-fi
-
-export PG_TEST_URL="postgres://postgres:${PG_PASSWORD}@127.0.0.1:${HOST_PORT}/suprnova_test"
+export PG_TEST_URL="postgres://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT}/${GATE_DB}"
 
 # Serial, always. These tests share a database and several of them DROP and
 # recreate the same table names; in parallel they clobber each other and

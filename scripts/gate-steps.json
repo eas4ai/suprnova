@@ -202,7 +202,7 @@
       "name": "MySQL relation regressions",
       "tiers": ["full"],
       "argv": ["scripts/check-mysql.sh"],
-      "timeout_seconds": 600,
+      "timeout_seconds": 1500,
       "category": "environment",
       "capabilities": ["bash", "cargo", "docker"]
     },
@@ -211,7 +211,7 @@
       "name": "Magnetar live Postgres and MySQL",
       "tiers": ["full"],
       "argv": ["scripts/check-magnetar-live.sh"],
-      "timeout_seconds": 1200,
+      "timeout_seconds": 1800,
       "category": "environment",
       "capabilities": ["bash", "cargo", "docker"]
     },

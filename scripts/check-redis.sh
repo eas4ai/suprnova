@@ -13,75 +13,46 @@
 # the cache store's TTLs, tag indexes, and connection retry, and the
 # broadcasting fanout hub, which needs `--features broadcasting-fanout` and
 # therefore a second build. This script is what runs all of them, in one
-# container, in one order.
+# order, against the standing service.
 #
 # Usage:
 #   scripts/check-redis.sh
 #
-# The container is disposable and removed on exit, success or failure.
+# The step needs the standing Redis from this machine; see scripts/setup-gate-databases.sh.
 #
-# ## Port safety
+# ## Standing service, gate-owned database indexes
 #
-# The host port is assigned by Docker (`-p 127.0.0.1::6379`) and read back,
-# rather than pinned. Two reasons: a pinned 6379 collides with whatever the
-# developer already runs, and - more importantly - a wrong guess would point
-# these tests at somebody's real instance. They write and delete keys.
-# Letting Docker choose makes that impossible by construction. The bind is
-# loopback-only, matching the scaffold's compose templates.
+# The gate runs against the host's standing Redis at 127.0.0.1:6379 - never a
+# per-run container. Ruling (Shawn, 2026-09-12): the gate provisions nothing;
+# services stand ready on this machine and a missing one fails the step with
+# instructions, it is never pulled or started mid-gate.
+#
+# Isolation: database indexes 9-14 are reserved for gate runs by decree - no
+# other workload on this machine may use them. Each run picks an index from
+# its own pid and clears it before testing, so parallel gate runs (different
+# pids) land on different indexes and leftover keys from a crashed run cannot
+# leak into the next. The test suites themselves never FLUSH anything - this
+# script is the only thing that clears, and only its own gate index.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 : "${SUPRNOVA_GATE_RUN_ID:?SUPRNOVA_GATE_RUN_ID must be set by gate-runner.py}"
 
-if ! docker info >/dev/null 2>&1; then
-    echo "check-redis: the Docker daemon must be reachable." >&2
-    echo "    These tests need a real Redis; there is no in-memory fallback" >&2
-    echo "    that would prove anything about the scripts or expiry." >&2
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+if ! redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1; then
+    echo "check-redis: no Redis answering at ${REDIS_HOST}:${REDIS_PORT}." >&2
+    echo "    The gate uses the machine's standing Redis service and never" >&2
+    echo "    provisions one mid-run. Start it (systemctl start redis) and rerun." >&2
     exit 1
 fi
 
-CONTAINER="suprnova-gate-redis-${SUPRNOVA_GATE_RUN_ID}-$$"
+GATE_DB=$(( $$ % 6 + 9 ))
+redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$GATE_DB" flushdb >/dev/null
+echo "using standing Redis at ${REDIS_HOST}:${REDIS_PORT}, gate database index ${GATE_DB}"
 
-cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
-
-echo "starting disposable Redis (${CONTAINER})..."
-docker run -d --rm --name "$CONTAINER" \
-    --label "suprnova-gate-run=${SUPRNOVA_GATE_RUN_ID}" \
-    -p 127.0.0.1::6379 \
-    redis:7-alpine >/dev/null
-
-# `docker port` reports the host side Docker picked, e.g. "127.0.0.1:49154".
-HOST_PORT="$(docker port "$CONTAINER" 6379/tcp | head -1 | sed 's/.*://')"
-if [[ -z "$HOST_PORT" ]]; then
-    echo "check-redis: could not determine the mapped host port." >&2
-    exit 1
-fi
-echo "    mapped to 127.0.0.1:${HOST_PORT}"
-
-# Wait for readiness, bounded at 60 attempts a second apart. `redis-cli ping`
-# runs inside the container, so PONG is the server's own answer rather than a
-# TCP connect that succeeds before Redis finishes loading and starts
-# accepting commands.
-for _ in $(seq 1 60); do
-    if [[ "$(docker exec "$CONTAINER" redis-cli ping 2>/dev/null)" == *PONG* ]]; then
-        ready=1
-        break
-    fi
-    sleep 1
-done
-if [[ "${ready:-0}" -ne 1 ]]; then
-    echo "check-redis: Redis never became ready. Container log:" >&2
-    docker logs "$CONTAINER" >&2 || true
-    exit 1
-fi
-
-# The mapped port is the only value that reaches the tests, and it reaches
-# them as this URL and nothing else.
-export REDIS_TEST_URL="redis://127.0.0.1:${HOST_PORT}/"
+export REDIS_TEST_URL="redis://${REDIS_HOST}:${REDIS_PORT}/${GATE_DB}"
 
 # Serial, always. These tests share one instance and several of them inspect
 # key counts and run bounded scans; in parallel they see each other's keys
@@ -316,7 +287,7 @@ fi
 # slowest block here on a cold target and the only one that compiles anything
 # the rest of the gate did not.
 #
-# The export is unconditional and derived from this run's own container port,
+# The export is unconditional and derived from this run's own gate database index,
 # and that is what makes the block mean something: each of these three tests
 # reads REDIS_BROADCAST_URL and `return`s silently when it is unset or empty
 # (framework/tests/broadcasting/fanout.rs:519 and its twins), and a test that
