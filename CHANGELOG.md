@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### Fixed
 
@@ -66,6 +66,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   had been written. `setup` is synchronous now and chains the translation
   catalog load onto the mount, so the ordering the template describes is
   unchanged.
+
+### Documentation
+
+- **The six locale mirrors of the 2.0.0 chapters follow the manual's own
+  conventions.** The chapters translated since 1.3.7 wrapped Japanese and
+  Simplified Chinese prose mid-sentence (1,653 line breaks that rendered as
+  stray spaces), rendered 59 terms differently from the rest of their
+  locale, translated 9 repeated headings a second way, and left 2 quotes
+  unpaired. All of that is aligned with the older chapters, so a reader of
+  any locale sees one vocabulary and unbroken sentences across the manual.
 
 ### Upgrading
 

@@ -5,7 +5,7 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### Corrigido
 
@@ -73,6 +73,17 @@ são enviados atomicamente. Mais recentes primeiro.
   dentro do `npm run build` antes de uma única página ter sido escrita.
   `setup` agora é síncrono e encadeia o carregamento do catálogo de
   traduções na montagem, então a ordem que o template descreve não muda.
+
+### Documentação
+
+- **Os seis espelhos de idioma dos capítulos do 2.0.0 seguem as convenções
+  do próprio manual.** Os capítulos traduzidos desde o 1.3.7 quebravam a
+  prosa em japonês e chinês no meio da frase (1.653 quebras de linha que
+  apareciam como espaços soltos), traduziam 59 termos de forma diferente do
+  resto do seu idioma, traduziam 9 títulos repetidos de uma segunda maneira
+  e deixavam 2 aspas sem par. Tudo isso agora está alinhado com os
+  capítulos mais antigos, de modo que quem lê em qualquer idioma vê um só
+  vocabulário e frases inteiras em todo o manual.
 
 ### Atualizando
 

@@ -6,7 +6,7 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### Corrigé
 
@@ -77,6 +77,18 @@ en premier.
   qu'une seule page ait été écrite. `setup` est désormais synchrone et
   enchaîne le chargement du catalogue de traductions au montage, si bien
   que l'ordre décrit par le template est inchangé.
+
+### Documentation
+
+- **Les six miroirs de langue des chapitres de 2.0.0 suivent les conventions
+  du manuel lui-même.** Les chapitres traduits depuis 1.3.7 coupaient la
+  prose japonaise et chinoise au milieu des phrases (1 653 retours à la
+  ligne rendus comme des espaces parasites), rendaient 59 termes autrement
+  que le reste de leur langue, traduisaient 9 titres récurrents d'une
+  seconde façon et laissaient 2 guillemets sans paire. Tout cela est
+  désormais aligné sur les chapitres plus anciens, si bien qu'un lecteur de
+  n'importe quelle langue voit un seul vocabulaire et des phrases entières
+  dans tout le manuel.
 
 ### Mise à niveau
 

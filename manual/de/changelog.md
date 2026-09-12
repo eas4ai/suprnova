@@ -5,7 +5,7 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### Behoben
 
@@ -76,6 +76,17 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   `setup` ist jetzt synchron und hängt das Laden des Übersetzungskatalogs
   an das Mounten an, sodass die im Template beschriebene Reihenfolge
   unverändert bleibt.
+
+### Dokumentation
+
+- **Die sechs Sprachspiegel der 2.0.0-Kapitel folgen den Konventionen des
+  Handbuchs.** Die seit 1.3.7 übersetzten Kapitel brachen japanische und
+  chinesische Sätze mitten im Satz um (1.653 Zeilenumbrüche, die als
+  überzählige Leerzeichen erschienen), gaben 59 Begriffe anders wieder als
+  der Rest ihrer Sprache, übersetzten 9 wiederkehrende Überschriften ein
+  zweites Mal anders und ließen 2 Anführungszeichen ungepaart. All das ist
+  jetzt an die älteren Kapitel angeglichen, sodass Leser jeder Sprache im
+  gesamten Handbuch ein Vokabular und ungebrochene Sätze sehen.
 
 ### Upgrade
 

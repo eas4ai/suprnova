@@ -6,7 +6,7 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### Corregido
 
@@ -76,6 +76,17 @@ recientes primero.
   `npm run build` antes de escribir una sola página. `setup` ahora es
   síncrono y encadena la carga del catálogo de traducciones al montaje, de
   modo que el orden que describe la plantilla no cambia.
+
+### Documentación
+
+- **Los seis espejos de idioma de los capítulos de 2.0.0 siguen las
+  convenciones del propio manual.** Los capítulos traducidos desde 1.3.7
+  cortaban la prosa japonesa y china a mitad de frase (1.653 saltos de línea
+  que se veían como espacios sueltos), traducían 59 términos de forma
+  distinta al resto de su idioma, traducían 9 encabezados repetidos de una
+  segunda manera y dejaban 2 comillas sin pareja. Todo eso está alineado
+  ahora con los capítulos más antiguos, de modo que quien lea cualquier
+  idioma ve un solo vocabulario y frases sin cortes en todo el manual.
 
 ### Actualización
 

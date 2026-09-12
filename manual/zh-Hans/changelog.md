@@ -2,7 +2,7 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
-## 2.0.1 - 2026-09-11
+## 2.0.1 - 2026-09-12
 
 ### 修复
 
@@ -15,6 +15,10 @@
 - **脚手架生成的应用会验证邮箱地址并重置密码了。** 注册会创建用户并让其登录，却不发送验证邮件，也没有任何路由提供邮箱验证或密码找回，尽管生成的 `User` 已经实现了 `MustVerifyEmail` 和 `CanResetPassword`，`auth_flow_tokens` 迁移也已经随附。注册现在通过 `EmailVerification::send_link` 邮寄一个验证链接并继续到 `/verify-email`，那里会显示提示、重发链接，并只为已登录的所有者在 `/verify-email/verify` 上消费它。`/forgot-password` 会向已验证的地址邮寄一个重置链接（未知或未验证的地址得到相同的回答且不会收到邮件），`/reset-password` 通过 `PasswordReset::complete_with_outcome` 轮换密码，并且在该账户的其他会话或记住我令牌未能撤销时拒绝完成。Vue、React 和 Svelte 的启动模板都带上了 `ForgotPassword`、`ResetPassword` 和 `VerifyEmail` 页面，以及登录页面上的一个“Forgot your password?”链接。链接由 `url::to` 构建，所以 `APP_URL` 必须指向用户访问应用时使用的地址，而注册需要一个能工作的邮件传输：脚手架写出的 `.env` 把 `MAIL_DRIVER=smtp` 指向 1025 端口上的本地捕获器（`suprnova docker:compose --with-mailpit` 添加的 Mailpit），或者把 `MAIL_DRIVER=log` 设上，把每封邮件连同链接一起打印到服务器日志。
 
 - **新生成的 Svelte 脚手架能针对 `@inertiajs/svelte` 3.7 构建了。** 生成出来的 `main.ts` 声明了一个 `async setup`，而 `@inertiajs/svelte` 3.7 把 `setup` 的返回类型定为 `SvelteRenderResult | void`，于是今天脚手架出来的项目（模板要求 `^3.6.1`，现在会解析到 3.7.1）在 `npm run build` 里的 `svelte-check` 这一步就失败了，一页代码都还没写。`setup` 现在是同步的，并把翻译目录的加载串接到挂载之后，所以模板里描述的顺序没有变化。
+
+### 文档说明
+
+- **2.0.0 各章的六个语言镜像遵循手册自身的约定了。** 自 1.3.7 以来翻译的章节把日语和简体中文的正文在句子中间换行（1,653 处换行，渲染成多余的空格）、把 59 个术语译得与本语言其他章节不同、把 9 个反复出现的标题译成了第二种写法，还留下 2 处未配对的引号。这些现在都已与更早的章节对齐，因此任何语言的读者在整本手册里看到的都是同一套词汇和不间断的句子。
 
 ### 升级
 
