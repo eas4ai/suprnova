@@ -10,8 +10,9 @@ pub use service::{
     AcceptedExecution, AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest,
     ExecutionRefreshReason, ExecutionResult, ExecutionService, InstancedActionRequest,
     InstancedFreshRenderRequest, InstancedLifecycleOperation, InstancedLifecycleRequest,
-    PromotedActionRequest, RefreshRequiredExecution, ResponseIntentPreparationPort,
-    ResponseIntentPreparationRequest, VerifiedResponseIntentAuthority,
+    PromotedActionRequest, PromotedRequestIdentity, RefreshRequiredExecution,
+    ResponseIntentPreparationPort, ResponseIntentPreparationRequest,
+    VerifiedResponseIntentAuthority,
 };
 pub(crate) use trace::record;
 pub use trace::{ExecutionPhase, ExecutionTracePort, NoopExecutionTrace};
