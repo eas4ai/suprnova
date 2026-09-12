@@ -332,6 +332,13 @@ def run_step(step: Step, context: RunContext) -> StepResult:
 
     child_env = dict(context.env)
     child_env["SUPRNOVA_GATE_RUN_ID"] = context.run_id
+    # Every verdict is built non-incrementally, whatever the caller's shell
+    # exports. Cargo defaults the test profile to incremental, sccache cannot
+    # cache an incremental compile, and stale incremental sessions in a long-
+    # lived target directory made rust-lld fail with an undefined hidden
+    # symbol on the 2.0.1 release (2026-09-12); the same tree linked with
+    # CARGO_INCREMENTAL=0, which is what every green gate had been using.
+    child_env["CARGO_INCREMENTAL"] = "0"
     started_at = time.monotonic()
     try:
         log = log_path.open("wb")

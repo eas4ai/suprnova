@@ -488,6 +488,27 @@ class RunStepTests(unittest.TestCase):
         self.assertEqual(ledger[0]["outcome"], "pass")
         self.assertEqual(ledger[0]["argv"], [sys.executable, str(script)])
 
+    def test_cargo_incremental_is_off_whatever_the_caller_exported(self):
+        # The release and the gate inherit the caller's shell. A shell that
+        # leaves CARGO_INCREMENTAL unset gets cargo's default, incremental
+        # builds for the test profile, and stale incremental sessions made
+        # rust-lld fail with an undefined hidden symbol on the 2.0.1 release
+        # (2026-09-12). Every verdict is built the same way: non-incremental.
+        script = self._script(
+            "incremental.py",
+            "import os\nprint('incremental=' + os.environ.get('CARGO_INCREMENTAL', 'unset'))\n",
+        )
+        for exported in ({"CARGO_INCREMENTAL": "1"}, {}):
+            env = {k: v for k, v in os.environ.items() if k != "CARGO_INCREMENTAL"}
+            env.update(exported)
+            result = self.runner.run_step(self._step(script), self._context(env=env))
+            self.assertEqual(result.outcome, self.runner.Outcome.PASS)
+            self.assertIn(
+                "incremental=0",
+                Path(result.log_path).read_text(encoding="utf-8"),
+                f"caller exported {exported or 'nothing'}",
+            )
+
     def test_nonzero_is_fail_and_same_group_grandchild_is_reaped(self):
         pid_file = self.workspace / "grandchild.pid"
         script = self._script(
