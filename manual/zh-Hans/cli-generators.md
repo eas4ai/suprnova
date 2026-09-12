@@ -190,8 +190,7 @@ impl TypedCommand for CleanCache {
 
 ## live:make
 
-生成一个 Live 组件：一个由服务器拥有的岛屿，其类型化动作通过 Live 协议到达，其重新
-渲染的视图由随附的浏览器运行时就地变形。
+生成一个 Live 组件：一个由服务器拥有的岛屿，其类型化动作通过 Live 协议到达，其重新渲染的视图由随附的浏览器运行时就地变形。
 
 ```bash
 suprnova live:make Counter
@@ -201,8 +200,7 @@ suprnova live:make Counter --dry-run
 
 名称必须是 `Counter`、`TodoList`、`todo-list` 或 `todo_list` 任一形式的纯 ASCII
 标识符；文件和模块使用 snake_case，结构体使用 PascalCase，注册的组件名为
-`<package>.<kebab>`（对于名为 `demo-app` 的包：`demo-app.counter`）。Rust 关键字、
-分隔符、点以及非 ASCII 输入会在写入任何内容之前被拒绝。
+`<package>.<kebab>`（对于名为 `demo-app` 的包：`demo-app.counter`）。Rust 关键字、分隔符、点以及非 ASCII 输入会在写入任何内容之前被拒绝。
 
 ### 生成的文件
 
@@ -237,17 +235,12 @@ impl Counter {
 </div>
 ```
 
-### 它接线了什么
+### 它接好了什么
 
-1. 先验证每一个目标路径，拒绝路径穿越和符号链接；如果组件文件或视图已经存在，则
-   发出警告且完全不写入。
-2. 原子地写入 `src/live/<snake>.rs` 与 `templates/live/<snake>.html`；如果任一写入
-   失败，本次运行创建或修改的每个文件都会被回滚，任何无法恢复的文件都会在错误中
-   被点名，而不是被报告为未受影响。
+1. 先验证每一个目标路径，拒绝路径穿越和符号链接；如果组件文件或视图已经存在，则发出警告且完全不写入。
+2. 原子地写入 `src/live/<snake>.rs` 与 `templates/live/<snake>.html`；如果任一写入失败，本次运行创建或修改的每个文件都会被回滚，任何无法恢复的文件都会在错误中被点名，而不是被报告为未受影响。
 3. 把 `pub mod <snake>;` 和 `.register::<snake::Pascal>()?` 插入到
-   `src/live/mod.rs` 的 `registry()` 构建器中。由 `suprnova new` 创建的每个项目都
-   附带该模块：一个空的注册表、一个安装带守卫的保留 Live 路由的 `routes()` 函数，
-   以及一个绑定注册表的引导；较旧的项目会在首次使用时创建同一个模块。
+   `src/live/mod.rs` 的 `registry()` 构建器中。由 `suprnova new` 创建的每个项目都附带该模块：一个空的注册表、一个安装带守卫的保留 Live 路由的 `routes()` 函数，以及一个绑定注册表的引导；较旧的项目会在首次使用时创建同一个模块。
 4. 在 `src/lib.rs` 缺少 `pub mod live;` 时添加它。
 5. 打印绑定注册表的引导行，然后打印检查命令：`suprnova live:check`。
 

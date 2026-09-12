@@ -32,7 +32,7 @@ recientes primero.
   andamiaje, de modo que la primera regeneración de un proyecto ya no
   reescribe un archivo que nadie editó.
 
-- **Una aplicación generada por el andamiaje sirve su frontend
+- **Una aplicación generada con andamiaje sirve su frontend
   compilado.** El `routes.rs` generado no registraba ningún fallback de
   archivos estáticos, así que en cuanto el servidor de desarrollo de Vite
   no estaba en marcha, cada URL `/assets/*` del shell HTML respondía
@@ -43,7 +43,7 @@ recientes primero.
   el recorrido de rutas se rechazan, y una URL desconocida sigue
   renderizando la página `Error` de Inertia.
 
-- **Una aplicación generada por el andamiaje verifica direcciones de
+- **Una aplicación generada con andamiaje verifica direcciones de
   correo y restablece contraseñas.** El registro creaba e iniciaba la
   sesión del usuario sin enviar correo de verificación, y ninguna ruta
   ofrecía verificación de correo ni recuperación de contraseña, aunque el

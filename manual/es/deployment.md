@@ -180,7 +180,7 @@ El binario que construye el Dockerfile nunca lleva la característica
 `testing` del framework: los instaladores de claves de cifrado, los fakes
 de almacenamiento y los hooks de prueba de RenderCache que una suite de
 pruebas necesita quedan fuera de la compilación. Tu `Cargo.toml`
-generado por el scaffolder (y la app dogfood en el propio repositorio de
+generado con andamiaje (y la app dogfood en el propio repositorio de
 Suprnova) toma esta forma por construcción, con dos entradas de
 dependencia:
 

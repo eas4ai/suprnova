@@ -499,7 +499,7 @@ en premier.
   autorisé via la capacité de gate `live:<component>.stream.<name>` ;
   l'application publie via `suprnova::live::LiveStreams`, `refresh` disant
   aux îlots abonnés de se rendre à neuf et `event::<T>` délivrant un payload
-  typé aux gestionnaires enregistrés de l'îlot. Le fanout, le nombre de sauts
+  typé aux handlers enregistrés de l'îlot. Le fanout, le nombre de sauts
   et la livraison par document sont tous bornés. Le polling est un rendu
   frais ordinaire : l'état rattrape son retard, mais les payloads d'événement
   publiés pendant qu'un transport était indisponible ne sont pas rejoués, ce

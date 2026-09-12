@@ -467,7 +467,7 @@ flatterhaft.
   `Age`-Header.** Sie wird abgelehnt, sie scheitert nicht. Lesen Sie zuerst
   das `reason`-Label des `declined`-Lookups - es benennt den genauen
   Vertrag, der das Rendering tatsächlich verweigert hat, aus der
-  geschlossenen Menge unter „Telemetrie" oben - und arbeiten Sie dann, für
+  geschlossenen Menge unter „Telemetrie“ oben - und arbeiten Sie dann, für
   einen der klassifizierungsbedingten Gründe, die Klassifizierungsliste in
   [RenderCache](render-cache.md) durch: ein Sitzungslesen, ein
   Identitätslesen auf einer Route ohne `Principal`-Varianz, ein Locale-Lesen
