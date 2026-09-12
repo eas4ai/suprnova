@@ -242,27 +242,19 @@ pub struct PromotedActionRequest<'a> {
     context: &'a TrustedLiveRequestContext,
     browser: BrowserRenderContext,
     promoted: PromotedInstance,
-    browser_nonce: BrowserNonce,
-    idempotency_key: IdempotencyKey,
-    request_digest: ContentDigest,
+    identity: PromotedRequestIdentity,
     action: ActionExecutionRequest<'a>,
 }
 
 impl<'a> PromotedActionRequest<'a> {
     /// Binds an internal promotion capability to the current trusted request.
     #[must_use]
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "every trust input a promoted request binds stays explicit where it is bound"
-    )]
     pub fn new(
         descriptor: &'a ComponentDescriptor,
         context: &'a TrustedLiveRequestContext,
         browser: BrowserRenderContext,
         promoted: PromotedInstance,
-        browser_nonce: BrowserNonce,
-        idempotency_key: IdempotencyKey,
-        request_digest: ContentDigest,
+        identity: PromotedRequestIdentity,
         action: ActionExecutionRequest<'a>,
     ) -> Self {
         Self {
@@ -270,10 +262,33 @@ impl<'a> PromotedActionRequest<'a> {
             context,
             browser,
             promoted,
+            identity,
+            action,
+        }
+    }
+}
+
+/// The identity a promoted request carries: the browser nonce the public seed
+/// was promoted under, and the retry identity (idempotency key and content
+/// digest) the ledger arbitrates the action on.
+pub struct PromotedRequestIdentity {
+    browser_nonce: BrowserNonce,
+    idempotency_key: IdempotencyKey,
+    request_digest: ContentDigest,
+}
+
+impl PromotedRequestIdentity {
+    /// Binds the promotion nonce to the retry identity of one request.
+    #[must_use]
+    pub fn new(
+        browser_nonce: BrowserNonce,
+        idempotency_key: IdempotencyKey,
+        request_digest: ContentDigest,
+    ) -> Self {
+        Self {
             browser_nonce,
             idempotency_key,
             request_digest,
-            action,
         }
     }
 }
@@ -978,8 +993,8 @@ impl ExecutionService {
                 request.context.scope(),
                 authority.instance_id(),
                 authority.revision(),
-                request.idempotency_key,
-                request.request_digest,
+                request.identity.idempotency_key,
+                request.identity.request_digest,
                 trace,
             )
             .await
@@ -1028,7 +1043,9 @@ impl ExecutionService {
                 extensions: seed.extensions().clone(),
                 composition_lineage: None,
                 owner_parent_revision: None,
-                request_snapshot: RequestSnapshotAuthority::SeedPromotion(request.browser_nonce),
+                request_snapshot: RequestSnapshotAuthority::SeedPromotion(
+                    request.identity.browser_nonce,
+                ),
             },
             SuccessorPresentation {
                 document_key: request.browser.document_key().as_str().to_owned(),

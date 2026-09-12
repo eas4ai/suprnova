@@ -24,7 +24,7 @@ use suprnova_live::endpoint::{
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionResult, ExecutionService, ExecutionTracePort,
     InstancedActionRequest, InstancedFreshRenderRequest, InstancedLifecycleOperation,
-    InstancedLifecycleRequest, PromotedActionRequest, TransactionPort,
+    InstancedLifecycleRequest, PromotedActionRequest, PromotedRequestIdentity, TransactionPort,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BrowserOperationName, ContentDigest, IdempotencyKey, InstanceId,
@@ -585,9 +585,11 @@ impl SuprnovaEndpointKernel {
                 request.context(),
                 browser,
                 promoted,
-                browser_nonce,
-                idempotency_key(request.request()).clone(),
-                digest,
+                PromotedRequestIdentity::new(
+                    browser_nonce,
+                    idempotency_key(request.request()).clone(),
+                    digest,
+                ),
                 action,
             ))
             .await;

@@ -24,7 +24,7 @@ use suprnova_live::component::{
 };
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionPhase, ExecutionResult, ExecutionService, ExecutionTracePort,
-    PromotedActionRequest, RetryLegality,
+    PromotedActionRequest, PromotedRequestIdentity, RetryLegality,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BuildId, IslandSlot, Revision, UnixMillis,
@@ -540,9 +540,11 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
             &context,
             browser_context(),
             promoted,
-            browser_nonce,
-            promotion_support::idempotency(0x40),
-            promotion_support::digest(0x50),
+            PromotedRequestIdentity::new(
+                browser_nonce,
+                promotion_support::idempotency(0x40),
+                promotion_support::digest(0x50),
+            ),
             action_request(
                 &action,
                 &input_limits,
@@ -654,9 +656,11 @@ async fn promotion_mount_failure_consumes_authority_without_action_or_partial_sn
             &context,
             browser_context(),
             promoted,
-            browser_nonce,
-            promotion_support::idempotency(0x41),
-            promotion_support::digest(0x51),
+            PromotedRequestIdentity::new(
+                browser_nonce,
+                promotion_support::idempotency(0x41),
+                promotion_support::digest(0x51),
+            ),
             action_request(
                 &action,
                 &input_limits,
@@ -726,9 +730,11 @@ async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operatio
             &context,
             browser_context(),
             promoted,
-            browser_nonce,
-            promotion_support::idempotency(0x42),
-            promotion_support::digest(0x52),
+            PromotedRequestIdentity::new(
+                browser_nonce,
+                promotion_support::idempotency(0x42),
+                promotion_support::digest(0x52),
+            ),
             action_request(
                 &action,
                 &input_limits,

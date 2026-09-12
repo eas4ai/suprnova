@@ -1,10 +1,5 @@
 //! Shared deterministic values for registered-event descriptor conformance tests.
 
-#![allow(
-    dead_code,
-    reason = "shared helpers are used by separate integration-test crates"
-)]
-
 use std::collections::BTreeSet;
 use std::num::NonZeroU8;
 
