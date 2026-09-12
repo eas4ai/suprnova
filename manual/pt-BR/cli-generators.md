@@ -282,7 +282,7 @@ impl Counter {
 </div>
 ```
 
-### O que ele conecta
+### O que conecta
 
 1. Valida primeiro cada caminho de destino e recusa traversal e links simbólicos;
    se o arquivo do componente ou a view já existirem, avisa e não escreve nada.

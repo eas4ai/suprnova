@@ -109,11 +109,8 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-`destroy_all_for_user` は、`SessionMiddleware::new` または `with_store` で
-登録された `SessionStore` を解決し、その構成済みストアに対して
-`destroy_for_user` を呼び出します。セッションストアが登録されていない場合
-（テストやミドルウェアを一度も構築しなかった埋め込みシステムなど）のみ、
-新しい `DatabaseSessionDriver` にフォールバックします。
+`destroy_all_for_user` は、`SessionMiddleware::new` または `with_store` で登録された `SessionStore` を解決し、その構成済みストアに対して
+`destroy_for_user` を呼び出します。セッションストアが登録されていない場合（テストやミドルウェアを一度も構築しなかった埋め込みシステムなど）のみ、新しい `DatabaseSessionDriver` にフォールバックします。
 
 ## 認証のヘルパー
 

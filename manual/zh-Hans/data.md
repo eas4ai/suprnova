@@ -78,7 +78,7 @@ match dto.bio {
 
 当在调用点配上 `#[serde(default, skip_serializing_if = "Field::is_absent")]` 时，`Field::Absent`（默认值）能来回还原成“从 JSON 里省略”。没有 `skip_serializing_if` 的话，`Absent` 会序列化成 JSON 的 `null`。
 
-对于三态的数据库 upsert：`dto.bio.into_option_or_null() -> Option<Option<T>>` 的映射关系是 `Absent → None`、`Null → Some(None)`、`Value(v) → Some(Some(v))`。当下游需要把”不要动”和”设置为 NULL”区分开来时，就用这个。
+对于三态的数据库 upsert：`dto.bio.into_option_or_null() -> Option<Option<T>>` 的映射关系是 `Absent → None`、`Null → Some(None)`、`Value(v) → Some(Some(v))`。当下游需要把“不要动”和“设置为 NULL”区分开来时，就用这个。
 
 > **注意事项：** `Field<Option<T>>` 是有损的 - `Value(None)` 和 `Null` 都会序列化成 JSON 的 `null`，并反序列化回 `Null`。对于可空的内部类型，优先选用一个扁平的 `Field<T>`，让 `Null` 来携带“清空它”这个信号。
 

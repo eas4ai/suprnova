@@ -284,7 +284,7 @@ impl Counter {
 </div>
 ```
 
-### Ce qui est câblé
+### Ce qu'elle câble
 
 1. Valide d'abord chaque chemin cible et refuse la traversée et les liens
    symboliques ; si le fichier du composant ou la vue existe déjà, il avertit et

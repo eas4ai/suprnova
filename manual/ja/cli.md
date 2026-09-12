@@ -75,10 +75,7 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 | `suprnova live:assets --out <dir>` | 精査済みの Live ランタイム成果物を `<dir>/<identity>/` にアトミックに公開します。`--replace` はバイト列が異なる公開物を置き換えます。 |
 
 `live:check`、`live:inspect`、`live:assets` はアプリケーションの内部で実行されます。
-CLI は `cargo run --bin console` を起動し、フレームワークの隠しツーリングヘルパーから
-有界でバージョン付きの JSON 行レポートを読むため、CLI 自身にフレームワーク依存は
-不要です。ビルド出力は stderr に残り、stdout 上の予期しないものはコマンドを
-閉じた形で失敗させます。
+CLI は `cargo run --bin console` を起動し、フレームワークの隠しツーリングヘルパーから有界でバージョン付きの JSON 行レポートを読むため、CLI 自身にフレームワーク依存は不要です。ビルド出力は stderr に残り、stdout 上の予期しないものはコマンドを閉じた形で失敗させます。
 
 ### データベース
 

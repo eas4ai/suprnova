@@ -249,7 +249,7 @@ suprnova live:make Counter --dry-run
 ```
 
 Namen müssen einfache ASCII-Bezeichner in einer der Formen `Counter`, `TodoList`,
-`todo-list` oder `todo_list` sein; Datei und Modul werden in snake_case, das Struct in
+`todo-list` oder `todo_list` sein; Datei und Modul werden in snake_case, die Struktur in
 PascalCase geschrieben, und der registrierte Komponentenname lautet
 `<package>.<kebab>` (für ein Paket namens `demo-app`: `demo-app.counter`).
 Rust-Schlüsselwörter, Trennzeichen, Punkte und Nicht-ASCII-Eingaben werden abgelehnt,
@@ -288,7 +288,7 @@ impl Counter {
 </div>
 ```
 
-### Was verdrahtet wird
+### Was es verdrahtet
 
 1. Validiert zuerst jeden Zielpfad und lehnt Traversal und Symlinks ab; existiert die
    Komponentendatei oder die View bereits, warnt der Befehl und schreibt gar nichts.

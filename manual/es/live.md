@@ -386,10 +386,10 @@ streams.refresh("activity").await?;
 ```
 
 Un refresh indica a las islas suscritas que se re-rendericen desde cero; un
-evento se entrega a los manejadores registrados de la isla. El polling es el
+evento se entrega a los handlers registrados de la isla. El polling es el
 render fresco ordinario: el estado de la isla se pone al día cuando un
 transporte no está disponible, pero las cargas de eventos publicadas entre
-tanto no se reenvían a sus manejadores, y el runtime lo informa como un stream
+tanto no se reenvían a sus handlers, y el runtime lo informa como un stream
 degradado en lugar de actual. Un componente que declara exactamente un stream
 obtiene su raíz de isla suscrita a él; un componente con varios streams se
 suscribe a cada uno mediante las llamadas registradas del runtime.
