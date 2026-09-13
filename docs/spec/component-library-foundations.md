@@ -12,8 +12,9 @@ namespaces, and the component unit `live:add` installs. Live spec 20
 holds the agreed capability text this file refines into requirements
 with falsifiers; its "Decisions and revisions" section carries the four
 dated entries of 2026-09-13 that record the developer's rulings below.
-Nothing here is Agreed yet: the developer confirms the requirement texts
-and falsifiers as one set.
+Each requirement block carries its own Status line; the developer
+confirmed UI-001 to UI-019 with their falsifiers as one set on
+2026-09-13 at 11:08.
 
 The family specs (`component-library-forms.md`, `-navigation.md`,
 `-overlays.md`, `-feedback.md`, `-data-display.md`) inherit every
@@ -58,6 +59,7 @@ Falsifier: a token role named in Live spec 20 has no `--sn-` custom
 property in the shipped token stylesheet, or the stylesheet defines a
 role for light only.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
+Status: Agreed 2026-09-13
 
 [UI-002] The library MUST ship a base layer, inside the `suprnova-ui`
 cascade layer, that styles bare semantic HTML (`button`, `input`,
@@ -69,6 +71,7 @@ base-layer rule sits outside the `suprnova-ui` cascade layer.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
 Reading: the developer named Pico CSS (2026-09-12) as the reference to
 expand on; its ~10KB footprint is the baseline-size bar.
+Status: Agreed 2026-09-13
 
 [UI-003] Every component stylesheet MUST select state styling from the
 accessibility or native state attribute the checker already proves
@@ -79,6 +82,7 @@ Falsifier: a component's invalid, busy, expanded, pressed, current, or
 selected presentation is selected by a class with no corresponding
 attribute selector.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
+Status: Agreed 2026-09-13
 
 [UI-004] A component stylesheet MUST take every visual value (color, font
 family, radius, shadow, duration, easing) from a `--sn-` token. A
@@ -89,11 +93,13 @@ component stylesheet outside a `var(--sn-...)` reference.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
 Reading: structural rules (display, position, grid, overflow, scroll
 snap) may be literal; they are behavior, not appearance.
+Status: Agreed 2026-09-13
 
 [UI-005] A shipped view MUST NOT carry a `style` attribute.
 Falsifier: `style=` appears in a shipped view.
 Mechanism: `.cairn/mechanisms/ui-tokens` (a grep over the vendored views)
 and `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-13
 
 [UI-006] Every shipped component MUST keep its behavior, semantics, and
 state with the base layer removed.
@@ -101,6 +107,7 @@ Falsifier: with the `suprnova-ui` layer absent, a component loses a
 behavior, an accessible name, or a state attribute.
 Mechanism: one browserless harness run with the base layer stripped.
 Reading: this is what "headless by default" proves; the skin ships on.
+Status: Agreed 2026-09-13
 
 [UI-007] The library MUST ship a Tailwind CSS 4 `@theme` preset that maps
 Tailwind's theme namespaces to the `--sn-` tokens, documented and tested
@@ -109,6 +116,7 @@ Falsifier: a `--sn-` color, spacing, radius, or font token has no
 counterpart in the preset, or the preset fails against the pinned range.
 Mechanism: a node check over the preset against the token stylesheet
 (`.cairn/mechanisms/ui-tokens`, second input).
+Status: Agreed 2026-09-13
 
 ## Delivery, DOM, and engines
 
@@ -123,11 +131,13 @@ Mechanism: `.cairn/mechanisms/live-gate` (tracked artifact parity).
 Reading: per-component CSS and JavaScript are vendored into the
 application (UI-017) and served by the application; the artifact
 contract binds only what Suprnova ships.
+Status: Agreed 2026-09-13
 
 [UI-009] Every shipped component view MUST pass `suprnova live:check`
 without `--allow-unproved`.
 Falsifier: a shipped view needs the flag to pass.
 Mechanism: `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-13
 
 [UI-010] The library MUST render every shipped component's content in
 light DOM. A custom-element enhancement MUST NOT attach a shadow root.
@@ -135,6 +145,7 @@ Falsifier: `attachShadow` appears in library source, or a fetched document
 lacks content that a component displays.
 Mechanism: `.cairn/mechanisms/ui-light-dom`; the fetchability half is
 asserted by the dogfood document tests.
+Status: Agreed 2026-09-13
 
 [UI-011] A custom-element enhancement that stands in for a form control
 MUST be form-associated through `ElementInternals` so `live:model` and
@@ -144,6 +155,7 @@ form-associated and the surrounding form submits without it.
 Mechanism: the browserless component harness
 (`crates/suprnova-live/docs/implementation/component-harness.md`) plus one
 Playwright case per enhancement.
+Status: Agreed 2026-09-13
 
 [UI-012] The library MUST target the qualified engines only. A component
 that uses a platform feature the three engines disagree on MUST degrade
@@ -152,6 +164,7 @@ Falsifier: a component relies on a feature one qualified engine lacks and
 no Playwright case exercises that component on that engine.
 Mechanism: `.cairn/mechanisms/live-gate`, with one Playwright case per
 shipped component that uses a platform feature beyond plain HTML and CSS.
+Status: Agreed 2026-09-13
 
 [UI-013] Every behavioral component MUST document its RenderCache
 classification (shell bytes, stitch slot, or varies). A behavioral
@@ -160,6 +173,7 @@ or cell.
 Falsifier: a shipped table or list component mounts an island per item.
 Mechanism: review against the dogfood stitched-dashboard test
 (`app/tests/`); a grep for per-item mounts in library views.
+Status: Agreed 2026-09-13
 
 ## Registration and namespaces
 
@@ -171,6 +185,7 @@ application whose registry builder never named it.
 Mechanism: `.cairn/mechanisms/ui-live-check` (the checker reports the
 bound registry) and a source grep for `inventory::submit!` under the
 library crate.
+Status: Agreed 2026-09-13
 
 [UI-015] Every library component name MUST carry the reserved prefix
 `suprnova.`. The registry MUST reject that prefix on a component from any
@@ -178,6 +193,7 @@ other crate.
 Falsifier: a component outside the library registers under `suprnova.`
 and the registry builds.
 Mechanism: a registry unit test in the library crate.
+Status: Agreed 2026-09-13
 
 [UI-016] Every library view MUST live under the reserved template root
 `suprnova-ui/`. A library view MUST NOT shadow a path under the
@@ -186,6 +202,7 @@ Falsifier: a library template resolves at a path an application template
 can also occupy.
 Mechanism: `.cairn/mechanisms/ui-live-check` with both template roots
 declared; a duplicate view fails registration.
+Status: Agreed 2026-09-13
 
 [UI-017] A library component MUST be one directory under the reserved
 template root holding its view, its stylesheet when it has one, and its
@@ -198,6 +215,7 @@ manifest omits a file the component needs, or `live:add` overwrites an
 edited file without the developer asking for it.
 Mechanism: a CLI test in `suprnova-cli/tests/` that installs a component
 twice, edits it between runs, and asserts the edit survives.
+Status: Agreed 2026-09-13
 
 [UI-018] Every custom-element enhancement tag MUST carry the `sn-`
 prefix. A library custom element MUST be defined only by its own
@@ -207,6 +225,7 @@ Falsifier: a library-free document defines an `sn-` element, or a library
 tag lacks the prefix.
 Mechanism: `.cairn/mechanisms/ui-light-dom` and one Playwright case that
 boots a library-free document and asserts no `sn-` definition.
+Status: Agreed 2026-09-13
 
 [UI-019] The framework MUST load the shared library bases only when a
 document opts in through `LiveBootstrapOptions`, in the same way the
@@ -214,3 +233,4 @@ Stimulus role loads only through `with_stimulus`.
 Falsifier: a document that never opted in serves a library base in its
 bootstrap markup.
 Mechanism: a framework test beside `framework/tests/live/assets.rs`.
+Status: Agreed 2026-09-13

@@ -111,8 +111,11 @@ span).
   stylesheet will be formatted; a minified stylesheet would need the
   check to parse braces properly.
 
-### For the developer
+### Agreement
 
-The spec's "Rulings the developer still owes" list is written so that each
-item names what a ruling authorizes. If any item is unclear, ask for it to
-be explained another way before ruling.
+The developer walked the four open rulings one by one (2026-09-13,
+10:20-10:54: styling c, distribution c, custom elements b', chart
+charts-rs only, plus the five family items) and confirmed UI-001 to
+UI-019 and FORM-001 to FORM-004 with their falsifiers as one set at
+11:08. The six queued decisions were reviewed and their queue entries
+removed in the same commit as the Agreed markers.

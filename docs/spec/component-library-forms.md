@@ -27,12 +27,14 @@ Falsifier: one listed component is missing from the shipped set, or one
 replaces a native control with a scripted stand-in.
 Mechanism: `.cairn/mechanisms/ui-live-check` over a dogfood view that
 mounts every listed component.
+Status: Agreed 2026-09-13
 
 [FORM-002] Every control the library ships MUST have a programmatic label
 and stable error and help associations.
 Falsifier: the checker reports a shipped control without an accessible
 name or with an unassociated error element.
 Mechanism: `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-13
 
 [FORM-003] A search or immediate input MUST use a bounded `live:model`
 debounce or throttle default.
@@ -40,6 +42,7 @@ Falsifier: a shipped search input proposes on every keystroke with no
 timing modifier.
 Mechanism: `.cairn/mechanisms/ui-live-check` (the checker proves the
 directive's timing form) and a grep over the shipped views.
+Status: Agreed 2026-09-13
 
 [FORM-004] Password and one-time-code controls MUST bind through transient
 model fields. The library MUST NOT dehydrate a password or one-time-code
@@ -48,6 +51,7 @@ Falsifier: a rendered snapshot contains a password or one-time-code value.
 Mechanism: the framework's Live snapshot tests
 (`framework/tests/live/document_routes.rs`) extended with a library case.
 Reading: Live spec 21, Decisions and revisions, 2026-08-21.
+Status: Agreed 2026-09-13
 
 ## Behavioral tier
 

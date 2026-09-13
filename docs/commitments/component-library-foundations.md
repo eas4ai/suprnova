@@ -14,10 +14,9 @@ reserved namespaces, and the form family's presentational tier - every
 shipped view checker-clean, in light DOM, on the three qualified engines.
 
 Drafted 2026-09-13 from the developer's 2026-09-12 rulings, his 09:57
-registration ruling, and Live specs 20 and 21. Not Agreed: the rulings
-listed in `docs/spec/component-library-foundations.md` gate the
-requirements above, and every UI and FORM requirement is Draft until the
-developer confirms its text and falsifier as one set.
+registration ruling, and Live specs 20 and 21; the four remaining rulings
+were walked one by one between 10:20 and 10:54 and every requirement
+above was confirmed as one set at 11:08. Agreed.
 
 ## Decisions recorded (all Consequential, all ruled 2026-09-13)
 
