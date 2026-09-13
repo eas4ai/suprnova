@@ -105,10 +105,15 @@ if (!preset || !existsSync(preset)) {
   fail("UI-007", "no stylesheet to compare the preset against");
 }
 
+// Cairn reads the bare `cairn: <id>: pass|fail` line; the reasons follow on
+// their own indented line so a reader has them without breaking the parse.
 let failed = false;
 for (const [id, result] of results) {
-  const line = result.startsWith("fail") ? `${result})` : result;
-  process.stdout.write(`cairn: ${id}: ${line}\n`);
-  if (result.startsWith("fail")) failed = true;
+  if (result.startsWith("fail")) {
+    failed = true;
+    process.stdout.write(`cairn: ${id}: fail\n  reason: ${result.slice("fail (".length)}\n`);
+  } else {
+    process.stdout.write(`cairn: ${id}: pass\n`);
+  }
 }
 process.exit(failed ? 1 : 0);
