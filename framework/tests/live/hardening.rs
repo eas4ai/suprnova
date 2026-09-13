@@ -216,19 +216,37 @@ async fn issuance_cap_holds_under_concurrency() {
         .expect("the burst task did not panic");
     let successes = replies
         .iter()
-        .filter(|reply| reply.status.as_u16() == 200)
+        .filter(|reply| reply.status.as_u16() == 201)
         .count();
     let limited = replies
         .iter()
-        .filter(|reply| reply.status.as_u16() == 429)
+        .filter(|reply| reply.status.as_u16() == 409)
         .count();
+    // The cap is the contract: the limit refuses exactly the overflow, and no
+    // more than LIMIT requests are ever admitted to authorization, whatever
+    // else those admitted requests then meet.
+    let mut histogram = std::collections::BTreeMap::new();
+    for reply in &replies {
+        let key = if reply.status.as_u16() == 201 {
+            "201".to_owned()
+        } else {
+            format!("{} {}", reply.status.as_u16(), reply.json())
+        };
+        *histogram.entry(key).or_insert(0_usize) += 1;
+    }
+    let admitted = replies.len() - limited;
+    assert!(
+        admitted <= LIMIT,
+        "the per-scope limit admitted {admitted} concurrent issuances (limit {LIMIT}); \
+         statuses seen: {histogram:?}"
+    );
     assert!(
         successes <= LIMIT,
-        "the per-scope limit admitted {successes} concurrent issuances (limit {LIMIT})"
+        "more issuances succeeded than the limit allows: {successes}"
     );
     assert_eq!(
-        successes + limited,
-        BURST,
-        "every request was either admitted or limited"
+        limited,
+        BURST - LIMIT,
+        "exactly the overflow was refused by the limit; statuses seen: {histogram:?}"
     );
 }

@@ -626,6 +626,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Reserved the per-scope issuance slot before authorization.
+  Issuance counted the scope's records under the tables lock, released the
+  lock, awaited subscription issuance and connection authorization, and
+  only then inserted the record, so every concurrent request could observe
+  a count below the limit and all of them could insert once the authorizer
+  answered (audit finding ASTRA-07, reasoned from source; the host's test
+  now holds 513 requests at a delayed authorizer and releases them
+  together). The count check now reserves a slot in the same lock, held by
+  a guard that gives it back on every error path and hands it to the record
+  under the insert lock, so admitted plus reserved never exceeds the limit.
+  Recorded under Bounded issuance; the framework's requirement is LIVE-018
+  in `docs/spec/live.md`.
 - 2026-09-13 -- Re-evaluated authorization at delivery. The host now
   records the principal a subscription was issued to and, before appending
   a published event to any membership, asks the framework Gate again

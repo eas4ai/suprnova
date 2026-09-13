@@ -103,6 +103,15 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Das Live-Abonnementlimit pro Scope hält auch unter Nebenläufigkeit.** Die
+  Ausstellung zählte die Abonnements eines Scopes, gab die Sperre frei,
+  wartete auf den Autorisierer und fügte danach ein, sodass ein Schwall
+  gleichzeitiger Anfragen die Zählung alle passieren und nach der Rückkehr der
+  Autorisierung alle zugelassen werden konnten, weit über das angekündigte
+  Limit von 512 pro Scope hinaus. Der Slot wird jetzt unter derselben Sperre
+  wie die Zählung reserviert, auf jedem Fehlerpfad freigegeben und dem
+  Datensatz übergeben, sobald er landet. Gefunden durch das adversariale Audit
+  vom 2026-09-13 (ASTRA-07); nach dem Tag `v2.0.1` auf main gelandet.
 - **Ein Live-Abonnement erhält keine Ereignisse mehr, sobald sein Gate
   ablehnt.** Eine bestehende asynchrone Mitgliedschaft erhielt weiterhin neu
   veröffentlichte Ereignisse, nachdem das Autorisierungs-Gate des Streams neu

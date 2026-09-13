@@ -104,6 +104,15 @@ recientes primero.
 
 ### Seguridad
 
+- **El límite de suscripciones Live por ámbito se mantiene bajo
+  concurrencia.** La emisión contaba las suscripciones de un ámbito, soltaba
+  el bloqueo, esperaba al autorizador e insertaba después, así que una ráfaga
+  de peticiones concurrentes podía pasar toda la cuenta y ser admitida por
+  completo cuando la autorización regresaba, mucho más allá del límite
+  anunciado de 512 por ámbito. Ahora la plaza se reserva bajo el mismo bloqueo
+  que la cuenta, se libera en cada ruta de error y se entrega al registro
+  cuando este aterriza. Detectado por la auditoría adversarial del 2026-09-13
+  (ASTRA-07); aterrizó en main después de la etiqueta `v2.0.1`.
 - **Una suscripción Live deja de recibir eventos en cuanto su Gate deniega.**
   Una membresía asíncrona existente seguía recibiendo eventos recién
   publicados después de redefinir el Gate de autorización del stream para

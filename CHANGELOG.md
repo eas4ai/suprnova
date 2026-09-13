@@ -91,6 +91,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **The Live per-scope subscription limit holds under concurrency.**
+  Issuance counted a scope's subscriptions, released the lock, awaited the
+  authorizer, and inserted afterwards, so a burst of concurrent requests
+  could all pass the count and all be admitted once authorization
+  returned, well past the advertised limit of 512 per scope. The slot is
+  now reserved under the same lock as the count, released on every error
+  path, and handed to the record when it lands. Found by the 2026-09-13
+  adversarial audit (ASTRA-07); landed on main after the `v2.0.1` tag.
 - **A Live subscription stops receiving events once its Gate denies.** An
   existing asynchronous membership kept receiving newly published events
   after the stream's authorization Gate was redefined to deny the

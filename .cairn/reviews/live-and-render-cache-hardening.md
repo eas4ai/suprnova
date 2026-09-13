@@ -256,3 +256,30 @@ policy registered and served. After the fix (`LiveRegistryBuilder`
 refuses any component whose action declares `transaction = "required"`
 with `RegistryErrorKind::RequiredTransactionUnsupported`) the same test
 passes, and a component without the policy still registers.
+
+### LIVE-018, `live-async-issuance-cap`, 2026-09-13 17:40
+
+Taken out of the audit's order because its unfixed test, added with
+LIVE-016, made the workspace tests and so the gate on `cfea9215` red.
+Violating example: `issuance_cap_holds_under_concurrency` on the tree at
+`905c0ce4` (Astra's probe with its assertion inverted; the probe itself
+never linked in the audit, so this is the first run of that schedule).
+Its status histogram on the unfixed tree:
+
+    {201: 462, 403 async_authority_invalid: 51}
+
+That is ASTRA-07 as the audit reasoned it: none of 513 concurrent
+issuances was refused by the per-scope limit. After the fix (the slot is
+reserved under the same lock as the count, held by a guard released on
+every error path and consumed under the insert lock) the histogram reads
+`{201: 473, 403: 39, 409 async_subscription_limit: 1}`: exactly the
+overflow refused, at most 512 admitted to authorization. The test asserts
+that contract (admitted at most the limit, successes at most the limit,
+exactly the overflow limited) and the full `live` binary (108 tests)
+passes.
+
+The 403 population is a separate observation, not this requirement's:
+under that burst, some of the admitted requests on one SSE document
+instance answer `async_authority_invalid` from the subscription
+service's connect step. Captured in `.cairn/backlog/` from LIVE-018 for
+the owner; not fixed here.

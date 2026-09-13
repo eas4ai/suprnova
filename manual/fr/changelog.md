@@ -105,6 +105,15 @@ en premier.
 
 ### Sécurité
 
+- **La limite d'abonnements Live par portée tient sous concurrence.**
+  L'émission comptait les abonnements d'une portée, relâchait le verrou,
+  attendait l'autorisateur puis insérait, si bien qu'une rafale de requêtes
+  concurrentes pouvait toutes passer le comptage et toutes être admises une
+  fois l'autorisation revenue, bien au-delà de la limite annoncée de 512 par
+  portée. La place est désormais réservée sous le même verrou que le comptage,
+  libérée sur chaque chemin d'erreur et remise à l'enregistrement quand il se
+  pose. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-07) ; arrivé sur
+  main après le tag `v2.0.1`.
 - **Un abonnement Live cesse de recevoir des événements dès que son Gate
   refuse.** Une adhésion asynchrone existante continuait de recevoir les
   événements nouvellement publiés après que le Gate d'autorisation du flux eut

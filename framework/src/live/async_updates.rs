@@ -430,6 +430,51 @@ impl AsyncEventSession for LogSession {
 }
 
 /// One issued logical subscription with its retained authority and log.
+/// A per-scope issuance slot held between the limit check and the record's
+/// insertion (LIVE-018). Dropped on any error path, it gives the slot back;
+/// consumed under the insert lock, it hands the slot to the record.
+struct ScopeReservation {
+    state: Arc<AsyncState>,
+    scope: String,
+    consumed: bool,
+}
+
+impl ScopeReservation {
+    fn held(state: &Arc<AsyncState>, scope: String) -> Self {
+        Self {
+            state: Arc::clone(state),
+            scope,
+            consumed: false,
+        }
+    }
+
+    /// Releases the reservation into `tables`, whose lock the caller holds,
+    /// so the inserted record and the released slot change under one lock.
+    fn consume(mut self, tables: &mut AsyncTables) {
+        release_reservation(tables, &self.scope);
+        self.consumed = true;
+    }
+}
+
+impl Drop for ScopeReservation {
+    fn drop(&mut self) {
+        if self.consumed {
+            return;
+        }
+        let mut tables = self.state.tables();
+        release_reservation(&mut tables, &self.scope);
+    }
+}
+
+fn release_reservation(tables: &mut AsyncTables, scope: &str) {
+    if let Some(count) = tables.reserved.get_mut(scope) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            tables.reserved.remove(scope);
+        }
+    }
+}
+
 /// One membership of a published topic, captured under the tables lock so
 /// its authorization can be re-evaluated outside it (LIVE-016).
 struct DeliveryCandidate {
@@ -523,6 +568,10 @@ impl TransportRecord {
 #[derive(Default)]
 pub(crate) struct AsyncTables {
     issued: HashMap<String, IssuedRecord>,
+    /// Issuances admitted under the per-scope limit but not yet inserted
+    /// (LIVE-018): counted with `issued` so concurrent requests cannot all
+    /// pass the limit before any of them lands. Keyed by document scope.
+    reserved: HashMap<String, usize>,
     transports: HashMap<TransportKey, TransportRecord>,
     credentials: HashMap<String, TransportKey>,
     topics: HashMap<String, BTreeSet<String>>,
@@ -657,7 +706,13 @@ impl AsyncState {
         let modes = subscription_metadata.modes().clone();
         let document_scope = self.document_scope(context.host_scope_facts(), kind)?;
         let scope_text = document_scope.to_base64url();
-        {
+        // LIVE-018 (audit finding ASTRA-07, 2026-09-13): the slot is reserved
+        // here, under the lock, before the authorizer is awaited. Counting
+        // alone let every concurrent request see a count below the limit and
+        // then insert after authorization returned; the reservation is held
+        // by a guard that releases it on every error path and is consumed
+        // when the record lands.
+        let reservation = {
             let mut tables = self.tables();
             self.prune(&mut tables, now);
             let issued_in_scope = tables
@@ -665,10 +720,13 @@ impl AsyncState {
                 .values()
                 .filter(|record| record.document_scope == document_scope)
                 .count();
-            if issued_in_scope >= MAX_ISSUED_PER_SCOPE {
+            let reserved_in_scope = tables.reserved.get(&scope_text).copied().unwrap_or(0);
+            if issued_in_scope.saturating_add(reserved_in_scope) >= MAX_ISSUED_PER_SCOPE {
                 return Err(AsyncErrorKind::SubscriptionLimit);
             }
-        }
+            *tables.reserved.entry(scope_text.clone()).or_insert(0) += 1;
+            ScopeReservation::held(self, scope_text.clone())
+        };
         let issued = self
             .service
             .issue(
@@ -798,6 +856,7 @@ impl AsyncState {
             Vec::new(),
             "authoritative_no_tail",
         );
+        reservation.consume(tables);
         tables.issued.insert(
             id.clone(),
             IssuedRecord {

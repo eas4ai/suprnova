@@ -100,6 +100,14 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **O limite de assinaturas Live por escopo se mantém sob concorrência.** A
+  emissão contava as assinaturas de um escopo, soltava o lock, aguardava o
+  autorizador e inseria depois, então uma rajada de requisições concorrentes
+  podia passar toda pela contagem e ser toda admitida quando a autorização
+  retornava, muito além do limite anunciado de 512 por escopo. A vaga agora é
+  reservada sob o mesmo lock da contagem, liberada em todo caminho de erro e
+  entregue ao registro quando ele pousa. Encontrado pela auditoria adversarial
+  de 2026-09-13 (ASTRA-07); chegou à main depois da tag `v2.0.1`.
 - **Uma assinatura Live para de receber eventos assim que seu Gate nega.** Uma
   associação assíncrona existente continuava recebendo eventos
   recém-publicados depois que o Gate de autorização do stream foi redefinido
