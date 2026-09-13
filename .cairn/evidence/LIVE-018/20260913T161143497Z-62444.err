@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+────────────
+ Nextest run ID ebbcc870-9d51-42cb-98f9-83afc543f0aa with nextest profile: default
+    Starting 0 tests across 1 binary (105 tests skipped)
+────────────
+     Summary [   0.000s] 0 tests run: 0 passed, 105 skipped
+error: no tests to run
+(hint: use `--no-tests` to customize)

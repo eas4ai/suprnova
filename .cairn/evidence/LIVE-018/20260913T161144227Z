@@ -1,0 +1,21 @@
+requirement: LIVE-018
+requirement_digest: sha256:4f2075a1d3912de24a952b70966706de58b5cd4158fb606469b570a3897258b1
+sequence: 1
+history_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+mechanism: live-async-issuance-cap
+commit: bf6f1ed1
+inputs_digest: sha256:c466e568f80e609c48b911c42e630529be77a15eaf3906e83338108d949d2e50
+mechanism_digest: sha256:2b5257c732d94055d65bca6883835a6312f8e586c427b6c989e228eb90db7549
+inputs_detail: .cairn/evidence/LIVE-018/20260913T161143497Z-62444.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::issuance_cap_holds_under_concurrency)'
+cwd: .
+exit: 4
+output_digest: sha256:aa4ddaab2f2a7d6180079ec2bf0dd7d7930f6fd191f2077430e19850b0778513
+output: .cairn/evidence/LIVE-018/20260913T161143497Z-62444.out
+stderr_output: .cairn/evidence/LIVE-018/20260913T161143497Z-62444.err
+stderr_digest: sha256:aa4ddaab2f2a7d6180079ec2bf0dd7d7930f6fd191f2077430e19850b0778513
+signal: none
+execution_error: null
+result: fail
+source: exit
+recorded: 2026-09-13T16:11:44.227Z

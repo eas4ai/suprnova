@@ -1,0 +1,9 @@
+   Compiling suprnova v2.0.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+────────────
+ Nextest run ID 43eda2df-d1af-46cb-a996-da5f56b9d655 with nextest profile: default
+    Starting 0 tests across 1 binary (105 tests skipped)
+────────────
+     Summary [   0.000s] 0 tests run: 0 passed, 105 skipped
+error: no tests to run
+(hint: use `--no-tests` to customize)

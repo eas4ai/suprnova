@@ -1,0 +1,12 @@
+cairn: UI-001: fail
+  reason: no stylesheet at crates/suprnova-live/browser/src/styles/suprnova-ui.css
+cairn: UI-002: fail
+  reason: no stylesheet at crates/suprnova-live/browser/src/styles/suprnova-ui.css
+cairn: UI-003: fail
+  reason: no stylesheet at crates/suprnova-live/browser/src/styles/suprnova-ui.css
+cairn: UI-004: fail
+  reason: no stylesheet at crates/suprnova-live/browser/src/styles/suprnova-ui.css
+cairn: UI-005: fail
+  reason: no views root at app/templates/suprnova-ui
+cairn: UI-007: fail
+  reason: no preset at crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css

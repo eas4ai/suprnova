@@ -1,0 +1,21 @@
+requirement: CACHE-010
+requirement_digest: sha256:d70b1d946fc7c36685c83c12949fe32ae9bc7e1981e5b6a09110197c633027cb
+sequence: 1
+history_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+mechanism: cache-snapshot-failure
+commit: bf6f1ed1
+inputs_digest: sha256:e0278e3c07792d0072e008234e1bb85fbface2b75f57c32625f320aa121bd70a
+mechanism_digest: sha256:f786bdd999d28637936490167ae0f8460b14834db4e1e0eba9e53f7fd0e1aa53
+inputs_detail: .cairn/evidence/CACHE-010/20260913T161144330Z-62444.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::snapshot_failure_is_uncacheable)'
+cwd: .
+exit: 4
+output_digest: sha256:1ab1b41ba3f65e89ce5eb19d5c2bc5fbd61763858b116872e4736e7c060dfbeb
+output: .cairn/evidence/CACHE-010/20260913T161144330Z-62444.out
+stderr_output: .cairn/evidence/CACHE-010/20260913T161144330Z-62444.err
+stderr_digest: sha256:1ab1b41ba3f65e89ce5eb19d5c2bc5fbd61763858b116872e4736e7c060dfbeb
+signal: none
+execution_error: null
+result: fail
+source: exit
+recorded: 2026-09-13T16:11:45.044Z
