@@ -104,6 +104,18 @@ recientes primero.
 
 ### Seguridad
 
+- **Una respuesta en caché conserva sus cabeceras de aislamiento y
+  ejecución.** RenderCache no almacenaba en ningún sitio las cabeceras
+  `Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy` y `X-Frame-Options` de una respuesta, así que un
+  acierto de caché servía los mismos bytes sin ellas. Una exportación HTML que
+  se descargaba como adjunto en la primera petición se renderizaba inline bajo
+  el origen de la aplicación en la segunda, donde cualquier marcado que
+  contuviera se ejecutaba con autoridad del mismo origen. Las seis cabeceras
+  ahora se reproducen byte a byte desde la representación almacenada.
+  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-11); aterrizó
+  en main después de la etiqueta `v2.0.1`.
 - **El lockfile se desprende de una versión insegura y tres retiradas de
   dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo listener
   asignado en la pila era incondicionalmente `Send`/`Sync` y dejaba que una

@@ -105,6 +105,17 @@ en premier.
 
 ### Sécurité
 
+- **Une réponse en cache conserve ses en-têtes d'isolation et d'exécution.**
+  RenderCache ne stockait nulle part les en-têtes `Content-Disposition`,
+  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
+  `Cross-Origin-Resource-Policy`, `Permissions-Policy` et `X-Frame-Options`
+  d'une réponse, si bien qu'un hit de cache servait les mêmes octets sans eux.
+  Un export HTML téléchargé comme pièce jointe à la première requête était
+  rendu inline sous l'origine de l'application à la seconde, où tout balisage
+  qu'il contenait s'exécutait avec l'autorité de la même origine. Les six
+  en-têtes sont désormais rejoués octet pour octet depuis la représentation
+  stockée. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-11) ; arrivé
+  sur main après le tag `v2.0.1`.
 - **Le fichier de verrouillage se défait d'une version non sûre et de trois
   versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont le
   listener alloué sur la pile était inconditionnellement `Send`/`Sync` et

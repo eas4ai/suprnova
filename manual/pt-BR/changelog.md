@@ -100,6 +100,17 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **Uma resposta em cache mantém seus cabeçalhos de isolamento e execução.** O
+  RenderCache não armazenava em lugar nenhum os cabeçalhos
+  `Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy` e `X-Frame-Options` de uma resposta, então um acerto de
+  cache servia os mesmos bytes sem eles. Uma exportação HTML baixada como
+  anexo na primeira requisição era renderizada inline sob a origem da
+  aplicação na segunda, onde qualquer marcação que carregasse rodava com
+  autoridade de mesma origem. Os seis cabeçalhos agora são reproduzidos byte a
+  byte a partir da representação armazenada. Encontrado pela auditoria
+  adversarial de 2026-09-13 (ASTRA-11); chegou à main depois da tag `v2.0.1`.
 - **O lockfile se livra de uma versão insegura e três versões retiradas de
   dependências.** `event-listener` 5.4.2 substitui a 5.4.1, cujo listener
   alocado na pilha era incondicionalmente `Send`/`Sync` e deixava uma tag

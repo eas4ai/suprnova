@@ -23,6 +23,8 @@
 
 ### 安全
 
+- **缓存的响应会保留其隔离与执行相关的头部。** RenderCache 之前不会存储响应的 `Content-Disposition`、`Cross-Origin-Opener-Policy`、`Cross-Origin-Embedder-Policy`、`Cross-Origin-Resource-Policy`、`Permissions-Policy` 和 `X-Frame-Options`，因此缓存命中会返回同样的字节却不带这些头部。一次在首个请求中作为附件下载的 HTML 导出，在第二次请求时会在应用的源之下内联渲染，其中携带的任何标记都会以同源权限执行。这六个头部现在会从存储的表示中逐字节重放。由 2026-09-13 的对抗性审计发现 (ASTRA-11)；在 `v2.0.1` 标签之后合入 main。
+
 - **锁文件甩掉了一个不健全的发布版本和三个已撤回的发布版本。** `event-listener` 5.4.2 取代了 5.4.1：后者栈上分配的监听器被无条件标记为 `Send`/`Sync`，让一个 `!Send` 的标签能够在安全代码中跨越线程（RUSTSEC-2026-0221）；Suprnova 的依赖只使用不带标签的事件，所以这条不健全的路径在这里从未被走到。`spin` 0.9.9 和 0.10.1 以及 `chacha20` 0.10.2 取代了被发布者撤回的版本，`concurrent-queue` 则彻底离开依赖树。这是在 `v2.0.1` 标签之后进入 main 的；标签里的 `Cargo.lock` 仍解析到之前的版本。
 
 ### 文档说明

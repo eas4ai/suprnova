@@ -103,6 +103,17 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Eine zwischengespeicherte Antwort behält ihre Isolations- und
+  Ausführungsheader.** RenderCache speicherte `Content-Disposition`,
+  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
+  `Cross-Origin-Resource-Policy`, `Permissions-Policy` und `X-Frame-Options`
+  einer Antwort nirgends, sodass ein Cache-Treffer dieselben Bytes ohne sie
+  auslieferte. Ein HTML-Export, der bei der ersten Anfrage als Anhang
+  heruntergeladen wurde, wurde bei der zweiten inline unter dem Origin der
+  Anwendung gerendert, wo jedes enthaltene Markup mit Same-Origin-Rechten
+  lief. Die sechs Header werden jetzt Byte für Byte aus der gespeicherten
+  Repräsentation wiedergegeben. Gefunden durch das adversariale Audit vom
+  2026-09-13 (ASTRA-11); nach dem Tag `v2.0.1` auf main gelandet.
 - **Die Lockdatei legt eine unsichere und drei zurückgezogene
   Abhängigkeitsversionen ab.** `event-listener` 5.4.2 ersetzt 5.4.1, dessen
   stack-allozierter Listener bedingungslos `Send`/`Sync` war und ein
