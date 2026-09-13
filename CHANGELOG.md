@@ -91,6 +91,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A cached response keeps its isolation and execution headers.**
+  RenderCache stored a response's `Content-Disposition`,
+  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
+  `Cross-Origin-Resource-Policy`, `Permissions-Policy`, and
+  `X-Frame-Options` nowhere, so a cache hit served the same bytes without
+  them. An HTML export that downloaded as an attachment on the first
+  request rendered inline under the application's origin on the second,
+  where any markup it carried ran with same-origin authority. The six
+  headers now replay byte for byte from the stored representation. Found
+  by the 2026-09-13 adversarial audit (ASTRA-11); landed on main after the
+  `v2.0.1` tag.
 - **The lockfile sheds one unsound and three yanked dependency releases.**
   `event-listener` 5.4.2 replaces 5.4.1, whose stack-allocated listener was
   unconditionally `Send`/`Sync` and let a `!Send` tag cross threads in safe

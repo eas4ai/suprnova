@@ -65,7 +65,13 @@ pub enum EntryKind {
 pub struct SafeHeaders(BTreeMap<String, String>);
 
 /// Header names a stored representation may carry.
-pub const REPLAYABLE_HEADERS: [&str; 8] = [
+///
+/// The last six are the isolation and execution headers (CACHE-003): a
+/// response that carries one is replayed with it byte for byte, because the
+/// same bytes served without it behave differently in a browser. An HTML
+/// attachment that downloaded on the render would otherwise run inline
+/// under the application's origin on the hit (audit finding ASTRA-11).
+pub const REPLAYABLE_HEADERS: [&str; 14] = [
     "cache-control",
     "content-language",
     "content-security-policy",
@@ -74,6 +80,12 @@ pub const REPLAYABLE_HEADERS: [&str; 8] = [
     "referrer-policy",
     "vary",
     "x-content-type-options",
+    "content-disposition",
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
+    "cross-origin-resource-policy",
+    "permissions-policy",
+    "x-frame-options",
 ];
 
 /// Whether `value` is a valid HTTP header value byte for byte: horizontal

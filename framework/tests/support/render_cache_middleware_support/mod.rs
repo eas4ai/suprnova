@@ -845,6 +845,12 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("non ascii header policy");
+    // CACHE-003: the plain public shape again, on a route whose handler
+    // sets the six isolation and execution headers.
+    let security_headers_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("security headers policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1186,6 +1192,9 @@ async fn boot(
     let router: Router = router
         .get("/non-ascii-header", non_ascii_header_handler)
         .into();
+    let router: Router = router
+        .get("/security-headers", security_headers_handler)
+        .into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1402,6 +1411,11 @@ async fn boot(
             GroupPolicy::from(non_ascii_header_policy),
         )
         .expect("attach non ascii header policy")
+        .try_render_cache(
+            "/security-headers",
+            GroupPolicy::from(security_headers_policy),
+        )
+        .expect("attach security headers policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -1932,6 +1946,36 @@ pub const CONTROL_BYTE_LINK: &str = "<https://example.com/next>; rel=\"next\"; t
 /// the middleware test that owns `/non-ascii-header`.
 pub const NON_ASCII_LINK: &str =
     "<https://example.com/caf\u{e9}>; rel=\"next\"; title=\"caf\u{e9}\"";
+
+/// The six response headers whose loss changes how a browser isolates or
+/// executes the same bytes (CACHE-003, from audit finding ASTRA-11), with
+/// the exact values `/security-headers` sets. A hardening test asserts
+/// each one survives a second request byte for byte.
+pub const SECURITY_HEADERS: &[(&str, &str)] = &[
+    ("Content-Disposition", "attachment; filename=report.html"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Permissions-Policy", "camera=(), microphone=()"),
+    ("X-Frame-Options", "DENY"),
+];
+
+/// Renders an HTML attachment carrying every header in
+/// [`SECURITY_HEADERS`]: bytes that download on the render and would run
+/// inline under the application's origin if a hit ever dropped the
+/// disposition.
+async fn security_headers_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    let mut response = HttpResponse::html(format!(
+        "<script>globalThis.attachmentExecuted = {n}</script>"
+    ));
+    for (name, value) in SECURITY_HEADERS {
+        response = response.header(*name, *value);
+    }
+    Ok(response)
+}
 
 /// Renders with a replayable header whose value the wire cannot carry.
 async fn control_byte_header_handler(_request: Request) -> Response {

@@ -55,8 +55,26 @@ and the commitment's decisions section.
 
 ## Mechanism demonstrations
 
-To be recorded as each hardening test lands: the safe violating example
-for each mechanism is the audit's probe as written, which passes against
-the current tree, and the mechanism is that probe with its assertion
-inverted to the agreed behavior. Both directions are recorded here per
-requirement, with the commit that flipped them.
+Recorded as each hardening test lands: the safe violating example for
+each mechanism is the audit's probe as written, which passes against the
+tree the audit examined, and the mechanism is that probe with its
+assertion inverted to the agreed behavior. Both directions are recorded
+here per requirement, with the commit that flipped them.
+
+### CACHE-003, `cache-security-headers`, 2026-09-13 12:10
+
+Violating example: the test `security_headers_replay_or_decline` on the
+tree at `cdf31ac6`, with only the test and its `/security-headers`
+support route added. Result:
+
+    FAIL hardening::security_headers_replay_or_decline
+    assertion `left == right` failed: Content-Disposition survived the
+    second request byte for byte (served from storage)
+      left: None
+     right: Some("attachment; filename=report.html")
+
+That is ASTRA-11 as the audit reproduced it: the second request was a
+hit and carried no disposition. After the fix (the six headers join
+`REPLAYABLE_HEADERS`, `crates/suprnova-live/src/render_cache/entry.rs`)
+the same test passes, and the full `render_cache` binary (366 tests) and
+the engine's render_cache tests (57) pass with it.

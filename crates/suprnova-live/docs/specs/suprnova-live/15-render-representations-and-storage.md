@@ -1,7 +1,7 @@
 # Suprnova Live -- 15 Render Representations and Storage
 
 Status: Normative design specification
-Last revised: 2026-09-09
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -251,6 +251,21 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Widened the replayable header set to the six isolation and
+  execution headers (`Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy`, `X-Frame-Options`), so a stored representation
+  replays them byte for byte. The adversarial audit of the same day
+  (finding ASTRA-11) served an HTML attachment from storage without its
+  disposition, so bytes that downloaded on the render rendered inline under
+  the application's origin on the hit. Response metadata that changes how a
+  browser isolates or executes the bytes is part of the representation's
+  semantics; dropping it silently is the one thing the allowlist may not
+  do. Rejected declining storage for such responses instead: a cached
+  export or report is a legitimate thing to cache, and the header is
+  static per route. Recorded under the Complete and Composite
+  representation models; the framework's requirement is CACHE-003 in
+  `docs/spec/render-cache.md`.
 - 2026-09-09 -- Recorded the nested-segment entry shape and the generation-hint
   storage note ahead of code, matching the mechanism decided in
   `16-cache-variance-privacy-and-stitching.md` and

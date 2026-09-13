@@ -3224,7 +3224,7 @@ fn entry_header(
             if http::HeaderValue::from_str(value).is_ok() {
                 return true;
             }
-            // The name is one of the eight in `REPLAYABLE_HEADERS`, so it is
+            // The name is one of the fourteen in `REPLAYABLE_HEADERS`, so it is
             // closed and low-cardinality and safe to name; the value is the
             // request-influenced part and is never logged.
             tracing::warn!(
