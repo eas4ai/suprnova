@@ -1,0 +1,21 @@
+requirement: CACHE-002
+requirement_digest: sha256:8fbc620f179d31cfdf2cfce35feff54b8da3fdde967340e28ea5acc2ed8976ec
+sequence: 3
+history_digest: sha256:7ae082888a20b987b58c0942b26f93f4d30d3267c38386cdfd855a0aefda77ea
+mechanism: cache-vary
+commit: fe65703c
+inputs_digest: sha256:dbdc83fdf3df52de5d32d4b52d72fa21ef72bf1ec9d9d4f9dc1c574ab1efe2fb
+mechanism_digest: sha256:8cd9d017ae18988eeb133387bdb8efa32fb6692d68c4232f63583e0b805ac31b
+inputs_detail: .cairn/evidence/CACHE-002/20260913T222409197Z-560936.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::vary_must_match_declared_dimensions)'
+cwd: .
+exit: 0
+output_digest: sha256:0932b1344410d801b2234707a1918f7725f9b6a5dc7548ce0112705098da6f0a
+output: .cairn/evidence/CACHE-002/20260913T222409197Z-560936.out
+stderr_output: .cairn/evidence/CACHE-002/20260913T222409197Z-560936.err
+stderr_digest: sha256:0932b1344410d801b2234707a1918f7725f9b6a5dc7548ce0112705098da6f0a
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-13T22:24:10.195Z
