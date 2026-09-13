@@ -1,0 +1,6 @@
+command: sh -c '! grep -rn "attachShadow" crates/suprnova-live/browser/src app/templates'
+inputs:
+  - crates/suprnova-live/browser/src/
+  - app/templates/
+requirements:
+  - UI-006

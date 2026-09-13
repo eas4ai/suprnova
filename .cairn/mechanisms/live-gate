@@ -1,0 +1,11 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 crates/suprnova-live/scripts/gate.sh
+inputs:
+  - crates/suprnova-live/
+  - framework/src/live/
+  - Cargo.lock
+requirements:
+  - LIVE-010
+  - LIVE-011
+  - LIVE-012
+  - UI-004
+  - UI-008

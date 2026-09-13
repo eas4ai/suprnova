@@ -1,0 +1,12 @@
+command: sh -c 'cd app && cargo run -q -p suprnova-cli -- live:check'
+inputs:
+  - app/
+  - suprnova-cli/src/commands/live_check.rs
+  - suprnova-cli/src/commands/live_tool.rs
+  - crates/suprnova-live/src/checker/
+  - framework/src/live/
+requirements:
+  - LIVE-008
+  - LIVE-009
+  - UI-005
+  - UI-010

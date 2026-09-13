@@ -1,0 +1,8 @@
+command: node crates/suprnova-live/scripts/check-specs.mjs && node crates/suprnova-live/scripts/check-implementation-docs.mjs && crates/suprnova-live/tests/documentation_contract.sh
+inputs:
+  - crates/suprnova-live/docs/
+  - crates/suprnova-live/scripts/check-specs.mjs
+  - crates/suprnova-live/scripts/check-implementation-docs.mjs
+  - crates/suprnova-live/tests/documentation_contract.sh
+requirements:
+  - LIVE-013

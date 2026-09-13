@@ -19,8 +19,8 @@ Cargo.lock
 .env.*.local
 
 reference/
-# docs/ is the Cairn record: docs/spec/, docs/commitments/, docs/decisions/
-# and docs/recon.md are tracked - Cairn is tooling under the owner's rule.
+# docs/ is the Cairn record: the spec set, commitments, decisions, and the
+# recon survey are tracked - Cairn is tooling under the owner's rule.
 # Planning archives (plans, design docs, reviews) are development
 # artifacts and stay out at any level, including the Live crate's.
 **/docs/superpowers/

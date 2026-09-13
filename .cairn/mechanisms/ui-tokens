@@ -1,0 +1,9 @@
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-tokens.mjs
+  - crates/suprnova-live/browser/src/
+requirements:
+  - UI-001
+  - UI-002
+  - UI-003
