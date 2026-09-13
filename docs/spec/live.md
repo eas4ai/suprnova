@@ -123,3 +123,38 @@ seven under `app/templates/live/` and the scaffold templates under
 Falsifier: a library crate, macro set, or shipped stylesheet is found at
 `31fb0ead`.
 Evidence: `crates/` listing; `app/templates/live/`; Live specs 20-25 are capability text with no implementation checkpoints.
+
+## Findings of the 2026-09-13 adversarial audit
+
+Drawn from ASTRA-01, ASTRA-05, and ASTRA-07 (Astra, report outside the
+repository). Each refines agreed text in Live spec 14 or the action
+contract in spec 04; each is Draft until the developer confirms it.
+
+[LIVE-016] The framework MUST re-evaluate the current authorization
+(the Gate, the session, and revocation state) before delivering an
+asynchronous event to an existing membership. The framework MUST retire
+a membership whose authorization no longer holds.
+Falsifier: a subscriber whose stream Gate is redefined to deny still
+receives an event published after the denial (ASTRA-01).
+Mechanism: `.cairn/mechanisms/live-async-revocation`.
+Refines: Live spec 14, admission "rechecks ... registry and revocation
+state" at the consumption boundary.
+
+[LIVE-017] The framework MUST run an action declared
+`transaction = "required"` inside one ambient database transaction that
+its ORM writes join. The framework MUST roll that transaction back when a
+later stage of the action fails. Until the framework can do both, the
+registry MUST refuse a component whose action declares the policy.
+Falsifier: an action with two writes whose second stage fails leaves the
+first write durable (ASTRA-05).
+Mechanism: `.cairn/mechanisms/live-action-transaction`.
+Refines: the `transaction` policy in
+`crates/suprnova-live/docs/specs/suprnova-live/04-actions-and-validation.md`.
+
+[LIVE-018] The framework MUST reserve a subscription slot under the
+per-scope limit before awaiting external authorization. The framework
+MUST release that slot on every error path.
+Falsifier: 513 concurrent issuances for one scope against a delayed
+authorizer all succeed (ASTRA-07).
+Mechanism: `.cairn/mechanisms/live-async-issuance-cap`.
+Refines: Live spec 14, bounded per-scope issuance.

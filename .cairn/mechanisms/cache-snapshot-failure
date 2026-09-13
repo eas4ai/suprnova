@@ -1,0 +1,10 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::snapshot_failure_is_uncacheable)'
+inputs:
+  - framework/src/render_cache/
+  - framework/src/live/
+  - framework/src/database/
+  - framework/tests/render_cache/
+  - crates/suprnova-live/src/
+  - Cargo.lock
+requirements:
+  - CACHE-010

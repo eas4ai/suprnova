@@ -91,6 +91,7 @@ rather than duplicates.
 
 | Domain | Prefix | File | State |
 |---|---|---|---|
+| RenderCache (document cache: policy, keys, storage, coherence) | CACHE | `render-cache.md` | Draft; ten requirements from the 2026-09-13 audit, each refining Live specs 15-18; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
 | Live (engine, facade, browser runtime, tooling) | LIVE | `live.md` | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
 | Component library - foundations (inherited by every commitment) | UI | `component-library-foundations.md` | Draft; refines Live spec 20 |
 | Component library - form and input | FORM | `component-library-forms.md` | Draft; refines Live spec 21; the first commitment with foundations |

@@ -4,13 +4,21 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-foundations
+Current: live-and-render-cache-hardening
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
 The order below follows the developer's sequencing rulings: platform-first
 components in waves, the advanced components last, the datatable closing.
 
+0. live-and-render-cache-hardening - the thirteen defects of the
+   2026-09-13 adversarial audit, in the audit's order: the four that
+   change browser execution or replay bytes past the handler's HTTP
+   contract first (CACHE-003, CACHE-004, CACHE-001, CACHE-002), then
+   write invalidation (CACHE-009), database routing (CACHE-008), the
+   Live authorization and transaction contracts (LIVE-016, LIVE-017),
+   then CACHE-006, CACHE-005, LIVE-018, CACHE-010, CACHE-007. The owner
+   ruled at 11:13 that this precedes the library.
 1. component-library-foundations - tokens, base layer, state-attribute
    styling, asset delivery, explicit registration and reserved
    namespaces, the checker and baseline mechanisms, and the form
