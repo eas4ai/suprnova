@@ -3,6 +3,7 @@ inputs:
   - framework/src/render_cache/
   - framework/src/live/
   - framework/src/database/
+  - framework/src/eloquent/
   - framework/tests/render_cache/
   - crates/suprnova-live/src/
   - Cargo.lock
