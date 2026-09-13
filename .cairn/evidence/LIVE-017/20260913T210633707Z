@@ -1,0 +1,21 @@
+requirement: LIVE-017
+requirement_digest: sha256:f8cfde3007d9da15d01fc820bd71dfa8860007d30e5e4a6c66d3753d97baa903
+sequence: 2
+history_digest: sha256:6547f3a267c2378bcd53fd2e525927b78941bfca466946bbcb43668f85ca85f1
+mechanism: live-action-transaction
+commit: cecb87df
+inputs_digest: sha256:0ab7c9db06609e70aea81e1cb960fa07686013bdd1a323c0d3ef860665c69176
+mechanism_digest: sha256:923ccde23589a71d5f9dfbc383507747af2e8a22ce8dada1ab915d63040e3194
+inputs_detail: .cairn/evidence/LIVE-017/20260913T210632815Z-3693238.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::required_transaction_is_refused_until_real)'
+cwd: .
+exit: 0
+output_digest: sha256:1e8ea8fb5ea280cd0512fd145971279c614ffb4d6f69b18babbf463962aa7cd6
+output: .cairn/evidence/LIVE-017/20260913T210632815Z-3693238.out
+stderr_output: .cairn/evidence/LIVE-017/20260913T210632815Z-3693238.err
+stderr_digest: sha256:1e8ea8fb5ea280cd0512fd145971279c614ffb4d6f69b18babbf463962aa7cd6
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-13T21:06:33.707Z
